@@ -1,0 +1,22 @@
+# Rust build outputs
+/target
+**/*.rs.bk
+
+# Local agent/task tooling state
+.bv/
+.beads/
+
+# Local oracle clone (not part of clean-room implementation)
+legacy_redis_code/
+crates/*/.git/
+crates/*/.git.nested_backup/
+
+# Generated performance/repro artifacts
+baselines/
+golden_outputs/
+golden_checksums.txt
+
+# Local scratch/runtime files
+*.out
+*.log
+*.tmp

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/fr-eventloop",
+  "crates/fr-protocol",
+  "crates/fr-command",
+  "crates/fr-store",
+  "crates/fr-expire",
+  "crates/fr-persist",
+  "crates/fr-repl",
+  "crates/fr-config",
+  "crates/fr-conformance",
+  "crates/fr-runtime",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"

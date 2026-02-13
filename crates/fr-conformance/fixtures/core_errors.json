@@ -1,0 +1,59 @@
+{
+  "suite": "core_errors",
+  "cases": [
+    {
+      "name": "unknown_no_args",
+      "now_ms": 0,
+      "argv": ["NOPE"],
+      "expect": { "kind": "error", "value": "ERR unknown command 'NOPE'" }
+    },
+    {
+      "name": "unknown_with_args_preview",
+      "now_ms": 0,
+      "argv": ["NOPE", "x", "y"],
+      "expect": { "kind": "error", "value": "ERR unknown command 'NOPE', with args beginning with: 'x' 'y' " }
+    },
+    {
+      "name": "wrong_arity_get",
+      "now_ms": 0,
+      "argv": ["GET"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GET' command" }
+    },
+    {
+      "name": "set_syntax_error",
+      "now_ms": 0,
+      "argv": ["SET", "k", "v", "NX", "10"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
+      "name": "expire_invalid_integer",
+      "now_ms": 0,
+      "argv": ["EXPIRE", "k", "abc"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "set_text_value",
+      "now_ms": 1,
+      "argv": ["SET", "counter", "hello"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "incr_non_integer",
+      "now_ms": 1,
+      "argv": ["INCR", "counter"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "set_max_i64",
+      "now_ms": 2,
+      "argv": ["SET", "maxint", "9223372036854775807"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "incr_overflow",
+      "now_ms": 2,
+      "argv": ["INCR", "maxint"],
+      "expect": { "kind": "error", "value": "ERR increment or decrement would overflow" }
+    }
+  ]
+}

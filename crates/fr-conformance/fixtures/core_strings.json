@@ -1,0 +1,89 @@
+{
+  "suite": "core_strings",
+  "cases": [
+    {
+      "name": "ping",
+      "now_ms": 0,
+      "argv": ["PING"],
+      "expect": { "kind": "simple", "value": "PONG" }
+    },
+    {
+      "name": "set_foo",
+      "now_ms": 10,
+      "argv": ["SET", "foo", "bar"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "get_foo",
+      "now_ms": 10,
+      "argv": ["GET", "foo"],
+      "expect": { "kind": "bulk", "value": "bar" }
+    },
+    {
+      "name": "incr_counter_1",
+      "now_ms": 20,
+      "argv": ["INCR", "counter"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "incr_counter_2",
+      "now_ms": 20,
+      "argv": ["INCR", "counter"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "expire_foo",
+      "now_ms": 1000,
+      "argv": ["EXPIRE", "foo", "1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pttl_foo_not_expired",
+      "now_ms": 1000,
+      "argv": ["PTTL", "foo"],
+      "expect": { "kind": "integer", "value": 1000 }
+    },
+    {
+      "name": "foo_expires",
+      "now_ms": 2001,
+      "argv": ["GET", "foo"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "pttl_foo_missing",
+      "now_ms": 2001,
+      "argv": ["PTTL", "foo"],
+      "expect": { "kind": "integer", "value": -2 }
+    },
+    {
+      "name": "set_px",
+      "now_ms": 3000,
+      "argv": ["SET", "ephemeral", "v", "PX", "20"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pttl_ephemeral",
+      "now_ms": 3000,
+      "argv": ["PTTL", "ephemeral"],
+      "expect": { "kind": "integer", "value": 20 }
+    },
+    {
+      "name": "ephemeral_expired",
+      "now_ms": 3021,
+      "argv": ["GET", "ephemeral"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "unknown_command",
+      "now_ms": 4000,
+      "argv": ["NOPE"],
+      "expect": { "kind": "error", "value": "ERR unknown command 'NOPE'" }
+    },
+    {
+      "name": "wrong_arity",
+      "now_ms": 4001,
+      "argv": ["GET"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GET' command" }
+    }
+  ]
+}

@@ -1,0 +1,560 @@
+#![forbid(unsafe_code)]
+
+use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::PathBuf;
+use std::thread::sleep;
+use std::time::Duration;
+
+use fr_persist::AofRecord;
+use fr_protocol::{RespFrame, parse_frame};
+use fr_runtime::Runtime;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone)]
+pub struct HarnessConfig {
+    pub oracle_root: PathBuf,
+    pub fixture_root: PathBuf,
+    pub strict_mode: bool,
+}
+
+impl HarnessConfig {
+    #[must_use]
+    pub fn default_paths() -> Self {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        Self {
+            oracle_root: repo_root.join("legacy_redis_code/redis"),
+            fixture_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures"),
+            strict_mode: true,
+        }
+    }
+}
+
+impl Default for HarnessConfig {
+    fn default() -> Self {
+        Self::default_paths()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HarnessReport {
+    pub suite: &'static str,
+    pub oracle_present: bool,
+    pub fixture_count: usize,
+    pub strict_mode: bool,
+}
+
+#[must_use]
+pub fn run_smoke(config: &HarnessConfig) -> HarnessReport {
+    let fixture_count = fs::read_dir(&config.fixture_root)
+        .ok()
+        .into_iter()
+        .flat_map(|it| it.filter_map(Result::ok))
+        .count();
+
+    HarnessReport {
+        suite: "smoke",
+        oracle_present: config.oracle_root.exists(),
+        fixture_count,
+        strict_mode: config.strict_mode,
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ConformanceFixture {
+    pub suite: String,
+    pub cases: Vec<ConformanceCase>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ConformanceCase {
+    pub name: String,
+    pub now_ms: u64,
+    pub argv: Vec<String>,
+    pub expect: ExpectedFrame,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ExpectedFrame {
+    Simple { value: String },
+    Error { value: String },
+    Integer { value: i64 },
+    Bulk { value: Option<String> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseOutcome {
+    pub name: String,
+    pub passed: bool,
+    pub expected: RespFrame,
+    pub actual: RespFrame,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DifferentialReport {
+    pub suite: String,
+    pub total: usize,
+    pub passed: usize,
+    pub failed: Vec<CaseOutcome>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveOracleConfig {
+    pub host: String,
+    pub port: u16,
+    pub io_timeout_ms: u64,
+    pub align_timing_from_fixture: bool,
+}
+
+impl Default for LiveOracleConfig {
+    fn default() -> Self {
+        Self {
+            host: "127.0.0.1".to_string(),
+            port: 6379,
+            io_timeout_ms: 2_000,
+            align_timing_from_fixture: true,
+        }
+    }
+}
+
+pub fn run_fixture(
+    config: &HarnessConfig,
+    fixture_name: &str,
+) -> Result<DifferentialReport, String> {
+    let path = config.fixture_root.join(fixture_name);
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read fixture {}: {err}", path.display()))?;
+    let fixture: ConformanceFixture = serde_json::from_str(&raw)
+        .map_err(|err| format!("invalid fixture JSON {}: {err}", path.display()))?;
+
+    let mut runtime = Runtime::default_strict();
+    let mut failed = Vec::new();
+    let total = fixture.cases.len();
+    for case in fixture.cases {
+        let frame = case_to_frame(&case);
+        let actual = runtime.execute_frame(frame, case.now_ms);
+        let expected = expected_to_frame(&case.expect);
+        let passed = actual == expected;
+        if !passed {
+            failed.push(CaseOutcome {
+                name: case.name,
+                passed,
+                expected,
+                actual,
+            });
+        }
+    }
+
+    Ok(DifferentialReport {
+        suite: fixture.suite,
+        total,
+        passed: total.saturating_sub(failed.len()),
+        failed,
+    })
+}
+
+pub fn run_live_redis_diff(
+    config: &HarnessConfig,
+    fixture_name: &str,
+    oracle: &LiveOracleConfig,
+) -> Result<DifferentialReport, String> {
+    let fixture = load_conformance_fixture(config, fixture_name)?;
+    let mut runtime = Runtime::default_strict();
+    let mut stream = connect_live_redis(oracle)?;
+    flushall(&mut stream)?;
+
+    let mut failed = Vec::new();
+    let total = fixture.cases.len();
+    let mut prev_now_ms: Option<u64> = None;
+    for case in fixture.cases {
+        if oracle.align_timing_from_fixture {
+            if let Some(previous) = prev_now_ms {
+                let delta_ms = case.now_ms.saturating_sub(previous);
+                if delta_ms > 0 {
+                    sleep(Duration::from_millis(delta_ms));
+                }
+            }
+            prev_now_ms = Some(case.now_ms);
+        }
+
+        let frame = case_to_frame(&case);
+        let runtime_actual = runtime.execute_frame(frame.clone(), case.now_ms);
+        send_frame(&mut stream, &frame)?;
+        let redis_actual = read_resp_frame_from_stream(&mut stream)?;
+        if runtime_actual != redis_actual {
+            failed.push(CaseOutcome {
+                name: case.name,
+                passed: false,
+                expected: redis_actual,
+                actual: runtime_actual,
+            });
+        }
+    }
+
+    Ok(DifferentialReport {
+        suite: format!("live_redis_diff::{}", fixture.suite),
+        total,
+        passed: total.saturating_sub(failed.len()),
+        failed,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProtocolFixture {
+    pub suite: String,
+    pub cases: Vec<ProtocolCase>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProtocolCase {
+    pub name: String,
+    pub now_ms: u64,
+    pub raw_request: String,
+    pub expect: ExpectedFrame,
+}
+
+pub fn run_protocol_fixture(
+    config: &HarnessConfig,
+    fixture_name: &str,
+) -> Result<DifferentialReport, String> {
+    let path = config.fixture_root.join(fixture_name);
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read fixture {}: {err}", path.display()))?;
+    let fixture: ProtocolFixture = serde_json::from_str(&raw)
+        .map_err(|err| format!("invalid fixture JSON {}: {err}", path.display()))?;
+
+    let mut runtime = Runtime::default_strict();
+    let mut failed = Vec::new();
+    let total = fixture.cases.len();
+    for case in fixture.cases {
+        let encoded = runtime.execute_bytes(case.raw_request.as_bytes(), case.now_ms);
+        let actual = parse_frame(&encoded)
+            .map_err(|err| format!("runtime emitted invalid RESP frame in {}: {err}", case.name))?
+            .frame;
+        let expected = expected_to_frame(&case.expect);
+        let passed = actual == expected;
+        if !passed {
+            failed.push(CaseOutcome {
+                name: case.name,
+                passed,
+                expected,
+                actual,
+            });
+        }
+    }
+
+    Ok(DifferentialReport {
+        suite: fixture.suite,
+        total,
+        passed: total.saturating_sub(failed.len()),
+        failed,
+    })
+}
+
+pub fn run_live_redis_protocol_diff(
+    config: &HarnessConfig,
+    fixture_name: &str,
+    oracle: &LiveOracleConfig,
+) -> Result<DifferentialReport, String> {
+    let fixture = load_protocol_fixture(config, fixture_name)?;
+    let mut runtime = Runtime::default_strict();
+    let mut failed = Vec::new();
+    let total = fixture.cases.len();
+
+    for case in fixture.cases {
+        let mut stream = connect_live_redis(oracle)?;
+        let raw = case.raw_request.as_bytes();
+        stream
+            .write_all(raw)
+            .map_err(|err| format!("failed to send protocol payload in {}: {err}", case.name))?;
+        stream
+            .flush()
+            .map_err(|err| format!("failed to flush protocol payload in {}: {err}", case.name))?;
+
+        let redis_actual = read_resp_frame_from_stream(&mut stream)?;
+        let runtime_encoded = runtime.execute_bytes(raw, case.now_ms);
+        let runtime_actual = parse_frame(&runtime_encoded)
+            .map_err(|err| format!("runtime emitted invalid RESP frame in {}: {err}", case.name))?
+            .frame;
+
+        if runtime_actual != redis_actual {
+            failed.push(CaseOutcome {
+                name: case.name,
+                passed: false,
+                expected: redis_actual,
+                actual: runtime_actual,
+            });
+        }
+    }
+
+    Ok(DifferentialReport {
+        suite: format!("live_redis_protocol_diff::{}", fixture.suite),
+        total,
+        passed: total.saturating_sub(failed.len()),
+        failed,
+    })
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReplayFixture {
+    pub suite: String,
+    pub cases: Vec<ReplayCase>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReplayCase {
+    pub name: String,
+    pub now_ms: u64,
+    pub records: Vec<Vec<String>>,
+    pub assertions: Vec<ReplayAssertion>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReplayAssertion {
+    pub key: String,
+    pub expect: Option<String>,
+    pub at_ms: Option<u64>,
+}
+
+pub fn run_replay_fixture(
+    config: &HarnessConfig,
+    fixture_name: &str,
+) -> Result<DifferentialReport, String> {
+    let path = config.fixture_root.join(fixture_name);
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read fixture {}: {err}", path.display()))?;
+    let fixture: ReplayFixture = serde_json::from_str(&raw)
+        .map_err(|err| format!("invalid fixture JSON {}: {err}", path.display()))?;
+
+    let mut failed = Vec::new();
+    let mut total = 0_usize;
+    for case in fixture.cases {
+        let mut runtime = Runtime::default_strict();
+        for record in case.records {
+            let aof = AofRecord {
+                argv: record
+                    .iter()
+                    .map(|value| value.as_bytes().to_vec())
+                    .collect::<Vec<_>>(),
+            };
+            let frame = aof.to_resp_frame();
+            let _ = runtime.execute_frame(frame, case.now_ms);
+        }
+
+        for assertion in case.assertions {
+            total = total.saturating_add(1);
+            let at_ms = assertion.at_ms.unwrap_or(case.now_ms);
+            let get = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"GET".to_vec())),
+                RespFrame::BulkString(Some(assertion.key.as_bytes().to_vec())),
+            ]));
+            let actual = runtime.execute_frame(get, at_ms);
+            let expected = RespFrame::BulkString(assertion.expect.map(|v| v.as_bytes().to_vec()));
+            let passed = actual == expected;
+            if !passed {
+                failed.push(CaseOutcome {
+                    name: format!("{}::{}", case.name, assertion.key),
+                    passed,
+                    expected,
+                    actual,
+                });
+            }
+        }
+    }
+
+    Ok(DifferentialReport {
+        suite: fixture.suite,
+        total,
+        passed: total.saturating_sub(failed.len()),
+        failed,
+    })
+}
+
+fn load_conformance_fixture(
+    config: &HarnessConfig,
+    fixture_name: &str,
+) -> Result<ConformanceFixture, String> {
+    let path = config.fixture_root.join(fixture_name);
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read fixture {}: {err}", path.display()))?;
+    serde_json::from_str(&raw)
+        .map_err(|err| format!("invalid fixture JSON {}: {err}", path.display()))
+}
+
+fn load_protocol_fixture(
+    config: &HarnessConfig,
+    fixture_name: &str,
+) -> Result<ProtocolFixture, String> {
+    let path = config.fixture_root.join(fixture_name);
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read fixture {}: {err}", path.display()))?;
+    serde_json::from_str(&raw)
+        .map_err(|err| format!("invalid fixture JSON {}: {err}", path.display()))
+}
+
+fn connect_live_redis(oracle: &LiveOracleConfig) -> Result<TcpStream, String> {
+    let addr = format!("{}:{}", oracle.host, oracle.port);
+    let stream = TcpStream::connect(&addr)
+        .map_err(|err| format!("failed to connect to redis {}: {err}", addr))?;
+    let timeout = Duration::from_millis(oracle.io_timeout_ms);
+    stream
+        .set_read_timeout(Some(timeout))
+        .map_err(|err| format!("failed to set read timeout: {err}"))?;
+    stream
+        .set_write_timeout(Some(timeout))
+        .map_err(|err| format!("failed to set write timeout: {err}"))?;
+    Ok(stream)
+}
+
+fn flushall(stream: &mut TcpStream) -> Result<(), String> {
+    let frame = RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
+        b"FLUSHALL".to_vec(),
+    ))]));
+    send_frame(stream, &frame)?;
+    let reply = read_resp_frame_from_stream(stream)?;
+    match reply {
+        RespFrame::SimpleString(ref s) if s == "OK" => Ok(()),
+        other => Err(format!("unexpected FLUSHALL reply: {other:?}")),
+    }
+}
+
+fn send_frame(stream: &mut TcpStream, frame: &RespFrame) -> Result<(), String> {
+    let encoded = frame.to_bytes();
+    stream
+        .write_all(&encoded)
+        .map_err(|err| format!("failed to write frame: {err}"))?;
+    stream
+        .flush()
+        .map_err(|err| format!("failed to flush frame: {err}"))
+}
+
+fn read_resp_frame_from_stream(stream: &mut TcpStream) -> Result<RespFrame, String> {
+    let mut buf = Vec::with_capacity(4096);
+    let mut chunk = [0_u8; 4096];
+    loop {
+        let n = stream
+            .read(&mut chunk)
+            .map_err(|err| format!("failed to read response: {err}"))?;
+        if n == 0 {
+            return Err("redis closed connection before reply was complete".to_string());
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        match parse_frame(&buf) {
+            Ok(parsed) => return Ok(parsed.frame),
+            Err(fr_protocol::RespParseError::Incomplete) => {}
+            Err(err) => {
+                return Err(format!("invalid RESP from redis: {err}"));
+            }
+        }
+        if buf.len() > 16 * 1024 * 1024 {
+            return Err("response exceeded max read bound".to_string());
+        }
+    }
+}
+
+fn case_to_frame(case: &ConformanceCase) -> RespFrame {
+    let args = case
+        .argv
+        .iter()
+        .map(|arg| RespFrame::BulkString(Some(arg.as_bytes().to_vec())))
+        .collect();
+    RespFrame::Array(Some(args))
+}
+
+fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
+    match expected {
+        ExpectedFrame::Simple { value } => RespFrame::SimpleString(value.clone()),
+        ExpectedFrame::Error { value } => RespFrame::Error(value.clone()),
+        ExpectedFrame::Integer { value } => RespFrame::Integer(*value),
+        ExpectedFrame::Bulk { value } => {
+            RespFrame::BulkString(value.as_ref().map(|v| v.as_bytes().to_vec()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        HarnessConfig, LiveOracleConfig, run_fixture, run_live_redis_diff,
+        run_live_redis_protocol_diff, run_protocol_fixture, run_replay_fixture, run_smoke,
+    };
+
+    #[test]
+    fn smoke_harness_finds_oracle_and_fixtures() {
+        let cfg = HarnessConfig::default_paths();
+        let report = run_smoke(&cfg);
+        assert!(report.oracle_present, "oracle repo should be present");
+        assert!(report.fixture_count >= 1, "expected at least one fixture");
+        assert!(report.strict_mode);
+    }
+
+    #[test]
+    fn conformance_fixture_core_passes() {
+        let cfg = HarnessConfig::default_paths();
+        let report = run_fixture(&cfg, "core_strings.json").expect("fixture run");
+        assert_eq!(
+            report.total, report.passed,
+            "all conformance cases should pass; mismatches: {:?}",
+            report.failed
+        );
+        assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn conformance_errors_fixture_passes() {
+        let cfg = HarnessConfig::default_paths();
+        let report = run_fixture(&cfg, "core_errors.json").expect("errors fixture run");
+        assert_eq!(
+            report.total, report.passed,
+            "mismatch details: {:?}",
+            report.failed
+        );
+        assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn conformance_protocol_fixture_passes() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_protocol_fixture(&cfg, "protocol_negative.json").expect("protocol fixture run");
+        assert_eq!(report.total, report.passed);
+        assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn conformance_replay_fixture_passes() {
+        let cfg = HarnessConfig::default_paths();
+        let report = run_replay_fixture(&cfg, "persist_replay.json").expect("replay fixture run");
+        assert_eq!(report.total, report.passed);
+        assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires running redis-server on localhost:6379"]
+    fn live_redis_core_errors_matches_runtime() {
+        let cfg = HarnessConfig::default_paths();
+        let oracle = LiveOracleConfig::default();
+        let report = run_live_redis_diff(&cfg, "core_errors.json", &oracle).expect("live diff");
+        assert_eq!(
+            report.total, report.passed,
+            "mismatches: {:?}",
+            report.failed
+        );
+    }
+
+    #[test]
+    #[ignore = "requires running redis-server on localhost:6379"]
+    fn live_redis_protocol_negative_matches_runtime() {
+        let cfg = HarnessConfig::default_paths();
+        let oracle = LiveOracleConfig::default();
+        let report = run_live_redis_protocol_diff(&cfg, "protocol_negative.json", &oracle)
+            .expect("live protocol diff");
+        assert_eq!(
+            report.total, report.passed,
+            "mismatches: {:?}",
+            report.failed
+        );
+    }
+}

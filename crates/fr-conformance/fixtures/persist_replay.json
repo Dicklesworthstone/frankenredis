@@ -1,0 +1,30 @@
+{
+  "suite": "persist_replay",
+  "cases": [
+    {
+      "name": "basic_replay_sequence",
+      "now_ms": 1000,
+      "records": [
+        ["SET", "a", "1"],
+        ["INCR", "a"],
+        ["SET", "ttl", "x", "PX", "5"]
+      ],
+      "assertions": [
+        { "key": "a", "expect": "2" },
+        { "key": "ttl", "expect": "x", "at_ms": 1002 },
+        { "key": "ttl", "expect": null, "at_ms": 1006 }
+      ]
+    },
+    {
+      "name": "delete_persists",
+      "now_ms": 2000,
+      "records": [
+        ["SET", "k", "v"],
+        ["DEL", "k"]
+      ],
+      "assertions": [
+        { "key": "k", "expect": null }
+      ]
+    }
+  ]
+}

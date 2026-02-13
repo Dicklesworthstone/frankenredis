@@ -1,0 +1,5 @@
+{
+  "suite": "smoke",
+  "oracle": "legacy_redis_code/redis",
+  "notes": "Bootstrap fixture for first runnable conformance harness"
+}

@@ -1,0 +1,41 @@
+{
+  "suite": "protocol_negative",
+  "cases": [
+    {
+      "name": "invalid_bulk_length",
+      "now_ms": 0,
+      "raw_request": "$-2\r\n",
+      "expect": { "kind": "error", "value": "ERR Protocol error: invalid bulk length" }
+    },
+    {
+      "name": "invalid_multibulk_length",
+      "now_ms": 0,
+      "raw_request": "*-2\r\n",
+      "expect": { "kind": "error", "value": "ERR Protocol error: invalid multibulk length" }
+    },
+    {
+      "name": "incomplete_bulk",
+      "now_ms": 0,
+      "raw_request": "$3\r\nab",
+      "expect": { "kind": "error", "value": "ERR Protocol error: unexpected EOF while reading request" }
+    },
+    {
+      "name": "invalid_prefix",
+      "now_ms": 0,
+      "raw_request": "~1\r\n",
+      "expect": { "kind": "error", "value": "ERR Protocol error: invalid RESP type prefix '~'" }
+    },
+    {
+      "name": "invalid_integer_payload",
+      "now_ms": 0,
+      "raw_request": ":abc\r\n",
+      "expect": { "kind": "error", "value": "ERR Protocol error: invalid integer payload" }
+    },
+    {
+      "name": "valid_ping",
+      "now_ms": 0,
+      "raw_request": "*1\r\n$4\r\nPING\r\n",
+      "expect": { "kind": "simple", "value": "PONG" }
+    }
+  ]
+}
