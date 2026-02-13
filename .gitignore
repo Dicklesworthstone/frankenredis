@@ -12,13 +12,21 @@ legacy_redis_code/
 crates/*/.git/
 crates/*/.git.nested_backup/
 
-# Generated performance/repro artifacts
+# Generated artifacts and benchmark outputs
+artifacts/
 baselines/
 golden_outputs/
 golden_checksums.txt
-artifacts/optimization/phase2c-gate/bench_packets/
 
-# Local scratch/runtime files
+# OS/editor/env/scratch files
+.DS_Store
+._*
+.idea/
+.vscode/
+.env
+.env.*
+*.swp
+*.swo
 *.out
 *.log
 *.tmp

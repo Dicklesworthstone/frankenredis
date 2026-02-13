@@ -1,5 +1,9 @@
 # FrankenRedis
 
+<div align="center">
+  <img src="frankenredis_illustration.webp" alt="FrankenRedis - memory-safe clean-room Redis reimplementation in Rust">
+</div>
+
 FrankenRedis is a clean-room Rust reimplementation targeting grand-scope excellence: semantic fidelity, mathematical rigor, operational safety, and profile-proven performance.
 
 ## What Makes This Project Special
