@@ -1,5 +1,6 @@
 # Rust build outputs
 /target
+/target-local
 **/*.rs.bk
 
 # Local agent/task tooling state
@@ -15,6 +16,7 @@ crates/*/.git.nested_backup/
 baselines/
 golden_outputs/
 golden_checksums.txt
+artifacts/optimization/phase2c-gate/bench_packets/
 
 # Local scratch/runtime files
 *.out

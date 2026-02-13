@@ -1,0 +1,12 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-TEST-VALID",
+  "decode_proofs": [
+    {
+      "ts_unix_ms": 1730000000100,
+      "reason": "scheduled drill",
+      "recovered_blocks": 0,
+      "proof_hash": "blake3:proof-valid"
+    }
+  ]
+}

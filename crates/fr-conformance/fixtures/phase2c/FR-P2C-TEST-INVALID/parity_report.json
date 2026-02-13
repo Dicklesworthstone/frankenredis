@@ -1,0 +1,8 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-TEST-INVALID",
+  "readiness": "NOT READY",
+  "missing_mandatory_fields": ["command_acl_contract"],
+  "strict_mode": {"status": "pending"},
+  "hardened_mode": {"status": "pending"}
+}

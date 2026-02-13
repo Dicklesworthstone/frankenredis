@@ -1,0 +1,42 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "contract": "phase2c_artifact_topology_lock",
+  "required_packet_files": [
+    "legacy_anchor_map.md",
+    "contract_table.md",
+    "fixture_manifest.json",
+    "parity_gate.yaml",
+    "risk_note.md",
+    "parity_report.json",
+    "parity_report.raptorq.json",
+    "parity_report.decode_proof.json"
+  ],
+  "required_fixture_manifest_fields": [
+    "packet_id",
+    "legacy_paths",
+    "legacy_symbols",
+    "state_machine_contract",
+    "protocol_contract",
+    "command_acl_contract",
+    "persistence_replication_contract",
+    "error_contract",
+    "strict_mode_policy",
+    "hardened_mode_policy",
+    "excluded_scope",
+    "oracle_tests",
+    "performance_sentinels",
+    "compatibility_risks",
+    "raptorq_artifacts"
+  ],
+  "required_parity_report_fields": [
+    "schema_version",
+    "packet_id",
+    "readiness",
+    "missing_mandatory_fields"
+  ],
+  "required_raptorq_sidecar_fields": {
+    "root": ["artifact_id", "artifact_type", "source_hash", "raptorq", "scrub", "decode_proofs"],
+    "raptorq": ["k", "repair_symbols", "overhead_ratio", "symbol_hashes"],
+    "scrub": ["last_ok_unix_ms", "status"]
+  }
+}

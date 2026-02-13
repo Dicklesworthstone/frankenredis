@@ -1,0 +1,880 @@
+packet: FR-P2C-BENCH-INVALID-01
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-01', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-01', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-01', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-02
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-02', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-02', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-02', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-03
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-03', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-03', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-03', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-04
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-04', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-04', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-04', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-05
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-05', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-05', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-05', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-06
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-06', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-06', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-06', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-07
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-07', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-07', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-07', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-08
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-08', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-08', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-08', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-09
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-09', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-09', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-09', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-10
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-10', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-10', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-10', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-11
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-11', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-11', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-11', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-12
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-12', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-12', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-12', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-13
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-13', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-13', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-13', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-14
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-14', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-14', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-14', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-15
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-15', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-15', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-15', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-16
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-16', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-16', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-16', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-17
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-17', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-17', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-17', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-18
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-18', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-18', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-18', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-19
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-19', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-19', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-19', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-20
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-20', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-20', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-20', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-21
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-21', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-21', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-21', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-22
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-22', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-22', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-22', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-23
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-23', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-23', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-23', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-24
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-24', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-24', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-24', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-25
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-25', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-25', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-25', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-26
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-26', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-26', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-26', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-27
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-27', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-27', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-27', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-28
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-28', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-28', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-28', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-29
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-29', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-29', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-29', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-30
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-30', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-30', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-30', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-31
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-31', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-31', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-31', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-32
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-32', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-32', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-32', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-33
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-33', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-33', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-33', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-34
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-34', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-34', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-34', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-35
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-35', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-35', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-35', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-36
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-36', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-36', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-36', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-37
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-37', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-37', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-37', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-38
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-38', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-38', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-38', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-39
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-39', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-39', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-39', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-40
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-40', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-40', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-40', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-41
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-41', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-41', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-41', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-42
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-42', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-42', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-42', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-43
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-43', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-43', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-43', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-44
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-44', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-44', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-44', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-45
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-45', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-45', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-45', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-46
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-46', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-46', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-46', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-47
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-47', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-47', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-47', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-48
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-48', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-48', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-48', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-49
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-49', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-49', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-49', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-50
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-50', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-50', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-50', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-51
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-51', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-51', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-51', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-52
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-52', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-52', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-52', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-53
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-53', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-53', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-53', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-54
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-54', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-54', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-54', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-55
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-55', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-55', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-55', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-56
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-56', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-56', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-56', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-57
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-57', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-57', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-57', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-58
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-58', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-58', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-58', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-59
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-59', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-59', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-59', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-60
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-60', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-60', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-60', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-61
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-61', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-61', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-61', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-62
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-62', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-62', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-62', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-63
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-63', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-63', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-63', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-64
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-64', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-64', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-64', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-65
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-65', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-65', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-65', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-66
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-66', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-66', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-66', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-67
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-67', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-67', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-67', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-68
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-68', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-68', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-68', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-69
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-69', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-69', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-69', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-70
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-70', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-70', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-70', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-71
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-71', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-71', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-71', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-72
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-72', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-72', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-72', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-73
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-73', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-73', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-73', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-74
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-74', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-74', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-74', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-75
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-75', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-75', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-75', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-76
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-76', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-76', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-76', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-77
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-77', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-77', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-77', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-78
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-78', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-78', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-78', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-79
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-79', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-79', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-79', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-INVALID-80
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+missing_fields: fixture_manifest.command_acl_contract
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-INVALID-80', got 'FR-P2C-TEST-INVALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-INVALID-80', got 'FR-P2C-TEST-INVALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-INVALID-80', got 'FR-P2C-TEST-INVALID'
+---
+packet: FR-P2C-BENCH-VALID-01
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-01', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-01', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-01', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-02
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-02', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-02', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-02', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-03
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-03', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-03', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-03', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-04
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-04', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-04', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-04', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-05
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-05', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-05', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-05', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-06
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-06', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-06', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-06', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-07
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-07', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-07', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-07', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-08
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-08', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-08', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-08', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-09
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-09', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-09', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-09', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-10
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-10', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-10', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-10', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-11
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-11', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-11', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-11', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-12
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-12', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-12', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-12', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-13
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-13', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-13', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-13', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-14
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-14', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-14', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-14', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-15
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-15', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-15', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-15', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-16
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-16', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-16', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-16', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-17
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-17', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-17', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-17', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-18
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-18', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-18', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-18', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-19
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-19', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-19', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-19', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-20
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-20', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-20', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-20', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-21
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-21', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-21', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-21', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-22
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-22', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-22', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-22', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-23
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-23', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-23', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-23', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-24
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-24', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-24', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-24', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-25
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-25', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-25', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-25', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-26
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-26', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-26', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-26', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-27
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-27', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-27', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-27', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-28
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-28', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-28', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-28', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-29
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-29', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-29', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-29', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-30
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-30', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-30', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-30', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-31
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-31', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-31', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-31', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-32
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-32', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-32', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-32', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-33
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-33', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-33', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-33', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-34
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-34', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-34', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-34', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-35
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-35', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-35', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-35', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-36
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-36', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-36', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-36', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-37
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-37', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-37', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-37', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-38
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-38', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-38', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-38', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-39
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-39', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-39', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-39', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-40
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-40', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-40', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-40', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-41
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-41', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-41', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-41', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-42
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-42', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-42', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-42', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-43
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-43', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-43', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-43', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-44
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-44', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-44', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-44', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-45
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-45', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-45', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-45', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-46
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-46', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-46', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-46', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-47
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-47', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-47', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-47', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-48
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-48', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-48', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-48', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-49
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-49', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-49', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-49', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-50
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-50', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-50', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-50', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-51
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-51', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-51', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-51', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-52
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-52', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-52', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-52', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-53
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-53', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-53', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-53', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-54
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-54', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-54', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-54', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-55
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-55', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-55', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-55', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-56
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-56', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-56', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-56', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-57
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-57', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-57', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-57', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-58
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-58', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-58', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-58', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-59
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-59', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-59', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-59', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-60
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-60', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-60', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-60', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-61
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-61', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-61', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-61', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-62
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-62', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-62', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-62', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-63
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-63', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-63', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-63', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-64
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-64', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-64', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-64', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-65
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-65', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-65', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-65', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-66
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-66', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-66', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-66', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-67
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-67', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-67', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-67', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-68
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-68', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-68', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-68', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-69
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-69', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-69', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-69', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-70
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-70', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-70', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-70', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-71
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-71', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-71', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-71', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-72
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-72', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-72', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-72', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-73
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-73', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-73', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-73', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-74
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-74', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-74', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-74', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-75
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-75', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-75', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-75', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-76
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-76', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-76', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-76', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-77
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-77', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-77', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-77', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-78
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-78', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-78', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-78', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-79
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-79', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-79', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-79', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---
+packet: FR-P2C-BENCH-VALID-80
+schema_version: fr_phase2c_packet_v1
+status: NOT READY
+errors: fixture_manifest.packet_id expected 'FR-P2C-BENCH-VALID-80', got 'FR-P2C-TEST-VALID' | parity_report.json.packet_id expected 'FR-P2C-BENCH-VALID-80', got 'FR-P2C-TEST-VALID' | parity_report.decode_proof.json.packet_id expected 'FR-P2C-BENCH-VALID-80', got 'FR-P2C-TEST-VALID' | parity_report.json.readiness expected 'NOT READY' when mandatory contract data is missing; got 'READY_FOR_IMPL'
+---

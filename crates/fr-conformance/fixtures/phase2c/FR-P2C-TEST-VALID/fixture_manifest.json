@@ -1,0 +1,18 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-TEST-VALID",
+  "legacy_paths": ["src/server.c"],
+  "legacy_symbols": ["processInputBuffer"],
+  "state_machine_contract": ["dispatch_order"],
+  "protocol_contract": ["resp_wire_compat"],
+  "command_acl_contract": ["acl_pre_dispatch"],
+  "persistence_replication_contract": ["append_before_replicate"],
+  "error_contract": ["redis_error_surface"],
+  "strict_mode_policy": ["exact_observable_compat"],
+  "hardened_mode_policy": ["fail_closed_unknown"],
+  "excluded_scope": ["cluster_multi_primary"],
+  "oracle_tests": ["core_strings.json"],
+  "performance_sentinels": ["p95<=1.5ms"],
+  "compatibility_risks": ["arity_error_drift"],
+  "raptorq_artifacts": ["parity_report.raptorq.json"]
+}

@@ -12,6 +12,8 @@ use fr_protocol::{RespFrame, parse_frame};
 use fr_runtime::Runtime;
 use serde::{Deserialize, Serialize};
 
+pub mod phase2c_schema;
+
 #[derive(Debug, Clone)]
 pub struct HarnessConfig {
     pub oracle_root: PathBuf,

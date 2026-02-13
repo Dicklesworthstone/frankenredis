@@ -1,0 +1,4 @@
+strict:
+  conformance_drift: 0
+hardened:
+  allowed_deviation_classes: []

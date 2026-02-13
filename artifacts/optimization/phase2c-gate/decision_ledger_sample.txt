@@ -1,0 +1,8 @@
+packet: FR-P2C-TEST-VALID
+schema_version: fr_phase2c_packet_v1
+status: READY_FOR_IMPL
+decision.posterior_contract_violation: 0.010000
+decision.expected_loss.proceed_impl: 1.000000
+decision.expected_loss.block_impl: 7.930000
+decision.recommended_action: PROCEED_IMPL
+---

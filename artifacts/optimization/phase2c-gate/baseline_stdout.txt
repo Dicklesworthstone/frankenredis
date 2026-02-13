@@ -1,0 +1,2 @@
+status: NOT READY
+reason: no packet directories found (expected FR-P2C-* under /data/projects/frankenredis/crates/fr-conformance/../../artifacts/phase2c)

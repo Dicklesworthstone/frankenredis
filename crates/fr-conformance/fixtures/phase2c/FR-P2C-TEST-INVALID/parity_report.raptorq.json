@@ -1,0 +1,16 @@
+{
+  "artifact_id": "FR-P2C-TEST-INVALID/parity_report.json",
+  "artifact_type": "conformance",
+  "source_hash": "blake3:invalid",
+  "raptorq": {
+    "k": 12,
+    "repair_symbols": 3,
+    "overhead_ratio": 0.25,
+    "symbol_hashes": ["blake3:symbol-1"]
+  },
+  "scrub": {
+    "last_ok_unix_ms": 1730000000200,
+    "status": "ok"
+  },
+  "decode_proofs": []
+}
