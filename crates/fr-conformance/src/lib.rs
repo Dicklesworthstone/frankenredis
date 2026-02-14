@@ -13,6 +13,10 @@ use fr_protocol::{RespFrame, parse_frame};
 use fr_runtime::{EvidenceEvent, Runtime};
 use serde::{Deserialize, Serialize};
 
+use crate::log_contract::{
+    LogOutcome, RuntimeEvidenceContext, StructuredLogEvent, VerificationPath,
+};
+
 pub mod log_contract;
 pub mod phase2c_schema;
 
@@ -157,19 +161,25 @@ pub fn run_fixture(
         let frame = case_to_frame(&case);
         let actual = runtime.execute_frame(frame, case.now_ms);
         let expected = expected_to_frame(&case.expect);
-        let threat_result = validate_threat_expectation(
-            case.expect_threat.as_ref(),
-            &runtime.evidence().events()[evidence_before..],
+        let new_events = &runtime.evidence().events()[evidence_before..];
+        let threat_result = validate_threat_expectation(case.expect_threat.as_ref(), new_events);
+        let log_result = validate_structured_log_emission(
+            &fixture.suite,
+            fixture_name,
+            &case.name,
+            VerificationPath::E2e,
+            case.now_ms,
+            new_events,
         );
         let frame_ok = actual == expected;
-        let passed = frame_ok && threat_result.is_ok();
+        let passed = frame_ok && threat_result.is_ok() && log_result.is_ok();
         if !passed {
             failed.push(CaseOutcome {
                 name: case.name,
                 passed,
                 expected,
                 actual,
-                detail: build_case_detail(frame_ok, threat_result.err()),
+                detail: build_case_detail(frame_ok, threat_result.err(), log_result.err()),
             });
         }
     }
@@ -265,19 +275,25 @@ pub fn run_protocol_fixture(
             .map_err(|err| format!("runtime emitted invalid RESP frame in {}: {err}", case.name))?
             .frame;
         let expected = expected_to_frame(&case.expect);
-        let threat_result = validate_threat_expectation(
-            case.expect_threat.as_ref(),
-            &runtime.evidence().events()[evidence_before..],
+        let new_events = &runtime.evidence().events()[evidence_before..];
+        let threat_result = validate_threat_expectation(case.expect_threat.as_ref(), new_events);
+        let log_result = validate_structured_log_emission(
+            &fixture.suite,
+            fixture_name,
+            &case.name,
+            VerificationPath::E2e,
+            case.now_ms,
+            new_events,
         );
         let frame_ok = actual == expected;
-        let passed = frame_ok && threat_result.is_ok();
+        let passed = frame_ok && threat_result.is_ok() && log_result.is_ok();
         if !passed {
             failed.push(CaseOutcome {
                 name: case.name,
                 passed,
                 expected,
                 actual,
-                detail: build_case_detail(frame_ok, threat_result.err()),
+                detail: build_case_detail(frame_ok, threat_result.err(), log_result.err()),
             });
         }
     }
@@ -612,13 +628,62 @@ fn validate_single_threat_expectation(
     Ok(())
 }
 
-fn build_case_detail(frame_ok: bool, threat_err: Option<String>) -> Option<String> {
-    if frame_ok {
-        return threat_err;
+fn build_case_detail(
+    frame_ok: bool,
+    threat_err: Option<String>,
+    log_err: Option<String>,
+) -> Option<String> {
+    let mut parts = Vec::new();
+    if !frame_ok {
+        parts.push("frame mismatch".to_string());
     }
-    match threat_err {
-        Some(err) => Some(format!("frame mismatch; {err}")),
-        None => Some("frame mismatch".to_string()),
+    if let Some(err) = threat_err {
+        parts.push(err);
+    }
+    if let Some(err) = log_err {
+        parts.push(format!("structured log emission failed: {err}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("; "))
+    }
+}
+
+fn validate_structured_log_emission(
+    suite_id: &str,
+    fixture_name: &str,
+    case_name: &str,
+    verification_path: VerificationPath,
+    now_ms: u64,
+    new_events: &[EvidenceEvent],
+) -> Result<(), String> {
+    let packet_id = packet_family_for_fixture(fixture_name);
+    for event in new_events {
+        let _ = StructuredLogEvent::from_runtime_evidence(
+            event,
+            RuntimeEvidenceContext {
+                suite_id,
+                test_or_scenario_id: case_name,
+                packet_id,
+                verification_path,
+                seed: now_ms,
+                duration_ms: 0,
+                outcome: LogOutcome::Pass,
+                fixture_id: Some(fixture_name),
+                env_ref: Some("crates/fr-conformance/fixtures/log_contract_v1/env.json"),
+            },
+        )
+        .map_err(|err| format!("runtime evidence conversion error: {err}"))?;
+    }
+    Ok(())
+}
+
+fn packet_family_for_fixture(fixture_name: &str) -> &'static str {
+    match fixture_name {
+        "protocol_negative.json" => "FR-P2C-002",
+        "persist_replay.json" => "FR-P2C-005",
+        _ => "FR-P2C-003",
     }
 }
 
@@ -659,8 +724,10 @@ mod tests {
     use super::{
         EvidenceEvent, ExpectedThreat, HarnessConfig, LiveOracleConfig, run_fixture,
         run_live_redis_diff, run_live_redis_protocol_diff, run_protocol_fixture,
-        run_replay_fixture, run_smoke, validate_threat_expectation,
+        run_replay_fixture, run_smoke, validate_structured_log_emission,
+        validate_threat_expectation,
     };
+    use crate::log_contract::VerificationPath;
 
     #[test]
     fn smoke_harness_finds_oracle_and_fixtures() {
@@ -894,6 +961,73 @@ mod tests {
         };
 
         validate_threat_expectation(Some(&expected), &[event]).expect("must match");
+    }
+
+    #[test]
+    fn structured_log_enforcement_accepts_valid_runtime_event() {
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:1".to_string(),
+            ts_ms: 1,
+            packet_id: 2,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ParserAbuse,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "protocol",
+            action: "parse_failure",
+            reason_code: "protocol_parse_failure",
+            reason: "invalid bulk length".to_string(),
+            input_digest: "abc".to_string(),
+            output_digest: "def".to_string(),
+            state_digest_before: "state_before".to_string(),
+            state_digest_after: "state_after".to_string(),
+            replay_cmd: "cargo test".to_string(),
+            artifact_refs: vec!["TEST_LOG_SCHEMA_V1.md".to_string()],
+            confidence: Some(1.0),
+        };
+        validate_structured_log_emission(
+            "protocol_negative",
+            "protocol_negative.json",
+            "invalid_bulk_len",
+            VerificationPath::E2e,
+            7,
+            &[event],
+        )
+        .expect("conversion should pass");
+    }
+
+    #[test]
+    fn structured_log_enforcement_rejects_invalid_runtime_event() {
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:1".to_string(),
+            ts_ms: 1,
+            packet_id: 2,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ParserAbuse,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "protocol",
+            action: "parse_failure",
+            reason_code: "protocol_parse_failure",
+            reason: "invalid bulk length".to_string(),
+            input_digest: "abc".to_string(),
+            output_digest: "def".to_string(),
+            state_digest_before: "state_before".to_string(),
+            state_digest_after: "state_after".to_string(),
+            replay_cmd: "cargo test".to_string(),
+            artifact_refs: vec![],
+            confidence: Some(1.0),
+        };
+        let err = validate_structured_log_emission(
+            "protocol_negative",
+            "protocol_negative.json",
+            "invalid_bulk_len",
+            VerificationPath::E2e,
+            7,
+            &[event],
+        )
+        .expect_err("empty artifact_refs should fail conversion");
+        assert!(err.contains("artifact_refs"));
     }
 
     #[test]

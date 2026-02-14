@@ -309,6 +309,7 @@ fn command_error_to_resp(error: CommandError) -> RespFrame {
             RespFrame::Error("ERR value is not an integer or out of range".to_string())
         }
         CommandError::SyntaxError => RespFrame::Error("ERR syntax error".to_string()),
+        CommandError::NoSuchKey => RespFrame::Error("ERR no such key".to_string()),
         CommandError::Store(store_error) => match store_error {
             fr_store::StoreError::ValueNotInteger => {
                 RespFrame::Error("ERR value is not an integer or out of range".to_string())
@@ -316,6 +317,7 @@ fn command_error_to_resp(error: CommandError) -> RespFrame {
             fr_store::StoreError::IntegerOverflow => {
                 RespFrame::Error("ERR increment or decrement would overflow".to_string())
             }
+            fr_store::StoreError::KeyNotFound => RespFrame::Error("ERR no such key".to_string()),
         },
     }
 }

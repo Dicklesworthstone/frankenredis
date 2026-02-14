@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fr_config::Mode;
+use fr_runtime::EvidenceEvent;
 use serde::{Deserialize, Serialize};
 
 pub const STRUCTURED_LOG_SCHEMA_VERSION: &str = "fr_testlog_v1";
@@ -81,6 +82,19 @@ pub struct StructuredLogEvent {
     pub env_ref: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeEvidenceContext<'a> {
+    pub suite_id: &'a str,
+    pub test_or_scenario_id: &'a str,
+    pub packet_id: &'a str,
+    pub verification_path: VerificationPath,
+    pub seed: u64,
+    pub duration_ms: u64,
+    pub outcome: LogOutcome,
+    pub fixture_id: Option<&'a str>,
+    pub env_ref: Option<&'a str>,
+}
+
 impl StructuredLogEvent {
     pub fn validate(&self) -> Result<(), String> {
         if self.schema_version != STRUCTURED_LOG_SCHEMA_VERSION {
@@ -121,6 +135,33 @@ impl StructuredLogEvent {
         self.validate()?;
         serde_json::to_string(self)
             .map_err(|err| format!("failed to serialize structured log event: {err}"))
+    }
+
+    pub fn from_runtime_evidence(
+        event: &EvidenceEvent,
+        context: RuntimeEvidenceContext<'_>,
+    ) -> Result<Self, String> {
+        let out = Self {
+            schema_version: STRUCTURED_LOG_SCHEMA_VERSION.to_string(),
+            ts_utc: event.ts_utc.clone(),
+            suite_id: context.suite_id.to_string(),
+            test_or_scenario_id: context.test_or_scenario_id.to_string(),
+            packet_id: context.packet_id.to_string(),
+            mode: event.mode.into(),
+            verification_path: context.verification_path,
+            seed: context.seed,
+            input_digest: event.input_digest.clone(),
+            output_digest: event.output_digest.clone(),
+            duration_ms: context.duration_ms,
+            outcome: context.outcome,
+            reason_code: event.reason_code.to_string(),
+            replay_cmd: event.replay_cmd.clone(),
+            artifact_refs: event.artifact_refs.clone(),
+            fixture_id: context.fixture_id.map(std::string::ToString::to_string),
+            env_ref: context.env_ref.map(std::string::ToString::to_string),
+        };
+        out.validate()?;
+        Ok(out)
     }
 }
 
@@ -231,10 +272,40 @@ fn deterministic_digest(label: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use fr_config::{DecisionAction, DriftSeverity, Mode, ThreatClass};
+    use fr_runtime::EvidenceEvent;
+
     use super::{
-        LogMode, PACKET_FAMILIES, STRUCTURED_LOG_SCHEMA_VERSION, VerificationPath, e2e_replay_cmd,
+        LogMode, LogOutcome, PACKET_FAMILIES, RuntimeEvidenceContext,
+        STRUCTURED_LOG_SCHEMA_VERSION, StructuredLogEvent, VerificationPath, e2e_replay_cmd,
         golden_packet_logs, unit_replay_cmd,
     };
+
+    fn sample_runtime_event() -> EvidenceEvent {
+        EvidenceEvent {
+            ts_utc: "2026-02-14T00:00:00Z".to_string(),
+            ts_ms: 1,
+            packet_id: 11,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ParserAbuse,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "protocol",
+            action: "parse_failure",
+            reason_code: "protocol_parse_failure",
+            reason: "invalid bulk length".to_string(),
+            input_digest: "input_digest".to_string(),
+            output_digest: "output_digest".to_string(),
+            state_digest_before: "before".to_string(),
+            state_digest_after: "after".to_string(),
+            replay_cmd: "cargo test -p fr-runtime parse_failure".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/log_contract_v1/env.json".to_string(),
+            ],
+            confidence: Some(1.0),
+        }
+    }
 
     #[test]
     fn replay_templates_are_deterministic() {
@@ -268,5 +339,52 @@ mod tests {
     fn unknown_packet_family_is_rejected() {
         let err = golden_packet_logs("FR-P2C-404").expect_err("must fail");
         assert!(err.contains("unknown packet family"));
+    }
+
+    #[test]
+    fn runtime_evidence_conversion_emits_valid_structured_log_event() {
+        let runtime_event = sample_runtime_event();
+        let structured = StructuredLogEvent::from_runtime_evidence(
+            &runtime_event,
+            RuntimeEvidenceContext {
+                suite_id: "e2e::protocol_negative",
+                test_or_scenario_id: "protocol_negative::invalid_bulk_len",
+                packet_id: "FR-P2C-002",
+                verification_path: VerificationPath::E2e,
+                seed: 7,
+                duration_ms: 3,
+                outcome: LogOutcome::Pass,
+                fixture_id: Some("protocol_negative.json"),
+                env_ref: Some("crates/fr-conformance/fixtures/log_contract_v1/env.json"),
+            },
+        )
+        .expect("conversion must succeed");
+        assert_eq!(structured.schema_version, STRUCTURED_LOG_SCHEMA_VERSION);
+        assert_eq!(structured.mode, LogMode::Strict);
+        assert_eq!(structured.packet_id, "FR-P2C-002");
+        assert_eq!(structured.reason_code, "protocol_parse_failure");
+        structured.validate().expect("event validates");
+    }
+
+    #[test]
+    fn runtime_evidence_conversion_rejects_empty_artifact_refs() {
+        let mut runtime_event = sample_runtime_event();
+        runtime_event.artifact_refs.clear();
+        let err = StructuredLogEvent::from_runtime_evidence(
+            &runtime_event,
+            RuntimeEvidenceContext {
+                suite_id: "e2e::protocol_negative",
+                test_or_scenario_id: "protocol_negative::invalid_bulk_len",
+                packet_id: "FR-P2C-002",
+                verification_path: VerificationPath::E2e,
+                seed: 7,
+                duration_ms: 3,
+                outcome: LogOutcome::Fail,
+                fixture_id: Some("protocol_negative.json"),
+                env_ref: None,
+            },
+        )
+        .expect_err("empty artifact refs should fail validation");
+        assert!(err.contains("artifact_refs"));
     }
 }
