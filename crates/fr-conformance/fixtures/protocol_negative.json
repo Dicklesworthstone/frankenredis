@@ -5,31 +5,71 @@
       "name": "invalid_bulk_length",
       "now_ms": 0,
       "raw_request": "$-2\r\n",
-      "expect": { "kind": "error", "value": "ERR Protocol error: invalid bulk length" }
+      "expect": { "kind": "error", "value": "ERR Protocol error: invalid bulk length" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
     },
     {
       "name": "invalid_multibulk_length",
       "now_ms": 0,
       "raw_request": "*-2\r\n",
-      "expect": { "kind": "error", "value": "ERR Protocol error: invalid multibulk length" }
+      "expect": { "kind": "error", "value": "ERR Protocol error: invalid multibulk length" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
     },
     {
       "name": "incomplete_bulk",
       "now_ms": 0,
       "raw_request": "$3\r\nab",
-      "expect": { "kind": "error", "value": "ERR Protocol error: unexpected EOF while reading request" }
+      "expect": { "kind": "error", "value": "ERR Protocol error: unexpected EOF while reading request" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
     },
     {
       "name": "invalid_prefix",
       "now_ms": 0,
       "raw_request": "~1\r\n",
-      "expect": { "kind": "error", "value": "ERR Protocol error: invalid RESP type prefix '~'" }
+      "expect": { "kind": "error", "value": "ERR Protocol error: invalid RESP type prefix '~'" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
     },
     {
       "name": "invalid_integer_payload",
       "now_ms": 0,
       "raw_request": ":abc\r\n",
-      "expect": { "kind": "error", "value": "ERR Protocol error: invalid integer payload" }
+      "expect": { "kind": "error", "value": "ERR Protocol error: invalid integer payload" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
     },
     {
       "name": "valid_ping",

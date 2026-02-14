@@ -14,7 +14,7 @@ Purpose: convert Phase-2 analysis into direct implementation tickets with concre
 | `FR-P2C-004` | ACL and auth policy | selector and rule machinery in `src/acl.c` (`ACLCreateSelector`, allowed-command/arg tracking) | `fr-config`, `fr-command` | ACL-focused unit/integration tests |
 | `FR-P2C-005` | Persistence format and replay | `rdbSave*`/`rdbLoad*` families in `src/rdb.c`; manifest/write/read routines in `src/aof.c` | `fr-persist` | persistence integration tests and replay fixtures |
 | `FR-P2C-006` | Replication state machine | replication channel and backlog flow in `src/replication.c` (`replication*`, rdb-channel routines) | `fr-repl` | `tests/integration/*` replication suites |
-| `FR-P2C-007` | Cluster behavior (scoped) | payload/slot/restore paths in `src/cluster.c` | `fr-repl`, `fr-command` | `tests/cluster/*` |
+| `FR-P2C-007` | Cluster behavior | payload/slot/restore paths in `src/cluster.c` | `fr-repl`, `fr-command` | `tests/cluster/*` |
 | `FR-P2C-008` | Expiration + eviction | active expire logic in `src/expire.c`; eviction loops in `src/evict.c` | `fr-expire`, `fr-store` | TTL/eviction unit and integration tests |
 | `FR-P2C-009` | TLS/config boundary | protocol/config validation in `src/tls.c` and config path in `src/config.c` | `fr-config` | TLS/config regression fixtures |
 
@@ -30,7 +30,7 @@ For each ticket above, deliver all artifacts in the same PR:
 
 ## 3. Strict/Hardened Expectations per Packet
 
-- Strict mode: exact scoped Redis-observable behavior.
+- Strict mode: exact Redis-observable behavior for the packet's parity-target surface.
 - Hardened mode: same outward contract with bounded defensive checks (parser/config/auth limits).
 - Unknown incompatible protocol/config/metadata path: fail-closed.
 
@@ -46,12 +46,16 @@ For each ticket above, deliver all artifacts in the same PR:
 8. `FR-P2C-007`
 9. `FR-P2C-009`
 
-## 5. Done Criteria (Phase-2C)
+## 5. Done Criteria (Phase-2C Backbone)
 
 - All 9 packets have extracted anchor maps and contract tables.
 - At least one runnable fixture family exists per packet in `fr-conformance`.
 - Packet-level parity report schema is produced for every packet.
 - RaptorQ sidecars are generated for fixture bundles and parity reports.
+
+Backbone scope rule:
+- These 9 packets are the initial parity backbone, not the full endpoint.
+- Additional packets must be added until full drop-in parity requirements are exhausted and closed.
 
 ## 6. Per-Ticket Extraction Schema (Mandatory Fields)
 
@@ -66,7 +70,7 @@ Every `FR-P2C-*` packet MUST include:
 8. `error_contract`
 9. `strict_mode_policy`
 10. `hardened_mode_policy`
-11. `excluded_scope`
+11. `sequencing_boundary_notes` (must include follow-up closure beads for deferred areas)
 12. `oracle_tests`
 13. `performance_sentinels`
 14. `compatibility_risks`

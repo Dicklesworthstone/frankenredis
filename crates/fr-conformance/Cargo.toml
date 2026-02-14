@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+fr-config = { version = "0.1.0", path = "../fr-config" }
 fr-persist = { version = "0.1.0", path = "../fr-persist" }
 fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
 fr-runtime = { version = "0.1.0", path = "../fr-runtime" }

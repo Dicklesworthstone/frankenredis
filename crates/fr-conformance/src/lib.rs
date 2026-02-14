@@ -7,9 +7,10 @@ use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 
+use fr_config::{DecisionAction, DriftSeverity, ThreatClass};
 use fr_persist::AofRecord;
 use fr_protocol::{RespFrame, parse_frame};
-use fr_runtime::Runtime;
+use fr_runtime::{EvidenceEvent, Runtime};
 use serde::{Deserialize, Serialize};
 
 pub mod phase2c_schema;
@@ -75,6 +76,8 @@ pub struct ConformanceCase {
     pub now_ms: u64,
     pub argv: Vec<String>,
     pub expect: ExpectedFrame,
+    #[serde(default)]
+    pub expect_threat: Option<ExpectedThreat>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -86,12 +89,26 @@ pub enum ExpectedFrame {
     Bulk { value: Option<String> },
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExpectedThreat {
+    pub threat_class: String,
+    pub severity: String,
+    pub decision_action: String,
+    #[serde(default)]
+    pub reason_code: Option<String>,
+    #[serde(default)]
+    pub subsystem: Option<String>,
+    #[serde(default)]
+    pub action: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaseOutcome {
     pub name: String,
     pub passed: bool,
     pub expected: RespFrame,
     pub actual: RespFrame,
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,16 +152,23 @@ pub fn run_fixture(
     let mut failed = Vec::new();
     let total = fixture.cases.len();
     for case in fixture.cases {
+        let evidence_before = runtime.evidence().events().len();
         let frame = case_to_frame(&case);
         let actual = runtime.execute_frame(frame, case.now_ms);
         let expected = expected_to_frame(&case.expect);
-        let passed = actual == expected;
+        let threat_result = validate_threat_expectation(
+            case.expect_threat.as_ref(),
+            &runtime.evidence().events()[evidence_before..],
+        );
+        let frame_ok = actual == expected;
+        let passed = frame_ok && threat_result.is_ok();
         if !passed {
             failed.push(CaseOutcome {
                 name: case.name,
                 passed,
                 expected,
                 actual,
+                detail: build_case_detail(frame_ok, threat_result.err()),
             });
         }
     }
@@ -191,6 +215,7 @@ pub fn run_live_redis_diff(
                 passed: false,
                 expected: redis_actual,
                 actual: runtime_actual,
+                detail: Some("frame mismatch against live redis".to_string()),
             });
         }
     }
@@ -215,6 +240,8 @@ pub struct ProtocolCase {
     pub now_ms: u64,
     pub raw_request: String,
     pub expect: ExpectedFrame,
+    #[serde(default)]
+    pub expect_threat: Option<ExpectedThreat>,
 }
 
 pub fn run_protocol_fixture(
@@ -231,18 +258,25 @@ pub fn run_protocol_fixture(
     let mut failed = Vec::new();
     let total = fixture.cases.len();
     for case in fixture.cases {
+        let evidence_before = runtime.evidence().events().len();
         let encoded = runtime.execute_bytes(case.raw_request.as_bytes(), case.now_ms);
         let actual = parse_frame(&encoded)
             .map_err(|err| format!("runtime emitted invalid RESP frame in {}: {err}", case.name))?
             .frame;
         let expected = expected_to_frame(&case.expect);
-        let passed = actual == expected;
+        let threat_result = validate_threat_expectation(
+            case.expect_threat.as_ref(),
+            &runtime.evidence().events()[evidence_before..],
+        );
+        let frame_ok = actual == expected;
+        let passed = frame_ok && threat_result.is_ok();
         if !passed {
             failed.push(CaseOutcome {
                 name: case.name,
                 passed,
                 expected,
                 actual,
+                detail: build_case_detail(frame_ok, threat_result.err()),
             });
         }
     }
@@ -287,6 +321,7 @@ pub fn run_live_redis_protocol_diff(
                 passed: false,
                 expected: redis_actual,
                 actual: runtime_actual,
+                detail: Some("frame mismatch against live redis".to_string()),
             });
         }
     }
@@ -361,6 +396,7 @@ pub fn run_replay_fixture(
                     passed,
                     expected,
                     actual,
+                    detail: Some("replay assertion mismatch".to_string()),
                 });
             }
         }
@@ -476,11 +512,153 @@ fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
     }
 }
 
+fn validate_threat_expectation(
+    expected: Option<&ExpectedThreat>,
+    new_events: &[EvidenceEvent],
+) -> Result<(), String> {
+    match expected {
+        Some(expected_threat) => {
+            if new_events.is_empty() {
+                return Err("expected threat event but none recorded".to_string());
+            }
+            let mut first_mismatch: Option<String> = None;
+            for (idx, event) in new_events.iter().enumerate() {
+                match validate_single_threat_expectation(expected_threat, event) {
+                    Ok(()) => return Ok(()),
+                    Err(err) => {
+                        if first_mismatch.is_none() {
+                            first_mismatch = Some(format!("event[{idx}] {err}"));
+                        }
+                    }
+                }
+            }
+            Err(format!(
+                "no matching threat event found across {} event(s); first mismatch: {}",
+                new_events.len(),
+                first_mismatch.unwrap_or_else(|| "none".to_string())
+            ))
+        }
+        None => {
+            if let Some(event) = new_events.first() {
+                return Err(format!(
+                    "unexpected threat event recorded (class={}, severity={}, action={}, reason_code={})",
+                    threat_class_label(event.threat_class),
+                    drift_severity_label(event.severity),
+                    decision_action_label(event.decision_action),
+                    event.reason_code
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_single_threat_expectation(
+    expected_threat: &ExpectedThreat,
+    event: &EvidenceEvent,
+) -> Result<(), String> {
+    let got_threat_class = threat_class_label(event.threat_class);
+    if got_threat_class != expected_threat.threat_class {
+        return Err(format!(
+            "threat_class mismatch: expected '{}', got '{}'",
+            expected_threat.threat_class, got_threat_class
+        ));
+    }
+
+    let got_severity = drift_severity_label(event.severity);
+    if got_severity != expected_threat.severity {
+        return Err(format!(
+            "severity mismatch: expected '{}', got '{}'",
+            expected_threat.severity, got_severity
+        ));
+    }
+
+    let got_decision = decision_action_label(event.decision_action);
+    if got_decision != expected_threat.decision_action {
+        return Err(format!(
+            "decision_action mismatch: expected '{}', got '{}'",
+            expected_threat.decision_action, got_decision
+        ));
+    }
+
+    if let Some(reason_code) = expected_threat.reason_code.as_deref()
+        && event.reason_code != reason_code
+    {
+        return Err(format!(
+            "reason_code mismatch: expected '{reason_code}', got '{}'",
+            event.reason_code
+        ));
+    }
+
+    if let Some(subsystem) = expected_threat.subsystem.as_deref()
+        && event.subsystem != subsystem
+    {
+        return Err(format!(
+            "subsystem mismatch: expected '{subsystem}', got '{}'",
+            event.subsystem
+        ));
+    }
+
+    if let Some(action) = expected_threat.action.as_deref()
+        && event.action != action
+    {
+        return Err(format!(
+            "action mismatch: expected '{action}', got '{}'",
+            event.action
+        ));
+    }
+
+    Ok(())
+}
+
+fn build_case_detail(frame_ok: bool, threat_err: Option<String>) -> Option<String> {
+    if frame_ok {
+        return threat_err;
+    }
+    match threat_err {
+        Some(err) => Some(format!("frame mismatch; {err}")),
+        None => Some("frame mismatch".to_string()),
+    }
+}
+
+fn threat_class_label(threat_class: ThreatClass) -> &'static str {
+    match threat_class {
+        ThreatClass::ParserAbuse => "parser_abuse",
+        ThreatClass::MetadataAmbiguity => "metadata_ambiguity",
+        ThreatClass::VersionSkew => "version_skew",
+        ThreatClass::ResourceExhaustion => "resource_exhaustion",
+        ThreatClass::PersistenceTampering => "persistence_tampering",
+        ThreatClass::ReplicationOrderAttack => "replication_order_attack",
+        ThreatClass::AuthPolicyConfusion => "auth_policy_confusion",
+        ThreatClass::ConfigDowngradeAbuse => "config_downgrade_abuse",
+    }
+}
+
+fn drift_severity_label(severity: DriftSeverity) -> &'static str {
+    match severity {
+        DriftSeverity::S0 => "s0",
+        DriftSeverity::S1 => "s1",
+        DriftSeverity::S2 => "s2",
+        DriftSeverity::S3 => "s3",
+    }
+}
+
+fn decision_action_label(decision_action: DecisionAction) -> &'static str {
+    match decision_action {
+        DecisionAction::FailClosed => "fail_closed",
+        DecisionAction::BoundedDefense => "bounded_defense",
+        DecisionAction::RejectNonAllowlisted => "reject_non_allowlisted",
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use fr_config::{DecisionAction, DriftSeverity, Mode, ThreatClass};
+
     use super::{
-        HarnessConfig, LiveOracleConfig, run_fixture, run_live_redis_diff,
-        run_live_redis_protocol_diff, run_protocol_fixture, run_replay_fixture, run_smoke,
+        EvidenceEvent, ExpectedThreat, HarnessConfig, LiveOracleConfig, run_fixture,
+        run_live_redis_diff, run_live_redis_protocol_diff, run_protocol_fixture,
+        run_replay_fixture, run_smoke, validate_threat_expectation,
     };
 
     #[test]
@@ -531,6 +709,190 @@ mod tests {
         let report = run_replay_fixture(&cfg, "persist_replay.json").expect("replay fixture run");
         assert_eq!(report.total, report.passed);
         assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn threat_expectation_rejects_unexpected_event() {
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:0".to_string(),
+            ts_ms: 0,
+            packet_id: 1,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ParserAbuse,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "protocol",
+            action: "parse_failure",
+            reason_code: "protocol_parse_failure",
+            reason: "invalid bulk length".to_string(),
+            input_digest: "abc".to_string(),
+            output_digest: "def".to_string(),
+            state_digest_before: "state_before".to_string(),
+            state_digest_after: "state_after".to_string(),
+            replay_cmd: "cargo test".to_string(),
+            artifact_refs: vec![],
+            confidence: Some(1.0),
+        };
+
+        let err = validate_threat_expectation(None, &[event]).expect_err("must fail");
+        assert!(err.contains("unexpected threat event"));
+    }
+
+    #[test]
+    fn threat_expectation_accepts_matching_event() {
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:0".to_string(),
+            ts_ms: 0,
+            packet_id: 1,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ParserAbuse,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "protocol",
+            action: "parse_failure",
+            reason_code: "protocol_parse_failure",
+            reason: "invalid bulk length".to_string(),
+            input_digest: "abc".to_string(),
+            output_digest: "def".to_string(),
+            state_digest_before: "state_before".to_string(),
+            state_digest_after: "state_after".to_string(),
+            replay_cmd: "cargo test".to_string(),
+            artifact_refs: vec![],
+            confidence: Some(1.0),
+        };
+        let expected = ExpectedThreat {
+            threat_class: "parser_abuse".to_string(),
+            severity: "s0".to_string(),
+            decision_action: "fail_closed".to_string(),
+            reason_code: Some("protocol_parse_failure".to_string()),
+            subsystem: Some("protocol".to_string()),
+            action: Some("parse_failure".to_string()),
+        };
+
+        validate_threat_expectation(Some(&expected), &[event]).expect("must match");
+    }
+
+    #[test]
+    fn threat_expectation_rejects_severity_mismatch() {
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:0".to_string(),
+            ts_ms: 0,
+            packet_id: 1,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ParserAbuse,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "protocol",
+            action: "parse_failure",
+            reason_code: "protocol_parse_failure",
+            reason: "invalid bulk length".to_string(),
+            input_digest: "abc".to_string(),
+            output_digest: "def".to_string(),
+            state_digest_before: "state_before".to_string(),
+            state_digest_after: "state_after".to_string(),
+            replay_cmd: "cargo test".to_string(),
+            artifact_refs: vec![],
+            confidence: Some(1.0),
+        };
+        let expected = ExpectedThreat {
+            threat_class: "parser_abuse".to_string(),
+            severity: "s1".to_string(),
+            decision_action: "fail_closed".to_string(),
+            reason_code: Some("protocol_parse_failure".to_string()),
+            subsystem: Some("protocol".to_string()),
+            action: Some("parse_failure".to_string()),
+        };
+
+        let err = validate_threat_expectation(Some(&expected), &[event]).expect_err("must fail");
+        assert!(err.contains("severity mismatch"));
+    }
+
+    #[test]
+    fn threat_expectation_matches_any_event_in_batch() {
+        let mismatched = EvidenceEvent {
+            ts_utc: "unix_ms:0".to_string(),
+            ts_ms: 0,
+            packet_id: 1,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "compatibility_gate",
+            action: "fail_closed_array_len",
+            reason_code: "compat_array_len_exceeded",
+            reason: "array length exceeded".to_string(),
+            input_digest: "abc".to_string(),
+            output_digest: "def".to_string(),
+            state_digest_before: "state_before".to_string(),
+            state_digest_after: "state_after".to_string(),
+            replay_cmd: "cargo test".to_string(),
+            artifact_refs: vec![],
+            confidence: Some(1.0),
+        };
+        let matching = EvidenceEvent {
+            ts_utc: "unix_ms:1".to_string(),
+            ts_ms: 1,
+            packet_id: 2,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ParserAbuse,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "protocol",
+            action: "parse_failure",
+            reason_code: "protocol_parse_failure",
+            reason: "invalid bulk length".to_string(),
+            input_digest: "abc".to_string(),
+            output_digest: "def".to_string(),
+            state_digest_before: "state_before".to_string(),
+            state_digest_after: "state_after".to_string(),
+            replay_cmd: "cargo test".to_string(),
+            artifact_refs: vec![],
+            confidence: Some(1.0),
+        };
+        let expected = ExpectedThreat {
+            threat_class: "parser_abuse".to_string(),
+            severity: "s0".to_string(),
+            decision_action: "fail_closed".to_string(),
+            reason_code: Some("protocol_parse_failure".to_string()),
+            subsystem: Some("protocol".to_string()),
+            action: Some("parse_failure".to_string()),
+        };
+
+        validate_threat_expectation(Some(&expected), &[mismatched, matching]).expect("must match");
+    }
+
+    #[test]
+    fn threat_expectation_allows_omitted_optional_fields() {
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:1".to_string(),
+            ts_ms: 1,
+            packet_id: 2,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ParserAbuse,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "protocol",
+            action: "parse_failure",
+            reason_code: "protocol_parse_failure",
+            reason: "invalid bulk length".to_string(),
+            input_digest: "abc".to_string(),
+            output_digest: "def".to_string(),
+            state_digest_before: "state_before".to_string(),
+            state_digest_after: "state_after".to_string(),
+            replay_cmd: "cargo test".to_string(),
+            artifact_refs: vec![],
+            confidence: Some(1.0),
+        };
+        let expected = ExpectedThreat {
+            threat_class: "parser_abuse".to_string(),
+            severity: "s0".to_string(),
+            decision_action: "fail_closed".to_string(),
+            reason_code: None,
+            subsystem: None,
+            action: None,
+        };
+
+        validate_threat_expectation(Some(&expected), &[event]).expect("must match");
     }
 
     #[test]

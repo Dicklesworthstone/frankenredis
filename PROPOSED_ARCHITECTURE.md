@@ -7,6 +7,7 @@
 3. Deterministic semantics first; optimization second.
 4. Every meaningful change emits proof, perf, and risk artifacts.
 5. Persistent artifacts are RaptorQ-sidecar eligible by contract.
+6. Full drop-in feature/functionality parity is mandatory; sequencing cannot become permanent exclusion.
 
 ## 2. Execution Pipeline
 

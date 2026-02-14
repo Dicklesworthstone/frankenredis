@@ -18,6 +18,7 @@ version = "0.1.0"
 name = "fr-conformance"
 version = "0.1.0"
 dependencies = [
+ "fr-config",
  "fr-persist",
  "fr-protocol",
  "fr-runtime",
@@ -53,6 +54,7 @@ name = "fr-runtime"
 version = "0.1.0"
 dependencies = [
  "fr-command",
+ "fr-config",
  "fr-protocol",
  "fr-store",
 ]

@@ -142,11 +142,33 @@ impl Store {
             self.entries.remove(key);
         }
     }
+
+    #[must_use]
+    pub fn state_digest(&self) -> String {
+        let mut rows = self.entries.iter().collect::<Vec<_>>();
+        rows.sort_by_key(|(key, _)| *key);
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for (key, entry) in rows {
+            hash = fnv1a_update(hash, key);
+            hash = fnv1a_update(hash, &entry.value);
+            let expiry_bytes = entry.expires_at_ms.unwrap_or(0).to_le_bytes();
+            hash = fnv1a_update(hash, &expiry_bytes);
+        }
+        format!("{hash:016x}")
+    }
 }
 
 fn parse_i64(bytes: &[u8]) -> Result<i64, StoreError> {
     let text = std::str::from_utf8(bytes).map_err(|_| StoreError::ValueNotInteger)?;
     text.parse::<i64>().map_err(|_| StoreError::ValueNotInteger)
+}
+
+fn fnv1a_update(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
 }
 
 #[cfg(test)]
@@ -177,5 +199,17 @@ mod tests {
         assert!(store.expire_seconds(b"k", 5, 1_000));
         assert_eq!(store.pttl(b"k", 1_000), PttlValue::Remaining(5_000));
         assert_eq!(store.pttl(b"k", 6_001), PttlValue::KeyMissing);
+    }
+
+    #[test]
+    fn state_digest_changes_on_mutation() {
+        let mut store = Store::new();
+        let digest_a = store.state_digest();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+        let digest_b = store.state_digest();
+        assert_ne!(digest_a, digest_b);
+        store.del(&[b"k".to_vec()], 0);
+        let digest_c = store.state_digest();
+        assert_ne!(digest_b, digest_c);
     }
 }

@@ -5,7 +5,7 @@ Method stack: `$porting-to-rust` Phase-2 Deep Extraction + `$alien-artifact-codi
 
 ## 0. Mission and Completion Criteria
 
-This document defines exhaustive legacy extraction for FrankenRedis. Phase-2 is complete only when each scoped subsystem has:
+This document defines exhaustive legacy extraction for FrankenRedis. Phase-2 is complete only when each subsystem in the full parity program has:
 1. explicit invariants,
 2. explicit crate ownership,
 3. explicit oracle families,
@@ -56,10 +56,10 @@ High-density zones:
 ## 4. Alien-Artifact Invariant Ledger (Formal Obligations)
 
 - `FR-I1` RESP completeness: command argv is created only from fully parsed frames.
-- `FR-I2` Event ordering safety: read/write readiness semantics are deterministic under scoped scheduler rules.
-- `FR-I3` Command authorization integrity: ACL and command flags jointly enforce scoped access rules.
-- `FR-I4` Persistence replay correctness: replayed state is observationally equivalent for scoped command set.
-- `FR-I5` Replication offset consistency: scoped replication never silently regresses committed offset semantics.
+- `FR-I2` Event ordering safety: read/write readiness semantics are deterministic under scheduler rules for parity-target workloads.
+- `FR-I3` Command authorization integrity: ACL and command flags jointly enforce full access-rule parity.
+- `FR-I4` Persistence replay correctness: replayed state is observationally equivalent for parity-target command surface.
+- `FR-I5` Replication offset consistency: replication never silently regresses committed offset semantics for parity-target paths.
 
 Required proof artifacts per implemented slice:
 1. invariant statement,
@@ -85,7 +85,7 @@ Decision law (runtime):
 |---|---|---|---|
 | malformed RESP payload | fail-closed | fail-closed with bounded diagnostics | parser incident ledger |
 | ACL confusion | fail unauthorized path | fail unauthorized path + additional auditing | auth decision ledger |
-| command abuse payload (size/explosion) | execute scoped behavior | admission guard with bounded limits | admission report |
+| command abuse payload (size/explosion) | execute documented behavior | admission guard with bounded limits | admission report |
 | persistence corruption | fail and mark incident | attempt bounded recovery then audit | replay/recovery ledger |
 | unknown incompatible config/metadata | fail-closed | fail-closed | compatibility drift report |
 

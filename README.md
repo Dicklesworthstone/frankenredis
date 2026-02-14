@@ -6,6 +6,8 @@
 
 FrankenRedis is a clean-room Rust reimplementation targeting grand-scope excellence: semantic fidelity, mathematical rigor, operational safety, and profile-proven performance.
 
+Absolute project goal: full drop-in replacement parity with legacy Redis behavior for the complete intended Redis surface, not a permanently reduced feature subset.
+
 ## What Makes This Project Special
 
 Deterministic Latency Replication Core (DLRC): strict command semantics with tail-aware scheduling and recoverable persistence pipelines.
@@ -38,12 +40,12 @@ This project uses four pervasive disciplines:
   - `baselines/round2_protocol_negative_strace.txt`
   - `golden_checksums.txt`
 
-## V1 Scope
+## Full Drop-In Parity Contract
 
-- RESP2/RESP3 core paths
-- scoped key and data-type command families
-- TTL and persistence scope
-- primary and replica basics
+- 100% feature/functionality overlap with legacy Redis target surface is mandatory.
+- Any staged rollout is sequencing only, never a permanent exclusion.
+- Every deferred surface must be represented as an explicit blocking backlog item with closure criteria.
+- Strict mode must preserve Redis-observable replies, side effects, and ordering across the full parity program.
 
 ## Architecture Direction
 
@@ -51,7 +53,7 @@ RESP parser -> command router -> data engine -> persistence -> replication
 
 ## Compatibility and Security Stance
 
-Preserve Redis-observable replies, side effects, and ordering guarantees for scoped command sets.
+Preserve Redis-observable replies, side effects, and ordering guarantees for full parity scope.
 
 Defend against malformed protocol frames, replay/order attacks, and persistence tampering.
 
@@ -69,11 +71,11 @@ Maintain deterministic command semantics, expiration behavior, and AOF/RDB recov
 
 ## Next Steps
 
-1. Expand conformance fixtures to parser-negative corpus and strict Redis error-string parity.
-2. Land persistence replay invariants and replication handshake fixtures.
+1. Expand conformance fixtures until all command families and compatibility-critical behaviors are covered.
+2. Land persistence and replication invariants at full behavior parity.
 3. Add Asupersync-backed runtime adapter and FrankenTUI operator dashboard adapter.
-4. Implement first RaptorQ sidecar pipeline for baseline/conformance artifacts.
-5. Run optimization loop with one lever per commit and isomorphism proofs.
+4. Implement RaptorQ sidecar pipeline for all durability-critical artifacts.
+5. Run optimization loop with one lever per commit and isomorphism proofs while preserving strict parity.
 
 ## Porting Artifact Set
 

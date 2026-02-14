@@ -18,6 +18,33 @@ pub enum HardenedDeviationCategory {
     MetadataSanitization,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ThreatClass {
+    ParserAbuse,
+    MetadataAmbiguity,
+    VersionSkew,
+    ResourceExhaustion,
+    PersistenceTampering,
+    ReplicationOrderAttack,
+    AuthPolicyConfusion,
+    ConfigDowngradeAbuse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DriftSeverity {
+    S0,
+    S1,
+    S2,
+    S3,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DecisionAction {
+    FailClosed,
+    BoundedDefense,
+    RejectNonAllowlisted,
+}
+
 pub const HARDENED_ALLOWLIST_DEFAULT: [HardenedDeviationCategory; 4] = [
     HardenedDeviationCategory::BoundedParserDiagnostics,
     HardenedDeviationCategory::BoundedReplayRepair,
@@ -73,11 +100,43 @@ impl RuntimePolicy {
     pub fn is_deviation_allowed(&self, category: HardenedDeviationCategory) -> bool {
         self.mode == Mode::Hardened && self.hardened_allowlist.contains(&category)
     }
+
+    #[must_use]
+    pub fn decide(
+        &self,
+        threat: ThreatClass,
+        preferred_deviation: Option<HardenedDeviationCategory>,
+    ) -> (DecisionAction, DriftSeverity) {
+        match self.mode {
+            Mode::Strict => (DecisionAction::FailClosed, DriftSeverity::S0),
+            Mode::Hardened => match preferred_deviation {
+                Some(category) if self.is_deviation_allowed(category) => {
+                    (DecisionAction::BoundedDefense, DriftSeverity::S1)
+                }
+                Some(_) => (DecisionAction::RejectNonAllowlisted, DriftSeverity::S2),
+                None => match threat {
+                    ThreatClass::ParserAbuse
+                    | ThreatClass::MetadataAmbiguity
+                    | ThreatClass::VersionSkew
+                    | ThreatClass::ResourceExhaustion
+                    | ThreatClass::PersistenceTampering
+                    | ThreatClass::ReplicationOrderAttack
+                    | ThreatClass::AuthPolicyConfusion
+                    | ThreatClass::ConfigDowngradeAbuse => {
+                        (DecisionAction::FailClosed, DriftSeverity::S0)
+                    }
+                },
+            },
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HARDENED_ALLOWLIST_DEFAULT, HardenedDeviationCategory, Mode, RuntimePolicy};
+    use super::{
+        DecisionAction, DriftSeverity, HARDENED_ALLOWLIST_DEFAULT, HardenedDeviationCategory, Mode,
+        RuntimePolicy, ThreatClass,
+    };
 
     #[test]
     fn default_policy_is_strict() {
@@ -99,5 +158,36 @@ mod tests {
         for category in HARDENED_ALLOWLIST_DEFAULT {
             assert!(policy.is_deviation_allowed(category));
         }
+    }
+
+    #[test]
+    fn strict_mode_decision_is_fail_closed_s0() {
+        let policy = RuntimePolicy::default();
+        let (action, severity) = policy.decide(ThreatClass::ParserAbuse, None);
+        assert_eq!(action, DecisionAction::FailClosed);
+        assert_eq!(severity, DriftSeverity::S0);
+    }
+
+    #[test]
+    fn hardened_mode_respects_allowlist_for_bounded_defense() {
+        let policy = RuntimePolicy::hardened();
+        let (action, severity) = policy.decide(
+            ThreatClass::ResourceExhaustion,
+            Some(HardenedDeviationCategory::ResourceClamp),
+        );
+        assert_eq!(action, DecisionAction::BoundedDefense);
+        assert_eq!(severity, DriftSeverity::S1);
+    }
+
+    #[test]
+    fn hardened_mode_rejects_non_allowlisted_deviation() {
+        let mut policy = RuntimePolicy::hardened();
+        policy.hardened_allowlist.clear();
+        let (action, severity) = policy.decide(
+            ThreatClass::ResourceExhaustion,
+            Some(HardenedDeviationCategory::ResourceClamp),
+        );
+        assert_eq!(action, DecisionAction::RejectNonAllowlisted);
+        assert_eq!(severity, DriftSeverity::S2);
     }
 }

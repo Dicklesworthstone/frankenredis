@@ -19,10 +19,10 @@
 | Replication | `src/replication.c` | offsets, backlog semantics, PSYNC transitions, ordering on reconnect |
 | Security/config | `src/acl.c`, `src/config.c`, `src/tls.c` | fail-closed behavior and configuration compatibility |
 
-## 3. Semantics To Preserve Exactly (V1)
+## 3. Semantics To Preserve Exactly (Full-Parity Program)
 
 1. RESP parse validity boundaries and error class mapping.
-2. Command arity and command error strings for scoped V1 commands.
+2. Command arity and command error strings for the full command-family parity target.
 3. Command side effects and reply shape parity.
 4. TTL behavior including deletion on immediate expiry.
 5. AOF/RDB replay ordering invariants.
@@ -40,13 +40,16 @@
 | Replication behavior | partial | state/offset scaffolding only |
 | ACL/config semantics | not_started | reserved for M3+ |
 
-## 5. V1 Extraction Boundary
+## 5. Extraction Sequencing Boundary (No Permanent Exclusions)
 
-Included for V1:
+Current sequencing tranche:
 - protocol framing, command core, keyspace string semantics, TTL core, AOF/RDB baseline, replication baseline.
 
-Deferred from V1:
+Deferred in sequence (still mandatory for final parity):
 - sentinel, module API, full-cluster orchestration, full TLS/IO-thread parity, scripting/module surface.
+
+Rule:
+- deferred means "next in queue with blocking closure criteria", not "excluded from scope".
 
 ## 6. Conformance Fixture Families (Planned)
 

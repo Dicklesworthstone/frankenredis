@@ -1,10 +1,12 @@
 # COMPREHENSIVE_SPEC_FOR_FRANKENREDIS_V1
 
+Note on naming: "V1" refers to the initial release epoch, not a reduced compatibility target. Full drop-in parity remains the mandatory destination.
+
 ## 0. Prime Directive
 
 Build a system that is simultaneously:
 
-1. Behaviorally trustworthy for scoped compatibility.
+1. Behaviorally trustworthy for full drop-in compatibility.
 2. Mathematically explicit in decision and risk handling.
 3. Operationally resilient via RaptorQ-backed durability.
 4. Performance-competitive via profile-and-proof discipline.
@@ -26,20 +28,12 @@ Exemplar reference:
 
 Most reimplementations fail by being partially compatible and operationally brittle. FrankenRedis will instead combine compatibility realism with first-principles architecture and strict quality gates.
 
-## 2. V1 Scope Contract
+## 2. Full-Parity Scope Contract (Non-Negotiable)
 
-Included in V1:
-
-- RESP2/RESP3 core paths
-- scoped key and data-type command families
-- TTL and persistence scope
-- primary and replica basics
-
-Deferred from V1:
-
-- long-tail API surface outside highest-value use cases
-- broad ecosystem parity not required for core migration value
-- distributed/platform expansion not needed for V1 acceptance
+Program requirement:
+- Full feature/functionality overlap with legacy Redis target surface is mandatory.
+- Any implementation staging is sequencing only and must not be treated as permanent exclusion.
+- Every deferred family must remain explicitly tracked with closure gates and conformance obligations.
 
 ## 3. Architecture Blueprint
 
@@ -63,14 +57,14 @@ Planned crate families:
 Two explicit operating modes:
 
 1. strict mode:
-   - maximize observable compatibility for scoped APIs
+   - maximize observable compatibility for full targeted API surface
    - no behavior-altering repair heuristics
 2. hardened mode:
    - maintain outward contract while enabling defensive runtime checks and bounded repairs
 
 Compatibility focus for this project:
 
-Preserve Redis-observable replies, side effects, and ordering guarantees for scoped command sets.
+Preserve Redis-observable replies, side effects, and ordering guarantees for full parity scope.
 
 Fail-closed policy:
 
@@ -186,7 +180,7 @@ Exit:
 
 ### M2 — First Vertical Slice
 
-- end-to-end scoped workflow implemented
+- end-to-end workflow implemented for initial sequencing tranche
 
 Exit:
 - differential parity for first major API family
@@ -194,7 +188,7 @@ Exit:
 
 ### M3 — Scope Expansion
 
-- additional V1 API families
+- additional API families toward full parity closure
 
 Exit:
 - expanded parity reports green
@@ -206,11 +200,11 @@ Exit:
 
 Exit:
 - regression gates stable
-- conformance drift zero for V1 scope
+- conformance drift zero for implemented strict-scope families; unresolved families remain blocked from release closure
 
 ## 11. Acceptance Gates
 
-Gate A: compatibility parity report passes for V1 scope.
+Gate A: compatibility parity report passes for full release target scope.
 
 Gate B: security/fuzz/adversarial suite passes for high-risk paths.
 
@@ -218,7 +212,7 @@ Gate C: performance budgets pass with no semantic regressions.
 
 Gate D: RaptorQ durability artifacts validated and scrub-clean.
 
-All four gates must pass for V1 release readiness.
+All four gates must pass for release readiness.
 
 ## 12. Risk Register
 
@@ -237,12 +231,12 @@ Mitigations:
 ## 13. Immediate Execution Checklist
 
 1. Create workspace and crate skeleton.
-2. Implement smallest high-value end-to-end path in V1 scope.
+2. Implement smallest high-value end-to-end path as sequencing, without shrinking full-parity objective.
 3. Stand up differential conformance harness against legacy oracle.
 4. Add benchmark baseline generation and regression gating.
 5. Add RaptorQ sidecar pipeline for conformance and benchmark artifacts.
 
-## 14. Detailed Crate Contracts (V1)
+## 14. Detailed Crate Contracts (Full-Parity Program)
 
 | Crate | Primary Responsibility | Explicit Non-Goal | Invariants | Mandatory Tests |
 |---|---|---|---|---|
@@ -257,16 +251,16 @@ Mitigations:
 | fr-conformance | differential harness vs Redis legacy oracle | production serving | explicit comparison policy by command family | report schema + differential runner tests |
 | frankenredis | integration binary/library and policy loading | algorithm design | strict/hardened mode wiring and evidence logging | mode gate and startup tests |
 
-## 15. Conformance Matrix (V1)
+## 15. Conformance Matrix (Full-Parity Program)
 
 | Family | Oracle Workload | Pass Criterion | Drift Severity |
 |---|---|---|---|
 | RESP framing + parse | protocol corpus with mixed frame classes | exact parse/reply parity | critical |
-| core command semantics | SET/GET/DEL/INCR and scoped hash/list/set cases | reply + side-effect parity | critical |
+| core command semantics | full command-family progression (including SET/GET/DEL/INCR/hash/list/set and beyond) | reply + side-effect parity | critical |
 | TTL + expiration | mixed expire/ttl workloads | expiration-time and visibility parity | critical |
 | persistence replay | AOF/RDB load + replay fixtures | restored state parity | critical |
 | replication first wave | primary/replica sync workloads | lag + state parity under policy | high |
-| ACL/auth scoped behavior | auth and rule fixtures | allow/deny parity and audit parity | high |
+| ACL/auth behavior | auth and rule fixtures | allow/deny parity and audit parity | high |
 | config + protocol toggles | config mutation fixtures | deterministic config semantics | high |
 | mixed E2E pipeline | protocol -> commands -> persistence -> replay | reproducible parity report with no critical drift | critical |
 
@@ -276,7 +270,7 @@ Mitigations:
 |---|---|---|---|
 | malformed RESP frame abuse | fail-closed parse error | fail-closed + bounded diagnostics | protocol incident ledger |
 | ACL confusion or bypass attempt | reject unauthorized command | reject + explicit policy audit | ACL decision ledger |
-| command amplification abuse | execute scoped semantics as specified | admission controls + explicit reject path | admission decision log |
+| command amplification abuse | execute documented semantics as specified | admission controls + explicit reject path | admission decision log |
 | persistence tampering | fail load on invalid artifacts | recover only with validated sidecar proof | decode proof + tamper ledger |
 | replication replay mismatch | fail replication step | fail + quarantine replica state | replication incident report |
 | unknown incompatible config field | fail-closed | fail-closed | compatibility drift report |
@@ -288,11 +282,11 @@ Mitigations:
 | Path | Workload Class | Budget |
 |---|---|---|
 | RESP parse hot path | mixed 128B-4KB frames | p95 <= 120 us |
-| command dispatch + store | scoped mixed key workloads | p95 <= 1.5 ms |
-| single-node throughput | mixed read/write scoped command set | >= 150k ops/s |
+| command dispatch + store | mixed key workloads across parity-target command families | p95 <= 1.5 ms |
+| single-node throughput | mixed read/write command sets across parity target | >= 150k ops/s |
 | expiration sweep overhead | TTL-heavy workload | p95 regression <= +8% |
 | AOF append overhead | write-heavy workload | p95 regression <= +12% |
-| replication catch-up | scoped primary/replica benchmark | lag p95 <= 250 ms |
+| replication catch-up | primary/replica benchmark across parity target paths | lag p95 <= 250 ms |
 | memory footprint | mixed E2E workload | peak RSS regression <= +10% |
 | tail stability | all benchmark families | p99 regression <= +10% |
 

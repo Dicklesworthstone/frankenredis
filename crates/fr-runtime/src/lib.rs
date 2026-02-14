@@ -1,38 +1,35 @@
 #![forbid(unsafe_code)]
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use fr_command::{CommandError, dispatch_argv, frame_to_argv};
+use fr_config::{
+    DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
+};
 use fr_protocol::{RespFrame, RespParseError, parse_frame};
 use fr_store::Store;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CompatibilityMode {
-    Strict,
-    Hardened,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeConfig {
-    pub mode: CompatibilityMode,
-    pub max_array_len: usize,
-    pub max_bulk_len: usize,
-}
-
-impl Default for RuntimeConfig {
-    fn default() -> Self {
-        Self {
-            mode: CompatibilityMode::Strict,
-            max_array_len: 1024,
-            max_bulk_len: 8 * 1024 * 1024,
-        }
-    }
-}
+static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvidenceEvent {
+    pub ts_utc: String,
     pub ts_ms: u64,
+    pub packet_id: u64,
+    pub mode: Mode,
+    pub severity: DriftSeverity,
+    pub threat_class: ThreatClass,
+    pub decision_action: DecisionAction,
     pub subsystem: &'static str,
-    pub action: String,
+    pub action: &'static str,
+    pub reason_code: &'static str,
     pub reason: String,
+    pub input_digest: String,
+    pub output_digest: String,
+    pub state_digest_before: String,
+    pub state_digest_after: String,
+    pub replay_cmd: String,
+    pub artifact_refs: Vec<String>,
     pub confidence: Option<f64>,
 }
 
@@ -54,16 +51,30 @@ impl EvidenceLedger {
 
 #[derive(Debug)]
 pub struct Runtime {
-    config: RuntimeConfig,
+    policy: RuntimePolicy,
     store: Store,
     evidence: EvidenceLedger,
 }
 
+struct ThreatEventInput<'a> {
+    now_ms: u64,
+    packet_id: u64,
+    threat_class: ThreatClass,
+    preferred_deviation: Option<HardenedDeviationCategory>,
+    subsystem: &'static str,
+    action: &'static str,
+    reason_code: &'static str,
+    reason: String,
+    input_digest: String,
+    state_before: &'a str,
+    output: &'a RespFrame,
+}
+
 impl Runtime {
     #[must_use]
-    pub fn new(config: RuntimeConfig) -> Self {
+    pub fn new(policy: RuntimePolicy) -> Self {
         Self {
-            config,
+            policy,
             store: Store::new(),
             evidence: EvidenceLedger::default(),
         }
@@ -71,7 +82,12 @@ impl Runtime {
 
     #[must_use]
     pub fn default_strict() -> Self {
-        Self::new(RuntimeConfig::default())
+        Self::new(RuntimePolicy::default())
+    }
+
+    #[must_use]
+    pub fn default_hardened() -> Self {
+        Self::new(RuntimePolicy::hardened())
     }
 
     #[must_use]
@@ -80,21 +96,35 @@ impl Runtime {
     }
 
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
-        if let Some(reply) = self.preflight_gate(&frame, now_ms) {
+        let packet_id = next_packet_id();
+        let input_digest = digest_bytes(&frame.to_bytes());
+        let state_before = self.store.state_digest();
+
+        if let Some(reply) =
+            self.preflight_gate(&frame, now_ms, packet_id, &input_digest, &state_before)
+        {
             return reply;
         }
 
         let argv = match frame_to_argv(&frame) {
             Ok(argv) => argv,
             Err(_) => {
-                self.evidence.record(EvidenceEvent {
-                    ts_ms: now_ms,
+                let reply =
+                    RespFrame::Error("ERR Protocol error: invalid command frame".to_string());
+                self.record_threat_event(ThreatEventInput {
+                    now_ms,
+                    packet_id,
+                    threat_class: ThreatClass::ParserAbuse,
+                    preferred_deviation: Some(HardenedDeviationCategory::BoundedParserDiagnostics),
                     subsystem: "router",
-                    action: "reject_frame".to_string(),
+                    action: "reject_frame",
+                    reason_code: "invalid_command_frame",
                     reason: "invalid command frame".to_string(),
-                    confidence: Some(1.0),
+                    input_digest,
+                    state_before: &state_before,
+                    output: &reply,
                 });
-                return RespFrame::Error("ERR Protocol error: invalid command frame".to_string());
+                return reply;
             }
         };
 
@@ -105,64 +135,151 @@ impl Runtime {
     }
 
     pub fn execute_bytes(&mut self, input: &[u8], now_ms: u64) -> Vec<u8> {
+        let packet_id = next_packet_id();
+        let input_digest = digest_bytes(input);
+        let state_before = self.store.state_digest();
         match parse_frame(input) {
             Ok(parsed) => self.execute_frame(parsed.frame, now_ms).to_bytes(),
             Err(err) => {
-                self.evidence.record(EvidenceEvent {
-                    ts_ms: now_ms,
+                let reason = err.to_string();
+                let reply = protocol_error_to_resp(err);
+                self.record_threat_event(ThreatEventInput {
+                    now_ms,
+                    packet_id,
+                    threat_class: ThreatClass::ParserAbuse,
+                    preferred_deviation: Some(HardenedDeviationCategory::BoundedParserDiagnostics),
                     subsystem: "protocol",
-                    action: "parse_failure".to_string(),
-                    reason: err.to_string(),
-                    confidence: Some(1.0),
+                    action: "parse_failure",
+                    reason_code: "protocol_parse_failure",
+                    reason,
+                    input_digest,
+                    state_before: &state_before,
+                    output: &reply,
                 });
-                protocol_error_to_resp(err).to_bytes()
+                reply.to_bytes()
             }
         }
     }
 
-    fn preflight_gate(&mut self, frame: &RespFrame, now_ms: u64) -> Option<RespFrame> {
+    fn preflight_gate(
+        &mut self,
+        frame: &RespFrame,
+        now_ms: u64,
+        packet_id: u64,
+        input_digest: &str,
+        state_before: &str,
+    ) -> Option<RespFrame> {
         let RespFrame::Array(Some(items)) = frame else {
             return None;
         };
-        if items.len() > self.config.max_array_len {
-            self.evidence.record(EvidenceEvent {
-                ts_ms: now_ms,
+        if items.len() > self.policy.gate.max_array_len {
+            let reply = RespFrame::Error(
+                "ERR Protocol error: command array exceeds compatibility gate".to_string(),
+            );
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
                 subsystem: "compatibility_gate",
-                action: "fail_closed_array_len".to_string(),
+                action: "fail_closed_array_len",
+                reason_code: "compat_array_len_exceeded",
                 reason: format!(
                     "array length {} exceeded {}",
                     items.len(),
-                    self.config.max_array_len
+                    self.policy.gate.max_array_len
                 ),
-                confidence: Some(1.0),
+                input_digest: input_digest.to_string(),
+                state_before,
+                output: &reply,
             });
-            return Some(RespFrame::Error(
-                "ERR Protocol error: command array exceeds compatibility gate".to_string(),
-            ));
+            return Some(reply);
         }
 
         for item in items {
             if let RespFrame::BulkString(Some(bytes)) = item
-                && bytes.len() > self.config.max_bulk_len
+                && bytes.len() > self.policy.gate.max_bulk_len
             {
-                self.evidence.record(EvidenceEvent {
-                    ts_ms: now_ms,
+                let reply = RespFrame::Error(
+                    "ERR Protocol error: bulk payload exceeds compatibility gate".to_string(),
+                );
+                self.record_threat_event(ThreatEventInput {
+                    now_ms,
+                    packet_id,
+                    threat_class: ThreatClass::ResourceExhaustion,
+                    preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
                     subsystem: "compatibility_gate",
-                    action: "fail_closed_bulk_len".to_string(),
+                    action: "fail_closed_bulk_len",
+                    reason_code: "compat_bulk_len_exceeded",
                     reason: format!(
                         "bulk len {} exceeded {}",
                         bytes.len(),
-                        self.config.max_bulk_len
+                        self.policy.gate.max_bulk_len
                     ),
-                    confidence: Some(1.0),
+                    input_digest: input_digest.to_string(),
+                    state_before,
+                    output: &reply,
                 });
-                return Some(RespFrame::Error(
-                    "ERR Protocol error: bulk payload exceeds compatibility gate".to_string(),
-                ));
+                return Some(reply);
             }
         }
         None
     }
+
+    fn record_threat_event(&mut self, input: ThreatEventInput<'_>) {
+        if !self.policy.emit_evidence_ledger {
+            return;
+        }
+
+        let (decision_action, severity) = self
+            .policy
+            .decide(input.threat_class, input.preferred_deviation);
+        let state_after = self.store.state_digest();
+        let output_digest = digest_bytes(&input.output.to_bytes());
+        self.evidence.record(EvidenceEvent {
+            ts_utc: format_ts_utc(input.now_ms),
+            ts_ms: input.now_ms,
+            packet_id: input.packet_id,
+            mode: self.policy.mode,
+            severity,
+            threat_class: input.threat_class,
+            decision_action,
+            subsystem: input.subsystem,
+            action: input.action,
+            reason_code: input.reason_code,
+            reason: input.reason,
+            input_digest: input.input_digest,
+            output_digest,
+            state_digest_before: input.state_before.to_string(),
+            state_digest_after: state_after,
+            replay_cmd: format!(
+                "cargo test -p fr-runtime -- --nocapture packet_{}",
+                input.packet_id
+            ),
+            artifact_refs: vec![
+                "SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md".to_string(),
+                "PORTING_TO_RUST_ESSENCE_EXTRACTION_LEDGER_V1.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        });
+    }
+}
+
+fn next_packet_id() -> u64 {
+    PACKET_COUNTER.fetch_add(1, Ordering::Relaxed)
+}
+
+fn format_ts_utc(now_ms: u64) -> String {
+    format!("unix_ms:{now_ms}")
+}
+
+fn digest_bytes(bytes: &[u8]) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn command_error_to_resp(error: CommandError) -> RespFrame {
@@ -242,9 +359,12 @@ pub mod ecosystem {
 
 #[cfg(test)]
 mod tests {
+    use fr_config::{
+        DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
+    };
     use fr_protocol::{RespFrame, parse_frame};
 
-    use super::{Runtime, RuntimeConfig};
+    use super::Runtime;
 
     #[test]
     fn strict_ping_path() {
@@ -256,10 +376,9 @@ mod tests {
 
     #[test]
     fn compatibility_gate_trips_on_large_array() {
-        let mut rt = Runtime::new(RuntimeConfig {
-            max_array_len: 1,
-            ..RuntimeConfig::default()
-        });
+        let mut policy = RuntimePolicy::default();
+        policy.gate.max_array_len = 1;
+        let mut rt = Runtime::new(policy);
         let in_frame = RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"PING".to_vec())),
             RespFrame::BulkString(Some(b"x".to_vec())),
@@ -267,6 +386,16 @@ mod tests {
         let out = rt.execute_frame(in_frame, 100);
         assert!(matches!(out, RespFrame::Error(_)));
         assert_eq!(rt.evidence().events().len(), 1);
+        let event = &rt.evidence().events()[0];
+        assert_eq!(event.mode, Mode::Strict);
+        assert_eq!(event.threat_class, ThreatClass::ResourceExhaustion);
+        assert_eq!(event.severity, DriftSeverity::S0);
+        assert_eq!(event.decision_action, DecisionAction::FailClosed);
+        assert_eq!(event.reason_code, "compat_array_len_exceeded");
+        assert!(!event.input_digest.is_empty());
+        assert!(!event.output_digest.is_empty());
+        assert!(!event.state_digest_before.is_empty());
+        assert!(!event.state_digest_after.is_empty());
     }
 
     #[test]
@@ -296,5 +425,45 @@ mod tests {
             parsed.frame,
             RespFrame::Error("ERR Protocol error: invalid bulk length".to_string())
         );
+        let event = rt.evidence().events().last().expect("event");
+        assert_eq!(event.threat_class, ThreatClass::ParserAbuse);
+        assert_eq!(event.severity, DriftSeverity::S0);
+        assert_eq!(event.decision_action, DecisionAction::FailClosed);
+        assert_eq!(event.reason_code, "protocol_parse_failure");
+    }
+
+    #[test]
+    fn hardened_mode_allowlisted_gate_uses_bounded_defense() {
+        let mut policy = RuntimePolicy::hardened();
+        policy.gate.max_array_len = 1;
+        let mut rt = Runtime::new(policy);
+        let in_frame = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"PING".to_vec())),
+            RespFrame::BulkString(Some(b"x".to_vec())),
+        ]));
+        let _ = rt.execute_frame(in_frame, 42);
+        let event = rt.evidence().events().last().expect("event");
+        assert_eq!(event.mode, Mode::Hardened);
+        assert_eq!(event.decision_action, DecisionAction::BoundedDefense);
+        assert_eq!(event.severity, DriftSeverity::S1);
+    }
+
+    #[test]
+    fn hardened_mode_without_allowlist_rejects_non_allowlisted() {
+        let mut policy = RuntimePolicy::hardened();
+        policy.gate.max_array_len = 1;
+        policy
+            .hardened_allowlist
+            .retain(|c| *c != HardenedDeviationCategory::ResourceClamp);
+        let mut rt = Runtime::new(policy);
+        let in_frame = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"PING".to_vec())),
+            RespFrame::BulkString(Some(b"x".to_vec())),
+        ]));
+        let _ = rt.execute_frame(in_frame, 42);
+        let event = rt.evidence().events().last().expect("event");
+        assert_eq!(event.mode, Mode::Hardened);
+        assert_eq!(event.decision_action, DecisionAction::RejectNonAllowlisted);
+        assert_eq!(event.severity, DriftSeverity::S2);
     }
 }

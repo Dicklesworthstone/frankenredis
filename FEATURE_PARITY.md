@@ -1,5 +1,9 @@
 # FEATURE_PARITY
 
+Non-negotiable policy:
+- This matrix tracks progress toward absolute, total drop-in parity.
+- No row may be permanently excluded; sequencing deferrals must convert to closure work.
+
 ## Status Legend
 
 - not_started
@@ -19,13 +23,14 @@
 | ACL/config mode split | not_started | policy model exists; ACL behavior parity not yet implemented |
 | Differential conformance harness | in_progress | fixture runner online for `core_strings`, `core_errors`, `protocol_negative`, and `persist_replay` suites |
 | Benchmark + optimization artifacts | in_progress | round1 + round2 baseline JSON, syscall profile, and expanded golden checksum artifacts added |
+| Full command/API surface closure | not_started | program-level closure row; all deferred families must roll up here before release sign-off |
 
 ## Required Evidence Per Feature Family
 
 1. Differential fixture report.
 2. Edge-case/adversarial test results.
 3. Benchmark delta (when performance-sensitive).
-4. Documented compatibility exceptions (if any).
+4. Documented compatibility exceptions only as temporary sequencing notes with blocking closure IDs.
 
 ## Current Evidence Pointers
 
