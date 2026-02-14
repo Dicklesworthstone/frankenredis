@@ -37,6 +37,15 @@ pub const REQUIRED_MANIFEST_FIELDS: [&str; 15] = [
     "raptorq_artifacts",
 ];
 
+const FILE_BIT_LEGACY_ANCHOR_MAP: u16 = 1 << 0;
+const FILE_BIT_CONTRACT_TABLE: u16 = 1 << 1;
+const FILE_BIT_FIXTURE_MANIFEST: u16 = 1 << 2;
+const FILE_BIT_PARITY_GATE: u16 = 1 << 3;
+const FILE_BIT_RISK_NOTE: u16 = 1 << 4;
+const FILE_BIT_PARITY_REPORT: u16 = 1 << 5;
+const FILE_BIT_RAPTORQ_SIDECAR: u16 = 1 << 6;
+const FILE_BIT_DECODE_PROOF: u16 = 1 << 7;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PacketReadiness {
     ReadyForImpl,
@@ -224,9 +233,12 @@ pub fn validate_phase2c_packet(packet_dir: &Path) -> Result<PacketValidationRepo
         decision_ledger: GateDecisionLedger::default_prior(),
     };
 
+    let file_mask = collect_packet_file_mask(packet_dir)?;
+
     for required in REQUIRED_PACKET_FILES {
-        let path = packet_dir.join(required);
-        if !path.is_file() {
+        let required_bit =
+            file_presence_bit(required).expect("required phase2c file should have a mapped bit");
+        if file_mask & required_bit == 0 {
             report.missing_files.push(required.to_string());
         }
     }
@@ -234,7 +246,7 @@ pub fn validate_phase2c_packet(packet_dir: &Path) -> Result<PacketValidationRepo
     let mut parity_report_readiness = None::<String>;
 
     let fixture_manifest_path = packet_dir.join("fixture_manifest.json");
-    if fixture_manifest_path.is_file() {
+    if file_mask & FILE_BIT_FIXTURE_MANIFEST != 0 {
         match parse_json_file(&fixture_manifest_path) {
             Ok(value) => validate_fixture_manifest(&packet_id, &value, &mut report),
             Err(err) => report.errors.push(err),
@@ -242,7 +254,7 @@ pub fn validate_phase2c_packet(packet_dir: &Path) -> Result<PacketValidationRepo
     }
 
     let parity_report_path = packet_dir.join("parity_report.json");
-    if parity_report_path.is_file() {
+    if file_mask & FILE_BIT_PARITY_REPORT != 0 {
         match parse_json_file(&parity_report_path) {
             Ok(value) => {
                 parity_report_readiness = validate_parity_report(&packet_id, &value, &mut report);
@@ -252,7 +264,7 @@ pub fn validate_phase2c_packet(packet_dir: &Path) -> Result<PacketValidationRepo
     }
 
     let raptorq_path = packet_dir.join("parity_report.raptorq.json");
-    if raptorq_path.is_file() {
+    if file_mask & FILE_BIT_RAPTORQ_SIDECAR != 0 {
         match parse_json_file(&raptorq_path) {
             Ok(value) => validate_raptorq_sidecar(&value, &mut report),
             Err(err) => report.errors.push(err),
@@ -260,7 +272,7 @@ pub fn validate_phase2c_packet(packet_dir: &Path) -> Result<PacketValidationRepo
     }
 
     let decode_proof_path = packet_dir.join("parity_report.decode_proof.json");
-    if decode_proof_path.is_file() {
+    if file_mask & FILE_BIT_DECODE_PROOF != 0 {
         match parse_json_file(&decode_proof_path) {
             Ok(value) => validate_decode_proof(&packet_id, &value, &mut report),
             Err(err) => report.errors.push(err),
@@ -576,10 +588,69 @@ fn validate_decode_proof(
 }
 
 fn parse_json_file(path: &Path) -> Result<Value, String> {
-    let raw = fs::read_to_string(path)
-        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
-    serde_json::from_str::<Value>(&raw)
+    let raw = fs::read(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    serde_json::from_slice::<Value>(&raw)
         .map_err(|err| format!("invalid JSON {}: {err}", path.display()))
+}
+
+fn file_presence_bit(file_name: &str) -> Option<u16> {
+    match file_name {
+        "legacy_anchor_map.md" => Some(FILE_BIT_LEGACY_ANCHOR_MAP),
+        "contract_table.md" => Some(FILE_BIT_CONTRACT_TABLE),
+        "fixture_manifest.json" => Some(FILE_BIT_FIXTURE_MANIFEST),
+        "parity_gate.yaml" => Some(FILE_BIT_PARITY_GATE),
+        "risk_note.md" => Some(FILE_BIT_RISK_NOTE),
+        "parity_report.json" => Some(FILE_BIT_PARITY_REPORT),
+        "parity_report.raptorq.json" => Some(FILE_BIT_RAPTORQ_SIDECAR),
+        "parity_report.decode_proof.json" => Some(FILE_BIT_DECODE_PROOF),
+        _ => None,
+    }
+}
+
+fn collect_packet_file_mask(packet_dir: &Path) -> Result<u16, String> {
+    let entries = fs::read_dir(packet_dir).map_err(|err| {
+        format!(
+            "failed to scan packet directory {}: {err}",
+            packet_dir.display()
+        )
+    })?;
+    let mut file_mask = 0_u16;
+
+    for entry in entries {
+        let entry = entry.map_err(|err| {
+            format!(
+                "failed to read packet entry {}: {err}",
+                packet_dir.display()
+            )
+        })?;
+        let file_type = entry.file_type().map_err(|err| {
+            format!(
+                "failed to inspect packet entry type in {}: {err}",
+                packet_dir.display()
+            )
+        })?;
+        let is_file = if file_type.is_file() {
+            true
+        } else if file_type.is_symlink() {
+            // Preserve Path::is_file semantics for symlinked artifacts.
+            entry.path().is_file()
+        } else {
+            false
+        };
+        if !is_file {
+            continue;
+        }
+
+        let file_name = entry.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if let Some(bit) = file_presence_bit(file_name) {
+            file_mask |= bit;
+        }
+    }
+
+    Ok(file_mask)
 }
 
 fn is_present(value: &Value) -> bool {
@@ -683,5 +754,15 @@ mod tests {
             .map(|report| report.packet_id.as_str())
             .collect::<Vec<_>>();
         assert_eq!(packet_ids, vec!["FR-P2C-TEST-INVALID", "FR-P2C-TEST-VALID"]);
+    }
+
+    #[test]
+    fn all_required_packet_files_have_presence_bits() {
+        for file_name in super::REQUIRED_PACKET_FILES {
+            assert!(
+                super::file_presence_bit(file_name).is_some(),
+                "missing bit mapping for required file {file_name}"
+            );
+        }
     }
 }
