@@ -13,6 +13,7 @@ use fr_protocol::{RespFrame, parse_frame};
 use fr_runtime::{EvidenceEvent, Runtime};
 use serde::{Deserialize, Serialize};
 
+pub mod log_contract;
 pub mod phase2c_schema;
 
 #[derive(Debug, Clone)]

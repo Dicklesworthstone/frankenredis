@@ -16,3 +16,7 @@ Round 1 events implemented:
 
 Planned expansion:
 - include loss-matrix IDs, posterior terms, and Bayes factor snippets for adaptive decisions.
+
+Structured test/e2e schema reference:
+- `TEST_LOG_SCHEMA_V1.md`
+- generated goldens: `crates/fr-conformance/fixtures/log_contract_v1/*.golden.jsonl`

@@ -1,0 +1,3 @@
+cargo run -p fr-conformance --bin emit_log_contract_goldens
+cargo test -p fr-conformance --test log_contract_goldens -- --nocapture
+cargo test --workspace

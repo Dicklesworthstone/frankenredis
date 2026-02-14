@@ -1,0 +1,27 @@
+{
+  "files": [
+    "FR-P2C-001.golden.jsonl",
+    "FR-P2C-002.golden.jsonl",
+    "FR-P2C-003.golden.jsonl",
+    "FR-P2C-004.golden.jsonl",
+    "FR-P2C-005.golden.jsonl",
+    "FR-P2C-006.golden.jsonl",
+    "FR-P2C-007.golden.jsonl",
+    "FR-P2C-008.golden.jsonl",
+    "FR-P2C-009.golden.jsonl"
+  ],
+  "generated_at_utc": "2026-02-14T00:00:00Z",
+  "generator": "cargo run -p fr-conformance --bin emit_log_contract_goldens",
+  "packets": [
+    "FR-P2C-001",
+    "FR-P2C-002",
+    "FR-P2C-003",
+    "FR-P2C-004",
+    "FR-P2C-005",
+    "FR-P2C-006",
+    "FR-P2C-007",
+    "FR-P2C-008",
+    "FR-P2C-009"
+  ],
+  "schema_version": "fr_testlog_v1"
+}

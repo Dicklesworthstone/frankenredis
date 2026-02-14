@@ -143,6 +143,9 @@ Assurance ladder:
 - Tier C: property/fuzz/adversarial tests
 - Tier D: regression corpus for historical failures
 
+Structured verification-log schema:
+- `TEST_LOG_SCHEMA_V1.md`
+
 ## 9. RaptorQ-Everywhere Durability Contract
 
 RaptorQ repair-symbol sidecars are required for long-lived project evidence:

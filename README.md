@@ -68,6 +68,7 @@ Maintain deterministic command semantics, expiration behavior, and AOF/RDB recov
 - AGENTS.md
 - COMPREHENSIVE_SPEC_FOR_FRANKENREDIS_V1.md
 - COMPREHENSIVE_SPEC_FOR_FRANKENSQLITE_V1_REFERENCE.md (copied exemplar from `frankensqlite`)
+- TEST_LOG_SCHEMA_V1.md
 
 ## Next Steps
 
