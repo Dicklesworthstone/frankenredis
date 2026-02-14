@@ -77,6 +77,10 @@ Fail-closed policy:
 - unknown incompatible features or protocol fields must fail closed by default
 - compatibility exceptions require explicit allowlist entries and audit traces
 
+Normative matrix and allowlist reference:
+
+- `SECURITY_COMPATIBILITY_THREAT_MATRIX_V1.md`
+
 ## 5. Security Model
 
 Security focus for this project:
@@ -95,6 +99,7 @@ Mandatory controls:
 - adversarial fixtures and fuzz/property suites for high-risk entry points
 - deterministic audit trail for recoveries and mode/policy overrides
 - explicit subsystem ownership and trust-boundary notes
+- explicit strict/hardened threat-class handling matrix with allowlisted deviation categories
 
 ## 6. Alien-Artifact Decision Layer
 
