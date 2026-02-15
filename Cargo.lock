@@ -55,6 +55,7 @@ version = "0.1.0"
 dependencies = [
  "fr-command",
  "fr-config",
+ "fr-eventloop",
  "fr-protocol",
  "fr-store",
 ]
