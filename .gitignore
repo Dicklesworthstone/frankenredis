@@ -40,3 +40,8 @@ target_*/
 *.out
 *.log
 *.tmp
+
+# Ephemeral files (agent-generated, build artifacts, test detritus)
+ci-artifacts/
+proptest-regressions/
+test_meminfo
