@@ -68,6 +68,7 @@ pub struct ParseResult {
 pub enum RespParseError {
     Incomplete,
     InvalidPrefix(u8),
+    UnsupportedResp3Type(u8),
     InvalidInteger,
     InvalidBulkLength,
     InvalidMultibulkLength,
@@ -79,6 +80,9 @@ impl Display for RespParseError {
         match self {
             Self::Incomplete => write!(f, "incomplete frame"),
             Self::InvalidPrefix(ch) => write!(f, "invalid RESP type prefix: {}", char::from(*ch)),
+            Self::UnsupportedResp3Type(ch) => {
+                write!(f, "unsupported RESP3 type prefix: {}", char::from(*ch))
+            }
             Self::InvalidInteger => write!(f, "invalid RESP integer"),
             Self::InvalidBulkLength => write!(f, "invalid bulk length"),
             Self::InvalidMultibulkLength => write!(f, "invalid multibulk length"),
@@ -122,6 +126,9 @@ fn parse_frame_internal(input: &[u8], start: usize) -> Result<(RespFrame, usize)
         }
         b'$' => parse_bulk(input, next),
         b'*' => parse_array(input, next),
+        b'~' | b'%' | b'#' | b',' | b'_' | b'(' | b'=' | b'|' | b'>' | b'!' => {
+            Err(RespParseError::UnsupportedResp3Type(prefix))
+        }
         other => Err(RespParseError::InvalidPrefix(other)),
     }
 }
@@ -230,5 +237,30 @@ mod tests {
 
         let mbulk = parse_frame(b"*-2\r\n").expect_err("must fail");
         assert_eq!(mbulk.to_string(), "invalid multibulk length");
+    }
+
+    #[test]
+    fn parse_unsupported_resp3_type() {
+        let err = parse_frame(b"~1\r\n").expect_err("must fail");
+        assert_eq!(err.to_string(), "unsupported RESP3 type prefix: ~");
+    }
+
+    #[test]
+    fn parse_unknown_prefix_still_errors_as_invalid_prefix() {
+        let err = parse_frame(b"?\r\n").expect_err("must fail");
+        assert_eq!(err.to_string(), "invalid RESP type prefix: ?");
+    }
+
+    #[test]
+    fn parse_known_resp3_prefixes_fail_closed() {
+        let prefixes = [b'~', b'%', b'#', b',', b'_', b'(', b'=', b'|', b'>', b'!'];
+        for prefix in prefixes {
+            let input = [prefix, b'\r', b'\n'];
+            let err = parse_frame(&input).expect_err("must fail");
+            assert_eq!(
+                err.to_string(),
+                format!("unsupported RESP3 type prefix: {}", char::from(prefix))
+            );
+        }
     }
 }

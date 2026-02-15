@@ -361,6 +361,10 @@ fn protocol_error_to_resp(error: RespParseError) -> RespFrame {
             "ERR Protocol error: invalid RESP type prefix '{}'",
             char::from(ch)
         )),
+        RespParseError::UnsupportedResp3Type(ch) => RespFrame::Error(format!(
+            "ERR Protocol error: unsupported RESP3 type prefix '{}'",
+            char::from(ch)
+        )),
         RespParseError::InvalidInteger => {
             RespFrame::Error("ERR Protocol error: invalid integer payload".to_string())
         }
@@ -514,6 +518,23 @@ mod tests {
         assert_eq!(
             parsed.frame,
             RespFrame::Error("ERR Protocol error: invalid bulk length".to_string())
+        );
+        let event = rt.evidence().events().last().expect("event");
+        assert_eq!(event.threat_class, ThreatClass::ParserAbuse);
+        assert_eq!(event.severity, DriftSeverity::S0);
+        assert_eq!(event.decision_action, DecisionAction::FailClosed);
+        assert_eq!(event.reason_code, "protocol_parse_failure");
+    }
+
+    #[test]
+    fn protocol_unsupported_resp3_type_error_string() {
+        let mut rt = Runtime::default_strict();
+        let raw = b"~1\r\n";
+        let encoded = rt.execute_bytes(raw, 0);
+        let parsed = parse_frame(&encoded).expect("parse");
+        assert_eq!(
+            parsed.frame,
+            RespFrame::Error("ERR Protocol error: unsupported RESP3 type prefix '~'".to_string())
         );
         let event = rt.evidence().events().last().expect("event");
         assert_eq!(event.threat_class, ThreatClass::ParserAbuse);

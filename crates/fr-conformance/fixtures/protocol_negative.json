@@ -44,10 +44,38 @@
       }
     },
     {
-      "name": "invalid_prefix",
+      "name": "unsupported_resp3_prefix",
       "now_ms": 0,
       "raw_request": "~1\r\n",
-      "expect": { "kind": "error", "value": "ERR Protocol error: invalid RESP type prefix '~'" },
+      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '~'" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
+    },
+    {
+      "name": "unsupported_resp3_map_prefix",
+      "now_ms": 0,
+      "raw_request": "%1\r\n",
+      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '%'" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
+    },
+    {
+      "name": "invalid_prefix_unknown_byte",
+      "now_ms": 0,
+      "raw_request": "?\r\n",
+      "expect": { "kind": "error", "value": "ERR Protocol error: invalid RESP type prefix '?'" },
       "expect_threat": {
         "threat_class": "parser_abuse",
         "severity": "s0",
