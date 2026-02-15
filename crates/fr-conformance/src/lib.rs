@@ -8,7 +8,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use fr_config::{DecisionAction, DriftSeverity, ThreatClass};
-use fr_persist::AofRecord;
+use fr_persist::{AofRecord, decode_aof_stream, encode_aof_stream};
 use fr_protocol::{RespFrame, parse_frame};
 use fr_runtime::{EvidenceEvent, Runtime};
 use serde::{Deserialize, Serialize};
@@ -460,15 +460,34 @@ pub fn run_replay_fixture(
     let mut total = 0_usize;
     for case in fixture.cases {
         let mut runtime = Runtime::default_strict();
-        for (record_idx, record) in case.records.into_iter().enumerate() {
-            let evidence_before = runtime.evidence().events().len();
-            let aof = AofRecord {
+        let source_records = case
+            .records
+            .into_iter()
+            .map(|record| AofRecord {
                 argv: record
                     .iter()
                     .map(|value| value.as_bytes().to_vec())
                     .collect::<Vec<_>>(),
-            };
-            let frame = aof.to_resp_frame();
+            })
+            .collect::<Vec<_>>();
+        let encoded_stream = encode_aof_stream(&source_records);
+        let decoded_records = match decode_aof_stream(&encoded_stream) {
+            Ok(records) => records,
+            Err(err) => {
+                failed.push(CaseOutcome {
+                    name: format!("{}::aof_decode", case.name),
+                    passed: false,
+                    expected: RespFrame::BulkString(None),
+                    actual: RespFrame::BulkString(None),
+                    detail: Some(format!("AOF stream decode failed: {err:?}")),
+                });
+                continue;
+            }
+        };
+
+        for (record_idx, record) in decoded_records.into_iter().enumerate() {
+            let evidence_before = runtime.evidence().events().len();
+            let frame = record.to_resp_frame();
             let _ = runtime.execute_frame(frame, case.now_ms);
             let new_events = &runtime.evidence().events()[evidence_before..];
             let replay_case_name = format!("{}::record_{record_idx}", case.name);
@@ -857,6 +876,10 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use fr_config::{DecisionAction, DriftSeverity, Mode, ThreatClass};
+    use fr_repl::{
+        BacklogWindow, HandshakeFsm, HandshakeState, HandshakeStep, PsyncDecision, PsyncRejection,
+        ReplOffset, WaitAofThreshold, WaitThreshold, decide_psync, evaluate_wait, evaluate_waitaof,
+    };
 
     use super::{
         EvidenceEvent, ExpectedThreat, HarnessConfig, LiveOracleConfig,
@@ -1009,6 +1032,270 @@ mod tests {
             }
         }
         let _ = fs::remove_dir_all(log_root);
+    }
+
+    #[test]
+    fn fr_p2c_006_f_handshake_contract_vectors_are_enforced() {
+        #[derive(Debug, Clone)]
+        struct HandshakeVector {
+            name: &'static str,
+            auth_required: bool,
+            steps: &'static [HandshakeStep],
+            accept_psync_reply: bool,
+            expected_state: HandshakeState,
+            expected_reason_code: Option<&'static str>,
+        }
+
+        let vectors = [
+            HandshakeVector {
+                name: "happy_path_no_auth",
+                auth_required: false,
+                steps: &[
+                    HandshakeStep::Ping,
+                    HandshakeStep::Replconf,
+                    HandshakeStep::Psync,
+                ],
+                accept_psync_reply: true,
+                expected_state: HandshakeState::Online,
+                expected_reason_code: None,
+            },
+            HandshakeVector {
+                name: "happy_path_auth_required",
+                auth_required: true,
+                steps: &[
+                    HandshakeStep::Ping,
+                    HandshakeStep::Auth,
+                    HandshakeStep::Replconf,
+                    HandshakeStep::Psync,
+                ],
+                accept_psync_reply: true,
+                expected_state: HandshakeState::Online,
+                expected_reason_code: None,
+            },
+            HandshakeVector {
+                name: "reject_replconf_before_ping",
+                auth_required: false,
+                steps: &[HandshakeStep::Replconf],
+                accept_psync_reply: false,
+                expected_state: HandshakeState::Init,
+                expected_reason_code: Some("repl.handshake_state_machine_mismatch"),
+            },
+            HandshakeVector {
+                name: "reject_psync_without_replconf",
+                auth_required: false,
+                steps: &[HandshakeStep::Ping, HandshakeStep::Psync],
+                accept_psync_reply: false,
+                expected_state: HandshakeState::PingSeen,
+                expected_reason_code: Some("repl.handshake_state_machine_mismatch"),
+            },
+            HandshakeVector {
+                name: "reject_psync_reply_before_psync_sent",
+                auth_required: false,
+                steps: &[HandshakeStep::Ping, HandshakeStep::Replconf],
+                accept_psync_reply: true,
+                expected_state: HandshakeState::ReplconfSeen,
+                expected_reason_code: Some("repl.fullresync_reply_parse_violation"),
+            },
+        ];
+
+        for vector in vectors {
+            let mut fsm = HandshakeFsm::new(vector.auth_required);
+            let mut observed_reason_code = None;
+
+            for step in vector.steps {
+                if let Err(err) = fsm.on_step(*step) {
+                    observed_reason_code = Some(err.reason_code());
+                    break;
+                }
+            }
+
+            if observed_reason_code.is_none()
+                && vector.accept_psync_reply
+                && let Err(err) = fsm.on_psync_accepted()
+            {
+                observed_reason_code = Some(err.reason_code());
+            }
+
+            assert_eq!(
+                observed_reason_code, vector.expected_reason_code,
+                "vector={} reason code mismatch",
+                vector.name
+            );
+            assert_eq!(
+                fsm.state(),
+                vector.expected_state,
+                "vector={} state mismatch",
+                vector.name
+            );
+        }
+    }
+
+    #[test]
+    fn fr_p2c_006_f_psync_adversarial_matrix_prefers_safe_fallbacks() {
+        let backlog = BacklogWindow {
+            replid: "replid-a".to_string(),
+            start_offset: ReplOffset(100),
+            end_offset: ReplOffset(200),
+        };
+
+        let cases = [
+            ("boundary_start", "replid-a", ReplOffset(100), None),
+            ("boundary_end", "replid-a", ReplOffset(200), None),
+            (
+                "replid_mismatch",
+                "replid-b",
+                ReplOffset(150),
+                Some(PsyncRejection::ReplidMismatch),
+            ),
+            (
+                "offset_underflow",
+                "replid-a",
+                ReplOffset(99),
+                Some(PsyncRejection::OffsetOutOfRange),
+            ),
+            (
+                "offset_overflow",
+                "replid-a",
+                ReplOffset(201),
+                Some(PsyncRejection::OffsetOutOfRange),
+            ),
+        ];
+
+        for (name, requested_replid, requested_offset, expected_rejection) in cases {
+            let decision = decide_psync(&backlog, requested_replid, requested_offset);
+            if let Some(expected) = expected_rejection {
+                assert!(
+                    matches!(
+                        decision,
+                        PsyncDecision::FullResync { rejection } if rejection == expected
+                    ),
+                    "case={name} decision mismatch: got={decision:?} expected_rejection={expected:?}"
+                );
+                if let PsyncDecision::FullResync { rejection } = decision {
+                    let reason_code = rejection.reason_code();
+                    match expected {
+                        PsyncRejection::ReplidMismatch => {
+                            assert_eq!(
+                                reason_code, "repl.psync_replid_or_offset_reject_mismatch",
+                                "case={name} reason code mismatch"
+                            );
+                        }
+                        PsyncRejection::OffsetOutOfRange => {
+                            assert_eq!(
+                                reason_code, "repl.psync_fullresync_fallback_mismatch",
+                                "case={name} reason code mismatch"
+                            );
+                        }
+                    }
+                }
+            } else {
+                assert_eq!(
+                    decision,
+                    PsyncDecision::Continue { requested_offset },
+                    "case={name} should preserve requested partial offset"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fr_p2c_006_f_wait_metamorphic_ack_monotonicity_holds() {
+        let threshold = WaitThreshold {
+            required_offset: ReplOffset(100),
+            required_replicas: 2,
+        };
+
+        let baseline = evaluate_wait(
+            &[ReplOffset(100), ReplOffset(99), ReplOffset(50)],
+            threshold,
+        );
+        let promoted = evaluate_wait(
+            &[ReplOffset(100), ReplOffset(105), ReplOffset(50)],
+            threshold,
+        );
+        let expanded = evaluate_wait(
+            &[
+                ReplOffset(100),
+                ReplOffset(105),
+                ReplOffset(50),
+                ReplOffset(500),
+            ],
+            threshold,
+        );
+
+        assert_eq!(baseline.acked_replicas, 1);
+        assert!(!baseline.satisfied);
+        assert!(
+            promoted.acked_replicas >= baseline.acked_replicas,
+            "promoting a replica ack must not reduce acked count"
+        );
+        assert!(promoted.satisfied);
+        assert!(
+            expanded.acked_replicas >= promoted.acked_replicas,
+            "adding a higher replica ack must not reduce acked count"
+        );
+        assert!(expanded.satisfied);
+
+        let relaxed_threshold = WaitThreshold {
+            required_offset: ReplOffset(95),
+            required_replicas: 2,
+        };
+        let relaxed = evaluate_wait(
+            &[
+                ReplOffset(100),
+                ReplOffset(105),
+                ReplOffset(50),
+                ReplOffset(500),
+            ],
+            relaxed_threshold,
+        );
+        assert!(
+            relaxed.acked_replicas >= expanded.acked_replicas,
+            "lowering required offset must not reduce acked count"
+        );
+    }
+
+    #[test]
+    fn fr_p2c_006_f_waitaof_metamorphic_joint_threshold_semantics_hold() {
+        let threshold = WaitAofThreshold {
+            required_local_offset: ReplOffset(100),
+            required_replica_offset: ReplOffset(95),
+            required_replicas: 2,
+        };
+
+        let local_not_ready = evaluate_waitaof(
+            ReplOffset(99),
+            &[ReplOffset(120), ReplOffset(121)],
+            threshold,
+        );
+        let local_ready = evaluate_waitaof(
+            ReplOffset(100),
+            &[ReplOffset(120), ReplOffset(121)],
+            threshold,
+        );
+        let replica_sparse = evaluate_waitaof(
+            ReplOffset(100),
+            &[ReplOffset(120), ReplOffset(94)],
+            threshold,
+        );
+        let replica_dense = evaluate_waitaof(
+            ReplOffset(100),
+            &[ReplOffset(120), ReplOffset(96), ReplOffset(130)],
+            threshold,
+        );
+
+        assert!(!local_not_ready.local_satisfied);
+        assert!(!local_not_ready.satisfied);
+        assert!(local_ready.local_satisfied);
+        assert!(local_ready.satisfied);
+        assert!(replica_sparse.local_satisfied);
+        assert_eq!(replica_sparse.acked_replicas, 1);
+        assert!(!replica_sparse.satisfied);
+        assert!(
+            replica_dense.acked_replicas >= local_ready.acked_replicas,
+            "adding qualifying replica acks must not reduce acked count"
+        );
+        assert!(replica_dense.satisfied);
     }
 
     #[test]

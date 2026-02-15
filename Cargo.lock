@@ -21,6 +21,7 @@ dependencies = [
  "fr-config",
  "fr-persist",
  "fr-protocol",
+ "fr-repl",
  "fr-runtime",
  "serde",
  "serde_json",
