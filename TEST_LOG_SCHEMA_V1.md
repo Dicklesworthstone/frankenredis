@@ -81,3 +81,20 @@ Regeneration command:
 ```bash
 cargo run -p fr-conformance --bin emit_log_contract_goldens
 ```
+
+## Harness Persistence Paths
+
+When `HarnessConfig.live_log_root` is set in `fr-conformance`, structured log lines are appended
+to deterministic JSONL files using:
+
+```text
+<live_log_root>/<sanitized suite_id>/<sanitized fixture name>.jsonl
+```
+
+Current harness entry points that support this persistence path:
+
+- `run_fixture(...)`
+- `run_protocol_fixture(...)`
+- `run_replay_fixture(...)`
+- `run_live_redis_diff(...)`
+- `run_live_redis_protocol_diff(...)`

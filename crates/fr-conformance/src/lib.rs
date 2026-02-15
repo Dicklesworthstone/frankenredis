@@ -155,6 +155,10 @@ pub fn run_fixture(
         .map_err(|err| format!("failed to read fixture {}: {err}", path.display()))?;
     let fixture: ConformanceFixture = serde_json::from_str(&raw)
         .map_err(|err| format!("invalid fixture JSON {}: {err}", path.display()))?;
+    let fixture_log_path = config
+        .live_log_root
+        .as_ref()
+        .map(|root| live_log_output_path(root, &fixture.suite, fixture_name));
 
     let mut runtime = Runtime::default_strict();
     let mut failed = Vec::new();
@@ -174,7 +178,7 @@ pub fn run_fixture(
                 verification_path: VerificationPath::E2e,
                 now_ms: case.now_ms,
                 outcome: LogOutcome::Pass,
-                persist_path: None,
+                persist_path: fixture_log_path.as_deref(),
             },
             new_events,
         );
@@ -297,6 +301,10 @@ pub fn run_protocol_fixture(
         .map_err(|err| format!("failed to read fixture {}: {err}", path.display()))?;
     let fixture: ProtocolFixture = serde_json::from_str(&raw)
         .map_err(|err| format!("invalid fixture JSON {}: {err}", path.display()))?;
+    let fixture_log_path = config
+        .live_log_root
+        .as_ref()
+        .map(|root| live_log_output_path(root, &fixture.suite, fixture_name));
 
     let mut runtime = Runtime::default_strict();
     let mut failed = Vec::new();
@@ -318,7 +326,7 @@ pub fn run_protocol_fixture(
                 verification_path: VerificationPath::E2e,
                 now_ms: case.now_ms,
                 outcome: LogOutcome::Pass,
-                persist_path: None,
+                persist_path: fixture_log_path.as_deref(),
             },
             new_events,
         );
@@ -443,12 +451,17 @@ pub fn run_replay_fixture(
         .map_err(|err| format!("failed to read fixture {}: {err}", path.display()))?;
     let fixture: ReplayFixture = serde_json::from_str(&raw)
         .map_err(|err| format!("invalid fixture JSON {}: {err}", path.display()))?;
+    let replay_log_path = config
+        .live_log_root
+        .as_ref()
+        .map(|root| live_log_output_path(root, &fixture.suite, fixture_name));
 
     let mut failed = Vec::new();
     let mut total = 0_usize;
     for case in fixture.cases {
         let mut runtime = Runtime::default_strict();
-        for record in case.records {
+        for (record_idx, record) in case.records.into_iter().enumerate() {
+            let evidence_before = runtime.evidence().events().len();
             let aof = AofRecord {
                 argv: record
                     .iter()
@@ -457,25 +470,71 @@ pub fn run_replay_fixture(
             };
             let frame = aof.to_resp_frame();
             let _ = runtime.execute_frame(frame, case.now_ms);
+            let new_events = &runtime.evidence().events()[evidence_before..];
+            let replay_case_name = format!("{}::record_{record_idx}", case.name);
+            let log_result = validate_structured_log_emission(
+                StructuredLogEmissionContext {
+                    suite_id: &fixture.suite,
+                    fixture_name,
+                    case_name: &replay_case_name,
+                    verification_path: VerificationPath::E2e,
+                    now_ms: case.now_ms,
+                    outcome: LogOutcome::Pass,
+                    persist_path: replay_log_path.as_deref(),
+                },
+                new_events,
+            );
+            if let Err(err) = log_result {
+                failed.push(CaseOutcome {
+                    name: replay_case_name,
+                    passed: false,
+                    expected: RespFrame::BulkString(None),
+                    actual: RespFrame::BulkString(None),
+                    detail: Some(format!(
+                        "structured log emission failed during replay record execution: {err}"
+                    )),
+                });
+            }
         }
 
         for assertion in case.assertions {
             total = total.saturating_add(1);
             let at_ms = assertion.at_ms.unwrap_or(case.now_ms);
+            let evidence_before = runtime.evidence().events().len();
             let get = RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"GET".to_vec())),
                 RespFrame::BulkString(Some(assertion.key.as_bytes().to_vec())),
             ]));
             let actual = runtime.execute_frame(get, at_ms);
             let expected = RespFrame::BulkString(assertion.expect.map(|v| v.as_bytes().to_vec()));
-            let passed = actual == expected;
+            let frame_ok = actual == expected;
+            let outcome = if frame_ok {
+                LogOutcome::Pass
+            } else {
+                LogOutcome::Fail
+            };
+            let new_events = &runtime.evidence().events()[evidence_before..];
+            let assertion_case_name = format!("{}::assert::{}", case.name, assertion.key);
+            let log_result = validate_structured_log_emission(
+                StructuredLogEmissionContext {
+                    suite_id: &fixture.suite,
+                    fixture_name,
+                    case_name: &assertion_case_name,
+                    verification_path: VerificationPath::E2e,
+                    now_ms: at_ms,
+                    outcome,
+                    persist_path: replay_log_path.as_deref(),
+                },
+                new_events,
+            );
+            let passed = frame_ok && log_result.is_ok();
             if !passed {
                 failed.push(CaseOutcome {
                     name: format!("{}::{}", case.name, assertion.key),
                     passed,
                     expected,
                     actual,
-                    detail: Some("replay assertion mismatch".to_string()),
+                    detail: build_case_detail(frame_ok, None, log_result.err()),
                 });
             }
         }
@@ -794,6 +853,9 @@ fn decision_action_label(decision_action: DecisionAction) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use fr_config::{DecisionAction, DriftSeverity, Mode, ThreatClass};
 
     use super::{
@@ -802,7 +864,17 @@ mod tests {
         run_live_redis_protocol_diff, run_protocol_fixture, run_replay_fixture, run_smoke,
         validate_structured_log_emission, validate_threat_expectation,
     };
-    use crate::log_contract::{LogOutcome, VerificationPath};
+    use crate::log_contract::{
+        LogOutcome, StructuredLogEvent, VerificationPath, live_log_output_path,
+    };
+
+    fn unique_temp_log_root(prefix: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock moved backwards")
+            .as_nanos();
+        std::env::temp_dir().join(format!("{prefix}_{nonce}"))
+    }
 
     #[test]
     fn smoke_harness_finds_oracle_and_fixtures() {
@@ -838,6 +910,31 @@ mod tests {
     }
 
     #[test]
+    fn run_fixture_accepts_structured_log_persistence_toggle() {
+        let log_root = unique_temp_log_root("fr_conformance_fixture_logs");
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.live_log_root = Some(log_root.clone());
+
+        let report = run_fixture(&cfg, "core_errors.json").expect("fixture run");
+        assert_eq!(
+            report.total, report.passed,
+            "mismatches: {:?}",
+            report.failed
+        );
+
+        let out_path = live_log_output_path(&log_root, "core_errors", "core_errors.json");
+        if out_path.exists() {
+            let raw = fs::read_to_string(&out_path).expect("read optional persisted logs");
+            for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+                let event: StructuredLogEvent =
+                    serde_json::from_str(line).expect("parse structured log line");
+                event.validate().expect("structured log validates");
+            }
+        }
+        let _ = fs::remove_dir_all(log_root);
+    }
+
+    #[test]
     fn conformance_protocol_fixture_passes() {
         let cfg = HarnessConfig::default_paths();
         let report =
@@ -847,11 +944,71 @@ mod tests {
     }
 
     #[test]
+    fn run_protocol_fixture_persists_structured_logs_when_enabled() {
+        let log_root = unique_temp_log_root("fr_conformance_protocol_logs");
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.live_log_root = Some(log_root.clone());
+
+        let report =
+            run_protocol_fixture(&cfg, "protocol_negative.json").expect("protocol fixture run");
+        assert_eq!(
+            report.total, report.passed,
+            "mismatches: {:?}",
+            report.failed
+        );
+
+        let out_path =
+            live_log_output_path(&log_root, "protocol_negative", "protocol_negative.json");
+        let raw =
+            fs::read_to_string(&out_path).expect("expected persisted protocol structured logs");
+        let lines = raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        assert!(
+            !lines.is_empty(),
+            "expected at least one structured log line in {}",
+            out_path.display()
+        );
+        for line in lines {
+            let event: StructuredLogEvent =
+                serde_json::from_str(line).expect("parse structured log line");
+            event.validate().expect("structured log validates");
+        }
+        let _ = fs::remove_dir_all(log_root);
+    }
+
+    #[test]
     fn conformance_replay_fixture_passes() {
         let cfg = HarnessConfig::default_paths();
         let report = run_replay_fixture(&cfg, "persist_replay.json").expect("replay fixture run");
         assert_eq!(report.total, report.passed);
         assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn run_replay_fixture_allows_structured_log_persistence_toggle() {
+        let log_root = unique_temp_log_root("fr_conformance_replay_logs");
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.live_log_root = Some(log_root.clone());
+
+        let report = run_replay_fixture(&cfg, "persist_replay.json").expect("replay fixture run");
+        assert_eq!(
+            report.total, report.passed,
+            "mismatches: {:?}",
+            report.failed
+        );
+
+        let out_path = live_log_output_path(&log_root, "persist_replay", "persist_replay.json");
+        if out_path.exists() {
+            let raw = fs::read_to_string(&out_path).expect("read replay structured logs");
+            for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+                let event: StructuredLogEvent =
+                    serde_json::from_str(line).expect("parse replay structured log");
+                event.validate().expect("replay structured log validates");
+            }
+        }
+        let _ = fs::remove_dir_all(log_root);
     }
 
     #[test]
@@ -1073,6 +1230,57 @@ mod tests {
             &[event],
         )
         .expect("conversion should pass");
+    }
+
+    #[test]
+    fn structured_log_enforcement_persists_when_path_is_provided() {
+        let log_root = unique_temp_log_root("fr_conformance_emit_logs");
+        let out_path = log_root.join("persist/core_errors.jsonl");
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:1".to_string(),
+            ts_ms: 1,
+            packet_id: 2,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ParserAbuse,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "protocol",
+            action: "parse_failure",
+            reason_code: "protocol_parse_failure",
+            reason: "invalid bulk length".to_string(),
+            input_digest: "abc".to_string(),
+            output_digest: "def".to_string(),
+            state_digest_before: "state_before".to_string(),
+            state_digest_after: "state_after".to_string(),
+            replay_cmd: "cargo test".to_string(),
+            artifact_refs: vec!["TEST_LOG_SCHEMA_V1.md".to_string()],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "protocol_negative",
+                fixture_name: "protocol_negative.json",
+                case_name: "invalid_bulk_len",
+                verification_path: VerificationPath::E2e,
+                now_ms: 7,
+                outcome: LogOutcome::Pass,
+                persist_path: Some(&out_path),
+            },
+            &[event],
+        )
+        .expect("conversion should pass");
+
+        let raw = fs::read_to_string(&out_path).expect("read persisted structured logs");
+        let lines = raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1, "expected exactly one persisted log line");
+        let parsed: StructuredLogEvent =
+            serde_json::from_str(lines[0]).expect("parse persisted structured log line");
+        parsed.validate().expect("persisted log validates");
+        let _ = fs::remove_dir_all(log_root);
     }
 
     #[test]
