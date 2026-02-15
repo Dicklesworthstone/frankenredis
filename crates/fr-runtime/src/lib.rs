@@ -7,8 +7,8 @@ use fr_config::{
     DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
 };
 use fr_eventloop::{
-    EventLoopMode, EventLoopPhase, PhaseReplayError, TickBudget, TickPlan, plan_tick,
-    replay_phase_trace,
+    BootstrapError, EventLoopMode, EventLoopPhase, LoopBootstrap, PhaseReplayError, TickBudget,
+    TickPlan, plan_tick, replay_phase_trace, validate_bootstrap,
 };
 use fr_protocol::{RespFrame, RespParseError, parse_frame};
 use fr_store::Store;
@@ -108,6 +108,10 @@ impl Runtime {
         trace: &[EventLoopPhase],
     ) -> Result<usize, PhaseReplayError> {
         replay_phase_trace(trace)
+    }
+
+    pub fn validate_event_loop_bootstrap(bootstrap: LoopBootstrap) -> Result<(), BootstrapError> {
+        validate_bootstrap(bootstrap)
     }
 
     #[must_use]
@@ -384,7 +388,9 @@ mod tests {
     use fr_config::{
         DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
     };
-    use fr_eventloop::{EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase, TickBudget};
+    use fr_eventloop::{
+        EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase, LoopBootstrap, TickBudget,
+    };
     use fr_protocol::{RespFrame, parse_frame};
 
     use super::Runtime;
@@ -431,6 +437,23 @@ mod tests {
         let err = Runtime::replay_event_loop_phase_trace(&[EventLoopPhase::Poll])
             .expect_err("invalid start");
         assert_eq!(err.reason_code(), "eventloop.main_loop_entry_missing");
+    }
+
+    #[test]
+    fn fr_p2c_001_u010_runtime_bootstrap_validation_accepts_fully_wired() {
+        Runtime::validate_event_loop_bootstrap(LoopBootstrap::fully_wired())
+            .expect("fully wired bootstrap");
+    }
+
+    #[test]
+    fn fr_p2c_001_u010_runtime_bootstrap_validation_rejects_missing_hook() {
+        let err = Runtime::validate_event_loop_bootstrap(LoopBootstrap {
+            before_sleep_hook_installed: false,
+            after_sleep_hook_installed: true,
+            server_cron_timer_installed: true,
+        })
+        .expect_err("missing hook");
+        assert_eq!(err.reason_code(), "eventloop.hook_install_missing");
     }
 
     #[test]

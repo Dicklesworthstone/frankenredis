@@ -79,6 +79,56 @@ impl PhaseReplayError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoopBootstrap {
+    pub before_sleep_hook_installed: bool,
+    pub after_sleep_hook_installed: bool,
+    pub server_cron_timer_installed: bool,
+}
+
+impl LoopBootstrap {
+    #[must_use]
+    pub const fn fully_wired() -> Self {
+        Self {
+            before_sleep_hook_installed: true,
+            after_sleep_hook_installed: true,
+            server_cron_timer_installed: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootstrapError {
+    BeforeSleepHookMissing,
+    AfterSleepHookMissing,
+    ServerCronTimerMissing,
+}
+
+impl BootstrapError {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::BeforeSleepHookMissing | Self::AfterSleepHookMissing => {
+                "eventloop.hook_install_missing"
+            }
+            Self::ServerCronTimerMissing => "eventloop.server_cron_timer_missing",
+        }
+    }
+}
+
+pub fn validate_bootstrap(bootstrap: LoopBootstrap) -> Result<(), BootstrapError> {
+    if !bootstrap.before_sleep_hook_installed {
+        return Err(BootstrapError::BeforeSleepHookMissing);
+    }
+    if !bootstrap.after_sleep_hook_installed {
+        return Err(BootstrapError::AfterSleepHookMissing);
+    }
+    if !bootstrap.server_cron_timer_installed {
+        return Err(BootstrapError::ServerCronTimerMissing);
+    }
+    Ok(())
+}
+
 #[must_use]
 pub const fn next_phase(phase: EventLoopPhase) -> EventLoopPhase {
     match phase {
@@ -178,8 +228,8 @@ pub fn plan_tick(
 #[cfg(test)]
 mod tests {
     use super::{
-        EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase, PhaseReplayError, TickBudget,
-        plan_tick, replay_phase_trace, run_tick,
+        BootstrapError, EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase, LoopBootstrap,
+        PhaseReplayError, TickBudget, plan_tick, replay_phase_trace, run_tick, validate_bootstrap,
     };
 
     #[test]
@@ -308,5 +358,34 @@ mod tests {
         .expect_err("partial tick");
         assert_eq!(err, PhaseReplayError::PartialTick { observed: 3 });
         assert_eq!(err.reason_code(), "eventloop.dispatch.order_mismatch");
+    }
+
+    #[test]
+    fn fr_p2c_001_u010_bootstrap_accepts_required_hooks_and_timer() {
+        validate_bootstrap(LoopBootstrap::fully_wired()).expect("fully wired");
+    }
+
+    #[test]
+    fn fr_p2c_001_u010_bootstrap_rejects_missing_hooks() {
+        let err = validate_bootstrap(LoopBootstrap {
+            before_sleep_hook_installed: false,
+            after_sleep_hook_installed: true,
+            server_cron_timer_installed: true,
+        })
+        .expect_err("missing hook");
+        assert_eq!(err, BootstrapError::BeforeSleepHookMissing);
+        assert_eq!(err.reason_code(), "eventloop.hook_install_missing");
+    }
+
+    #[test]
+    fn fr_p2c_001_u010_bootstrap_rejects_missing_server_cron_timer() {
+        let err = validate_bootstrap(LoopBootstrap {
+            before_sleep_hook_installed: true,
+            after_sleep_hook_installed: true,
+            server_cron_timer_installed: false,
+        })
+        .expect_err("missing timer");
+        assert_eq!(err, BootstrapError::ServerCronTimerMissing);
+        assert_eq!(err.reason_code(), "eventloop.server_cron_timer_missing");
     }
 }
