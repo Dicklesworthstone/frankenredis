@@ -209,11 +209,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         });
     }
     if xx && !key_exists {
-        return Ok(if get {
-            RespFrame::BulkString(None)
-        } else {
-            RespFrame::BulkString(None)
-        });
+        return Ok(RespFrame::BulkString(None));
     }
 
     store.set(argv[1].clone(), argv[2].clone(), px_ttl_ms, now_ms);
@@ -294,15 +290,12 @@ fn mget(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     }
     let keys: Vec<&[u8]> = argv[1..].iter().map(Vec::as_slice).collect();
     let values = store.mget(&keys, now_ms);
-    let frames = values
-        .into_iter()
-        .map(|v| RespFrame::BulkString(v))
-        .collect();
+    let frames = values.into_iter().map(RespFrame::BulkString).collect();
     Ok(RespFrame::Array(Some(frames)))
 }
 
 fn mset(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() < 3 || (argv.len() - 1) % 2 != 0 {
+    if argv.len() < 3 || !(argv.len() - 1).is_multiple_of(2) {
         return Err(CommandError::WrongArity("MSET"));
     }
     let mut i = 1;

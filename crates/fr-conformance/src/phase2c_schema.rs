@@ -676,10 +676,19 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/phase2c")
     }
 
+    fn test_packet_dirs() -> Vec<PathBuf> {
+        let mut packets = discover_phase2c_packets(&fixture_root()).expect("discover packets");
+        packets.retain(|path| {
+            path.file_name()
+                .and_then(|v| v.to_str())
+                .is_some_and(|name| name.starts_with("FR-P2C-TEST-"))
+        });
+        packets
+    }
+
     #[test]
     fn discovers_phase2c_packet_dirs() {
-        let root = fixture_root();
-        let packets = discover_phase2c_packets(&root).expect("discover packets");
+        let packets = test_packet_dirs();
         assert_eq!(packets.len(), 2);
         assert_eq!(
             packets[0].file_name().and_then(|v| v.to_str()),
@@ -731,14 +740,19 @@ mod tests {
     #[test]
     fn tree_validation_includes_all_packets() {
         let reports = validate_phase2c_tree(&fixture_root()).expect("validate tree");
-        assert_eq!(reports.len(), 2);
+        assert!(reports.len() >= 2);
+        let test_reports = reports
+            .iter()
+            .filter(|report| report.packet_id.starts_with("FR-P2C-TEST-"))
+            .collect::<Vec<_>>();
+        assert_eq!(test_reports.len(), 2);
         assert!(
-            reports
+            test_reports
                 .iter()
                 .any(|r| r.readiness == PacketReadiness::ReadyForImpl)
         );
         assert!(
-            reports
+            test_reports
                 .iter()
                 .any(|r| r.readiness == PacketReadiness::NotReady)
         );
@@ -746,7 +760,7 @@ mod tests {
 
     #[test]
     fn packet_validation_parallel_path_is_deterministic() {
-        let mut packet_dirs = discover_phase2c_packets(&fixture_root()).expect("discover packets");
+        let mut packet_dirs = test_packet_dirs();
         packet_dirs.reverse();
         let reports = validate_phase2c_packets(&packet_dirs).expect("parallel packet validation");
         let packet_ids = reports
