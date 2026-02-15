@@ -52,6 +52,76 @@ pub const EVENT_LOOP_PHASE_ORDER: [EventLoopPhase; 5] = [
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PhaseReplayError {
+    EmptyTrace,
+    MissingMainLoopEntry {
+        first: EventLoopPhase,
+    },
+    StageTransitionInvalid {
+        from: EventLoopPhase,
+        to: EventLoopPhase,
+    },
+    PartialTick {
+        observed: usize,
+    },
+}
+
+impl PhaseReplayError {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::EmptyTrace | Self::MissingMainLoopEntry { .. } => {
+                "eventloop.main_loop_entry_missing"
+            }
+            Self::StageTransitionInvalid { .. } => "eventloop.dispatch.stage_transition_invalid",
+            Self::PartialTick { .. } => "eventloop.dispatch.order_mismatch",
+        }
+    }
+}
+
+#[must_use]
+pub const fn next_phase(phase: EventLoopPhase) -> EventLoopPhase {
+    match phase {
+        EventLoopPhase::BeforeSleep => EventLoopPhase::Poll,
+        EventLoopPhase::Poll => EventLoopPhase::FileDispatch,
+        EventLoopPhase::FileDispatch => EventLoopPhase::TimeDispatch,
+        EventLoopPhase::TimeDispatch => EventLoopPhase::AfterSleep,
+        EventLoopPhase::AfterSleep => EventLoopPhase::BeforeSleep,
+    }
+}
+
+pub fn replay_phase_trace(trace: &[EventLoopPhase]) -> Result<usize, PhaseReplayError> {
+    let Some((&first, rest)) = trace.split_first() else {
+        return Err(PhaseReplayError::EmptyTrace);
+    };
+    if first != EventLoopPhase::BeforeSleep {
+        return Err(PhaseReplayError::MissingMainLoopEntry { first });
+    }
+
+    let mut completed_ticks = 0usize;
+    let mut current = first;
+    for &next in rest {
+        let expected = next_phase(current);
+        if next != expected {
+            return Err(PhaseReplayError::StageTransitionInvalid {
+                from: current,
+                to: next,
+            });
+        }
+        if current == EventLoopPhase::AfterSleep {
+            completed_ticks = completed_ticks.saturating_add(1);
+        }
+        current = next;
+    }
+    if current != EventLoopPhase::AfterSleep {
+        return Err(PhaseReplayError::PartialTick {
+            observed: trace.len(),
+        });
+    }
+    Ok(completed_ticks.saturating_add(1))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TickStats {
     pub accepted: usize,
     pub processed_commands: usize,
@@ -107,7 +177,10 @@ pub fn plan_tick(
 
 #[cfg(test)]
 mod tests {
-    use super::{EVENT_LOOP_PHASE_ORDER, EventLoopMode, TickBudget, plan_tick, run_tick};
+    use super::{
+        EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase, PhaseReplayError, TickBudget,
+        plan_tick, replay_phase_trace, run_tick,
+    };
 
     #[test]
     fn tick_respects_budget() {
@@ -175,5 +248,65 @@ mod tests {
         );
         assert_eq!(plan.stats.accepted, 0);
         assert_eq!(plan.stats.processed_commands, 7);
+    }
+
+    #[test]
+    fn fr_p2c_001_u011_replay_trace_accepts_single_tick() {
+        let ticks = replay_phase_trace(&EVENT_LOOP_PHASE_ORDER).expect("single tick");
+        assert_eq!(ticks, 1);
+    }
+
+    #[test]
+    fn fr_p2c_001_u011_replay_trace_accepts_multiple_ticks() {
+        let mut trace = Vec::new();
+        trace.extend_from_slice(&EVENT_LOOP_PHASE_ORDER);
+        trace.extend_from_slice(&EVENT_LOOP_PHASE_ORDER);
+        let ticks = replay_phase_trace(&trace).expect("two ticks");
+        assert_eq!(ticks, 2);
+    }
+
+    #[test]
+    fn fr_p2c_001_u011_replay_trace_rejects_invalid_transition() {
+        let err = replay_phase_trace(&[
+            EventLoopPhase::BeforeSleep,
+            EventLoopPhase::FileDispatch,
+            EventLoopPhase::AfterSleep,
+        ])
+        .expect_err("invalid transition");
+        assert_eq!(
+            err,
+            PhaseReplayError::StageTransitionInvalid {
+                from: EventLoopPhase::BeforeSleep,
+                to: EventLoopPhase::FileDispatch
+            }
+        );
+        assert_eq!(
+            err.reason_code(),
+            "eventloop.dispatch.stage_transition_invalid"
+        );
+    }
+
+    #[test]
+    fn fr_p2c_001_u011_replay_trace_rejects_missing_main_loop_entry() {
+        let err = replay_phase_trace(&[EventLoopPhase::Poll]).expect_err("missing entry");
+        assert_eq!(
+            err,
+            PhaseReplayError::MissingMainLoopEntry {
+                first: EventLoopPhase::Poll
+            }
+        );
+        assert_eq!(err.reason_code(), "eventloop.main_loop_entry_missing");
+    }
+
+    #[test]
+    fn fr_p2c_001_u011_replay_trace_rejects_partial_tick() {
+        let err = replay_phase_trace(&[
+            EventLoopPhase::BeforeSleep,
+            EventLoopPhase::Poll,
+            EventLoopPhase::FileDispatch,
+        ])
+        .expect_err("partial tick");
+        assert_eq!(err, PhaseReplayError::PartialTick { observed: 3 });
+        assert_eq!(err.reason_code(), "eventloop.dispatch.order_mismatch");
     }
 }

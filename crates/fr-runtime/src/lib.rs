@@ -6,7 +6,10 @@ use fr_command::{CommandError, dispatch_argv, frame_to_argv};
 use fr_config::{
     DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
 };
-use fr_eventloop::{EventLoopMode, TickBudget, TickPlan, plan_tick};
+use fr_eventloop::{
+    EventLoopMode, EventLoopPhase, PhaseReplayError, TickBudget, TickPlan, plan_tick,
+    replay_phase_trace,
+};
 use fr_protocol::{RespFrame, RespParseError, parse_frame};
 use fr_store::Store;
 
@@ -99,6 +102,12 @@ impl Runtime {
         mode: EventLoopMode,
     ) -> TickPlan {
         plan_tick(pending_accepts, pending_commands, budget, mode)
+    }
+
+    pub fn replay_event_loop_phase_trace(
+        trace: &[EventLoopPhase],
+    ) -> Result<usize, PhaseReplayError> {
+        replay_phase_trace(trace)
     }
 
     #[must_use]
@@ -375,7 +384,7 @@ mod tests {
     use fr_config::{
         DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
     };
-    use fr_eventloop::{EVENT_LOOP_PHASE_ORDER, EventLoopMode, TickBudget};
+    use fr_eventloop::{EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase, TickBudget};
     use fr_protocol::{RespFrame, parse_frame};
 
     use super::Runtime;
@@ -408,6 +417,20 @@ mod tests {
             plan.stats.processed_commands,
             TickBudget::BLOCKED_MODE_MAX_COMMANDS
         );
+    }
+
+    #[test]
+    fn fr_p2c_001_u011_runtime_phase_replay_accepts_contract_order() {
+        let ticks = Runtime::replay_event_loop_phase_trace(&EVENT_LOOP_PHASE_ORDER)
+            .expect("valid phase trace");
+        assert_eq!(ticks, 1);
+    }
+
+    #[test]
+    fn fr_p2c_001_u011_runtime_phase_replay_rejects_invalid_start() {
+        let err = Runtime::replay_event_loop_phase_trace(&[EventLoopPhase::Poll])
+            .expect_err("invalid start");
+        assert_eq!(err.reason_code(), "eventloop.main_loop_entry_missing");
     }
 
     #[test]
