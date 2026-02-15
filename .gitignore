@@ -18,6 +18,16 @@ baselines/
 golden_outputs/
 golden_checksums.txt
 
+# Ephemeral agent/runtime artifacts
+storage.sqlite3
+storage.sqlite3-*
+rustc-ice-*.txt
+perf.data
+perf.data.*
+--graph-format.svg
+target-codex*/
+target_*/
+
 # OS/editor/env/scratch files
 .DS_Store
 ._*
