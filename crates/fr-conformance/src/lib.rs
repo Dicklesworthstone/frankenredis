@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::log_contract::{
     LogOutcome, RuntimeEvidenceContext, StructuredLogEvent, VerificationPath,
+    append_structured_log_jsonl, live_log_output_path,
 };
 
 pub mod log_contract;
@@ -25,6 +26,7 @@ pub struct HarnessConfig {
     pub oracle_root: PathBuf,
     pub fixture_root: PathBuf,
     pub strict_mode: bool,
+    pub live_log_root: Option<PathBuf>,
 }
 
 impl HarnessConfig {
@@ -35,6 +37,7 @@ impl HarnessConfig {
             oracle_root: repo_root.join("legacy_redis_code/redis"),
             fixture_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures"),
             strict_mode: true,
+            live_log_root: None,
         }
     }
 }
@@ -164,11 +167,15 @@ pub fn run_fixture(
         let new_events = &runtime.evidence().events()[evidence_before..];
         let threat_result = validate_threat_expectation(case.expect_threat.as_ref(), new_events);
         let log_result = validate_structured_log_emission(
-            &fixture.suite,
-            fixture_name,
-            &case.name,
-            VerificationPath::E2e,
-            case.now_ms,
+            StructuredLogEmissionContext {
+                suite_id: &fixture.suite,
+                fixture_name,
+                case_name: &case.name,
+                verification_path: VerificationPath::E2e,
+                now_ms: case.now_ms,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
             new_events,
         );
         let frame_ok = actual == expected;
@@ -201,6 +208,11 @@ pub fn run_live_redis_diff(
     let mut runtime = Runtime::default_strict();
     let mut stream = connect_live_redis(oracle)?;
     flushall(&mut stream)?;
+    let suite = format!("live_redis_diff::{}", fixture.suite);
+    let live_log_path = config
+        .live_log_root
+        .as_ref()
+        .map(|root| live_log_output_path(root, &suite, fixture_name));
 
     let mut failed = Vec::new();
     let total = fixture.cases.len();
@@ -216,23 +228,44 @@ pub fn run_live_redis_diff(
             prev_now_ms = Some(case.now_ms);
         }
 
+        let evidence_before = runtime.evidence().events().len();
         let frame = case_to_frame(&case);
         let runtime_actual = runtime.execute_frame(frame.clone(), case.now_ms);
+        let new_events = &runtime.evidence().events()[evidence_before..];
         send_frame(&mut stream, &frame)?;
         let redis_actual = read_resp_frame_from_stream(&mut stream)?;
-        if runtime_actual != redis_actual {
+        let frame_ok = runtime_actual == redis_actual;
+        let outcome = if frame_ok {
+            LogOutcome::Pass
+        } else {
+            LogOutcome::Fail
+        };
+        let log_result = validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: &suite,
+                fixture_name,
+                case_name: &case.name,
+                verification_path: VerificationPath::E2e,
+                now_ms: case.now_ms,
+                outcome,
+                persist_path: live_log_path.as_deref(),
+            },
+            new_events,
+        );
+        let passed = frame_ok && log_result.is_ok();
+        if !passed {
             failed.push(CaseOutcome {
                 name: case.name,
-                passed: false,
+                passed,
                 expected: redis_actual,
                 actual: runtime_actual,
-                detail: Some("frame mismatch against live redis".to_string()),
+                detail: build_case_detail(frame_ok, None, log_result.err()),
             });
         }
     }
 
     Ok(DifferentialReport {
-        suite: format!("live_redis_diff::{}", fixture.suite),
+        suite,
         total,
         passed: total.saturating_sub(failed.len()),
         failed,
@@ -278,11 +311,15 @@ pub fn run_protocol_fixture(
         let new_events = &runtime.evidence().events()[evidence_before..];
         let threat_result = validate_threat_expectation(case.expect_threat.as_ref(), new_events);
         let log_result = validate_structured_log_emission(
-            &fixture.suite,
-            fixture_name,
-            &case.name,
-            VerificationPath::E2e,
-            case.now_ms,
+            StructuredLogEmissionContext {
+                suite_id: &fixture.suite,
+                fixture_name,
+                case_name: &case.name,
+                verification_path: VerificationPath::E2e,
+                now_ms: case.now_ms,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
             new_events,
         );
         let frame_ok = actual == expected;
@@ -313,10 +350,16 @@ pub fn run_live_redis_protocol_diff(
 ) -> Result<DifferentialReport, String> {
     let fixture = load_protocol_fixture(config, fixture_name)?;
     let mut runtime = Runtime::default_strict();
+    let suite = format!("live_redis_protocol_diff::{}", fixture.suite);
+    let live_log_path = config
+        .live_log_root
+        .as_ref()
+        .map(|root| live_log_output_path(root, &suite, fixture_name));
     let mut failed = Vec::new();
     let total = fixture.cases.len();
 
     for case in fixture.cases {
+        let evidence_before = runtime.evidence().events().len();
         let mut stream = connect_live_redis(oracle)?;
         let raw = case.raw_request.as_bytes();
         stream
@@ -328,23 +371,42 @@ pub fn run_live_redis_protocol_diff(
 
         let redis_actual = read_resp_frame_from_stream(&mut stream)?;
         let runtime_encoded = runtime.execute_bytes(raw, case.now_ms);
+        let new_events = &runtime.evidence().events()[evidence_before..];
         let runtime_actual = parse_frame(&runtime_encoded)
             .map_err(|err| format!("runtime emitted invalid RESP frame in {}: {err}", case.name))?
             .frame;
-
-        if runtime_actual != redis_actual {
+        let frame_ok = runtime_actual == redis_actual;
+        let outcome = if frame_ok {
+            LogOutcome::Pass
+        } else {
+            LogOutcome::Fail
+        };
+        let log_result = validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: &suite,
+                fixture_name,
+                case_name: &case.name,
+                verification_path: VerificationPath::E2e,
+                now_ms: case.now_ms,
+                outcome,
+                persist_path: live_log_path.as_deref(),
+            },
+            new_events,
+        );
+        let passed = frame_ok && log_result.is_ok();
+        if !passed {
             failed.push(CaseOutcome {
                 name: case.name,
-                passed: false,
+                passed,
                 expected: redis_actual,
                 actual: runtime_actual,
-                detail: Some("frame mismatch against live redis".to_string()),
+                detail: build_case_detail(frame_ok, None, log_result.err()),
             });
         }
     }
 
     Ok(DifferentialReport {
-        suite: format!("live_redis_protocol_diff::{}", fixture.suite),
+        suite,
         total,
         passed: total.saturating_sub(failed.len()),
         failed,
@@ -650,31 +712,44 @@ fn build_case_detail(
     }
 }
 
-fn validate_structured_log_emission(
-    suite_id: &str,
-    fixture_name: &str,
-    case_name: &str,
+#[derive(Clone, Copy)]
+struct StructuredLogEmissionContext<'a> {
+    suite_id: &'a str,
+    fixture_name: &'a str,
+    case_name: &'a str,
     verification_path: VerificationPath,
     now_ms: u64,
+    outcome: LogOutcome,
+    persist_path: Option<&'a Path>,
+}
+
+fn validate_structured_log_emission(
+    context: StructuredLogEmissionContext<'_>,
     new_events: &[EvidenceEvent],
 ) -> Result<(), String> {
-    let packet_id = packet_family_for_fixture(fixture_name);
+    let packet_id = packet_family_for_fixture(context.fixture_name);
+    let mut structured_events = Vec::with_capacity(new_events.len());
     for event in new_events {
-        let _ = StructuredLogEvent::from_runtime_evidence(
+        let converted = StructuredLogEvent::from_runtime_evidence(
             event,
             RuntimeEvidenceContext {
-                suite_id,
-                test_or_scenario_id: case_name,
+                suite_id: context.suite_id,
+                test_or_scenario_id: context.case_name,
                 packet_id,
-                verification_path,
-                seed: now_ms,
+                verification_path: context.verification_path,
+                seed: context.now_ms,
                 duration_ms: 0,
-                outcome: LogOutcome::Pass,
-                fixture_id: Some(fixture_name),
+                outcome: context.outcome,
+                fixture_id: Some(context.fixture_name),
                 env_ref: Some("crates/fr-conformance/fixtures/log_contract_v1/env.json"),
             },
         )
         .map_err(|err| format!("runtime evidence conversion error: {err}"))?;
+        structured_events.push(converted);
+    }
+    if let Some(path) = context.persist_path {
+        append_structured_log_jsonl(path, &structured_events)
+            .map_err(|err| format!("structured log persistence error: {err}"))?;
     }
     Ok(())
 }
@@ -722,12 +797,12 @@ mod tests {
     use fr_config::{DecisionAction, DriftSeverity, Mode, ThreatClass};
 
     use super::{
-        EvidenceEvent, ExpectedThreat, HarnessConfig, LiveOracleConfig, run_fixture,
-        run_live_redis_diff, run_live_redis_protocol_diff, run_protocol_fixture,
-        run_replay_fixture, run_smoke, validate_structured_log_emission,
-        validate_threat_expectation,
+        EvidenceEvent, ExpectedThreat, HarnessConfig, LiveOracleConfig,
+        StructuredLogEmissionContext, run_fixture, run_live_redis_diff,
+        run_live_redis_protocol_diff, run_protocol_fixture, run_replay_fixture, run_smoke,
+        validate_structured_log_emission, validate_threat_expectation,
     };
-    use crate::log_contract::VerificationPath;
+    use crate::log_contract::{LogOutcome, VerificationPath};
 
     #[test]
     fn smoke_harness_finds_oracle_and_fixtures() {
@@ -986,11 +1061,15 @@ mod tests {
             confidence: Some(1.0),
         };
         validate_structured_log_emission(
-            "protocol_negative",
-            "protocol_negative.json",
-            "invalid_bulk_len",
-            VerificationPath::E2e,
-            7,
+            StructuredLogEmissionContext {
+                suite_id: "protocol_negative",
+                fixture_name: "protocol_negative.json",
+                case_name: "invalid_bulk_len",
+                verification_path: VerificationPath::E2e,
+                now_ms: 7,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
             &[event],
         )
         .expect("conversion should pass");
@@ -1019,11 +1098,15 @@ mod tests {
             confidence: Some(1.0),
         };
         let err = validate_structured_log_emission(
-            "protocol_negative",
-            "protocol_negative.json",
-            "invalid_bulk_len",
-            VerificationPath::E2e,
-            7,
+            StructuredLogEmissionContext {
+                suite_id: "protocol_negative",
+                fixture_name: "protocol_negative.json",
+                case_name: "invalid_bulk_len",
+                verification_path: VerificationPath::E2e,
+                now_ms: 7,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
             &[event],
         )
         .expect_err("empty artifact_refs should fail conversion");

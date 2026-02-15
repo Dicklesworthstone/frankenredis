@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::env;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use fr_conformance::{
@@ -18,7 +19,21 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode, String> {
-    let mut args = env::args().skip(1);
+    let mut args = env::args().skip(1).collect::<Vec<_>>();
+    let mut log_root: Option<PathBuf> = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        if args[idx] == "--log-root" {
+            if idx + 1 >= args.len() {
+                return Err(usage("missing path after --log-root"));
+            }
+            log_root = Some(PathBuf::from(args[idx + 1].clone()));
+            args.drain(idx..=idx + 1);
+            continue;
+        }
+        idx += 1;
+    }
+    let mut args = args.into_iter();
     let mode = args
         .next()
         .ok_or_else(|| usage("missing mode; expected 'command' or 'protocol'"))?;
@@ -34,7 +49,8 @@ fn run() -> Result<ExitCode, String> {
         None => 6379,
     };
 
-    let cfg = HarnessConfig::default_paths();
+    let mut cfg = HarnessConfig::default_paths();
+    cfg.live_log_root = log_root.clone();
     let oracle = LiveOracleConfig {
         host,
         port,
@@ -51,6 +67,9 @@ fn run() -> Result<ExitCode, String> {
     println!("total: {}", report.total);
     println!("passed: {}", report.passed);
     println!("failed: {}", report.failed.len());
+    if let Some(path) = &log_root {
+        println!("live_log_root: {}", path.display());
+    }
 
     if !report.failed.is_empty() {
         for failure in &report.failed {
@@ -67,6 +86,6 @@ fn run() -> Result<ExitCode, String> {
 
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nusage: cargo run -p fr-conformance --bin live_oracle_diff -- <command|protocol> <fixture.json> [host] [port]"
+        "{reason}\nusage: cargo run -p fr-conformance --bin live_oracle_diff -- [--log-root <path>] <command|protocol> <fixture.json> [host] [port]"
     )
 }

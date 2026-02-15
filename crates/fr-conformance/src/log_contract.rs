@@ -1,5 +1,9 @@
 #![forbid(unsafe_code)]
 
+use std::fs::{self, OpenOptions};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+
 use fr_config::Mode;
 use fr_runtime::EvidenceEvent;
 use serde::{Deserialize, Serialize};
@@ -270,15 +274,78 @@ fn deterministic_digest(label: &str) -> String {
     format!("{hash:016x}")
 }
 
+#[must_use]
+pub fn live_log_output_path(root: &Path, suite_id: &str, fixture_name: &str) -> PathBuf {
+    let suite_slug = sanitize_path_segment(suite_id);
+    let fixture_base = fixture_name.strip_suffix(".json").unwrap_or(fixture_name);
+    let fixture_slug = sanitize_path_segment(fixture_base);
+    root.join(suite_slug).join(format!("{fixture_slug}.jsonl"))
+}
+
+pub fn append_structured_log_jsonl(
+    path: &Path,
+    events: &[StructuredLogEvent],
+) -> Result<(), String> {
+    if events.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create log directory {}: {err}", parent.display()))?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|err| {
+            format!(
+                "failed to open structured log file {}: {err}",
+                path.display()
+            )
+        })?;
+    for event in events {
+        let line = event.to_json_line()?;
+        writeln!(file, "{line}").map_err(|err| {
+            format!(
+                "failed to append structured log line {}: {err}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn sanitize_path_segment(input: &str) -> String {
+    let out = input
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if out.is_empty() {
+        "unnamed".to_string()
+    } else {
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
     use fr_config::{DecisionAction, DriftSeverity, Mode, ThreatClass};
     use fr_runtime::EvidenceEvent;
 
     use super::{
         LogMode, LogOutcome, PACKET_FAMILIES, RuntimeEvidenceContext,
-        STRUCTURED_LOG_SCHEMA_VERSION, StructuredLogEvent, VerificationPath, e2e_replay_cmd,
-        golden_packet_logs, unit_replay_cmd,
+        STRUCTURED_LOG_SCHEMA_VERSION, StructuredLogEvent, VerificationPath,
+        append_structured_log_jsonl, e2e_replay_cmd, golden_packet_logs, live_log_output_path,
+        unit_replay_cmd,
     };
 
     fn sample_runtime_event() -> EvidenceEvent {
@@ -386,5 +453,80 @@ mod tests {
         )
         .expect_err("empty artifact refs should fail validation");
         assert!(err.contains("artifact_refs"));
+    }
+
+    #[test]
+    fn live_log_output_path_is_deterministic() {
+        let path = live_log_output_path(
+            std::path::Path::new("artifacts/log_contract/live"),
+            "live_redis_diff::core/errors",
+            "core_errors.json",
+        );
+        assert_eq!(
+            path,
+            std::path::Path::new("artifacts/log_contract/live")
+                .join("live_redis_diff__core_errors")
+                .join("core_errors.jsonl")
+        );
+    }
+
+    #[test]
+    fn append_structured_log_jsonl_appends_lines() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock moved backwards")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("fr_conformance_log_contract_{unique}"));
+        let path = dir.join("live/core_errors.jsonl");
+
+        let mut first = StructuredLogEvent::from_runtime_evidence(
+            &sample_runtime_event(),
+            RuntimeEvidenceContext {
+                suite_id: "live_redis_diff::core_errors",
+                test_or_scenario_id: "case_one",
+                packet_id: "FR-P2C-003",
+                verification_path: VerificationPath::E2e,
+                seed: 10,
+                duration_ms: 1,
+                outcome: LogOutcome::Pass,
+                fixture_id: Some("core_errors.json"),
+                env_ref: Some("crates/fr-conformance/fixtures/log_contract_v1/env.json"),
+            },
+        )
+        .expect("first structured event");
+        first.reason_code = "first_reason".to_string();
+        append_structured_log_jsonl(&path, &[first]).expect("append first line");
+
+        let mut second = StructuredLogEvent::from_runtime_evidence(
+            &sample_runtime_event(),
+            RuntimeEvidenceContext {
+                suite_id: "live_redis_diff::core_errors",
+                test_or_scenario_id: "case_two",
+                packet_id: "FR-P2C-003",
+                verification_path: VerificationPath::E2e,
+                seed: 11,
+                duration_ms: 1,
+                outcome: LogOutcome::Fail,
+                fixture_id: Some("core_errors.json"),
+                env_ref: Some("crates/fr-conformance/fixtures/log_contract_v1/env.json"),
+            },
+        )
+        .expect("second structured event");
+        second.reason_code = "second_reason".to_string();
+        append_structured_log_jsonl(&path, &[second]).expect("append second line");
+
+        let raw = fs::read_to_string(&path).expect("read appended file");
+        let lines = raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect::<Vec<_>>();
+        assert_eq!(lines.len(), 2, "two appended records expected");
+        let first_event: StructuredLogEvent = serde_json::from_str(lines[0]).expect("parse first");
+        let second_event: StructuredLogEvent =
+            serde_json::from_str(lines[1]).expect("parse second");
+        assert_eq!(first_event.reason_code, "first_reason");
+        assert_eq!(second_event.reason_code, "second_reason");
+
+        fs::remove_dir_all(&dir).expect("cleanup temp directory");
     }
 }

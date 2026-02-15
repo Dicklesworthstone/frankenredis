@@ -6,5 +6,6 @@ edition = "2024"
 [dependencies]
 fr-command = { version = "0.1.0", path = "../fr-command" }
 fr-config = { version = "0.1.0", path = "../fr-config" }
+fr-eventloop = { version = "0.1.0", path = "../fr-eventloop" }
 fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
 fr-store = { version = "0.1.0", path = "../fr-store" }

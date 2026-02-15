@@ -6,6 +6,7 @@ use fr_command::{CommandError, dispatch_argv, frame_to_argv};
 use fr_config::{
     DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
 };
+use fr_eventloop::{EventLoopMode, TickBudget, TickPlan, plan_tick};
 use fr_protocol::{RespFrame, RespParseError, parse_frame};
 use fr_store::Store;
 
@@ -88,6 +89,16 @@ impl Runtime {
     #[must_use]
     pub fn default_hardened() -> Self {
         Self::new(RuntimePolicy::hardened())
+    }
+
+    #[must_use]
+    pub fn plan_event_loop_tick(
+        pending_accepts: usize,
+        pending_commands: usize,
+        budget: TickBudget,
+        mode: EventLoopMode,
+    ) -> TickPlan {
+        plan_tick(pending_accepts, pending_commands, budget, mode)
     }
 
     #[must_use]
@@ -364,9 +375,40 @@ mod tests {
     use fr_config::{
         DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
     };
+    use fr_eventloop::{EVENT_LOOP_PHASE_ORDER, EventLoopMode, TickBudget};
     use fr_protocol::{RespFrame, parse_frame};
 
     use super::Runtime;
+
+    #[test]
+    fn fr_p2c_001_u001_runtime_exposes_deterministic_phase_order() {
+        let plan =
+            Runtime::plan_event_loop_tick(1, 3, TickBudget::default(), EventLoopMode::Normal);
+        assert_eq!(plan.phase_order, EVENT_LOOP_PHASE_ORDER);
+    }
+
+    #[test]
+    fn fr_p2c_001_u003_runtime_no_sleep_when_backlog_present() {
+        let plan =
+            Runtime::plan_event_loop_tick(0, 1, TickBudget::default(), EventLoopMode::Normal);
+        assert_eq!(plan.poll_timeout_ms, 0);
+    }
+
+    #[test]
+    fn fr_p2c_001_u005_runtime_blocked_mode_is_bounded() {
+        let plan = Runtime::plan_event_loop_tick(
+            50,
+            10_000,
+            TickBudget::default(),
+            EventLoopMode::Blocked,
+        );
+        assert_eq!(plan.poll_timeout_ms, 0);
+        assert_eq!(plan.stats.accepted, TickBudget::BLOCKED_MODE_MAX_ACCEPTS);
+        assert_eq!(
+            plan.stats.processed_commands,
+            TickBudget::BLOCKED_MODE_MAX_COMMANDS
+        );
+    }
 
     #[test]
     fn strict_ping_path() {
