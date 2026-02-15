@@ -274,3 +274,64 @@ Phase-2C is complete only when:
 4. High-risk packets include optimization proof artifacts.
 5. RaptorQ sidecars + decode proofs are scrub-clean.
 6. Governance backfill tasks are tied to packet evidence.
+
+## 18. DOC-PASS-00 Baseline Gap Matrix + Quantitative Expansion Targets
+
+### 18.1 Scoring rubric (auditable)
+
+- Coverage score (`0..5`): `0` absent, `1` skeletal bullets, `2` partial map, `3` substantial map with missing edge handling, `4` near-complete with evidence anchors, `5` full operational contract.
+- Evidence quality: `low` (claims without reproducible artifacts), `medium` (some measured data/paths), `high` (fixture IDs, commands, and artifact pointers).
+- Expansion factor: minimum multiplier required for section rewrite depth in DOC-PASS-01..14.
+
+### 18.2 Section-by-section matrix (this document)
+
+| Section | Baseline lines | Coverage | Evidence | Primary omissions to close | Expansion factor | Target lines | Risk | Downstream bead |
+|---|---:|---:|---|---|---:|---:|---|---|
+| 0. Mission and completion criteria | 9 | 2 | low | Missing measurable closure gates by subsystem and packet | 8x | 72 | medium | `bd-2wb.24.14` |
+| 1. Source-of-truth crosswalk | 16 | 2 | medium | Missing commit/hash pinning, path-level ownership, and replay entrypoints | 10x | 160 | high | `bd-2wb.24.2` |
+| 2. Quantitative legacy inventory | 12 | 2 | medium | Missing per-command-family, per-test-family, and per-risk-bucket counts | 12x | 144 | high | `bd-2wb.24.1` |
+| 3. Subsystem extraction matrix | 13 | 2 | low | Missing module ownership boundaries, coupling direction, and explicit handoff contracts | 15x | 195 | critical | `bd-2wb.24.2` |
+| 4. Invariant ledger | 14 | 2 | medium | Missing invariant-to-unit/e2e mapping and failure reason-code taxonomy | 14x | 196 | critical | `bd-2wb.24.4` |
+| 5. Native/OS boundary register | 9 | 2 | low | Missing syscall-level failure envelopes and deterministic recovery constraints | 12x | 108 | high | `bd-2wb.24.6` |
+| 6. Compatibility/security doctrine | 13 | 2 | medium | Missing strict/hardened allowlist classes, budgeted fallback triggers, and operator actions | 14x | 182 | critical | `bd-2wb.24.6` |
+| 7. Conformance program | 21 | 2 | low | Missing per-fixture coverage map, closure criteria, and CI contract | 16x | 336 | critical | `bd-2wb.24.10` |
+| 7.1 Fixture families | 9 | 1 | low | Missing fixture IDs, seeds, replay commands, and packet linkage | 18x | 162 | critical | `bd-2wb.24.10` |
+| 7.2 Differential harness outputs | 10 | 1 | low | Missing schema version, required fields, and triage reason-code map | 18x | 180 | critical | `bd-2wb.24.10` |
+| 8. Extreme optimization program | 24 | 2 | low | Missing measured baseline/profile artifacts and one-lever audit trails | 12x | 288 | high | `bd-2wb.24.7` |
+| 9. RaptorQ artifact contract | 13 | 2 | low | Missing concrete manifest schema and decode-proof validation checklist | 14x | 182 | high | `bd-2wb.24.8` |
+| 10. Phase-2 execution backlog | 21 | 3 | medium | Missing dependency DAG, owner boundaries, and acceptance evidence links | 10x | 210 | medium | `bd-2wb.24.9` |
+| 11. Residual gaps/risks | 6 | 1 | low | Missing quantified risk table with probability/impact and trigger thresholds | 20x | 120 | high | `bd-2wb.24.11` |
+| 12. Deep-pass hotspot inventory | 21 | 3 | medium | Missing hotspot-to-lever mapping and counterfactual validation plan | 10x | 210 | medium | `bd-2wb.24.5` |
+| 13. Packet extraction payload contract | 21 | 3 | medium | Missing packet schema examples, claim/evidence IDs, and artifact validation rules | 12x | 252 | high | `bd-2wb.24.9` |
+| 14. Drift budgets | 15 | 2 | medium | Missing per-family statistical thresholds and escalation policy | 12x | 180 | critical | `bd-2wb.24.6` |
+| 15. Optimization execution law | 18 | 2 | medium | Missing profiling protocol details and behavior-isomorphism checklist | 10x | 180 | high | `bd-2wb.24.7` |
+| 16. RaptorQ topology/recovery drills | 16 | 2 | low | Missing symbol-generation policy and integrity scrub report schema | 14x | 224 | high | `bd-2wb.24.8` |
+| 17. Exit checklist | 9 | 2 | low | Missing objective pass/fail formulas and per-packet attestation format | 12x | 108 | high | `bd-2wb.24.14` |
+
+Current baseline for this file: `276` lines.  
+Target range for final rewrite: `3,000-3,700` lines (about `10.9x-13.4x`).
+
+### 18.3 High-risk omissions to front-load (P0 first)
+
+1. Missing module/package ownership and dependency direction map for all parity-critical subsystems.  
+   Blocks: `bd-2wb.24.2`
+2. Missing symbol/API census with public-contract vs incidental-internal classification.  
+   Blocks: `bd-2wb.24.3`
+3. Missing invariant crosswalk from claims -> unit tests -> e2e scenarios -> forensic logs.  
+   Blocks: `bd-2wb.24.4`, `bd-2wb.24.10`
+4. Missing control-flow narratives for request lifecycle, replay path, and replication transitions.  
+   Blocks: `bd-2wb.24.5`
+5. Missing strict/hardened failure envelope taxonomy with explicit reason codes and failover triggers.  
+   Blocks: `bd-2wb.24.6`
+6. Missing measured optimization evidence pack (baseline/profile/one-lever/re-profile/isomorphism proof).  
+   Blocks: `bd-2wb.24.7`
+7. Missing RaptorQ manifest/integrity/decode-proof schemas and recovery drill acceptance checks.  
+   Blocks: `bd-2wb.24.8`
+
+### 18.4 Completion gates for DOC-PASS-00
+
+DOC-PASS-00 is considered complete when all conditions hold:
+1. Every top-level section and nested conformance subsection has a baseline line count, coverage score, omissions list, and numeric target.
+2. Total-file target range is explicit and computed from the matrix.
+3. P0 omissions are prioritized with bead dependencies.
+4. The matrix is auditable from repository content alone (no hidden assumptions).
