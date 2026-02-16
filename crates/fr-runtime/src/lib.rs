@@ -16,6 +16,44 @@ use fr_protocol::{RespFrame, RespParseError, parse_frame};
 use fr_store::Store;
 
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
+const DEFAULT_AUTH_USER: &[u8] = b"default";
+const NOAUTH_ERROR: &str = "NOAUTH Authentication required.";
+const WRONGPASS_ERROR: &str = "WRONGPASS invalid username-password pair or user is disabled.";
+const AUTH_NOT_CONFIGURED_ERROR: &str = "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthState {
+    requirepass: Option<Vec<u8>>,
+    authenticated_user: Option<Vec<u8>>,
+}
+
+impl Default for AuthState {
+    fn default() -> Self {
+        Self {
+            requirepass: None,
+            authenticated_user: Some(DEFAULT_AUTH_USER.to_vec()),
+        }
+    }
+}
+
+impl AuthState {
+    fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
+        self.requirepass = requirepass;
+        if self.requirepass.is_some() {
+            self.authenticated_user = None;
+        } else {
+            self.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
+        }
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.authenticated_user.is_some()
+    }
+
+    fn requires_auth(&self) -> bool {
+        self.requirepass.is_some() && !self.is_authenticated()
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvidenceEvent {
@@ -61,6 +99,7 @@ pub struct Runtime {
     store: Store,
     evidence: EvidenceLedger,
     tls_state: TlsRuntimeState,
+    auth_state: AuthState,
 }
 
 struct ThreatEventInput<'a> {
@@ -85,6 +124,7 @@ impl Runtime {
             store: Store::new(),
             evidence: EvidenceLedger::default(),
             tls_state: TlsRuntimeState::default(),
+            auth_state: AuthState::default(),
         }
     }
 
@@ -150,6 +190,15 @@ impl Runtime {
     #[must_use]
     pub fn tls_runtime_state(&self) -> &TlsRuntimeState {
         &self.tls_state
+    }
+
+    pub fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
+        self.auth_state.set_requirepass(requirepass);
+    }
+
+    #[must_use]
+    pub fn is_authenticated(&self) -> bool {
+        self.auth_state.is_authenticated()
     }
 
     pub fn apply_tls_config(
@@ -231,6 +280,40 @@ impl Runtime {
             }
         };
 
+        let command_name = match std::str::from_utf8(&argv[0]) {
+            Ok(command_name) => command_name,
+            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+        };
+
+        if command_name.eq_ignore_ascii_case("AUTH") {
+            return self.handle_auth_command(&argv);
+        }
+
+        if command_name.eq_ignore_ascii_case("HELLO") {
+            return self.handle_hello_command(&argv);
+        }
+
+        if self.auth_state.requires_auth() {
+            let reply = RespFrame::Error(NOAUTH_ERROR.to_string());
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::AuthPolicyConfusion,
+                preferred_deviation: None,
+                subsystem: "admission_gate",
+                action: "reject_unauthenticated_command",
+                reason_code: "auth.noauth_gate_violation",
+                reason: format!(
+                    "rejected '{}' prior to dispatch while unauthenticated",
+                    command_name
+                ),
+                input_digest,
+                state_before: &state_before,
+                output: &reply,
+            });
+            return reply;
+        }
+
         match dispatch_argv(&argv, &mut self.store, now_ms) {
             Ok(reply) => reply,
             Err(err) => command_error_to_resp(err),
@@ -262,6 +345,79 @@ impl Runtime {
                 reply.to_bytes()
             }
         }
+    }
+
+    fn handle_auth_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 && argv.len() != 3 {
+            return command_error_to_resp(CommandError::WrongArity("AUTH"));
+        }
+
+        let Some(required_password) = self.auth_state.requirepass.as_deref() else {
+            return RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string());
+        };
+
+        let (username, password) = if argv.len() == 2 {
+            (DEFAULT_AUTH_USER, argv[1].as_slice())
+        } else {
+            (argv[1].as_slice(), argv[2].as_slice())
+        };
+
+        if username == DEFAULT_AUTH_USER && password == required_password {
+            self.auth_state.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
+            return RespFrame::SimpleString("OK".to_string());
+        }
+
+        RespFrame::Error(WRONGPASS_ERROR.to_string())
+    }
+
+    fn handle_hello_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return command_error_to_resp(CommandError::WrongArity("HELLO"));
+        }
+
+        let protocol_version = match parse_i64_arg(&argv[1]) {
+            Ok(version) => version,
+            Err(err) => return command_error_to_resp(err),
+        };
+
+        if protocol_version != 2 && protocol_version != 3 {
+            return RespFrame::Error(format!(
+                "NOPROTO unsupported protocol version '{}'",
+                protocol_version
+            ));
+        }
+
+        let mut index = 2;
+        let mut auth_credentials: Option<(&[u8], &[u8])> = None;
+        while index < argv.len() {
+            let option = match std::str::from_utf8(&argv[index]) {
+                Ok(option) => option,
+                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+            };
+            if option.eq_ignore_ascii_case("AUTH") {
+                if index + 2 >= argv.len() {
+                    return command_error_to_resp(CommandError::SyntaxError);
+                }
+                auth_credentials = Some((argv[index + 1].as_slice(), argv[index + 2].as_slice()));
+                index += 3;
+                continue;
+            }
+            return command_error_to_resp(CommandError::SyntaxError);
+        }
+
+        if let Some((username, password)) = auth_credentials {
+            let Some(required_password) = self.auth_state.requirepass.as_deref() else {
+                return RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string());
+            };
+            if username != DEFAULT_AUTH_USER || password != required_password {
+                return RespFrame::Error(WRONGPASS_ERROR.to_string());
+            }
+            self.auth_state.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
+        } else if self.auth_state.requires_auth() {
+            return RespFrame::Error(NOAUTH_ERROR.to_string());
+        }
+
+        build_hello_response(protocol_version)
     }
 
     fn preflight_gate(
@@ -436,6 +592,27 @@ fn digest_bytes(bytes: &[u8]) -> String {
     format!("{hash:016x}")
 }
 
+fn parse_i64_arg(arg: &[u8]) -> Result<i64, CommandError> {
+    let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    text.parse::<i64>()
+        .map_err(|_| CommandError::InvalidInteger)
+}
+
+fn hello_bulk(value: &str) -> RespFrame {
+    RespFrame::BulkString(Some(value.as_bytes().to_vec()))
+}
+
+fn build_hello_response(protocol_version: i64) -> RespFrame {
+    RespFrame::Array(Some(vec![
+        hello_bulk("server"),
+        hello_bulk("frankenredis"),
+        hello_bulk("version"),
+        hello_bulk(env!("CARGO_PKG_VERSION")),
+        hello_bulk("proto"),
+        RespFrame::Integer(protocol_version),
+    ]))
+}
+
 fn command_error_to_resp(error: CommandError) -> RespFrame {
     match error {
         CommandError::InvalidCommandFrame => {
@@ -529,6 +706,15 @@ mod tests {
     use fr_protocol::{RespFrame, parse_frame};
 
     use super::Runtime;
+
+    fn command(parts: &[&[u8]]) -> RespFrame {
+        RespFrame::Array(Some(
+            parts
+                .iter()
+                .map(|part| RespFrame::BulkString(Some((*part).to_vec())))
+                .collect(),
+        ))
+    }
 
     #[test]
     fn fr_p2c_001_u001_runtime_exposes_deterministic_phase_order() {
@@ -631,6 +817,82 @@ mod tests {
         let in_frame = RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"PING".to_vec()))]));
         let out = rt.execute_frame(in_frame, 100);
         assert_eq!(out, RespFrame::SimpleString("PONG".to_string()));
+    }
+
+    #[test]
+    fn fr_p2c_004_u001_default_bootstrap_is_authenticated() {
+        let rt = Runtime::default_strict();
+        assert!(rt.is_authenticated());
+    }
+
+    #[test]
+    fn fr_p2c_004_u002_auth_success_transitions_state() {
+        let mut rt = Runtime::default_strict();
+        rt.set_requirepass(Some(b"secret".to_vec()));
+        assert!(!rt.is_authenticated());
+
+        let out = rt.execute_frame(command(&[b"AUTH", b"secret"]), 0);
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        assert!(rt.is_authenticated());
+    }
+
+    #[test]
+    fn fr_p2c_004_u003_auth_wrongpass_rejected_without_state_promotion() {
+        let mut rt = Runtime::default_strict();
+        rt.set_requirepass(Some(b"secret".to_vec()));
+
+        let wrong = rt.execute_frame(command(&[b"AUTH", b"bad"]), 0);
+        assert_eq!(
+            wrong,
+            RespFrame::Error(
+                "WRONGPASS invalid username-password pair or user is disabled.".to_string()
+            )
+        );
+        assert!(!rt.is_authenticated());
+    }
+
+    #[test]
+    fn fr_p2c_004_u004_hello_auth_early_fails_and_success_path_authenticates() {
+        let mut rt = Runtime::default_strict();
+        rt.set_requirepass(Some(b"secret".to_vec()));
+
+        let wrong = rt.execute_frame(command(&[b"HELLO", b"3", b"AUTH", b"default", b"bad"]), 0);
+        assert_eq!(
+            wrong,
+            RespFrame::Error(
+                "WRONGPASS invalid username-password pair or user is disabled.".to_string()
+            )
+        );
+        assert!(!rt.is_authenticated());
+
+        let ok = rt.execute_frame(
+            command(&[b"HELLO", b"3", b"AUTH", b"default", b"secret"]),
+            0,
+        );
+        assert_eq!(
+            ok,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"server".to_vec())),
+                RespFrame::BulkString(Some(b"frankenredis".to_vec())),
+                RespFrame::BulkString(Some(b"version".to_vec())),
+                RespFrame::BulkString(Some(env!("CARGO_PKG_VERSION").as_bytes().to_vec())),
+                RespFrame::BulkString(Some(b"proto".to_vec())),
+                RespFrame::Integer(3),
+            ]))
+        );
+        assert!(rt.is_authenticated());
+    }
+
+    #[test]
+    fn fr_p2c_004_u005_noauth_gate_runs_before_dispatch() {
+        let mut rt = Runtime::default_strict();
+        rt.set_requirepass(Some(b"secret".to_vec()));
+
+        let gated = rt.execute_frame(command(&[b"GET", b"k"]), 0);
+        assert_eq!(
+            gated,
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
     }
 
     #[test]
