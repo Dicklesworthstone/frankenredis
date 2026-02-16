@@ -585,3 +585,136 @@ Replication ordering:
 - `rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u004_replica_ack_offsets_never_regress`
 - `rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u001_psync_accepts_partial_resync_inside_window`
 - `rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u005_wait_threshold_counts_acknowledged_replicas`
+
+## 20. DOC-PASS-07 Error Taxonomy, Failure Modes, and Recovery Semantics
+
+### 20.1 Cross-crate error surface inventory
+
+| Crate | Primary error types | Error-to-contract bridge | Source anchors |
+|---|---|---|---|
+| `fr-protocol` | `RespParseError` (`Incomplete`, `InvalidPrefix`, `UnsupportedResp3Type`, `InvalidInteger`, `InvalidBulkLength`, `InvalidMultibulkLength`, `InvalidUtf8`) | surfaced as protocol error replies via runtime translation | `crates/fr-protocol/src/lib.rs:68`, `crates/fr-runtime/src/lib.rs:755` |
+| `fr-command` | `CommandError` (`InvalidCommandFrame`, `InvalidUtf8Argument`, `UnknownCommand`, `WrongArity`, `InvalidInteger`, `SyntaxError`, `NoSuchKey`, `Store`) | surfaced as deterministic `ERR ...` replies in runtime | `crates/fr-command/src/lib.rs:7`, `crates/fr-runtime/src/lib.rs:715` |
+| `fr-store` | `StoreError` (`ValueNotInteger`, `IntegerOverflow`, `KeyNotFound`) | mapped into `CommandError::Store` and then wire errors | `crates/fr-store/src/lib.rs:6`, `crates/fr-runtime/src/lib.rs:743` |
+| `fr-persist` | `PersistError` (`InvalidFrame`, `Parse(RespParseError)`) | fail decode/replay branch on first invalid frame | `crates/fr-persist/src/lib.rs:11`, `crates/fr-persist/src/lib.rs:59` |
+| `fr-repl` | `ReplError`, `PsyncRejection` | explicit reason-code methods for contract checks | `crates/fr-repl/src/lib.rs:76`, `crates/fr-repl/src/lib.rs:176` |
+| `fr-eventloop` | `PhaseReplayError`, `BootstrapError` | explicit reason-code methods for deterministic ordering/bootstrap failures | `crates/fr-eventloop/src/lib.rs:55`, `crates/fr-eventloop/src/lib.rs:101` |
+| `fr-config` | `TlsCfgError` variant family | `reason_code()` projection for strict/hardened policy auditing | `crates/fr-config/src/lib.rs:241`, `crates/fr-config/src/lib.rs:261` |
+| `fr-runtime` | threat-event reason codes + translated user-facing replies | fail-closed admission gates + evidence ledger | `crates/fr-runtime/src/lib.rs:129`, `crates/fr-runtime/src/lib.rs:587` |
+| `fr-conformance` | expectation mismatches and structured-log validation errors (`String`) | verifies reason-code contracts and deterministic threat semantics | `crates/fr-conformance/src/lib.rs:672`, `crates/fr-conformance/src/log_contract.rs:102` |
+
+### 20.2 User-visible reply taxonomy (wire contract)
+
+| Class | Representative trigger | Reply shape / message family | Source anchors |
+|---|---|---|---|
+| Protocol parse failure | malformed RESP frame (`invalid bulk length`, `invalid prefix`, EOF) | `ERR Protocol error: ...` | `crates/fr-runtime/src/lib.rs:755` |
+| Frame-to-command projection failure | non-array / invalid argv item shape | `ERR Protocol error: invalid command frame` (pre-dispatch) | `crates/fr-runtime/src/lib.rs:296` |
+| Command routing failure | unknown command or wrong arity | `ERR unknown command ...`, `ERR wrong number of arguments for ...` | `crates/fr-runtime/src/lib.rs:723`, `crates/fr-runtime/src/lib.rs:734` |
+| Argument semantic failure | bad integer / syntax | `ERR value is not an integer or out of range`, `ERR syntax error` | `crates/fr-runtime/src/lib.rs:738`, `crates/fr-runtime/src/lib.rs:741` |
+| Store-domain violation | overflow or no such key | `ERR increment or decrement would overflow`, `ERR no such key` | `crates/fr-runtime/src/lib.rs:747`, `crates/fr-runtime/src/lib.rs:750` |
+| Auth admission failure | unauthenticated command under `requirepass` | `NOAUTH Authentication required.` | `crates/fr-runtime/src/lib.rs:20`, `crates/fr-runtime/src/lib.rs:331` |
+| Credential mismatch | invalid `AUTH`/`HELLO AUTH` tuple | `WRONGPASS ...` | `crates/fr-runtime/src/lib.rs:21`, `crates/fr-runtime/src/lib.rs:463` |
+| HELLO protocol mismatch | unsupported protocol version | `NOPROTO unsupported protocol version ...` | `crates/fr-runtime/src/lib.rs:434` |
+| Compatibility-gate clamp | array/bulk exceeds policy gate | `ERR Protocol error: ... exceeds compatibility gate` | `crates/fr-runtime/src/lib.rs:533`, `crates/fr-runtime/src/lib.rs:559` |
+| Cluster stub invalid subcommand | unsupported `CLUSTER` route in current stage | `ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'...` | `crates/fr-runtime/src/lib.rs:23`, `crates/fr-runtime/src/lib.rs:519` |
+
+### 20.3 Deterministic reason-code namespaces
+
+| Namespace | Emission source | Canonical examples | Contract role |
+|---|---|---|---|
+| `protocol_*` / parser-gate | runtime threat recording on parse failure | `protocol_parse_failure`, `invalid_command_frame` | parser abuse detection and replayability |
+| `compat_*` | runtime compatibility gate | `compat_array_len_exceeded`, `compat_bulk_len_exceeded` | resource-clamp fail-closed boundary |
+| `auth.*` | runtime auth admission gate | `auth.noauth_gate_violation` | pre-dispatch auth ordering invariant |
+| `eventloop.*` | event-loop replay/bootstrap errors | `eventloop.main_loop_entry_missing`, `eventloop.dispatch.stage_transition_invalid`, `eventloop.dispatch.order_mismatch`, `eventloop.hook_install_missing` | deterministic loop-order and bootstrap guarantees |
+| `repl.*` | replication FSM and PSYNC decision logic | `repl.handshake_state_machine_mismatch`, `repl.fullresync_reply_parse_violation`, `repl.psync_replid_or_offset_reject_mismatch`, `repl.psync_fullresync_fallback_mismatch` | replication safety/fallback semantics |
+| `tlscfg.*` / `tls.*` | TLS config validation + runtime apply policy | `tlscfg.protocols_parse_contract_violation`, `tlscfg.safety_gate_contract_violation`, `tlscfg.hardened_nonallowlisted_rejected`, `tls.handshake_verify_policy_violation` | config hardening and downgrade-abuse defense |
+| `parity_ok` / `journey_ok` | log-contract golden artifacts | structured log reason codes for success paths | deterministic harness log schema validation |
+
+Source anchors:
+- `crates/fr-runtime/src/lib.rs:383`
+- `crates/fr-runtime/src/lib.rs:537`
+- `crates/fr-eventloop/src/lib.rs:69`
+- `crates/fr-repl/src/lib.rs:86`
+- `crates/fr-config/src/lib.rs:261`
+- `crates/fr-conformance/src/log_contract.rs:202`
+
+### 20.4 Failure-mode and recovery matrix
+
+| Failure mode | Detection point | Deterministic response | State mutation posture | Recovery semantics |
+|---|---|---|---|---|
+| Invalid/incomplete RESP request | `parse_frame`/runtime parse branch | protocol error reply + threat event (`protocol_parse_failure`) | no command dispatch; store remains unchanged | client must resend valid frame; server stays online |
+| Invalid command frame shape | `frame_to_argv` in `execute_frame` | reject frame (`invalid_command_frame`) | pre-dispatch rejection; no store mutation | fail-closed at admission boundary |
+| Unauthenticated command under `requirepass` | runtime auth gate before dispatch | `NOAUTH` + `auth.noauth_gate_violation` evidence | command not executed | explicit AUTH required before progress |
+| Oversized array/bulk vs compatibility gate | runtime `preflight_gate` | compatibility-gate rejection + threat event | no command dispatch | strict fail-closed in strict mode; bounded defensive classification in hardened mode |
+| TLS config contract violation | `plan_tls_runtime_apply` / `validate_tls_config` | return `TlsCfgError` and record `tls_config` threat event | runtime TLS state remains unchanged on failed plan/apply path | operator must provide valid config; hardened mode may reclassify non-allowlisted deviations to rejection errors |
+| Event-loop phase trace invalid | `replay_phase_trace` | typed `PhaseReplayError` with reason code | no hidden repair; trace rejected | caller must supply valid phase order |
+| Missing event-loop hooks/timer | `validate_bootstrap` | typed `BootstrapError` with reason code | bootstrap fails cleanly | install missing hooks/timer before run |
+| Replication handshake order violation | `HandshakeFsm::on_step` | `ReplError::HandshakeStateMachineMismatch` | FSM state does not advance on invalid transition | retry with correct ordered steps |
+| PSYNC mismatch/out-of-range | `decide_psync` | deterministic full-resync fallback with rejection reason | no unsafe partial-resync continuation | safe fallback to full resync |
+| AOF decode invalid frame | `decode_aof_stream` | `PersistError::InvalidFrame` / parse error | replay stream processing halts | input stream must be repaired/replaced before replay |
+| Threat expectation mismatch in conformance | `validate_threat_expectation` | explicit mismatch error with first offending detail | test case fails; no hidden reclassification | fix runtime reason-code or fixture expectation |
+| Structured log schema violation | `StructuredLogEvent::validate` / persistence | deterministic error (`artifact_refs must not be empty`, etc.) | log write is aborted for invalid payload | fix event payload/schema inputs |
+
+### 20.5 Strict-vs-hardened recovery policy boundaries
+
+1. Strict mode:
+   all threats resolve to `DecisionAction::FailClosed` + severity `S0`, with no behavior-altering recovery paths.
+2. Hardened mode:
+   explicit allowlisted deviation categories may take `BoundedDefense` (`S1`), while non-allowlisted deviations are rejected (`RejectNonAllowlisted`, `S2`).
+3. Config downgrade handling:
+   `evaluate_tls_hardened_deviation` enforces allowlist policy and promotes non-allowlisted deviations to `tlscfg.hardened_nonallowlisted_rejected`.
+4. In both modes:
+   error paths are deterministic and evidence-first; no silent fallback that alters external command semantics.
+
+Source anchors:
+- `crates/fr-config/src/lib.rs:107`
+- `crates/fr-config/src/lib.rs:651`
+- `crates/fr-runtime/src/lib.rs:625`
+
+### 20.6 Recovery semantics by subsystem (what is and is not recoverable)
+
+Recoverable (caller/operator can retry with corrected input/state):
+- protocol frame shape/content errors after client resubmission,
+- auth failures after successful `AUTH`,
+- handshake FSM progression errors after step-order correction,
+- PSYNC rejections via deterministic full-resync fallback,
+- TLS directive/config violations after corrected config material.
+
+Non-recoverable in-place (must fail closed immediately in current attempt):
+- non-allowlisted hardened deviations,
+- incompatible command-frame or gate violations in the active request packet,
+- invalid event-loop replay traces/bootstrap prerequisites,
+- invalid AOF frame encountered during decode cursor walk.
+
+### 20.7 Evidence and conformance coupling for failures
+
+| Contract plane | What is asserted | Source anchors |
+|---|---|---|
+| Runtime evidence ledger | every threat event captures `threat_class`, `decision_action`, `reason_code`, digests, replay command, artifacts | `crates/fr-runtime/src/lib.rs:597` |
+| Conformance threat checks | optional expected threat blocks verify class, severity, decision, reason code, subsystem, and action | `crates/fr-conformance/src/lib.rs:713` |
+| Structured log contract | conversion + schema validation requires non-empty reason code/replay command/artifacts | `crates/fr-conformance/src/log_contract.rs:103`, `crates/fr-conformance/src/log_contract.rs:144` |
+| Replication reason-code vectors | handshake and PSYNC adversarial vectors assert expected reason-code mapping | `crates/fr-conformance/src/lib.rs:1056`, `crates/fr-conformance/src/lib.rs:1152` |
+
+### 20.8 Verification anchors and replay commands (`rch`)
+
+Error mapping and parser/admission behavior:
+- `rch exec -- cargo test -p fr-runtime -- --nocapture protocol_invalid_bulk_length_error_string`
+- `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_004_u005_noauth_gate_runs_before_dispatch`
+- `rch exec -- cargo test -p fr-runtime -- --nocapture compatibility_gate_trips_on_large_array`
+
+Event-loop/bootstrap reason-code behavior:
+- `rch exec -- cargo test -p fr-eventloop -- --nocapture fr_p2c_001_u001_phase_order_is_deterministic`
+- `rch exec -- cargo test -p fr-eventloop -- --nocapture fr_p2c_001_u010_bootstrap_requires_hooks_and_server_cron`
+
+Replication rejection reason-code behavior:
+- `rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u003_handshake_requires_ping_first`
+- `rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u002_psync_rejects_replid_mismatch`
+- `rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_handshake_contract_vectors_are_enforced`
+
+TLS config fail-closed and hardened policy behavior:
+- `rch exec -- cargo test -p fr-config -- --nocapture fr_p2c_009_u013_hardened_gate_rejects_non_allowlisted_deviation`
+- `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_009_u013_hardened_non_allowlisted_tls_deviation_is_rejected`
+- `rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_009_e013_hardened_non_allowlisted_rejection_matches_expected_threat_contract`
+
+Structured logging and failure-evidence validity:
+- `rch exec -- cargo test -p fr-conformance -- --nocapture runtime_evidence_conversion_rejects_empty_artifact_refs`
+- `rch exec -- cargo test -p fr-conformance -- --nocapture threat_expectation_rejects_unexpected_event`
