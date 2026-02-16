@@ -20,6 +20,8 @@ const DEFAULT_AUTH_USER: &[u8] = b"default";
 const NOAUTH_ERROR: &str = "NOAUTH Authentication required.";
 const WRONGPASS_ERROR: &str = "WRONGPASS invalid username-password pair or user is disabled.";
 const AUTH_NOT_CONFIGURED_ERROR: &str = "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?";
+const CLUSTER_UNKNOWN_SUBCOMMAND_ERROR: &str =
+    "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AuthState {
@@ -52,6 +54,27 @@ impl AuthState {
 
     fn requires_auth(&self) -> bool {
         self.requirepass.is_some() && !self.is_authenticated()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClusterClientMode {
+    ReadWrite,
+    ReadOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ClusterClientState {
+    mode: ClusterClientMode,
+    asking: bool,
+}
+
+impl Default for ClusterClientState {
+    fn default() -> Self {
+        Self {
+            mode: ClusterClientMode::ReadWrite,
+            asking: false,
+        }
     }
 }
 
@@ -100,6 +123,7 @@ pub struct Runtime {
     evidence: EvidenceLedger,
     tls_state: TlsRuntimeState,
     auth_state: AuthState,
+    cluster_state: ClusterClientState,
 }
 
 struct ThreatEventInput<'a> {
@@ -125,6 +149,7 @@ impl Runtime {
             evidence: EvidenceLedger::default(),
             tls_state: TlsRuntimeState::default(),
             auth_state: AuthState::default(),
+            cluster_state: ClusterClientState::default(),
         }
     }
 
@@ -199,6 +224,16 @@ impl Runtime {
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
         self.auth_state.is_authenticated()
+    }
+
+    #[must_use]
+    pub fn is_cluster_read_only(&self) -> bool {
+        self.cluster_state.mode == ClusterClientMode::ReadOnly
+    }
+
+    #[must_use]
+    pub fn is_cluster_asking(&self) -> bool {
+        self.cluster_state.asking
     }
 
     pub fn apply_tls_config(
@@ -314,6 +349,22 @@ impl Runtime {
             return reply;
         }
 
+        if command_name.eq_ignore_ascii_case("ASKING") {
+            return self.handle_asking_command(&argv);
+        }
+
+        if command_name.eq_ignore_ascii_case("READONLY") {
+            return self.handle_readonly_command(&argv);
+        }
+
+        if command_name.eq_ignore_ascii_case("READWRITE") {
+            return self.handle_readwrite_command(&argv);
+        }
+
+        if command_name.eq_ignore_ascii_case("CLUSTER") {
+            return self.handle_cluster_command(&argv);
+        }
+
         match dispatch_argv(&argv, &mut self.store, now_ms) {
             Ok(reply) => reply,
             Err(err) => command_error_to_resp(err),
@@ -418,6 +469,54 @@ impl Runtime {
         }
 
         build_hello_response(protocol_version)
+    }
+
+    fn handle_asking_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            return command_error_to_resp(CommandError::WrongArity("ASKING"));
+        }
+        self.cluster_state.asking = true;
+        RespFrame::SimpleString("OK".to_string())
+    }
+
+    fn handle_readonly_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            return command_error_to_resp(CommandError::WrongArity("READONLY"));
+        }
+        self.cluster_state.mode = ClusterClientMode::ReadOnly;
+        RespFrame::SimpleString("OK".to_string())
+    }
+
+    fn handle_readwrite_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            return command_error_to_resp(CommandError::WrongArity("READWRITE"));
+        }
+        self.cluster_state.mode = ClusterClientMode::ReadWrite;
+        self.cluster_state.asking = false;
+        RespFrame::SimpleString("OK".to_string())
+    }
+
+    fn handle_cluster_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return command_error_to_resp(CommandError::WrongArity("CLUSTER"));
+        }
+        let subcommand = match std::str::from_utf8(&argv[1]) {
+            Ok(subcommand) => subcommand,
+            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+        };
+
+        if subcommand.eq_ignore_ascii_case("HELP") {
+            if argv.len() != 2 {
+                return RespFrame::Error(CLUSTER_UNKNOWN_SUBCOMMAND_ERROR.to_string());
+            }
+            return RespFrame::Array(Some(vec![
+                hello_bulk("CLUSTER HELP"),
+                hello_bulk("CLUSTER subcommand dispatch scaffold (FR-P2C-007 D1)."),
+                hello_bulk("Supported subcommands in this stage: HELP."),
+            ]));
+        }
+
+        RespFrame::Error(CLUSTER_UNKNOWN_SUBCOMMAND_ERROR.to_string())
     }
 
     fn preflight_gate(
@@ -893,6 +992,62 @@ mod tests {
             gated,
             RespFrame::Error("NOAUTH Authentication required.".to_string())
         );
+    }
+
+    #[test]
+    fn fr_p2c_007_u001_cluster_subcommand_router_is_deterministic() {
+        let mut rt = Runtime::default_strict();
+
+        let wrong_arity = rt.execute_frame(command(&[b"CLUSTER"]), 0);
+        assert_eq!(
+            wrong_arity,
+            RespFrame::Error("ERR wrong number of arguments for 'CLUSTER' command".to_string())
+        );
+
+        let help = rt.execute_frame(command(&[b"CLUSTER", b"HELP"]), 0);
+        assert_eq!(
+            help,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"CLUSTER HELP".to_vec())),
+                RespFrame::BulkString(Some(
+                    b"CLUSTER subcommand dispatch scaffold (FR-P2C-007 D1).".to_vec(),
+                )),
+                RespFrame::BulkString(
+                    Some(b"Supported subcommands in this stage: HELP.".to_vec(),)
+                ),
+            ]))
+        );
+
+        let unknown = rt.execute_frame(command(&[b"CLUSTER", b"NOPE"]), 0);
+        assert_eq!(
+            unknown,
+            RespFrame::Error(
+                "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP."
+                    .to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn fr_p2c_007_u007_client_cluster_mode_flags_transition_cleanly() {
+        let mut rt = Runtime::default_strict();
+        assert!(!rt.is_cluster_read_only());
+        assert!(!rt.is_cluster_asking());
+
+        let readonly = rt.execute_frame(command(&[b"READONLY"]), 0);
+        assert_eq!(readonly, RespFrame::SimpleString("OK".to_string()));
+        assert!(rt.is_cluster_read_only());
+        assert!(!rt.is_cluster_asking());
+
+        let asking = rt.execute_frame(command(&[b"ASKING"]), 0);
+        assert_eq!(asking, RespFrame::SimpleString("OK".to_string()));
+        assert!(rt.is_cluster_read_only());
+        assert!(rt.is_cluster_asking());
+
+        let readwrite = rt.execute_frame(command(&[b"READWRITE"]), 0);
+        assert_eq!(readwrite, RespFrame::SimpleString("OK".to_string()));
+        assert!(!rt.is_cluster_read_only());
+        assert!(!rt.is_cluster_asking());
     }
 
     #[test]
