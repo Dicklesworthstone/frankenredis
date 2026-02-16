@@ -335,6 +335,12 @@ fn classify_text(haystack: &str) -> (&'static str, &'static str) {
     {
         return ("parser_abuse", "bd-2wb.13.6");
     }
+    if haystack.contains("eventloop.")
+        || haystack.contains("ae_barrier_violation")
+        || haystack.contains("blocked_mode")
+    {
+        return ("eventloop_contract", "bd-2wb.12.6");
+    }
     if haystack.contains("compat_array_len_exceeded")
         || haystack.contains("compat_bulk_len_exceeded")
     {
@@ -565,6 +571,13 @@ mod tests {
         let (classification, route) = classify_text("ERR wrong number of arguments");
         assert_eq!(classification, "dispatch_validation");
         assert_eq!(route, "bd-2wb.14.6");
+    }
+
+    #[test]
+    fn classify_text_eventloop_contract() {
+        let (classification, route) = classify_text("eventloop.write.pending_reply_lost");
+        assert_eq!(classification, "eventloop_contract");
+        assert_eq!(route, "bd-2wb.12.6");
     }
 
     #[test]

@@ -1061,6 +1061,65 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_001_f_differential_fixture_passes() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_fixture(&cfg, "fr_p2c_001_eventloop_journey.json").expect("packet-001 fixture");
+        assert_eq!(report.fixture, "fr_p2c_001_eventloop_journey.json");
+        assert_eq!(report.suite, "fr_p2c_001_eventloop_journey");
+        assert_eq!(
+            report.total, report.passed,
+            "packet-001 fixture mismatches: {:?}",
+            report.failed
+        );
+        assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn fr_p2c_001_f_metamorphic_repeated_fixture_runs_are_deterministic() {
+        let cfg = HarnessConfig::default_paths();
+        let first =
+            run_fixture(&cfg, "fr_p2c_001_eventloop_journey.json").expect("first fixture run");
+        let second =
+            run_fixture(&cfg, "fr_p2c_001_eventloop_journey.json").expect("second fixture run");
+
+        assert_eq!(first.total, second.total);
+        assert_eq!(first.passed, second.passed);
+        assert_eq!(first.reason_code_counts, second.reason_code_counts);
+        assert_eq!(first.failed_without_reason_code, second.failed_without_reason_code);
+        assert_eq!(first.failed, second.failed);
+    }
+
+    #[test]
+    fn fr_p2c_001_f_adversarial_reason_codes_are_stable() {
+        let fd_err = Runtime::validate_event_loop_fd_registration(64, 64)
+            .expect_err("fd bounds violation expected");
+        assert_eq!(fd_err.reason_code(), "eventloop.fd_out_of_range");
+
+        let accept_err = Runtime::validate_event_loop_accept_path(10_000, 10_000, true)
+            .expect_err("maxclients violation expected");
+        assert_eq!(
+            accept_err.reason_code(),
+            "eventloop.accept.maxclients_reached"
+        );
+
+        let read_err = Runtime::validate_event_loop_read_path(6, 5, 10, false)
+            .expect_err("query buffer violation expected");
+        assert_eq!(
+            read_err.reason_code(),
+            "eventloop.read.querybuf_limit_exceeded"
+        );
+
+        let write_err =
+            Runtime::validate_event_loop_pending_write_delivery(&[1, 2, 3], &[2, 1], &[3])
+                .expect_err("write ordering violation expected");
+        assert_eq!(
+            write_err.reason_code(),
+            "eventloop.write.flush_order_violation"
+        );
+    }
+
+    #[test]
     fn conformance_errors_fixture_passes() {
         let cfg = HarnessConfig::default_paths();
         let report = run_fixture(&cfg, "core_errors.json").expect("errors fixture run");

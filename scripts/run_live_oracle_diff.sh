@@ -80,9 +80,9 @@ chmod +x "$REPLAY_SCRIPT"
 echo "Verifying live Redis endpoint ${HOST}:${PORT}"
 redis-cli -h "$HOST" -p "$PORT" ping >/dev/null
 
-declare -a SUITE_NAMES=("core_errors" "core_strings" "protocol_negative")
-declare -a SUITE_MODES=("command" "command" "protocol")
-declare -a SUITE_FIXTURES=("core_errors.json" "core_strings.json" "protocol_negative.json")
+declare -a SUITE_NAMES=("core_errors" "core_strings" "fr_p2c_001_eventloop_journey" "protocol_negative")
+declare -a SUITE_MODES=("command" "command" "command" "protocol")
+declare -a SUITE_FIXTURES=("core_errors.json" "core_strings.json" "fr_p2c_001_eventloop_journey.json" "protocol_negative.json")
 
 FAILED_COUNT=0
 TOTAL_COUNT=0
@@ -185,6 +185,8 @@ artifact_index = collections.defaultdict(list)
 
 
 def packet_id_for_fixture(fixture_name: str) -> str:
+    if fixture_name == "fr_p2c_001_eventloop_journey.json":
+        return "FR-P2C-001"
     if fixture_name == "protocol_negative.json":
         return "FR-P2C-002"
     if fixture_name == "persist_replay.json":

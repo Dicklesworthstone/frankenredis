@@ -4,6 +4,15 @@
   "default_seed": 424242,
   "suites": [
     {
+      "suite_id": "adv_fr_p2c_001_eventloop_v1",
+      "mode": "command",
+      "fixture": "fr_p2c_001_eventloop_journey.json",
+      "risk_focus": "event_loop_contract",
+      "owner_bead": "bd-2wb.12.6",
+      "strict_replay_cmd": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_001_unit_contract_smoke",
+      "hardened_replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_001_e2e_contract_smoke"
+    },
+    {
       "suite_id": "adv_protocol_negative_v1",
       "mode": "protocol",
       "fixture": "protocol_negative.json",
