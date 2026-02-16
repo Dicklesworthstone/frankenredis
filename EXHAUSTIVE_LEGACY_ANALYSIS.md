@@ -283,7 +283,7 @@ Phase-2C is complete only when:
 - Evidence quality: `low` (claims without reproducible artifacts), `medium` (some measured data/paths), `high` (fixture IDs, commands, and artifact pointers).
 - Expansion factor: minimum multiplier required for section rewrite depth in DOC-PASS-01..14.
 
-### 18.2 Section-by-section matrix (this document)
+### 18.2 Section-by-section matrix (`EXHAUSTIVE_LEGACY_ANALYSIS.md`)
 
 | Section | Baseline lines | Coverage | Evidence | Primary omissions to close | Expansion factor | Target lines | Risk | Downstream bead |
 |---|---:|---:|---|---|---:|---:|---|---|
@@ -308,10 +308,24 @@ Phase-2C is complete only when:
 | 16. RaptorQ topology/recovery drills | 16 | 2 | low | Missing symbol-generation policy and integrity scrub report schema | 14x | 224 | high | `bd-2wb.24.8` |
 | 17. Exit checklist | 9 | 2 | low | Missing objective pass/fail formulas and per-packet attestation format | 12x | 108 | high | `bd-2wb.24.14` |
 
-Current baseline for this file: `276` lines.  
+Baseline slice assessed here (sections `0..17` before DOC-PASS-00 instrumentation): `276` lines.  
 Target range for final rewrite: `3,000-3,700` lines (about `10.9x-13.4x`).
 
-### 18.3 High-risk omissions to front-load (P0 first)
+### 18.3 Companion matrix status (`EXISTING_REDIS_STRUCTURE.md`)
+
+DOC-PASS-00 coverage for the companion document is now tracked in:
+- `EXISTING_REDIS_STRUCTURE.md` section `8.2` (per-section baseline matrix)
+- `EXISTING_REDIS_STRUCTURE.md` section `8.3` (completion gates)
+
+Cross-document quantitative snapshot:
+
+| Document | Baseline lines | Target range | Expansion multiple | Highest-risk omissions |
+|---|---:|---:|---:|---|
+| `EXHAUSTIVE_LEGACY_ANALYSIS.md` (sections `0..17`) | 276 | 3,000-3,700 | 10.9x-13.4x | ownership/coupling map, invariant-to-test traceability, strict/hardened failure envelopes |
+| `EXISTING_REDIS_STRUCTURE.md` | 68 | 780-960 | 11.5x-14.1x | topology ownership map, command-surface classification, fixture/reason-code linkage |
+| Combined program target | 344 | 3,780-4,660 | 11.0x-13.5x | full parity documentation closure across architecture, behavior, and verification evidence |
+
+### 18.4 High-risk omissions to front-load (P0 first)
 
 1. Missing module/package ownership and dependency direction map for all parity-critical subsystems.  
    Blocks: `bd-2wb.24.2`
@@ -328,10 +342,10 @@ Target range for final rewrite: `3,000-3,700` lines (about `10.9x-13.4x`).
 7. Missing RaptorQ manifest/integrity/decode-proof schemas and recovery drill acceptance checks.  
    Blocks: `bd-2wb.24.8`
 
-### 18.4 Completion gates for DOC-PASS-00
+### 18.5 Completion gates for DOC-PASS-00
 
 DOC-PASS-00 is considered complete when all conditions hold:
-1. Every top-level section and nested conformance subsection has a baseline line count, coverage score, omissions list, and numeric target.
-2. Total-file target range is explicit and computed from the matrix.
-3. P0 omissions are prioritized with bead dependencies.
-4. The matrix is auditable from repository content alone (no hidden assumptions).
+1. Every top-level section and nested conformance subsection in both target docs has a baseline line count, coverage score, omissions list, and numeric target.
+2. Per-document and combined target ranges are explicit and reproducible from repository content.
+3. P0 omissions are prioritized and linked to downstream beads with dependency-auditable IDs.
+4. Matrices are auditable from repository content alone (no hidden assumptions).
