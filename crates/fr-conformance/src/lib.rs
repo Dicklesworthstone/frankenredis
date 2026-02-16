@@ -875,11 +875,15 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use fr_config::{DecisionAction, DriftSeverity, Mode, ThreatClass};
+    use fr_config::{
+        DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
+        TlsAuthClients, TlsConfig, TlsProtocol,
+    };
     use fr_repl::{
         BacklogWindow, HandshakeFsm, HandshakeState, HandshakeStep, PsyncDecision, PsyncRejection,
         ReplOffset, WaitAofThreshold, WaitThreshold, decide_psync, evaluate_wait, evaluate_waitaof,
     };
+    use fr_runtime::Runtime;
 
     use super::{
         EvidenceEvent, ExpectedThreat, HarnessConfig, LiveOracleConfig,
@@ -897,6 +901,20 @@ mod tests {
             .expect("clock moved backwards")
             .as_nanos();
         std::env::temp_dir().join(format!("{prefix}_{nonce}"))
+    }
+
+    fn valid_tls_config() -> TlsConfig {
+        TlsConfig {
+            tls_port: Some(6380),
+            cert_file: Some("cert.pem".to_string()),
+            key_file: Some("key.pem".to_string()),
+            ca_file: Some("ca.pem".to_string()),
+            protocols: vec![TlsProtocol::TlsV1_2, TlsProtocol::TlsV1_3],
+            ciphers: Some("HIGH:!aNULL".to_string()),
+            auth_clients: TlsAuthClients::Required,
+            cluster_announce_tls_port: Some(16380),
+            max_new_tls_connections_per_cycle: 64,
+        }
     }
 
     #[test]
@@ -1480,6 +1498,111 @@ mod tests {
         };
 
         validate_threat_expectation(Some(&expected), &[event]).expect("must match");
+    }
+
+    #[test]
+    fn fr_p2c_009_e013_strict_runtime_tls_rejection_matches_expected_threat_contract() {
+        let mut runtime = Runtime::default_strict();
+        let mut invalid = valid_tls_config();
+        invalid.tls_port = None;
+        invalid.cluster_announce_tls_port = None;
+
+        let err = runtime
+            .apply_tls_config(invalid, 777)
+            .expect_err("strict must fail closed");
+        assert_eq!(err.reason_code(), "tlscfg.safety_gate_contract_violation");
+
+        let event = runtime.evidence().events().last().expect("event").clone();
+        let expected = ExpectedThreat {
+            threat_class: "config_downgrade_abuse".to_string(),
+            severity: "s0".to_string(),
+            decision_action: "fail_closed".to_string(),
+            reason_code: Some("tlscfg.safety_gate_contract_violation".to_string()),
+            subsystem: Some("tls_config".to_string()),
+            action: Some("reject_runtime_apply".to_string()),
+        };
+        validate_threat_expectation(Some(&expected), std::slice::from_ref(&event))
+            .expect("threat contract should match");
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_009",
+                fixture_name: "fr_p2c_009_tls_runtime_strict",
+                case_name: "strict_safety_gate",
+                verification_path: VerificationPath::E2e,
+                now_ms: 777,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            &[event],
+        )
+        .expect("structured log emission should validate");
+    }
+
+    #[test]
+    fn fr_p2c_009_e013_hardened_non_allowlisted_rejection_matches_expected_threat_contract() {
+        let mut policy = RuntimePolicy::hardened();
+        policy
+            .hardened_allowlist
+            .retain(|category| *category != HardenedDeviationCategory::MetadataSanitization);
+        let mut runtime = Runtime::new(policy);
+
+        let mut invalid = valid_tls_config();
+        invalid.tls_port = None;
+        invalid.cluster_announce_tls_port = None;
+
+        let err = runtime
+            .apply_tls_config(invalid, 778)
+            .expect_err("hardened must reject non-allowlisted deviation");
+        assert_eq!(err.reason_code(), "tlscfg.hardened_nonallowlisted_rejected");
+
+        let event = runtime.evidence().events().last().expect("event").clone();
+        let expected = ExpectedThreat {
+            threat_class: "config_downgrade_abuse".to_string(),
+            severity: "s2".to_string(),
+            decision_action: "reject_non_allowlisted".to_string(),
+            reason_code: Some("tlscfg.hardened_nonallowlisted_rejected".to_string()),
+            subsystem: Some("tls_config".to_string()),
+            action: Some("reject_runtime_apply".to_string()),
+        };
+        validate_threat_expectation(Some(&expected), std::slice::from_ref(&event))
+            .expect("threat contract should match");
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_009",
+                fixture_name: "fr_p2c_009_tls_runtime_hardened",
+                case_name: "hardened_nonallowlisted_reject",
+                verification_path: VerificationPath::E2e,
+                now_ms: 778,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            &[event],
+        )
+        .expect("structured log emission should validate");
+    }
+
+    #[test]
+    fn fr_p2c_009_e011_runtime_rejects_invalid_tls_operational_knob() {
+        let mut runtime = Runtime::default_strict();
+        let mut invalid = valid_tls_config();
+        invalid.max_new_tls_connections_per_cycle = 0;
+        let err = runtime
+            .apply_tls_config(invalid, 779)
+            .expect_err("invalid operational knob should fail");
+        assert_eq!(
+            err.reason_code(),
+            "tlscfg.operational_knob_contract_violation"
+        );
+
+        let event = runtime.evidence().events().last().expect("event");
+        assert_eq!(
+            event.reason_code,
+            "tlscfg.operational_knob_contract_violation"
+        );
+        assert_eq!(event.decision_action, DecisionAction::FailClosed);
+        assert_eq!(event.severity, DriftSeverity::S0);
     }
 
     #[test]
