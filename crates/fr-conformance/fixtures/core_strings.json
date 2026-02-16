@@ -146,6 +146,108 @@
       "expect": { "kind": "integer", "value": 1 }
     },
     {
+      "name": "set_abskey",
+      "now_ms": 3300,
+      "argv": ["SET", "abskey", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pexpire_abskey",
+      "now_ms": 3300,
+      "argv": ["PEXPIRE", "abskey", "250"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pttl_abskey",
+      "now_ms": 3300,
+      "argv": ["PTTL", "abskey"],
+      "expect": { "kind": "integer", "value": 250 }
+    },
+    {
+      "name": "pexpiretime_abskey",
+      "now_ms": 3300,
+      "argv": ["PEXPIRETIME", "abskey"],
+      "expect": { "kind": "integer", "value": 3550 }
+    },
+    {
+      "name": "expiretime_abskey",
+      "now_ms": 3300,
+      "argv": ["EXPIRETIME", "abskey"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "abskey_expired",
+      "now_ms": 3551,
+      "argv": ["GET", "abskey"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "set_whenkey",
+      "now_ms": 3600,
+      "argv": ["SET", "whenkey", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "expireat_whenkey",
+      "now_ms": 3600,
+      "argv": ["EXPIREAT", "whenkey", "6"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pttl_whenkey_after_expireat",
+      "now_ms": 3600,
+      "argv": ["PTTL", "whenkey"],
+      "expect": { "kind": "integer", "value": 2400 }
+    },
+    {
+      "name": "pexpireat_whenkey",
+      "now_ms": 3600,
+      "argv": ["PEXPIREAT", "whenkey", "7000"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pttl_whenkey_after_pexpireat",
+      "now_ms": 3600,
+      "argv": ["PTTL", "whenkey"],
+      "expect": { "kind": "integer", "value": 3400 }
+    },
+    {
+      "name": "expiretime_whenkey",
+      "now_ms": 3600,
+      "argv": ["EXPIRETIME", "whenkey"],
+      "expect": { "kind": "integer", "value": 7 }
+    },
+    {
+      "name": "set_poptkey",
+      "now_ms": 3700,
+      "argv": ["SET", "poptkey", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pexpire_nx_poptkey",
+      "now_ms": 3700,
+      "argv": ["PEXPIRE", "poptkey", "1000", "NX"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pexpire_gt_accept_poptkey",
+      "now_ms": 3700,
+      "argv": ["PEXPIRE", "poptkey", "1500", "GT"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pexpire_gt_reject_poptkey",
+      "now_ms": 3700,
+      "argv": ["PEXPIRE", "poptkey", "1200", "GT"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pexpire_lt_accept_poptkey",
+      "now_ms": 3700,
+      "argv": ["PEXPIRE", "poptkey", "500", "LT"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
       "name": "unknown_command",
       "now_ms": 4000,
       "argv": ["NOPE"],

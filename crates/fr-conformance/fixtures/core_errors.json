@@ -32,6 +32,18 @@
       "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
     },
     {
+      "name": "pexpire_invalid_integer",
+      "now_ms": 0,
+      "argv": ["PEXPIRE", "k", "abc"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "expiretime_wrong_arity",
+      "now_ms": 0,
+      "argv": ["EXPIRETIME"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'EXPIRETIME' command" }
+    },
+    {
       "name": "set_expire_options_key",
       "now_ms": 0,
       "argv": ["SET", "expire_opts_key", "value"],
@@ -59,6 +71,18 @@
       "name": "expire_unknown_option",
       "now_ms": 0,
       "argv": ["EXPIRE", "expire_opts_key", "5", "ZZ"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
+      "name": "pexpire_incompatible_gt_lt",
+      "now_ms": 0,
+      "argv": ["PEXPIRE", "expire_opts_key", "5", "GT", "LT"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
+      "name": "pexpire_unknown_option",
+      "now_ms": 0,
+      "argv": ["PEXPIRE", "expire_opts_key", "5", "ZZ"],
       "expect": { "kind": "error", "value": "ERR syntax error" }
     },
     {

@@ -93,19 +93,46 @@ impl Store {
     }
 
     pub fn expire_seconds(&mut self, key: &[u8], seconds: i64, now_ms: u64) -> bool {
+        let ttl_ms = seconds.checked_mul(1000).unwrap_or_else(|| {
+            if seconds.is_negative() {
+                i64::MIN
+            } else {
+                i64::MAX
+            }
+        });
+        self.expire_milliseconds(key, ttl_ms, now_ms)
+    }
+
+    pub fn expire_milliseconds(&mut self, key: &[u8], milliseconds: i64, now_ms: u64) -> bool {
         self.drop_if_expired(key, now_ms);
         if !self.entries.contains_key(key) {
             return false;
         }
-        if seconds <= 0 {
+        if milliseconds <= 0 {
             self.entries.remove(key);
             return true;
         }
-        let ttl_ms = seconds
-            .checked_mul(1000)
-            .and_then(|value| u64::try_from(value).ok())
-            .unwrap_or(u64::MAX);
+
+        let ttl_ms = u64::try_from(milliseconds).unwrap_or(u64::MAX);
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.expires_at_ms = Some(expires_at_ms);
+        }
+        true
+    }
+
+    pub fn expire_at_milliseconds(&mut self, key: &[u8], when_ms: i64, now_ms: u64) -> bool {
+        self.drop_if_expired(key, now_ms);
+        if !self.entries.contains_key(key) {
+            return false;
+        }
+
+        if i128::from(when_ms) <= i128::from(now_ms) {
+            self.entries.remove(key);
+            return true;
+        }
+
+        let expires_at_ms = u64::try_from(when_ms).unwrap_or(u64::MAX);
         if let Some(entry) = self.entries.get_mut(key) {
             entry.expires_at_ms = Some(expires_at_ms);
         }
@@ -459,6 +486,32 @@ mod tests {
         assert!(store.expire_seconds(b"k", 5, 1_000));
         assert_eq!(store.pttl(b"k", 1_000), PttlValue::Remaining(5_000));
         assert_eq!(store.pttl(b"k", 6_001), PttlValue::KeyMissing);
+    }
+
+    #[test]
+    fn expire_milliseconds_honors_ms_precision() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
+        assert!(store.expire_milliseconds(b"k", 1_500, 1_000));
+        assert_eq!(store.pttl(b"k", 1_000), PttlValue::Remaining(1_500));
+        assert_eq!(store.pttl(b"k", 2_501), PttlValue::KeyMissing);
+    }
+
+    #[test]
+    fn expire_at_milliseconds_sets_absolute_deadline() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
+        assert!(store.expire_at_milliseconds(b"k", 5_000, 1_000));
+        assert_eq!(store.pttl(b"k", 1_000), PttlValue::Remaining(4_000));
+        assert_eq!(store.pttl(b"k", 5_001), PttlValue::KeyMissing);
+    }
+
+    #[test]
+    fn expire_at_milliseconds_deletes_when_deadline_not_in_future() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
+        assert!(store.expire_at_milliseconds(b"k", 1_000, 1_000));
+        assert_eq!(store.get(b"k", 1_000), None);
     }
 
     #[test]

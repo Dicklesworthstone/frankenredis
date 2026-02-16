@@ -71,6 +71,15 @@ pub fn dispatch_argv(
     if cmd.eq_ignore_ascii_case("EXPIRE") {
         return expire(argv, store, now_ms);
     }
+    if cmd.eq_ignore_ascii_case("PEXPIRE") {
+        return pexpire(argv, store, now_ms);
+    }
+    if cmd.eq_ignore_ascii_case("EXPIREAT") {
+        return expireat(argv, store, now_ms);
+    }
+    if cmd.eq_ignore_ascii_case("PEXPIREAT") {
+        return pexpireat(argv, store, now_ms);
+    }
     if cmd.eq_ignore_ascii_case("PTTL") {
         return pttl(argv, store, now_ms);
     }
@@ -106,6 +115,12 @@ pub fn dispatch_argv(
     }
     if cmd.eq_ignore_ascii_case("TTL") {
         return ttl(argv, store, now_ms);
+    }
+    if cmd.eq_ignore_ascii_case("EXPIRETIME") {
+        return expiretime(argv, store, now_ms);
+    }
+    if cmd.eq_ignore_ascii_case("PEXPIRETIME") {
+        return pexpiretime(argv, store, now_ms);
     }
     if cmd.eq_ignore_ascii_case("PERSIST") {
         return persist(argv, store, now_ms);
@@ -253,46 +268,68 @@ struct ExpireOptions {
     lt: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ExpireCommandKind {
+    RelativeSeconds,
+    RelativeMilliseconds,
+    AbsoluteSeconds,
+    AbsoluteMilliseconds,
+}
+
 fn expire(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    expire_like(
+        argv,
+        store,
+        now_ms,
+        ExpireCommandKind::RelativeSeconds,
+        "EXPIRE",
+    )
+}
+
+fn pexpire(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    expire_like(
+        argv,
+        store,
+        now_ms,
+        ExpireCommandKind::RelativeMilliseconds,
+        "PEXPIRE",
+    )
+}
+
+fn expireat(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    expire_like(
+        argv,
+        store,
+        now_ms,
+        ExpireCommandKind::AbsoluteSeconds,
+        "EXPIREAT",
+    )
+}
+
+fn pexpireat(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    expire_like(
+        argv,
+        store,
+        now_ms,
+        ExpireCommandKind::AbsoluteMilliseconds,
+        "PEXPIREAT",
+    )
+}
+
+fn expire_like(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+    kind: ExpireCommandKind,
+    command_name: &'static str,
+) -> Result<RespFrame, CommandError> {
     if argv.len() < 3 {
-        return Err(CommandError::WrongArity("EXPIRE"));
+        return Err(CommandError::WrongArity(command_name));
     }
-    let seconds = parse_i64_arg(&argv[2])?;
+    let raw_time = parse_i64_arg(&argv[2])?;
     let options = parse_expire_options(&argv[3..])?;
-
-    let current_remaining_ms = match store.pttl(&argv[1], now_ms) {
-        PttlValue::KeyMissing => return Ok(RespFrame::Integer(0)),
-        PttlValue::NoExpiry => None,
-        PttlValue::Remaining(ms) => Some(ms),
-    };
-
-    let when_ms = i128::from(now_ms).saturating_add(i128::from(seconds).saturating_mul(1000));
-
-    if options.nx && current_remaining_ms.is_some() {
-        return Ok(RespFrame::Integer(0));
-    }
-    if options.xx && current_remaining_ms.is_none() {
-        return Ok(RespFrame::Integer(0));
-    }
-    if options.gt {
-        let Some(remaining_ms) = current_remaining_ms else {
-            return Ok(RespFrame::Integer(0));
-        };
-        let current_when_ms = i128::from(now_ms).saturating_add(i128::from(remaining_ms));
-        if when_ms <= current_when_ms {
-            return Ok(RespFrame::Integer(0));
-        }
-    }
-    if options.lt
-        && let Some(remaining_ms) = current_remaining_ms
-    {
-        let current_when_ms = i128::from(now_ms).saturating_add(i128::from(remaining_ms));
-        if when_ms >= current_when_ms {
-            return Ok(RespFrame::Integer(0));
-        }
-    }
-
-    let applied = store.expire_seconds(&argv[1], seconds, now_ms);
+    let when_ms = deadline_from_expire_kind(kind, raw_time, now_ms);
+    let applied = apply_expiry_with_options(store, &argv[1], when_ms, now_ms, options);
     Ok(RespFrame::Integer(if applied { 1 } else { 0 }))
 }
 
@@ -418,6 +455,41 @@ fn ttl(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
     Ok(RespFrame::Integer(value))
 }
 
+fn expiretime(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() != 2 {
+        return Err(CommandError::WrongArity("EXPIRETIME"));
+    }
+    let value = match store.pttl(&argv[1], now_ms) {
+        PttlValue::KeyMissing => -2,
+        PttlValue::NoExpiry => -1,
+        PttlValue::Remaining(ms) => {
+            let absolute_ms = i128::from(now_ms).saturating_add(i128::from(ms));
+            let absolute_ms = clamp_i128_to_i64(absolute_ms);
+            absolute_ms.saturating_add(500) / 1000
+        }
+    };
+    Ok(RespFrame::Integer(value))
+}
+
+fn pexpiretime(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() != 2 {
+        return Err(CommandError::WrongArity("PEXPIRETIME"));
+    }
+    let value = match store.pttl(&argv[1], now_ms) {
+        PttlValue::KeyMissing => -2,
+        PttlValue::NoExpiry => -1,
+        PttlValue::Remaining(ms) => {
+            let absolute_ms = i128::from(now_ms).saturating_add(i128::from(ms));
+            clamp_i128_to_i64(absolute_ms)
+        }
+    };
+    Ok(RespFrame::Integer(value))
+}
+
 fn persist(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() != 2 {
         return Err(CommandError::WrongArity("PERSIST"));
@@ -523,6 +595,69 @@ fn parse_expire_options(extra_args: &[Vec<u8>]) -> Result<ExpireOptions, Command
     }
 
     Ok(options)
+}
+
+fn deadline_from_expire_kind(kind: ExpireCommandKind, raw_time: i64, now_ms: u64) -> i128 {
+    match kind {
+        ExpireCommandKind::RelativeSeconds => {
+            i128::from(now_ms).saturating_add(i128::from(raw_time).saturating_mul(1000))
+        }
+        ExpireCommandKind::RelativeMilliseconds => {
+            i128::from(now_ms).saturating_add(i128::from(raw_time))
+        }
+        ExpireCommandKind::AbsoluteSeconds => i128::from(raw_time).saturating_mul(1000),
+        ExpireCommandKind::AbsoluteMilliseconds => i128::from(raw_time),
+    }
+}
+
+fn apply_expiry_with_options(
+    store: &mut Store,
+    key: &[u8],
+    when_ms: i128,
+    now_ms: u64,
+    options: ExpireOptions,
+) -> bool {
+    let current_remaining_ms = match store.pttl(key, now_ms) {
+        PttlValue::KeyMissing => return false,
+        PttlValue::NoExpiry => None,
+        PttlValue::Remaining(ms) => Some(ms),
+    };
+
+    if options.nx && current_remaining_ms.is_some() {
+        return false;
+    }
+    if options.xx && current_remaining_ms.is_none() {
+        return false;
+    }
+    if options.gt {
+        let Some(remaining_ms) = current_remaining_ms else {
+            return false;
+        };
+        let current_when_ms = i128::from(now_ms).saturating_add(i128::from(remaining_ms));
+        if when_ms <= current_when_ms {
+            return false;
+        }
+    }
+    if options.lt
+        && let Some(remaining_ms) = current_remaining_ms
+    {
+        let current_when_ms = i128::from(now_ms).saturating_add(i128::from(remaining_ms));
+        if when_ms >= current_when_ms {
+            return false;
+        }
+    }
+
+    store.expire_at_milliseconds(key, clamp_i128_to_i64(when_ms), now_ms)
+}
+
+fn clamp_i128_to_i64(value: i128) -> i64 {
+    if value < i128::from(i64::MIN) {
+        i64::MIN
+    } else if value > i128::from(i64::MAX) {
+        i64::MAX
+    } else {
+        value as i64
+    }
 }
 
 fn build_unknown_args_preview(argv: &[Vec<u8>]) -> Option<String> {
@@ -1121,5 +1256,225 @@ mod tests {
         )
         .expect_err("unknown option should fail");
         assert!(matches!(unknown, super::CommandError::SyntaxError));
+    }
+
+    #[test]
+    fn pexpire_sets_millisecond_ttl() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("set");
+
+        let out = dispatch_argv(
+            &[b"PEXPIRE".to_vec(), b"k".to_vec(), b"1500".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("pexpire");
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let pttl = dispatch_argv(&[b"PTTL".to_vec(), b"k".to_vec()], &mut store, 1_000)
+            .expect("pttl after pexpire");
+        assert_eq!(pttl, RespFrame::Integer(1_500));
+    }
+
+    #[test]
+    fn expireat_and_pexpireat_use_absolute_deadlines() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("set");
+
+        let expireat = dispatch_argv(
+            &[b"EXPIREAT".to_vec(), b"k".to_vec(), b"3".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("expireat");
+        assert_eq!(expireat, RespFrame::Integer(1));
+
+        let pttl = dispatch_argv(&[b"PTTL".to_vec(), b"k".to_vec()], &mut store, 1_000)
+            .expect("pttl after expireat");
+        assert_eq!(pttl, RespFrame::Integer(2_000));
+
+        let pexpireat = dispatch_argv(
+            &[b"PEXPIREAT".to_vec(), b"k".to_vec(), b"4500".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("pexpireat");
+        assert_eq!(pexpireat, RespFrame::Integer(1));
+
+        let pttl = dispatch_argv(&[b"PTTL".to_vec(), b"k".to_vec()], &mut store, 1_000)
+            .expect("pttl after pexpireat");
+        assert_eq!(pttl, RespFrame::Integer(3_500));
+
+        let delete_now = dispatch_argv(
+            &[b"PEXPIREAT".to_vec(), b"k".to_vec(), b"900".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("pexpireat in past");
+        assert_eq!(delete_now, RespFrame::Integer(1));
+
+        let missing = dispatch_argv(&[b"GET".to_vec(), b"k".to_vec()], &mut store, 1_000)
+            .expect("get missing");
+        assert_eq!(missing, RespFrame::BulkString(None));
+    }
+
+    #[test]
+    fn expiretime_and_pexpiretime_report_absolute_deadlines() {
+        let mut store = Store::new();
+        let missing = dispatch_argv(
+            &[b"EXPIRETIME".to_vec(), b"missing".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("expiretime missing");
+        assert_eq!(missing, RespFrame::Integer(-2));
+
+        dispatch_argv(
+            &[b"SET".to_vec(), b"persistent".to_vec(), b"v".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("set persistent");
+        let no_expiry = dispatch_argv(
+            &[b"PEXPIRETIME".to_vec(), b"persistent".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("pexpiretime persistent");
+        assert_eq!(no_expiry, RespFrame::Integer(-1));
+
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("set key");
+        dispatch_argv(
+            &[b"PEXPIRE".to_vec(), b"k".to_vec(), b"2500".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("pexpire key");
+
+        let expiretime = dispatch_argv(&[b"EXPIRETIME".to_vec(), b"k".to_vec()], &mut store, 1_000)
+            .expect("expiretime");
+        assert_eq!(expiretime, RespFrame::Integer(4));
+
+        let pexpiretime =
+            dispatch_argv(&[b"PEXPIRETIME".to_vec(), b"k".to_vec()], &mut store, 1_000)
+                .expect("pexpiretime");
+        assert_eq!(pexpiretime, RespFrame::Integer(3_500));
+    }
+
+    #[test]
+    fn pexpire_supports_nx_xx_gt_lt_options() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+
+        let out = dispatch_argv(
+            &[
+                b"PEXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"1000".to_vec(),
+                b"NX".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pexpire nx");
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"PEXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"2000".to_vec(),
+                b"NX".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pexpire nx reject");
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let out = dispatch_argv(
+            &[
+                b"PEXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"2000".to_vec(),
+                b"XX".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pexpire xx");
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"PEXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"1500".to_vec(),
+                b"GT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pexpire gt reject");
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let out = dispatch_argv(
+            &[
+                b"PEXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"2500".to_vec(),
+                b"GT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pexpire gt");
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"PEXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"3000".to_vec(),
+                b"LT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pexpire lt reject");
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let out = dispatch_argv(
+            &[
+                b"PEXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"500".to_vec(),
+                b"LT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pexpire lt");
+        assert_eq!(out, RespFrame::Integer(1));
     }
 }
