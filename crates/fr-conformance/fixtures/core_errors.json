@@ -32,6 +32,36 @@
       "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
     },
     {
+      "name": "set_expire_options_key",
+      "now_ms": 0,
+      "argv": ["SET", "expire_opts_key", "value"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "expire_incompatible_nx_xx",
+      "now_ms": 0,
+      "argv": ["EXPIRE", "expire_opts_key", "5", "NX", "XX"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
+      "name": "expire_incompatible_nx_gt",
+      "now_ms": 0,
+      "argv": ["EXPIRE", "expire_opts_key", "5", "NX", "GT"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
+      "name": "expire_incompatible_gt_lt",
+      "now_ms": 0,
+      "argv": ["EXPIRE", "expire_opts_key", "5", "GT", "LT"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
+      "name": "expire_unknown_option",
+      "now_ms": 0,
+      "argv": ["EXPIRE", "expire_opts_key", "5", "ZZ"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
       "name": "set_text_value",
       "now_ms": 1,
       "argv": ["SET", "counter", "hello"],

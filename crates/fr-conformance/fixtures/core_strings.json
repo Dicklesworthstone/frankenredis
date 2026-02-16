@@ -74,6 +74,78 @@
       "expect": { "kind": "bulk", "value": null }
     },
     {
+      "name": "set_expire_options_key",
+      "now_ms": 3100,
+      "argv": ["SET", "optkey", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "expire_nx_initial",
+      "now_ms": 3100,
+      "argv": ["EXPIRE", "optkey", "10", "NX"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_nx_reject_existing_ttl",
+      "now_ms": 3100,
+      "argv": ["EXPIRE", "optkey", "20", "NX"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_xx_accept_existing_ttl",
+      "now_ms": 3100,
+      "argv": ["EXPIRE", "optkey", "20", "XX"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_gt_reject_smaller_deadline",
+      "now_ms": 3100,
+      "argv": ["EXPIRE", "optkey", "15", "GT"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_gt_accept_larger_deadline",
+      "now_ms": 3100,
+      "argv": ["EXPIRE", "optkey", "25", "GT"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_lt_reject_larger_deadline",
+      "now_ms": 3100,
+      "argv": ["EXPIRE", "optkey", "30", "LT"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_lt_accept_smaller_deadline",
+      "now_ms": 3100,
+      "argv": ["EXPIRE", "optkey", "5", "LT"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "set_persistent_expire_options_key",
+      "now_ms": 3200,
+      "argv": ["SET", "persistent", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "expire_xx_rejects_no_ttl",
+      "now_ms": 3200,
+      "argv": ["EXPIRE", "persistent", "5", "XX"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_gt_rejects_no_ttl",
+      "now_ms": 3200,
+      "argv": ["EXPIRE", "persistent", "5", "GT"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_lt_accepts_no_ttl",
+      "now_ms": 3200,
+      "argv": ["EXPIRE", "persistent", "5", "LT"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
       "name": "unknown_command",
       "now_ms": 4000,
       "argv": ["NOPE"],

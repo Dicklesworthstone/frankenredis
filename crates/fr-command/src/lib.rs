@@ -245,11 +245,53 @@ fn incr(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     Ok(RespFrame::Integer(value))
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ExpireOptions {
+    nx: bool,
+    xx: bool,
+    gt: bool,
+    lt: bool,
+}
+
 fn expire(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 3 {
+    if argv.len() < 3 {
         return Err(CommandError::WrongArity("EXPIRE"));
     }
     let seconds = parse_i64_arg(&argv[2])?;
+    let options = parse_expire_options(&argv[3..])?;
+
+    let current_remaining_ms = match store.pttl(&argv[1], now_ms) {
+        PttlValue::KeyMissing => return Ok(RespFrame::Integer(0)),
+        PttlValue::NoExpiry => None,
+        PttlValue::Remaining(ms) => Some(ms),
+    };
+
+    let when_ms = i128::from(now_ms).saturating_add(i128::from(seconds).saturating_mul(1000));
+
+    if options.nx && current_remaining_ms.is_some() {
+        return Ok(RespFrame::Integer(0));
+    }
+    if options.xx && current_remaining_ms.is_none() {
+        return Ok(RespFrame::Integer(0));
+    }
+    if options.gt {
+        let Some(remaining_ms) = current_remaining_ms else {
+            return Ok(RespFrame::Integer(0));
+        };
+        let current_when_ms = i128::from(now_ms).saturating_add(i128::from(remaining_ms));
+        if when_ms <= current_when_ms {
+            return Ok(RespFrame::Integer(0));
+        }
+    }
+    if options.lt
+        && let Some(remaining_ms) = current_remaining_ms
+    {
+        let current_when_ms = i128::from(now_ms).saturating_add(i128::from(remaining_ms));
+        if when_ms >= current_when_ms {
+            return Ok(RespFrame::Integer(0));
+        }
+    }
+
     let applied = store.expire_seconds(&argv[1], seconds, now_ms);
     Ok(RespFrame::Integer(if applied { 1 } else { 0 }))
 }
@@ -457,6 +499,30 @@ fn parse_u64_arg(arg: &[u8]) -> Result<u64, CommandError> {
     let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
     text.parse::<u64>()
         .map_err(|_| CommandError::InvalidInteger)
+}
+
+fn parse_expire_options(extra_args: &[Vec<u8>]) -> Result<ExpireOptions, CommandError> {
+    let mut options = ExpireOptions::default();
+    for arg in extra_args {
+        let option = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if option.eq_ignore_ascii_case("NX") {
+            options.nx = true;
+        } else if option.eq_ignore_ascii_case("XX") {
+            options.xx = true;
+        } else if option.eq_ignore_ascii_case("GT") {
+            options.gt = true;
+        } else if option.eq_ignore_ascii_case("LT") {
+            options.lt = true;
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    }
+
+    if (options.nx && (options.xx || options.gt || options.lt)) || (options.gt && options.lt) {
+        return Err(CommandError::SyntaxError);
+    }
+
+    Ok(options)
 }
 
 fn build_unknown_args_preview(argv: &[Vec<u8>]) -> Option<String> {
@@ -847,5 +913,213 @@ mod tests {
         let argv2 = vec![b"Get".to_vec(), b"k".to_vec()];
         let out = dispatch_argv(&argv2, &mut store, 0).expect("mixed case get");
         assert_eq!(out, RespFrame::BulkString(Some(b"v".to_vec())));
+    }
+
+    #[test]
+    fn expire_nx_and_xx_options_follow_contract() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+
+        let out = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"10".to_vec(),
+                b"NX".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("expire nx first");
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"20".to_vec(),
+                b"NX".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("expire nx second");
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let out = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"20".to_vec(),
+                b"XX".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("expire xx");
+        assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn expire_gt_and_lt_options_follow_contract() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+        dispatch_argv(
+            &[b"EXPIRE".to_vec(), b"k".to_vec(), b"10".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("expire baseline");
+
+        let out = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"9".to_vec(),
+                b"GT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("gt rejects smaller");
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let out = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"20".to_vec(),
+                b"GT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("gt accepts larger");
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"30".to_vec(),
+                b"LT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lt rejects larger");
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let out = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"5".to_vec(),
+                b"LT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lt accepts smaller");
+        assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn expire_options_on_persistent_key_match_redis_behavior() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+
+        let gt = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"5".to_vec(),
+                b"GT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("gt on persistent key");
+        assert_eq!(gt, RespFrame::Integer(0));
+
+        let lt = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"5".to_vec(),
+                b"LT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lt on persistent key");
+        assert_eq!(lt, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn expire_incompatible_or_unknown_options_return_syntax_error() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+
+        let nx_xx = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"5".to_vec(),
+                b"NX".to_vec(),
+                b"XX".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("nx+xx should fail");
+        assert!(matches!(nx_xx, super::CommandError::SyntaxError));
+
+        let gt_lt = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"5".to_vec(),
+                b"GT".to_vec(),
+                b"LT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("gt+lt should fail");
+        assert!(matches!(gt_lt, super::CommandError::SyntaxError));
+
+        let unknown = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"5".to_vec(),
+                b"ZZ".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("unknown option should fail");
+        assert!(matches!(unknown, super::CommandError::SyntaxError));
     }
 }
