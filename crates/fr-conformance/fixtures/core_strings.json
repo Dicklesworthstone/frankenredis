@@ -242,6 +242,24 @@
       "expect": { "kind": "integer", "value": 0 }
     },
     {
+      "name": "pexpire_xx_gt_accept_poptkey",
+      "now_ms": 3700,
+      "argv": ["PEXPIRE", "poptkey", "2000", "XX", "GT"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pexpire_xx_lt_accept_poptkey",
+      "now_ms": 3700,
+      "argv": ["PEXPIRE", "poptkey", "1000", "XX", "LT"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pexpire_xx_lt_reject_poptkey",
+      "now_ms": 3700,
+      "argv": ["PEXPIRE", "poptkey", "1500", "XX", "LT"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
       "name": "pexpire_lt_accept_poptkey",
       "now_ms": 3700,
       "argv": ["PEXPIRE", "poptkey", "500", "LT"],

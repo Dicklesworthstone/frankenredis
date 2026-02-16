@@ -1207,7 +1207,7 @@ mod tests {
     }
 
     #[test]
-    fn expire_incompatible_or_unknown_options_return_syntax_error() {
+    fn expire_option_compatibility_rules_match_redis() {
         let mut store = Store::new();
         dispatch_argv(
             &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
@@ -1256,6 +1256,35 @@ mod tests {
         )
         .expect_err("unknown option should fail");
         assert!(matches!(unknown, super::CommandError::SyntaxError));
+
+        let xx_gt = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"10".to_vec(),
+                b"XX".to_vec(),
+                b"GT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xx+gt should be accepted");
+        assert_eq!(xx_gt, RespFrame::Integer(0));
+
+        let nx_xx_gt = dispatch_argv(
+            &[
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"10".to_vec(),
+                b"NX".to_vec(),
+                b"XX".to_vec(),
+                b"GT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("nx cannot combine with xx/gt");
+        assert!(matches!(nx_xx_gt, super::CommandError::SyntaxError));
     }
 
     #[test]
@@ -1429,6 +1458,34 @@ mod tests {
             &[
                 b"PEXPIRE".to_vec(),
                 b"k".to_vec(),
+                b"2500".to_vec(),
+                b"XX".to_vec(),
+                b"GT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pexpire xx gt");
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"PEXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"2400".to_vec(),
+                b"XX".to_vec(),
+                b"GT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pexpire xx gt reject");
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let out = dispatch_argv(
+            &[
+                b"PEXPIRE".to_vec(),
+                b"k".to_vec(),
                 b"1500".to_vec(),
                 b"GT".to_vec(),
             ],
@@ -1442,7 +1499,7 @@ mod tests {
             &[
                 b"PEXPIRE".to_vec(),
                 b"k".to_vec(),
-                b"2500".to_vec(),
+                b"2600".to_vec(),
                 b"GT".to_vec(),
             ],
             &mut store,
@@ -1450,6 +1507,34 @@ mod tests {
         )
         .expect("pexpire gt");
         assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"PEXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"2400".to_vec(),
+                b"XX".to_vec(),
+                b"LT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pexpire xx lt");
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let out = dispatch_argv(
+            &[
+                b"PEXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"2600".to_vec(),
+                b"XX".to_vec(),
+                b"LT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pexpire xx lt reject");
+        assert_eq!(out, RespFrame::Integer(0));
 
         let out = dispatch_argv(
             &[
