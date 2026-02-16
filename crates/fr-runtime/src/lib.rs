@@ -10,7 +10,7 @@ use fr_config::{
 };
 use fr_eventloop::{
     BootstrapError, EventLoopMode, EventLoopPhase, LoopBootstrap, PhaseReplayError, TickBudget,
-    TickPlan, plan_tick, replay_phase_trace, validate_bootstrap,
+    TickPlan, apply_tls_accept_rate_limit, plan_tick, replay_phase_trace, validate_bootstrap,
 };
 use fr_protocol::{RespFrame, RespParseError, parse_frame};
 use fr_store::Store;
@@ -106,6 +106,30 @@ impl Runtime {
         mode: EventLoopMode,
     ) -> TickPlan {
         plan_tick(pending_accepts, pending_commands, budget, mode)
+    }
+
+    #[must_use]
+    pub fn plan_event_loop_tick_with_tls_budget(
+        pending_accepts: usize,
+        pending_commands: usize,
+        pending_tls_accepts: usize,
+        max_new_tls_connections_per_cycle: usize,
+        budget: TickBudget,
+        mode: EventLoopMode,
+    ) -> TickPlan {
+        let mut plan = plan_tick(pending_accepts, pending_commands, budget, mode);
+        let pending_tls_accepts = pending_tls_accepts.min(pending_accepts);
+        let pending_non_tls_accepts = pending_accepts.saturating_sub(pending_tls_accepts);
+        let tls_accept_plan = apply_tls_accept_rate_limit(
+            plan.stats.accepted,
+            pending_tls_accepts,
+            pending_non_tls_accepts,
+            max_new_tls_connections_per_cycle,
+        );
+
+        plan.stats.accepted = tls_accept_plan.total_accepted;
+        plan.stats.accept_backlog_remaining = pending_accepts.saturating_sub(plan.stats.accepted);
+        plan
     }
 
     pub fn replay_event_loop_phase_trace(
@@ -534,6 +558,40 @@ mod tests {
             plan.stats.processed_commands,
             TickBudget::BLOCKED_MODE_MAX_COMMANDS
         );
+    }
+
+    #[test]
+    fn fr_p2c_009_u011_runtime_tls_accept_limit_clamps_tls_accepts() {
+        let plan = Runtime::plan_event_loop_tick_with_tls_budget(
+            15,
+            50,
+            12,
+            4,
+            TickBudget {
+                max_accepts: 10,
+                max_commands: 100,
+            },
+            EventLoopMode::Normal,
+        );
+        assert_eq!(plan.stats.accepted, 7);
+        assert_eq!(plan.stats.accept_backlog_remaining, 8);
+    }
+
+    #[test]
+    fn fr_p2c_009_u011_runtime_tls_accept_limit_never_exceeds_total_budget() {
+        let plan = Runtime::plan_event_loop_tick_with_tls_budget(
+            20,
+            1,
+            20,
+            64,
+            TickBudget {
+                max_accepts: 5,
+                max_commands: 10,
+            },
+            EventLoopMode::Normal,
+        );
+        assert_eq!(plan.stats.accepted, 5);
+        assert_eq!(plan.stats.accept_backlog_remaining, 15);
     }
 
     #[test]

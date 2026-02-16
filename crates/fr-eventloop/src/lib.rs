@@ -187,6 +187,14 @@ pub struct TickPlan {
     pub stats: TickStats,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TlsAcceptPlan {
+    pub accepted_tls: usize,
+    pub deferred_tls: usize,
+    pub accepted_non_tls: usize,
+    pub total_accepted: usize,
+}
+
 #[must_use]
 pub fn run_tick(pending_accepts: usize, pending_commands: usize, budget: TickBudget) -> TickStats {
     let accepted = pending_accepts.min(budget.max_accepts);
@@ -225,11 +233,34 @@ pub fn plan_tick(
     }
 }
 
+#[must_use]
+pub fn apply_tls_accept_rate_limit(
+    total_accept_budget: usize,
+    pending_tls_accepts: usize,
+    pending_non_tls_accepts: usize,
+    max_new_tls_connections_per_cycle: usize,
+) -> TlsAcceptPlan {
+    let tls_budget = total_accept_budget.min(max_new_tls_connections_per_cycle);
+    let accepted_tls = pending_tls_accepts.min(tls_budget);
+    let remaining_accept_budget = total_accept_budget.saturating_sub(accepted_tls);
+    let accepted_non_tls = pending_non_tls_accepts.min(remaining_accept_budget);
+    let total_accepted = accepted_tls.saturating_add(accepted_non_tls);
+    let deferred_tls = pending_tls_accepts.saturating_sub(accepted_tls);
+
+    TlsAcceptPlan {
+        accepted_tls,
+        deferred_tls,
+        accepted_non_tls,
+        total_accepted,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BootstrapError, EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase, LoopBootstrap,
-        PhaseReplayError, TickBudget, plan_tick, replay_phase_trace, run_tick, validate_bootstrap,
+        PhaseReplayError, TickBudget, apply_tls_accept_rate_limit, plan_tick, replay_phase_trace,
+        run_tick, validate_bootstrap,
     };
 
     #[test]
@@ -387,5 +418,32 @@ mod tests {
         .expect_err("missing timer");
         assert_eq!(err, BootstrapError::ServerCronTimerMissing);
         assert_eq!(err.reason_code(), "eventloop.server_cron_timer_missing");
+    }
+
+    #[test]
+    fn fr_p2c_009_u011_tls_accept_limit_clamps_tls_accepts() {
+        let plan = apply_tls_accept_rate_limit(10, 15, 5, 4);
+        assert_eq!(plan.accepted_tls, 4);
+        assert_eq!(plan.deferred_tls, 11);
+        assert_eq!(plan.accepted_non_tls, 5);
+        assert_eq!(plan.total_accepted, 9);
+    }
+
+    #[test]
+    fn fr_p2c_009_u011_tls_accept_limit_preserves_non_tls_when_tls_is_zero() {
+        let plan = apply_tls_accept_rate_limit(8, 6, 10, 0);
+        assert_eq!(plan.accepted_tls, 0);
+        assert_eq!(plan.deferred_tls, 6);
+        assert_eq!(plan.accepted_non_tls, 8);
+        assert_eq!(plan.total_accepted, 8);
+    }
+
+    #[test]
+    fn fr_p2c_009_u011_tls_accept_limit_respects_global_accept_budget() {
+        let plan = apply_tls_accept_rate_limit(3, 2, 8, 5);
+        assert_eq!(plan.accepted_tls, 2);
+        assert_eq!(plan.deferred_tls, 0);
+        assert_eq!(plan.accepted_non_tls, 1);
+        assert_eq!(plan.total_accepted, 3);
     }
 }
