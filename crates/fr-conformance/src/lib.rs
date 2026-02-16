@@ -121,6 +121,8 @@ pub struct CaseOutcome {
     pub actual: RespFrame,
     pub detail: Option<String>,
     pub reason_code: Option<String>,
+    pub replay_cmd: Option<String>,
+    pub artifact_refs: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,13 +195,18 @@ pub fn run_fixture(
         let frame_ok = actual == expected;
         let passed = frame_ok && threat_result.is_ok() && log_result.is_ok();
         if !passed {
+            let reason_code = reason_code_from_evidence(new_events);
+            let replay_cmd = replay_cmd_from_evidence(new_events);
+            let artifact_refs = artifact_refs_from_evidence(new_events);
             failed.push(CaseOutcome {
                 name: case.name,
                 passed,
                 expected,
                 actual,
                 detail: build_case_detail(frame_ok, threat_result.err(), log_result.err()),
-                reason_code: reason_code_from_evidence(new_events),
+                reason_code,
+                replay_cmd,
+                artifact_refs,
             });
         }
     }
@@ -267,13 +274,18 @@ pub fn run_live_redis_diff(
         );
         let passed = frame_ok && log_result.is_ok();
         if !passed {
+            let reason_code = reason_code_from_evidence(new_events);
+            let replay_cmd = replay_cmd_from_evidence(new_events);
+            let artifact_refs = artifact_refs_from_evidence(new_events);
             failed.push(CaseOutcome {
                 name: case.name,
                 passed,
                 expected: redis_actual,
                 actual: runtime_actual,
                 detail: build_case_detail(frame_ok, None, log_result.err()),
-                reason_code: reason_code_from_evidence(new_events),
+                reason_code,
+                replay_cmd,
+                artifact_refs,
             });
         }
     }
@@ -343,13 +355,18 @@ pub fn run_protocol_fixture(
         let frame_ok = actual == expected;
         let passed = frame_ok && threat_result.is_ok() && log_result.is_ok();
         if !passed {
+            let reason_code = reason_code_from_evidence(new_events);
+            let replay_cmd = replay_cmd_from_evidence(new_events);
+            let artifact_refs = artifact_refs_from_evidence(new_events);
             failed.push(CaseOutcome {
                 name: case.name,
                 passed,
                 expected,
                 actual,
                 detail: build_case_detail(frame_ok, threat_result.err(), log_result.err()),
-                reason_code: reason_code_from_evidence(new_events),
+                reason_code,
+                replay_cmd,
+                artifact_refs,
             });
         }
     }
@@ -414,13 +431,18 @@ pub fn run_live_redis_protocol_diff(
         );
         let passed = frame_ok && log_result.is_ok();
         if !passed {
+            let reason_code = reason_code_from_evidence(new_events);
+            let replay_cmd = replay_cmd_from_evidence(new_events);
+            let artifact_refs = artifact_refs_from_evidence(new_events);
             failed.push(CaseOutcome {
                 name: case.name,
                 passed,
                 expected: redis_actual,
                 actual: runtime_actual,
                 detail: build_case_detail(frame_ok, None, log_result.err()),
-                reason_code: reason_code_from_evidence(new_events),
+                reason_code,
+                replay_cmd,
+                artifact_refs,
             });
         }
     }
@@ -493,6 +515,8 @@ pub fn run_replay_fixture(
                     actual: RespFrame::BulkString(None),
                     detail: Some(format!("AOF stream decode failed: {err:?}")),
                     reason_code: None,
+                    replay_cmd: None,
+                    artifact_refs: Vec::new(),
                 });
                 continue;
             }
@@ -517,6 +541,9 @@ pub fn run_replay_fixture(
                 new_events,
             );
             if let Err(err) = log_result {
+                let reason_code = reason_code_from_evidence(new_events);
+                let replay_cmd = replay_cmd_from_evidence(new_events);
+                let artifact_refs = artifact_refs_from_evidence(new_events);
                 failed.push(CaseOutcome {
                     name: replay_case_name,
                     passed: false,
@@ -525,7 +552,9 @@ pub fn run_replay_fixture(
                     detail: Some(format!(
                         "structured log emission failed during replay record execution: {err}"
                     )),
-                    reason_code: reason_code_from_evidence(new_events),
+                    reason_code,
+                    replay_cmd,
+                    artifact_refs,
                 });
             }
         }
@@ -562,13 +591,18 @@ pub fn run_replay_fixture(
             );
             let passed = frame_ok && log_result.is_ok();
             if !passed {
+                let reason_code = reason_code_from_evidence(new_events);
+                let replay_cmd = replay_cmd_from_evidence(new_events);
+                let artifact_refs = artifact_refs_from_evidence(new_events);
                 failed.push(CaseOutcome {
                     name: format!("{}::{}", case.name, assertion.key),
                     passed,
                     expected,
                     actual,
                     detail: build_case_detail(frame_ok, None, log_result.err()),
-                    reason_code: reason_code_from_evidence(new_events),
+                    reason_code,
+                    replay_cmd,
+                    artifact_refs,
                 });
             }
         }
@@ -624,6 +658,32 @@ fn reason_code_from_evidence(events: &[EvidenceEvent]) -> Option<String> {
             Some(event.reason_code.to_string())
         }
     })
+}
+
+fn replay_cmd_from_evidence(events: &[EvidenceEvent]) -> Option<String> {
+    events.iter().rev().find_map(|event| {
+        if event.replay_cmd.trim().is_empty() {
+            None
+        } else {
+            Some(event.replay_cmd.clone())
+        }
+    })
+}
+
+fn artifact_refs_from_evidence(events: &[EvidenceEvent]) -> Vec<String> {
+    events
+        .iter()
+        .rev()
+        .find_map(|event| {
+            let refs = event
+                .artifact_refs
+                .iter()
+                .filter(|artifact_ref| !artifact_ref.trim().is_empty())
+                .cloned()
+                .collect::<Vec<_>>();
+            if refs.is_empty() { None } else { Some(refs) }
+        })
+        .unwrap_or_default()
 }
 
 fn load_conformance_fixture(
@@ -1862,6 +1922,8 @@ mod tests {
                     actual: RespFrame::Error("ERR".to_string()),
                     detail: Some("detail".to_string()),
                     reason_code: Some("parser.invalid_bulk_len".to_string()),
+                    replay_cmd: Some("cargo test -- case-a".to_string()),
+                    artifact_refs: vec!["artifact-a".to_string()],
                 },
                 CaseOutcome {
                     name: "case-b".to_string(),
@@ -1870,6 +1932,8 @@ mod tests {
                     actual: RespFrame::Error("ERR".to_string()),
                     detail: Some("detail".to_string()),
                     reason_code: Some("parser.invalid_bulk_len".to_string()),
+                    replay_cmd: Some("cargo test -- case-b".to_string()),
+                    artifact_refs: vec!["artifact-b".to_string()],
                 },
                 CaseOutcome {
                     name: "case-c".to_string(),
@@ -1878,6 +1942,8 @@ mod tests {
                     actual: RespFrame::Error("ERR".to_string()),
                     detail: Some("detail".to_string()),
                     reason_code: None,
+                    replay_cmd: None,
+                    artifact_refs: Vec::new(),
                 },
             ],
         );

@@ -576,6 +576,8 @@ mod tests {
             actual: RespFrame::Error("ERR syntax error".to_string()),
             detail: Some("detail".to_string()),
             reason_code: Some("dispatch.wrong_arity".to_string()),
+            replay_cmd: Some("cargo test -- sample".to_string()),
+            artifact_refs: vec!["artifact.log".to_string()],
         };
         assert!(!outcome.passed);
     }

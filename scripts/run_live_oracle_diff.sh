@@ -65,6 +65,7 @@ STATUS_TSV="${RUN_ROOT}/suite_status.tsv"
 REPLAY_SCRIPT="${RUN_ROOT}/replay_failed.sh"
 README_PATH="${RUN_ROOT}/README.md"
 COVERAGE_SUMMARY="${RUN_ROOT}/coverage_summary.json"
+FAILURE_ENVELOPE="${RUN_ROOT}/failure_envelope.json"
 
 mkdir -p "$SUITES_ROOT" "$LIVE_LOG_ROOT"
 : > "$TRACE_LOG"
@@ -154,6 +155,7 @@ cat > "$README_PATH" <<EOF
 - \`suites/<suite>/stdout.log\`: captured command output.
 - \`suites/<suite>/report.json\`: machine-readable diff report from \`live_oracle_diff --json-out\`.
 - \`coverage_summary.json\`: aggregated pass-rate and reason-code budget input.
+- \`failure_envelope.json\`: per-failure envelope with replay pointers + deterministic artifact index.
 - \`replay_failed.sh\`: deterministic replay commands for failed suites.
 
 ## Re-run
@@ -163,14 +165,14 @@ cat > "$README_PATH" <<EOF
 \`\`\`
 EOF
 
-python3 - "$STATUS_TSV" "$RUN_ID" "$HOST" "$PORT" "$RUNNER" "$RUN_ROOT" "$README_PATH" "$REPLAY_SCRIPT" "$COVERAGE_SUMMARY" <<'PY'
+python3 - "$STATUS_TSV" "$RUN_ID" "$HOST" "$PORT" "$RUNNER" "$RUN_ROOT" "$README_PATH" "$REPLAY_SCRIPT" "$COVERAGE_SUMMARY" "$FAILURE_ENVELOPE" <<'PY'
 import collections
 import csv
 import json
 import os
 import sys
 
-status_tsv, run_id, host, port, runner, run_root, readme_path, replay_script, out_path = sys.argv[1:]
+status_tsv, run_id, host, port, runner, run_root, readme_path, replay_script, out_path, failure_envelope_path = sys.argv[1:]
 
 suite_rows = []
 reason_counts = collections.Counter()
@@ -178,6 +180,8 @@ total_case_failures = 0
 flake_suspects = []
 hard_fail_suites = []
 packet_totals = collections.defaultdict(lambda: {"total_suites": 0, "passed_suites": 0})
+failure_envelope_rows = []
+artifact_index = collections.defaultdict(list)
 
 
 def packet_id_for_fixture(fixture_name: str) -> str:
@@ -213,6 +217,39 @@ with open(status_tsv, newline="", encoding="utf-8") as fh:
         packet_id = packet_id_for_fixture(row.get("fixture", ""))
         for reason_code, count in case_reason_counts.items():
             reason_counts[str(reason_code)] += int(count)
+
+        for failure in report.get("failures") or []:
+            case_name = str(failure.get("case_name") or "")
+            reason_code = failure.get("reason_code")
+            replay_cmd = failure.get("replay_cmd")
+            artifact_refs = [
+                str(artifact_ref)
+                for artifact_ref in (failure.get("artifact_refs") or [])
+                if str(artifact_ref).strip()
+            ]
+            envelope_row = {
+                "suite": row["suite"],
+                "fixture": row.get("fixture"),
+                "packet_id": packet_id,
+                "case_name": case_name,
+                "reason_code": reason_code,
+                "detail": failure.get("detail"),
+                "replay_cmd": replay_cmd,
+                "artifact_refs": artifact_refs,
+                "report_json": report_path,
+                "stdout_log": row.get("stdout_log"),
+                "live_log_root": report.get("live_log_root"),
+            }
+            failure_envelope_rows.append(envelope_row)
+            for artifact_ref in artifact_refs:
+                artifact_index[artifact_ref].append(
+                    {
+                        "suite": row["suite"],
+                        "case_name": case_name,
+                        "reason_code": reason_code,
+                        "replay_cmd": replay_cmd,
+                    }
+                )
 
         total_case_failures += failed_count
         packet_totals[packet_id]["total_suites"] += 1
@@ -271,6 +308,7 @@ summary = {
     "status_tsv": status_tsv,
     "readme_path": readme_path,
     "replay_script": replay_script,
+    "failure_envelope": failure_envelope_path,
     "total_suites": total_suites,
     "passed_suites": passed_suites,
     "failed_suites": failed_suites,
@@ -292,10 +330,38 @@ summary = {
 with open(out_path, "w", encoding="utf-8") as out_fh:
     json.dump(summary, out_fh, indent=2)
     out_fh.write("\n")
+
+failure_envelope_rows.sort(key=lambda row: (row["suite"], row["case_name"]))
+deterministic_artifact_index = []
+for artifact_ref in sorted(artifact_index):
+    entries = sorted(
+        artifact_index[artifact_ref],
+        key=lambda entry: (entry["suite"], entry["case_name"]),
+    )
+    deterministic_artifact_index.append(
+        {
+            "artifact_ref": artifact_ref,
+            "failure_count": len(entries),
+            "failures": entries,
+        }
+    )
+
+failure_envelope = {
+    "schema_version": "live_oracle_failure_envelope/v1",
+    "run_id": run_id,
+    "run_root": run_root,
+    "total_failures": len(failure_envelope_rows),
+    "failures": failure_envelope_rows,
+    "artifact_index": deterministic_artifact_index,
+}
+with open(failure_envelope_path, "w", encoding="utf-8") as out_fh:
+    json.dump(failure_envelope, out_fh, indent=2)
+    out_fh.write("\n")
 PY
 
 echo "coverage_summary: ${COVERAGE_SUMMARY}"
 cat "$COVERAGE_SUMMARY"
+echo "failure_envelope: ${FAILURE_ENVELOPE}"
 
 if ((FAILED_COUNT > 0)); then
   echo "live oracle diffs failed (${FAILED_COUNT}/${TOTAL_COUNT}); bundle: ${RUN_ROOT}"

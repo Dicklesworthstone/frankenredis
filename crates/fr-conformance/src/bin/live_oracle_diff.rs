@@ -106,6 +106,18 @@ fn run() -> Result<ExitCode, String> {
             if let Some(detail) = &failure.detail {
                 println!("detail: {detail}");
             }
+            if let Some(reason_code) = &failure.reason_code {
+                println!("reason_code: {reason_code}");
+            }
+            if let Some(replay_cmd) = &failure.replay_cmd {
+                println!("replay_cmd: {replay_cmd}");
+            }
+            if !failure.artifact_refs.is_empty() {
+                println!("artifact_refs:");
+                for artifact_ref in &failure.artifact_refs {
+                    println!("  - {artifact_ref}");
+                }
+            }
         }
         return Ok(ExitCode::from(1));
     }
@@ -183,6 +195,8 @@ struct JsonFailure {
     actual: String,
     detail: Option<String>,
     reason_code: Option<String>,
+    replay_cmd: Option<String>,
+    artifact_refs: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -224,7 +238,7 @@ fn write_json_report(
         })?;
     }
     let json_report = JsonReport {
-        schema_version: "live_oracle_diff_report/v2".to_string(),
+        schema_version: "live_oracle_diff_report/v3".to_string(),
         differential_schema_version: report.schema_version.to_string(),
         run_id: cli.run_id.clone(),
         status: "completed".to_string(),
@@ -264,7 +278,7 @@ fn write_json_error_report(path: &Path, cli: &CliArgs, run_error: &str) -> Resul
     }
 
     let json_report = JsonReport {
-        schema_version: "live_oracle_diff_report/v2".to_string(),
+        schema_version: "live_oracle_diff_report/v3".to_string(),
         differential_schema_version: DIFFERENTIAL_REPORT_SCHEMA_VERSION.to_string(),
         run_id: cli.run_id.clone(),
         status: "execution_error".to_string(),
@@ -297,6 +311,8 @@ fn json_failure(case: &CaseOutcome) -> JsonFailure {
         actual: format!("{:?}", case.actual),
         detail: case.detail.clone(),
         reason_code: case.reason_code.clone(),
+        replay_cmd: case.replay_cmd.clone(),
+        artifact_refs: case.artifact_refs.clone(),
     }
 }
 
@@ -316,7 +332,10 @@ fn usage(reason: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_args;
+    use fr_protocol::RespFrame;
+
+    use super::{json_failure, parse_args};
+    use fr_conformance::CaseOutcome;
 
     #[test]
     fn parse_args_supports_optional_flags() {
@@ -360,5 +379,28 @@ mod tests {
         assert_eq!(parsed.host, "127.0.0.1");
         assert_eq!(parsed.port, 6379);
         assert_eq!(parsed.run_id, None);
+    }
+
+    #[test]
+    fn json_failure_carries_replay_and_artifact_metadata() {
+        let failure = CaseOutcome {
+            name: "case-1".to_string(),
+            passed: false,
+            expected: RespFrame::SimpleString("OK".to_string()),
+            actual: RespFrame::Error("ERR".to_string()),
+            detail: Some("detail".to_string()),
+            reason_code: Some("eventloop.accept.maxclients_reached".to_string()),
+            replay_cmd: Some("cargo test -p fr-runtime case-1 -- --nocapture".to_string()),
+            artifact_refs: vec!["artifacts/logs/case-1.jsonl".to_string()],
+        };
+        let encoded = json_failure(&failure);
+        assert_eq!(
+            encoded.replay_cmd.as_deref(),
+            Some("cargo test -p fr-runtime case-1 -- --nocapture")
+        );
+        assert_eq!(
+            encoded.artifact_refs,
+            vec!["artifacts/logs/case-1.jsonl".to_string()]
+        );
     }
 }
