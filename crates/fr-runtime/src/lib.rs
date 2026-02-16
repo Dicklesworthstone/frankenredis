@@ -5,6 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fr_command::{CommandError, dispatch_argv, frame_to_argv};
 use fr_config::{
     DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
+    TlsCfgError, TlsConfig, TlsListenerTransition, TlsRuntimeState,
+    evaluate_tls_hardened_deviation, plan_tls_runtime_apply,
 };
 use fr_eventloop::{
     BootstrapError, EventLoopMode, EventLoopPhase, LoopBootstrap, PhaseReplayError, TickBudget,
@@ -58,6 +60,7 @@ pub struct Runtime {
     policy: RuntimePolicy,
     store: Store,
     evidence: EvidenceLedger,
+    tls_state: TlsRuntimeState,
 }
 
 struct ThreatEventInput<'a> {
@@ -81,6 +84,7 @@ impl Runtime {
             policy,
             store: Store::new(),
             evidence: EvidenceLedger::default(),
+            tls_state: TlsRuntimeState::default(),
         }
     }
 
@@ -117,6 +121,57 @@ impl Runtime {
     #[must_use]
     pub fn evidence(&self) -> &EvidenceLedger {
         &self.evidence
+    }
+
+    #[must_use]
+    pub fn tls_runtime_state(&self) -> &TlsRuntimeState {
+        &self.tls_state
+    }
+
+    pub fn apply_tls_config(
+        &mut self,
+        candidate: TlsConfig,
+        now_ms: u64,
+    ) -> Result<(), TlsCfgError> {
+        let packet_id = next_packet_id();
+        let input_digest = digest_bytes(format!("{candidate:?}").as_bytes());
+        let state_before = self.store.state_digest();
+
+        let plan = match plan_tls_runtime_apply(&self.tls_state, candidate) {
+            Ok(plan) => plan,
+            Err(error) => {
+                let preferred_deviation = preferred_tls_deviation_for_error(&error);
+                let gated_error = self.gate_tls_error_for_mode(error, preferred_deviation);
+                self.record_tls_config_event(
+                    now_ms,
+                    packet_id,
+                    &input_digest,
+                    &state_before,
+                    &gated_error,
+                    preferred_deviation,
+                );
+                return Err(gated_error);
+            }
+        };
+
+        let mut next_state = self.tls_state.clone();
+        match plan.listener_transition {
+            TlsListenerTransition::Enable => next_state.tls_listener_enabled = true,
+            TlsListenerTransition::Disable => next_state.tls_listener_enabled = false,
+            TlsListenerTransition::Keep => {}
+        }
+        if plan.requires_context_swap {
+            next_state.active_config = if plan.candidate_config.tls_enabled() {
+                Some(plan.candidate_config.clone())
+            } else {
+                None
+            };
+        }
+        if plan.requires_connection_type_configure {
+            next_state.connection_type_configured = true;
+        }
+        self.tls_state = next_state;
+        Ok(())
     }
 
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
@@ -287,6 +342,57 @@ impl Runtime {
             confidence: Some(1.0),
         });
     }
+
+    fn gate_tls_error_for_mode(
+        &self,
+        error: TlsCfgError,
+        preferred_deviation: HardenedDeviationCategory,
+    ) -> TlsCfgError {
+        if self.policy.mode != Mode::Hardened {
+            return error;
+        }
+        match evaluate_tls_hardened_deviation(&self.policy, preferred_deviation) {
+            Ok(_) => error,
+            Err(gated_error) => gated_error,
+        }
+    }
+
+    fn record_tls_config_event(
+        &mut self,
+        now_ms: u64,
+        packet_id: u64,
+        input_digest: &str,
+        state_before: &str,
+        error: &TlsCfgError,
+        preferred_deviation: HardenedDeviationCategory,
+    ) {
+        let reply = RespFrame::Error(format!(
+            "ERR TLS/config boundary violation ({})",
+            error.reason_code()
+        ));
+        self.record_threat_event(ThreatEventInput {
+            now_ms,
+            packet_id,
+            threat_class: ThreatClass::ConfigDowngradeAbuse,
+            preferred_deviation: Some(preferred_deviation),
+            subsystem: "tls_config",
+            action: "reject_runtime_apply",
+            reason_code: error.reason_code(),
+            reason: error.to_string(),
+            input_digest: input_digest.to_string(),
+            state_before,
+            output: &reply,
+        });
+    }
+}
+
+fn preferred_tls_deviation_for_error(error: &TlsCfgError) -> HardenedDeviationCategory {
+    match error {
+        TlsCfgError::OperationalKnobContractViolation(_) => {
+            HardenedDeviationCategory::ResourceClamp
+        }
+        _ => HardenedDeviationCategory::MetadataSanitization,
+    }
 }
 
 fn next_packet_id() -> u64 {
@@ -391,6 +497,7 @@ pub mod ecosystem {
 mod tests {
     use fr_config::{
         DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
+        TlsAuthClients, TlsConfig, TlsProtocol,
     };
     use fr_eventloop::{
         EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase, LoopBootstrap, TickBudget,
@@ -574,6 +681,72 @@ mod tests {
         let _ = rt.execute_frame(in_frame, 42);
         let event = rt.evidence().events().last().expect("event");
         assert_eq!(event.mode, Mode::Hardened);
+        assert_eq!(event.decision_action, DecisionAction::RejectNonAllowlisted);
+        assert_eq!(event.severity, DriftSeverity::S2);
+    }
+
+    fn valid_tls_config() -> TlsConfig {
+        TlsConfig {
+            tls_port: Some(6380),
+            cert_file: Some("cert.pem".to_string()),
+            key_file: Some("key.pem".to_string()),
+            ca_file: Some("ca.pem".to_string()),
+            protocols: vec![TlsProtocol::TlsV1_2, TlsProtocol::TlsV1_3],
+            ciphers: Some("HIGH:!aNULL".to_string()),
+            auth_clients: TlsAuthClients::Required,
+            cluster_announce_tls_port: Some(16380),
+            max_new_tls_connections_per_cycle: 64,
+        }
+    }
+
+    #[test]
+    fn fr_p2c_009_u010_runtime_apply_updates_tls_state() {
+        let mut runtime = Runtime::default_strict();
+        runtime
+            .apply_tls_config(valid_tls_config(), 123)
+            .expect("valid TLS config");
+        let tls_state = runtime.tls_runtime_state();
+        assert!(tls_state.tls_listener_enabled);
+        assert!(tls_state.connection_type_configured);
+        assert!(tls_state.active_config.is_some());
+    }
+
+    #[test]
+    fn fr_p2c_009_u013_strict_mode_rejects_unsafe_tls_config_and_records_event() {
+        let mut runtime = Runtime::default_strict();
+        let mut invalid = valid_tls_config();
+        invalid.tls_port = None;
+        invalid.cluster_announce_tls_port = None;
+        let err = runtime
+            .apply_tls_config(invalid, 321)
+            .expect_err("must fail closed");
+        assert_eq!(err.reason_code(), "tlscfg.safety_gate_contract_violation");
+
+        let event = runtime.evidence().events().last().expect("event");
+        assert_eq!(event.threat_class, ThreatClass::ConfigDowngradeAbuse);
+        assert_eq!(event.reason_code, "tlscfg.safety_gate_contract_violation");
+        assert_eq!(event.decision_action, DecisionAction::FailClosed);
+        assert_eq!(event.severity, DriftSeverity::S0);
+    }
+
+    #[test]
+    fn fr_p2c_009_u013_hardened_non_allowlisted_tls_deviation_is_rejected() {
+        let mut policy = RuntimePolicy::hardened();
+        policy
+            .hardened_allowlist
+            .retain(|category| *category != HardenedDeviationCategory::MetadataSanitization);
+        let mut runtime = Runtime::new(policy);
+
+        let mut invalid = valid_tls_config();
+        invalid.tls_port = None;
+        invalid.cluster_announce_tls_port = None;
+        let err = runtime
+            .apply_tls_config(invalid, 456)
+            .expect_err("must reject non-allowlisted");
+        assert_eq!(err.reason_code(), "tlscfg.hardened_nonallowlisted_rejected");
+
+        let event = runtime.evidence().events().last().expect("event");
+        assert_eq!(event.reason_code, "tlscfg.hardened_nonallowlisted_rejected");
         assert_eq!(event.decision_action, DecisionAction::RejectNonAllowlisted);
         assert_eq!(event.severity, DriftSeverity::S2);
     }
