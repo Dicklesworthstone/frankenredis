@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -20,6 +21,8 @@ use crate::log_contract::{
 
 pub mod log_contract;
 pub mod phase2c_schema;
+
+pub const DIFFERENTIAL_REPORT_SCHEMA_VERSION: &str = "fr_conformance_differential_report/v1";
 
 #[derive(Debug, Clone)]
 pub struct HarnessConfig {
@@ -117,14 +120,19 @@ pub struct CaseOutcome {
     pub expected: RespFrame,
     pub actual: RespFrame,
     pub detail: Option<String>,
+    pub reason_code: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DifferentialReport {
+    pub schema_version: &'static str,
     pub suite: String,
+    pub fixture: String,
     pub total: usize,
     pub passed: usize,
     pub failed: Vec<CaseOutcome>,
+    pub reason_code_counts: BTreeMap<String, usize>,
+    pub failed_without_reason_code: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -191,16 +199,17 @@ pub fn run_fixture(
                 expected,
                 actual,
                 detail: build_case_detail(frame_ok, threat_result.err(), log_result.err()),
+                reason_code: reason_code_from_evidence(new_events),
             });
         }
     }
 
-    Ok(DifferentialReport {
-        suite: fixture.suite,
+    Ok(build_differential_report(
+        fixture.suite,
+        fixture_name,
         total,
-        passed: total.saturating_sub(failed.len()),
         failed,
-    })
+    ))
 }
 
 pub fn run_live_redis_diff(
@@ -264,16 +273,17 @@ pub fn run_live_redis_diff(
                 expected: redis_actual,
                 actual: runtime_actual,
                 detail: build_case_detail(frame_ok, None, log_result.err()),
+                reason_code: reason_code_from_evidence(new_events),
             });
         }
     }
 
-    Ok(DifferentialReport {
+    Ok(build_differential_report(
         suite,
+        fixture_name,
         total,
-        passed: total.saturating_sub(failed.len()),
         failed,
-    })
+    ))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -339,16 +349,17 @@ pub fn run_protocol_fixture(
                 expected,
                 actual,
                 detail: build_case_detail(frame_ok, threat_result.err(), log_result.err()),
+                reason_code: reason_code_from_evidence(new_events),
             });
         }
     }
 
-    Ok(DifferentialReport {
-        suite: fixture.suite,
+    Ok(build_differential_report(
+        fixture.suite,
+        fixture_name,
         total,
-        passed: total.saturating_sub(failed.len()),
         failed,
-    })
+    ))
 }
 
 pub fn run_live_redis_protocol_diff(
@@ -409,16 +420,17 @@ pub fn run_live_redis_protocol_diff(
                 expected: redis_actual,
                 actual: runtime_actual,
                 detail: build_case_detail(frame_ok, None, log_result.err()),
+                reason_code: reason_code_from_evidence(new_events),
             });
         }
     }
 
-    Ok(DifferentialReport {
+    Ok(build_differential_report(
         suite,
+        fixture_name,
         total,
-        passed: total.saturating_sub(failed.len()),
         failed,
-    })
+    ))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -480,6 +492,7 @@ pub fn run_replay_fixture(
                     expected: RespFrame::BulkString(None),
                     actual: RespFrame::BulkString(None),
                     detail: Some(format!("AOF stream decode failed: {err:?}")),
+                    reason_code: None,
                 });
                 continue;
             }
@@ -512,6 +525,7 @@ pub fn run_replay_fixture(
                     detail: Some(format!(
                         "structured log emission failed during replay record execution: {err}"
                     )),
+                    reason_code: reason_code_from_evidence(new_events),
                 });
             }
         }
@@ -554,16 +568,61 @@ pub fn run_replay_fixture(
                     expected,
                     actual,
                     detail: build_case_detail(frame_ok, None, log_result.err()),
+                    reason_code: reason_code_from_evidence(new_events),
                 });
             }
         }
     }
 
-    Ok(DifferentialReport {
-        suite: fixture.suite,
+    Ok(build_differential_report(
+        fixture.suite,
+        fixture_name,
+        total,
+        failed,
+    ))
+}
+
+fn build_differential_report(
+    suite: String,
+    fixture_name: &str,
+    total: usize,
+    failed: Vec<CaseOutcome>,
+) -> DifferentialReport {
+    let (reason_code_counts, failed_without_reason_code) = summarize_failure_reason_codes(&failed);
+    DifferentialReport {
+        schema_version: DIFFERENTIAL_REPORT_SCHEMA_VERSION,
+        suite,
+        fixture: fixture_name.to_string(),
         total,
         passed: total.saturating_sub(failed.len()),
         failed,
+        reason_code_counts,
+        failed_without_reason_code,
+    }
+}
+
+fn summarize_failure_reason_codes(failed: &[CaseOutcome]) -> (BTreeMap<String, usize>, usize) {
+    let mut reason_code_counts = BTreeMap::new();
+    let mut failed_without_reason_code = 0_usize;
+    for case in failed {
+        if let Some(reason_code) = case.reason_code.as_deref() {
+            *reason_code_counts
+                .entry(reason_code.to_string())
+                .or_insert(0) += 1;
+        } else {
+            failed_without_reason_code = failed_without_reason_code.saturating_add(1);
+        }
+    }
+    (reason_code_counts, failed_without_reason_code)
+}
+
+fn reason_code_from_evidence(events: &[EvidenceEvent]) -> Option<String> {
+    events.iter().rev().find_map(|event| {
+        if event.reason_code.is_empty() {
+            None
+        } else {
+            Some(event.reason_code.to_string())
+        }
     })
 }
 
@@ -834,6 +893,7 @@ fn validate_structured_log_emission(
 
 fn packet_family_for_fixture(fixture_name: &str) -> &'static str {
     match fixture_name {
+        "fr_p2c_001_eventloop_journey.json" => "FR-P2C-001",
         "protocol_negative.json" => "FR-P2C-002",
         "persist_replay.json" => "FR-P2C-005",
         _ => "FR-P2C-003",
@@ -879,6 +939,7 @@ mod tests {
         DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
         TlsAuthClients, TlsConfig, TlsProtocol,
     };
+    use fr_protocol::RespFrame;
     use fr_repl::{
         BacklogWindow, HandshakeFsm, HandshakeState, HandshakeStep, PsyncDecision, PsyncRejection,
         ReplOffset, WaitAofThreshold, WaitThreshold, decide_psync, evaluate_wait, evaluate_waitaof,
@@ -886,10 +947,11 @@ mod tests {
     use fr_runtime::Runtime;
 
     use super::{
-        EvidenceEvent, ExpectedThreat, HarnessConfig, LiveOracleConfig,
-        StructuredLogEmissionContext, run_fixture, run_live_redis_diff,
-        run_live_redis_protocol_diff, run_protocol_fixture, run_replay_fixture, run_smoke,
-        validate_structured_log_emission, validate_threat_expectation,
+        CaseOutcome, DIFFERENTIAL_REPORT_SCHEMA_VERSION, EvidenceEvent, ExpectedThreat,
+        HarnessConfig, LiveOracleConfig, StructuredLogEmissionContext, build_differential_report,
+        run_fixture, run_live_redis_diff, run_live_redis_protocol_diff, run_protocol_fixture,
+        run_replay_fixture, run_smoke, validate_structured_log_emission,
+        validate_threat_expectation,
     };
     use crate::log_contract::{
         LogOutcome, StructuredLogEvent, VerificationPath, live_log_output_path,
@@ -972,6 +1034,61 @@ mod tests {
                 event.validate().expect("structured log validates");
             }
         }
+        let _ = fs::remove_dir_all(log_root);
+    }
+
+    #[test]
+    fn fr_p2c_001_fixture_maps_to_packet_family_in_structured_logs() {
+        let log_root = unique_temp_log_root("fr_p2c_001_structured_log");
+        let out_path = log_root.join("packet/fr_p2c_001.jsonl");
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:7".to_string(),
+            ts_ms: 7,
+            packet_id: 1,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "eventloop",
+            action: "maxclients_reject",
+            reason_code: "eventloop.accept.maxclients_reached",
+            reason: "maxclients reached".to_string(),
+            input_digest: "abc".to_string(),
+            output_digest: "def".to_string(),
+            state_digest_before: "state_before".to_string(),
+            state_digest_after: "state_after".to_string(),
+            replay_cmd: "cargo test".to_string(),
+            artifact_refs: vec!["TEST_LOG_SCHEMA_V1.md".to_string()],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "unit::fr-p2c-001",
+                fixture_name: "fr_p2c_001_eventloop_journey.json",
+                case_name: "fr_p2c_001_u006_accept_path_rejects_over_maxclients",
+                verification_path: VerificationPath::Unit,
+                now_ms: 7,
+                outcome: LogOutcome::Pass,
+                persist_path: Some(&out_path),
+            },
+            &[event],
+        )
+        .expect("packet family conversion should succeed");
+
+        let raw = fs::read_to_string(&out_path).expect("read structured output");
+        let line = raw
+            .lines()
+            .find(|candidate| !candidate.trim().is_empty())
+            .expect("one structured event");
+        let parsed: StructuredLogEvent =
+            serde_json::from_str(line).expect("parse structured event");
+        assert_eq!(parsed.packet_id, "FR-P2C-001");
+        assert_eq!(
+            parsed.fixture_id.as_deref(),
+            Some("fr_p2c_001_eventloop_journey.json")
+        );
+        parsed.validate().expect("structured event validates");
         let _ = fs::remove_dir_all(log_root);
     }
 
@@ -1729,6 +1846,49 @@ mod tests {
         )
         .expect_err("empty artifact_refs should fail conversion");
         assert!(err.contains("artifact_refs"));
+    }
+
+    #[test]
+    fn differential_report_summarizes_reason_codes_deterministically() {
+        let report = build_differential_report(
+            "suite".to_string(),
+            "fixture.json",
+            4,
+            vec![
+                CaseOutcome {
+                    name: "case-a".to_string(),
+                    passed: false,
+                    expected: RespFrame::SimpleString("OK".to_string()),
+                    actual: RespFrame::Error("ERR".to_string()),
+                    detail: Some("detail".to_string()),
+                    reason_code: Some("parser.invalid_bulk_len".to_string()),
+                },
+                CaseOutcome {
+                    name: "case-b".to_string(),
+                    passed: false,
+                    expected: RespFrame::SimpleString("OK".to_string()),
+                    actual: RespFrame::Error("ERR".to_string()),
+                    detail: Some("detail".to_string()),
+                    reason_code: Some("parser.invalid_bulk_len".to_string()),
+                },
+                CaseOutcome {
+                    name: "case-c".to_string(),
+                    passed: false,
+                    expected: RespFrame::SimpleString("OK".to_string()),
+                    actual: RespFrame::Error("ERR".to_string()),
+                    detail: Some("detail".to_string()),
+                    reason_code: None,
+                },
+            ],
+        );
+
+        assert_eq!(report.schema_version, DIFFERENTIAL_REPORT_SCHEMA_VERSION);
+        assert_eq!(report.fixture, "fixture.json");
+        assert_eq!(
+            report.reason_code_counts.get("parser.invalid_bulk_len"),
+            Some(&2)
+        );
+        assert_eq!(report.failed_without_reason_code, 1);
     }
 
     #[test]

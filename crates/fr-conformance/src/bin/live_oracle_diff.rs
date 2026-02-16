@@ -1,13 +1,14 @@
 #![forbid(unsafe_code)]
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use fr_conformance::{
-    CaseOutcome, DifferentialReport, HarnessConfig, LiveOracleConfig, run_live_redis_diff,
-    run_live_redis_protocol_diff,
+    CaseOutcome, DIFFERENTIAL_REPORT_SCHEMA_VERSION, DifferentialReport, HarnessConfig,
+    LiveOracleConfig, run_live_redis_diff, run_live_redis_protocol_diff,
 };
 use serde::Serialize;
 
@@ -19,6 +20,7 @@ struct CliArgs {
     port: u16,
     log_root: Option<PathBuf>,
     json_out: Option<PathBuf>,
+    run_id: Option<String>,
 }
 
 fn main() -> ExitCode {
@@ -67,9 +69,26 @@ fn run() -> Result<ExitCode, String> {
     };
 
     println!("suite: {}", report.suite);
+    println!("schema_version: {}", report.schema_version);
     println!("total: {}", report.total);
     println!("passed: {}", report.passed);
     println!("failed: {}", report.failed.len());
+    println!(
+        "pass_rate: {:.4}",
+        compute_pass_rate(report.passed, report.total)
+    );
+    if !report.reason_code_counts.is_empty() {
+        println!("reason_code_summary:");
+        for (reason_code, count) in &report.reason_code_counts {
+            println!("  {reason_code}: {count}");
+        }
+    }
+    if report.failed_without_reason_code > 0 {
+        println!(
+            "failed_without_reason_code: {}",
+            report.failed_without_reason_code
+        );
+    }
     if let Some(path) = &cli.log_root {
         println!("live_log_root: {}", path.display());
     }
@@ -98,6 +117,7 @@ fn parse_args(raw_args: Vec<String>) -> Result<CliArgs, String> {
     let mut args = raw_args;
     let mut log_root: Option<PathBuf> = None;
     let mut json_out: Option<PathBuf> = None;
+    let mut run_id: Option<String> = None;
     let mut idx = 0;
     while idx < args.len() {
         match args[idx].as_str() {
@@ -114,6 +134,14 @@ fn parse_args(raw_args: Vec<String>) -> Result<CliArgs, String> {
                     return Err(usage("missing path after --json-out"));
                 }
                 json_out = Some(PathBuf::from(args[idx + 1].clone()));
+                args.drain(idx..=idx + 1);
+                continue;
+            }
+            "--run-id" => {
+                if idx + 1 >= args.len() {
+                    return Err(usage("missing value after --run-id"));
+                }
+                run_id = Some(args[idx + 1].clone());
                 args.drain(idx..=idx + 1);
                 continue;
             }
@@ -144,6 +172,7 @@ fn parse_args(raw_args: Vec<String>) -> Result<CliArgs, String> {
         port,
         log_root,
         json_out,
+        run_id,
     })
 }
 
@@ -153,10 +182,14 @@ struct JsonFailure {
     expected: String,
     actual: String,
     detail: Option<String>,
+    reason_code: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 struct JsonReport {
+    schema_version: String,
+    differential_schema_version: String,
+    run_id: Option<String>,
     status: String,
     mode: String,
     fixture: String,
@@ -165,8 +198,12 @@ struct JsonReport {
     suite: String,
     total: usize,
     passed: usize,
+    pass_rate: f64,
     failed_count: usize,
+    total_failures: usize,
     live_log_root: Option<String>,
+    reason_code_counts: BTreeMap<String, usize>,
+    failed_without_reason_code: usize,
     failures: Vec<JsonFailure>,
     run_error: Option<String>,
 }
@@ -187,6 +224,9 @@ fn write_json_report(
         })?;
     }
     let json_report = JsonReport {
+        schema_version: "live_oracle_diff_report/v2".to_string(),
+        differential_schema_version: report.schema_version.to_string(),
+        run_id: cli.run_id.clone(),
         status: "completed".to_string(),
         mode: cli.mode.clone(),
         fixture: cli.fixture.clone(),
@@ -195,8 +235,12 @@ fn write_json_report(
         suite: report.suite.clone(),
         total: report.total,
         passed: report.passed,
+        pass_rate: compute_pass_rate(report.passed, report.total),
         failed_count: report.failed.len(),
+        total_failures: report.failed.len(),
         live_log_root: cli.log_root.as_ref().map(|root| root.display().to_string()),
+        reason_code_counts: report.reason_code_counts.clone(),
+        failed_without_reason_code: report.failed_without_reason_code,
         failures: report.failed.iter().map(json_failure).collect(),
         run_error: None,
     };
@@ -220,6 +264,9 @@ fn write_json_error_report(path: &Path, cli: &CliArgs, run_error: &str) -> Resul
     }
 
     let json_report = JsonReport {
+        schema_version: "live_oracle_diff_report/v2".to_string(),
+        differential_schema_version: DIFFERENTIAL_REPORT_SCHEMA_VERSION.to_string(),
+        run_id: cli.run_id.clone(),
         status: "execution_error".to_string(),
         mode: cli.mode.clone(),
         fixture: cli.fixture.clone(),
@@ -228,8 +275,12 @@ fn write_json_error_report(path: &Path, cli: &CliArgs, run_error: &str) -> Resul
         suite: String::new(),
         total: 0,
         passed: 0,
+        pass_rate: 0.0,
         failed_count: 0,
+        total_failures: 0,
         live_log_root: cli.log_root.as_ref().map(|root| root.display().to_string()),
+        reason_code_counts: BTreeMap::new(),
+        failed_without_reason_code: 0,
         failures: Vec::new(),
         run_error: Some(run_error.to_string()),
     };
@@ -245,12 +296,21 @@ fn json_failure(case: &CaseOutcome) -> JsonFailure {
         expected: format!("{:?}", case.expected),
         actual: format!("{:?}", case.actual),
         detail: case.detail.clone(),
+        reason_code: case.reason_code.clone(),
+    }
+}
+
+fn compute_pass_rate(passed: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        passed as f64 / total as f64
     }
 }
 
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nusage: cargo run -p fr-conformance --bin live_oracle_diff -- [--log-root <path>] [--json-out <path>] <command|protocol> <fixture.json> [host] [port]"
+        "{reason}\nusage: cargo run -p fr-conformance --bin live_oracle_diff -- [--log-root <path>] [--json-out <path>] [--run-id <id>] <command|protocol> <fixture.json> [host] [port]"
     )
 }
 
@@ -265,6 +325,8 @@ mod tests {
             "artifacts/logs".to_string(),
             "--json-out".to_string(),
             "artifacts/report.json".to_string(),
+            "--run-id".to_string(),
+            "run-123".to_string(),
             "protocol".to_string(),
             "protocol_negative.json".to_string(),
             "10.0.0.5".to_string(),
@@ -287,6 +349,7 @@ mod tests {
                 .to_string_lossy(),
             "artifacts/report.json"
         );
+        assert_eq!(parsed.run_id.as_deref(), Some("run-123"));
     }
 
     #[test]
@@ -296,5 +359,6 @@ mod tests {
 
         assert_eq!(parsed.host, "127.0.0.1");
         assert_eq!(parsed.port, 6379);
+        assert_eq!(parsed.run_id, None);
     }
 }

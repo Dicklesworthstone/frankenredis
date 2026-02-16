@@ -1,0 +1,64 @@
+name: Live Conformance Gates
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  live-conformance-gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Redis
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-server
+
+      - name: Install Rust Nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache Rust Build Artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Start Redis Server
+        run: redis-server --save "" --appendonly no --daemonize yes
+
+      - name: Run Live Oracle Differential Suites
+        run: |
+          ./scripts/run_live_oracle_diff.sh \
+            --host 127.0.0.1 \
+            --port 6379 \
+            --output-root artifacts/e2e_orchestrator \
+            --run-id ci-live
+
+      - name: Enforce Coverage/Flake Budgets
+        run: ./scripts/check_coverage_flake_budget.sh artifacts/e2e_orchestrator/ci-live/coverage_summary.json
+
+      - name: Run Adversarial Triage
+        run: |
+          ./scripts/run_adversarial_triage.sh \
+            --output-root artifacts/adversarial_triage \
+            --run-id ci-adv \
+            --runner local
+
+      - name: Upload Live Oracle Bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-orchestrator-ci-live
+          path: artifacts/e2e_orchestrator/ci-live
+          if-no-files-found: warn
+
+      - name: Upload Adversarial Triage Bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: adversarial-triage-ci-adv
+          path: artifacts/adversarial_triage/ci-adv
+          if-no-files-found: warn

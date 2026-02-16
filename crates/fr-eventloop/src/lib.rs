@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+use std::collections::{BTreeMap, BTreeSet};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TickBudget {
     pub max_accepts: usize,
@@ -188,6 +190,287 @@ pub struct TickPlan {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadinessCallback {
+    Readable,
+    Writable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallbackDispatchOrder {
+    pub first: Option<ReadinessCallback>,
+    pub second: Option<ReadinessCallback>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarrierOrderError {
+    AeBarrierViolation,
+}
+
+impl BarrierOrderError {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::AeBarrierViolation => "eventloop.ae_barrier_violation",
+        }
+    }
+}
+
+#[must_use]
+pub const fn plan_readiness_callback_order(
+    readable_ready: bool,
+    writable_ready: bool,
+    ae_barrier: bool,
+) -> CallbackDispatchOrder {
+    match (readable_ready, writable_ready, ae_barrier) {
+        (false, false, _) => CallbackDispatchOrder {
+            first: None,
+            second: None,
+        },
+        (true, false, _) => CallbackDispatchOrder {
+            first: Some(ReadinessCallback::Readable),
+            second: None,
+        },
+        (false, true, _) => CallbackDispatchOrder {
+            first: Some(ReadinessCallback::Writable),
+            second: None,
+        },
+        (true, true, true) => CallbackDispatchOrder {
+            first: Some(ReadinessCallback::Writable),
+            second: Some(ReadinessCallback::Readable),
+        },
+        (true, true, false) => CallbackDispatchOrder {
+            first: Some(ReadinessCallback::Readable),
+            second: Some(ReadinessCallback::Writable),
+        },
+    }
+}
+
+pub fn validate_ae_barrier_order(
+    readable_ready: bool,
+    writable_ready: bool,
+    ae_barrier: bool,
+    observed: CallbackDispatchOrder,
+) -> Result<(), BarrierOrderError> {
+    if readable_ready && writable_ready && ae_barrier {
+        let expected = CallbackDispatchOrder {
+            first: Some(ReadinessCallback::Writable),
+            second: Some(ReadinessCallback::Readable),
+        };
+        if observed != expected {
+            return Err(BarrierOrderError::AeBarrierViolation);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FdRegistrationError {
+    FdOutOfRange {
+        fd: usize,
+        setsize: usize,
+    },
+    FdResizeFailure {
+        requested_fd: usize,
+        max_setsize: usize,
+    },
+}
+
+impl FdRegistrationError {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::FdOutOfRange { .. } => "eventloop.fd_out_of_range",
+            Self::FdResizeFailure { .. } => "eventloop.fd_resize_failure",
+        }
+    }
+}
+
+pub fn validate_fd_registration_bounds(
+    fd: usize,
+    setsize: usize,
+) -> Result<(), FdRegistrationError> {
+    if fd >= setsize {
+        return Err(FdRegistrationError::FdOutOfRange { fd, setsize });
+    }
+    Ok(())
+}
+
+pub fn plan_fd_setsize_growth(
+    current_setsize: usize,
+    requested_fd: usize,
+    max_setsize: usize,
+) -> Result<usize, FdRegistrationError> {
+    let required_setsize = requested_fd.saturating_add(1);
+    if required_setsize > max_setsize {
+        return Err(FdRegistrationError::FdResizeFailure {
+            requested_fd,
+            max_setsize,
+        });
+    }
+    if requested_fd < current_setsize {
+        return Ok(current_setsize);
+    }
+
+    let mut next_setsize = current_setsize.max(1);
+    while next_setsize < required_setsize {
+        if next_setsize >= max_setsize {
+            break;
+        }
+        next_setsize = next_setsize.saturating_mul(2).min(max_setsize);
+    }
+    if next_setsize < required_setsize {
+        return Err(FdRegistrationError::FdResizeFailure {
+            requested_fd,
+            max_setsize,
+        });
+    }
+    Ok(next_setsize)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AcceptPathError {
+    MaxClientsReached {
+        current_clients: usize,
+        max_clients: usize,
+    },
+    HandlerBindFailure,
+}
+
+impl AcceptPathError {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::MaxClientsReached { .. } => "eventloop.accept.maxclients_reached",
+            Self::HandlerBindFailure => "eventloop.accept.handler_bind_failure",
+        }
+    }
+}
+
+pub fn validate_accept_path(
+    current_clients: usize,
+    max_clients: usize,
+    read_handler_bound: bool,
+) -> Result<(), AcceptPathError> {
+    if current_clients >= max_clients {
+        return Err(AcceptPathError::MaxClientsReached {
+            current_clients,
+            max_clients,
+        });
+    }
+    if !read_handler_bound {
+        return Err(AcceptPathError::HandlerBindFailure);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadPathError {
+    QueryBufferLimitExceeded { observed: usize, limit: usize },
+    FatalErrorDisconnect,
+}
+
+impl ReadPathError {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::QueryBufferLimitExceeded { .. } => "eventloop.read.querybuf_limit_exceeded",
+            Self::FatalErrorDisconnect => "eventloop.read.fatal_error_disconnect",
+        }
+    }
+}
+
+pub fn validate_read_path(
+    current_query_buffer_len: usize,
+    newly_read_bytes: usize,
+    query_buffer_limit: usize,
+    fatal_read_error: bool,
+) -> Result<usize, ReadPathError> {
+    if fatal_read_error {
+        return Err(ReadPathError::FatalErrorDisconnect);
+    }
+    let next_query_buffer_len = current_query_buffer_len.saturating_add(newly_read_bytes);
+    if next_query_buffer_len > query_buffer_limit {
+        return Err(ReadPathError::QueryBufferLimitExceeded {
+            observed: next_query_buffer_len,
+            limit: query_buffer_limit,
+        });
+    }
+    Ok(next_query_buffer_len)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingWriteError {
+    FlushOrderViolation { client_id: u64 },
+    PendingReplyLost { client_id: u64 },
+}
+
+impl PendingWriteError {
+    #[must_use]
+    pub const fn reason_code(self) -> &'static str {
+        match self {
+            Self::FlushOrderViolation { .. } => "eventloop.write.flush_order_violation",
+            Self::PendingReplyLost { .. } => "eventloop.write.pending_reply_lost",
+        }
+    }
+}
+
+pub fn validate_pending_write_delivery(
+    queued_before_flush: &[u64],
+    flushed_now: &[u64],
+    pending_after_flush: &[u64],
+) -> Result<(), PendingWriteError> {
+    let mut queue_positions = BTreeMap::new();
+    for (idx, client_id) in queued_before_flush.iter().copied().enumerate() {
+        if queue_positions.insert(client_id, idx).is_some() {
+            return Err(PendingWriteError::FlushOrderViolation { client_id });
+        }
+    }
+
+    let mut seen = BTreeSet::new();
+    validate_delivery_slice(flushed_now, &queue_positions, &mut seen)?;
+    validate_delivery_slice(pending_after_flush, &queue_positions, &mut seen)?;
+
+    for client_id in queued_before_flush {
+        if !seen.contains(client_id) {
+            return Err(PendingWriteError::PendingReplyLost {
+                client_id: *client_id,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_delivery_slice(
+    sequence: &[u64],
+    queue_positions: &BTreeMap<u64, usize>,
+    seen: &mut BTreeSet<u64>,
+) -> Result<(), PendingWriteError> {
+    let mut prev_index = None;
+    for client_id in sequence {
+        let Some(&index) = queue_positions.get(client_id) else {
+            return Err(PendingWriteError::PendingReplyLost {
+                client_id: *client_id,
+            });
+        };
+        if !seen.insert(*client_id) {
+            return Err(PendingWriteError::FlushOrderViolation {
+                client_id: *client_id,
+            });
+        }
+        if let Some(previous) = prev_index
+            && index < previous
+        {
+            return Err(PendingWriteError::FlushOrderViolation {
+                client_id: *client_id,
+            });
+        }
+        prev_index = Some(index);
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TlsAcceptPlan {
     pub accepted_tls: usize,
     pub deferred_tls: usize,
@@ -258,9 +541,12 @@ pub fn apply_tls_accept_rate_limit(
 #[cfg(test)]
 mod tests {
     use super::{
-        BootstrapError, EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase, LoopBootstrap,
-        PhaseReplayError, TickBudget, apply_tls_accept_rate_limit, plan_tick, replay_phase_trace,
-        run_tick, validate_bootstrap,
+        AcceptPathError, BarrierOrderError, BootstrapError, EVENT_LOOP_PHASE_ORDER, EventLoopMode,
+        EventLoopPhase, FdRegistrationError, LoopBootstrap, PendingWriteError, PhaseReplayError,
+        ReadPathError, ReadinessCallback, TickBudget, apply_tls_accept_rate_limit,
+        plan_fd_setsize_growth, plan_readiness_callback_order, plan_tick, replay_phase_trace,
+        run_tick, validate_accept_path, validate_ae_barrier_order, validate_bootstrap,
+        validate_fd_registration_bounds, validate_pending_write_delivery, validate_read_path,
     };
 
     #[test]
@@ -298,6 +584,78 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_001_u002_barrier_order_preserves_writable_before_readable() {
+        let observed = plan_readiness_callback_order(true, true, true);
+        assert_eq!(observed.first, Some(ReadinessCallback::Writable));
+        assert_eq!(observed.second, Some(ReadinessCallback::Readable));
+        validate_ae_barrier_order(true, true, true, observed).expect("barrier order valid");
+    }
+
+    #[test]
+    fn fr_p2c_001_u002_barrier_order_violation_is_rejected() {
+        let err = validate_ae_barrier_order(
+            true,
+            true,
+            true,
+            super::CallbackDispatchOrder {
+                first: Some(ReadinessCallback::Readable),
+                second: Some(ReadinessCallback::Writable),
+            },
+        )
+        .expect_err("must reject readable-before-writable order under barrier");
+        assert_eq!(err, BarrierOrderError::AeBarrierViolation);
+        assert_eq!(err.reason_code(), "eventloop.ae_barrier_violation");
+    }
+
+    #[test]
+    fn fr_p2c_001_u002_barrier_order_property_covers_readiness_combinations() {
+        for readable_ready in [false, true] {
+            for writable_ready in [false, true] {
+                let observed = plan_readiness_callback_order(readable_ready, writable_ready, true);
+                if readable_ready && writable_ready {
+                    validate_ae_barrier_order(true, true, true, observed)
+                        .expect("barrier validation succeeds for planned order");
+                } else {
+                    validate_ae_barrier_order(readable_ready, writable_ready, true, observed)
+                        .expect("barrier validation is vacuously true without dual readiness");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fr_p2c_001_u004_fd_registration_rejects_out_of_range_descriptor() {
+        let err = validate_fd_registration_bounds(64, 64).expect_err("fd must be in range");
+        assert_eq!(
+            err,
+            FdRegistrationError::FdOutOfRange {
+                fd: 64,
+                setsize: 64
+            }
+        );
+        assert_eq!(err.reason_code(), "eventloop.fd_out_of_range");
+    }
+
+    #[test]
+    fn fr_p2c_001_u004_fd_resize_growth_is_deterministic() {
+        let grown = plan_fd_setsize_growth(64, 120, 1_024).expect("must grow");
+        assert_eq!(grown, 128);
+    }
+
+    #[test]
+    fn fr_p2c_001_u004_fd_resize_failure_reports_reason_code() {
+        let err = plan_fd_setsize_growth(64, 2_048, 1_024).expect_err("must fail");
+        assert_eq!(
+            err,
+            FdRegistrationError::FdResizeFailure {
+                requested_fd: 2_048,
+                max_setsize: 1_024
+            }
+        );
+        assert_eq!(err.reason_code(), "eventloop.fd_resize_failure");
+    }
+
+    #[test]
     fn fr_p2c_001_u005_blocked_mode_bounded_scope() {
         let plan = plan_tick(
             100,
@@ -329,6 +687,78 @@ mod tests {
         );
         assert_eq!(plan.stats.accepted, 0);
         assert_eq!(plan.stats.processed_commands, 7);
+    }
+
+    #[test]
+    fn fr_p2c_001_u006_accept_path_rejects_over_maxclients() {
+        let err = validate_accept_path(10_000, 10_000, true).expect_err("must reject");
+        assert_eq!(
+            err,
+            AcceptPathError::MaxClientsReached {
+                current_clients: 10_000,
+                max_clients: 10_000
+            }
+        );
+        assert_eq!(err.reason_code(), "eventloop.accept.maxclients_reached");
+    }
+
+    #[test]
+    fn fr_p2c_001_u006_accept_path_detects_handler_bind_failure() {
+        let err = validate_accept_path(9_999, 10_000, false).expect_err("bind must fail");
+        assert_eq!(err, AcceptPathError::HandlerBindFailure);
+        assert_eq!(err.reason_code(), "eventloop.accept.handler_bind_failure");
+    }
+
+    #[test]
+    fn fr_p2c_001_u007_read_path_enforces_query_buffer_limit() {
+        let err = validate_read_path(6, 5, 10, false).expect_err("must exceed limit");
+        assert_eq!(
+            err,
+            ReadPathError::QueryBufferLimitExceeded {
+                observed: 11,
+                limit: 10
+            }
+        );
+        assert_eq!(err.reason_code(), "eventloop.read.querybuf_limit_exceeded");
+    }
+
+    #[test]
+    fn fr_p2c_001_u008_read_path_terminates_on_fatal_error() {
+        let err = validate_read_path(0, 0, 32, true).expect_err("fatal read must disconnect");
+        assert_eq!(err, ReadPathError::FatalErrorDisconnect);
+        assert_eq!(err.reason_code(), "eventloop.read.fatal_error_disconnect");
+    }
+
+    #[test]
+    fn fr_p2c_001_u009_pending_write_delivery_accepts_prefix_flushes() {
+        let queued = [11_u64, 13, 17, 19];
+        for split in 0..=queued.len() {
+            let flushed = &queued[..split];
+            let pending = &queued[split..];
+            validate_pending_write_delivery(&queued, flushed, pending)
+                .expect("prefix flush must preserve delivery integrity");
+        }
+    }
+
+    #[test]
+    fn fr_p2c_001_u009_pending_write_delivery_rejects_reordered_flushes() {
+        let queued = [11_u64, 13, 17];
+        let err = validate_pending_write_delivery(&queued, &[13, 11], &[17])
+            .expect_err("reordered flush must fail");
+        assert_eq!(
+            err,
+            PendingWriteError::FlushOrderViolation { client_id: 11 }
+        );
+        assert_eq!(err.reason_code(), "eventloop.write.flush_order_violation");
+    }
+
+    #[test]
+    fn fr_p2c_001_u009_pending_write_delivery_rejects_missing_replies() {
+        let queued = [11_u64, 13, 17];
+        let err = validate_pending_write_delivery(&queued, &[11], &[17])
+            .expect_err("missing client reply must fail");
+        assert_eq!(err, PendingWriteError::PendingReplyLost { client_id: 13 });
+        assert_eq!(err.reason_code(), "eventloop.write.pending_reply_lost");
     }
 
     #[test]

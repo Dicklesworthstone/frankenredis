@@ -4,9 +4,11 @@ This folder stores normalized oracle-vs-target fixtures for fr-conformance.
 
 - core_strings.json: first deterministic compatibility suite for `PING`, `SET`, `GET`, `DEL`, `INCR`, `EXPIRE`, and `PTTL`.
 - core_errors.json: Redis-style error normalization suite for unknown command, arity, syntax, integer parse, and overflow paths.
+- fr_p2c_001_eventloop_journey.json: packet-001 smoke journey fixture used by `fr_p2c_001_e2e_contract_smoke`.
 - protocol_negative.json: malformed RESP corpus for parser fail-closed behavior and protocol error string contract.
 - persist_replay.json: replay-oriented fixtures that execute AOF-shaped records and assert post-replay key state.
 - adversarial_corpus_v1.json: versioned adversarial corpus manifest (suite mode, fixture path, risk focus, replay commands, and default route bead).
+- user_workflow_corpus_v1.json: versioned user-journey corpus mapping stable scenario IDs to unit/differential/e2e hooks and owner beads.
 - smoke_case.json: legacy bootstrap fixture retained for backwards compatibility.
 
 ## Live Oracle E2E Orchestrator
@@ -53,3 +55,20 @@ This executes the suites listed in `adversarial_corpus_v1.json` using `fr-confor
 - `artifacts/adversarial_triage/<run-id>/manifest.json` (copied corpus manifest)
 - `artifacts/adversarial_triage/<run-id>/repro.lock` (replay metadata)
 - `artifacts/adversarial_triage/<run-id>/live_logs/` (structured JSONL logs)
+
+## User Workflow Journey Corpus Gate
+
+Validate that the versioned user workflow corpus remains stable and aligned with
+golden log artifacts:
+
+```bash
+cargo run -p fr-conformance --bin user_journey_corpus_gate -- \
+  --manifest crates/fr-conformance/fixtures/user_workflow_corpus_v1.json \
+  --json-out artifacts/user_journey_corpus/report.json
+```
+
+The gate verifies:
+
+- packet coverage for all `FR-P2C-001..FR-P2C-009` journeys
+- stable `test_or_scenario_id` bindings against golden log JSONL entries
+- explicit unit/differential/e2e hook mappings with owner-bead traceability

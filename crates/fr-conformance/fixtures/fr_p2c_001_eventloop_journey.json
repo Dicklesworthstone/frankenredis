@@ -1,0 +1,35 @@
+{
+  "suite": "fr_p2c_001_eventloop_journey",
+  "cases": [
+    {
+      "name": "ping_round_trip",
+      "now_ms": 0,
+      "argv": ["PING"],
+      "expect": { "kind": "simple", "value": "PONG" }
+    },
+    {
+      "name": "set_contract_key",
+      "now_ms": 1,
+      "argv": ["SET", "fr:p2c:001:key", "value"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "get_contract_key",
+      "now_ms": 2,
+      "argv": ["GET", "fr:p2c:001:key"],
+      "expect": { "kind": "bulk", "value": "value" }
+    },
+    {
+      "name": "unknown_command_is_deterministic_error",
+      "now_ms": 3,
+      "argv": ["NOPE"],
+      "expect": { "kind": "error", "value": "ERR unknown command 'NOPE'" }
+    },
+    {
+      "name": "wrong_arity_is_deterministic_error",
+      "now_ms": 4,
+      "argv": ["GET"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GET' command" }
+    }
+  ]
+}

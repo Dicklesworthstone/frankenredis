@@ -9,8 +9,12 @@ use fr_config::{
     evaluate_tls_hardened_deviation, plan_tls_runtime_apply,
 };
 use fr_eventloop::{
-    BootstrapError, EventLoopMode, EventLoopPhase, LoopBootstrap, PhaseReplayError, TickBudget,
-    TickPlan, apply_tls_accept_rate_limit, plan_tick, replay_phase_trace, validate_bootstrap,
+    AcceptPathError, BarrierOrderError, BootstrapError, CallbackDispatchOrder, EventLoopMode,
+    EventLoopPhase, FdRegistrationError, LoopBootstrap, PendingWriteError, PhaseReplayError,
+    ReadPathError, TickBudget, TickPlan, apply_tls_accept_rate_limit, plan_fd_setsize_growth,
+    plan_readiness_callback_order, plan_tick, replay_phase_trace, validate_accept_path,
+    validate_ae_barrier_order, validate_bootstrap, validate_fd_registration_bounds,
+    validate_pending_write_delivery, validate_read_path,
 };
 use fr_protocol::{RespFrame, RespParseError, parse_frame};
 use fr_store::Store;
@@ -205,6 +209,69 @@ impl Runtime {
 
     pub fn validate_event_loop_bootstrap(bootstrap: LoopBootstrap) -> Result<(), BootstrapError> {
         validate_bootstrap(bootstrap)
+    }
+
+    #[must_use]
+    pub fn plan_event_loop_readiness_order(
+        readable_ready: bool,
+        writable_ready: bool,
+        ae_barrier: bool,
+    ) -> CallbackDispatchOrder {
+        plan_readiness_callback_order(readable_ready, writable_ready, ae_barrier)
+    }
+
+    pub fn validate_event_loop_barrier_order(
+        readable_ready: bool,
+        writable_ready: bool,
+        ae_barrier: bool,
+        observed: CallbackDispatchOrder,
+    ) -> Result<(), BarrierOrderError> {
+        validate_ae_barrier_order(readable_ready, writable_ready, ae_barrier, observed)
+    }
+
+    pub fn validate_event_loop_fd_registration(
+        fd: usize,
+        setsize: usize,
+    ) -> Result<(), FdRegistrationError> {
+        validate_fd_registration_bounds(fd, setsize)
+    }
+
+    pub fn plan_event_loop_fd_resize(
+        current_setsize: usize,
+        requested_fd: usize,
+        max_setsize: usize,
+    ) -> Result<usize, FdRegistrationError> {
+        plan_fd_setsize_growth(current_setsize, requested_fd, max_setsize)
+    }
+
+    pub fn validate_event_loop_accept_path(
+        current_clients: usize,
+        max_clients: usize,
+        read_handler_bound: bool,
+    ) -> Result<(), AcceptPathError> {
+        validate_accept_path(current_clients, max_clients, read_handler_bound)
+    }
+
+    pub fn validate_event_loop_read_path(
+        current_query_buffer_len: usize,
+        newly_read_bytes: usize,
+        query_buffer_limit: usize,
+        fatal_read_error: bool,
+    ) -> Result<usize, ReadPathError> {
+        validate_read_path(
+            current_query_buffer_len,
+            newly_read_bytes,
+            query_buffer_limit,
+            fatal_read_error,
+        )
+    }
+
+    pub fn validate_event_loop_pending_write_delivery(
+        queued_before_flush: &[u64],
+        flushed_now: &[u64],
+        pending_after_flush: &[u64],
+    ) -> Result<(), PendingWriteError> {
+        validate_pending_write_delivery(queued_before_flush, flushed_now, pending_after_flush)
     }
 
     #[must_use]
@@ -800,7 +867,9 @@ mod tests {
         TlsAuthClients, TlsConfig, TlsProtocol,
     };
     use fr_eventloop::{
-        EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase, LoopBootstrap, TickBudget,
+        AcceptPathError, BarrierOrderError, EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase,
+        FdRegistrationError, LoopBootstrap, PendingWriteError, ReadPathError, ReadinessCallback,
+        TickBudget,
     };
     use fr_protocol::{RespFrame, parse_frame};
 
@@ -843,6 +912,129 @@ mod tests {
             plan.stats.processed_commands,
             TickBudget::BLOCKED_MODE_MAX_COMMANDS
         );
+    }
+
+    #[test]
+    fn fr_p2c_001_u002_runtime_barrier_order_preserves_contract() {
+        let observed = Runtime::plan_event_loop_readiness_order(true, true, true);
+        assert_eq!(observed.first, Some(ReadinessCallback::Writable));
+        assert_eq!(observed.second, Some(ReadinessCallback::Readable));
+        Runtime::validate_event_loop_barrier_order(true, true, true, observed)
+            .expect("barrier order must validate");
+    }
+
+    #[test]
+    fn fr_p2c_001_u002_runtime_barrier_violation_returns_reason_code() {
+        let err = Runtime::validate_event_loop_barrier_order(
+            true,
+            true,
+            true,
+            super::CallbackDispatchOrder {
+                first: Some(ReadinessCallback::Readable),
+                second: Some(ReadinessCallback::Writable),
+            },
+        )
+        .expect_err("barrier violation");
+        assert_eq!(err, BarrierOrderError::AeBarrierViolation);
+        assert_eq!(err.reason_code(), "eventloop.ae_barrier_violation");
+    }
+
+    #[test]
+    fn fr_p2c_001_u004_runtime_fd_registration_bounds_are_enforced() {
+        let err = Runtime::validate_event_loop_fd_registration(32, 32)
+            .expect_err("out-of-range fd should fail");
+        assert_eq!(
+            err,
+            FdRegistrationError::FdOutOfRange {
+                fd: 32,
+                setsize: 32
+            }
+        );
+        assert_eq!(err.reason_code(), "eventloop.fd_out_of_range");
+    }
+
+    #[test]
+    fn fr_p2c_001_u004_runtime_fd_resize_growth_is_deterministic() {
+        let grown = Runtime::plan_event_loop_fd_resize(64, 120, 1_024).expect("fd resize");
+        assert_eq!(grown, 128);
+    }
+
+    #[test]
+    fn fr_p2c_001_u006_runtime_accept_path_rejects_maxclients_overflow() {
+        let err = Runtime::validate_event_loop_accept_path(5_000, 5_000, true)
+            .expect_err("maxclients rejection");
+        assert_eq!(
+            err,
+            AcceptPathError::MaxClientsReached {
+                current_clients: 5_000,
+                max_clients: 5_000
+            }
+        );
+        assert_eq!(err.reason_code(), "eventloop.accept.maxclients_reached");
+    }
+
+    #[test]
+    fn fr_p2c_001_u007_runtime_read_path_enforces_query_buffer_limit() {
+        let err =
+            Runtime::validate_event_loop_read_path(6, 5, 10, false).expect_err("limit exceeded");
+        assert_eq!(
+            err,
+            ReadPathError::QueryBufferLimitExceeded {
+                observed: 11,
+                limit: 10
+            }
+        );
+        assert_eq!(err.reason_code(), "eventloop.read.querybuf_limit_exceeded");
+    }
+
+    #[test]
+    fn fr_p2c_001_u008_runtime_read_path_closes_on_fatal_error() {
+        let err =
+            Runtime::validate_event_loop_read_path(0, 0, 128, true).expect_err("fatal read path");
+        assert_eq!(err, ReadPathError::FatalErrorDisconnect);
+        assert_eq!(err.reason_code(), "eventloop.read.fatal_error_disconnect");
+    }
+
+    #[test]
+    fn fr_p2c_001_u009_runtime_pending_write_delivery_rejects_losses() {
+        let queued = [3_u64, 5, 8];
+        let err = Runtime::validate_event_loop_pending_write_delivery(&queued, &[3], &[8])
+            .expect_err("missing pending reply must fail");
+        assert_eq!(err, PendingWriteError::PendingReplyLost { client_id: 5 });
+        assert_eq!(err.reason_code(), "eventloop.write.pending_reply_lost");
+    }
+
+    #[test]
+    fn fr_p2c_001_u009_runtime_pending_write_delivery_rejects_reordering() {
+        let queued = [3_u64, 5, 8];
+        let err = Runtime::validate_event_loop_pending_write_delivery(&queued, &[5, 3], &[8])
+            .expect_err("flush reordering must fail");
+        assert_eq!(err, PendingWriteError::FlushOrderViolation { client_id: 3 });
+        assert_eq!(err.reason_code(), "eventloop.write.flush_order_violation");
+    }
+
+    #[test]
+    fn fr_p2c_001_unit_contract_smoke() {
+        let plan =
+            Runtime::plan_event_loop_tick(1, 1, TickBudget::default(), EventLoopMode::Normal);
+        assert_eq!(plan.phase_order, EVENT_LOOP_PHASE_ORDER);
+        assert_eq!(plan.poll_timeout_ms, 0);
+
+        let barrier = Runtime::plan_event_loop_readiness_order(true, true, true);
+        Runtime::validate_event_loop_barrier_order(true, true, true, barrier)
+            .expect("barrier order");
+
+        Runtime::validate_event_loop_fd_registration(31, 32).expect("fd bounds");
+        Runtime::plan_event_loop_fd_resize(64, 120, 1_024).expect("fd growth");
+
+        Runtime::validate_event_loop_accept_path(999, 1_000, true).expect("accept path");
+        Runtime::validate_event_loop_read_path(1, 2, 16, false).expect("read path");
+        Runtime::validate_event_loop_pending_write_delivery(&[1, 2, 3], &[1], &[2, 3])
+            .expect("pending writes");
+
+        Runtime::validate_event_loop_bootstrap(LoopBootstrap::fully_wired())
+            .expect("bootstrap wiring");
+        Runtime::replay_event_loop_phase_trace(&EVENT_LOOP_PHASE_ORDER).expect("phase replay");
     }
 
     #[test]

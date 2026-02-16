@@ -31,3 +31,11 @@ fn smoke_report_is_stable() {
     assert_eq!(replay.total, replay.passed);
     assert!(replay.failed.is_empty());
 }
+
+#[test]
+fn fr_p2c_001_e2e_contract_smoke() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "fr_p2c_001_eventloop_journey.json").expect("packet fixture");
+    assert_eq!(diff.total, diff.passed);
+    assert!(diff.failed.is_empty());
+}

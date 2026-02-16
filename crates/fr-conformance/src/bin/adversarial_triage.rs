@@ -575,6 +575,7 @@ mod tests {
             expected: RespFrame::SimpleString("OK".to_string()),
             actual: RespFrame::Error("ERR syntax error".to_string()),
             detail: Some("detail".to_string()),
+            reason_code: Some("dispatch.wrong_arity".to_string()),
         };
         assert!(!outcome.passed);
     }
