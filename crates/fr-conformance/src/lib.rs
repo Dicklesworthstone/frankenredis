@@ -999,7 +999,7 @@ mod tests {
         DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
         TlsAuthClients, TlsConfig, TlsProtocol,
     };
-    use fr_protocol::RespFrame;
+    use fr_protocol::{RespFrame, parse_frame};
     use fr_repl::{
         BacklogWindow, HandshakeFsm, HandshakeState, HandshakeStep, PsyncDecision, PsyncRejection,
         ReplOffset, WaitAofThreshold, WaitThreshold, decide_psync, evaluate_wait, evaluate_waitaof,
@@ -1086,7 +1086,10 @@ mod tests {
         assert_eq!(first.total, second.total);
         assert_eq!(first.passed, second.passed);
         assert_eq!(first.reason_code_counts, second.reason_code_counts);
-        assert_eq!(first.failed_without_reason_code, second.failed_without_reason_code);
+        assert_eq!(
+            first.failed_without_reason_code,
+            second.failed_without_reason_code
+        );
         assert_eq!(first.failed, second.failed);
     }
 
@@ -1117,6 +1120,134 @@ mod tests {
             write_err.reason_code(),
             "eventloop.write.flush_order_violation"
         );
+    }
+
+    #[test]
+    fn fr_p2c_002_f_differential_protocol_fixture_passes() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_protocol_fixture(&cfg, "protocol_negative.json").expect("protocol fixture run");
+        assert_eq!(report.schema_version, DIFFERENTIAL_REPORT_SCHEMA_VERSION);
+        assert_eq!(report.suite, "protocol_negative");
+        assert_eq!(report.fixture, "protocol_negative.json");
+        assert_eq!(report.total, report.passed);
+        assert_eq!(report.failed_without_reason_code, 0);
+        assert!(report.reason_code_counts.is_empty());
+        assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn fr_p2c_002_f_metamorphic_protocol_fixture_runs_are_deterministic() {
+        let cfg = HarnessConfig::default_paths();
+        let first =
+            run_protocol_fixture(&cfg, "protocol_negative.json").expect("first protocol fixture");
+        let second =
+            run_protocol_fixture(&cfg, "protocol_negative.json").expect("second protocol fixture");
+
+        assert_eq!(first.total, second.total);
+        assert_eq!(first.passed, second.passed);
+        assert_eq!(first.reason_code_counts, second.reason_code_counts);
+        assert_eq!(
+            first.failed_without_reason_code,
+            second.failed_without_reason_code
+        );
+        assert_eq!(first.failed, second.failed);
+    }
+
+    #[test]
+    fn fr_p2c_002_f_adversarial_runtime_parse_failures_emit_stable_reason_code() {
+        let cases = [
+            (
+                "invalid_bulk_length",
+                "$-2\r\n",
+                "ERR Protocol error: invalid bulk length",
+            ),
+            (
+                "invalid_multibulk_length",
+                "*-2\r\n",
+                "ERR Protocol error: invalid multibulk length",
+            ),
+            (
+                "incomplete_bulk",
+                "$3\r\nab",
+                "ERR Protocol error: unexpected EOF while reading request",
+            ),
+            (
+                "unsupported_resp3_prefix",
+                "~1\r\n",
+                "ERR Protocol error: unsupported RESP3 type prefix '~'",
+            ),
+            (
+                "unsupported_resp3_map_prefix",
+                "%1\r\n",
+                "ERR Protocol error: unsupported RESP3 type prefix '%'",
+            ),
+            (
+                "invalid_prefix_unknown_byte",
+                "?\r\n",
+                "ERR Protocol error: invalid RESP type prefix '?'",
+            ),
+            (
+                "noncanonical_null_bulk",
+                "$-01\r\n",
+                "ERR Protocol error: invalid bulk length",
+            ),
+            (
+                "noncanonical_null_array",
+                "*-01\r\n",
+                "ERR Protocol error: invalid multibulk length",
+            ),
+            (
+                "unsupported_resp3_attribute_prefix",
+                "|1\r\n",
+                "ERR Protocol error: unsupported RESP3 type prefix '|'",
+            ),
+            (
+                "invalid_integer_payload",
+                ":abc\r\n",
+                "ERR Protocol error: invalid integer payload",
+            ),
+        ];
+
+        let mut runtime = Runtime::default_strict();
+        for (idx, (name, raw, expected_err)) in cases.iter().enumerate() {
+            let evidence_before = runtime.evidence().events().len();
+            let encoded = runtime.execute_bytes(raw.as_bytes(), idx as u64);
+            let actual = parse_frame(&encoded)
+                .expect("runtime emitted a parseable RESP reply")
+                .frame;
+            assert_eq!(
+                actual,
+                RespFrame::Error((*expected_err).to_string()),
+                "case={name}"
+            );
+
+            let events = &runtime.evidence().events()[evidence_before..];
+            assert_eq!(events.len(), 1, "case={name} should emit one threat event");
+            let event = &events[0];
+            assert_eq!(event.threat_class, ThreatClass::ParserAbuse, "case={name}");
+            assert_eq!(event.severity, DriftSeverity::S0, "case={name}");
+            assert_eq!(
+                event.decision_action,
+                DecisionAction::FailClosed,
+                "case={name}"
+            );
+            assert_eq!(event.reason_code, "protocol_parse_failure", "case={name}");
+
+            validate_structured_log_emission(
+                StructuredLogEmissionContext {
+                    suite_id: "protocol_negative",
+                    fixture_name: "protocol_negative.json",
+                    case_name: name,
+                    verification_path: VerificationPath::E2e,
+                    now_ms: idx as u64,
+                    outcome: LogOutcome::Pass,
+                    persist_path: None,
+                },
+                events,
+            )
+            .expect("structured log contract must hold for parser abuse vectors");
+        }
     }
 
     #[test]

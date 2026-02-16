@@ -95,6 +95,7 @@ cargo check --all-targets
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 cargo test -p fr-conformance -- --nocapture
+cargo run -p fr-conformance --bin phase2c_schema_gate -- --optimization-gate
 cargo bench
 ```
 

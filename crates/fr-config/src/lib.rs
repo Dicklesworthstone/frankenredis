@@ -733,6 +733,31 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_002_u013_hardened_gate_rejects_non_allowlisted_parser_drift() {
+        let mut policy = RuntimePolicy::hardened();
+        policy
+            .hardened_allowlist
+            .retain(|category| *category != HardenedDeviationCategory::BoundedParserDiagnostics);
+        let (action, severity) = policy.decide(
+            ThreatClass::ParserAbuse,
+            Some(HardenedDeviationCategory::BoundedParserDiagnostics),
+        );
+        assert_eq!(action, DecisionAction::RejectNonAllowlisted);
+        assert_eq!(severity, DriftSeverity::S2);
+    }
+
+    #[test]
+    fn fr_p2c_002_u013_strict_mode_parser_drift_is_fail_closed() {
+        let policy = RuntimePolicy::default();
+        let (action, severity) = policy.decide(
+            ThreatClass::ParserAbuse,
+            Some(HardenedDeviationCategory::BoundedParserDiagnostics),
+        );
+        assert_eq!(action, DecisionAction::FailClosed);
+        assert_eq!(severity, DriftSeverity::S0);
+    }
+
+    #[test]
     fn fr_p2c_009_u001_protocol_parse_rejects_unknown_token() {
         let protocols = parse_tls_protocols("TLSv1.2,TLSv1.3").expect("supported protocols");
         assert_eq!(protocols, vec![TlsProtocol::TlsV1_2, TlsProtocol::TlsV1_3]);

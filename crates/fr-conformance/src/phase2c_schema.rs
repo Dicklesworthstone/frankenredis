@@ -7,6 +7,7 @@ use serde_json::Value;
 pub const PHASE2C_SCHEMA_VERSION: &str = "fr_phase2c_packet_v1";
 pub const READY_FOR_IMPL: &str = "READY_FOR_IMPL";
 pub const NOT_READY: &str = "NOT READY";
+pub const READY_FOR_OPTIMIZATION: &str = "READY_FOR_OPTIMIZATION";
 
 pub const REQUIRED_PACKET_FILES: [&str; 8] = [
     "legacy_anchor_map.md",
@@ -35,6 +36,30 @@ pub const REQUIRED_MANIFEST_FIELDS: [&str; 15] = [
     "performance_sentinels",
     "compatibility_risks",
     "raptorq_artifacts",
+];
+
+pub const REQUIRED_OPTIMIZATION_ROOT_FILES: [&str; 4] = [
+    "run_gate_bench.sh",
+    "bench_packets",
+    "baseline_hyperfine_multi.json",
+    "after_hyperfine_multi.json",
+];
+
+pub const REQUIRED_OPTIMIZATION_ROUND_FILES: [&str; 14] = [
+    "manifest.json",
+    "env.json",
+    "repro.lock",
+    "optimization_report.md",
+    "alien_recommendation_card.md",
+    "isomorphism_check.txt",
+    "baseline_hyperfine.json",
+    "after_hyperfine.json",
+    "baseline_output.txt",
+    "after_output.txt",
+    "baseline_output.sha256",
+    "after_output.sha256",
+    "baseline_strace.txt",
+    "after_strace.txt",
 ];
 
 const FILE_BIT_LEGACY_ANCHOR_MAP: u16 = 1 << 0;
@@ -122,6 +147,52 @@ pub struct PacketValidationReport {
     pub decision_ledger: GateDecisionLedger,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptimizationGateStatus {
+    Ready,
+    NotReady,
+}
+
+impl OptimizationGateStatus {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => READY_FOR_OPTIMIZATION,
+            Self::NotReady => NOT_READY,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OptimizationRoundReport {
+    pub round_id: String,
+    pub claim_id: Option<String>,
+    pub evidence_id: Option<String>,
+    pub baseline_mean_seconds: Option<f64>,
+    pub after_mean_seconds: Option<f64>,
+    pub delta_percent: Option<f64>,
+    pub missing_files: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+impl OptimizationRoundReport {
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.missing_files.is_empty() && self.errors.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OptimizationGateReport {
+    pub root: PathBuf,
+    pub status: OptimizationGateStatus,
+    pub baseline_mean_seconds: Option<f64>,
+    pub after_mean_seconds: Option<f64>,
+    pub missing_files: Vec<String>,
+    pub errors: Vec<String>,
+    pub rounds: Vec<OptimizationRoundReport>,
+}
+
 impl PacketValidationReport {
     #[must_use]
     pub fn is_ready_for_impl(&self) -> bool {
@@ -201,6 +272,499 @@ pub fn validate_phase2c_packets(
     }
     reports.sort_by(|a, b| a.packet_id.cmp(&b.packet_id));
     Ok(reports)
+}
+
+#[derive(Debug, Clone)]
+struct HyperfineSummary {
+    command: String,
+    mean_seconds: f64,
+    sample_count: usize,
+}
+
+pub fn validate_phase2c_optimization_gate(root: &Path) -> Result<OptimizationGateReport, String> {
+    let mut report = OptimizationGateReport {
+        root: root.to_path_buf(),
+        status: OptimizationGateStatus::NotReady,
+        baseline_mean_seconds: None,
+        after_mean_seconds: None,
+        missing_files: Vec::new(),
+        errors: Vec::new(),
+        rounds: Vec::new(),
+    };
+
+    if root.exists() && !root.is_dir() {
+        return Err(format!(
+            "optimization gate root is not a directory: {}",
+            root.display()
+        ));
+    }
+
+    for required in REQUIRED_OPTIMIZATION_ROOT_FILES {
+        let path = root.join(required);
+        if required == "bench_packets" {
+            if !path.is_dir() {
+                report.missing_files.push(required.to_string());
+            }
+        } else if !path.is_file() {
+            report.missing_files.push(required.to_string());
+        }
+    }
+
+    let run_gate_bench_path = root.join("run_gate_bench.sh");
+    if run_gate_bench_path.is_file() {
+        match fs::read_to_string(&run_gate_bench_path) {
+            Ok(script) => {
+                if !script.contains("phase2c_schema_gate") {
+                    report.errors.push(format!(
+                        "{} does not invoke phase2c_schema_gate",
+                        run_gate_bench_path.display()
+                    ));
+                }
+                if !script.contains("bench_packets") {
+                    report.errors.push(format!(
+                        "{} does not include bench_packets corpus",
+                        run_gate_bench_path.display()
+                    ));
+                }
+            }
+            Err(err) => report.errors.push(format!(
+                "failed to read {}: {err}",
+                run_gate_bench_path.display()
+            )),
+        }
+    }
+
+    if let Some(summary) = parse_hyperfine_summary_if_present(
+        &root.join("baseline_hyperfine_multi.json"),
+        &mut report.errors,
+    ) {
+        if !summary.command.contains("run_gate_bench.sh") {
+            report.errors.push(format!(
+                "baseline_hyperfine_multi.json command should invoke run_gate_bench.sh, got '{}'",
+                summary.command
+            ));
+        }
+        if summary.sample_count < 10 {
+            report.errors.push(format!(
+                "baseline_hyperfine_multi.json expected >=10 samples, got {}",
+                summary.sample_count
+            ));
+        }
+        report.baseline_mean_seconds = Some(summary.mean_seconds);
+    }
+
+    if let Some(summary) = parse_hyperfine_summary_if_present(
+        &root.join("after_hyperfine_multi.json"),
+        &mut report.errors,
+    ) {
+        if !summary.command.contains("run_gate_bench.sh") {
+            report.errors.push(format!(
+                "after_hyperfine_multi.json command should invoke run_gate_bench.sh, got '{}'",
+                summary.command
+            ));
+        }
+        if summary.sample_count < 10 {
+            report.errors.push(format!(
+                "after_hyperfine_multi.json expected >=10 samples, got {}",
+                summary.sample_count
+            ));
+        }
+        report.after_mean_seconds = Some(summary.mean_seconds);
+    }
+
+    let bench_packets_root = root.join("bench_packets");
+    if bench_packets_root.is_dir() {
+        let mut valid_count = 0_usize;
+        let mut invalid_count = 0_usize;
+        let mut entries = fs::read_dir(&bench_packets_root).map_err(|err| {
+            format!(
+                "failed to read bench packet corpus {}: {err}",
+                bench_packets_root.display()
+            )
+        })?;
+        entries.try_for_each(|entry| -> Result<(), String> {
+            let entry = entry.map_err(|err| {
+                format!(
+                    "failed to read bench packet entry {}: {err}",
+                    bench_packets_root.display()
+                )
+            })?;
+            let path = entry.path();
+            if !path.is_dir() {
+                return Ok(());
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.contains("VALID") {
+                valid_count += 1;
+            }
+            if name.contains("INVALID") {
+                invalid_count += 1;
+            }
+            Ok(())
+        })?;
+        if valid_count == 0 || invalid_count == 0 {
+            report.errors.push(format!(
+                "bench_packets corpus must include both VALID and INVALID suites (valid={valid_count}, invalid={invalid_count})"
+            ));
+        }
+    }
+
+    let round_dirs = discover_canonical_optimization_rounds(root)?;
+    if round_dirs.is_empty() {
+        report.errors.push(format!(
+            "no canonical optimization rounds found under {} (expected round_*/manifest.json)",
+            root.display()
+        ));
+    }
+
+    for round_dir in round_dirs {
+        let round_report = validate_optimization_round(&round_dir)?;
+        if !round_report.is_ready() {
+            report.errors.push(format!(
+                "optimization round {} is incomplete",
+                round_report.round_id
+            ));
+        }
+        report.rounds.push(round_report);
+    }
+
+    if report.missing_files.is_empty() && report.errors.is_empty() {
+        report.status = OptimizationGateStatus::Ready;
+    }
+
+    Ok(report)
+}
+
+fn discover_canonical_optimization_rounds(root: &Path) -> Result<Vec<PathBuf>, String> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut round_dirs = fs::read_dir(root)
+        .map_err(|err| format!("failed to read optimization root {}: {err}", root.display()))?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+            let name = path.file_name()?.to_str()?;
+            if !name.starts_with("round_") {
+                return None;
+            }
+            if path.join("manifest.json").is_file() {
+                Some(path)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    round_dirs.sort();
+    Ok(round_dirs)
+}
+
+fn validate_optimization_round(round_dir: &Path) -> Result<OptimizationRoundReport, String> {
+    if !round_dir.exists() {
+        return Err(format!(
+            "optimization round directory does not exist: {}",
+            round_dir.display()
+        ));
+    }
+    if !round_dir.is_dir() {
+        return Err(format!(
+            "optimization round path is not a directory: {}",
+            round_dir.display()
+        ));
+    }
+
+    let round_id = round_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "invalid optimization round directory: {}",
+                round_dir.display()
+            )
+        })?
+        .to_string();
+
+    let mut report = OptimizationRoundReport {
+        round_id,
+        claim_id: None,
+        evidence_id: None,
+        baseline_mean_seconds: None,
+        after_mean_seconds: None,
+        delta_percent: None,
+        missing_files: Vec::new(),
+        errors: Vec::new(),
+    };
+
+    for required in REQUIRED_OPTIMIZATION_ROUND_FILES {
+        let path = round_dir.join(required);
+        if !path.is_file() {
+            report.missing_files.push(required.to_string());
+        }
+    }
+
+    let manifest_path = round_dir.join("manifest.json");
+    if manifest_path.is_file() {
+        match parse_json_file(&manifest_path) {
+            Ok(value) => validate_optimization_round_manifest(round_dir, &value, &mut report),
+            Err(err) => report.errors.push(err),
+        }
+    }
+
+    if let Some(summary) = parse_hyperfine_summary_if_present(
+        &round_dir.join("baseline_hyperfine.json"),
+        &mut report.errors,
+    ) {
+        report.baseline_mean_seconds = Some(summary.mean_seconds);
+    }
+
+    if let Some(summary) = parse_hyperfine_summary_if_present(
+        &round_dir.join("after_hyperfine.json"),
+        &mut report.errors,
+    ) {
+        report.after_mean_seconds = Some(summary.mean_seconds);
+    }
+
+    let isomorphism_path = round_dir.join("isomorphism_check.txt");
+    if isomorphism_path.is_file() {
+        match fs::read_to_string(&isomorphism_path) {
+            Ok(raw) => {
+                if !raw.contains("isomorphism_output_match=1") {
+                    report.errors.push(format!(
+                        "{} must include 'isomorphism_output_match=1'",
+                        isomorphism_path.display()
+                    ));
+                }
+            }
+            Err(err) => report.errors.push(format!(
+                "failed to read {}: {err}",
+                isomorphism_path.display()
+            )),
+        }
+    }
+
+    let card_path = round_dir.join("alien_recommendation_card.md");
+    if card_path.is_file() {
+        match fs::read_to_string(&card_path) {
+            Ok(raw) => {
+                if let Some(claim_id) = report.claim_id.as_deref()
+                    && !raw.contains(claim_id)
+                {
+                    report.errors.push(format!(
+                        "{} must reference claim_id '{claim_id}'",
+                        card_path.display()
+                    ));
+                }
+                if let Some(evidence_id) = report.evidence_id.as_deref()
+                    && !raw.contains(evidence_id)
+                {
+                    report.errors.push(format!(
+                        "{} must reference evidence_id '{evidence_id}'",
+                        card_path.display()
+                    ));
+                }
+            }
+            Err(err) => report
+                .errors
+                .push(format!("failed to read {}: {err}", card_path.display())),
+        }
+    }
+
+    let report_path = round_dir.join("optimization_report.md");
+    if report_path.is_file() {
+        match fs::read_to_string(&report_path) {
+            Ok(raw) => {
+                if !raw.contains("Delta:") {
+                    report.errors.push(format!(
+                        "{} missing performance delta line",
+                        report_path.display()
+                    ));
+                }
+                if !raw.contains("Isomorphism:") {
+                    report.errors.push(format!(
+                        "{} missing isomorphism line",
+                        report_path.display()
+                    ));
+                }
+            }
+            Err(err) => report
+                .errors
+                .push(format!("failed to read {}: {err}", report_path.display())),
+        }
+    }
+
+    Ok(report)
+}
+
+fn validate_optimization_round_manifest(
+    round_dir: &Path,
+    manifest: &Value,
+    report: &mut OptimizationRoundReport,
+) {
+    let Some(object) = manifest.as_object() else {
+        report
+            .errors
+            .push("optimization manifest must be a JSON object".to_string());
+        return;
+    };
+
+    match object.get("claim_id").and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() => report.claim_id = Some(value.to_string()),
+        _ => report
+            .errors
+            .push("manifest.claim_id must be a non-empty string".to_string()),
+    }
+    match object.get("evidence_id").and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() => report.evidence_id = Some(value.to_string()),
+        _ => report
+            .errors
+            .push("manifest.evidence_id must be a non-empty string".to_string()),
+    }
+    match object.get("delta_percent").and_then(Value::as_f64) {
+        Some(value) if value.is_finite() => report.delta_percent = Some(value),
+        _ => report
+            .errors
+            .push("manifest.delta_percent must be a finite number".to_string()),
+    }
+
+    validate_optimization_manifest_section(round_dir, object, report, "baseline");
+    validate_optimization_manifest_section(round_dir, object, report, "after");
+
+    let isomorphism_ref = object.get("isomorphism").and_then(Value::as_str);
+    match isomorphism_ref {
+        Some(value) if !value.trim().is_empty() => {
+            if !round_dir.join(value).is_file() {
+                report.errors.push(format!(
+                    "manifest.isomorphism references missing file '{}'",
+                    value
+                ));
+            }
+        }
+        _ => report
+            .errors
+            .push("manifest.isomorphism must be a non-empty string".to_string()),
+    }
+
+    match object.get("source_files").and_then(Value::as_array) {
+        Some(files) if !files.is_empty() => {}
+        _ => report
+            .errors
+            .push("manifest.source_files must contain at least one entry".to_string()),
+    }
+}
+
+fn validate_optimization_manifest_section(
+    round_dir: &Path,
+    manifest: &serde_json::Map<String, Value>,
+    report: &mut OptimizationRoundReport,
+    section_name: &'static str,
+) {
+    let Some(section) = manifest.get(section_name).and_then(Value::as_object) else {
+        report
+            .errors
+            .push(format!("manifest.{section_name} must be an object"));
+        return;
+    };
+
+    match section.get("hyperfine").and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() => {
+            if !round_dir.join(value).is_file() {
+                report.errors.push(format!(
+                    "manifest.{section_name}.hyperfine references missing file '{}'",
+                    value
+                ));
+            }
+        }
+        _ => report.errors.push(format!(
+            "manifest.{section_name}.hyperfine must be a non-empty string"
+        )),
+    }
+    match section.get("strace").and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() => {
+            if !round_dir.join(value).is_file() {
+                report.errors.push(format!(
+                    "manifest.{section_name}.strace references missing file '{}'",
+                    value
+                ));
+            }
+        }
+        _ => report.errors.push(format!(
+            "manifest.{section_name}.strace must be a non-empty string"
+        )),
+    }
+    match section.get("stdout_sha256").and_then(Value::as_str) {
+        Some(value) if !value.trim().is_empty() => {}
+        _ => report.errors.push(format!(
+            "manifest.{section_name}.stdout_sha256 must be a non-empty string"
+        )),
+    }
+    match section.get("mean_seconds").and_then(Value::as_f64) {
+        Some(value) if value.is_finite() && value > 0.0_f64 => {}
+        _ => report.errors.push(format!(
+            "manifest.{section_name}.mean_seconds must be a positive number"
+        )),
+    }
+}
+
+fn parse_hyperfine_summary_if_present(
+    path: &Path,
+    errors: &mut Vec<String>,
+) -> Option<HyperfineSummary> {
+    if !path.is_file() {
+        return None;
+    }
+    match parse_hyperfine_summary(path) {
+        Ok(summary) => Some(summary),
+        Err(err) => {
+            errors.push(err);
+            None
+        }
+    }
+}
+
+fn parse_hyperfine_summary(path: &Path) -> Result<HyperfineSummary, String> {
+    let value = parse_json_file(path)?;
+    let results = value
+        .get("results")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            format!(
+                "invalid hyperfine JSON {}: missing results[]",
+                path.display()
+            )
+        })?;
+    let first = results
+        .first()
+        .ok_or_else(|| format!("invalid hyperfine JSON {}: empty results[]", path.display()))?;
+    let command = first
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("invalid hyperfine JSON {}: missing command", path.display()))?
+        .to_string();
+    let mean_seconds = first
+        .get("mean")
+        .and_then(Value::as_f64)
+        .ok_or_else(|| format!("invalid hyperfine JSON {}: missing mean", path.display()))?;
+    if !mean_seconds.is_finite() || mean_seconds <= 0.0_f64 {
+        return Err(format!(
+            "invalid hyperfine mean in {}: expected positive finite number, got {mean_seconds}",
+            path.display()
+        ));
+    }
+    let sample_count = first
+        .get("times")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+
+    Ok(HyperfineSummary {
+        command,
+        mean_seconds,
+        sample_count,
+    })
 }
 
 pub fn validate_phase2c_packet(packet_dir: &Path) -> Result<PacketValidationReport, String> {
@@ -668,12 +1232,17 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        GateAction, NOT_READY, PacketReadiness, READY_FOR_IMPL, discover_phase2c_packets,
-        validate_phase2c_packet, validate_phase2c_packets, validate_phase2c_tree,
+        GateAction, NOT_READY, OptimizationGateStatus, PacketReadiness, READY_FOR_IMPL,
+        discover_phase2c_packets, validate_phase2c_optimization_gate, validate_phase2c_packet,
+        validate_phase2c_packets, validate_phase2c_tree,
     };
 
     fn fixture_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/phase2c")
+    }
+
+    fn optimization_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/optimization/phase2c-gate")
     }
 
     fn test_packet_dirs() -> Vec<PathBuf> {
@@ -778,5 +1347,48 @@ mod tests {
                 "missing bit mapping for required file {file_name}"
             );
         }
+    }
+
+    #[test]
+    fn optimization_gate_validates_canonical_round_artifacts() {
+        let report = validate_phase2c_optimization_gate(&optimization_root())
+            .expect("validate optimization gate");
+        assert_eq!(report.status, OptimizationGateStatus::Ready);
+        assert!(
+            report.baseline_mean_seconds.is_some(),
+            "expected baseline mean from hyperfine summary"
+        );
+        assert!(
+            report.after_mean_seconds.is_some(),
+            "expected after mean from hyperfine summary"
+        );
+        assert!(
+            report
+                .rounds
+                .iter()
+                .any(|round| round.round_id == "round_dir_scan_mask"),
+            "expected canonical round_dir_scan_mask to be validated"
+        );
+        assert!(
+            report.rounds.iter().all(|round| round.is_ready()),
+            "all canonical rounds should be complete: {:#?}",
+            report.rounds
+        );
+    }
+
+    #[test]
+    fn optimization_gate_missing_root_is_not_ready() {
+        let missing_root = fixture_root().join("missing_optimization_gate_root");
+        let report =
+            validate_phase2c_optimization_gate(&missing_root).expect("validate missing root");
+        assert_eq!(report.status, OptimizationGateStatus::NotReady);
+        assert!(
+            report
+                .missing_files
+                .iter()
+                .any(|file| file == "run_gate_bench.sh"),
+            "missing_files should include run_gate_bench.sh: {:?}",
+            report.missing_files
+        );
     }
 }
