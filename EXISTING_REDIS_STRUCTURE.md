@@ -315,3 +315,273 @@ Invalid-state strategy in the current codebase is predominantly fail-closed:
 2. mutation paths avoid partial writes on validation failure.
 3. unknown or unsupported protocol/config shapes are rejected explicitly.
 4. runtime evidence paths capture rejection reason codes when ledger emission is enabled.
+
+## 17. DOC-PASS-04 Execution-Path Tracing and Control-Flow Narratives
+
+### 17.1 Narrative cards index
+
+| Path ID | Workflow | Primary entrypoint | Key branch/fallback points | Source anchors | Oracle anchors |
+|---|---|---|---|---|---|
+| EP-001 | Request bytes to reply bytes | `Runtime::execute_bytes` | parse success vs parse failure | `crates/fr-runtime/src/lib.rs:374`, `crates/fr-protocol/src/lib.rs:96`, `crates/fr-runtime/src/lib.rs:755` | `crates/fr-runtime/src/lib.rs:1095`, `crates/fr-runtime/src/lib.rs:1112` |
+| EP-002 | Preflight compatibility gate | `Runtime::execute_frame` + `preflight_gate` | array/bulk cap rejection vs dispatch path | `crates/fr-runtime/src/lib.rs:285`, `crates/fr-runtime/src/lib.rs:522` | `crates/fr-runtime/src/lib.rs:1070`, `crates/fr-conformance/src/lib.rs:1427` |
+| EP-003 | Auth/HELLO admission gate | `handle_auth_command` + `handle_hello_command` | auth success, wrongpass, noauth pre-dispatch rejection | `crates/fr-runtime/src/lib.rs:401`, `crates/fr-runtime/src/lib.rs:424`, `crates/fr-runtime/src/lib.rs:340` | `crates/fr-runtime/src/lib.rs:928`, `crates/fr-runtime/src/lib.rs:939`, `crates/fr-runtime/src/lib.rs:986` |
+| EP-004 | Cluster client-mode control path | `handle_cluster_command`, `READONLY`, `READWRITE`, `ASKING` | supported HELP scaffold vs unknown subcommand, mode flag transitions | `crates/fr-runtime/src/lib.rs:499` | `crates/fr-runtime/src/lib.rs:998`, `crates/fr-runtime/src/lib.rs:1032` |
+| EP-005 | Command dispatch and state mutation | `dispatch_argv` + store mutators | command parse/arity error, syntax fallback, store error mapping | `crates/fr-command/src/lib.rs:47`, `crates/fr-command/src/lib.rs:576`, `crates/fr-store/src/lib.rs:317` | `crates/fr-command/src/lib.rs:757`, `crates/fr-command/src/lib.rs:1175` |
+| EP-006 | AOF replay assertion path | `run_replay_fixture` | decode fail, record replay, assertion mismatch | `crates/fr-conformance/src/lib.rs:445`, `crates/fr-persist/src/lib.rs:59` | `crates/fr-conformance/src/lib.rs:1023`, `crates/fr-conformance/src/lib.rs:1031` |
+| EP-007 | Live oracle differential protocol path | `run_live_redis_protocol_diff` | TCP connect/read failure, parse mismatch, log persistence fallback | `crates/fr-conformance/src/lib.rs:354`, `crates/fr-conformance/src/lib.rs:628` | `crates/fr-conformance/src/lib.rs:1749` |
+| EP-008 | Event-loop deterministic planning path | runtime wrappers over `fr-eventloop` | normal vs blocked mode, phase replay acceptance vs rejection | `crates/fr-runtime/src/lib.rs:167`, `crates/fr-runtime/src/lib.rs:200`, `crates/fr-eventloop/src/lib.rs:211` | `crates/fr-runtime/src/lib.rs:819`, `crates/fr-runtime/src/lib.rs:883` |
+| EP-009 | Runtime evidence to structured log path | `record_threat_event` -> `validate_structured_log_emission` | emission disabled, conversion validation failure, append path | `crates/fr-runtime/src/lib.rs:587`, `crates/fr-conformance/src/lib.rs:804`, `crates/fr-conformance/src/log_contract.rs:67` | `crates/fr-conformance/src/lib.rs:954`, `crates/fr-conformance/src/lib.rs:988`, `crates/fr-conformance/src/log_contract.rs:474` |
+
+### 17.2 EP-001 Request bytes -> runtime response narrative
+
+1. `Runtime::execute_bytes` computes input digest/state digest and calls `parse_frame`.
+2. Parse success branch:
+   decoded frame is forwarded to `Runtime::execute_frame`, then response is encoded to bytes.
+3. Parse failure branch:
+   `protocol_error_to_resp` maps parse error class to explicit Redis error text and `record_threat_event` emits `reason_code=protocol_parse_failure`.
+4. Fail-safe property:
+   malformed input does not reach command dispatch/store mutation.
+
+Replay anchors:
+- `rch exec -- cargo test -p fr-runtime -- --nocapture protocol_invalid_bulk_length_error_string`
+- `rch exec -- cargo test -p fr-runtime -- --nocapture protocol_unsupported_resp3_type_error_string`
+
+### 17.3 EP-002 Compatibility preflight narrative
+
+1. `execute_frame` calls `preflight_gate` before argv projection and command dispatch.
+2. Branch A (`compat_array_len_exceeded`):
+   oversized array returns immediate protocol error and records `ThreatClass::ResourceExhaustion`.
+3. Branch B (`compat_bulk_len_exceeded`):
+   oversized bulk payload returns immediate protocol error and records equivalent resource clamp reasoning.
+4. Pass branch:
+   command continues to argv projection and dispatch.
+
+Replay anchors:
+- `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_004_u005_noauth_gate_runs_before_dispatch`
+- `rch exec -- cargo test -p fr-runtime -- --nocapture compatibility_gate_trips_on_large_array`
+
+### 17.4 EP-003 Authentication and HELLO control-flow narrative
+
+1. `execute_frame` fast-paths `AUTH` and `HELLO` before generic noauth gate.
+2. `AUTH` branches:
+   wrong arity -> standard wrong-arity error; no configured password -> explicit config error; valid credentials -> authenticated state promotion.
+3. `HELLO` branches:
+   invalid protocol version -> `NOPROTO`; `AUTH` option with wrong creds -> wrongpass; no auth supplied while auth required -> `NOAUTH`.
+4. Generic noauth branch:
+   any non-auth command while unauthenticated is rejected pre-dispatch with `reason_code=auth.noauth_gate_violation`.
+
+Replay anchors:
+- `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_004_u002_auth_success_transitions_state`
+- `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_004_u003_auth_wrongpass_rejected_without_state_promotion`
+- `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_004_u004_hello_auth_early_fails_and_success_path_authenticates`
+
+### 17.5 EP-004 Cluster mode and subcommand routing narrative
+
+1. Cluster-related commands are handled inside runtime admission path, not inside `dispatch_argv`.
+2. `CLUSTER` path supports deterministic `HELP` scaffold; unsupported subcommands return explicit bounded error text.
+3. `READONLY`, `READWRITE`, and `ASKING` mutate per-client mode flags:
+   `READWRITE` clears `asking`; `ASKING` sets temporary flag.
+4. Invalid arity or unknown subcommands never mutate mode state.
+
+Replay anchors:
+- `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_007_u001_cluster_subcommand_router_is_deterministic`
+- `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_007_u007_client_cluster_mode_flags_transition_cleanly`
+
+### 17.6 EP-005 Command dispatch and mutation narrative
+
+1. `dispatch_argv` resolves command by case-insensitive comparisons and routes to command-specific handlers.
+2. Control branches:
+   wrong arity, syntax errors, invalid integer, and unknown command all return deterministic error mapping via `command_error_to_resp`.
+3. Expiry path:
+   `parse_expire_options` enforces option constraints (`NX/XX/GT/LT`) before mutation; invalid combos fail without partial state change.
+4. Store mutation path:
+   `Store` methods apply lazy expiry (`drop_if_expired`) before reads/mutations to preserve key visibility invariants.
+
+Replay anchors:
+- `rch exec -- cargo test -p fr-command -- --nocapture set_with_ex_option`
+- `rch exec -- cargo test -p fr-command -- --nocapture expire_option_compatibility_rules_match_redis`
+- `rch exec -- cargo test -p fr-store -- --nocapture expire_and_pttl`
+
+### 17.7 EP-006 Replay fixture narrative (AOF stream -> assertions)
+
+1. `run_replay_fixture` loads fixture records and encodes stream via `encode_aof_stream`.
+2. Decode branch:
+   `decode_aof_stream` failure produces explicit failed case outcome (`AOF stream decode failed`) and stops that case branch.
+3. Replay branch:
+   each decoded record is executed through runtime, then assertions are checked with explicit pass/fail outcomes.
+4. Logging branch:
+   structured-log emission validation runs for each replayed record and assertion path.
+
+Replay anchors:
+- `rch exec -- cargo test -p fr-conformance -- --nocapture conformance_replay_fixture_passes`
+- `rch exec -- cargo test -p fr-conformance -- --nocapture run_replay_fixture_allows_structured_log_persistence_toggle`
+
+### 17.8 EP-007 Live oracle differential protocol narrative
+
+1. `run_live_redis_protocol_diff` establishes live Redis connection, writes raw protocol payload, and reads oracle response.
+2. Runtime path for same payload executes via `Runtime::execute_bytes`; parsed runtime response is compared against live oracle response.
+3. Branch points:
+   network connect/read/write failure, oracle invalid RESP, runtime mismatch, or structured-log emission failure.
+4. Failure handling:
+   case is marked failed with explicit expected/actual frames and detail, preserving deterministic diagnostics.
+
+Replay anchor:
+- `rch exec -- cargo test -p fr-conformance -- --nocapture live_redis_protocol_negative_matches_runtime`
+
+### 17.9 EP-008 Event-loop deterministic planning narrative
+
+1. Runtime wrappers call into `fr-eventloop` for tick planning and phase replay checks.
+2. Planning branch:
+   `Normal` mode uses configured budget; `Blocked` mode clamps accepts/commands and poll timeout semantics.
+3. Replay branch:
+   valid phase sequence returns completed ticks; invalid start/transition yields typed replay errors.
+4. Bootstrap branch:
+   missing before/after hooks or server cron timer yields explicit bootstrap contract errors.
+
+Replay anchors:
+- `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_001_u001_runtime_exposes_deterministic_phase_order`
+- `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_001_u011_runtime_phase_replay_accepts_contract_order`
+
+### 17.10 EP-009 Structured-log conversion and persistence narrative
+
+1. Runtime rejection events are recorded via `record_threat_event` with reason codes and replay metadata.
+2. Conformance harness converts runtime evidence using `StructuredLogEvent::from_runtime_evidence`.
+3. Persistence branch:
+   `append_structured_log_jsonl` appends newline-delimited JSON logs when enabled.
+4. Contract guarantees:
+   `reason_code` and `replay_cmd` are required non-empty fields in structured-log validation.
+
+Replay anchors:
+- `rch exec -- cargo test -p fr-conformance -- --nocapture run_fixture_accepts_structured_log_persistence_toggle`
+- `rch exec -- cargo test -p fr-conformance -- --nocapture run_protocol_fixture_persists_structured_logs_when_enabled`
+
+## 18. DOC-PASS-05 Complexity, Performance, and Memory Characterization
+
+### 18.1 Operation complexity map (current implementation)
+
+| Surface | Representative path | Time complexity (dominant term) | Space behavior | Source anchors |
+|---|---|---|---|---|
+| RESP frame parse | recursive frame parse over input bytes | `O(n)` in input size | `O(n)` for decoded frame buffers | `crates/fr-protocol/src/lib.rs:101`, `crates/fr-protocol/src/lib.rs:163` |
+| Command dispatch resolution | command-name chain in `dispatch_argv` | `O(k)` over supported command checks | `O(1)` aside from reply payloads | `crates/fr-command/src/lib.rs:47` |
+| Key read/write | `HashMap` lookup/insert in `Store` | expected `O(1)` average | key/value allocation proportional to payload size | `crates/fr-store/src/lib.rs:26`, `crates/fr-store/src/lib.rs:27` |
+| Multi-key read | `mget` over input keys | `O(m)` in key count | `O(m)` output vector + clones | `crates/fr-store/src/lib.rs:188` |
+| Key pattern scan | `keys_matching` + glob checks | `O(K * P)` for keys and pattern cost | `O(K)` key snapshot + matched result | `crates/fr-store/src/lib.rs:288` |
+| Database size with lazy expiry | `dbsize` with full-key sweep | `O(K)` | `O(K)` key snapshot during sweep | `crates/fr-store/src/lib.rs:305` |
+| AOF stream decode | cursor loop over concatenated frames | `O(n)` in stream bytes | `O(r)` decoded records + argv allocations | `crates/fr-persist/src/lib.rs:59` |
+| Replay fixture execution | record loop + assertion loop | `O(r + a)` per case | `O(r + a)` case artifacts/reports | `crates/fr-conformance/src/lib.rs:445` |
+| Event-loop plan | budget clamp and simple arithmetic | `O(1)` | `O(1)` | `crates/fr-eventloop/src/lib.rs:199`, `crates/fr-eventloop/src/lib.rs:211` |
+| Replication wait evaluation | threshold checks on offsets slice | `O(N)` in replica count | `O(1)` | `crates/fr-repl/src/lib.rs:257` |
+
+Legend:
+- `n`: bytes in payload/stream, `k`: command variants, `K`: key cardinality, `P`: pattern-evaluation cost, `m`: requested keys, `r`: replay records, `a`: replay assertions, `N`: replica offsets.
+
+### 18.2 Throughput-limiting paths and contention candidates
+
+1. Command-name linear resolution in `dispatch_argv` is currently string-compare heavy and grows with command surface.
+2. `KEYS`/`DBSIZE` paths perform full-key sweeps and can become latency spikes at higher key cardinalities.
+3. Replay verification (`run_replay_fixture`) compounds stream decode + command execution + assertion checks and scales with fixture size.
+4. RESP parse path allocates per-frame vectors and bulk buffers; malformed-load paths still pay scan cost before fail-closed return.
+
+### 18.3 Memory growth vectors
+
+| Component | Primary growth driver | Bound behavior today | Risk note |
+|---|---|---|---|
+| `Store.entries` | number of keys and value sizes | unbounded by policy in current code | high-cardinality workloads can increase RSS rapidly |
+| RESP decoded frames | payload size and array depth | bounded at runtime by compatibility gate (`max_array_len`, `max_bulk_len`) | gate values must be tuned to prevent hostile memory pressure |
+| Evidence ledger (`events: Vec`) | number of rejected/threat events | append-only while runtime instance lives | long-lived runtimes with ledger enabled can accumulate large audit vectors |
+| Replay decoded records | fixture record count | per-case vectors in harness | very large fixtures may inflate transient memory during replay validation |
+| Structured log aggregation | `Vec` of converted events prior to append | proportional to new events in case batch | bounded in normal test flows, but burst failures can enlarge transient allocations |
+
+Source anchors:
+- `crates/fr-store/src/lib.rs:27`
+- `crates/fr-runtime/src/lib.rs:105`
+- `crates/fr-runtime/src/lib.rs:522`
+- `crates/fr-conformance/src/lib.rs:445`
+- `crates/fr-conformance/src/lib.rs:809`
+
+### 18.4 Performance envelope and fallback behavior
+
+1. Strict mode defaults to fail-closed behavior on incompatible protocol/config surfaces; this preserves semantic safety but can increase rejection-path overhead under hostile traffic.
+2. Hardened mode allows bounded defenses only through allowlisted deviation categories in `RuntimePolicy`; non-allowlisted deviations are rejected with explicit reason codes.
+3. Event-loop blocked mode enforces reduced accept/command budgets (`TickBudget::bounded_for_blocked_mode`) to constrain worst-case cycle pressure.
+
+### 18.5 Measurement and replay command anchors (`rch` only)
+
+Baseline and static quality gates:
+- `rch exec -- cargo fmt --check`
+- `rch exec -- cargo check --workspace --all-targets`
+- `rch exec -- cargo clippy --workspace --all-targets -- -D warnings`
+
+Behavior and conformance probes:
+- `rch exec -- cargo test -p fr-runtime -- --nocapture`
+- `rch exec -- cargo test -p fr-command -- --nocapture`
+- `rch exec -- cargo test -p fr-store -- --nocapture`
+- `rch exec -- cargo test -p fr-conformance -- --nocapture`
+
+Targeted replay/diff probes:
+- `rch exec -- cargo test -p fr-conformance -- --nocapture conformance_replay_fixture_passes`
+- `rch exec -- cargo test -p fr-conformance -- --nocapture live_redis_protocol_negative_matches_runtime`
+
+Existing baseline artifact anchors:
+- `baselines/round1_conformance_baseline.json`
+- `baselines/round2_protocol_negative_baseline.json`
+- `baselines/round1_conformance_strace.txt`
+- `baselines/round2_protocol_negative_strace.txt`
+
+## 19. DOC-PASS-06 Concurrency/Lifecycle Semantics and Ordering Guarantees
+
+### 19.1 Concurrency model (current code)
+
+1. Runtime command execution is effectively single-threaded at the `Runtime` instance level: one frame is parsed/gated/dispatched at a time through `execute_frame`/`execute_bytes`.
+2. Event-loop semantics are modeled as deterministic phase progression rather than concurrent worker execution.
+3. Conformance harness may open sockets and iterate fixtures, but each per-case runtime state transition is serial within a case execution path.
+
+### 19.2 Lifecycle phases
+
+| Lifecycle slice | Primary state transitions | Ordering contract | Source anchors |
+|---|---|---|---|
+| Event-loop cycle | `BeforeSleep -> Poll -> FileDispatch -> TimeDispatch -> AfterSleep` | order must match constant phase sequence | `crates/fr-eventloop/src/lib.rs:46`, `crates/fr-eventloop/src/lib.rs:143` |
+| Runtime request | parse -> preflight -> auth/cluster admission -> dispatch -> reply | admission gates run before mutation/dispatch | `crates/fr-runtime/src/lib.rs:285`, `crates/fr-runtime/src/lib.rs:522`, `crates/fr-runtime/src/lib.rs:331` |
+| Auth lifecycle | bootstrap auth state -> credential check -> authenticated session | `NOAUTH` rejection occurs before generic dispatch when required | `crates/fr-runtime/src/lib.rs:401`, `crates/fr-runtime/src/lib.rs:986` |
+| Replay lifecycle | AOF decode order -> record replay order -> assertion order | record and assertion evaluation are deterministic loop order | `crates/fr-persist/src/lib.rs:62`, `crates/fr-conformance/src/lib.rs:488`, `crates/fr-conformance/src/lib.rs:519` |
+| Replication lifecycle | handshake progression + monotonic offsets | illegal transitions rejected; ACK offsets never regress | `crates/fr-repl/src/lib.rs:97`, `crates/fr-repl/src/lib.rs:43` |
+
+### 19.3 Ordering guarantees (explicit)
+
+| Guarantee ID | Guarantee | Enforcement mechanism | Failure mode |
+|---|---|---|---|
+| ORD-001 | Event-loop phase order is deterministic | `EVENT_LOOP_PHASE_ORDER` + `replay_phase_trace` expected-next checks | typed `PhaseReplayError` on mismatch |
+| ORD-002 | Noauth gate runs before command dispatch | `execute_frame` checks `requires_auth` before `dispatch_argv` | immediate `NOAUTH` error |
+| ORD-003 | Replay applies records in stream order | `decode_aof_stream` cursor walk + sequential `for` replay loop | replay case failure with deterministic case naming |
+| ORD-004 | Replica ACK offsets are monotonic | `ack_replica_offset` only promotes higher offsets | lower ACK ignored, no state regression |
+| ORD-005 | PSYNC decision is deterministic on `(replid, offset window)` | `decide_psync` pure decision function | explicit full-resync rejection reason |
+| ORD-006 | Blocked-mode event loop budget is clamped | `bounded_for_blocked_mode` and blocked poll-timeout branch | bounded throughput rather than unbounded cycle work |
+
+### 19.4 Lifecycle branch/fallback semantics
+
+1. Event-loop replay:
+   invalid start phase, invalid transition, or partial tick all return explicit replay errors rather than inferring continuation.
+2. Runtime admission:
+   invalid command frame, protocol parse failure, and auth-policy violations return fail-closed error replies and do not mutate store state.
+3. Replay harness:
+   decode failure branch surfaces explicit assertion details and halts that case branch safely.
+4. Replication FSM:
+   unexpected handshake step or PSYNC reply state mismatch returns typed `ReplError` reason codes instead of implicit recovery.
+
+### 19.5 Verification anchors and replay commands (`rch`)
+
+Event-loop ordering:
+- `rch exec -- cargo test -p fr-eventloop -- --nocapture fr_p2c_001_u001_phase_order_is_deterministic`
+- `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_001_u011_runtime_phase_replay_accepts_contract_order`
+
+Admission ordering:
+- `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_004_u005_noauth_gate_runs_before_dispatch`
+
+Replay ordering:
+- `rch exec -- cargo test -p fr-conformance -- --nocapture conformance_replay_fixture_passes`
+- `rch exec -- cargo test -p fr-conformance -- --nocapture run_replay_fixture_allows_structured_log_persistence_toggle`
+
+Replication ordering:
+- `rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u004_replica_ack_offsets_never_regress`
+- `rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u001_psync_accepts_partial_resync_inside_window`
+- `rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u005_wait_threshold_counts_acknowledged_replicas`
