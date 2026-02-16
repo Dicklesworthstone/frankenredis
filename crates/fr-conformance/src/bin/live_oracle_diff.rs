@@ -1,12 +1,25 @@
 #![forbid(unsafe_code)]
 
 use std::env;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use fr_conformance::{
-    HarnessConfig, LiveOracleConfig, run_live_redis_diff, run_live_redis_protocol_diff,
+    CaseOutcome, DifferentialReport, HarnessConfig, LiveOracleConfig, run_live_redis_diff,
+    run_live_redis_protocol_diff,
 };
+use serde::Serialize;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CliArgs {
+    mode: String,
+    fixture: String,
+    host: String,
+    port: u16,
+    log_root: Option<PathBuf>,
+    json_out: Option<PathBuf>,
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -19,47 +32,37 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode, String> {
-    let mut args = env::args().skip(1).collect::<Vec<_>>();
-    let mut log_root: Option<PathBuf> = None;
-    let mut idx = 0;
-    while idx < args.len() {
-        if args[idx] == "--log-root" {
-            if idx + 1 >= args.len() {
-                return Err(usage("missing path after --log-root"));
-            }
-            log_root = Some(PathBuf::from(args[idx + 1].clone()));
-            args.drain(idx..=idx + 1);
-            continue;
-        }
-        idx += 1;
-    }
-    let mut args = args.into_iter();
-    let mode = args
-        .next()
-        .ok_or_else(|| usage("missing mode; expected 'command' or 'protocol'"))?;
-    let fixture = args
-        .next()
-        .ok_or_else(|| usage("missing fixture file name (e.g. core_errors.json)"))?;
-
-    let host = args.next().unwrap_or_else(|| "127.0.0.1".to_string());
-    let port = match args.next() {
-        Some(text) => text
-            .parse::<u16>()
-            .map_err(|_| format!("invalid port '{text}'"))?,
-        None => 6379,
-    };
+    let cli = parse_args(env::args().skip(1).collect())?;
 
     let mut cfg = HarnessConfig::default_paths();
-    cfg.live_log_root = log_root.clone();
+    cfg.live_log_root = cli.log_root.clone();
     let oracle = LiveOracleConfig {
-        host,
-        port,
+        host: cli.host.clone(),
+        port: cli.port,
         ..LiveOracleConfig::default()
     };
 
-    let report = match mode.as_str() {
-        "command" => run_live_redis_diff(&cfg, &fixture, &oracle)?,
-        "protocol" => run_live_redis_protocol_diff(&cfg, &fixture, &oracle)?,
+    let report = match cli.mode.as_str() {
+        "command" => match run_live_redis_diff(&cfg, &cli.fixture, &oracle) {
+            Ok(report) => report,
+            Err(err) => {
+                if let Some(path) = &cli.json_out {
+                    write_json_error_report(path, &cli, &err)?;
+                    println!("json_report: {}", path.display());
+                }
+                return Err(err);
+            }
+        },
+        "protocol" => match run_live_redis_protocol_diff(&cfg, &cli.fixture, &oracle) {
+            Ok(report) => report,
+            Err(err) => {
+                if let Some(path) = &cli.json_out {
+                    write_json_error_report(path, &cli, &err)?;
+                    println!("json_report: {}", path.display());
+                }
+                return Err(err);
+            }
+        },
         _ => return Err(usage("mode must be 'command' or 'protocol'")),
     };
 
@@ -67,8 +70,12 @@ fn run() -> Result<ExitCode, String> {
     println!("total: {}", report.total);
     println!("passed: {}", report.passed);
     println!("failed: {}", report.failed.len());
-    if let Some(path) = &log_root {
+    if let Some(path) = &cli.log_root {
         println!("live_log_root: {}", path.display());
+    }
+    if let Some(path) = &cli.json_out {
+        write_json_report(path, &cli, &report)?;
+        println!("json_report: {}", path.display());
     }
 
     if !report.failed.is_empty() {
@@ -77,6 +84,9 @@ fn run() -> Result<ExitCode, String> {
             println!("case: {}", failure.name);
             println!("expected(redis): {:?}", failure.expected);
             println!("actual(runtime):  {:?}", failure.actual);
+            if let Some(detail) = &failure.detail {
+                println!("detail: {detail}");
+            }
         }
         return Ok(ExitCode::from(1));
     }
@@ -84,8 +94,207 @@ fn run() -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn parse_args(raw_args: Vec<String>) -> Result<CliArgs, String> {
+    let mut args = raw_args;
+    let mut log_root: Option<PathBuf> = None;
+    let mut json_out: Option<PathBuf> = None;
+    let mut idx = 0;
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--log-root" => {
+                if idx + 1 >= args.len() {
+                    return Err(usage("missing path after --log-root"));
+                }
+                log_root = Some(PathBuf::from(args[idx + 1].clone()));
+                args.drain(idx..=idx + 1);
+                continue;
+            }
+            "--json-out" => {
+                if idx + 1 >= args.len() {
+                    return Err(usage("missing path after --json-out"));
+                }
+                json_out = Some(PathBuf::from(args[idx + 1].clone()));
+                args.drain(idx..=idx + 1);
+                continue;
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    let mut args = args.into_iter();
+    let mode = args
+        .next()
+        .ok_or_else(|| usage("missing mode; expected 'command' or 'protocol'"))?;
+    let fixture = args
+        .next()
+        .ok_or_else(|| usage("missing fixture file name (e.g. core_errors.json)"))?;
+    let host = args.next().unwrap_or_else(|| "127.0.0.1".to_string());
+    let port = match args.next() {
+        Some(text) => text
+            .parse::<u16>()
+            .map_err(|_| format!("invalid port '{text}'"))?,
+        None => 6379,
+    };
+
+    Ok(CliArgs {
+        mode,
+        fixture,
+        host,
+        port,
+        log_root,
+        json_out,
+    })
+}
+
+#[derive(Debug, Serialize)]
+struct JsonFailure {
+    case_name: String,
+    expected: String,
+    actual: String,
+    detail: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct JsonReport {
+    status: String,
+    mode: String,
+    fixture: String,
+    host: String,
+    port: u16,
+    suite: String,
+    total: usize,
+    passed: usize,
+    failed_count: usize,
+    live_log_root: Option<String>,
+    failures: Vec<JsonFailure>,
+    run_error: Option<String>,
+}
+
+fn write_json_report(
+    path: &Path,
+    cli: &CliArgs,
+    report: &DifferentialReport,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create json report directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+    let json_report = JsonReport {
+        status: "completed".to_string(),
+        mode: cli.mode.clone(),
+        fixture: cli.fixture.clone(),
+        host: cli.host.clone(),
+        port: cli.port,
+        suite: report.suite.clone(),
+        total: report.total,
+        passed: report.passed,
+        failed_count: report.failed.len(),
+        live_log_root: cli.log_root.as_ref().map(|root| root.display().to_string()),
+        failures: report.failed.iter().map(json_failure).collect(),
+        run_error: None,
+    };
+
+    let payload = serde_json::to_string_pretty(&json_report)
+        .map_err(|err| format!("failed to encode json report: {err}"))?;
+    fs::write(path, payload)
+        .map_err(|err| format!("failed to write json report {}: {err}", path.display()))
+}
+
+fn write_json_error_report(path: &Path, cli: &CliArgs, run_error: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create json report directory {}: {err}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let json_report = JsonReport {
+        status: "execution_error".to_string(),
+        mode: cli.mode.clone(),
+        fixture: cli.fixture.clone(),
+        host: cli.host.clone(),
+        port: cli.port,
+        suite: String::new(),
+        total: 0,
+        passed: 0,
+        failed_count: 0,
+        live_log_root: cli.log_root.as_ref().map(|root| root.display().to_string()),
+        failures: Vec::new(),
+        run_error: Some(run_error.to_string()),
+    };
+    let payload = serde_json::to_string_pretty(&json_report)
+        .map_err(|err| format!("failed to encode json error report: {err}"))?;
+    fs::write(path, payload)
+        .map_err(|err| format!("failed to write json report {}: {err}", path.display()))
+}
+
+fn json_failure(case: &CaseOutcome) -> JsonFailure {
+    JsonFailure {
+        case_name: case.name.clone(),
+        expected: format!("{:?}", case.expected),
+        actual: format!("{:?}", case.actual),
+        detail: case.detail.clone(),
+    }
+}
+
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nusage: cargo run -p fr-conformance --bin live_oracle_diff -- [--log-root <path>] <command|protocol> <fixture.json> [host] [port]"
+        "{reason}\nusage: cargo run -p fr-conformance --bin live_oracle_diff -- [--log-root <path>] [--json-out <path>] <command|protocol> <fixture.json> [host] [port]"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_args;
+
+    #[test]
+    fn parse_args_supports_optional_flags() {
+        let parsed = parse_args(vec![
+            "--log-root".to_string(),
+            "artifacts/logs".to_string(),
+            "--json-out".to_string(),
+            "artifacts/report.json".to_string(),
+            "protocol".to_string(),
+            "protocol_negative.json".to_string(),
+            "10.0.0.5".to_string(),
+            "6380".to_string(),
+        ])
+        .expect("arguments parse");
+
+        assert_eq!(parsed.mode, "protocol");
+        assert_eq!(parsed.fixture, "protocol_negative.json");
+        assert_eq!(parsed.host, "10.0.0.5");
+        assert_eq!(parsed.port, 6380);
+        assert_eq!(
+            parsed.log_root.expect("log root present").to_string_lossy(),
+            "artifacts/logs"
+        );
+        assert_eq!(
+            parsed
+                .json_out
+                .expect("json path present")
+                .to_string_lossy(),
+            "artifacts/report.json"
+        );
+    }
+
+    #[test]
+    fn parse_args_defaults_host_and_port() {
+        let parsed = parse_args(vec!["command".to_string(), "core_strings.json".to_string()])
+            .expect("arguments parse");
+
+        assert_eq!(parsed.host, "127.0.0.1");
+        assert_eq!(parsed.port, 6379);
+    }
 }

@@ -1,0 +1,34 @@
+{
+  "schema_version": "adversarial_corpus/v1",
+  "corpus_id": "frankenredis-foundation-adversarial-v1",
+  "default_seed": 424242,
+  "suites": [
+    {
+      "suite_id": "adv_protocol_negative_v1",
+      "mode": "protocol",
+      "fixture": "protocol_negative.json",
+      "risk_focus": "parser_abuse",
+      "owner_bead": "bd-2wb.13.6",
+      "strict_replay_cmd": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-runtime -- --nocapture protocol_invalid_bulk_length_error_string",
+      "hardened_replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture conformance_protocol_fixture_passes"
+    },
+    {
+      "suite_id": "adv_core_errors_v1",
+      "mode": "command",
+      "fixture": "core_errors.json",
+      "risk_focus": "dispatch_validation",
+      "owner_bead": "bd-2wb.14.6",
+      "strict_replay_cmd": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture conformance_fixture_errors_passes",
+      "hardened_replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture conformance_fixture_errors_passes"
+    },
+    {
+      "suite_id": "adv_persist_replay_v1",
+      "mode": "replay",
+      "fixture": "persist_replay.json",
+      "risk_focus": "replay_ordering",
+      "owner_bead": "bd-2wb.16.6",
+      "strict_replay_cmd": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture conformance_replay_fixture_passes",
+      "hardened_replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture run_replay_fixture_allows_structured_log_persistence_toggle"
+    }
+  ]
+}
