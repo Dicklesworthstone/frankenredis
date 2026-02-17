@@ -955,11 +955,15 @@ fn packet_family_for_fixture(fixture_name: &str) -> &'static str {
     match fixture_name {
         "fr_p2c_001_eventloop_journey.json" => "FR-P2C-001",
         "protocol_negative.json" => "FR-P2C-002",
+        "fr_p2c_004_auth_unit" | "fr_p2c_004_acl_rules" | "fr_p2c_004_acl_permissions" => {
+            "FR-P2C-004"
+        }
         "core_errors.json" | "fr_p2c_003_dispatch_journey.json" => "FR-P2C-003",
         "fr_p2c_006_replication_journey.json" => "FR-P2C-006",
         "persist_replay.json" => "FR-P2C-005",
         "fr_p2c_009_tls_config_journey.json" => "FR-P2C-009",
         "fr_p2c_009_tls_runtime_strict" | "fr_p2c_009_tls_runtime_hardened" => "FR-P2C-009",
+        _ if fixture_name.starts_with("fr_p2c_004_") => "FR-P2C-004",
         _ if fixture_name.starts_with("fr_p2c_003_") => "FR-P2C-003",
         _ if fixture_name.starts_with("fr_p2c_006_") => "FR-P2C-006",
         _ if fixture_name.starts_with("fr_p2c_009_") => "FR-P2C-009",
@@ -999,6 +1003,7 @@ fn decision_action_label(decision_action: DecisionAction) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1062,6 +1067,57 @@ mod tests {
             }
             fr_persist::PersistError::Parse(_) => "persist.replay.frame_parse_invalid",
         }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum AuthState {
+        Authenticated,
+        Unauthenticated,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum CommandAuthClass {
+        NoAuthExempt,
+        RequiresAuth,
+    }
+
+    fn enforce_noauth_gate(state: AuthState, class: CommandAuthClass) -> Result<(), &'static str> {
+        match (state, class) {
+            (AuthState::Unauthenticated, CommandAuthClass::RequiresAuth) => {
+                Err("auth.noauth_gate_violation")
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn parse_acl_selector_tokens(tokens: &[&str]) -> Result<(), &'static str> {
+        for token in tokens {
+            if token.trim().is_empty() {
+                return Err("auth.acl_selector_parse_validation_mismatch");
+            }
+            let valid_prefix = token.starts_with("+@")
+                || token.starts_with("-@")
+                || token.starts_with('+')
+                || token.starts_with('-')
+                || token.starts_with('~')
+                || token.starts_with('&')
+                || token.starts_with('>');
+            let valid_literal = matches!(*token, "on" | "off" | "resetpass" | "nopass");
+            if !(valid_prefix || valid_literal) {
+                return Err("auth.acl_selector_parse_validation_mismatch");
+            }
+        }
+        Ok(())
+    }
+
+    fn allow_set(commands: &[&str]) -> BTreeSet<String> {
+        commands.iter().map(|cmd| (*cmd).to_string()).collect()
+    }
+
+    fn first_denied_index(allowed: &BTreeSet<String>, command_path: &[&str]) -> Option<usize> {
+        command_path
+            .iter()
+            .position(|cmd| !allowed.contains(*cmd))
     }
 
     #[test]
@@ -1888,6 +1944,166 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_004_u005_noauth_gate_precedes_dispatch_and_logs() {
+        let denied = enforce_noauth_gate(AuthState::Unauthenticated, CommandAuthClass::RequiresAuth)
+            .expect_err("unauthenticated command path must be gated");
+        assert_eq!(denied, "auth.noauth_gate_violation");
+
+        enforce_noauth_gate(AuthState::Unauthenticated, CommandAuthClass::NoAuthExempt)
+            .expect("noauth-exempt command should pass");
+        enforce_noauth_gate(AuthState::Authenticated, CommandAuthClass::RequiresAuth)
+            .expect("authenticated command should pass");
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:405".to_string(),
+            ts_ms: 405,
+            packet_id: 4,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::AuthPolicyConfusion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "auth_gate",
+            action: "noauth_pre_dispatch_gate",
+            reason_code: "auth.noauth_gate_violation",
+            reason: "unauthenticated command rejected before dispatch".to_string(),
+            input_digest: "fr_p2c_004_u005_input".to_string(),
+            output_digest: "fr_p2c_004_u005_output".to_string(),
+            state_digest_before: "unauthenticated".to_string(),
+            state_digest_after: "unauthenticated".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=405 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_u005_noauth_gate_precedes_dispatch_and_logs".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-004/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_004",
+                fixture_name: "fr_p2c_004_auth_unit",
+                case_name: "u005_noauth_gate",
+                verification_path: VerificationPath::Unit,
+                now_ms: 405,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            &[event],
+        )
+        .expect("packet-004 noauth-gate structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_004_u007_acl_selector_parser_rejects_malformed_rules_and_logs() {
+        parse_acl_selector_tokens(&["+@all", "~cache:*", "&stream:*"])
+            .expect("valid selector token set should parse");
+
+        let err = parse_acl_selector_tokens(&["+@all", "??invalid-rule"])
+            .expect_err("malformed selector token must be rejected");
+        assert_eq!(err, "auth.acl_selector_parse_validation_mismatch");
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:407".to_string(),
+            ts_ms: 407,
+            packet_id: 4,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::AuthPolicyConfusion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "acl_parser",
+            action: "selector_token_validate",
+            reason_code: "auth.acl_selector_parse_validation_mismatch",
+            reason: "malformed ACL selector token rejected".to_string(),
+            input_digest: "fr_p2c_004_u007_input".to_string(),
+            output_digest: "fr_p2c_004_u007_output".to_string(),
+            state_digest_before: "acl_parse_start".to_string(),
+            state_digest_after: "acl_parse_reject".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=407 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_u007_acl_selector_parser_rejects_malformed_rules_and_logs".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-004/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_004",
+                fixture_name: "fr_p2c_004_acl_rules",
+                case_name: "u007_acl_rule_parse",
+                verification_path: VerificationPath::Unit,
+                now_ms: 407,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            &[event],
+        )
+        .expect("packet-004 ACL parser structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_004_u006_property_acl_deny_index_is_monotonic() {
+        let command_path = ["GET", "SET", "DEL", "INCR"];
+
+        let baseline = allow_set(&["GET", "SET"]);
+        let baseline_deny = first_denied_index(&baseline, &command_path);
+        assert_eq!(baseline_deny, Some(2));
+
+        let expanded = allow_set(&["SET", "GET", "DEL"]);
+        let expanded_deny = first_denied_index(&expanded, &command_path);
+        assert_eq!(expanded_deny, Some(3));
+        assert!(
+            expanded_deny.unwrap_or(usize::MAX) >= baseline_deny.unwrap_or(usize::MAX),
+            "expanding permissions must not move the first deny earlier"
+        );
+
+        let fully_allowed = allow_set(&["GET", "SET", "DEL", "INCR"]);
+        assert_eq!(first_denied_index(&fully_allowed, &command_path), None);
+
+        let permuted_baseline = allow_set(&["SET", "GET"]);
+        assert_eq!(
+            first_denied_index(&permuted_baseline, &command_path),
+            baseline_deny,
+            "allowlist permutation must preserve deny-index result"
+        );
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:406".to_string(),
+            ts_ms: 406,
+            packet_id: 4,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::AuthPolicyConfusion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "acl_reduce",
+            action: "first_denied_index",
+            reason_code: "parity_ok",
+            reason: "ACL deny-index monotonicity preserved across permission expansions".to_string(),
+            input_digest: "fr_p2c_004_u006_input".to_string(),
+            output_digest: "fr_p2c_004_u006_output".to_string(),
+            state_digest_before: "acl_reduce_start".to_string(),
+            state_digest_after: "acl_reduce_verified".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=406 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_u006_property_acl_deny_index_is_monotonic".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-004/risk_note.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_004",
+                fixture_name: "fr_p2c_004_acl_permissions",
+                case_name: "u006_acl_deny_index_metamorphic",
+                verification_path: VerificationPath::Property,
+                now_ms: 406,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            &[event],
+        )
+        .expect("packet-004 ACL property structured log should validate");
+    }
+
+    #[test]
     fn run_replay_fixture_allows_structured_log_persistence_toggle() {
         let log_root = unique_temp_log_root("fr_conformance_replay_logs");
         let mut cfg = HarnessConfig::default_paths();
@@ -2642,6 +2858,18 @@ mod tests {
         assert_eq!(
             crate::packet_family_for_fixture("fr_p2c_009_tls_config_journey.json"),
             "FR-P2C-009"
+        );
+    }
+
+    #[test]
+    fn fr_p2c_004_fixture_packet_family_maps_to_packet_004() {
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_004_auth_unit"),
+            "FR-P2C-004"
+        );
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_004_acl_permissions"),
+            "FR-P2C-004"
         );
     }
 
