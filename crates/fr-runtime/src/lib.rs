@@ -67,6 +67,117 @@ enum ClusterClientMode {
     ReadOnly,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeSpecialCommand {
+    Auth,
+    Hello,
+    Asking,
+    Readonly,
+    Readwrite,
+    Cluster,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClusterSubcommand {
+    Help,
+    Unknown,
+}
+
+#[inline]
+fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand> {
+    match cmd.len() {
+        4 => {
+            if eq_ascii_token(cmd, b"AUTH") {
+                Some(RuntimeSpecialCommand::Auth)
+            } else {
+                None
+            }
+        }
+        5 => {
+            if eq_ascii_token(cmd, b"HELLO") {
+                Some(RuntimeSpecialCommand::Hello)
+            } else {
+                None
+            }
+        }
+        6 => {
+            if eq_ascii_token(cmd, b"ASKING") {
+                Some(RuntimeSpecialCommand::Asking)
+            } else {
+                None
+            }
+        }
+        7 => {
+            if eq_ascii_token(cmd, b"CLUSTER") {
+                Some(RuntimeSpecialCommand::Cluster)
+            } else {
+                None
+            }
+        }
+        8 => {
+            if eq_ascii_token(cmd, b"READONLY") {
+                Some(RuntimeSpecialCommand::Readonly)
+            } else {
+                None
+            }
+        }
+        9 => {
+            if eq_ascii_token(cmd, b"READWRITE") {
+                Some(RuntimeSpecialCommand::Readwrite)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialCommand> {
+    let command = std::str::from_utf8(cmd).ok()?;
+    if command.eq_ignore_ascii_case("AUTH") {
+        Some(RuntimeSpecialCommand::Auth)
+    } else if command.eq_ignore_ascii_case("HELLO") {
+        Some(RuntimeSpecialCommand::Hello)
+    } else if command.eq_ignore_ascii_case("ASKING") {
+        Some(RuntimeSpecialCommand::Asking)
+    } else if command.eq_ignore_ascii_case("READONLY") {
+        Some(RuntimeSpecialCommand::Readonly)
+    } else if command.eq_ignore_ascii_case("READWRITE") {
+        Some(RuntimeSpecialCommand::Readwrite)
+    } else if command.eq_ignore_ascii_case("CLUSTER") {
+        Some(RuntimeSpecialCommand::Cluster)
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn classify_cluster_subcommand(cmd: &[u8]) -> Result<ClusterSubcommand, CommandError> {
+    if cmd.len() == 4 && eq_ascii_token(cmd, b"HELP") {
+        return Ok(ClusterSubcommand::Help);
+    }
+    if std::str::from_utf8(cmd).is_err() {
+        return Err(CommandError::InvalidUtf8Argument);
+    }
+    Ok(ClusterSubcommand::Unknown)
+}
+
+#[cfg(test)]
+fn classify_cluster_subcommand_linear(cmd: &[u8]) -> Result<ClusterSubcommand, CommandError> {
+    let subcommand = std::str::from_utf8(cmd).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if subcommand.eq_ignore_ascii_case("HELP") {
+        Ok(ClusterSubcommand::Help)
+    } else {
+        Ok(ClusterSubcommand::Unknown)
+    }
+}
+
+#[inline]
+fn eq_ascii_token(lhs: &[u8], rhs: &[u8]) -> bool {
+    lhs.eq_ignore_ascii_case(rhs)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ClusterClientState {
     mode: ClusterClientMode,
@@ -386,13 +497,12 @@ impl Runtime {
             Ok(command_name) => command_name,
             Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
         };
+        let special_command = classify_runtime_special_command(command_name.as_bytes());
 
-        if command_name.eq_ignore_ascii_case("AUTH") {
-            return self.handle_auth_command(&argv);
-        }
-
-        if command_name.eq_ignore_ascii_case("HELLO") {
-            return self.handle_hello_command(&argv);
+        match special_command {
+            Some(RuntimeSpecialCommand::Auth) => return self.handle_auth_command(&argv),
+            Some(RuntimeSpecialCommand::Hello) => return self.handle_hello_command(&argv),
+            _ => {}
         }
 
         if self.auth_state.requires_auth() {
@@ -416,20 +526,12 @@ impl Runtime {
             return reply;
         }
 
-        if command_name.eq_ignore_ascii_case("ASKING") {
-            return self.handle_asking_command(&argv);
-        }
-
-        if command_name.eq_ignore_ascii_case("READONLY") {
-            return self.handle_readonly_command(&argv);
-        }
-
-        if command_name.eq_ignore_ascii_case("READWRITE") {
-            return self.handle_readwrite_command(&argv);
-        }
-
-        if command_name.eq_ignore_ascii_case("CLUSTER") {
-            return self.handle_cluster_command(&argv);
+        match special_command {
+            Some(RuntimeSpecialCommand::Asking) => return self.handle_asking_command(&argv),
+            Some(RuntimeSpecialCommand::Readonly) => return self.handle_readonly_command(&argv),
+            Some(RuntimeSpecialCommand::Readwrite) => return self.handle_readwrite_command(&argv),
+            Some(RuntimeSpecialCommand::Cluster) => return self.handle_cluster_command(&argv),
+            _ => {}
         }
 
         match dispatch_argv(&argv, &mut self.store, now_ms) {
@@ -567,12 +669,12 @@ impl Runtime {
         if argv.len() < 2 {
             return command_error_to_resp(CommandError::WrongArity("CLUSTER"));
         }
-        let subcommand = match std::str::from_utf8(&argv[1]) {
+        let subcommand = match classify_cluster_subcommand(&argv[1]) {
             Ok(subcommand) => subcommand,
-            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+            Err(err) => return command_error_to_resp(err),
         };
 
-        if subcommand.eq_ignore_ascii_case("HELP") {
+        if subcommand == ClusterSubcommand::Help {
             if argv.len() != 2 {
                 return RespFrame::Error(CLUSTER_UNKNOWN_SUBCOMMAND_ERROR.to_string());
             }
@@ -862,6 +964,9 @@ pub mod ecosystem {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
+    use fr_command::CommandError;
     use fr_config::{
         DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
         TlsAuthClients, TlsConfig, TlsProtocol,
@@ -873,7 +978,11 @@ mod tests {
     };
     use fr_protocol::{RespFrame, parse_frame};
 
-    use super::Runtime;
+    use super::{
+        ClusterSubcommand, Runtime, classify_cluster_subcommand,
+        classify_cluster_subcommand_linear, classify_runtime_special_command,
+        classify_runtime_special_command_linear,
+    };
 
     fn command(parts: &[&[u8]]) -> RespFrame {
         RespFrame::Array(Some(
@@ -1184,6 +1293,213 @@ mod tests {
             gated,
             RespFrame::Error("NOAUTH Authentication required.".to_string())
         );
+    }
+
+    #[test]
+    fn fr_p2c_004_runtime_special_command_classifier_matches_linear_reference() {
+        let samples: &[&[u8]] = &[
+            b"AUTH",
+            b"auth",
+            b"HeLlO",
+            b"ASKING",
+            b"readonly",
+            b"READWRITE",
+            b"cluster",
+            b"PING",
+            b"GET",
+            b"SET",
+            b"UNKNOWN",
+            b"post",
+            b"host:",
+            &[0xFF],
+        ];
+        for sample in samples {
+            let optimized = classify_runtime_special_command(sample);
+            let linear = classify_runtime_special_command_linear(sample);
+            assert_eq!(
+                optimized,
+                linear,
+                "special command classifier mismatch for {:?}",
+                String::from_utf8_lossy(sample)
+            );
+        }
+    }
+
+    #[test]
+    fn fr_p2c_007_cluster_subcommand_classifier_matches_linear_reference() {
+        let samples: &[&[u8]] = &[
+            b"HELP",
+            b"help",
+            b"HeLp",
+            b"NOPE",
+            b"SLOTS",
+            b"NODES",
+            b"SETSLOT",
+            b"FAILOVER",
+            b"myid",
+            &[0xFF],
+        ];
+        for sample in samples {
+            let optimized = classify_cluster_subcommand(sample);
+            let linear = classify_cluster_subcommand_linear(sample);
+            assert_eq!(
+                optimized,
+                linear,
+                "cluster subcommand classifier mismatch for {:?}",
+                String::from_utf8_lossy(sample)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "profiling helper for FR-P2C-007-H"]
+    fn fr_p2c_007_cluster_subcommand_route_profile_snapshot() {
+        let workload: &[&[u8]] = &[
+            b"HELP",
+            b"help",
+            b"HeLp",
+            b"HELP",
+            b"NOPE",
+            b"SLOTS",
+            b"NODES",
+            b"SETSLOT",
+            b"FAILOVER",
+            b"myid",
+            &[0xFF],
+        ];
+
+        let rounds = 300_000usize;
+        let total_lookups = rounds.saturating_mul(workload.len());
+
+        let mut linear_help_hits = 0usize;
+        let mut linear_invalid_utf8 = 0usize;
+        let linear_start = Instant::now();
+        for _ in 0..rounds {
+            for cmd in workload {
+                match classify_cluster_subcommand_linear(cmd) {
+                    Ok(ClusterSubcommand::Help) => {
+                        linear_help_hits = linear_help_hits.saturating_add(1)
+                    }
+                    Ok(ClusterSubcommand::Unknown) => {}
+                    Err(CommandError::InvalidUtf8Argument) => {
+                        linear_invalid_utf8 = linear_invalid_utf8.saturating_add(1)
+                    }
+                    Err(err) => panic!("unexpected linear classifier error: {err:?}"),
+                }
+            }
+        }
+        let linear_ns = linear_start.elapsed().as_nanos();
+
+        let mut optimized_help_hits = 0usize;
+        let mut optimized_invalid_utf8 = 0usize;
+        let optimized_start = Instant::now();
+        for _ in 0..rounds {
+            for cmd in workload {
+                match classify_cluster_subcommand(cmd) {
+                    Ok(ClusterSubcommand::Help) => {
+                        optimized_help_hits = optimized_help_hits.saturating_add(1)
+                    }
+                    Ok(ClusterSubcommand::Unknown) => {}
+                    Err(CommandError::InvalidUtf8Argument) => {
+                        optimized_invalid_utf8 = optimized_invalid_utf8.saturating_add(1)
+                    }
+                    Err(err) => panic!("unexpected optimized classifier error: {err:?}"),
+                }
+            }
+        }
+        let optimized_ns = optimized_start.elapsed().as_nanos();
+
+        assert_eq!(linear_help_hits, optimized_help_hits);
+        assert_eq!(linear_invalid_utf8, optimized_invalid_utf8);
+        assert!(total_lookups > 0);
+
+        let linear_ns_per_lookup = linear_ns as f64 / total_lookups as f64;
+        let optimized_ns_per_lookup = optimized_ns as f64 / total_lookups as f64;
+        let speedup_ratio = if optimized_ns > 0 {
+            linear_ns as f64 / optimized_ns as f64
+        } else {
+            0.0
+        };
+
+        println!("profile.packet_id=FR-P2C-007");
+        println!("profile.benchmark=cluster_subcommand_classifier");
+        println!("profile.total_lookups={total_lookups}");
+        println!("profile.linear_total_ns={linear_ns}");
+        println!("profile.optimized_total_ns={optimized_ns}");
+        println!("profile.linear_help_hits={linear_help_hits}");
+        println!("profile.optimized_help_hits={optimized_help_hits}");
+        println!("profile.linear_invalid_utf8={linear_invalid_utf8}");
+        println!("profile.optimized_invalid_utf8={optimized_invalid_utf8}");
+        println!("profile.linear_ns_per_lookup={linear_ns_per_lookup:.6}");
+        println!("profile.optimized_ns_per_lookup={optimized_ns_per_lookup:.6}");
+        println!("profile.speedup_ratio={speedup_ratio:.6}");
+    }
+
+    #[test]
+    #[ignore = "profiling helper for FR-P2C-004-H"]
+    fn fr_p2c_004_runtime_special_route_profile_snapshot() {
+        let workload: &[&[u8]] = &[
+            b"PING",
+            b"SET",
+            b"GET",
+            b"AUTH",
+            b"HELLO",
+            b"READONLY",
+            b"READWRITE",
+            b"CLUSTER",
+            b"ASKING",
+            b"DEL",
+            b"MGET",
+            b"MSET",
+            b"UNKNOWN",
+            b"host:",
+            b"post",
+        ];
+
+        let rounds = 300_000usize;
+        let total_lookups = rounds.saturating_mul(workload.len());
+
+        let mut linear_hits = 0usize;
+        let linear_start = Instant::now();
+        for _ in 0..rounds {
+            for cmd in workload {
+                if classify_runtime_special_command_linear(cmd).is_some() {
+                    linear_hits = linear_hits.saturating_add(1);
+                }
+            }
+        }
+        let linear_ns = linear_start.elapsed().as_nanos();
+
+        let mut optimized_hits = 0usize;
+        let optimized_start = Instant::now();
+        for _ in 0..rounds {
+            for cmd in workload {
+                if classify_runtime_special_command(cmd).is_some() {
+                    optimized_hits = optimized_hits.saturating_add(1);
+                }
+            }
+        }
+        let optimized_ns = optimized_start.elapsed().as_nanos();
+
+        assert_eq!(linear_hits, optimized_hits);
+        assert!(total_lookups > 0);
+
+        let linear_ns_per_lookup = linear_ns as f64 / total_lookups as f64;
+        let optimized_ns_per_lookup = optimized_ns as f64 / total_lookups as f64;
+        let speedup_ratio = if optimized_ns > 0 {
+            linear_ns as f64 / optimized_ns as f64
+        } else {
+            0.0
+        };
+
+        println!("profile.packet_id=FR-P2C-004");
+        println!("profile.benchmark=runtime_special_route_classifier");
+        println!("profile.total_lookups={total_lookups}");
+        println!("profile.linear_total_ns={linear_ns}");
+        println!("profile.optimized_total_ns={optimized_ns}");
+        println!("profile.linear_ns_per_lookup={linear_ns_per_lookup:.6}");
+        println!("profile.optimized_ns_per_lookup={optimized_ns_per_lookup:.6}");
+        println!("profile.speedup_ratio={speedup_ratio:.6}");
     }
 
     #[test]

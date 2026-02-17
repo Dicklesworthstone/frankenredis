@@ -11,6 +11,7 @@ durability-critical evidence files, with optional corruption simulation.
 Options:
   --output-root <path>   Output root for run artifacts (default: artifacts/durability/raptorq_runs)
   --run-id <id>          Run identifier (default: local-<utc-timestamp>)
+  --no-phase2c           Skip auto-discovery of artifacts/phase2c evidence bundles
   --no-corruption        Skip corruption simulation checks
   -h, --help             Show this help
 USAGE
@@ -21,6 +22,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 output_root="$REPO_ROOT/artifacts/durability/raptorq_runs"
 run_id="local-$(date -u +%Y%m%dT%H%M%SZ)"
+include_phase2c=1
 simulate_corruption=1
 
 while [[ $# -gt 0 ]]; do
@@ -32,6 +34,10 @@ while [[ $# -gt 0 ]]; do
     --run-id)
       run_id="$2"
       shift 2
+      ;;
+    --no-phase2c)
+      include_phase2c=0
+      shift
       ;;
     --no-corruption)
       simulate_corruption=0
@@ -59,11 +65,51 @@ if ! command -v sha256sum >/dev/null 2>&1; then
   exit 2
 fi
 
-declare -a artifact_targets=(
+declare -a seed_targets=(
   "baselines/round1_conformance_baseline.json"
   "baselines/round2_protocol_negative_baseline.json"
   "golden_outputs/core_strings.json"
 )
+
+declare -a artifact_targets=()
+
+collect_artifact_targets() {
+  declare -A seen_targets=()
+  local rel_path abs_path
+
+  for rel_path in "${seed_targets[@]}"; do
+    if [[ -f "$REPO_ROOT/$rel_path" ]]; then
+      seen_targets["$rel_path"]=1
+    fi
+  done
+
+  if [[ "$include_phase2c" -eq 1 ]]; then
+    while IFS= read -r -d '' abs_path; do
+      rel_path="${abs_path#$REPO_ROOT/}"
+      seen_targets["$rel_path"]=1
+    done < <(
+      find "$REPO_ROOT/artifacts/phase2c" -mindepth 2 -maxdepth 2 -type f \
+        \( -name "baseline_profile.json" \
+        -o -name "post_profile.json" \
+        -o -name "lever_selection.md" \
+        -o -name "isomorphism_report.md" \
+        -o -name "env.json" \
+        -o -name "manifest.json" \
+        -o -name "repro.lock" \
+        -o -name "LEGAL.md" \) \
+        -print0 2>/dev/null
+    )
+  fi
+
+  if [[ "${#seen_targets[@]}" -eq 0 ]]; then
+    echo "no durability artifact targets discovered" >&2
+    exit 1
+  fi
+
+  mapfile -t artifact_targets < <(printf '%s\n' "${!seen_targets[@]}" | sort)
+}
+
+collect_artifact_targets
 
 run_dir="$output_root/$run_id"
 sidecar_dir="$run_dir/sidecars"
@@ -125,6 +171,7 @@ for rel_path in "${artifact_targets[@]}"; do
     {
       "proof_id": "${artifact_id}-proof-001",
       "status": "verified",
+      "reason_code": "raptorq.decode_verified",
       "generated_ts": "$generated_ts",
       "source_hash": "$source_hash"
     }
@@ -142,6 +189,7 @@ EOF
     {
       "proof_id": "${artifact_id}-proof-001",
       "status": "verified",
+      "reason_code": "raptorq.decode_verified",
       "generated_ts": "$generated_ts",
       "recovered_artifact_sha256": "$source_hash",
       "source_hash": "$source_hash"
@@ -185,6 +233,8 @@ EOF
     --arg source_hash "$source_hash" \
     --arg sidecar_path "$sidecar_path" \
     --arg decode_path "$decode_path" \
+    --arg reason_code "raptorq.decode_verified" \
+    --arg replay_cmd "./scripts/run_raptorq_artifact_gate.sh --output-root $output_root --run-id $run_id" \
     --arg corruption_check "$corruption_check" \
     '{
       artifact_id: $artifact_id,
@@ -193,6 +243,8 @@ EOF
       sidecar_path: $sidecar_path,
       decode_proof_path: $decode_path,
       validation: "pass",
+      reason_code: $reason_code,
+      replay_cmd: $replay_cmd,
       corruption_check: $corruption_check
     }' >> "$report_ndjson"
 done

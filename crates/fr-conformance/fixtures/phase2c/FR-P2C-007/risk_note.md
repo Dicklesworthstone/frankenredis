@@ -58,6 +58,65 @@ All threat detections/rejections/recoveries must emit:
 - `replay_cmd`
 - `artifact_refs`
 
+## Implemented packet-007 unit/property probes (bd-2wb.18.5)
+
+- `fr_p2c_007_u001_cluster_subcommand_router_contract_and_logs`  
+  Focus: `T01`/`C01` router arity and subcommand-dispatch contract shape  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_u001_cluster_subcommand_router_contract_and_logs`
+- `fr_p2c_007_u007_client_mode_flags_transition_and_logs`  
+  Focus: `T04`/`C07` deterministic `ASKING`/`READONLY`/`READWRITE` transition semantics  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_u007_client_mode_flags_transition_and_logs`
+- `fr_p2c_007_u007_property_cluster_mode_state_is_sequence_deterministic`  
+  Focus: `I06` metamorphic convergence across casefolded and redundant command sequences  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_u007_property_cluster_mode_state_is_sequence_deterministic`
+
+## Implemented packet-007 differential/adversarial probes (bd-2wb.18.6)
+
+- `fr_p2c_007_f_differential_cluster_surface_mode_split_is_stable`  
+  Focus: strict-vs-hardened output equivalence for scoped cluster command surface (`C01`, `C07`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_differential_cluster_surface_mode_split_is_stable`
+- `fr_p2c_007_f_metamorphic_cluster_help_is_idempotent_across_mode_toggles`  
+  Focus: metamorphic idempotence across casefolded `CLUSTER HELP` and client mode toggles (`I01`, `I06`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_metamorphic_cluster_help_is_idempotent_across_mode_toggles`
+- `fr_p2c_007_f_adversarial_cluster_reason_codes_are_stable`  
+  Focus: adversarial reason-code stability (`cluster.command_router_contract_violation`, `cluster.client_mode_flag_transition_violation`, `cluster.hardened_nonallowlisted_rejected`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_adversarial_cluster_reason_codes_are_stable`
+
+## Implemented packet-007 e2e probe (bd-2wb.18.7)
+
+- `fr_p2c_007_e2e_contract_smoke`  
+  Focus: deterministic smoke journey for cluster command/router + client mode transition safety (`T01`, `T04`)  
+  Fixture: `crates/fr-conformance/fixtures/fr_p2c_007_cluster_journey.json`  
+  Replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_007_e2e_contract_smoke`
+
+## Implemented packet-007 optimization probe (bd-2wb.18.8)
+
+- `fr_p2c_007_cluster_subcommand_classifier_matches_linear_reference`  
+  Focus: behavior-preserving equivalence between optimized and linear `CLUSTER` subcommand classification (`T01`, `T04`)  
+  Replay: `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_007_cluster_subcommand_classifier_matches_linear_reference`
+- `fr_p2c_007_cluster_subcommand_route_profile_snapshot`  
+  Focus: bounded routing optimization evidence for packet-007 command-surface classifier
+  Replay: `rch exec -- cargo test -p fr-runtime fr_p2c_007_cluster_subcommand_route_profile_snapshot -- --ignored --nocapture`
+  Snapshot metrics: `linear_ns_per_lookup=33.994749`, `optimized_ns_per_lookup=20.778880`, `speedup_ratio=1.636024`
+  Artifact pack: `artifacts/phase2c/FR-P2C-007/{baseline_profile.json,post_profile.json,lever_selection.md,isomorphism_report.md,env.json,manifest.json,repro.lock,LEGAL.md}`
+
+## Implemented packet-007 final parity + durability artifacts (bd-2wb.18.9)
+
+- Final packet manifest + gate policy published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/fixture_manifest.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/parity_gate.yaml`
+  - hardened policy keeps `non_allowlisted_action=fail_closed`.
+- Final packet parity report published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/parity_report.json`
+  - readiness set to `READY_FOR_IMPL` with no missing mandatory fields.
+- RaptorQ proof chain published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/parity_report.raptorq.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/parity_report.decode_proof.json`
+  - deterministic decode reason code: `raptorq.decode_verified`
+  - replay command: `./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke`
+- Replay validation command:
+  - `rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- crates/fr-conformance/fixtures/phase2c/FR-P2C-007`
+
 ## Alien-graveyard recommendation contract card
 
 | Field | Value |

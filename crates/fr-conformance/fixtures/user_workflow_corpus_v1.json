@@ -112,19 +112,21 @@
         "owner_bead": "bd-2wb.15.5"
       },
       "differential_hook": {
-        "status": "planned",
+        "status": "active",
         "hook_mode": "command",
         "fixtures": [
-          "fr_p2c_004_acl_journey.json"
+          "fr_p2c_004_acl_journey.json",
+          "fr_p2c_004_acl_runtime_strict",
+          "fr_p2c_004_acl_runtime_hardened"
         ],
-        "command": "rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- command fr_p2c_004_acl_journey.json 127.0.0.1 6379",
+        "command": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_f_differential_auth_mode_split_contract_is_stable",
         "owner_bead": "bd-2wb.15.6",
-        "notes": "Mapped and tracked for packet differential harness expansion."
+        "notes": "Active via packet-004 F-level differential mode-split test with metamorphic/adversarial companions."
       },
       "e2e_hook": {
         "suite_id": "e2e::fr-p2c-004",
-        "test_or_scenario_id": "fr-p2c-004::e2e_contract_smoke",
-        "replay_cmd": "FR_MODE=hardened FR_SEED=42 cargo test -p fr-conformance --test smoke -- --nocapture fr-p2c-004::e2e_contract_smoke",
+        "test_or_scenario_id": "fr_p2c_004_e2e_contract_smoke",
+        "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_004_e2e_contract_smoke",
         "owner_bead": "bd-2wb.15.7"
       },
       "stable_reason_codes": [
@@ -199,28 +201,31 @@
     {
       "journey_id": "FR-P2C-007-J001",
       "packet_id": "FR-P2C-007",
-      "description": "Cluster behavior journey",
+      "description": "Cluster behavior journey (fr_p2c_007_cluster_journey.json)",
       "golden_log_path": "crates/fr-conformance/fixtures/log_contract_v1/FR-P2C-007.golden.jsonl",
       "unit_hook": {
         "suite_id": "unit::fr-p2c-007",
-        "test_or_scenario_id": "fr-p2c-007::unit_contract_smoke",
-        "replay_cmd": "FR_MODE=strict FR_SEED=17 cargo test -p fr-runtime fr-p2c-007::unit_contract_smoke -- --nocapture",
+        "test_or_scenario_id": "fr_p2c_007_u001_cluster_subcommand_router_contract_and_logs",
+        "replay_cmd": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_u001_cluster_subcommand_router_contract_and_logs",
         "owner_bead": "bd-2wb.18.5"
       },
       "differential_hook": {
-        "status": "planned",
+        "status": "active",
         "hook_mode": "command",
         "fixtures": [
-          "fr_p2c_007_cluster_journey.json"
+          "fr_p2c_007_cluster_journey.json",
+          "fr_p2c_007_cluster_router",
+          "fr_p2c_007_cluster_mode_flags",
+          "fr_p2c_007_cluster_adversarial"
         ],
-        "command": "rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- command fr_p2c_007_cluster_journey.json 127.0.0.1 6379",
+        "command": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_differential_cluster_surface_mode_split_is_stable",
         "owner_bead": "bd-2wb.18.6",
-        "notes": "Mapped and tracked for packet differential harness expansion."
+        "notes": "Active via packet-007 F-level differential mode-split test with metamorphic/adversarial companions."
       },
       "e2e_hook": {
         "suite_id": "e2e::fr-p2c-007",
-        "test_or_scenario_id": "fr-p2c-007::e2e_contract_smoke",
-        "replay_cmd": "FR_MODE=hardened FR_SEED=42 cargo test -p fr-conformance --test smoke -- --nocapture fr-p2c-007::e2e_contract_smoke",
+        "test_or_scenario_id": "fr_p2c_007_e2e_contract_smoke",
+        "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_007_e2e_contract_smoke",
         "owner_bead": "bd-2wb.18.7"
       },
       "stable_reason_codes": [

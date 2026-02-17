@@ -7,7 +7,9 @@ This folder stores normalized oracle-vs-target fixtures for fr-conformance.
 - fr_p2c_001_eventloop_journey.json: packet-001 smoke journey fixture used by `fr_p2c_001_e2e_contract_smoke`.
 - protocol_negative.json: packet-002 malformed RESP corpus used by `fr_p2c_002_e2e_contract_smoke`.
 - fr_p2c_003_dispatch_journey.json: packet-003 dispatch journey fixture used by `fr_p2c_003_e2e_contract_smoke`.
+- fr_p2c_004_acl_journey.json: packet-004 ACL/auth journey fixture used by `fr_p2c_004_e2e_contract_smoke`.
 - fr_p2c_006_replication_journey.json: packet-006 replication journey fixture used by `fr_p2c_006_e2e_contract_smoke`.
+- fr_p2c_007_cluster_journey.json: packet-007 cluster journey fixture used by `fr_p2c_007_e2e_contract_smoke`.
 - fr_p2c_009_tls_config_journey.json: packet-009 TLS/config journey fixture used by `fr_p2c_009_e2e_contract_smoke`.
 - persist_replay.json: replay-oriented fixtures that execute AOF-shaped records and assert post-replay key state.
 - adversarial_corpus_v1.json: versioned adversarial corpus manifest (suite mode, fixture path, risk focus, replay commands, and default route bead).
@@ -68,6 +70,27 @@ This executes the suites listed in `adversarial_corpus_v1.json` using `fr-confor
 - `artifacts/adversarial_triage/<run-id>/repro.lock` (replay metadata)
 - `artifacts/adversarial_triage/<run-id>/live_logs/` (structured JSONL logs)
 
+## RaptorQ Artifact Gate
+
+Generate deterministic RaptorQ sidecar + decode-proof artifacts for durability-critical evidence files:
+
+```bash
+./scripts/run_raptorq_artifact_gate.sh
+```
+
+The gate auto-discovers canonical `artifacts/phase2c/*` evidence packs (baseline/post profile,
+lever/isomorphism docs, env/manifest/repro/legal) and validates:
+
+- sidecar source-hash binding
+- decode-proof source-hash binding + verified status
+- corruption simulation detection (unless `--no-corruption`)
+
+Outputs are written under:
+
+```text
+artifacts/durability/raptorq_runs/<run-id>/
+```
+
 ## User Workflow Journey Corpus Gate
 
 Validate that the versioned user workflow corpus remains stable and aligned with
@@ -97,6 +120,38 @@ Artifacts include:
 
 - `baseline_profile.json` (linear lookup baseline metrics)
 - `post_profile.json` (optimized lookup metrics)
+- `lever_selection.md` (selected optimization lever + hotspot evidence)
+- `isomorphism_report.md` (behavior-preservation proof and replay commands)
+- `env.json`, `manifest.json`, `repro.lock`, `LEGAL.md` (repro/provenance bundle)
+
+## FR-P2C-004 Optimization Evidence Pack
+
+The FR-P2C-004 profile/isomorphism evidence for `bd-2wb.15.8` is stored under:
+
+```text
+artifacts/phase2c/FR-P2C-004/
+```
+
+Artifacts include:
+
+- `baseline_profile.json` (linear runtime special-command routing baseline metrics)
+- `post_profile.json` (optimized routing metrics)
+- `lever_selection.md` (selected optimization lever + hotspot evidence)
+- `isomorphism_report.md` (behavior-preservation proof and replay commands)
+- `env.json`, `manifest.json`, `repro.lock`, `LEGAL.md` (repro/provenance bundle)
+
+## FR-P2C-007 Optimization Evidence Pack
+
+The FR-P2C-007 profile/isomorphism evidence for `bd-2wb.18.8` is stored under:
+
+```text
+artifacts/phase2c/FR-P2C-007/
+```
+
+Artifacts include:
+
+- `baseline_profile.json` (linear cluster-subcommand routing baseline metrics)
+- `post_profile.json` (optimized cluster-subcommand routing metrics)
 - `lever_selection.md` (selected optimization lever + hotspot evidence)
 - `isomorphism_report.md` (behavior-preservation proof and replay commands)
 - `env.json`, `manifest.json`, `repro.lock`, `LEGAL.md` (repro/provenance bundle)

@@ -47,6 +47,12 @@ jobs:
             --run-id ci-adv \
             --runner local
 
+      - name: Run RaptorQ Artifact Gate
+        run: |
+          ./scripts/run_raptorq_artifact_gate.sh \
+            --output-root artifacts/durability/raptorq_runs \
+            --run-id ci-raptorq
+
       - name: Upload Live Oracle Bundle
         if: always()
         uses: actions/upload-artifact@v4
@@ -61,4 +67,12 @@ jobs:
         with:
           name: adversarial-triage-ci-adv
           path: artifacts/adversarial_triage/ci-adv
+          if-no-files-found: warn
+
+      - name: Upload RaptorQ Artifact Gate Bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: raptorq-artifact-gate-ci-raptorq
+          path: artifacts/durability/raptorq_runs/ci-raptorq
           if-no-files-found: warn

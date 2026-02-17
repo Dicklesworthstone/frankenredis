@@ -86,6 +86,21 @@ Each contract-row verification result (pass/fail and divergence checks) must emi
 - Strict-mode sweep: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_004_STRICT`
 - Hardened-mode sweep: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_004_HARDENED`
 
+## Implemented final evidence pack (bd-2wb.15.9)
+
+- Packet final manifest + parity gate authored in `crates/fr-conformance/fixtures/phase2c/FR-P2C-004/{fixture_manifest.json,parity_gate.yaml}`.
+- Packet parity report finalized in `crates/fr-conformance/fixtures/phase2c/FR-P2C-004/parity_report.json` with:
+  - `readiness=READY_FOR_IMPL`
+  - `missing_mandatory_fields=[]`
+  - explicit unit/differential/e2e/optimization evidence IDs.
+- Durability sidecar + decode-proof artifacts finalized in:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-004/parity_report.raptorq.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-004/parity_report.decode_proof.json`
+  - reason code: `raptorq.decode_verified`
+  - replay command: `./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke`
+- Packet schema/readiness replay:
+  - `rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- crates/fr-conformance/fixtures/phase2c/FR-P2C-004`
+
 ## Alien-graveyard recommendation contract card
 
 | Field | Value |
@@ -143,7 +158,7 @@ Calibration + fallback:
 
 Selected lever:
 
-- `LEV-004-02`: memoized selector reduction result keyed by `(user_epoch, cmd_id, argv_shape_hash)` with mutation epoch invalidation.
+- `LEV-004-H1`: replace repeated string-based runtime special-command routing checks (`AUTH`, `HELLO`, `ASKING`, `READONLY`, `READWRITE`, `CLUSTER`) with a length-bucketed byte classifier in `crates/fr-runtime/src/lib.rs`.
 
 Required artifacts:
 

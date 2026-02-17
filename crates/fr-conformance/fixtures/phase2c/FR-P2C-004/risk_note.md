@@ -58,6 +58,23 @@ All threat detections/rejections/recoveries must emit:
 - `replay_cmd`
 - `artifact_refs`
 
+## Implemented packet-004 final parity + durability artifacts (bd-2wb.15.9)
+
+- Final packet manifest + gate policy published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-004/fixture_manifest.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-004/parity_gate.yaml`
+  - hardened policy keeps `non_allowlisted_action=fail_closed`.
+- Final packet parity report published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-004/parity_report.json`
+  - readiness set to `READY_FOR_IMPL` with no missing mandatory fields.
+- RaptorQ proof chain published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-004/parity_report.raptorq.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-004/parity_report.decode_proof.json`
+  - deterministic decode reason code: `raptorq.decode_verified`
+  - replay command: `./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke`
+- Replay validation command:
+  - `rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- crates/fr-conformance/fixtures/phase2c/FR-P2C-004`
+
 ## Alien-graveyard recommendation contract card
 
 | Field | Value |
@@ -117,7 +134,7 @@ Decision policy:
 
 Selected single optimization lever:
 
-- `LEV-004-03`: short-circuit noauth and selector deny decisions via deterministic pre-dispatch decision cache with ACL epoch invalidation.
+- `LEV-004-H1`: replace repeated string-based runtime special-command routing checks (`AUTH`, `HELLO`, `ASKING`, `READONLY`, `READWRITE`, `CLUSTER`) with a length-bucketed byte classifier in `crates/fr-runtime/src/lib.rs`.
 
 Required artifacts:
 
@@ -128,9 +145,9 @@ Required artifacts:
 
 ## Replay commands
 
-- Unit threat suite: `rch exec -- cargo test -p fr-command -- --nocapture FR_P2C_004`
-- E2E threat suite: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_004`
-- Hardened replay: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_004_HARDENED`
+- Unit threat suite: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-command -- --nocapture FR_P2C_004`
+- Conformance threat replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_f_differential_auth_mode_split_contract_is_stable`
+- Hardened replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_f_adversarial_auth_reason_codes_are_stable`
 
 ## Reproducibility/provenance pack references
 

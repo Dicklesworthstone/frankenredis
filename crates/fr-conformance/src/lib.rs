@@ -955,17 +955,20 @@ fn packet_family_for_fixture(fixture_name: &str) -> &'static str {
     match fixture_name {
         "fr_p2c_001_eventloop_journey.json" => "FR-P2C-001",
         "protocol_negative.json" => "FR-P2C-002",
-        "fr_p2c_004_auth_unit" | "fr_p2c_004_acl_rules" | "fr_p2c_004_acl_permissions" => {
-            "FR-P2C-004"
-        }
+        "fr_p2c_004_auth_unit"
+        | "fr_p2c_004_acl_rules"
+        | "fr_p2c_004_acl_permissions"
+        | "fr_p2c_004_acl_journey.json" => "FR-P2C-004",
         "core_errors.json" | "fr_p2c_003_dispatch_journey.json" => "FR-P2C-003",
         "fr_p2c_006_replication_journey.json" => "FR-P2C-006",
+        "fr_p2c_007_cluster_journey.json" => "FR-P2C-007",
         "persist_replay.json" => "FR-P2C-005",
         "fr_p2c_009_tls_config_journey.json" => "FR-P2C-009",
         "fr_p2c_009_tls_runtime_strict" | "fr_p2c_009_tls_runtime_hardened" => "FR-P2C-009",
         _ if fixture_name.starts_with("fr_p2c_004_") => "FR-P2C-004",
         _ if fixture_name.starts_with("fr_p2c_003_") => "FR-P2C-003",
         _ if fixture_name.starts_with("fr_p2c_006_") => "FR-P2C-006",
+        _ if fixture_name.starts_with("fr_p2c_007_") => "FR-P2C-007",
         _ if fixture_name.starts_with("fr_p2c_009_") => "FR-P2C-009",
         _ => "FR-P2C-003",
     }
@@ -1115,9 +1118,15 @@ mod tests {
     }
 
     fn first_denied_index(allowed: &BTreeSet<String>, command_path: &[&str]) -> Option<usize> {
-        command_path
-            .iter()
-            .position(|cmd| !allowed.contains(*cmd))
+        command_path.iter().position(|cmd| !allowed.contains(*cmd))
+    }
+
+    fn command_frame(argv: &[&str]) -> RespFrame {
+        RespFrame::Array(Some(
+            argv.iter()
+                .map(|arg| RespFrame::BulkString(Some(arg.as_bytes().to_vec())))
+                .collect(),
+        ))
     }
 
     #[test]
@@ -1945,8 +1954,9 @@ mod tests {
 
     #[test]
     fn fr_p2c_004_u005_noauth_gate_precedes_dispatch_and_logs() {
-        let denied = enforce_noauth_gate(AuthState::Unauthenticated, CommandAuthClass::RequiresAuth)
-            .expect_err("unauthenticated command path must be gated");
+        let denied =
+            enforce_noauth_gate(AuthState::Unauthenticated, CommandAuthClass::RequiresAuth)
+                .expect_err("unauthenticated command path must be gated");
         assert_eq!(denied, "auth.noauth_gate_violation");
 
         enforce_noauth_gate(AuthState::Unauthenticated, CommandAuthClass::NoAuthExempt)
@@ -2101,6 +2111,874 @@ mod tests {
             &[event],
         )
         .expect("packet-004 ACL property structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_004_f_differential_auth_mode_split_contract_is_stable() {
+        let mut strict = Runtime::default_strict();
+        let mut hardened = Runtime::default_hardened();
+        strict.set_requirepass(Some(b"secret".to_vec()));
+        hardened.set_requirepass(Some(b"secret".to_vec()));
+
+        let strict_noauth = strict.execute_frame(command_frame(&["GET", "fr:p2c:004:key"]), 504);
+        let hardened_noauth =
+            hardened.execute_frame(command_frame(&["GET", "fr:p2c:004:key"]), 504);
+        assert_eq!(
+            strict_noauth,
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
+        assert_eq!(strict_noauth, hardened_noauth);
+
+        let strict_auth = strict.execute_frame(command_frame(&["AUTH", "secret"]), 505);
+        let hardened_auth = hardened.execute_frame(command_frame(&["AUTH", "secret"]), 505);
+        assert_eq!(strict_auth, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(strict_auth, hardened_auth);
+
+        let strict_set =
+            strict.execute_frame(command_frame(&["SET", "fr:p2c:004:key", "value"]), 506);
+        let hardened_set =
+            hardened.execute_frame(command_frame(&["SET", "fr:p2c:004:key", "value"]), 506);
+        assert_eq!(strict_set, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(strict_set, hardened_set);
+
+        let strict_get = strict.execute_frame(command_frame(&["GET", "fr:p2c:004:key"]), 507);
+        let hardened_get = hardened.execute_frame(command_frame(&["GET", "fr:p2c:004:key"]), 507);
+        assert_eq!(strict_get, RespFrame::BulkString(Some(b"value".to_vec())));
+        assert_eq!(strict_get, hardened_get);
+
+        let mut strict_event = strict
+            .evidence()
+            .events()
+            .first()
+            .expect("strict mode should emit noauth gate event")
+            .clone();
+        let mut hardened_event = hardened
+            .evidence()
+            .events()
+            .first()
+            .expect("hardened mode should emit noauth gate event")
+            .clone();
+        assert_eq!(strict_event.reason_code, "auth.noauth_gate_violation");
+        assert_eq!(hardened_event.reason_code, "auth.noauth_gate_violation");
+        assert_eq!(strict_event.decision_action, DecisionAction::FailClosed);
+        assert_eq!(hardened_event.decision_action, DecisionAction::FailClosed);
+
+        strict_event.replay_cmd = "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_f_differential_auth_mode_split_contract_is_stable".to_string();
+        strict_event.artifact_refs.push(
+            "crates/fr-conformance/fixtures/phase2c/FR-P2C-004/contract_table.md".to_string(),
+        );
+        hardened_event.replay_cmd = "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_f_differential_auth_mode_split_contract_is_stable".to_string();
+        hardened_event.artifact_refs.push(
+            "crates/fr-conformance/fixtures/phase2c/FR-P2C-004/contract_table.md".to_string(),
+        );
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_004",
+                fixture_name: "fr_p2c_004_acl_runtime_strict",
+                case_name: "differential_mode_split_strict",
+                verification_path: VerificationPath::Property,
+                now_ms: 504,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&strict_event),
+        )
+        .expect("strict-mode packet-004 differential log must validate");
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_004",
+                fixture_name: "fr_p2c_004_acl_runtime_hardened",
+                case_name: "differential_mode_split_hardened",
+                verification_path: VerificationPath::Property,
+                now_ms: 504,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&hardened_event),
+        )
+        .expect("hardened-mode packet-004 differential log must validate");
+    }
+
+    #[test]
+    fn fr_p2c_004_f_metamorphic_auth_entrypoints_converge_to_same_session_state() {
+        let mut auth_path = Runtime::default_strict();
+        let mut hello_path = Runtime::default_strict();
+        auth_path.set_requirepass(Some(b"secret".to_vec()));
+        hello_path.set_requirepass(Some(b"secret".to_vec()));
+
+        let auth_reply = auth_path.execute_frame(command_frame(&["AUTH", "secret"]), 520);
+        assert_eq!(auth_reply, RespFrame::SimpleString("OK".to_string()));
+
+        let hello_reply = hello_path.execute_frame(
+            command_frame(&["HELLO", "3", "AUTH", "default", "secret"]),
+            520,
+        );
+        match hello_reply {
+            RespFrame::Array(Some(parts)) => {
+                assert_eq!(parts.len(), 6);
+                assert_eq!(parts[0], RespFrame::BulkString(Some(b"server".to_vec())));
+                assert_eq!(
+                    parts[1],
+                    RespFrame::BulkString(Some(b"frankenredis".to_vec()))
+                );
+                assert_eq!(parts[2], RespFrame::BulkString(Some(b"version".to_vec())));
+                assert_eq!(parts[4], RespFrame::BulkString(Some(b"proto".to_vec())));
+                assert_eq!(parts[5], RespFrame::Integer(3));
+            }
+            other => panic!("HELLO AUTH path returned unexpected frame: {other:?}"),
+        }
+
+        let auth_set =
+            auth_path.execute_frame(command_frame(&["SET", "fr:p2c:004:mm:key", "value"]), 521);
+        let hello_set =
+            hello_path.execute_frame(command_frame(&["SET", "fr:p2c:004:mm:key", "value"]), 521);
+        assert_eq!(auth_set, hello_set);
+
+        let auth_incr = auth_path.execute_frame(
+            command_frame(&["INCRBY", "fr:p2c:004:mm:counter", "7"]),
+            522,
+        );
+        let hello_incr = hello_path.execute_frame(
+            command_frame(&["INCRBY", "fr:p2c:004:mm:counter", "7"]),
+            522,
+        );
+        assert_eq!(auth_incr, hello_incr);
+
+        let auth_get = auth_path.execute_frame(command_frame(&["GET", "fr:p2c:004:mm:key"]), 523);
+        let hello_get = hello_path.execute_frame(command_frame(&["GET", "fr:p2c:004:mm:key"]), 523);
+        assert_eq!(auth_get, hello_get);
+        assert_eq!(auth_get, RespFrame::BulkString(Some(b"value".to_vec())));
+
+        assert!(auth_path.is_authenticated());
+        assert!(hello_path.is_authenticated());
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:524".to_string(),
+            ts_ms: 524,
+            packet_id: 4,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::AuthPolicyConfusion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "auth_metamorphic",
+            action: "entrypoint_convergence",
+            reason_code: "parity_ok",
+            reason: "AUTH and HELLO AUTH entrypoints converge to equivalent authenticated session state".to_string(),
+            input_digest: "fr_p2c_004_f_metamorphic_input".to_string(),
+            output_digest: "fr_p2c_004_f_metamorphic_output".to_string(),
+            state_digest_before: "dual_path_pre_auth".to_string(),
+            state_digest_after: "dual_path_converged".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_f_metamorphic_auth_entrypoints_converge_to_same_session_state".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-004/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_004",
+                fixture_name: "fr_p2c_004_acl_metamorphic",
+                case_name: "f_metamorphic_auth_entrypoint_convergence",
+                verification_path: VerificationPath::Property,
+                now_ms: 524,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&event),
+        )
+        .expect("packet-004 metamorphic structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_004_f_adversarial_auth_reason_codes_are_stable() {
+        let mut strict = Runtime::default_strict();
+        strict.set_requirepass(Some(b"secret".to_vec()));
+
+        let wrongpass = strict.execute_frame(command_frame(&["AUTH", "bad"]), 530);
+        assert_eq!(
+            wrongpass,
+            RespFrame::Error(
+                "WRONGPASS invalid username-password pair or user is disabled.".to_string(),
+            ),
+        );
+        assert!(!strict.is_authenticated());
+
+        let noauth = strict.execute_frame(command_frame(&["GET", "fr:p2c:004:adv:key"]), 531);
+        assert_eq!(
+            noauth,
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
+
+        let selector_err = parse_acl_selector_tokens(&["+@all", "??invalid-rule"])
+            .expect_err("malformed selector token must be rejected");
+        assert_eq!(selector_err, "auth.acl_selector_parse_validation_mismatch");
+
+        let mut noauth_event = strict
+            .evidence()
+            .events()
+            .last()
+            .expect("noauth rejection should emit threat event")
+            .clone();
+        assert_eq!(noauth_event.reason_code, "auth.noauth_gate_violation");
+        noauth_event.replay_cmd = "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_f_adversarial_auth_reason_codes_are_stable".to_string();
+        noauth_event
+            .artifact_refs
+            .push("crates/fr-conformance/fixtures/phase2c/FR-P2C-004/risk_note.md".to_string());
+
+        let wrongpass_event = EvidenceEvent {
+            ts_utc: "unix_ms:530".to_string(),
+            ts_ms: 530,
+            packet_id: 4,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::AuthPolicyConfusion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "auth_gate",
+            action: "auth_wrongpass_reject",
+            reason_code: "auth.auth_command_wrongpass_response_mismatch",
+            reason: "wrongpass auth attempt rejected without promoting auth state".to_string(),
+            input_digest: "fr_p2c_004_f_adv_wrongpass_input".to_string(),
+            output_digest: "fr_p2c_004_f_adv_wrongpass_output".to_string(),
+            state_digest_before: "unauthenticated".to_string(),
+            state_digest_after: "unauthenticated".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_f_adversarial_auth_reason_codes_are_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-004/risk_note.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        let selector_event = EvidenceEvent {
+            ts_utc: "unix_ms:532".to_string(),
+            ts_ms: 532,
+            packet_id: 4,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::AuthPolicyConfusion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "acl_parser",
+            action: "selector_token_validate",
+            reason_code: "auth.acl_selector_parse_validation_mismatch",
+            reason: "malformed ACL selector token rejected on adversarial input".to_string(),
+            input_digest: "fr_p2c_004_f_adv_selector_input".to_string(),
+            output_digest: "fr_p2c_004_f_adv_selector_output".to_string(),
+            state_digest_before: "acl_parse_start".to_string(),
+            state_digest_after: "acl_parse_reject".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_f_adversarial_auth_reason_codes_are_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-004/risk_note.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        let hardened_policy_event = EvidenceEvent {
+            ts_utc: "unix_ms:533".to_string(),
+            ts_ms: 533,
+            packet_id: 4,
+            mode: Mode::Hardened,
+            severity: DriftSeverity::S1,
+            threat_class: ThreatClass::AuthPolicyConfusion,
+            decision_action: DecisionAction::RejectNonAllowlisted,
+            subsystem: "auth_policy",
+            action: "hardened_deviation_gate",
+            reason_code: "auth.hardened_nonallowlisted_rejected",
+            reason: "non-allowlisted hardened auth/ACL deviation rejected and forced fail-closed".to_string(),
+            input_digest: "fr_p2c_004_f_adv_hardened_input".to_string(),
+            output_digest: "fr_p2c_004_f_adv_hardened_output".to_string(),
+            state_digest_before: "hardened_candidate".to_string(),
+            state_digest_after: "hardened_rejected".to_string(),
+            replay_cmd: "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_f_adversarial_auth_reason_codes_are_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-004/risk_note.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        let cases = [
+            (
+                "f_adv_wrongpass_reason",
+                wrongpass_event,
+                "auth.auth_command_wrongpass_response_mismatch",
+            ),
+            (
+                "f_adv_noauth_gate_reason",
+                noauth_event,
+                "auth.noauth_gate_violation",
+            ),
+            (
+                "f_adv_acl_selector_reason",
+                selector_event,
+                "auth.acl_selector_parse_validation_mismatch",
+            ),
+            (
+                "f_adv_hardened_nonallowlisted_reason",
+                hardened_policy_event,
+                "auth.hardened_nonallowlisted_rejected",
+            ),
+        ];
+
+        for (case_name, event, expected_reason_code) in cases {
+            assert_eq!(
+                event.reason_code, expected_reason_code,
+                "reason-code stability mismatch for case={case_name}",
+            );
+            validate_structured_log_emission(
+                StructuredLogEmissionContext {
+                    suite_id: "fr_p2c_004",
+                    fixture_name: "fr_p2c_004_acl_adversarial",
+                    case_name,
+                    verification_path: VerificationPath::Property,
+                    now_ms: event.ts_ms,
+                    outcome: LogOutcome::Pass,
+                    persist_path: None,
+                },
+                std::slice::from_ref(&event),
+            )
+            .expect("packet-004 adversarial structured log should validate");
+        }
+    }
+
+    #[test]
+    fn fr_p2c_007_u001_cluster_subcommand_router_contract_and_logs() {
+        let mut runtime = Runtime::default_strict();
+
+        let wrong_arity = runtime.execute_frame(command_frame(&["CLUSTER"]), 700);
+        assert_eq!(
+            wrong_arity,
+            RespFrame::Error("ERR wrong number of arguments for 'CLUSTER' command".to_string())
+        );
+
+        let help = runtime.execute_frame(command_frame(&["CLUSTER", "HELP"]), 701);
+        assert_eq!(
+            help,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"CLUSTER HELP".to_vec())),
+                RespFrame::BulkString(Some(
+                    b"CLUSTER subcommand dispatch scaffold (FR-P2C-007 D1).".to_vec(),
+                )),
+                RespFrame::BulkString(
+                    Some(b"Supported subcommands in this stage: HELP.".to_vec(),)
+                ),
+            ]))
+        );
+
+        let help_casefold = runtime.execute_frame(command_frame(&["cluster", "help"]), 702);
+        assert_eq!(help_casefold, help);
+
+        let unknown = runtime.execute_frame(command_frame(&["CLUSTER", "NOPE"]), 703);
+        assert_eq!(
+            unknown,
+            RespFrame::Error(
+                "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP."
+                    .to_string(),
+            )
+        );
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:703".to_string(),
+            ts_ms: 703,
+            packet_id: 7,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::MetadataAmbiguity,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "cluster_router",
+            action: "cluster_subcommand_dispatch",
+            reason_code: "cluster.command_router_contract_violation",
+            reason: "cluster subcommand router enforces arity/help/unknown contracts".to_string(),
+            input_digest: "fr_p2c_007_u001_input".to_string(),
+            output_digest: "fr_p2c_007_u001_output".to_string(),
+            state_digest_before: "cluster_router_start".to_string(),
+            state_digest_after: "cluster_router_verified".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_u001_cluster_subcommand_router_contract_and_logs".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-007/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_007",
+                fixture_name: "fr_p2c_007_cluster_router",
+                case_name: "u001_cluster_router",
+                verification_path: VerificationPath::Unit,
+                now_ms: 703,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            &[event],
+        )
+        .expect("packet-007 cluster router structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_007_u007_client_mode_flags_transition_and_logs() {
+        let mut runtime = Runtime::default_strict();
+
+        assert!(!runtime.is_cluster_read_only());
+        assert!(!runtime.is_cluster_asking());
+
+        let readonly = runtime.execute_frame(command_frame(&["READONLY"]), 705);
+        assert_eq!(readonly, RespFrame::SimpleString("OK".to_string()));
+        assert!(runtime.is_cluster_read_only());
+        assert!(!runtime.is_cluster_asking());
+
+        let asking = runtime.execute_frame(command_frame(&["ASKING"]), 706);
+        assert_eq!(asking, RespFrame::SimpleString("OK".to_string()));
+        assert!(runtime.is_cluster_read_only());
+        assert!(runtime.is_cluster_asking());
+
+        let readwrite = runtime.execute_frame(command_frame(&["READWRITE"]), 707);
+        assert_eq!(readwrite, RespFrame::SimpleString("OK".to_string()));
+        assert!(!runtime.is_cluster_read_only());
+        assert!(!runtime.is_cluster_asking());
+
+        let wrong_arity = runtime.execute_frame(command_frame(&["READONLY", "extra"]), 708);
+        assert_eq!(
+            wrong_arity,
+            RespFrame::Error("ERR wrong number of arguments for 'READONLY' command".to_string())
+        );
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:708".to_string(),
+            ts_ms: 708,
+            packet_id: 7,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::MetadataAmbiguity,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "cluster_client_mode",
+            action: "readonly_asking_readwrite_transition",
+            reason_code: "cluster.client_mode_flag_transition_violation",
+            reason: "client cluster mode flags transition deterministically and enforce arity"
+                .to_string(),
+            input_digest: "fr_p2c_007_u007_input".to_string(),
+            output_digest: "fr_p2c_007_u007_output".to_string(),
+            state_digest_before: "cluster_client_mode_start".to_string(),
+            state_digest_after: "cluster_client_mode_verified".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_u007_client_mode_flags_transition_and_logs".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-007/risk_note.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_007",
+                fixture_name: "fr_p2c_007_cluster_mode_flags",
+                case_name: "u007_client_mode_transition",
+                verification_path: VerificationPath::Unit,
+                now_ms: 708,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            &[event],
+        )
+        .expect("packet-007 client mode transition structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_007_u007_property_cluster_mode_state_is_sequence_deterministic() {
+        let mut canonical = Runtime::default_strict();
+        let canonical_sequence = ["READONLY", "ASKING", "READWRITE", "READONLY", "ASKING"];
+        for (idx, command_name) in canonical_sequence.iter().enumerate() {
+            let reply = canonical.execute_frame(command_frame(&[*command_name]), 720 + idx as u64);
+            assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+        }
+        assert!(canonical.is_cluster_read_only());
+        assert!(canonical.is_cluster_asking());
+
+        let mut casefold = Runtime::default_strict();
+        let casefold_sequence = ["readonly", "asking", "readwrite", "READONLY", "asking"];
+        for (idx, command_name) in casefold_sequence.iter().enumerate() {
+            let reply = casefold.execute_frame(command_frame(&[*command_name]), 720 + idx as u64);
+            assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+        }
+        assert_eq!(
+            casefold.is_cluster_read_only(),
+            canonical.is_cluster_read_only()
+        );
+        assert_eq!(casefold.is_cluster_asking(), canonical.is_cluster_asking());
+
+        let mut redundant = Runtime::default_strict();
+        let redundant_sequence = ["READONLY", "ASKING", "ASKING"];
+        for (idx, command_name) in redundant_sequence.iter().enumerate() {
+            let reply = redundant.execute_frame(command_frame(&[*command_name]), 730 + idx as u64);
+            assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+        }
+        assert!(redundant.is_cluster_read_only());
+        assert!(redundant.is_cluster_asking());
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:725".to_string(),
+            ts_ms: 725,
+            packet_id: 7,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::MetadataAmbiguity,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "cluster_client_mode_property",
+            action: "cluster_mode_sequence_reduce",
+            reason_code: "parity_ok",
+            reason: "cluster client-mode state converges deterministically for equivalent command sequences".to_string(),
+            input_digest: "fr_p2c_007_u007_property_input".to_string(),
+            output_digest: "fr_p2c_007_u007_property_output".to_string(),
+            state_digest_before: "cluster_mode_property_start".to_string(),
+            state_digest_after: "cluster_mode_property_verified".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_u007_property_cluster_mode_state_is_sequence_deterministic".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-007/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_007",
+                fixture_name: "fr_p2c_007_cluster_mode_property",
+                case_name: "u007_property_mode_sequence",
+                verification_path: VerificationPath::Property,
+                now_ms: 725,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            &[event],
+        )
+        .expect("packet-007 client mode property structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_007_f_differential_cluster_surface_mode_split_is_stable() {
+        let mut strict = Runtime::default_strict();
+        let mut hardened = Runtime::default_hardened();
+
+        let strict_help = strict.execute_frame(command_frame(&["CLUSTER", "HELP"]), 740);
+        let hardened_help = hardened.execute_frame(command_frame(&["CLUSTER", "HELP"]), 740);
+        assert_eq!(strict_help, hardened_help);
+
+        let strict_readonly = strict.execute_frame(command_frame(&["READONLY"]), 741);
+        let hardened_readonly = hardened.execute_frame(command_frame(&["READONLY"]), 741);
+        assert_eq!(strict_readonly, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(strict_readonly, hardened_readonly);
+
+        let strict_asking = strict.execute_frame(command_frame(&["ASKING"]), 742);
+        let hardened_asking = hardened.execute_frame(command_frame(&["ASKING"]), 742);
+        assert_eq!(strict_asking, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(strict_asking, hardened_asking);
+
+        let strict_readwrite = strict.execute_frame(command_frame(&["READWRITE"]), 743);
+        let hardened_readwrite = hardened.execute_frame(command_frame(&["READWRITE"]), 743);
+        assert_eq!(strict_readwrite, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(strict_readwrite, hardened_readwrite);
+
+        assert!(!strict.is_cluster_read_only());
+        assert!(!strict.is_cluster_asking());
+        assert!(!hardened.is_cluster_read_only());
+        assert!(!hardened.is_cluster_asking());
+
+        let strict_unknown = strict.execute_frame(command_frame(&["CLUSTER", "NOPE"]), 744);
+        let hardened_unknown = hardened.execute_frame(command_frame(&["CLUSTER", "NOPE"]), 744);
+        let expected_unknown = RespFrame::Error(
+            "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP."
+                .to_string(),
+        );
+        assert_eq!(strict_unknown, expected_unknown);
+        assert_eq!(strict_unknown, hardened_unknown);
+
+        let strict_event = EvidenceEvent {
+            ts_utc: "unix_ms:744".to_string(),
+            ts_ms: 744,
+            packet_id: 7,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::MetadataAmbiguity,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "cluster_differential",
+            action: "mode_split_compare",
+            reason_code: "parity_ok",
+            reason: "strict and hardened packet-007 surface remain output-equivalent for cluster D1 commands".to_string(),
+            input_digest: "fr_p2c_007_f_diff_input".to_string(),
+            output_digest: "fr_p2c_007_f_diff_output".to_string(),
+            state_digest_before: "mode_split_start".to_string(),
+            state_digest_after: "mode_split_verified".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_differential_cluster_surface_mode_split_is_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-007/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        let hardened_event = EvidenceEvent {
+            ts_utc: "unix_ms:744".to_string(),
+            ts_ms: 744,
+            packet_id: 7,
+            mode: Mode::Hardened,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::MetadataAmbiguity,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "cluster_differential",
+            action: "mode_split_compare",
+            reason_code: "parity_ok",
+            reason:
+                "hardened mode preserves strict-equivalent outputs for scoped packet-007 cluster surface"
+                    .to_string(),
+            input_digest: "fr_p2c_007_f_diff_input".to_string(),
+            output_digest: "fr_p2c_007_f_diff_output".to_string(),
+            state_digest_before: "mode_split_start".to_string(),
+            state_digest_after: "mode_split_verified".to_string(),
+            replay_cmd: "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_differential_cluster_surface_mode_split_is_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-007/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_007",
+                fixture_name: "fr_p2c_007_cluster_runtime_strict",
+                case_name: "f_differential_mode_split_strict",
+                verification_path: VerificationPath::Property,
+                now_ms: 744,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&strict_event),
+        )
+        .expect("packet-007 strict differential structured log should validate");
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_007",
+                fixture_name: "fr_p2c_007_cluster_runtime_hardened",
+                case_name: "f_differential_mode_split_hardened",
+                verification_path: VerificationPath::Property,
+                now_ms: 744,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&hardened_event),
+        )
+        .expect("packet-007 hardened differential structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_007_f_metamorphic_cluster_help_is_idempotent_across_mode_toggles() {
+        let mut runtime = Runtime::default_strict();
+
+        let baseline_help = runtime.execute_frame(command_frame(&["CLUSTER", "HELP"]), 750);
+        let casefold_help = runtime.execute_frame(command_frame(&["cluster", "help"]), 751);
+        assert_eq!(baseline_help, casefold_help);
+
+        let readonly = runtime.execute_frame(command_frame(&["READONLY"]), 752);
+        let asking = runtime.execute_frame(command_frame(&["ASKING"]), 753);
+        let readwrite = runtime.execute_frame(command_frame(&["READWRITE"]), 754);
+        assert_eq!(readonly, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(asking, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(readwrite, RespFrame::SimpleString("OK".to_string()));
+
+        let post_toggle_help = runtime.execute_frame(command_frame(&["CLUSTER", "HELP"]), 755);
+        assert_eq!(
+            post_toggle_help, baseline_help,
+            "cluster help output must be invariant to client mode toggles"
+        );
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:755".to_string(),
+            ts_ms: 755,
+            packet_id: 7,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::MetadataAmbiguity,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "cluster_metamorphic",
+            action: "cluster_help_idempotence",
+            reason_code: "parity_ok",
+            reason: "cluster help surface is idempotent across case-folded command forms and mode toggles".to_string(),
+            input_digest: "fr_p2c_007_f_metamorphic_input".to_string(),
+            output_digest: "fr_p2c_007_f_metamorphic_output".to_string(),
+            state_digest_before: "cluster_help_start".to_string(),
+            state_digest_after: "cluster_help_verified".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_metamorphic_cluster_help_is_idempotent_across_mode_toggles".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-007/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_007",
+                fixture_name: "fr_p2c_007_cluster_metamorphic",
+                case_name: "f_metamorphic_help_idempotence",
+                verification_path: VerificationPath::Property,
+                now_ms: 755,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&event),
+        )
+        .expect("packet-007 metamorphic structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_007_f_adversarial_cluster_reason_codes_are_stable() {
+        let mut runtime = Runtime::default_strict();
+
+        let cluster_wrong_arity = runtime.execute_frame(command_frame(&["CLUSTER"]), 760);
+        assert_eq!(
+            cluster_wrong_arity,
+            RespFrame::Error("ERR wrong number of arguments for 'CLUSTER' command".to_string())
+        );
+
+        let cluster_unknown = runtime.execute_frame(command_frame(&["CLUSTER", "NOPE"]), 761);
+        assert_eq!(
+            cluster_unknown,
+            RespFrame::Error(
+                "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP."
+                    .to_string(),
+            )
+        );
+
+        let readonly_wrong_arity =
+            runtime.execute_frame(command_frame(&["READONLY", "extra"]), 762);
+        let asking_wrong_arity = runtime.execute_frame(command_frame(&["ASKING", "extra"]), 763);
+        let readwrite_wrong_arity =
+            runtime.execute_frame(command_frame(&["READWRITE", "extra"]), 764);
+        assert_eq!(
+            readonly_wrong_arity,
+            RespFrame::Error("ERR wrong number of arguments for 'READONLY' command".to_string())
+        );
+        assert_eq!(
+            asking_wrong_arity,
+            RespFrame::Error("ERR wrong number of arguments for 'ASKING' command".to_string())
+        );
+        assert_eq!(
+            readwrite_wrong_arity,
+            RespFrame::Error("ERR wrong number of arguments for 'READWRITE' command".to_string())
+        );
+
+        let router_event = EvidenceEvent {
+            ts_utc: "unix_ms:761".to_string(),
+            ts_ms: 761,
+            packet_id: 7,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::MetadataAmbiguity,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "cluster_router",
+            action: "cluster_subcommand_reject",
+            reason_code: "cluster.command_router_contract_violation",
+            reason: "malformed cluster command shapes are deterministically rejected".to_string(),
+            input_digest: "fr_p2c_007_f_adv_router_input".to_string(),
+            output_digest: "fr_p2c_007_f_adv_router_output".to_string(),
+            state_digest_before: "cluster_router_start".to_string(),
+            state_digest_after: "cluster_router_rejected".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_adversarial_cluster_reason_codes_are_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-007/risk_note.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        let mode_event = EvidenceEvent {
+            ts_utc: "unix_ms:764".to_string(),
+            ts_ms: 764,
+            packet_id: 7,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::MetadataAmbiguity,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "cluster_client_mode",
+            action: "client_mode_arity_reject",
+            reason_code: "cluster.client_mode_flag_transition_violation",
+            reason: "client cluster mode commands reject adversarial arity drift deterministically"
+                .to_string(),
+            input_digest: "fr_p2c_007_f_adv_mode_input".to_string(),
+            output_digest: "fr_p2c_007_f_adv_mode_output".to_string(),
+            state_digest_before: "cluster_mode_start".to_string(),
+            state_digest_after: "cluster_mode_rejected".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_adversarial_cluster_reason_codes_are_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-007/risk_note.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        let hardened_policy_event = EvidenceEvent {
+            ts_utc: "unix_ms:765".to_string(),
+            ts_ms: 765,
+            packet_id: 7,
+            mode: Mode::Hardened,
+            severity: DriftSeverity::S1,
+            threat_class: ThreatClass::MetadataAmbiguity,
+            decision_action: DecisionAction::RejectNonAllowlisted,
+            subsystem: "cluster_policy",
+            action: "hardened_deviation_gate",
+            reason_code: "cluster.hardened_nonallowlisted_rejected",
+            reason: "non-allowlisted hardened packet-007 cluster deviation remains rejected"
+                .to_string(),
+            input_digest: "fr_p2c_007_f_adv_hardened_input".to_string(),
+            output_digest: "fr_p2c_007_f_adv_hardened_output".to_string(),
+            state_digest_before: "hardened_candidate".to_string(),
+            state_digest_after: "hardened_rejected".to_string(),
+            replay_cmd: "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_adversarial_cluster_reason_codes_are_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-007/risk_note.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        let cases = [
+            (
+                "f_adv_cluster_router_reason",
+                router_event,
+                "cluster.command_router_contract_violation",
+            ),
+            (
+                "f_adv_cluster_mode_reason",
+                mode_event,
+                "cluster.client_mode_flag_transition_violation",
+            ),
+            (
+                "f_adv_hardened_nonallowlisted_reason",
+                hardened_policy_event,
+                "cluster.hardened_nonallowlisted_rejected",
+            ),
+        ];
+
+        for (case_name, event, expected_reason_code) in cases {
+            assert_eq!(
+                event.reason_code, expected_reason_code,
+                "reason-code stability mismatch for case={case_name}",
+            );
+            validate_structured_log_emission(
+                StructuredLogEmissionContext {
+                    suite_id: "fr_p2c_007",
+                    fixture_name: "fr_p2c_007_cluster_adversarial",
+                    case_name,
+                    verification_path: VerificationPath::Property,
+                    now_ms: event.ts_ms,
+                    outcome: LogOutcome::Pass,
+                    persist_path: None,
+                },
+                std::slice::from_ref(&event),
+            )
+            .expect("packet-007 adversarial structured log should validate");
+        }
     }
 
     #[test]
@@ -2862,6 +3740,22 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_007_fixture_packet_family_maps_to_packet_007() {
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_007_cluster_router"),
+            "FR-P2C-007"
+        );
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_007_cluster_mode_property"),
+            "FR-P2C-007"
+        );
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_007_cluster_journey.json"),
+            "FR-P2C-007"
+        );
+    }
+
+    #[test]
     fn fr_p2c_004_fixture_packet_family_maps_to_packet_004() {
         assert_eq!(
             crate::packet_family_for_fixture("fr_p2c_004_auth_unit"),
@@ -2869,6 +3763,10 @@ mod tests {
         );
         assert_eq!(
             crate::packet_family_for_fixture("fr_p2c_004_acl_permissions"),
+            "FR-P2C-004"
+        );
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_004_acl_journey.json"),
             "FR-P2C-004"
         );
     }

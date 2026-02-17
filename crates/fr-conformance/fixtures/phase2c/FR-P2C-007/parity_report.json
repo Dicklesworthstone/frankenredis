@@ -1,0 +1,33 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-007",
+  "readiness": "READY_FOR_IMPL",
+  "missing_mandatory_fields": [],
+  "strict_mode": {
+    "status": "pass",
+    "summary": "Cluster router + client-mode command surface is deterministic and parity-aligned for packet scope."
+  },
+  "hardened_mode": {
+    "status": "pass",
+    "summary": "Only allowlisted bounded defenses are permitted; non-allowlisted deviations are rejected fail-closed."
+  },
+  "evidence": {
+    "unit_property": [
+      "fr_p2c_007_u001_cluster_subcommand_router_contract_and_logs",
+      "fr_p2c_007_u007_client_mode_flags_transition_and_logs",
+      "fr_p2c_007_u007_property_cluster_mode_state_is_sequence_deterministic"
+    ],
+    "differential": [
+      "fr_p2c_007_f_differential_cluster_surface_mode_split_is_stable",
+      "fr_p2c_007_f_metamorphic_cluster_help_is_idempotent_across_mode_toggles",
+      "fr_p2c_007_f_adversarial_cluster_reason_codes_are_stable"
+    ],
+    "e2e": [
+      "fr_p2c_007_e2e_contract_smoke"
+    ],
+    "optimization": [
+      "fr_p2c_007_cluster_subcommand_classifier_matches_linear_reference",
+      "fr_p2c_007_cluster_subcommand_route_profile_snapshot"
+    ]
+  }
+}

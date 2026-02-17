@@ -1,0 +1,68 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-001",
+  "legacy_paths": [
+    "legacy_redis_code/redis/src/ae.c",
+    "legacy_redis_code/redis/src/networking.c",
+    "legacy_redis_code/redis/src/server.c"
+  ],
+  "legacy_symbols": [
+    "aeProcessEvents",
+    "aeCreateFileEvent",
+    "beforeSleep",
+    "afterSleep"
+  ],
+  "state_machine_contract": [
+    "eventloop_phase_order_determinism",
+    "ae_barrier_callback_order_determinism",
+    "blocked_mode_iteration_budget"
+  ],
+  "protocol_contract": [
+    "accept_path_maxclients_rejection_surface",
+    "read_querybuf_limit_disconnect_surface",
+    "fatal_read_disconnect_surface"
+  ],
+  "command_acl_contract": [
+    "eventloop_pre_dispatch_gate_preserved"
+  ],
+  "persistence_replication_contract": [
+    "pending_write_delivery_order_preserved"
+  ],
+  "error_contract": [
+    "eventloop.ae_barrier_violation",
+    "eventloop.accept.maxclients_reached",
+    "eventloop.read.querybuf_limit_exceeded"
+  ],
+  "strict_mode_policy": [
+    "redis_observable_eventloop_ordering_parity",
+    "fail_closed_unknown_eventloop_transition"
+  ],
+  "hardened_mode_policy": [
+    "bounded_parser_diagnostics_only",
+    "reject_non_allowlisted_eventloop_deviation"
+  ],
+  "excluded_scope": [
+    "io_threads_full_parallel_scheduling_model",
+    "cluster_bus_eventloop_transport_specialization"
+  ],
+  "oracle_tests": [
+    "fr_p2c_001_unit_contract_smoke",
+    "fr_p2c_001_f_differential_fixture_passes",
+    "fr_p2c_001_f_metamorphic_repeated_fixture_runs_are_deterministic",
+    "fr_p2c_001_f_adversarial_reason_codes_are_stable",
+    "fr_p2c_001_e2e_contract_smoke"
+  ],
+  "performance_sentinels": [
+    "eventloop_blocked_mode_progress_is_bounded",
+    "eventloop_pending_write_delivery_is_lossless"
+  ],
+  "compatibility_risks": [
+    "eventloop_phase_order_drift",
+    "accept_path_maxclients_drift",
+    "hardened_nonallowlisted_deviation_leak"
+  ],
+  "raptorq_artifacts": [
+    "parity_report.raptorq.json",
+    "parity_report.decode_proof.json"
+  ]
+}

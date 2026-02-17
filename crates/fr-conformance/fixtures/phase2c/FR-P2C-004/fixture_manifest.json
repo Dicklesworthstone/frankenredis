@@ -1,0 +1,72 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-004",
+  "legacy_paths": [
+    "legacy_redis_code/redis/src/acl.c",
+    "legacy_redis_code/redis/src/networking.c",
+    "legacy_redis_code/redis/src/server.c"
+  ],
+  "legacy_symbols": [
+    "authCommand",
+    "ACLSetUser",
+    "ACLCheckAllPerm",
+    "processCommand"
+  ],
+  "state_machine_contract": [
+    "auth_bootstrap_state_determinism",
+    "hello_auth_early_fail_transition",
+    "acl_deny_index_monotonicity"
+  ],
+  "protocol_contract": [
+    "auth_wrongpass_error_surface",
+    "noauth_pre_dispatch_rejection_surface",
+    "hello_auth_reply_shape_contract"
+  ],
+  "command_acl_contract": [
+    "acl_selector_parse_reduce_determinism",
+    "acl_denial_log_contract"
+  ],
+  "persistence_replication_contract": [
+    "acl_file_transactional_load_and_atomic_save"
+  ],
+  "error_contract": [
+    "auth.noauth_gate_violation",
+    "auth.acl_selector_parse_validation_mismatch",
+    "auth.hardened_nonallowlisted_rejected"
+  ],
+  "strict_mode_policy": [
+    "redis_observable_auth_acl_reply_parity",
+    "startup_acl_source_conflict_failclosed"
+  ],
+  "hardened_mode_policy": [
+    "bounded_parser_diagnostics_only",
+    "reject_non_allowlisted_acl_deviation"
+  ],
+  "excluded_scope": [
+    "acl_pubsub_selector_expansion",
+    "acl_external_identity_provider_integration"
+  ],
+  "oracle_tests": [
+    "fr_p2c_004_u005_noauth_gate_precedes_dispatch_and_logs",
+    "fr_p2c_004_u007_acl_selector_parser_rejects_malformed_rules_and_logs",
+    "fr_p2c_004_u006_property_acl_deny_index_is_monotonic",
+    "fr_p2c_004_f_differential_auth_mode_split_contract_is_stable",
+    "fr_p2c_004_f_metamorphic_auth_entrypoints_converge_to_same_session_state",
+    "fr_p2c_004_f_adversarial_auth_reason_codes_are_stable",
+    "fr_p2c_004_e2e_contract_smoke",
+    "fr_p2c_004_runtime_special_command_classifier_matches_linear_reference"
+  ],
+  "performance_sentinels": [
+    "runtime_special_command_classifier_speedup_ratio>=1.30",
+    "runtime_special_command_classifier_optimized_ns_per_lookup<=35"
+  ],
+  "compatibility_risks": [
+    "noauth_gate_ordering_drift",
+    "acl_selector_reduce_drift",
+    "hardened_nonallowlisted_deviation_leak"
+  ],
+  "raptorq_artifacts": [
+    "parity_report.raptorq.json",
+    "parity_report.decode_proof.json"
+  ]
+}

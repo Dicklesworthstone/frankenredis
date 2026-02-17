@@ -205,7 +205,7 @@ Calibration + fallback:
 
 Selected single optimization lever:
 
-- `LEV-004-04`: pre-dispatch auth/ACL decision memoization keyed by `(client_auth_epoch, cmd_fingerprint)` with strict invalidation on ACL/config mutation.
+- `LEV-004-H1`: replace repeated string-based runtime special-command routing checks (`AUTH`, `HELLO`, `ASKING`, `READONLY`, `READWRITE`, `CLUSTER`) with a length-bucketed byte classifier in `crates/fr-runtime/src/lib.rs`.
 
 Required artifacts:
 

@@ -1,0 +1,68 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-007",
+  "legacy_paths": [
+    "legacy_redis_code/redis/src/cluster.c",
+    "legacy_redis_code/redis/src/cluster_legacy.c",
+    "legacy_redis_code/redis/src/cluster_asm.c"
+  ],
+  "legacy_symbols": [
+    "clusterCommand",
+    "getNodeByQuery",
+    "clusterCron",
+    "clusterBeforeSleep"
+  ],
+  "state_machine_contract": [
+    "slot_owner_query_determinism",
+    "client_mode_flag_transition",
+    "cluster_failclosed_nonallowlisted"
+  ],
+  "protocol_contract": [
+    "cluster_help_array_shape",
+    "cluster_unknown_subcommand_error_surface",
+    "asking_readonly_readwrite_arity_contract"
+  ],
+  "command_acl_contract": [
+    "readonly_asking_readwrite_transition_order"
+  ],
+  "persistence_replication_contract": [
+    "cluster_mode_toggle_does_not_mutate_store_ordering"
+  ],
+  "error_contract": [
+    "cluster.command_router_contract_violation",
+    "cluster.client_mode_flag_transition_violation",
+    "cluster.hardened_nonallowlisted_rejected"
+  ],
+  "strict_mode_policy": [
+    "redis_observable_cluster_reply_parity",
+    "fail_closed_nonallowlisted_deviation"
+  ],
+  "hardened_mode_policy": [
+    "bounded_parser_diagnostics_only",
+    "reject_non_allowlisted_cluster_deviation"
+  ],
+  "excluded_scope": [
+    "cluster_multi_primary_membership_management",
+    "cluster_bus_transport_reliability_model"
+  ],
+  "oracle_tests": [
+    "fr_p2c_007_u001_cluster_subcommand_router_contract_and_logs",
+    "fr_p2c_007_u007_client_mode_flags_transition_and_logs",
+    "fr_p2c_007_f_differential_cluster_surface_mode_split_is_stable",
+    "fr_p2c_007_e2e_contract_smoke",
+    "fr_p2c_007_cluster_subcommand_classifier_matches_linear_reference"
+  ],
+  "performance_sentinels": [
+    "cluster_subcommand_classifier_speedup_ratio>=1.20",
+    "cluster_subcommand_classifier_optimized_ns_per_lookup<=25"
+  ],
+  "compatibility_risks": [
+    "cluster_help_array_shape_drift",
+    "client_mode_flag_transition_drift",
+    "hardened_nonallowlisted_deviation_leak"
+  ],
+  "raptorq_artifacts": [
+    "parity_report.raptorq.json",
+    "parity_report.decode_proof.json"
+  ]
+}

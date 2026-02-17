@@ -141,7 +141,7 @@ Calibration and fallback policy:
 
 Selected single optimization lever (downstream execution target):
 
-- `LEV-004-01`: cache ACL command-permission reduction per `(user_epoch, command_id, firstarg_shape, keyspec_shape)` and invalidate on ACL/user mutation.
+- `LEV-004-H1`: replace repeated string-based runtime special-command routing checks (`AUTH`, `HELLO`, `ASKING`, `READONLY`, `READWRITE`, `CLUSTER`) with a length-bucketed byte classifier in `crates/fr-runtime/src/lib.rs`.
 
 Required loop artifacts and paths:
 

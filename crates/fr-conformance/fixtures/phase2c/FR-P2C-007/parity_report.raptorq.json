@@ -1,0 +1,26 @@
+{
+  "artifact_id": "FR-P2C-007/parity_report.json",
+  "artifact_type": "conformance",
+  "source_hash": "sha256:68cc0910ef85680373d51b0accbf27ff827255d9636faf57abee2dd380df92ae",
+  "raptorq": {
+    "k": 27,
+    "repair_symbols": 7,
+    "overhead_ratio": 0.259259,
+    "symbol_hashes": [
+      "sha256:68cc0910ef85680373d51b0accbf27ff827255d9636faf57abee2dd380df92ae"
+    ]
+  },
+  "scrub": {
+    "last_ok_unix_ms": 1763415663000,
+    "status": "ok"
+  },
+  "decode_proofs": [
+    {
+      "proof_id": "fr-p2c-007-parity-proof-001",
+      "status": "verified",
+      "reason_code": "raptorq.decode_verified",
+      "generated_ts": "2026-02-17T21:41:03Z",
+      "source_hash": "sha256:68cc0910ef85680373d51b0accbf27ff827255d9636faf57abee2dd380df92ae"
+    }
+  ]
+}

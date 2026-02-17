@@ -88,6 +88,56 @@ Each contract-row verification result (pass/fail and divergence checks) must emi
 - Strict-mode sweep: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_007_STRICT`
 - Hardened-mode sweep: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_007_HARDENED`
 
+## Implemented unit/property evidence (bd-2wb.18.5)
+
+- `fr_p2c_007_u001_cluster_subcommand_router_contract_and_logs` (`C01`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_u001_cluster_subcommand_router_contract_and_logs`
+- `fr_p2c_007_u007_client_mode_flags_transition_and_logs` (`C07`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_u007_client_mode_flags_transition_and_logs`
+- `fr_p2c_007_u007_property_cluster_mode_state_is_sequence_deterministic` (`I06` metamorphic/property)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_u007_property_cluster_mode_state_is_sequence_deterministic`
+
+## Implemented differential/metamorphic/adversarial evidence (bd-2wb.18.6)
+
+- `fr_p2c_007_f_differential_cluster_surface_mode_split_is_stable` (`C01`/`C07` strict-vs-hardened parity)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_differential_cluster_surface_mode_split_is_stable`
+- `fr_p2c_007_f_metamorphic_cluster_help_is_idempotent_across_mode_toggles` (`I01`/`I06` metamorphic convergence)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_metamorphic_cluster_help_is_idempotent_across_mode_toggles`
+- `fr_p2c_007_f_adversarial_cluster_reason_codes_are_stable` (`T01`/`T04`/`T11` reason-code stability)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_007_f_adversarial_cluster_reason_codes_are_stable`
+
+## Implemented e2e evidence (bd-2wb.18.7)
+
+- `fr_p2c_007_e2e_contract_smoke` (`E001` smoke path for `C01`/`C07` contract surface)  
+  Fixture: `crates/fr-conformance/fixtures/fr_p2c_007_cluster_journey.json`  
+  Replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_007_e2e_contract_smoke`
+
+## Implemented optimization evidence (bd-2wb.18.8)
+
+- Lever `LEV-007-H1`: length-bucketed `CLUSTER` subcommand classifier (`classify_cluster_subcommand`) in `crates/fr-runtime/src/lib.rs`, with linear-reference parity comparator.
+- Classifier isomorphism replay: `rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_007_cluster_subcommand_classifier_matches_linear_reference`
+- Profile replay: `rch exec -- cargo test -p fr-runtime fr_p2c_007_cluster_subcommand_route_profile_snapshot -- --ignored --nocapture`
+- Profile delta from snapshot:
+  - `linear_ns_per_lookup=33.994749`
+  - `optimized_ns_per_lookup=20.778880`
+  - `speedup_ratio=1.636024`
+- Evidence pack: `artifacts/phase2c/FR-P2C-007/{baseline_profile.json,post_profile.json,lever_selection.md,isomorphism_report.md,env.json,manifest.json,repro.lock,LEGAL.md}`
+
+## Implemented final evidence pack (bd-2wb.18.9)
+
+- Packet final manifest + parity gate authored in `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/{fixture_manifest.json,parity_gate.yaml}`.
+- Packet parity report finalized in `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/parity_report.json` with:
+  - `readiness=READY_FOR_IMPL`
+  - `missing_mandatory_fields=[]`
+  - explicit unit/differential/e2e/optimization evidence IDs.
+- Durability sidecar + decode-proof artifacts finalized in:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/parity_report.raptorq.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/parity_report.decode_proof.json`
+  - reason code: `raptorq.decode_verified`
+  - replay command: `./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke`
+- Packet schema/readiness replay:
+  - `rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- crates/fr-conformance/fixtures/phase2c/FR-P2C-007`
+
 ## Alien-graveyard recommendation contract card
 
 | Field | Value |

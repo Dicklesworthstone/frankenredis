@@ -1,0 +1,33 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-004",
+  "readiness": "READY_FOR_IMPL",
+  "missing_mandatory_fields": [],
+  "strict_mode": {
+    "status": "pass",
+    "summary": "Auth and ACL command-surface contract paths are deterministic and parity-aligned for packet scope."
+  },
+  "hardened_mode": {
+    "status": "pass",
+    "summary": "Only allowlisted bounded defenses are permitted; non-allowlisted deviations are rejected fail-closed."
+  },
+  "evidence": {
+    "unit_property": [
+      "fr_p2c_004_u005_noauth_gate_precedes_dispatch_and_logs",
+      "fr_p2c_004_u007_acl_selector_parser_rejects_malformed_rules_and_logs",
+      "fr_p2c_004_u006_property_acl_deny_index_is_monotonic"
+    ],
+    "differential": [
+      "fr_p2c_004_f_differential_auth_mode_split_contract_is_stable",
+      "fr_p2c_004_f_metamorphic_auth_entrypoints_converge_to_same_session_state",
+      "fr_p2c_004_f_adversarial_auth_reason_codes_are_stable"
+    ],
+    "e2e": [
+      "fr_p2c_004_e2e_contract_smoke"
+    ],
+    "optimization": [
+      "fr_p2c_004_runtime_special_command_classifier_matches_linear_reference",
+      "fr_p2c_004_runtime_special_route_profile_snapshot"
+    ]
+  }
+}

@@ -1,0 +1,50 @@
+{
+  "suite": "fr_p2c_004_acl_journey",
+  "cases": [
+    {
+      "name": "auth_without_config_is_rejected",
+      "now_ms": 0,
+      "argv": ["AUTH", "secret"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?"
+      }
+    },
+    {
+      "name": "hello_auth_without_config_is_rejected",
+      "now_ms": 1,
+      "argv": ["HELLO", "3", "AUTH", "default", "secret"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?"
+      }
+    },
+    {
+      "name": "hello_with_invalid_proto_is_rejected",
+      "now_ms": 2,
+      "argv": ["HELLO", "7"],
+      "expect": {
+        "kind": "error",
+        "value": "NOPROTO unsupported protocol version '7'"
+      }
+    },
+    {
+      "name": "hello_auth_syntax_error_is_deterministic",
+      "now_ms": 3,
+      "argv": ["HELLO", "3", "AUTH", "default"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
+      "name": "set_acl_contract_key",
+      "now_ms": 4,
+      "argv": ["SET", "fr:p2c:004:key", "value"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "get_acl_contract_key",
+      "now_ms": 5,
+      "argv": ["GET", "fr:p2c:004:key"],
+      "expect": { "kind": "bulk", "value": "value" }
+    }
+  ]
+}

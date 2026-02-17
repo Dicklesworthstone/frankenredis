@@ -1,0 +1,80 @@
+{
+  "suite": "fr_p2c_007_cluster_journey",
+  "cases": [
+    {
+      "name": "cluster_wrong_arity_is_rejected",
+      "now_ms": 0,
+      "argv": ["CLUSTER"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLUSTER' command"
+      }
+    },
+    {
+      "name": "cluster_unknown_subcommand_is_rejected",
+      "now_ms": 1,
+      "argv": ["CLUSTER", "NOPE"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP."
+      }
+    },
+    {
+      "name": "readonly_enables_cluster_mode",
+      "now_ms": 2,
+      "argv": ["READONLY"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "asking_after_readonly_is_ok",
+      "now_ms": 3,
+      "argv": ["ASKING"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "readwrite_clears_cluster_mode",
+      "now_ms": 4,
+      "argv": ["READWRITE"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "readonly_wrong_arity_is_rejected",
+      "now_ms": 5,
+      "argv": ["READONLY", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'READONLY' command"
+      }
+    },
+    {
+      "name": "set_cluster_contract_key",
+      "now_ms": 6,
+      "argv": ["SET", "fr:p2c:007:key", "value"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "get_cluster_contract_key",
+      "now_ms": 7,
+      "argv": ["GET", "fr:p2c:007:key"],
+      "expect": { "kind": "bulk", "value": "value" }
+    },
+    {
+      "name": "dbsize_before_flush",
+      "now_ms": 8,
+      "argv": ["DBSIZE"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "flush_cluster_workspace",
+      "now_ms": 9,
+      "argv": ["FLUSHDB"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "dbsize_after_flush",
+      "now_ms": 10,
+      "argv": ["DBSIZE"],
+      "expect": { "kind": "integer", "value": 0 }
+    }
+  ]
+}
