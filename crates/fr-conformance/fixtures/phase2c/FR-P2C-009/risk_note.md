@@ -72,7 +72,7 @@ All threat detections/rejections/recoveries must emit:
 | Adoption wedge | Enforce parse/build/apply atomicity and listener safety before throughput-oriented tuning |
 | Budgeted mode defaults | Strict=`FailClosed`; Hardened=`BoundedDefense` allowlist only |
 | Deterministic exhaustion behavior | Budget exhaustion forces strict-equivalent fail-closed and emits `tlscfg.hardened_budget_exhausted_failclosed` |
-| Replay commands | `rch exec -- cargo test -p fr-config -- --nocapture FR_P2C_009`; `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_009_HARDENED` |
+| Replay commands | `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-config -- --nocapture fr_p2c_009_u001_protocol_parse_rejects_unknown_token`; `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_009_e013_hardened_non_allowlisted_rejection_matches_expected_threat_contract` |
 
 ## Expected-loss decision model
 
@@ -128,10 +128,10 @@ Required artifacts:
 
 ## Replay commands
 
-- Config-layer threat suite: `rch exec -- cargo test -p fr-config -- --nocapture FR_P2C_009`
-- Runtime threat suite: `rch exec -- cargo test -p fr-runtime -- --nocapture FR_P2C_009`
-- E2E threat suite: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_009`
-- Hardened replay: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_009_HARDENED`
+- Config-layer threat suite: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-config -- --nocapture fr_p2c_009_u013_strict_mode_returns_fail_closed_decision`
+- Runtime threat suite: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_009_u013_strict_mode_rejects_unsafe_tls_config_and_records_event`
+- Conformance threat replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_009_f_adversarial_tls_reason_codes_are_stable`
+- Hardened replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_009_e013_hardened_non_allowlisted_rejection_matches_expected_threat_contract`
 
 ## Reproducibility/provenance pack references
 

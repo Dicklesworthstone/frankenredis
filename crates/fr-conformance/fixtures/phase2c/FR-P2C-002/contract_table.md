@@ -68,11 +68,75 @@ All parser contract mismatches or reject paths must emit:
 
 ## Replay command templates
 
-- Unit: `cargo test -p fr-protocol -- --nocapture FR_P2C_002`
-- Integration/E2E: `cargo test -p fr-conformance -- --nocapture FR_P2C_002`
+- Strict unit replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-protocol -- --nocapture fr_p2c_002_u001_scalar_decode_parity`
+- Hardened unit/property replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_002_f_adversarial_runtime_parse_failures_emit_stable_reason_code`
+- E2E replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_002_e2e_contract_smoke`
 
 ## Traceability checklist
 
 - Every row `C01..C10` maps to at least one unit and one e2e ID.
 - Every row has at least one deterministic `reason_code`.
 - Every row defines strict/hardened behavior plus fail-closed boundary.
+
+## Alien recommendation contract card
+
+| Field | Value |
+|---|---|
+| `claim_id` | `fr-conformance.phase2c-gate.dir-scan-mask.v1` |
+| `evidence_id` | `evidence.phase2c-gate.round_dir_scan_mask.v1` |
+| Priority tier | `A` |
+| EV score | `2.61` |
+| Baseline comparator | `round_sort_prune + current HEAD pre-change` |
+| Hotspot evidence | `statx calls 2911 -> 991`, syscall share `30.17% -> 10.76%`, output checksum unchanged |
+| Graveyard mapping | `metadata-bound IO overhead -> layout-aware preindexing` |
+| Adoption wedge | single-module behavior-isomorphic syscall reduction in Phase2C gate path |
+| Budgeted-mode default | one optimization lever per round, then mandatory re-profile |
+
+## Expected-loss decision model (optimization lever)
+
+States:
+
+- `S0`: metadata syscall pressure dominates latency
+- `S1`: JSON parse dominates latency
+- `S2`: mixed pressure
+
+Actions:
+
+- `A0`: keep repeated per-file probes
+- `A1`: single directory scan + file-presence bitmask
+
+Loss matrix (lower is better):
+
+| State \ Action | `A0` | `A1` |
+|---|---:|---:|
+| `S0` | 8 | 2 |
+| `S1` | 3 | 3 |
+| `S2` | 5 | 3 |
+
+Calibration + fallback trigger:
+
+- If `delta_percent <= 0` over the 20-run benchmark window, reject/revert the lever.
+- If output checksum diverges, fail closed and reject promotion.
+- Exhaustion behavior: stop after one lever and re-profile before further optimization.
+
+## One-lever extreme-optimization loop artifacts
+
+Selected single optimization lever:
+
+- `LEV-002-OPT-01`: replace repeated per-file `is_file` checks with one deterministic directory scan plus file-presence bitmask.
+
+Required artifacts:
+
+- Baseline/profile evidence: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/baseline_hyperfine.json`
+- Hotspot syscall profile: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/baseline_strace.txt`
+- Chosen lever note: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/optimization_report.md`
+- Post-change re-profile: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/after_hyperfine.json`
+- Post-change syscall profile: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/after_strace.txt`
+- Behavior-isomorphism proof: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/isomorphism_check.txt`
+
+## Reproducibility/provenance pack references
+
+- `artifacts/optimization/phase2c-gate/round_dir_scan_mask/env.json`
+- `artifacts/optimization/phase2c-gate/round_dir_scan_mask/manifest.json`
+- `artifacts/optimization/phase2c-gate/round_dir_scan_mask/repro.lock`
+- `artifacts/optimization/phase2c-gate/round_dir_scan_mask/LEGAL.md` (required when IP/provenance risk is plausible)

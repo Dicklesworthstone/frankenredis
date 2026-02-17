@@ -1,0 +1,92 @@
+{
+  "suite": "fr_p2c_009_tls_config_journey",
+  "cases": [
+    {
+      "name": "set_tls_mode",
+      "now_ms": 0,
+      "argv": ["SET", "fr:p2c:009:tls:mode", "strict"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "get_tls_mode",
+      "now_ms": 1,
+      "argv": ["GET", "fr:p2c:009:tls:mode"],
+      "expect": { "kind": "bulk", "value": "strict" }
+    },
+    {
+      "name": "set_tls_allowlist",
+      "now_ms": 2,
+      "argv": ["SET", "fr:p2c:009:tls:allowlist", "127.0.0.1,localhost"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "strlen_tls_allowlist",
+      "now_ms": 3,
+      "argv": ["STRLEN", "fr:p2c:009:tls:allowlist"],
+      "expect": { "kind": "integer", "value": 19 }
+    },
+    {
+      "name": "transition_tls_mode_via_getset",
+      "now_ms": 4,
+      "argv": ["GETSET", "fr:p2c:009:tls:mode", "hardened"],
+      "expect": { "kind": "bulk", "value": "strict" }
+    },
+    {
+      "name": "get_hardened_tls_mode",
+      "now_ms": 5,
+      "argv": ["GET", "fr:p2c:009:tls:mode"],
+      "expect": { "kind": "bulk", "value": "hardened" }
+    },
+    {
+      "name": "seed_runtime_epoch",
+      "now_ms": 6,
+      "argv": ["SET", "fr:p2c:009:config:epoch", "100"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "increment_runtime_epoch",
+      "now_ms": 7,
+      "argv": ["INCR", "fr:p2c:009:config:epoch"],
+      "expect": { "kind": "integer", "value": 101 }
+    },
+    {
+      "name": "promote_runtime_epoch_key",
+      "now_ms": 8,
+      "argv": [
+        "RENAME",
+        "fr:p2c:009:config:epoch",
+        "fr:p2c:009:config:epoch:active"
+      ],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "count_tls_config_markers",
+      "now_ms": 9,
+      "argv": [
+        "EXISTS",
+        "fr:p2c:009:tls:mode",
+        "fr:p2c:009:tls:allowlist",
+        "fr:p2c:009:config:epoch:active"
+      ],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "dbsize_before_flush",
+      "now_ms": 10,
+      "argv": ["DBSIZE"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "flush_tls_config_workspace",
+      "now_ms": 11,
+      "argv": ["FLUSHDB"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "dbsize_after_flush",
+      "now_ms": 12,
+      "argv": ["DBSIZE"],
+      "expect": { "kind": "integer", "value": 0 }
+    }
+  ]
+}

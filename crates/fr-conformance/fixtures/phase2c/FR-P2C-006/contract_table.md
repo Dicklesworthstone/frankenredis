@@ -82,10 +82,9 @@ Each contract-row verification result (pass/fail and divergence checks) must emi
 
 ## Replay command templates
 
-- Unit/property: `rch exec -- cargo test -p fr-repl -- --nocapture FR_P2C_006`
-- Integration/E2E: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_006`
-- Strict-mode sweep: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_006_STRICT`
-- Hardened-mode sweep: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_006_HARDENED`
+- Strict unit replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u001_psync_accepts_partial_resync_inside_window`
+- Strict conformance replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_psync_adversarial_matrix_prefers_safe_fallbacks`
+- Hardened conformance replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_waitaof_metamorphic_joint_threshold_semantics_hold`
 
 ## Alien-graveyard recommendation contract card
 
@@ -101,7 +100,7 @@ Each contract-row verification result (pass/fail and divergence checks) must emi
 | Adoption wedge | Implement handshake+PSYNC core first, then WAIT/WAITAOF and role transition envelopes |
 | Budgeted mode defaults | Strict=`FailClosed`; Hardened=`BoundedDefense` allowlist only |
 | Deterministic exhaustion behavior | On budget exhaustion force strict-equivalent fail-closed with `repl.hardened_budget_exhausted_failclosed` |
-| Replay commands | `rch exec -- cargo test -p fr-repl -- --nocapture FR_P2C_006`; `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_006_HARDENED` |
+| Replay commands | `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u001_psync_accepts_partial_resync_inside_window`; `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_waitaof_metamorphic_joint_threshold_semantics_hold` |
 
 ## Expected-loss decision model
 

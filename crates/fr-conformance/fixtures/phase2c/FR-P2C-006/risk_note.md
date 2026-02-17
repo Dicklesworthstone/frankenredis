@@ -72,7 +72,7 @@ All threat detections/rejections/recoveries must emit:
 | Adoption wedge | Enforce PSYNC branch correctness and WAIT/WAITAOF thresholds before optimizing replication paths |
 | Budgeted mode defaults | Strict=`FailClosed`; Hardened=`BoundedDefense` allowlist only |
 | Deterministic exhaustion behavior | Budget exhaustion forces strict-equivalent fail-closed and emits `repl.hardened_budget_exhausted_failclosed` |
-| Replay commands | `rch exec -- cargo test -p fr-repl -- --nocapture FR_P2C_006`; `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_006_HARDENED` |
+| Replay commands | `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u001_psync_accepts_partial_resync_inside_window`; `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_waitaof_metamorphic_joint_threshold_semantics_hold` |
 
 ## Expected-loss decision model
 
@@ -128,9 +128,9 @@ Required artifacts:
 
 ## Replay commands
 
-- Unit threat suite: `rch exec -- cargo test -p fr-repl -- --nocapture FR_P2C_006`
-- E2E threat suite: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_006`
-- Hardened replay: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_006_HARDENED`
+- Unit threat suite: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u006_waitaof_requires_local_and_replica_thresholds`
+- Conformance threat replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_psync_adversarial_matrix_prefers_safe_fallbacks`
+- Hardened replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_waitaof_metamorphic_joint_threshold_semantics_hold`
 
 ## Reproducibility/provenance pack references
 

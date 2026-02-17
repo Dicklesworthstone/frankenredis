@@ -82,11 +82,11 @@ Each contract-row verification result (pass/fail and divergence checks) must emi
 
 ## Replay command templates
 
-- Unit/property: `rch exec -- cargo test -p fr-config -- --nocapture FR_P2C_009`
-- Runtime integration: `rch exec -- cargo test -p fr-runtime -- --nocapture FR_P2C_009`
-- Integration/E2E: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_009`
-- Strict-mode sweep: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_009_STRICT`
-- Hardened-mode sweep: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_009_HARDENED`
+- Strict unit replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-config -- --nocapture fr_p2c_009_u001_protocol_parse_rejects_unknown_token`
+- Strict runtime replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_009_u013_strict_mode_rejects_unsafe_tls_config_and_records_event`
+- Hardened runtime replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_009_u013_hardened_non_allowlisted_tls_deviation_is_rejected`
+- Strict conformance replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_009_e013_strict_runtime_tls_rejection_matches_expected_threat_contract`
+- Hardened conformance replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_009_e013_hardened_non_allowlisted_rejection_matches_expected_threat_contract`
 
 ## Alien-graveyard recommendation contract card
 
@@ -102,7 +102,7 @@ Each contract-row verification result (pass/fail and divergence checks) must emi
 | Adoption wedge | Land parse/build/apply atomicity first, then handshake/I/O semantics, then rewrite/operational knobs and hardened gates |
 | Budgeted mode defaults | Strict=`FailClosed`; Hardened=`BoundedDefense` allowlist only |
 | Deterministic exhaustion behavior | On budget exhaustion force strict-equivalent fail-closed with `tlscfg.hardened_budget_exhausted_failclosed` |
-| Replay commands | `rch exec -- cargo test -p fr-config -- --nocapture FR_P2C_009`; `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_009_HARDENED` |
+| Replay commands | `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-config -- --nocapture fr_p2c_009_u001_protocol_parse_rejects_unknown_token`; `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_009_e013_hardened_non_allowlisted_rejection_matches_expected_threat_contract` |
 
 ## Expected-loss decision model
 

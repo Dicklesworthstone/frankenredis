@@ -956,9 +956,13 @@ fn packet_family_for_fixture(fixture_name: &str) -> &'static str {
         "fr_p2c_001_eventloop_journey.json" => "FR-P2C-001",
         "protocol_negative.json" => "FR-P2C-002",
         "core_errors.json" | "fr_p2c_003_dispatch_journey.json" => "FR-P2C-003",
+        "fr_p2c_006_replication_journey.json" => "FR-P2C-006",
         "persist_replay.json" => "FR-P2C-005",
+        "fr_p2c_009_tls_config_journey.json" => "FR-P2C-009",
         "fr_p2c_009_tls_runtime_strict" | "fr_p2c_009_tls_runtime_hardened" => "FR-P2C-009",
         _ if fixture_name.starts_with("fr_p2c_003_") => "FR-P2C-003",
+        _ if fixture_name.starts_with("fr_p2c_006_") => "FR-P2C-006",
+        _ if fixture_name.starts_with("fr_p2c_009_") => "FR-P2C-009",
         _ => "FR-P2C-003",
     }
 }
@@ -2633,6 +2637,10 @@ mod tests {
         );
         assert_eq!(
             crate::packet_family_for_fixture("fr_p2c_009_tls_runtime_hardened"),
+            "FR-P2C-009"
+        );
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_009_tls_config_journey.json"),
             "FR-P2C-009"
         );
     }

@@ -138,8 +138,9 @@ Use remote offload for CPU-intensive checks:
 ```bash
 rch exec -- cargo check --workspace --all-targets
 rch exec -- cargo clippy --workspace --all-targets -- -D warnings
-rch exec -- cargo test -p fr-eventloop -- --nocapture FR_P2C_001
-rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_001
+FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-eventloop -- --nocapture fr_p2c_001_u001_phase_order_is_deterministic
+FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_001_u005_runtime_blocked_mode_is_bounded
+FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_001_e2e_contract_smoke
 rch exec -- cargo fmt --check
 ```
 
@@ -148,3 +149,66 @@ rch exec -- cargo fmt --check
 - This bead defines architecture/plan only (no behavior-changing Rust implementation yet).
 - Implementation execution continues in `bd-2wb.12.5` and later packet-001 dependents.
 - Any behavior deferment must remain explicitly linked to packet-001 follow-up beads.
+
+## 11) Expected-loss decision model and fallback policy (optimization lever)
+
+States:
+
+- `S0`: metadata syscall pressure dominates latency
+- `S1`: JSON parse dominates latency
+- `S2`: mixed pressure
+
+Actions:
+
+- `A0`: keep repeated per-file probes
+- `A1`: single directory scan + file-presence bitmask
+
+Loss matrix (lower is better):
+
+| State \ Action | `A0` | `A1` |
+|---|---:|---:|
+| `S0` | 8 | 2 |
+| `S1` | 3 | 3 |
+| `S2` | 5 | 3 |
+
+Posterior/evidence terms:
+
+- Baseline `statx` hotspot dominance from strace profile.
+- Post-change `statx` reduction while preserving output checksum.
+
+Calibration + fallback:
+
+- Calibration metric target: non-negative delta over 20-run hyperfine window.
+- Fallback trigger: `delta_percent <= 0` or output checksum divergence.
+- Fallback behavior: reject optimization promotion and keep fail-closed baseline.
+
+## 12) One-lever extreme-optimization loop artifacts
+
+Selected single optimization lever:
+
+- `LEV-001-OPT-01`: replace repeated per-file `is_file` checks with one deterministic directory scan plus file-presence bitmask.
+
+Required artifacts:
+
+- Baseline/profile evidence: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/baseline_hyperfine.json`
+- Hotspot syscall profile: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/baseline_strace.txt`
+- Chosen lever note: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/optimization_report.md`
+- Recommendation contract card: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/alien_recommendation_card.md`
+- Post-change re-profile: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/after_hyperfine.json`
+- Post-change syscall profile: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/after_strace.txt`
+- Behavior-isomorphism proof: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/isomorphism_check.txt`
+
+## 13) Reproducibility/provenance pack references
+
+- `artifacts/optimization/phase2c-gate/round_dir_scan_mask/env.json`
+- `artifacts/optimization/phase2c-gate/round_dir_scan_mask/manifest.json`
+- `artifacts/optimization/phase2c-gate/round_dir_scan_mask/repro.lock`
+- `artifacts/optimization/phase2c-gate/round_dir_scan_mask/LEGAL.md` (required if IP/provenance risk is plausible)
+
+## 14) Benchmark replay commands (`rch`-offloaded)
+
+```bash
+rch exec -- cargo build -p fr-conformance --bin phase2c_schema_gate
+rch exec -- bash artifacts/optimization/phase2c-gate/run_gate_bench.sh
+rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_001_f_differential_fixture_passes
+```

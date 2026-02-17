@@ -190,7 +190,7 @@ manager, handshake FSM, rewrite contract, runtime gate) must emit:
 | Adoption wedge | Land schema/validate/apply atomicity first, then runtime handshake/listener orchestration, then persistence and hardened policy |
 | Budgeted mode defaults | Strict=`FailClosed`; Hardened=`BoundedDefense` (allowlist only) |
 | Deterministic exhaustion behavior | Hardened budget exhaustion => strict-equivalent fail-closed with `tlscfg.hardened_budget_exhausted_failclosed` |
-| Replay commands | `rch exec -- cargo test -p fr-config -- --nocapture FR_P2C_009`; `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_009_HARDENED` |
+| Replay commands | `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-config -- --nocapture fr_p2c_009_u001_protocol_parse_rejects_unknown_token`; `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_009_e013_hardened_non_allowlisted_rejection_matches_expected_threat_contract` |
 
 ## 11) Expected-loss decision model
 
@@ -247,10 +247,10 @@ Required artifacts:
 
 ## 14) Verification command set (local + CI replay)
 
-- `rch exec -- cargo test -p fr-config -- --nocapture FR_P2C_009`
-- `rch exec -- cargo test -p fr-runtime -- --nocapture FR_P2C_009`
-- `rch exec -- cargo test -p fr-eventloop -- --nocapture FR_P2C_009`
-- `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_009`
-- `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_009_STRICT`
-- `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_009_HARDENED`
+- `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-config -- --nocapture fr_p2c_009_u`
+- `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_009_u`
+- `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-eventloop -- --nocapture fr_p2c_009_u011_`
+- `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_009_f_differential_mode_split_contract_is_stable`
+- `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_009_f_metamorphic_non_allowlisted_rejection_is_deterministic`
+- `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_009_f_adversarial_tls_reason_codes_are_stable`
 - `rch exec -- cargo clippy --workspace --all-targets -- -D warnings`

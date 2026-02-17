@@ -192,7 +192,7 @@ Replication boundaries (`backlog_lifecycle`, `psync_engine`, `handshake_fsm`,
 | Adoption wedge | Implement lineage+PSYNC core first, then WAIT/WAITAOF and role transitions, then hardened policy |
 | Budgeted mode defaults | Strict=`FailClosed`; Hardened=`BoundedDefense` (allowlist only) |
 | Deterministic exhaustion behavior | Hardened budget exhaustion => strict-equivalent fail-closed + `repl.hardened_budget_exhausted_failclosed` |
-| Replay commands | `rch exec -- cargo test -p fr-repl -- --nocapture FR_P2C_006`; `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_006_HARDENED` |
+| Replay commands | `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u001_psync_accepts_partial_resync_inside_window`; `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_waitaof_metamorphic_joint_threshold_semantics_hold` |
 
 ## 10) Expected-loss decision model
 
@@ -249,10 +249,9 @@ Required artifacts:
 
 ## 13) Verification command set (local + CI replay)
 
-- `rch exec -- cargo test -p fr-repl -- --nocapture FR_P2C_006`
-- `rch exec -- cargo test -p fr-command -- --nocapture FR_P2C_006`
-- `rch exec -- cargo test -p fr-runtime -- --nocapture FR_P2C_006`
-- `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_006`
-- `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_006_STRICT`
-- `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_006_HARDENED`
+- `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_`
+- `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_handshake_contract_vectors_are_enforced`
+- `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_psync_adversarial_matrix_prefers_safe_fallbacks`
+- `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_wait_metamorphic_ack_monotonicity_holds`
+- `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_waitaof_metamorphic_joint_threshold_semantics_hold`
 - `rch exec -- cargo clippy --workspace --all-targets -- -D warnings`

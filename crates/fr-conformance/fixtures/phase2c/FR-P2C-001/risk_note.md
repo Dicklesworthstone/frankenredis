@@ -90,8 +90,32 @@ Decision policy:
 
 ## Replay commands
 
-- Unit threat suite: `cargo test -p fr-eventloop -- --nocapture FR_P2C_001`
-- E2E threat suite: `cargo test -p fr-conformance -- --nocapture FR_P2C_001`
+- Strict unit threat suite: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-eventloop -- --nocapture fr_p2c_001_u006_accept_path_rejects_over_maxclients`
+- Hardened unit threat suite: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_001_u005_runtime_blocked_mode_is_bounded`
+- E2E threat suite: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_001_e2e_contract_smoke`
+
+## One-lever extreme-optimization loop artifacts
+
+Selected single optimization lever:
+
+- `LEV-001-OPT-01`: replace repeated per-file `is_file` checks with one deterministic directory scan plus file-presence bitmask.
+
+Required artifacts:
+
+- Baseline/profile evidence: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/baseline_hyperfine.json`
+- Hotspot syscall profile: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/baseline_strace.txt`
+- Chosen lever note: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/optimization_report.md`
+- Recommendation contract card: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/alien_recommendation_card.md`
+- Post-change re-profile: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/after_hyperfine.json`
+- Post-change syscall profile: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/after_strace.txt`
+- Behavior-isomorphism proof: `artifacts/optimization/phase2c-gate/round_dir_scan_mask/isomorphism_check.txt`
+
+## Reproducibility/provenance pack references
+
+- `artifacts/optimization/phase2c-gate/round_dir_scan_mask/env.json`
+- `artifacts/optimization/phase2c-gate/round_dir_scan_mask/manifest.json`
+- `artifacts/optimization/phase2c-gate/round_dir_scan_mask/repro.lock`
+- `artifacts/optimization/phase2c-gate/round_dir_scan_mask/LEGAL.md` (required when IP/provenance risk is plausible)
 
 ## Residual risks
 

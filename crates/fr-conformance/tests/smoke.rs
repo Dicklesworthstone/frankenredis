@@ -68,3 +68,19 @@ fn fr_p2c_005_e2e_contract_smoke() {
     assert_eq!(diff.total, diff.passed);
     assert!(diff.failed.is_empty());
 }
+
+#[test]
+fn fr_p2c_006_e2e_contract_smoke() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "fr_p2c_006_replication_journey.json").expect("packet fixture");
+    assert_eq!(diff.total, diff.passed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn fr_p2c_009_e2e_contract_smoke() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "fr_p2c_009_tls_config_journey.json").expect("packet fixture");
+    assert_eq!(diff.total, diff.passed);
+    assert!(diff.failed.is_empty());
+}

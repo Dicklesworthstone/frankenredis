@@ -1,0 +1,76 @@
+{
+  "suite": "fr_p2c_006_replication_journey",
+  "cases": [
+    {
+      "name": "set_replication_leader",
+      "now_ms": 0,
+      "argv": ["SET", "fr:p2c:006:leader", "node-a"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "get_replication_leader",
+      "now_ms": 1,
+      "argv": ["GET", "fr:p2c:006:leader"],
+      "expect": { "kind": "bulk", "value": "node-a" }
+    },
+    {
+      "name": "initialize_replication_offset",
+      "now_ms": 2,
+      "argv": ["SET", "fr:p2c:006:offset", "0"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "increment_replication_offset_first_ack",
+      "now_ms": 3,
+      "argv": ["INCRBY", "fr:p2c:006:offset", "7"],
+      "expect": { "kind": "integer", "value": 7 }
+    },
+    {
+      "name": "increment_replication_offset_second_ack",
+      "now_ms": 4,
+      "argv": ["INCRBY", "fr:p2c:006:offset", "5"],
+      "expect": { "kind": "integer", "value": 12 }
+    },
+    {
+      "name": "read_replication_offset",
+      "now_ms": 5,
+      "argv": ["GET", "fr:p2c:006:offset"],
+      "expect": { "kind": "bulk", "value": "12" }
+    },
+    {
+      "name": "seed_replica_ack_markers",
+      "now_ms": 6,
+      "argv": ["MSET", "fr:p2c:006:replica:a", "1", "fr:p2c:006:replica:b", "2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "count_replication_markers",
+      "now_ms": 7,
+      "argv": [
+        "EXISTS",
+        "fr:p2c:006:leader",
+        "fr:p2c:006:replica:a",
+        "fr:p2c:006:replica:b"
+      ],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "dbsize_before_flush",
+      "now_ms": 8,
+      "argv": ["DBSIZE"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "flush_replication_workspace",
+      "now_ms": 9,
+      "argv": ["FLUSHDB"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "dbsize_after_flush",
+      "now_ms": 10,
+      "argv": ["DBSIZE"],
+      "expect": { "kind": "integer", "value": 0 }
+    }
+  ]
+}
