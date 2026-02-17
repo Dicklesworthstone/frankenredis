@@ -72,6 +72,21 @@ All parser contract mismatches or reject paths must emit:
 - Hardened unit/property replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_002_f_adversarial_runtime_parse_failures_emit_stable_reason_code`
 - E2E replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_002_e2e_contract_smoke`
 
+## Implemented final evidence pack (bd-2wb.13.9)
+
+- Packet final manifest + parity gate authored in `crates/fr-conformance/fixtures/phase2c/FR-P2C-002/{fixture_manifest.json,parity_gate.yaml}`.
+- Packet parity report finalized in `crates/fr-conformance/fixtures/phase2c/FR-P2C-002/parity_report.json` with:
+  - `readiness=READY_FOR_IMPL`
+  - `missing_mandatory_fields=[]`
+  - explicit unit/differential/e2e/optimization evidence IDs.
+- Durability sidecar + decode-proof artifacts finalized in:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-002/parity_report.raptorq.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-002/parity_report.decode_proof.json`
+  - reason code: `raptorq.decode_verified`
+  - replay command: `./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke`
+- Packet schema/readiness replay:
+  - `rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- crates/fr-conformance/fixtures/phase2c/FR-P2C-002`
+
 ## Traceability checklist
 
 - Every row `C01..C10` maps to at least one unit and one e2e ID.

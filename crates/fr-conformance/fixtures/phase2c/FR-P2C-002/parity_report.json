@@ -1,0 +1,35 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-002",
+  "readiness": "READY_FOR_IMPL",
+  "missing_mandatory_fields": [],
+  "strict_mode": {
+    "status": "pass",
+    "summary": "RESP2 parser framing and consumed-length contracts are deterministic and parity-aligned for packet scope."
+  },
+  "hardened_mode": {
+    "status": "pass",
+    "summary": "Only allowlisted bounded parser defenses are permitted; non-allowlisted deviations are rejected fail-closed."
+  },
+  "evidence": {
+    "unit_property": [
+      "fr_p2c_002_u001_scalar_decode_parity",
+      "fr_p2c_002_u003_array_recursion_parity_property",
+      "fr_p2c_002_u007_resp3_fail_closed_prefix_matrix",
+      "fr_p2c_002_u009_consumed_length_exactness_property",
+      "fr_p2c_002_u013_hardened_gate_rejects_non_allowlisted_parser_drift"
+    ],
+    "differential": [
+      "fr_p2c_002_f_differential_protocol_fixture_passes",
+      "fr_p2c_002_f_metamorphic_protocol_fixture_runs_are_deterministic",
+      "fr_p2c_002_f_adversarial_runtime_parse_failures_emit_stable_reason_code"
+    ],
+    "e2e": [
+      "fr_p2c_002_e2e_contract_smoke"
+    ],
+    "optimization": [
+      "LEV-002-OPT-01_directory_scan_bitmask",
+      "phase2c_gate_round_dir_scan_mask_isomorphism_check"
+    ]
+  }
+}

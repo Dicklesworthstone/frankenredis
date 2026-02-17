@@ -1,0 +1,75 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-003",
+  "legacy_paths": [
+    "legacy_redis_code/redis/src/networking.c",
+    "legacy_redis_code/redis/src/server.c",
+    "legacy_redis_code/redis/src/acl.c",
+    "legacy_redis_code/redis/src/cluster.c",
+    "legacy_redis_code/redis/src/multi.c"
+  ],
+  "legacy_symbols": [
+    "processInputBuffer",
+    "processMultibulkBuffer",
+    "lookupCommand",
+    "processCommand",
+    "call"
+  ],
+  "state_machine_contract": [
+    "dispatch_admission_order_determinism",
+    "unknown_and_subcommand_error_family_stability",
+    "propagation_decision_determinism"
+  ],
+  "protocol_contract": [
+    "multibulk_parse_dispatch_semantics",
+    "inline_vs_multibulk_semantics_equivalence",
+    "master_inline_fail_closed_path"
+  ],
+  "command_acl_contract": [
+    "noauth_gate_precedes_acl_and_dispatch",
+    "acl_denial_no_side_effects_contract",
+    "wrong_arity_reject_before_side_effects"
+  ],
+  "persistence_replication_contract": [
+    "dirty_flag_propagation_decision_contract",
+    "cluster_redirection_no_local_mutation_contract"
+  ],
+  "error_contract": [
+    "dispatch.unknown_command_error_mismatch",
+    "dispatch.noauth_gate_order_violation",
+    "dispatch.propagation_decision_mismatch"
+  ],
+  "strict_mode_policy": [
+    "redis_observable_dispatch_reply_and_ordering_parity",
+    "fail_closed_unknown_or_non_allowlisted_dispatch_deviation"
+  ],
+  "hardened_mode_policy": [
+    "bounded_parser_diagnostics_only",
+    "reject_non_allowlisted_dispatch_deviation"
+  ],
+  "excluded_scope": [
+    "full_generated_commands_registry_parity",
+    "full_multi_exec_transaction_queue_semantics"
+  ],
+  "oracle_tests": [
+    "fr_p2c_003_fixture_maps_to_packet_family_in_structured_logs",
+    "fr_p2c_003_f_differential_dispatch_fixture_passes",
+    "fr_p2c_003_f_metamorphic_repeated_fixture_runs_are_deterministic",
+    "fr_p2c_003_f_adversarial_error_families_are_stable",
+    "fr_p2c_003_e2e_contract_smoke",
+    "fr_p2c_003_dispatch_lookup_profile_snapshot"
+  ],
+  "performance_sentinels": [
+    "dispatch_lookup_classifier_speedup_ratio>=1.10",
+    "dispatch_lookup_classifier_optimized_ns_per_lookup<=240"
+  ],
+  "compatibility_risks": [
+    "noauth_gate_ordering_drift",
+    "dispatch_error_family_drift",
+    "hardened_nonallowlisted_deviation_leak"
+  ],
+  "raptorq_artifacts": [
+    "parity_report.raptorq.json",
+    "parity_report.decode_proof.json"
+  ]
+}

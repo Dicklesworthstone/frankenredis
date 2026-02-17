@@ -90,6 +90,21 @@ Each contract-row verification event (pass/fail/drift) must emit:
 - Integration/E2E: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_003`
 - Packet schema gate: `rch exec -- cargo test -p fr-conformance -- --nocapture phase2c`
 
+## Implemented final evidence pack (bd-2wb.14.9)
+
+- Packet final manifest + parity gate authored in `crates/fr-conformance/fixtures/phase2c/FR-P2C-003/{fixture_manifest.json,parity_gate.yaml}`.
+- Packet parity report finalized in `crates/fr-conformance/fixtures/phase2c/FR-P2C-003/parity_report.json` with:
+  - `readiness=READY_FOR_IMPL`
+  - `missing_mandatory_fields=[]`
+  - explicit unit/differential/e2e/optimization evidence IDs.
+- Durability sidecar + decode-proof artifacts finalized in:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-003/parity_report.raptorq.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-003/parity_report.decode_proof.json`
+  - reason code: `raptorq.decode_verified`
+  - replay command: `./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke`
+- Packet schema/readiness replay:
+  - `rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- crates/fr-conformance/fixtures/phase2c/FR-P2C-003`
+
 ## Alien-graveyard recommendation contract card
 
 | Field | Value |

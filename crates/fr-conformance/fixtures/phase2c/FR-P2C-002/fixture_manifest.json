@@ -1,0 +1,73 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-002",
+  "legacy_paths": [
+    "legacy_redis_code/redis/src/resp_parser.c",
+    "legacy_redis_code/redis/src/resp_parser.h",
+    "legacy_redis_code/redis/src/call_reply.c",
+    "legacy_redis_code/redis/src/script_lua.c"
+  ],
+  "legacy_symbols": [
+    "parseReply",
+    "parseReplyBulkString",
+    "parseReplyArray",
+    "freeCallReply"
+  ],
+  "state_machine_contract": [
+    "prefix_dispatch_determinism",
+    "consumed_length_exactness",
+    "attribute_cursor_alignment_fail_closed"
+  ],
+  "protocol_contract": [
+    "resp2_scalar_bulk_array_parity",
+    "invalid_length_and_prefix_rejection",
+    "resp3_unimplemented_fail_closed_surface"
+  ],
+  "command_acl_contract": [
+    "runtime_parse_error_surface_reason_code_stability"
+  ],
+  "persistence_replication_contract": [
+    "parser_rejections_do_not_mutate_replay_or_replication_order"
+  ],
+  "error_contract": [
+    "protocol.invalid_prefix_rejected",
+    "protocol.invalid_length_rejected",
+    "protocol.resp3_unimplemented_fail_closed"
+  ],
+  "strict_mode_policy": [
+    "redis_observable_resp2_reply_parity",
+    "fail_closed_unsupported_or_unknown_protocol_surface"
+  ],
+  "hardened_mode_policy": [
+    "bounded_parser_diagnostics_only",
+    "reject_non_allowlisted_parser_deviation"
+  ],
+  "excluded_scope": [
+    "full_resp3_aggregate_reply_parity",
+    "module_callback_reply_parser_bridge_parity"
+  ],
+  "oracle_tests": [
+    "fr_p2c_002_u001_scalar_decode_parity",
+    "fr_p2c_002_u003_array_recursion_parity_property",
+    "fr_p2c_002_u007_resp3_fail_closed_prefix_matrix",
+    "fr_p2c_002_u009_consumed_length_exactness_property",
+    "fr_p2c_002_u013_hardened_gate_rejects_non_allowlisted_parser_drift",
+    "fr_p2c_002_f_differential_protocol_fixture_passes",
+    "fr_p2c_002_f_metamorphic_protocol_fixture_runs_are_deterministic",
+    "fr_p2c_002_f_adversarial_runtime_parse_failures_emit_stable_reason_code",
+    "fr_p2c_002_e2e_contract_smoke"
+  ],
+  "performance_sentinels": [
+    "phase2c_gate_round_dir_scan_mask_delta_percent>0",
+    "phase2c_gate_round_dir_scan_mask_isomorphism_check_pass"
+  ],
+  "compatibility_risks": [
+    "resp3_fail_closed_boundary_drift",
+    "attribute_cursor_alignment_drift",
+    "hardened_nonallowlisted_deviation_leak"
+  ],
+  "raptorq_artifacts": [
+    "parity_report.raptorq.json",
+    "parity_report.decode_proof.json"
+  ]
+}

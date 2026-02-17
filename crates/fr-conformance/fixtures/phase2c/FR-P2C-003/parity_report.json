@@ -1,0 +1,33 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-003",
+  "readiness": "READY_FOR_IMPL",
+  "missing_mandatory_fields": [],
+  "strict_mode": {
+    "status": "pass",
+    "summary": "Command-dispatch admission and error-family contracts are deterministic and parity-aligned for packet scope."
+  },
+  "hardened_mode": {
+    "status": "pass",
+    "summary": "Only allowlisted bounded defenses are permitted; non-allowlisted deviations are rejected fail-closed."
+  },
+  "evidence": {
+    "unit_property": [
+      "fr_p2c_003_fixture_maps_to_packet_family_in_structured_logs",
+      "fr_p2c_003_u005_unknown_command_parity",
+      "fr_p2c_003_dispatch_lookup_profile_snapshot"
+    ],
+    "differential": [
+      "fr_p2c_003_f_differential_dispatch_fixture_passes",
+      "fr_p2c_003_f_metamorphic_repeated_fixture_runs_are_deterministic",
+      "fr_p2c_003_f_adversarial_error_families_are_stable"
+    ],
+    "e2e": [
+      "fr_p2c_003_e2e_contract_smoke"
+    ],
+    "optimization": [
+      "fr_p2c_003_dispatch_lookup_profile_snapshot",
+      "dispatch_lookup_classifier_isomorphism_report"
+    ]
+  }
+}
