@@ -515,6 +515,31 @@ mod tests {
     }
 
     #[test]
+    fn expire_missing_key_returns_false() {
+        let mut store = Store::new();
+        assert!(!store.expire_seconds(b"missing", 5, 0));
+        assert!(!store.expire_milliseconds(b"missing", 5, 0));
+        assert!(!store.expire_at_milliseconds(b"missing", 5_000, 0));
+    }
+
+    #[test]
+    fn non_positive_expire_values_delete_immediately_property() {
+        for seconds in [0_i64, -1, -30] {
+            let mut store = Store::new();
+            store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
+            assert!(store.expire_seconds(b"k", seconds, 1_000));
+            assert_eq!(store.get(b"k", 1_000), None);
+        }
+
+        for milliseconds in [0_i64, -1, -500] {
+            let mut store = Store::new();
+            store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
+            assert!(store.expire_milliseconds(b"k", milliseconds, 1_000));
+            assert_eq!(store.get(b"k", 1_000), None);
+        }
+    }
+
+    #[test]
     fn state_digest_changes_on_mutation() {
         let mut store = Store::new();
         let digest_a = store.state_digest();
@@ -611,6 +636,19 @@ mod tests {
     }
 
     #[test]
+    fn rename_retains_expiry_deadline() {
+        let mut store = Store::new();
+        store.set(b"old".to_vec(), b"v".to_vec(), Some(5_000), 1_000);
+        assert_eq!(store.pttl(b"old", 1_000), PttlValue::Remaining(5_000));
+
+        store.rename(b"old", b"new", 1_000).expect("rename");
+        assert_eq!(store.get(b"old", 1_000), None);
+        assert_eq!(store.pttl(b"new", 1_000), PttlValue::Remaining(5_000));
+        assert_eq!(store.pttl(b"new", 5_999), PttlValue::Remaining(1));
+        assert_eq!(store.get(b"new", 6_001), None);
+    }
+
+    #[test]
     fn rename_missing_key_errors() {
         let mut store = Store::new();
         let err = store
@@ -643,6 +681,17 @@ mod tests {
         assert_eq!(result.len(), 3);
         let result = store.keys_matching(b"h*", 0);
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn keys_matching_skips_expired_entries() {
+        let mut store = Store::new();
+        store.set(b"live".to_vec(), b"1".to_vec(), None, 0);
+        store.set(b"soon".to_vec(), b"2".to_vec(), Some(50), 0);
+        store.set(b"later".to_vec(), b"3".to_vec(), Some(500), 0);
+
+        let result = store.keys_matching(b"*", 100);
+        assert_eq!(result, vec![b"later".to_vec(), b"live".to_vec()]);
     }
 
     #[test]

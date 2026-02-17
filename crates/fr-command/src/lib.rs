@@ -745,6 +745,14 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_invalid_utf8_command_name_errors_invalid_utf8_argument() {
+        let mut store = Store::new();
+        let argv = vec![vec![0xFF], b"k".to_vec()];
+        let err = dispatch_argv(&argv, &mut store, 0).expect_err("must fail");
+        assert!(matches!(err, super::CommandError::InvalidUtf8Argument));
+    }
+
+    #[test]
     fn set_with_ex_option() {
         let mut store = Store::new();
         let argv = vec![
@@ -879,6 +887,23 @@ mod tests {
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
         assert_eq!(store.get(b"a", 0), Some(b"1".to_vec()));
         assert_eq!(store.get(b"b", 0), Some(b"2".to_vec()));
+    }
+
+    #[test]
+    fn mset_odd_arg_count_errors_wrong_arity() {
+        let mut store = Store::new();
+        store.set(b"sentinel".to_vec(), b"keep".to_vec(), None, 0);
+        let argv = vec![
+            b"MSET".to_vec(),
+            b"a".to_vec(),
+            b"1".to_vec(),
+            b"b".to_vec(),
+        ];
+        let err = dispatch_argv(&argv, &mut store, 0).expect_err("must fail");
+        assert!(matches!(err, super::CommandError::WrongArity("MSET")));
+        assert_eq!(store.get(b"sentinel", 0), Some(b"keep".to_vec()));
+        assert_eq!(store.get(b"a", 0), None);
+        assert_eq!(store.get(b"b", 0), None);
     }
 
     #[test]
@@ -1030,6 +1055,58 @@ mod tests {
     }
 
     #[test]
+    fn expired_keys_become_invisible_to_get_keys_dbsize_and_ttl() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"live".to_vec(), b"1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set live");
+        dispatch_argv(
+            &[
+                b"SET".to_vec(),
+                b"soon".to_vec(),
+                b"2".to_vec(),
+                b"PX".to_vec(),
+                b"100".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("set soon");
+
+        let keys_before =
+            dispatch_argv(&[b"KEYS".to_vec(), b"*".to_vec()], &mut store, 0).expect("keys before");
+        assert_eq!(
+            keys_before,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"live".to_vec())),
+                RespFrame::BulkString(Some(b"soon".to_vec())),
+            ]))
+        );
+
+        let get_expired =
+            dispatch_argv(&[b"GET".to_vec(), b"soon".to_vec()], &mut store, 150).expect("get");
+        assert_eq!(get_expired, RespFrame::BulkString(None));
+
+        let ttl_expired =
+            dispatch_argv(&[b"TTL".to_vec(), b"soon".to_vec()], &mut store, 150).expect("ttl");
+        assert_eq!(ttl_expired, RespFrame::Integer(-2));
+
+        let keys_after =
+            dispatch_argv(&[b"KEYS".to_vec(), b"*".to_vec()], &mut store, 150).expect("keys after");
+        assert_eq!(
+            keys_after,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"live".to_vec()))]))
+        );
+
+        let dbsize_after =
+            dispatch_argv(&[b"DBSIZE".to_vec()], &mut store, 150).expect("dbsize after");
+        assert_eq!(dbsize_after, RespFrame::Integer(1));
+    }
+
+    #[test]
     fn flushdb_command() {
         let mut store = Store::new();
         store.set(b"a".to_vec(), b"1".to_vec(), None, 0);
@@ -1042,12 +1119,20 @@ mod tests {
 
     #[test]
     fn case_insensitive_commands() {
-        let mut store = Store::new();
-        let argv = vec![b"set".to_vec(), b"k".to_vec(), b"v".to_vec()];
-        dispatch_argv(&argv, &mut store, 0).expect("lowercase set");
-        let argv2 = vec![b"Get".to_vec(), b"k".to_vec()];
-        let out = dispatch_argv(&argv2, &mut store, 0).expect("mixed case get");
-        assert_eq!(out, RespFrame::BulkString(Some(b"v".to_vec())));
+        let command_variants = [
+            (b"set".to_vec(), b"get".to_vec()),
+            (b"SET".to_vec(), b"GET".to_vec()),
+            (b"SeT".to_vec(), b"gEt".to_vec()),
+            (b"sEt".to_vec(), b"GeT".to_vec()),
+        ];
+        for (set_cmd, get_cmd) in command_variants {
+            let mut store = Store::new();
+            let set = vec![set_cmd, b"k".to_vec(), b"v".to_vec()];
+            dispatch_argv(&set, &mut store, 0).expect("set variant");
+            let get = vec![get_cmd, b"k".to_vec()];
+            let out = dispatch_argv(&get, &mut store, 0).expect("get variant");
+            assert_eq!(out, RespFrame::BulkString(Some(b"v".to_vec())));
+        }
     }
 
     #[test]
@@ -1098,6 +1183,33 @@ mod tests {
         )
         .expect("expire xx");
         assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn expire_invalid_integer_argument_errors_invalid_integer_property() {
+        let invalid_values = ["", "not-a-number", "1.5", "+-2", "999999999999999999999"];
+        for invalid in invalid_values {
+            let mut store = Store::new();
+            dispatch_argv(
+                &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("set");
+
+            let err = dispatch_argv(
+                &[
+                    b"EXPIRE".to_vec(),
+                    b"k".to_vec(),
+                    invalid.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect_err("must fail");
+            assert!(matches!(err, super::CommandError::InvalidInteger));
+            assert_eq!(store.get(b"k", 0), Some(b"v".to_vec()));
+        }
     }
 
     #[test]
