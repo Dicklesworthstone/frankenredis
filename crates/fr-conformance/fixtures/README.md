@@ -5,7 +5,8 @@ This folder stores normalized oracle-vs-target fixtures for fr-conformance.
 - core_strings.json: first deterministic compatibility suite for `PING`, `SET`, `GET`, `DEL`, `INCR`, `EXPIRE`, and `PTTL`.
 - core_errors.json: Redis-style error normalization suite for unknown command, arity, syntax, integer parse, and overflow paths.
 - fr_p2c_001_eventloop_journey.json: packet-001 smoke journey fixture used by `fr_p2c_001_e2e_contract_smoke`.
-- protocol_negative.json: malformed RESP corpus for parser fail-closed behavior and protocol error string contract.
+- protocol_negative.json: packet-002 malformed RESP corpus used by `fr_p2c_002_e2e_contract_smoke`.
+- fr_p2c_003_dispatch_journey.json: packet-003 dispatch journey fixture used by `fr_p2c_003_e2e_contract_smoke`.
 - persist_replay.json: replay-oriented fixtures that execute AOF-shaped records and assert post-replay key state.
 - adversarial_corpus_v1.json: versioned adversarial corpus manifest (suite mode, fixture path, risk focus, replay commands, and default route bead).
 - user_workflow_corpus_v1.json: versioned user-journey corpus mapping stable scenario IDs to unit/differential/e2e hooks and owner beads.
@@ -23,7 +24,15 @@ with replay/forensics artifacts:
 By default it uses local `cargo run` so the binary can reach your local Redis endpoint.
 Set `FR_E2E_RUNNER=rch` only when the target Redis host is reachable from remote RCH workers.
 
-The script runs `core_errors`, `core_strings`, and `protocol_negative` in a fixed order and writes a
+self-contained bundle. It runs a fixed scenario matrix in deterministic order:
+
+- `core_strings` (golden)
+- `fr_p2c_001_eventloop_journey` (golden)
+- `fr_p2c_003_dispatch_journey` (golden)
+- `core_errors` (regression)
+- `fr_p2c_002_protocol_negative` (failure_injection, FR-P2C-002)
+
+It writes a
 self-contained bundle under:
 
 ```text
@@ -37,6 +46,7 @@ Bundle contents:
 - `live_logs/` (structured JSONL emitted via `live_log_root`)
 - `suites/<suite>/stdout.log` (captured command output)
 - `suites/<suite>/report.json` (`live_oracle_diff --json-out` output)
+- `replay_all.sh` (deterministic replay commands for all suites)
 - `replay_failed.sh` (deterministic replay commands for failures)
 
 ## Adversarial Corpus + Crash Triage Pipeline
@@ -72,3 +82,19 @@ The gate verifies:
 - packet coverage for all `FR-P2C-001..FR-P2C-009` journeys
 - stable `test_or_scenario_id` bindings against golden log JSONL entries
 - explicit unit/differential/e2e hook mappings with owner-bead traceability
+
+## FR-P2C-003 Optimization Evidence Pack
+
+The FR-P2C-003 profile/isomorphism evidence for `bd-2wb.14.8` is stored under:
+
+```text
+artifacts/phase2c/FR-P2C-003/
+```
+
+Artifacts include:
+
+- `baseline_profile.json` (linear lookup baseline metrics)
+- `post_profile.json` (optimized lookup metrics)
+- `lever_selection.md` (selected optimization lever + hotspot evidence)
+- `isomorphism_report.md` (behavior-preservation proof and replay commands)
+- `env.json`, `manifest.json`, `repro.lock`, `LEGAL.md` (repro/provenance bundle)

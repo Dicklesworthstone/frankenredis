@@ -1,0 +1,53 @@
+{
+  "suite": "fr_p2c_003_dispatch_journey",
+  "cases": [
+    {
+      "name": "known_ping_lookup",
+      "now_ms": 0,
+      "argv": ["PING"],
+      "expect": { "kind": "simple", "value": "PONG" }
+    },
+    {
+      "name": "known_echo_lookup",
+      "now_ms": 1,
+      "argv": ["ECHO", "dispatch"],
+      "expect": { "kind": "bulk", "value": "dispatch" }
+    },
+    {
+      "name": "set_for_followup_get",
+      "now_ms": 2,
+      "argv": ["SET", "fr:p2c:003:key", "value"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "get_after_set",
+      "now_ms": 3,
+      "argv": ["GET", "fr:p2c:003:key"],
+      "expect": { "kind": "bulk", "value": "value" }
+    },
+    {
+      "name": "unknown_no_args",
+      "now_ms": 4,
+      "argv": ["NOPE"],
+      "expect": { "kind": "error", "value": "ERR unknown command 'NOPE'" }
+    },
+    {
+      "name": "unknown_with_args_preview",
+      "now_ms": 5,
+      "argv": ["NOPE", "x", "y"],
+      "expect": { "kind": "error", "value": "ERR unknown command 'NOPE', with args beginning with: 'x' 'y' " }
+    },
+    {
+      "name": "wrong_arity_get",
+      "now_ms": 6,
+      "argv": ["GET"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GET' command" }
+    },
+    {
+      "name": "set_syntax_error",
+      "now_ms": 7,
+      "argv": ["SET", "k", "v", "NX", "10"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    }
+  ]
+}

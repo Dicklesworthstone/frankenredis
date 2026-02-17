@@ -22,13 +22,13 @@
       "hardened_replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture conformance_protocol_fixture_passes"
     },
     {
-      "suite_id": "adv_core_errors_v1",
+      "suite_id": "adv_fr_p2c_003_dispatch_v1",
       "mode": "command",
-      "fixture": "core_errors.json",
+      "fixture": "fr_p2c_003_dispatch_journey.json",
       "risk_focus": "dispatch_validation",
       "owner_bead": "bd-2wb.14.6",
-      "strict_replay_cmd": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture conformance_fixture_errors_passes",
-      "hardened_replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture conformance_fixture_errors_passes"
+      "strict_replay_cmd": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_003_f_differential_dispatch_fixture_passes",
+      "hardened_replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_003_f_metamorphic_repeated_fixture_runs_are_deterministic"
     },
     {
       "suite_id": "adv_persist_replay_v1",
@@ -36,8 +36,8 @@
       "fixture": "persist_replay.json",
       "risk_focus": "replay_ordering",
       "owner_bead": "bd-2wb.16.6",
-      "strict_replay_cmd": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture conformance_replay_fixture_passes",
-      "hardened_replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture run_replay_fixture_allows_structured_log_persistence_toggle"
+      "strict_replay_cmd": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_005_f_differential_replay_fixture_passes",
+      "hardened_replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_005_f_adversarial_decode_reason_taxonomy_is_stable"
     }
   ]
 }

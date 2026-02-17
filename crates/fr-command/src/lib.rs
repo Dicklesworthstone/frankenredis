@@ -50,98 +50,39 @@ pub fn dispatch_argv(
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
     let cmd = std::str::from_utf8(&argv[0]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    if cmd.eq_ignore_ascii_case("PING") {
-        return ping(argv);
-    }
-    if cmd.eq_ignore_ascii_case("ECHO") {
-        return echo(argv);
-    }
-    if cmd.eq_ignore_ascii_case("SET") {
-        return set(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("GET") {
-        return get(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("DEL") {
-        return del(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("INCR") {
-        return incr(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("EXPIRE") {
-        return expire(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("PEXPIRE") {
-        return pexpire(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("EXPIREAT") {
-        return expireat(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("PEXPIREAT") {
-        return pexpireat(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("PTTL") {
-        return pttl(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("APPEND") {
-        return append(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("STRLEN") {
-        return strlen(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("MGET") {
-        return mget(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("MSET") {
-        return mset(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("SETNX") {
-        return setnx(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("GETSET") {
-        return getset(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("INCRBY") {
-        return incrby(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("DECRBY") {
-        return decrby(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("DECR") {
-        return decr(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("EXISTS") {
-        return exists(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("TTL") {
-        return ttl(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("EXPIRETIME") {
-        return expiretime(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("PEXPIRETIME") {
-        return pexpiretime(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("PERSIST") {
-        return persist(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("TYPE") {
-        return type_cmd(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("RENAME") {
-        return rename(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("RENAMENX") {
-        return renamenx(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("KEYS") {
-        return keys(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("DBSIZE") {
-        return dbsize(argv, store, now_ms);
-    }
-    if cmd.eq_ignore_ascii_case("FLUSHDB") || cmd.eq_ignore_ascii_case("FLUSHALL") {
-        return flushdb(argv, store);
+    match classify_command(cmd.as_bytes()) {
+        Some(CommandId::Ping) => return ping(argv),
+        Some(CommandId::Echo) => return echo(argv),
+        Some(CommandId::Set) => return set(argv, store, now_ms),
+        Some(CommandId::Get) => return get(argv, store, now_ms),
+        Some(CommandId::Del) => return del(argv, store, now_ms),
+        Some(CommandId::Incr) => return incr(argv, store, now_ms),
+        Some(CommandId::Expire) => return expire(argv, store, now_ms),
+        Some(CommandId::Pexpire) => return pexpire(argv, store, now_ms),
+        Some(CommandId::Expireat) => return expireat(argv, store, now_ms),
+        Some(CommandId::Pexpireat) => return pexpireat(argv, store, now_ms),
+        Some(CommandId::Pttl) => return pttl(argv, store, now_ms),
+        Some(CommandId::Append) => return append(argv, store, now_ms),
+        Some(CommandId::Strlen) => return strlen(argv, store, now_ms),
+        Some(CommandId::Mget) => return mget(argv, store, now_ms),
+        Some(CommandId::Mset) => return mset(argv, store, now_ms),
+        Some(CommandId::Setnx) => return setnx(argv, store, now_ms),
+        Some(CommandId::Getset) => return getset(argv, store, now_ms),
+        Some(CommandId::Incrby) => return incrby(argv, store, now_ms),
+        Some(CommandId::Decrby) => return decrby(argv, store, now_ms),
+        Some(CommandId::Decr) => return decr(argv, store, now_ms),
+        Some(CommandId::Exists) => return exists(argv, store, now_ms),
+        Some(CommandId::Ttl) => return ttl(argv, store, now_ms),
+        Some(CommandId::Expiretime) => return expiretime(argv, store, now_ms),
+        Some(CommandId::Pexpiretime) => return pexpiretime(argv, store, now_ms),
+        Some(CommandId::Persist) => return persist(argv, store, now_ms),
+        Some(CommandId::Type) => return type_cmd(argv, store, now_ms),
+        Some(CommandId::Rename) => return rename(argv, store, now_ms),
+        Some(CommandId::Renamenx) => return renamenx(argv, store, now_ms),
+        Some(CommandId::Keys) => return keys(argv, store, now_ms),
+        Some(CommandId::Dbsize) => return dbsize(argv, store, now_ms),
+        Some(CommandId::Flushdb) => return flushdb(argv, store),
+        None => {}
     }
 
     let args_preview = build_unknown_args_preview(argv);
@@ -149,6 +90,166 @@ pub fn dispatch_argv(
         command: trim_and_cap_string(cmd, 128),
         args_preview,
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandId {
+    Ping,
+    Echo,
+    Set,
+    Get,
+    Del,
+    Incr,
+    Expire,
+    Pexpire,
+    Expireat,
+    Pexpireat,
+    Pttl,
+    Append,
+    Strlen,
+    Mget,
+    Mset,
+    Setnx,
+    Getset,
+    Incrby,
+    Decrby,
+    Decr,
+    Exists,
+    Ttl,
+    Expiretime,
+    Pexpiretime,
+    Persist,
+    Type,
+    Rename,
+    Renamenx,
+    Keys,
+    Dbsize,
+    Flushdb,
+}
+
+#[inline]
+fn classify_command(cmd: &[u8]) -> Option<CommandId> {
+    match cmd.len() {
+        3 => {
+            if eq_ascii_command(cmd, b"GET") {
+                Some(CommandId::Get)
+            } else if eq_ascii_command(cmd, b"SET") {
+                Some(CommandId::Set)
+            } else if eq_ascii_command(cmd, b"DEL") {
+                Some(CommandId::Del)
+            } else if eq_ascii_command(cmd, b"TTL") {
+                Some(CommandId::Ttl)
+            } else {
+                None
+            }
+        }
+        4 => {
+            if eq_ascii_command(cmd, b"PING") {
+                Some(CommandId::Ping)
+            } else if eq_ascii_command(cmd, b"ECHO") {
+                Some(CommandId::Echo)
+            } else if eq_ascii_command(cmd, b"INCR") {
+                Some(CommandId::Incr)
+            } else if eq_ascii_command(cmd, b"PTTL") {
+                Some(CommandId::Pttl)
+            } else if eq_ascii_command(cmd, b"MGET") {
+                Some(CommandId::Mget)
+            } else if eq_ascii_command(cmd, b"MSET") {
+                Some(CommandId::Mset)
+            } else if eq_ascii_command(cmd, b"DECR") {
+                Some(CommandId::Decr)
+            } else if eq_ascii_command(cmd, b"TYPE") {
+                Some(CommandId::Type)
+            } else if eq_ascii_command(cmd, b"KEYS") {
+                Some(CommandId::Keys)
+            } else {
+                None
+            }
+        }
+        5 => {
+            if eq_ascii_command(cmd, b"SETNX") {
+                Some(CommandId::Setnx)
+            } else {
+                None
+            }
+        }
+        6 => {
+            if eq_ascii_command(cmd, b"EXPIRE") {
+                Some(CommandId::Expire)
+            } else if eq_ascii_command(cmd, b"STRLEN") {
+                Some(CommandId::Strlen)
+            } else if eq_ascii_command(cmd, b"GETSET") {
+                Some(CommandId::Getset)
+            } else if eq_ascii_command(cmd, b"INCRBY") {
+                Some(CommandId::Incrby)
+            } else if eq_ascii_command(cmd, b"DECRBY") {
+                Some(CommandId::Decrby)
+            } else if eq_ascii_command(cmd, b"EXISTS") {
+                Some(CommandId::Exists)
+            } else if eq_ascii_command(cmd, b"RENAME") {
+                Some(CommandId::Rename)
+            } else if eq_ascii_command(cmd, b"DBSIZE") {
+                Some(CommandId::Dbsize)
+            } else if eq_ascii_command(cmd, b"APPEND") {
+                Some(CommandId::Append)
+            } else {
+                None
+            }
+        }
+        7 => {
+            if eq_ascii_command(cmd, b"PEXPIRE") {
+                Some(CommandId::Pexpire)
+            } else if eq_ascii_command(cmd, b"PERSIST") {
+                Some(CommandId::Persist)
+            } else if eq_ascii_command(cmd, b"FLUSHDB") {
+                Some(CommandId::Flushdb)
+            } else {
+                None
+            }
+        }
+        8 => {
+            if eq_ascii_command(cmd, b"EXPIREAT") {
+                Some(CommandId::Expireat)
+            } else if eq_ascii_command(cmd, b"RENAMENX") {
+                Some(CommandId::Renamenx)
+            } else if eq_ascii_command(cmd, b"FLUSHALL") {
+                Some(CommandId::Flushdb)
+            } else {
+                None
+            }
+        }
+        9 => {
+            if eq_ascii_command(cmd, b"PEXPIREAT") {
+                Some(CommandId::Pexpireat)
+            } else {
+                None
+            }
+        }
+        10 => {
+            if eq_ascii_command(cmd, b"EXPIRETIME") {
+                Some(CommandId::Expiretime)
+            } else {
+                None
+            }
+        }
+        11 => {
+            if eq_ascii_command(cmd, b"PEXPIRETIME") {
+                Some(CommandId::Pexpiretime)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+#[inline]
+fn eq_ascii_command(lhs: &[u8], rhs: &[u8]) -> bool {
+    lhs.len() == rhs.len()
+        && lhs
+            .iter()
+            .zip(rhs.iter())
+            .all(|(left, right)| left.to_ascii_uppercase() == *right)
 }
 
 fn ping(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
@@ -703,10 +804,109 @@ fn trim_and_cap_string(input: &str, cap: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use fr_protocol::RespFrame;
     use fr_store::Store;
 
-    use super::{dispatch_argv, frame_to_argv};
+    use super::{CommandId, classify_command, dispatch_argv, eq_ascii_command, frame_to_argv};
+
+    fn classify_command_linear(cmd: &[u8]) -> Option<CommandId> {
+        if eq_ascii_command(cmd, b"PING") {
+            return Some(CommandId::Ping);
+        }
+        if eq_ascii_command(cmd, b"ECHO") {
+            return Some(CommandId::Echo);
+        }
+        if eq_ascii_command(cmd, b"SET") {
+            return Some(CommandId::Set);
+        }
+        if eq_ascii_command(cmd, b"GET") {
+            return Some(CommandId::Get);
+        }
+        if eq_ascii_command(cmd, b"DEL") {
+            return Some(CommandId::Del);
+        }
+        if eq_ascii_command(cmd, b"INCR") {
+            return Some(CommandId::Incr);
+        }
+        if eq_ascii_command(cmd, b"EXPIRE") {
+            return Some(CommandId::Expire);
+        }
+        if eq_ascii_command(cmd, b"PEXPIRE") {
+            return Some(CommandId::Pexpire);
+        }
+        if eq_ascii_command(cmd, b"EXPIREAT") {
+            return Some(CommandId::Expireat);
+        }
+        if eq_ascii_command(cmd, b"PEXPIREAT") {
+            return Some(CommandId::Pexpireat);
+        }
+        if eq_ascii_command(cmd, b"PTTL") {
+            return Some(CommandId::Pttl);
+        }
+        if eq_ascii_command(cmd, b"APPEND") {
+            return Some(CommandId::Append);
+        }
+        if eq_ascii_command(cmd, b"STRLEN") {
+            return Some(CommandId::Strlen);
+        }
+        if eq_ascii_command(cmd, b"MGET") {
+            return Some(CommandId::Mget);
+        }
+        if eq_ascii_command(cmd, b"MSET") {
+            return Some(CommandId::Mset);
+        }
+        if eq_ascii_command(cmd, b"SETNX") {
+            return Some(CommandId::Setnx);
+        }
+        if eq_ascii_command(cmd, b"GETSET") {
+            return Some(CommandId::Getset);
+        }
+        if eq_ascii_command(cmd, b"INCRBY") {
+            return Some(CommandId::Incrby);
+        }
+        if eq_ascii_command(cmd, b"DECRBY") {
+            return Some(CommandId::Decrby);
+        }
+        if eq_ascii_command(cmd, b"DECR") {
+            return Some(CommandId::Decr);
+        }
+        if eq_ascii_command(cmd, b"EXISTS") {
+            return Some(CommandId::Exists);
+        }
+        if eq_ascii_command(cmd, b"TTL") {
+            return Some(CommandId::Ttl);
+        }
+        if eq_ascii_command(cmd, b"EXPIRETIME") {
+            return Some(CommandId::Expiretime);
+        }
+        if eq_ascii_command(cmd, b"PEXPIRETIME") {
+            return Some(CommandId::Pexpiretime);
+        }
+        if eq_ascii_command(cmd, b"PERSIST") {
+            return Some(CommandId::Persist);
+        }
+        if eq_ascii_command(cmd, b"TYPE") {
+            return Some(CommandId::Type);
+        }
+        if eq_ascii_command(cmd, b"RENAME") {
+            return Some(CommandId::Rename);
+        }
+        if eq_ascii_command(cmd, b"RENAMENX") {
+            return Some(CommandId::Renamenx);
+        }
+        if eq_ascii_command(cmd, b"KEYS") {
+            return Some(CommandId::Keys);
+        }
+        if eq_ascii_command(cmd, b"DBSIZE") {
+            return Some(CommandId::Dbsize);
+        }
+        if eq_ascii_command(cmd, b"FLUSHDB") || eq_ascii_command(cmd, b"FLUSHALL") {
+            return Some(CommandId::Flushdb);
+        }
+        None
+    }
 
     #[test]
     fn ping_works() {
@@ -750,6 +950,147 @@ mod tests {
         let argv = vec![vec![0xFF], b"k".to_vec()];
         let err = dispatch_argv(&argv, &mut store, 0).expect_err("must fail");
         assert!(matches!(err, super::CommandError::InvalidUtf8Argument));
+    }
+
+    #[test]
+    fn classify_command_matches_linear_reference() {
+        let samples: &[&[u8]] = &[
+            b"PING",
+            b"ping",
+            b"PiNg",
+            b"ECHO",
+            b"SET",
+            b"GET",
+            b"DEL",
+            b"INCR",
+            b"EXPIRE",
+            b"PEXPIRE",
+            b"EXPIREAT",
+            b"PEXPIREAT",
+            b"PTTL",
+            b"APPEND",
+            b"STRLEN",
+            b"MGET",
+            b"MSET",
+            b"SETNX",
+            b"GETSET",
+            b"INCRBY",
+            b"DECRBY",
+            b"DECR",
+            b"EXISTS",
+            b"TTL",
+            b"EXPIRETIME",
+            b"PEXPIRETIME",
+            b"PERSIST",
+            b"TYPE",
+            b"RENAME",
+            b"RENAMENX",
+            b"KEYS",
+            b"DBSIZE",
+            b"FLUSHDB",
+            b"flushall",
+            b"UNKNOWN",
+            b"POST",
+            b"host:",
+        ];
+        for sample in samples {
+            let optimized = classify_command(sample);
+            let linear = classify_command_linear(sample);
+            assert_eq!(
+                optimized,
+                linear,
+                "lookup mismatch for {:?}",
+                String::from_utf8_lossy(sample)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "profiling helper for FR-P2C-003-H"]
+    fn fr_p2c_003_dispatch_lookup_profile_snapshot() {
+        let workload: &[&[u8]] = &[
+            b"PING",
+            b"ECHO",
+            b"SET",
+            b"GET",
+            b"DEL",
+            b"INCR",
+            b"EXPIRE",
+            b"PEXPIRE",
+            b"EXPIREAT",
+            b"PEXPIREAT",
+            b"PTTL",
+            b"APPEND",
+            b"STRLEN",
+            b"MGET",
+            b"MSET",
+            b"SETNX",
+            b"GETSET",
+            b"INCRBY",
+            b"DECRBY",
+            b"DECR",
+            b"EXISTS",
+            b"TTL",
+            b"EXPIRETIME",
+            b"PEXPIRETIME",
+            b"PERSIST",
+            b"TYPE",
+            b"RENAME",
+            b"RENAMENX",
+            b"KEYS",
+            b"DBSIZE",
+            b"FLUSHDB",
+            b"FLUSHALL",
+            b"UNKNOWN",
+            b"NOPE",
+            b"host:",
+            b"post",
+        ];
+
+        let rounds = 200_000usize;
+        let total_lookups = rounds.saturating_mul(workload.len());
+
+        let mut linear_hits = 0usize;
+        let linear_start = Instant::now();
+        for _ in 0..rounds {
+            for cmd in workload {
+                if classify_command_linear(cmd).is_some() {
+                    linear_hits = linear_hits.saturating_add(1);
+                }
+            }
+        }
+        let linear_ns = linear_start.elapsed().as_nanos();
+
+        let mut optimized_hits = 0usize;
+        let optimized_start = Instant::now();
+        for _ in 0..rounds {
+            for cmd in workload {
+                if classify_command(cmd).is_some() {
+                    optimized_hits = optimized_hits.saturating_add(1);
+                }
+            }
+        }
+        let optimized_ns = optimized_start.elapsed().as_nanos();
+
+        assert_eq!(linear_hits, optimized_hits);
+        assert!(total_lookups > 0);
+
+        let linear_ns_per_lookup = linear_ns as f64 / total_lookups as f64;
+        let optimized_ns_per_lookup = optimized_ns as f64 / total_lookups as f64;
+        let speedup_ratio = if optimized_ns > 0 {
+            linear_ns as f64 / optimized_ns as f64
+        } else {
+            0.0
+        };
+
+        println!("profile.packet_id=FR-P2C-003");
+        println!("profile.benchmark=dispatch_lookup_classifier");
+        println!("profile.total_lookups={total_lookups}");
+        println!("profile.linear_total_ns={linear_ns}");
+        println!("profile.optimized_total_ns={optimized_ns}");
+        println!("profile.linear_ns_per_lookup={linear_ns_per_lookup:.6}");
+        println!("profile.optimized_ns_per_lookup={optimized_ns_per_lookup:.6}");
+        println!("profile.speedup_ratio={speedup_ratio:.6}");
     }
 
     #[test]

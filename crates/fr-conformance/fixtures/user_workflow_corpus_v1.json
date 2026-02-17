@@ -60,7 +60,7 @@
       "e2e_hook": {
         "suite_id": "e2e::fr-p2c-002",
         "test_or_scenario_id": "fr-p2c-002::e2e_contract_smoke",
-        "replay_cmd": "FR_MODE=hardened FR_SEED=42 cargo test -p fr-conformance --test smoke -- --nocapture fr-p2c-002::e2e_contract_smoke",
+        "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_002_e2e_contract_smoke",
         "owner_bead": "bd-2wb.13.7"
       },
       "stable_reason_codes": [
@@ -76,24 +76,23 @@
       "unit_hook": {
         "suite_id": "unit::fr-p2c-003",
         "test_or_scenario_id": "fr-p2c-003::unit_contract_smoke",
-        "replay_cmd": "FR_MODE=strict FR_SEED=17 cargo test -p fr-runtime fr-p2c-003::unit_contract_smoke -- --nocapture",
+        "replay_cmd": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-runtime fr-p2c-003::unit_contract_smoke -- --nocapture",
         "owner_bead": "bd-2wb.14.5"
       },
       "differential_hook": {
         "status": "active",
         "hook_mode": "command",
         "fixtures": [
-          "core_errors.json",
-          "core_strings.json"
+          "fr_p2c_003_dispatch_journey.json"
         ],
-        "command": "./scripts/run_live_oracle_diff.sh --host 127.0.0.1 --port 6379 --run-id fr-p2c-003",
+        "command": "rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- command fr_p2c_003_dispatch_journey.json 127.0.0.1 6379",
         "owner_bead": "bd-2wb.14.6",
-        "notes": "Active via live oracle command differential suites."
+        "notes": "Active via packet-specific FR-P2C-003 dispatch differential fixture."
       },
       "e2e_hook": {
         "suite_id": "e2e::fr-p2c-003",
         "test_or_scenario_id": "fr-p2c-003::e2e_contract_smoke",
-        "replay_cmd": "FR_MODE=hardened FR_SEED=42 cargo test -p fr-conformance --test smoke -- --nocapture fr-p2c-003::e2e_contract_smoke",
+        "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr-p2c-003::e2e_contract_smoke",
         "owner_bead": "bd-2wb.14.7"
       },
       "stable_reason_codes": [
@@ -140,8 +139,8 @@
       "golden_log_path": "crates/fr-conformance/fixtures/log_contract_v1/FR-P2C-005.golden.jsonl",
       "unit_hook": {
         "suite_id": "unit::fr-p2c-005",
-        "test_or_scenario_id": "fr-p2c-005::unit_contract_smoke",
-        "replay_cmd": "FR_MODE=strict FR_SEED=17 cargo test -p fr-runtime fr-p2c-005::unit_contract_smoke -- --nocapture",
+        "test_or_scenario_id": "fr_p2c_005_e001_replay_fixture_passes_with_schema_contract",
+        "replay_cmd": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_005_e001_replay_fixture_passes_with_schema_contract",
         "owner_bead": "bd-2wb.16.5"
       },
       "differential_hook": {
@@ -150,14 +149,14 @@
         "fixtures": [
           "persist_replay.json"
         ],
-        "command": "rch exec -- cargo test -p fr-conformance -- --nocapture conformance_replay_fixture_passes",
+        "command": "rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_005_f_differential_replay_fixture_passes",
         "owner_bead": "bd-2wb.16.6",
-        "notes": "Active replay differential fixture; live oracle packet fixture remains future work."
+        "notes": "Active packet-005 replay differential fixture with dedicated F-level conformance test."
       },
       "e2e_hook": {
         "suite_id": "e2e::fr-p2c-005",
-        "test_or_scenario_id": "fr-p2c-005::e2e_contract_smoke",
-        "replay_cmd": "FR_MODE=hardened FR_SEED=42 cargo test -p fr-conformance --test smoke -- --nocapture fr-p2c-005::e2e_contract_smoke",
+        "test_or_scenario_id": "fr_p2c_005_e2e_contract_smoke",
+        "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_005_e2e_contract_smoke",
         "owner_bead": "bd-2wb.16.7"
       },
       "stable_reason_codes": [

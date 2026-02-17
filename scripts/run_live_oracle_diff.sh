@@ -19,6 +19,15 @@ PORT="6379"
 OUTPUT_ROOT="${FR_E2E_OUTPUT_ROOT:-artifacts/e2e_orchestrator}"
 RUN_ID="${FR_E2E_RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)}"
 RUNNER="${FR_E2E_RUNNER:-local}"
+RUN_SEED="${FR_E2E_SEED:-424242}"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  RUN_FINGERPRINT="$(printf '%s' "${RUN_ID}|${HOST}|${PORT}|${RUNNER}|${RUN_SEED}" | sha256sum | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+  RUN_FINGERPRINT="$(printf '%s' "${RUN_ID}|${HOST}|${PORT}|${RUNNER}|${RUN_SEED}" | shasum -a 256 | awk '{print $1}')"
+else
+  RUN_FINGERPRINT="fingerprint-unavailable"
+fi
 
 POSITIONAL=()
 while (($# > 0)); do
@@ -63,13 +72,14 @@ LIVE_LOG_ROOT="${RUN_ROOT}/live_logs"
 TRACE_LOG="${RUN_ROOT}/command_trace.log"
 STATUS_TSV="${RUN_ROOT}/suite_status.tsv"
 REPLAY_SCRIPT="${RUN_ROOT}/replay_failed.sh"
+REPLAY_ALL_SCRIPT="${RUN_ROOT}/replay_all.sh"
 README_PATH="${RUN_ROOT}/README.md"
 COVERAGE_SUMMARY="${RUN_ROOT}/coverage_summary.json"
 FAILURE_ENVELOPE="${RUN_ROOT}/failure_envelope.json"
 
 mkdir -p "$SUITES_ROOT" "$LIVE_LOG_ROOT"
 : > "$TRACE_LOG"
-printf "suite\tmode\tfixture\texit_code\treport_json\tstdout_log\n" > "$STATUS_TSV"
+printf "suite\tmode\tfixture\tscenario_class\texit_code\treport_json\tstdout_log\n" > "$STATUS_TSV"
 
 cat > "$REPLAY_SCRIPT" <<'REPLAY'
 #!/usr/bin/env bash
@@ -77,12 +87,31 @@ set -euo pipefail
 REPLAY
 chmod +x "$REPLAY_SCRIPT"
 
+cat > "$REPLAY_ALL_SCRIPT" <<'REPLAY'
+#!/usr/bin/env bash
+set -euo pipefail
+REPLAY
+chmod +x "$REPLAY_ALL_SCRIPT"
+
 echo "Verifying live Redis endpoint ${HOST}:${PORT}"
 redis-cli -h "$HOST" -p "$PORT" ping >/dev/null
 
-declare -a SUITE_NAMES=("core_errors" "core_strings" "fr_p2c_001_eventloop_journey" "protocol_negative")
-declare -a SUITE_MODES=("command" "command" "command" "protocol")
-declare -a SUITE_FIXTURES=("core_errors.json" "core_strings.json" "fr_p2c_001_eventloop_journey.json" "protocol_negative.json")
+declare -a SUITE_NAMES=(
+  "core_strings"
+  "fr_p2c_001_eventloop_journey"
+  "fr_p2c_003_dispatch_journey"
+  "core_errors"
+  "fr_p2c_002_protocol_negative"
+)
+declare -a SUITE_MODES=("command" "command" "command" "command" "protocol")
+declare -a SUITE_FIXTURES=(
+  "core_strings.json"
+  "fr_p2c_001_eventloop_journey.json"
+  "fr_p2c_003_dispatch_journey.json"
+  "core_errors.json"
+  "protocol_negative.json"
+)
+declare -a SUITE_CLASSES=("golden" "golden" "golden" "regression" "failure_injection")
 
 FAILED_COUNT=0
 TOTAL_COUNT=0
@@ -92,6 +121,7 @@ for idx in "${!SUITE_NAMES[@]}"; do
   suite_name="${SUITE_NAMES[$idx]}"
   mode="${SUITE_MODES[$idx]}"
   fixture="${SUITE_FIXTURES[$idx]}"
+  scenario_class="${SUITE_CLASSES[$idx]}"
 
   suite_dir="${SUITES_ROOT}/${suite_name}"
   suite_log="${suite_dir}/stdout.log"
@@ -99,7 +129,7 @@ for idx in "${!SUITE_NAMES[@]}"; do
   mkdir -p "$suite_dir"
 
   cmd=(
-    cargo run -p fr-conformance --bin live_oracle_diff --
+    env FR_SEED="$RUN_SEED" cargo run -p fr-conformance --bin live_oracle_diff --
     --log-root "$LIVE_LOG_ROOT" --json-out "$suite_report" --run-id "$RUN_ID"
     "$mode" "$fixture" "$HOST" "$PORT"
   )
@@ -110,6 +140,9 @@ for idx in "${!SUITE_NAMES[@]}"; do
   {
     echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] suite=${suite_name}"
     echo "runner=${RUNNER}"
+    echo "scenario_class=${scenario_class}"
+    echo "run_seed=${RUN_SEED}"
+    echo "run_fingerprint=${RUN_FINGERPRINT}"
     printf 'cmd='
     printf '%q ' "${cmd[@]}"
     echo
@@ -121,8 +154,14 @@ for idx in "${!SUITE_NAMES[@]}"; do
   exit_code=$?
   set -e
 
-  printf "%s\t%s\t%s\t%d\t%s\t%s\n" \
-    "$suite_name" "$mode" "$fixture" "$exit_code" "$suite_report" "$suite_log" >> "$STATUS_TSV"
+  printf "%s\t%s\t%s\t%s\t%d\t%s\t%s\n" \
+    "$suite_name" "$mode" "$fixture" "$scenario_class" "$exit_code" "$suite_report" "$suite_log" >> "$STATUS_TSV"
+
+  {
+    printf '\n# %s (%s)\n' "$suite_name" "$scenario_class"
+    printf '%q ' "${cmd[@]}"
+    echo
+  } >> "$REPLAY_ALL_SCRIPT"
 
   if ((exit_code != 0)); then
     FAILED_COUNT=$((FAILED_COUNT + 1))
@@ -144,6 +183,8 @@ cat > "$README_PATH" <<EOF
 - host: \`${HOST}\`
 - port: \`${PORT}\`
 - runner: \`${RUNNER}\`
+- run_seed: \`${RUN_SEED}\`
+- run_fingerprint: \`${RUN_FINGERPRINT}\`
 - total_suites: \`${TOTAL_COUNT}\`
 - failed_suites: \`${FAILED_COUNT}\`
 
@@ -156,23 +197,32 @@ cat > "$README_PATH" <<EOF
 - \`suites/<suite>/report.json\`: machine-readable diff report from \`live_oracle_diff --json-out\`.
 - \`coverage_summary.json\`: aggregated pass-rate and reason-code budget input.
 - \`failure_envelope.json\`: per-failure envelope with replay pointers + deterministic artifact index.
+- \`replay_all.sh\`: deterministic replay commands for the full suite matrix.
 - \`replay_failed.sh\`: deterministic replay commands for failed suites.
+
+## Scenario Matrix
+
+- \`core_strings\` (golden)
+- \`fr_p2c_001_eventloop_journey\` (golden)
+- \`fr_p2c_003_dispatch_journey\` (golden)
+- \`core_errors\` (regression)
+- \`fr_p2c_002_protocol_negative\` (failure_injection, FR-P2C-002)
 
 ## Re-run
 
 \`\`\`bash
-./scripts/run_live_oracle_diff.sh --host ${HOST} --port ${PORT} --run-id ${RUN_ID}
+FR_E2E_SEED=${RUN_SEED} ./scripts/run_live_oracle_diff.sh --host ${HOST} --port ${PORT} --run-id ${RUN_ID}
 \`\`\`
 EOF
 
-python3 - "$STATUS_TSV" "$RUN_ID" "$HOST" "$PORT" "$RUNNER" "$RUN_ROOT" "$README_PATH" "$REPLAY_SCRIPT" "$COVERAGE_SUMMARY" "$FAILURE_ENVELOPE" <<'PY'
+python3 - "$STATUS_TSV" "$RUN_ID" "$HOST" "$PORT" "$RUNNER" "$RUN_ROOT" "$README_PATH" "$REPLAY_SCRIPT" "$REPLAY_ALL_SCRIPT" "$COVERAGE_SUMMARY" "$FAILURE_ENVELOPE" "$RUN_SEED" "$RUN_FINGERPRINT" <<'PY'
 import collections
 import csv
 import json
 import os
 import sys
 
-status_tsv, run_id, host, port, runner, run_root, readme_path, replay_script, out_path, failure_envelope_path = sys.argv[1:]
+status_tsv, run_id, host, port, runner, run_root, readme_path, replay_script, replay_all_script, out_path, failure_envelope_path, run_seed, run_fingerprint = sys.argv[1:]
 
 suite_rows = []
 reason_counts = collections.Counter()
@@ -180,8 +230,11 @@ total_case_failures = 0
 flake_suspects = []
 hard_fail_suites = []
 packet_totals = collections.defaultdict(lambda: {"total_suites": 0, "passed_suites": 0})
+scenario_totals = collections.defaultdict(lambda: {"total_suites": 0, "passed_suites": 0})
 failure_envelope_rows = []
 artifact_index = collections.defaultdict(list)
+required_scenario_classes = {"golden", "regression", "failure_injection"}
+scenario_classes_seen = set()
 
 
 def packet_id_for_fixture(fixture_name: str) -> str:
@@ -217,6 +270,8 @@ with open(status_tsv, newline="", encoding="utf-8") as fh:
         run_error = report.get("run_error")
         case_reason_counts = report.get("reason_code_counts") or {}
         packet_id = packet_id_for_fixture(row.get("fixture", ""))
+        scenario_class = str(row.get("scenario_class") or "unspecified")
+        scenario_classes_seen.add(scenario_class)
         for reason_code, count in case_reason_counts.items():
             reason_counts[str(reason_code)] += int(count)
 
@@ -233,6 +288,7 @@ with open(status_tsv, newline="", encoding="utf-8") as fh:
                 "suite": row["suite"],
                 "fixture": row.get("fixture"),
                 "packet_id": packet_id,
+                "scenario_class": scenario_class,
                 "case_name": case_name,
                 "reason_code": reason_code,
                 "detail": failure.get("detail"),
@@ -241,6 +297,8 @@ with open(status_tsv, newline="", encoding="utf-8") as fh:
                 "report_json": report_path,
                 "stdout_log": row.get("stdout_log"),
                 "live_log_root": report.get("live_log_root"),
+                "run_seed": int(run_seed),
+                "run_fingerprint": run_fingerprint,
             }
             failure_envelope_rows.append(envelope_row)
             for artifact_ref in artifact_refs:
@@ -255,8 +313,10 @@ with open(status_tsv, newline="", encoding="utf-8") as fh:
 
         total_case_failures += failed_count
         packet_totals[packet_id]["total_suites"] += 1
+        scenario_totals[scenario_class]["total_suites"] += 1
         if exit_code == 0:
             packet_totals[packet_id]["passed_suites"] += 1
+            scenario_totals[scenario_class]["passed_suites"] += 1
         if exit_code != 0:
             if report_status == "execution_error":
                 hard_fail_suites.append(row["suite"])
@@ -269,6 +329,7 @@ with open(status_tsv, newline="", encoding="utf-8") as fh:
                 "mode": row.get("mode"),
                 "fixture": row.get("fixture"),
                 "packet_id": packet_id,
+                "scenario_class": scenario_class,
                 "exit_code": exit_code,
                 "report_json": report_path,
                 "stdout_log": row.get("stdout_log"),
@@ -300,16 +361,37 @@ for packet_id, totals in sorted(packet_totals.items()):
         }
     )
 
+scenario_class_pass_rates = []
+for scenario_class, totals in sorted(scenario_totals.items()):
+    scenario_total = totals["total_suites"]
+    scenario_passed = totals["passed_suites"]
+    scenario_failed = scenario_total - scenario_passed
+    scenario_pass_rate = round((scenario_passed / scenario_total) if scenario_total else 0.0, 4)
+    scenario_class_pass_rates.append(
+        {
+            "scenario_class": scenario_class,
+            "total_suites": scenario_total,
+            "passed_suites": scenario_passed,
+            "failed_suites": scenario_failed,
+            "pass_rate": scenario_pass_rate,
+        }
+    )
+
+missing_scenario_classes = sorted(required_scenario_classes - scenario_classes_seen)
+
 summary = {
     "schema_version": "live_oracle_coverage_summary/v1",
     "run_id": run_id,
     "host": host,
     "port": int(port),
     "runner": runner,
+    "run_seed": int(run_seed),
+    "run_fingerprint": run_fingerprint,
     "run_root": run_root,
     "status_tsv": status_tsv,
     "readme_path": readme_path,
     "replay_script": replay_script,
+    "replay_all_script": replay_all_script,
     "failure_envelope": failure_envelope_path,
     "total_suites": total_suites,
     "passed_suites": passed_suites,
@@ -317,6 +399,10 @@ summary = {
     "pass_rate": pass_rate,
     "total_case_failures": total_case_failures,
     "packet_family_pass_rates": packet_family_pass_rates,
+    "scenario_class_pass_rates": scenario_class_pass_rates,
+    "required_scenario_classes": sorted(required_scenario_classes),
+    "missing_scenario_classes": missing_scenario_classes,
+    "scenario_matrix_complete": len(missing_scenario_classes) == 0,
     "flake_suspect_suites": sorted(set(flake_suspects)),
     "hard_fail_suites": sorted(set(hard_fail_suites)),
     "primary_reason_codes": [
@@ -351,6 +437,8 @@ for artifact_ref in sorted(artifact_index):
 failure_envelope = {
     "schema_version": "live_oracle_failure_envelope/v1",
     "run_id": run_id,
+    "run_seed": int(run_seed),
+    "run_fingerprint": run_fingerprint,
     "run_root": run_root,
     "total_failures": len(failure_envelope_rows),
     "failures": failure_envelope_rows,

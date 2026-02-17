@@ -955,7 +955,10 @@ fn packet_family_for_fixture(fixture_name: &str) -> &'static str {
     match fixture_name {
         "fr_p2c_001_eventloop_journey.json" => "FR-P2C-001",
         "protocol_negative.json" => "FR-P2C-002",
+        "core_errors.json" | "fr_p2c_003_dispatch_journey.json" => "FR-P2C-003",
         "persist_replay.json" => "FR-P2C-005",
+        "fr_p2c_009_tls_runtime_strict" | "fr_p2c_009_tls_runtime_hardened" => "FR-P2C-009",
+        _ if fixture_name.starts_with("fr_p2c_003_") => "FR-P2C-003",
         _ => "FR-P2C-003",
     }
 }
@@ -999,7 +1002,8 @@ mod tests {
         DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
         TlsAuthClients, TlsConfig, TlsProtocol,
     };
-    use fr_protocol::{RespFrame, parse_frame};
+    use fr_persist::{AofRecord, decode_aof_stream, encode_aof_stream};
+    use fr_protocol::{RespFrame, RespParseError, parse_frame};
     use fr_repl::{
         BacklogWindow, HandshakeFsm, HandshakeState, HandshakeStep, PsyncDecision, PsyncRejection,
         ReplOffset, WaitAofThreshold, WaitThreshold, decide_psync, evaluate_wait, evaluate_waitaof,
@@ -1008,9 +1012,9 @@ mod tests {
 
     use super::{
         CaseOutcome, DIFFERENTIAL_REPORT_SCHEMA_VERSION, EvidenceEvent, ExpectedThreat,
-        HarnessConfig, LiveOracleConfig, StructuredLogEmissionContext, build_differential_report,
-        run_fixture, run_live_redis_diff, run_live_redis_protocol_diff, run_protocol_fixture,
-        run_replay_fixture, run_smoke, validate_structured_log_emission,
+        HarnessConfig, LiveOracleConfig, ReplayFixture, StructuredLogEmissionContext,
+        build_differential_report, run_fixture, run_live_redis_diff, run_live_redis_protocol_diff,
+        run_protocol_fixture, run_replay_fixture, run_smoke, validate_structured_log_emission,
         validate_threat_expectation,
     };
     use crate::log_contract::{
@@ -1036,6 +1040,23 @@ mod tests {
             auth_clients: TlsAuthClients::Required,
             cluster_announce_tls_port: Some(16380),
             max_new_tls_connections_per_cycle: 64,
+        }
+    }
+
+    fn invalid_tls_without_listener_ports() -> TlsConfig {
+        let mut invalid = valid_tls_config();
+        invalid.tls_port = None;
+        invalid.cluster_announce_tls_port = None;
+        invalid
+    }
+
+    fn persist_decode_reason_code(err: &fr_persist::PersistError) -> &'static str {
+        match err {
+            fr_persist::PersistError::InvalidFrame => "persist.replay.frame_parse_invalid",
+            fr_persist::PersistError::Parse(RespParseError::Incomplete) => {
+                "persist.replay.frame_length_violation"
+            }
+            fr_persist::PersistError::Parse(_) => "persist.replay.frame_parse_invalid",
         }
     }
 
@@ -1120,6 +1141,77 @@ mod tests {
             write_err.reason_code(),
             "eventloop.write.flush_order_violation"
         );
+    }
+
+    #[test]
+    fn fr_p2c_003_f_differential_dispatch_fixture_passes() {
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_fixture(&cfg, "fr_p2c_003_dispatch_journey.json").expect("packet-003 fixture");
+        assert_eq!(report.schema_version, DIFFERENTIAL_REPORT_SCHEMA_VERSION);
+        assert_eq!(report.fixture, "fr_p2c_003_dispatch_journey.json");
+        assert_eq!(report.suite, "fr_p2c_003_dispatch_journey");
+        assert_eq!(
+            report.total, report.passed,
+            "packet-003 fixture mismatches: {:?}",
+            report.failed
+        );
+        assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn fr_p2c_003_f_metamorphic_repeated_fixture_runs_are_deterministic() {
+        let cfg = HarnessConfig::default_paths();
+        let first =
+            run_fixture(&cfg, "fr_p2c_003_dispatch_journey.json").expect("first fixture run");
+        let second =
+            run_fixture(&cfg, "fr_p2c_003_dispatch_journey.json").expect("second fixture run");
+
+        assert_eq!(first.total, second.total);
+        assert_eq!(first.passed, second.passed);
+        assert_eq!(first.reason_code_counts, second.reason_code_counts);
+        assert_eq!(
+            first.failed_without_reason_code,
+            second.failed_without_reason_code
+        );
+        assert_eq!(first.failed, second.failed);
+    }
+
+    #[test]
+    fn fr_p2c_003_f_adversarial_error_families_are_stable() {
+        let mut runtime = Runtime::default_strict();
+        let cases: [(&str, &[&str], &str); 4] = [
+            ("unknown_no_args", &["NOPE"], "ERR unknown command 'NOPE'"),
+            (
+                "unknown_with_args_preview",
+                &["NOPE", "x", "y"],
+                "ERR unknown command 'NOPE', with args beginning with: 'x' 'y' ",
+            ),
+            (
+                "wrong_arity_get",
+                &["GET"],
+                "ERR wrong number of arguments for 'GET' command",
+            ),
+            (
+                "set_syntax_error",
+                &["SET", "k", "v", "NX", "10"],
+                "ERR syntax error",
+            ),
+        ];
+
+        for (idx, (name, argv, expected_error)) in cases.iter().enumerate() {
+            let frame = RespFrame::Array(Some(
+                argv.iter()
+                    .map(|arg| RespFrame::BulkString(Some(arg.as_bytes().to_vec())))
+                    .collect(),
+            ));
+            let actual = runtime.execute_frame(frame, idx as u64);
+            assert_eq!(
+                actual,
+                RespFrame::Error((*expected_error).to_string()),
+                "case={name}"
+            );
+        }
     }
 
     #[test]
@@ -1343,6 +1435,113 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_003_fixture_maps_to_packet_family_in_structured_logs() {
+        let log_root = unique_temp_log_root("fr_p2c_003_structured_log");
+        let out_path = log_root.join("packet/fr_p2c_003.jsonl");
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:13".to_string(),
+            ts_ms: 13,
+            packet_id: 3,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::MetadataAmbiguity,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "dispatch",
+            action: "unknown_command",
+            reason_code: "dispatch.unknown_command_error_mismatch",
+            reason: "command family mismatch".to_string(),
+            input_digest: "abc".to_string(),
+            output_digest: "def".to_string(),
+            state_digest_before: "state_before".to_string(),
+            state_digest_after: "state_after".to_string(),
+            replay_cmd: "cargo test".to_string(),
+            artifact_refs: vec!["TEST_LOG_SCHEMA_V1.md".to_string()],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "unit::fr-p2c-003",
+                fixture_name: "fr_p2c_003_dispatch_journey.json",
+                case_name: "fr_p2c_003_u005_unknown_command_parity",
+                verification_path: VerificationPath::Unit,
+                now_ms: 13,
+                outcome: LogOutcome::Pass,
+                persist_path: Some(&out_path),
+            },
+            &[event],
+        )
+        .expect("packet family conversion should succeed");
+
+        let raw = fs::read_to_string(&out_path).expect("read structured output");
+        let line = raw
+            .lines()
+            .find(|candidate| !candidate.trim().is_empty())
+            .expect("one structured event");
+        let parsed: StructuredLogEvent =
+            serde_json::from_str(line).expect("parse structured event");
+        assert_eq!(parsed.packet_id, "FR-P2C-003");
+        assert_eq!(
+            parsed.fixture_id.as_deref(),
+            Some("fr_p2c_003_dispatch_journey.json")
+        );
+        parsed.validate().expect("structured event validates");
+        let _ = fs::remove_dir_all(log_root);
+    }
+
+    #[test]
+    fn fr_p2c_005_fixture_maps_to_packet_family_in_structured_logs() {
+        let log_root = unique_temp_log_root("fr_p2c_005_structured_log");
+        let out_path = log_root.join("packet/fr_p2c_005.jsonl");
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:15".to_string(),
+            ts_ms: 15,
+            packet_id: 5,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::PersistenceTampering,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "persist_replay",
+            action: "decode_aof_stream",
+            reason_code: "persist.replay.frame_parse_invalid",
+            reason: "invalid replay frame".to_string(),
+            input_digest: "abc".to_string(),
+            output_digest: "def".to_string(),
+            state_digest_before: "state_before".to_string(),
+            state_digest_after: "state_after".to_string(),
+            replay_cmd: "cargo test".to_string(),
+            artifact_refs: vec!["TEST_LOG_SCHEMA_V1.md".to_string()],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "unit::fr-p2c-005",
+                fixture_name: "persist_replay.json",
+                case_name: "fr_p2c_005_e013_adversarial_decode_errors",
+                verification_path: VerificationPath::Unit,
+                now_ms: 15,
+                outcome: LogOutcome::Pass,
+                persist_path: Some(&out_path),
+            },
+            &[event],
+        )
+        .expect("packet family conversion should succeed");
+
+        let raw = fs::read_to_string(&out_path).expect("read structured output");
+        let line = raw
+            .lines()
+            .find(|candidate| !candidate.trim().is_empty())
+            .expect("one structured event");
+        let parsed: StructuredLogEvent =
+            serde_json::from_str(line).expect("parse structured event");
+        assert_eq!(parsed.packet_id, "FR-P2C-005");
+        assert_eq!(parsed.fixture_id.as_deref(), Some("persist_replay.json"));
+        parsed.validate().expect("structured event validates");
+        let _ = fs::remove_dir_all(log_root);
+    }
+
+    #[test]
     fn conformance_protocol_fixture_passes() {
         let cfg = HarnessConfig::default_paths();
         let report =
@@ -1392,6 +1591,296 @@ mod tests {
         let report = run_replay_fixture(&cfg, "persist_replay.json").expect("replay fixture run");
         assert_eq!(report.total, report.passed);
         assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn fr_p2c_005_e001_replay_fixture_passes_with_schema_contract() {
+        let cfg = HarnessConfig::default_paths();
+        let report = run_replay_fixture(&cfg, "persist_replay.json").expect("replay fixture run");
+        assert_eq!(report.schema_version, DIFFERENTIAL_REPORT_SCHEMA_VERSION);
+        assert_eq!(report.suite, "persist_replay");
+        assert_eq!(report.fixture, "persist_replay.json");
+        assert_eq!(
+            report.total, report.passed,
+            "packet-005 replay mismatches: {:?}",
+            report.failed
+        );
+        assert!(report.failed.is_empty());
+        assert_eq!(report.failed_without_reason_code, 0);
+        assert!(report.reason_code_counts.is_empty());
+    }
+
+    #[test]
+    fn fr_p2c_005_e002_replay_fixture_runs_are_deterministic() {
+        let cfg = HarnessConfig::default_paths();
+        let first = run_replay_fixture(&cfg, "persist_replay.json").expect("first replay run");
+        let second = run_replay_fixture(&cfg, "persist_replay.json").expect("second replay run");
+
+        assert_eq!(first.total, second.total);
+        assert_eq!(first.passed, second.passed);
+        assert_eq!(first.reason_code_counts, second.reason_code_counts);
+        assert_eq!(
+            first.failed_without_reason_code,
+            second.failed_without_reason_code
+        );
+        assert_eq!(first.failed, second.failed);
+    }
+
+    #[test]
+    fn fr_p2c_005_e003_roundtrip_preserves_aof_record_order_and_payloads() {
+        let cases = vec![
+            vec![
+                AofRecord {
+                    argv: vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"INCR".to_vec(), b"k".to_vec()],
+                },
+            ],
+            vec![
+                AofRecord {
+                    argv: vec![b"DEL".to_vec(), b"missing".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"SET".to_vec(), b"ttl".to_vec(), b"x".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"PEXPIRE".to_vec(), b"ttl".to_vec(), b"5".to_vec()],
+                },
+            ],
+            vec![],
+        ];
+
+        for (idx, records) in cases.into_iter().enumerate() {
+            let encoded = encode_aof_stream(&records);
+            let decoded = decode_aof_stream(&encoded).expect("decode stream");
+            assert_eq!(decoded, records, "case={idx} roundtrip mismatch");
+        }
+    }
+
+    #[test]
+    fn fr_p2c_005_e004_metamorphic_appending_records_preserves_prefix() {
+        let baseline = vec![
+            AofRecord {
+                argv: vec![b"SET".to_vec(), b"a".to_vec(), b"1".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"INCR".to_vec(), b"a".to_vec()],
+            },
+        ];
+        let mut appended = baseline.clone();
+        appended.push(AofRecord {
+            argv: vec![b"SET".to_vec(), b"b".to_vec(), b"2".to_vec()],
+        });
+
+        let baseline_decoded =
+            decode_aof_stream(&encode_aof_stream(&baseline)).expect("decode baseline");
+        let appended_decoded =
+            decode_aof_stream(&encode_aof_stream(&appended)).expect("decode appended");
+
+        assert!(
+            appended_decoded.starts_with(&baseline_decoded),
+            "appending a replay record must preserve the baseline decoded prefix"
+        );
+    }
+
+    #[test]
+    fn fr_p2c_005_e013_adversarial_replay_decode_errors_are_stable() {
+        let cases = [
+            (
+                "invalid_non_array_frame",
+                b"$3\r\nbad\r\n".as_slice(),
+                fr_persist::PersistError::InvalidFrame,
+            ),
+            (
+                "incomplete_resp_frame",
+                b"*2\r\n$3\r\nGET\r\n$1\r\nk".as_slice(),
+                fr_persist::PersistError::Parse(RespParseError::Incomplete),
+            ),
+            (
+                "invalid_simple_string_frame",
+                b"+PONG\r\n".as_slice(),
+                fr_persist::PersistError::InvalidFrame,
+            ),
+        ];
+
+        for (idx, (name, raw, expected_err)) in cases.into_iter().enumerate() {
+            let actual_err = decode_aof_stream(raw).expect_err("decode should fail");
+            assert_eq!(actual_err, expected_err, "case={name}");
+            assert_eq!(
+                persist_decode_reason_code(&actual_err),
+                persist_decode_reason_code(&expected_err),
+                "case={name} reason-code mapping must remain stable"
+            );
+
+            let event = EvidenceEvent {
+                ts_utc: format!("unix_ms:{}", 505 + idx),
+                ts_ms: 505 + idx as u64,
+                packet_id: 5,
+                mode: Mode::Strict,
+                severity: DriftSeverity::S0,
+                threat_class: ThreatClass::PersistenceTampering,
+                decision_action: DecisionAction::FailClosed,
+                subsystem: "persist_replay",
+                action: "decode_aof_stream",
+                reason_code: persist_decode_reason_code(&actual_err),
+                reason: format!("{actual_err:?}"),
+                input_digest: format!("persist_decode_case_{idx}"),
+                output_digest: format!("persist_decode_error_{idx}"),
+                state_digest_before: "state_before".to_string(),
+                state_digest_after: "state_after".to_string(),
+                replay_cmd: format!(
+                    "cargo test -p fr-conformance -- --nocapture fr_p2c_005_e013_adversarial_replay_decode_errors_are_stable -- {name}"
+                ),
+                artifact_refs: vec![
+                    "crates/fr-conformance/fixtures/persist_replay.json".to_string(),
+                ],
+                confidence: Some(1.0),
+            };
+
+            validate_structured_log_emission(
+                StructuredLogEmissionContext {
+                    suite_id: "fr_p2c_005",
+                    fixture_name: "persist_replay.json",
+                    case_name: name,
+                    verification_path: VerificationPath::Unit,
+                    now_ms: 505 + idx as u64,
+                    outcome: LogOutcome::Pass,
+                    persist_path: None,
+                },
+                &[event],
+            )
+            .expect(
+                "structured log emission should validate for packet-005 decode adversarial case",
+            );
+        }
+    }
+
+    #[test]
+    fn fr_p2c_005_f_differential_replay_fixture_passes() {
+        let cfg = HarnessConfig::default_paths();
+        let report = run_replay_fixture(&cfg, "persist_replay.json").expect("replay fixture run");
+        assert_eq!(report.schema_version, DIFFERENTIAL_REPORT_SCHEMA_VERSION);
+        assert_eq!(report.suite, "persist_replay");
+        assert_eq!(report.fixture, "persist_replay.json");
+        assert_eq!(
+            report.total, report.passed,
+            "packet-005 differential replay mismatches: {:?}",
+            report.failed
+        );
+        assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn fr_p2c_005_f_metamorphic_noop_records_preserve_outcomes() {
+        let baseline_cfg = HarnessConfig::default_paths();
+        let baseline =
+            run_replay_fixture(&baseline_cfg, "persist_replay.json").expect("baseline replay run");
+
+        let fixture_path = baseline_cfg.fixture_root.join("persist_replay.json");
+        let raw = fs::read_to_string(&fixture_path).expect("read baseline packet-005 fixture");
+        let mut fixture: ReplayFixture =
+            serde_json::from_str(&raw).expect("parse packet-005 fixture JSON");
+        for case in &mut fixture.cases {
+            case.records.push(vec![
+                "SET".to_string(),
+                "__fr_p2c_005_noop".to_string(),
+                "1".to_string(),
+            ]);
+            case.records
+                .push(vec!["DEL".to_string(), "__fr_p2c_005_noop".to_string()]);
+        }
+
+        let fixture_root = unique_temp_log_root("fr_p2c_005_metamorphic_fixture");
+        fs::create_dir_all(&fixture_root).expect("create metamorphic fixture root");
+        let fixture_name = "persist_replay_metamorphic_noop.json";
+        let fixture_out = fixture_root.join(fixture_name);
+        let payload = serde_json::to_vec_pretty(&fixture).expect("encode metamorphic fixture");
+        fs::write(&fixture_out, payload).expect("write metamorphic fixture");
+
+        let mut metamorphic_cfg = HarnessConfig::default_paths();
+        metamorphic_cfg.fixture_root = fixture_root.clone();
+        let transformed = run_replay_fixture(&metamorphic_cfg, fixture_name)
+            .expect("metamorphic replay fixture run");
+
+        assert_eq!(transformed.total, baseline.total);
+        assert_eq!(transformed.passed, baseline.passed);
+        assert_eq!(transformed.failed, baseline.failed);
+        assert_eq!(transformed.reason_code_counts, baseline.reason_code_counts);
+        assert_eq!(
+            transformed.failed_without_reason_code,
+            baseline.failed_without_reason_code
+        );
+
+        let _ = fs::remove_dir_all(fixture_root);
+    }
+
+    #[test]
+    fn fr_p2c_005_f_adversarial_decode_reason_taxonomy_is_stable() {
+        let cases = [
+            (
+                "invalid_non_array_frame",
+                b"$3\r\nbad\r\n".as_slice(),
+                "persist.replay.frame_parse_invalid",
+            ),
+            (
+                "incomplete_resp_frame",
+                b"*2\r\n$3\r\nGET\r\n$1\r\nk".as_slice(),
+                "persist.replay.frame_length_violation",
+            ),
+            (
+                "invalid_simple_string_frame",
+                b"+PONG\r\n".as_slice(),
+                "persist.replay.frame_parse_invalid",
+            ),
+        ];
+
+        for (idx, (name, raw, expected_reason_code)) in cases.into_iter().enumerate() {
+            let err = decode_aof_stream(raw).expect_err("decode should fail");
+            let reason_code = persist_decode_reason_code(&err);
+            assert_eq!(reason_code, expected_reason_code, "case={name}");
+
+            let event = EvidenceEvent {
+                ts_utc: format!("unix_ms:{}", 605 + idx),
+                ts_ms: 605 + idx as u64,
+                packet_id: 5,
+                mode: Mode::Strict,
+                severity: DriftSeverity::S0,
+                threat_class: ThreatClass::PersistenceTampering,
+                decision_action: DecisionAction::FailClosed,
+                subsystem: "persist_replay",
+                action: "decode_aof_stream",
+                reason_code,
+                reason: format!("{err:?}"),
+                input_digest: format!("persist_f_decode_case_{idx}"),
+                output_digest: format!("persist_f_decode_error_{idx}"),
+                state_digest_before: "state_before".to_string(),
+                state_digest_after: "state_after".to_string(),
+                replay_cmd: format!(
+                    "cargo test -p fr-conformance -- --nocapture fr_p2c_005_f_adversarial_decode_reason_taxonomy_is_stable -- {name}"
+                ),
+                artifact_refs: vec![
+                    "crates/fr-conformance/fixtures/persist_replay.json".to_string(),
+                ],
+                confidence: Some(1.0),
+            };
+
+            validate_structured_log_emission(
+                StructuredLogEmissionContext {
+                    suite_id: "fr_p2c_005",
+                    fixture_name: "persist_replay.json",
+                    case_name: name,
+                    verification_path: VerificationPath::Property,
+                    now_ms: 605 + idx as u64,
+                    outcome: LogOutcome::Pass,
+                    persist_path: None,
+                },
+                &[event],
+            )
+            .expect(
+                "structured log emission should validate for packet-005 F-level adversarial case",
+            );
+        }
     }
 
     #[test]
@@ -1684,6 +2173,170 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_009_f_differential_mode_split_contract_is_stable() {
+        let mut strict = Runtime::default_strict();
+        let mut hardened = Runtime::default_hardened();
+
+        let strict_err = strict
+            .apply_tls_config(invalid_tls_without_listener_ports(), 900)
+            .expect_err("strict mode must fail closed for missing TLS listener ports");
+        let hardened_err = hardened
+            .apply_tls_config(invalid_tls_without_listener_ports(), 901)
+            .expect_err("hardened mode still rejects config boundary violation");
+
+        assert_eq!(
+            strict_err.reason_code(),
+            "tlscfg.safety_gate_contract_violation"
+        );
+        assert_eq!(
+            hardened_err.reason_code(),
+            "tlscfg.safety_gate_contract_violation"
+        );
+
+        let strict_event = strict
+            .evidence()
+            .events()
+            .last()
+            .expect("strict event")
+            .clone();
+        let hardened_event = hardened
+            .evidence()
+            .events()
+            .last()
+            .expect("hardened event")
+            .clone();
+
+        assert_eq!(
+            strict_event.reason_code,
+            "tlscfg.safety_gate_contract_violation"
+        );
+        assert_eq!(
+            hardened_event.reason_code,
+            "tlscfg.safety_gate_contract_violation"
+        );
+        assert_eq!(strict_event.decision_action, DecisionAction::FailClosed);
+        assert_eq!(
+            hardened_event.decision_action,
+            DecisionAction::BoundedDefense
+        );
+        assert_eq!(strict_event.severity, DriftSeverity::S0);
+        assert_eq!(hardened_event.severity, DriftSeverity::S1);
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_009",
+                fixture_name: "fr_p2c_009_tls_runtime_strict",
+                case_name: "differential_mode_split_strict",
+                verification_path: VerificationPath::Property,
+                now_ms: 900,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&strict_event),
+        )
+        .expect("strict structured-log emission validates");
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_009",
+                fixture_name: "fr_p2c_009_tls_runtime_hardened",
+                case_name: "differential_mode_split_hardened",
+                verification_path: VerificationPath::Property,
+                now_ms: 901,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&hardened_event),
+        )
+        .expect("hardened structured-log emission validates");
+    }
+
+    #[test]
+    fn fr_p2c_009_f_metamorphic_non_allowlisted_rejection_is_deterministic() {
+        let mut policy = RuntimePolicy::hardened();
+        policy
+            .hardened_allowlist
+            .retain(|category| *category != HardenedDeviationCategory::MetadataSanitization);
+        let mut first = Runtime::new(policy.clone());
+        let mut second = Runtime::new(policy);
+
+        let first_err = first
+            .apply_tls_config(invalid_tls_without_listener_ports(), 902)
+            .expect_err("first run must reject non-allowlisted deviation");
+        let second_err = second
+            .apply_tls_config(invalid_tls_without_listener_ports(), 902)
+            .expect_err("second run must reject non-allowlisted deviation");
+
+        assert_eq!(
+            first_err.reason_code(),
+            "tlscfg.hardened_nonallowlisted_rejected"
+        );
+        assert_eq!(first_err.reason_code(), second_err.reason_code());
+
+        let first_event = first.evidence().events().last().expect("first event");
+        let second_event = second.evidence().events().last().expect("second event");
+
+        assert_eq!(first_event.reason_code, second_event.reason_code);
+        assert_eq!(first_event.decision_action, second_event.decision_action);
+        assert_eq!(first_event.severity, second_event.severity);
+        assert_eq!(first_event.input_digest, second_event.input_digest);
+        assert_eq!(first_event.output_digest, second_event.output_digest);
+        assert_eq!(
+            first_event.state_digest_before,
+            second_event.state_digest_before
+        );
+        assert_eq!(
+            first_event.state_digest_after,
+            second_event.state_digest_after
+        );
+    }
+
+    #[test]
+    fn fr_p2c_009_f_adversarial_tls_reason_codes_are_stable() {
+        let mut strict = Runtime::default_strict();
+        let strict_safety = strict
+            .apply_tls_config(invalid_tls_without_listener_ports(), 903)
+            .expect_err("strict safety-gate violation expected");
+        assert_eq!(
+            strict_safety.reason_code(),
+            "tlscfg.safety_gate_contract_violation"
+        );
+
+        let mut invalid_knob = valid_tls_config();
+        invalid_knob.max_new_tls_connections_per_cycle = 0;
+        let strict_knob = strict
+            .apply_tls_config(invalid_knob, 904)
+            .expect_err("strict operational knob violation expected");
+        assert_eq!(
+            strict_knob.reason_code(),
+            "tlscfg.operational_knob_contract_violation"
+        );
+
+        let mut policy = RuntimePolicy::hardened();
+        policy
+            .hardened_allowlist
+            .retain(|category| *category != HardenedDeviationCategory::MetadataSanitization);
+        let mut hardened = Runtime::new(policy);
+        let hardened_reject = hardened
+            .apply_tls_config(invalid_tls_without_listener_ports(), 905)
+            .expect_err("hardened non-allowlisted rejection expected");
+        assert_eq!(
+            hardened_reject.reason_code(),
+            "tlscfg.hardened_nonallowlisted_rejected"
+        );
+
+        let strict_event = strict.evidence().events().last().expect("strict event");
+        assert_eq!(
+            strict_event.reason_code,
+            "tlscfg.operational_knob_contract_violation"
+        );
+        let hardened_event = hardened.evidence().events().last().expect("hardened event");
+        assert_eq!(
+            hardened_event.reason_code,
+            "tlscfg.hardened_nonallowlisted_rejected"
+        );
+    }
+
+    #[test]
     fn threat_expectation_rejects_unexpected_event() {
         let event = EvidenceEvent {
             ts_utc: "unix_ms:0".to_string(),
@@ -1970,6 +2623,26 @@ mod tests {
         );
         assert_eq!(event.decision_action, DecisionAction::FailClosed);
         assert_eq!(event.severity, DriftSeverity::S0);
+    }
+
+    #[test]
+    fn fr_p2c_009_fixture_packet_family_maps_to_packet_009() {
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_009_tls_runtime_strict"),
+            "FR-P2C-009"
+        );
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_009_tls_runtime_hardened"),
+            "FR-P2C-009"
+        );
+    }
+
+    #[test]
+    fn fr_p2c_005_fixture_packet_family_maps_to_packet_005() {
+        assert_eq!(
+            crate::packet_family_for_fixture("persist_replay.json"),
+            "FR-P2C-005"
+        );
     }
 
     #[test]

@@ -358,9 +358,11 @@ fn classify_text(haystack: &str) -> (&'static str, &'static str) {
     if haystack.contains("aof") || haystack.contains("replay") {
         return ("replay_ordering", "bd-2wb.16.6");
     }
-    if haystack.contains("wrong number of arguments")
+    if haystack.contains("dispatch.")
+        || haystack.contains("wrong number of arguments")
         || haystack.contains("syntax error")
         || haystack.contains("unknown command")
+        || haystack.contains("unknown subcommand")
     {
         return ("dispatch_validation", "bd-2wb.14.6");
     }
@@ -569,6 +571,22 @@ mod tests {
     #[test]
     fn classify_text_dispatch_validation() {
         let (classification, route) = classify_text("ERR wrong number of arguments");
+        assert_eq!(classification, "dispatch_validation");
+        assert_eq!(route, "bd-2wb.14.6");
+    }
+
+    #[test]
+    fn classify_text_dispatch_reason_code_prefix_routes_to_dispatch_bead() {
+        let (classification, route) =
+            classify_text("dispatch.unknown_command_error_mismatch in strict mode");
+        assert_eq!(classification, "dispatch_validation");
+        assert_eq!(route, "bd-2wb.14.6");
+    }
+
+    #[test]
+    fn classify_text_unknown_subcommand_routes_to_dispatch_bead() {
+        let (classification, route) =
+            classify_text("ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'");
         assert_eq!(classification, "dispatch_validation");
         assert_eq!(route, "bd-2wb.14.6");
     }
