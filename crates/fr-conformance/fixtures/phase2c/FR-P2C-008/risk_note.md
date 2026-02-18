@@ -58,6 +58,42 @@ All threat detections/rejections/recoveries must emit:
 - `replay_cmd`
 - `artifact_refs`
 
+## Implemented packet-008 unit/property evidence (bd-2wb.19.5)
+
+- `fr_p2c_008_u005_nonpositive_expire_deletes_immediately_and_logs`  
+  Focus: immediate-delete rewrite contract for non-positive expire values (`T03`/`C05`)  
+  Replay: `FR_MODE=strict FR_SEED=803 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_u005_nonpositive_expire_deletes_immediately_and_logs`
+- `fr_p2c_008_u006_ttl_pttl_persist_contract_and_logs`  
+  Focus: TTL/PTTL/PERSIST observability contract and deterministic reply semantics (`T04`/`C06`/`C07`)  
+  Replay: `FR_MODE=strict FR_SEED=812 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_u006_ttl_pttl_persist_contract_and_logs`
+- `fr_p2c_008_u009_property_expired_keys_are_invisible_across_access_paths`  
+  Focus: lazy-expire visibility/property reduction across read-path orderings (`T05`/`C09`)  
+  Replay: `FR_MODE=strict FR_SEED=1050 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_u009_property_expired_keys_are_invisible_across_access_paths`
+
+## Implemented packet-008 differential/metamorphic/adversarial evidence (bd-2wb.19.6)
+
+- `fr_p2c_008_f_differential_fixture_passes`  
+  Focus: deterministic packet journey fixture parity for expiration/eviction command envelope (`T01`/`T03`/`T04`/`T05`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_differential_fixture_passes`
+- `fr_p2c_008_f_differential_expire_evict_surface_mode_split_is_stable`  
+  Focus: strict vs hardened output equivalence on packet-008 scoped expire surface (`T03`/`T04`/`T05`/`T11`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_differential_expire_evict_surface_mode_split_is_stable`
+- `fr_p2c_008_f_metamorphic_expire_and_pexpire_equivalence_holds`  
+  Focus: `EXPIRE` and `PEXPIRE` path convergence for TTL-family observability (`T04`/`C06`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_metamorphic_expire_and_pexpire_equivalence_holds`
+- `fr_p2c_008_f_adversarial_expire_reason_codes_are_stable`  
+  Focus: stable reason-code taxonomy for parse/arity drift and hardened non-allowlisted rejection (`T02`/`T11`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_adversarial_expire_reason_codes_are_stable`
+- Live oracle command fixture (remote redis parity target):  
+  `rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- command fr_p2c_008_expire_evict_journey.json 127.0.0.1 6379`
+
+## Implemented packet-008 e2e probe (bd-2wb.19.7)
+
+- `fr_p2c_008_e2e_contract_smoke`  
+  Focus: deterministic expiration/eviction smoke journey spanning immediate delete, TTL observability, and lazy-expire cleanup (`T03`/`T04`/`T05`)  
+  Fixture: `crates/fr-conformance/fixtures/fr_p2c_008_expire_evict_journey.json`  
+  Replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_008_e2e_contract_smoke`
+
 ## Alien-graveyard recommendation contract card
 
 | Field | Value |

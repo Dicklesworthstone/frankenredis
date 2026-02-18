@@ -89,6 +89,34 @@ Each contract-row verification result (pass/fail and divergence checks) must emi
 - Strict-mode sweep: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_008_STRICT`
 - Hardened-mode sweep: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_008_HARDENED`
 
+## Implemented unit/property evidence (bd-2wb.19.5)
+
+- `fr_p2c_008_u005_nonpositive_expire_deletes_immediately_and_logs` (`C05`)  
+  Replay: `FR_MODE=strict FR_SEED=803 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_u005_nonpositive_expire_deletes_immediately_and_logs`
+- `fr_p2c_008_u006_ttl_pttl_persist_contract_and_logs` (`C06`/`C07`)  
+  Replay: `FR_MODE=strict FR_SEED=812 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_u006_ttl_pttl_persist_contract_and_logs`
+- `fr_p2c_008_u009_property_expired_keys_are_invisible_across_access_paths` (`C09` + lazy-expire observability property)  
+  Replay: `FR_MODE=strict FR_SEED=1050 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_u009_property_expired_keys_are_invisible_across_access_paths`
+
+## Implemented differential/metamorphic/adversarial evidence (bd-2wb.19.6)
+
+- `fr_p2c_008_f_differential_fixture_passes` (`fr_p2c_008_expire_evict_journey.json`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_differential_fixture_passes`
+- `fr_p2c_008_f_differential_expire_evict_surface_mode_split_is_stable` (`C05`/`C06`/`C07`/`C09`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_differential_expire_evict_surface_mode_split_is_stable`
+- `fr_p2c_008_f_metamorphic_expire_and_pexpire_equivalence_holds` (`C03`/`C06`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_metamorphic_expire_and_pexpire_equivalence_holds`
+- `fr_p2c_008_f_adversarial_expire_reason_codes_are_stable` (`C05`/`C06`/`C07`/`C16`)  
+  Replay: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_adversarial_expire_reason_codes_are_stable`
+- Live oracle differential entrypoint:  
+  `rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- command fr_p2c_008_expire_evict_journey.json 127.0.0.1 6379`
+
+## Implemented e2e evidence (bd-2wb.19.7)
+
+- `fr_p2c_008_e2e_contract_smoke` (`E001` smoke path for `C05`/`C06`/`C09` contract surface)  
+  Fixture: `crates/fr-conformance/fixtures/fr_p2c_008_expire_evict_journey.json`  
+  Replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_008_e2e_contract_smoke`
+
 ## Alien-graveyard recommendation contract card
 
 | Field | Value |

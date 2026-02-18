@@ -476,7 +476,7 @@ mod tests {
             report.violations
         );
         assert_eq!(report.journey_count, 9);
-        assert_eq!(report.active_differential_count, 5);
-        assert_eq!(report.planned_differential_count, 4);
+        assert_eq!(report.active_differential_count, 6);
+        assert_eq!(report.planned_differential_count, 3);
     }
 }

@@ -10,6 +10,7 @@ This folder stores normalized oracle-vs-target fixtures for fr-conformance.
 - fr_p2c_004_acl_journey.json: packet-004 ACL/auth journey fixture used by `fr_p2c_004_e2e_contract_smoke`.
 - fr_p2c_006_replication_journey.json: packet-006 replication journey fixture used by `fr_p2c_006_e2e_contract_smoke`.
 - fr_p2c_007_cluster_journey.json: packet-007 cluster journey fixture used by `fr_p2c_007_e2e_contract_smoke`.
+- fr_p2c_008_expire_evict_journey.json: packet-008 expiration/eviction journey fixture used by packet-008 differential + e2e smoke validation.
 - fr_p2c_009_tls_config_journey.json: packet-009 TLS/config journey fixture used by `fr_p2c_009_e2e_contract_smoke`.
 - persist_replay.json: replay-oriented fixtures that execute AOF-shaped records and assert post-replay key state.
 - adversarial_corpus_v1.json: versioned adversarial corpus manifest (suite mode, fixture path, risk focus, replay commands, and default route bead).

@@ -245,19 +245,23 @@
         "owner_bead": "bd-2wb.19.5"
       },
       "differential_hook": {
-        "status": "planned",
+        "status": "active",
         "hook_mode": "command",
         "fixtures": [
-          "fr_p2c_008_expire_evict_journey.json"
+          "fr_p2c_008_expire_evict_journey.json",
+          "fr_p2c_008_runtime_strict",
+          "fr_p2c_008_runtime_hardened",
+          "fr_p2c_008_expire_metamorphic",
+          "fr_p2c_008_expire_adversarial"
         ],
-        "command": "rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- command fr_p2c_008_expire_evict_journey.json 127.0.0.1 6379",
+        "command": "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_differential_expire_evict_surface_mode_split_is_stable",
         "owner_bead": "bd-2wb.19.6",
-        "notes": "Mapped and tracked for packet differential harness expansion."
+        "notes": "Active via packet-008 F-level differential mode-split test with metamorphic/adversarial companions."
       },
       "e2e_hook": {
         "suite_id": "e2e::fr-p2c-008",
-        "test_or_scenario_id": "fr-p2c-008::e2e_contract_smoke",
-        "replay_cmd": "FR_MODE=hardened FR_SEED=42 cargo test -p fr-conformance --test smoke -- --nocapture fr-p2c-008::e2e_contract_smoke",
+        "test_or_scenario_id": "fr_p2c_008_e2e_contract_smoke",
+        "replay_cmd": "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_008_e2e_contract_smoke",
         "owner_bead": "bd-2wb.19.7"
       },
       "stable_reason_codes": [

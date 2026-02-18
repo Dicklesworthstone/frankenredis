@@ -1,0 +1,104 @@
+{
+  "suite": "fr_p2c_008_expire_evict_journey",
+  "cases": [
+    {
+      "name": "set_contract_key",
+      "now_ms": 0,
+      "argv": ["SET", "fr:p2c:008:key", "value"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "expire_contract_key",
+      "now_ms": 1,
+      "argv": ["EXPIRE", "fr:p2c:008:key", "5"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "ttl_after_expire",
+      "now_ms": 1,
+      "argv": ["TTL", "fr:p2c:008:key"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "pttl_after_expire",
+      "now_ms": 1,
+      "argv": ["PTTL", "fr:p2c:008:key"],
+      "expect": { "kind": "integer", "value": 5000 }
+    },
+    {
+      "name": "persist_contract_key",
+      "now_ms": 2,
+      "argv": ["PERSIST", "fr:p2c:008:key"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "ttl_after_persist",
+      "now_ms": 2,
+      "argv": ["TTL", "fr:p2c:008:key"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "pttl_after_persist",
+      "now_ms": 2,
+      "argv": ["PTTL", "fr:p2c:008:key"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "set_short_lived_key",
+      "now_ms": 3,
+      "argv": ["SET", "fr:p2c:008:soon", "value", "PX", "100"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "expired_key_not_visible_on_get",
+      "now_ms": 200,
+      "argv": ["GET", "fr:p2c:008:soon"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "expired_key_ttl_reports_missing",
+      "now_ms": 200,
+      "argv": ["TTL", "fr:p2c:008:soon"],
+      "expect": { "kind": "integer", "value": -2 }
+    },
+    {
+      "name": "dbsize_after_lazy_expire_cleanup",
+      "now_ms": 200,
+      "argv": ["DBSIZE"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_missing_key_returns_zero",
+      "now_ms": 201,
+      "argv": ["EXPIRE", "fr:p2c:008:missing", "10"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "set_immediate_delete_key",
+      "now_ms": 202,
+      "argv": ["SET", "fr:p2c:008:delete", "value"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pexpire_negative_deletes_immediately",
+      "now_ms": 203,
+      "argv": ["PEXPIRE", "fr:p2c:008:delete", "-1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "deleted_key_is_missing_after_negative_pexpire",
+      "now_ms": 203,
+      "argv": ["GET", "fr:p2c:008:delete"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "expire_bad_integer_is_rejected",
+      "now_ms": 204,
+      "argv": ["EXPIRE", "fr:p2c:008:key", "not-int"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    }
+  ]
+}

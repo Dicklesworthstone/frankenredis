@@ -368,15 +368,15 @@ Cross-document coupling for this pass:
 
 | Packet | Behavioral contract focus | High-risk failure classes | Strict/Hardened envelope | Verification/log anchors | Status + gap bead |
 |---|---|---|---|---|---|
-| `FR-P2C-001` Event loop core | deterministic phase ordering, bounded blocked-mode budget, bootstrap prerequisites | phase-order drift, partial tick traces, missing hooks/timers | strict: fail-closed on any trace/bootstrap violation; hardened: same external contract with bounded diagnostics only | `crates/fr-eventloop/src/lib.rs`, `crates/fr-runtime/src/lib.rs`, `crates/fr-conformance/fixtures/log_contract_v1/FR-P2C-001.golden.jsonl` | partial; packet E2E suite pending `bd-2wb.12.7` |
-| `FR-P2C-002` RESP parser contract | malformed framing rejection and protocol-error string contract | parse desync, invalid length handling, transport timeout ambiguity on malformed payloads | strict: reject malformed frame with deterministic reason; hardened: bounded parser defense, no semantic relaxation | `crates/fr-protocol/src/lib.rs`, `crates/fr-runtime/src/lib.rs`, `crates/fr-conformance/fixtures/protocol_negative.json`, `artifacts/e2e_orchestrator/*/suites/protocol_negative/report.json` | partial; packet E2E suite pending `bd-2wb.13.7` |
-| `FR-P2C-003` Dispatch core | command routing determinism and arity/syntax normalization | command-family drift under incremental feature growth | strict: no behavior-altering fallback; hardened: bounded reject policy only | `crates/fr-command/src/lib.rs`, `crates/fr-conformance/fixtures/core_errors.json` | partial; packet E2E suite pending `bd-2wb.14.7` |
-| `FR-P2C-004` ACL/auth policy | pre-dispatch auth gates, AUTH/HELLO transitions, wrongpass handling | auth bypass/order inversion, ACL surface incompleteness | strict: `NOAUTH`/`WRONGPASS` fail-closed; hardened: identical observable auth contract + richer diagnostics | `crates/fr-runtime/src/lib.rs`, `crates/fr-conformance/fixtures/phase2c/FR-P2C-004/*.md`, `log_contract_v1/FR-P2C-004.golden.jsonl` | partial; packet E2E suite pending `bd-2wb.15.7` |
-| `FR-P2C-005` Persistence/replay | deterministic replay ordering and post-replay assertions | decode corruption, replay ordering drift, AOF tail ambiguity | strict: fail on untrusted/decode-invalid replay segments; hardened: bounded recovery only where allowlisted | `crates/fr-persist/src/lib.rs`, `crates/fr-conformance/fixtures/persist_replay.json`, `log_contract_v1/FR-P2C-005.golden.jsonl` | partial; packet E2E suite pending `bd-2wb.16.7` |
-| `FR-P2C-006` Replication | handshake FSM and PSYNC fallback safety | handshake reorder attacks, offset-window abuse, stale ACK regression | strict: reject invalid transitions; hardened: bounded full-resync fallback, never unsafe partial continuation | `crates/fr-repl/src/lib.rs`, `crates/fr-conformance/src/lib.rs` (`fr_p2c_006_f_*`), `log_contract_v1/FR-P2C-006.golden.jsonl` | partial; packet E2E suite pending `bd-2wb.17.7` |
-| `FR-P2C-007` Cluster (scoped) | deterministic subcommand routing and client cluster mode flags | redirect/routing ambiguity, unsupported subcommand surfaces | strict: reject unknown/unsupported paths; hardened: same API contract with bounded defensive classification | `crates/fr-runtime/src/lib.rs`, `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/*.md`, `log_contract_v1/FR-P2C-007.golden.jsonl` | partial; packet E2E suite pending `bd-2wb.18.7` |
+| `FR-P2C-001` Event loop core | deterministic phase ordering, bounded blocked-mode budget, bootstrap prerequisites | phase-order drift, partial tick traces, missing hooks/timers | strict: fail-closed on any trace/bootstrap violation; hardened: same external contract with bounded diagnostics only | `crates/fr-eventloop/src/lib.rs`, `crates/fr-runtime/src/lib.rs`, `crates/fr-conformance/fixtures/log_contract_v1/FR-P2C-001.golden.jsonl` | implemented (`bd-2wb.12.7` closed) |
+| `FR-P2C-002` RESP parser contract | malformed framing rejection and protocol-error string contract | parse desync, invalid length handling, transport timeout ambiguity on malformed payloads | strict: reject malformed frame with deterministic reason; hardened: bounded parser defense, no semantic relaxation | `crates/fr-protocol/src/lib.rs`, `crates/fr-runtime/src/lib.rs`, `crates/fr-conformance/fixtures/protocol_negative.json`, `artifacts/e2e_orchestrator/*/suites/protocol_negative/report.json` | implemented (`bd-2wb.13.7` closed) |
+| `FR-P2C-003` Dispatch core | command routing determinism and arity/syntax normalization | command-family drift under incremental feature growth | strict: no behavior-altering fallback; hardened: bounded reject policy only | `crates/fr-command/src/lib.rs`, `crates/fr-conformance/fixtures/core_errors.json` | implemented (`bd-2wb.14.7` closed) |
+| `FR-P2C-004` ACL/auth policy | pre-dispatch auth gates, AUTH/HELLO transitions, wrongpass handling | auth bypass/order inversion, ACL surface incompleteness | strict: `NOAUTH`/`WRONGPASS` fail-closed; hardened: identical observable auth contract + richer diagnostics | `crates/fr-runtime/src/lib.rs`, `crates/fr-conformance/fixtures/phase2c/FR-P2C-004/*.md`, `log_contract_v1/FR-P2C-004.golden.jsonl` | implemented (`bd-2wb.15.7` closed) |
+| `FR-P2C-005` Persistence/replay | deterministic replay ordering and post-replay assertions | decode corruption, replay ordering drift, AOF tail ambiguity | strict: fail on untrusted/decode-invalid replay segments; hardened: bounded recovery only where allowlisted | `crates/fr-persist/src/lib.rs`, `crates/fr-conformance/fixtures/persist_replay.json`, `log_contract_v1/FR-P2C-005.golden.jsonl` | implemented (`bd-2wb.16.7` closed) |
+| `FR-P2C-006` Replication | handshake FSM and PSYNC fallback safety | handshake reorder attacks, offset-window abuse, stale ACK regression | strict: reject invalid transitions; hardened: bounded full-resync fallback, never unsafe partial continuation | `crates/fr-repl/src/lib.rs`, `crates/fr-conformance/src/lib.rs` (`fr_p2c_006_f_*`), `log_contract_v1/FR-P2C-006.golden.jsonl` | implemented (`bd-2wb.17.7` closed) |
+| `FR-P2C-007` Cluster (scoped) | deterministic subcommand routing and client cluster mode flags | redirect/routing ambiguity, unsupported subcommand surfaces | strict: reject unknown/unsupported paths; hardened: same API contract with bounded defensive classification | `crates/fr-runtime/src/lib.rs`, `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/*.md`, `log_contract_v1/FR-P2C-007.golden.jsonl` | e2e implemented (`bd-2wb.18.7` closed); deferred-action scope remains bounded |
 | `FR-P2C-008` Expire/evict | TTL correctness under pressure and active-expire parity intent | lazy-vs-active expiry drift, eviction-policy under-specification | strict: preserve current explicit semantics, fail closed on undefined policy paths; hardened: bounded pressure defenses only | `crates/fr-expire/src/lib.rs`, `crates/fr-conformance/fixtures/phase2c/FR-P2C-008/*.md`, `log_contract_v1/FR-P2C-008.golden.jsonl` | partial; packet E2E suite pending `bd-2wb.19.7` |
-| `FR-P2C-009` TLS/config | fail-closed config validation and hardened allowlist gate | config downgrade abuse, invalid runtime apply transitions | strict: reject unsafe config, record deterministic reason code; hardened: allowlist-only bounded defense + reject non-allowlisted deviations | `crates/fr-config/src/lib.rs`, `crates/fr-runtime/src/lib.rs`, `crates/fr-conformance/src/lib.rs` (`fr_p2c_009_e013_*`), `log_contract_v1/FR-P2C-009.golden.jsonl` | partial; packet E2E suite pending `bd-2wb.20.7` |
+| `FR-P2C-009` TLS/config | fail-closed config validation and hardened allowlist gate | config downgrade abuse, invalid runtime apply transitions | strict: reject unsafe config, record deterministic reason code; hardened: allowlist-only bounded defense + reject non-allowlisted deviations | `crates/fr-config/src/lib.rs`, `crates/fr-runtime/src/lib.rs`, `crates/fr-conformance/src/lib.rs` (`fr_p2c_009_e013_*`), `log_contract_v1/FR-P2C-009.golden.jsonl` | implemented (`bd-2wb.20.7` closed) |
 
 ### 19.3 High-risk claim bindings (strict/hardened replay + forensic fields)
 
@@ -458,11 +458,11 @@ IP/legal note:
 
 | Gap | Impact | Follow-up bead |
 |---|---|---|
-| Packet-specific E2E suites for `FR-P2C-001..009` still open | prevents packet-level closure claims from moving to “complete” | `bd-2wb.12.7`, `bd-2wb.13.7`, `bd-2wb.14.7`, `bd-2wb.15.7`, `bd-2wb.16.7`, `bd-2wb.17.7`, `bd-2wb.18.7`, `bd-2wb.19.7`, `bd-2wb.20.7` |
-| CI gate topology not yet formalized to consume bundle schema | weakens automated promotion boundaries | `bd-2wb.10` |
-| Coverage/flake budget policy not yet encoded | risk of nondeterministic false confidence | `bd-2wb.23` |
-| Failure-forensics operator index not yet landed | slows human triage despite machine artifacts | `bd-2wb.22` |
-| Red-team contradiction review and specialist deep passes pending | pass-B draft not independently stress-tested yet | `bd-2wb.24.13`, `bd-2wb.24.16`, `bd-2wb.24.17` |
+| Packet-specific E2E suite for `FR-P2C-008` remains open | prevents full packet-family closure for Expire/Evict journey | `bd-2wb.19.7` |
+| Packet-008 differential/adversarial and optimization evidence still pending | keeps one packet chain from final end-to-end completion | `bd-2wb.19.6`, `bd-2wb.19.8`, `bd-2wb.19.9` |
+| CI gate topology now formalized and active (`G1..G8` + forensics index) | requires ongoing schema stability and artifact contract discipline | implemented via closed `bd-2wb.10` |
+| Coverage/flake budget policy and forensics operator index now landed | shifts risk from “missing foundation” to “packet residual depth” | implemented via closed `bd-2wb.23` + `bd-2wb.22` |
+| Red-team contradiction review and specialist deep passes | no longer pending; integrated outputs now feed final doc pass | implemented via closed `bd-2wb.24.13`, `bd-2wb.24.16`, `bd-2wb.24.17` |
 
 ## 20. DOC-PASS-12 Independent Red-Team Contradiction and Completeness Review
 
@@ -486,8 +486,8 @@ Deterministic evidence commands used for contradiction checks:
 | `RT-001` | Architecture narrative implies end-to-end persistence/replication flow, but runtime command path currently dispatches only to store. | `crates/fr-runtime/src/lib.rs` `execute_frame` path calls `dispatch_argv(&argv, &mut self.store, now_ms)` and contains no `fr_persist`/`fr_repl` references; `crates/fr-persist/src/lib.rs` and `crates/fr-repl/src/lib.rs` currently provide standalone kernels. | high | Resolved as explicit scope bound: persistence/replication are contract targets, not runtime-integrated in current state. Promotion remains blocked by `bd-2wb.16`, `bd-2wb.16.7`, `bd-2wb.17`, `bd-2wb.17.7`. |
 | `RT-002` | Expiration subsystem appears as crate-level component, but active-expire orchestration is not wired through runtime/store scheduling. | `crates/fr-expire/src/lib.rs` contains helper kernel `evaluate_expiry`; `crates/fr-store/src/lib.rs` contains current lazy expiry behavior (`drop_if_expired`) and TTL logic; packet plan notes helper-only status in `crates/fr-conformance/fixtures/phase2c/FR-P2C-008/implementation_plan.md`. | high | Resolved as explicit caveat: `FR-P2C-008` claims remain bounded to currently implemented lazy semantics plus documented gaps. Follow-up remains `bd-2wb.19`, `bd-2wb.19.7`. |
 | `RT-003` | Cluster packet contract includes deferred `clusterBeforeSleep` actions, while runtime cluster implementation remains intentionally narrow. | Deferred contract entry: `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/contract_table.md` row `FR-P2C-007-C13`; runtime currently exposes `CLUSTER HELP` scaffold and client mode toggles in `crates/fr-runtime/src/lib.rs`. | high | Resolved as bounded uncertainty: no completeness claim for cluster packet is permitted until deferred actions are implemented and replay-tested. Follow-up remains `bd-2wb.18`, `bd-2wb.18.7`. |
-| `RT-004` | RaptorQ-everywhere doctrine is broader than currently materialized sidecar artifacts in this repository slice. | Current sidecar footprint (`*.raptorq.json`, `*.decode_proof.json`) is concentrated in test fixtures (`FR-P2C-TEST-VALID`, `FR-P2C-TEST-INVALID`); foundational sidecar pipeline bead is still open. | medium | Resolved by explicit non-closure statement: doctrine is binding but not yet globally enforced. Follow-up remains `bd-2wb.9` and CI gate chain `bd-2wb.10`. |
-| `RT-005` | Some packet rows include unit/log anchors but still rely on foundation suites instead of packet-specific E2E suites. | Crosswalk in `EXISTING_REDIS_STRUCTURE.md` section `24.2` marks packet-level E2E gaps (`bd-2wb.12.7`..`bd-2wb.20.7`). | medium | Resolved by preserving explicit gap ledger and preventing any packet closure claim without packet-specific E2E evidence. |
+| `RT-004` | RaptorQ-everywhere doctrine is broader than any single packet slice; risk was missing foundation-wide gate wiring. | Foundation sidecar + decode-proof pipeline is now wired (`scripts/run_raptorq_artifact_gate.sh`) and consumed by CI gate topology (`.github/workflows/live-conformance-gates.yml`) with deterministic artifacts. | medium | Resolved at foundation scope: `bd-2wb.9` + `bd-2wb.10` are closed; continue extending artifact coverage as new durability bundles are introduced. |
+| `RT-005` | Packet E2E depth remains uneven after broad closure, with residual concentration in `FR-P2C-008`. | Crosswalk in `EXISTING_REDIS_STRUCTURE.md` section `24.2` shows packet-specific E2E closures for `FR-P2C-001/002/003/004/005/006/007/009`, with residual open `FR-P2C-008` (`bd-2wb.19.7`). | medium | Resolved by preserving explicit residual-gap ledger and preventing final sign-off until packet-008 E2E evidence is closed. |
 
 ### 20.3 Unsupported-claim reconciliation actions (applied)
 
@@ -502,18 +502,18 @@ Deterministic evidence commands used for contradiction checks:
 
 | Surface | Unit/property status | E2E status | Logging status | Bound and follow-up |
 |---|---|---|---|---|
-| `FR-P2C-005` persistence/replay | present (`conformance_replay_fixture_passes`) | packet-specific E2E still open | golden + optional live JSONL paths present | bounded by `bd-2wb.16.7` |
-| `FR-P2C-006` replication | present (FSM/PSYNC reducers + fixture vectors) | packet-specific E2E still open | packet golden logs present | bounded by `bd-2wb.17.7` |
-| `FR-P2C-007` cluster | present (router/client mode unit tests) | packet-specific E2E still open; deferred actions unresolved | packet golden logs present | bounded by `bd-2wb.18.7` |
-| `FR-P2C-008` expire/evict | partial (store lazy-expiry + helper kernel) | packet-specific E2E still open | packet golden logs present | bounded by `bd-2wb.19.7` |
-| `FR-P2C-009` tls/config | present (strict/hardened gate tests + conformance case) | packet-specific E2E still open | packet golden logs present | bounded by `bd-2wb.20.7` |
+| `FR-P2C-005` persistence/replay | present (`conformance_replay_fixture_passes`) | packet-specific E2E implemented | golden + optional live JSONL paths present | implemented (`bd-2wb.16.7` closed) |
+| `FR-P2C-006` replication | present (FSM/PSYNC reducers + fixture vectors) | packet-specific E2E implemented | packet golden logs present | implemented (`bd-2wb.17.7` closed) |
+| `FR-P2C-007` cluster | present (router/client mode unit tests; deferred actions still explicitly bounded) | packet-specific E2E implemented | packet golden logs present | e2e implemented (`bd-2wb.18.7` closed); deferred action scope remains in packet chain |
+| `FR-P2C-008` expire/evict | partial (store lazy-expiry + helper kernel) | packet-specific E2E still open | packet golden logs present | bounded by open `bd-2wb.19.7` |
+| `FR-P2C-009` tls/config | present (strict/hardened gate tests + conformance case) | packet-specific E2E implemented | packet golden logs present | implemented (`bd-2wb.20.7` closed) |
 
 ### 20.5 Carry-forward contract verification (alien + expected-loss + one-lever)
 
 This pass re-validates and carries forward Pass-B contract artifacts:
 1. recommendation contract card remains `AG-FR-PASSB-001` (section `19.4`) with EV `2.7` and evidence linkage (`claim_id`/`evidence_id`);
 2. expected-loss model remains section `19.5`, with explicit fallback trigger `S2|S3 -> A3 fail-closed`;
-3. one-lever optimization loop remains section `19.6` and is still blocked on baseline/profile implementation chain (`bd-2wb.8`, `bd-2wb.23`, packet `*.8` beads).
+3. one-lever optimization loop remains section `19.6`; foundation perf/gate prerequisites are closed, and residual work is concentrated in packet-008 optimization/final evidence (`bd-2wb.19.8`, `bd-2wb.19.9`).
 
 ### 20.6 Bounded uncertainty policy (no handwaving)
 
@@ -560,8 +560,8 @@ This pass focuses on behavior semantics and edge-condition interpretation:
 |---|---|---|---|---|---|
 | `BHV-001` | malformed protocol input fails before dispatch and returns deterministic protocol error class | `crates/fr-runtime/src/lib.rs` (`protocol_invalid_bulk_length_error_string`) | `crates/fr-conformance/src/lib.rs` (`conformance_protocol_fixture_passes`), `crates/fr-conformance/fixtures/protocol_negative.json` | `crates/fr-conformance/src/log_contract.rs` (`reason_code`, `replay_cmd`, `artifact_refs`) | validated |
 | `BHV-002` | compatibility gate (`max_array_len` / `max_bulk_len`) executes pre-dispatch and fail-closes | `crates/fr-runtime/src/lib.rs` (`compatibility_gate_trips_on_large_array`) | `protocol_negative` fixture + live differential suite report (`artifacts/e2e_orchestrator/<run-id>/suites/protocol_negative/report.json`) | packet log family `FR-P2C-002.golden.jsonl` | validated |
-| `BHV-003` | `NOAUTH` gate runs before command execution; HELLO+AUTH path transitions deterministically | `crates/fr-runtime/src/lib.rs` (`fr_p2c_004_u004_*`, `fr_p2c_004_u005_*`) | shared conformance fixtures (foundation suites), packet-specific E2E still pending | `FR-P2C-004.golden.jsonl`, threat reason codes in runtime evidence | validated with bounded E2E gap (`bd-2wb.15.7`) |
-| `BHV-004` | cluster command behavior is deterministic for implemented subset (HELP, mode flags), and rejects unknown paths | `crates/fr-runtime/src/lib.rs` (`fr_p2c_007_u001_*`, `fr_p2c_007_u007_*`) | packet-specific cluster E2E still pending | `FR-P2C-007.golden.jsonl` | partial (implemented subset only; `bd-2wb.18.7`) |
+| `BHV-003` | `NOAUTH` gate runs before command execution; HELLO+AUTH path transitions deterministically | `crates/fr-runtime/src/lib.rs` (`fr_p2c_004_u004_*`, `fr_p2c_004_u005_*`) | packet-specific E2E implemented (`fr_p2c_004_e2e_contract_smoke`) | `FR-P2C-004.golden.jsonl`, threat reason codes in runtime evidence | implemented (`bd-2wb.15.7` closed) |
+| `BHV-004` | cluster command behavior is deterministic for implemented subset (HELP, mode flags), and rejects unknown paths | `crates/fr-runtime/src/lib.rs` (`fr_p2c_007_u001_*`, `fr_p2c_007_u007_*`) | packet-specific cluster E2E implemented (`fr_p2c_007_e2e_contract_smoke`) | `FR-P2C-007.golden.jsonl` | implemented for scoped subset (`bd-2wb.18.7` closed); deferred actions remain bounded |
 | `BHV-005` | TTL behavior currently follows lazy expiry semantics (`PTTL`/deadline handling) | `crates/fr-store/src/lib.rs` (`expire_and_pttl`, `expire_*`, `drop_if_expired`) | foundation fixture coverage; packet-specific E2E pending | `FR-P2C-008.golden.jsonl` | validated for current scope; active-expire/eviction parity pending (`bd-2wb.19.7`) |
 | `BHV-006` | replication safety reducers preserve ordering and safe fallback (`handshake` sequencing + PSYNC rejection paths) | `crates/fr-repl/src/lib.rs` (`fr_p2c_006_u003_*`, `fr_p2c_006_u002_*`) | `crates/fr-conformance/src/lib.rs` (`fr_p2c_006_f_*`) | `FR-P2C-006.golden.jsonl` | validated as kernel behavior; runtime integration pending |
 | `BHV-007` | strict/hardened TLS/config gates reject unsafe or non-allowlisted deviations deterministically | `crates/fr-runtime/src/lib.rs` (`fr_p2c_009_u013_*`), `crates/fr-config/src/lib.rs` (`fr_p2c_009_u013_hardened_gate_rejects_non_allowlisted_deviation`) | `crates/fr-conformance/src/lib.rs` (`fr_p2c_009_e013_*`) | `FR-P2C-009.golden.jsonl` | validated |
@@ -639,7 +639,7 @@ Required artifacts:
 5. re-baseline: ambiguity-rate delta report.
 
 Follow-up dependency targets:
-- `bd-2wb.4` (harness core), `bd-2wb.23` (reliability budget), `bd-2wb.10` (CI gate topology).
+- packet-008 closure chain: `bd-2wb.19.5`, `bd-2wb.19.6`, `bd-2wb.19.7`, `bd-2wb.19.8`, `bd-2wb.19.9`.
 
 ### 21.8 Reproducibility and provenance references
 
@@ -659,8 +659,8 @@ Legal/IP note:
 | `BHV-G01` | Runtime integration for persistence/replication behavior path | `bd-2wb.16`, `bd-2wb.16.7`, `bd-2wb.17`, `bd-2wb.17.7` |
 | `BHV-G02` | Active-expire/eviction orchestration parity beyond lazy semantics | `bd-2wb.19`, `bd-2wb.19.7` |
 | `BHV-G03` | Cluster deferred-task behavioral contract execution | `bd-2wb.18`, `bd-2wb.18.7` |
-| `BHV-G04` | Packet-specific E2E coverage depth for all packet families | `bd-2wb.12.7`..`bd-2wb.20.7` |
-| `BHV-G05` | CI-level behavior-gate ingestion of deterministic failure envelope artifacts | `bd-2wb.10`, `bd-2wb.23` |
+| `BHV-G04` | Residual packet-specific E2E depth (expire/evict journey) | `bd-2wb.19.7` |
+| `BHV-G05` | CI-level behavior-gate ingestion of deterministic failure envelope artifacts | implemented via closed `bd-2wb.10` + `bd-2wb.23`; monitor packet residual depth via `bd-2wb.19.7` |
 
 ## 22. DOC-PASS-16 Full-Agent Deep Dive Pass C (Risk/Perf/Test Specialist)
 
@@ -675,7 +675,7 @@ Legal/IP note:
 | `RPT-005` | cluster deferred action drift and routing ambiguity | deterministic implemented subset only (`CLUSTER HELP`, mode flags) | high | deferred task execution + packet E2E: `bd-2wb.18`, `bd-2wb.18.7` |
 | `RPT-006` | TTL/eviction pressure mismatch between lazy and active policies | store lazy-expiry semantics + helper kernel in `fr-expire` | high | active-expire/eviction closure: `bd-2wb.19`, `bd-2wb.19.7` |
 | `RPT-007` | TLS/config downgrade and non-allowlisted hardened deviations | policy allowlist + strict/hardened gate tests (`fr_p2c_009_u013_*`, `fr_p2c_009_e013_*`) | medium | packet E2E depth: `bd-2wb.20.7` |
-| `RPT-008` | forensic evidence incompleteness (operator cannot replay diagnosis) | structured log schema contract + live bundle artifacts | medium | failure-forensics UX + CI gate topology: `bd-2wb.22`, `bd-2wb.10` |
+| `RPT-008` | forensic evidence incompleteness (operator cannot replay diagnosis) | structured log schema contract + live bundle artifacts + CI forensics index | low-medium | foundation mitigations closed (`bd-2wb.22`, `bd-2wb.10`); residual packet-depth gap tracked by `bd-2wb.19.7` |
 
 ### 22.2 Performance-proof readiness assessment
 
@@ -684,37 +684,37 @@ Current performance/proof anchors:
 - optimization evidence pack present at `artifacts/optimization/phase2c-gate/round_dir_scan_mask/` (`baseline_hyperfine.json`, `after_hyperfine.json`, `optimization_report.md`, `isomorphism_check.txt`, `env.json`, `manifest.json`, `repro.lock`).
 
 Primary readiness gaps:
-1. foundation performance gate bead remains open (`bd-2wb.8`);
-2. CI topology that consumes perf/isomorphism evidence remains open (`bd-2wb.10`);
-3. reliability/flake budget policy required for stable perf assertions remains open (`bd-2wb.23`).
+1. packet-008 chain still has open verification/evidence beads (`bd-2wb.19.6`, `bd-2wb.19.7`, `bd-2wb.19.8`, `bd-2wb.19.9`);
+2. final integrated sign-off remains blocked until packet-008 depth closes (`bd-2wb.24.14` dependency on `bd-2wb.19.*`);
+3. CI artifact schema must remain stable as additional packet evidence is integrated.
 
 ### 22.3 Verification-depth completeness map (unit/e2e/logging)
 
 | Verification lane | Current status | Evidence anchors | Gap / blocker |
 |---|---|---|---|
 | Unit/property contracts | foundationally strong in key crates (`fr-runtime`, `fr-repl`, `fr-store`, `fr-config`) | packet-tagged unit tests (`fr_p2c_*`) | packet-specific unit/property completion still depends on packet `*.5` and `*.6` chains |
-| E2E deterministic scripts | foundation orchestrator exists and emits replayable bundles | `scripts/run_live_oracle_diff.sh`, `live_oracle_diff` binary reports | packet E2E beads all open (`bd-2wb.12.7`..`bd-2wb.20.7`) |
-| Structured log contract | schema + golden packet logs + conversion validation are implemented | `crates/fr-conformance/src/log_contract.rs`, `TEST_LOG_SCHEMA_V1.md` | CI gate ingestion and operator index still open (`bd-2wb.10`, `bd-2wb.22`) |
+| E2E deterministic scripts | foundation orchestrator exists and emits replayable bundles | `scripts/run_live_oracle_diff.sh`, `live_oracle_diff` binary reports | packet E2E closures landed for `FR-P2C-001/002/003/004/005/006/007/009`; residual open depth is `FR-P2C-008` (`bd-2wb.19.7`) |
+| Structured log contract | schema + golden packet logs + conversion validation are implemented | `crates/fr-conformance/src/log_contract.rs`, `TEST_LOG_SCHEMA_V1.md` | CI gate ingestion and operator index are implemented (closed `bd-2wb.10`, `bd-2wb.22`); packet-008 E2E depth remains (`bd-2wb.19.7`) |
 
 ### 22.4 CI gate topology readiness (G1..G8)
 
 | Gate | Intent | Current substrate status | Bead status |
 |---|---|---|---|
-| `G1` | fmt/lint baseline | available (`cargo fmt --check`, clippy path) | pending integration in `bd-2wb.10` |
-| `G2` | unit/property deterministic checks | foundation contract/bead closed (`bd-2wb.5`) | pending integration in `bd-2wb.10` |
-| `G3` | differential parity gate | harness core in progress (`bd-2wb.4`) | blocked by `bd-2wb.4` |
-| `G4` | adversarial/fuzz gate | design present, corpus workflow open | blocked by `bd-2wb.7` |
-| `G5` | deterministic E2E/orchestrator gate | orchestrator landed (`bd-2wb.6` closed) | packet E2E depth still open (`*.7` beads) |
-| `G6` | perf regression + one-lever proof | artifacts partially present; foundation perf bead open | blocked by `bd-2wb.8` |
-| `G7` | artifact schema/forensics contract | logging contract closed (`bd-2wb.5`), docs crosswalk present | blocked by `bd-2wb.22`, `bd-2wb.23` |
-| `G8` | RaptorQ decode-proof gate | sidecar doctrine defined; foundation pipeline open | blocked by `bd-2wb.9` |
+| `G1` | fmt/lint baseline | wired in CI workflow (`cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`) | implemented (closed `bd-2wb.10`) |
+| `G2` | unit/property deterministic checks | wired in CI workflow (`cargo test --workspace -- --nocapture`) | implemented (closed `bd-2wb.10`) |
+| `G3` | differential parity gate | live differential orchestrator wired in CI (`run_live_oracle_diff.sh`) | implemented; residual packet-008 closure depth (`bd-2wb.19.*`) |
+| `G4` | adversarial/fuzz gate | adversarial triage pipeline wired in CI | implemented (closed `bd-2wb.7` + `bd-2wb.10`) |
+| `G5` | deterministic E2E/orchestrator gate | orchestrator + replay bundle + deterministic artifact uploads wired in CI | implemented foundation; packet-008 E2E still open (`bd-2wb.19.7`) |
+| `G6` | perf regression + one-lever proof | optimization schema gate wired in CI (`phase2c_schema_gate -- --optimization-gate`) | implemented foundation (closed `bd-2wb.8` + `bd-2wb.10`) |
+| `G7` | artifact schema/forensics contract | coverage/flake budget + corpus/schema gates + failure-forensics index wired in CI | implemented foundation (closed `bd-2wb.22`, `bd-2wb.23`, `bd-2wb.10`) |
+| `G8` | RaptorQ decode-proof gate | RaptorQ artifact gate wired in CI with deterministic report artifacts | implemented foundation (closed `bd-2wb.9` + `bd-2wb.10`) |
 
 ### 22.5 Risk/Perf/Test recommendation contract card
 
 | Field | Value |
 |---|---|
 | `card_id` | `AG-FR-RPT-001` |
-| Hotspot evidence | CI readiness is dominated by a small blocker set (`bd-2wb.4`, `bd-2wb.7`, `bd-2wb.8`, `bd-2wb.9`, `bd-2wb.10`, `bd-2wb.22`, `bd-2wb.23`) while packet E2E depth (`*.7`) remains open. |
+| Hotspot evidence | Foundation blockers are closed; dominant residual risk is packet-008 completion depth (`bd-2wb.19`, `bd-2wb.19.5`, `bd-2wb.19.6`, `bd-2wb.19.7`, `bd-2wb.19.8`, `bd-2wb.19.9`). |
 | Mapped graveyard section IDs | `AG-SEC-11` (fail-closed policy), `AG-PERF-08` (one-lever proof discipline), `AG-AUD-03` (deterministic forensic trails). |
 | Baseline comparator | current documented baseline/perf artifact set + live differential bundle schema. |
 | EV score | `2.9` |
@@ -765,9 +765,10 @@ Required artifacts:
 5. post-change delta report with confidence bounds.
 
 Dependency targets:
-- `bd-2wb.23` (coverage/flake budgets),
-- `bd-2wb.10` (CI gate ingestion),
-- `bd-2wb.4` (differential harness core).
+- `bd-2wb.19.5` (packet-008 unit/property evidence),
+- `bd-2wb.19.6` (packet-008 differential/adversarial evidence),
+- `bd-2wb.19.7` (packet-008 E2E journey evidence),
+- `bd-2wb.19.8` and `bd-2wb.19.9` (packet-008 optimization + final evidence pack).
 
 ### 22.8 Go / No-Go criteria for `bd-2wb.24.14` handoff
 

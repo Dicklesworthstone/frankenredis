@@ -962,6 +962,10 @@ fn packet_family_for_fixture(fixture_name: &str) -> &'static str {
         "core_errors.json" | "fr_p2c_003_dispatch_journey.json" => "FR-P2C-003",
         "fr_p2c_006_replication_journey.json" => "FR-P2C-006",
         "fr_p2c_007_cluster_journey.json" => "FR-P2C-007",
+        "fr_p2c_008_expire_semantics"
+        | "fr_p2c_008_ttl_persist"
+        | "fr_p2c_008_lazy_expire_visibility"
+        | "fr_p2c_008_expire_evict_journey.json" => "FR-P2C-008",
         "persist_replay.json" => "FR-P2C-005",
         "fr_p2c_009_tls_config_journey.json" => "FR-P2C-009",
         "fr_p2c_009_tls_runtime_strict" | "fr_p2c_009_tls_runtime_hardened" => "FR-P2C-009",
@@ -969,6 +973,7 @@ fn packet_family_for_fixture(fixture_name: &str) -> &'static str {
         _ if fixture_name.starts_with("fr_p2c_003_") => "FR-P2C-003",
         _ if fixture_name.starts_with("fr_p2c_006_") => "FR-P2C-006",
         _ if fixture_name.starts_with("fr_p2c_007_") => "FR-P2C-007",
+        _ if fixture_name.starts_with("fr_p2c_008_") => "FR-P2C-008",
         _ if fixture_name.starts_with("fr_p2c_009_") => "FR-P2C-009",
         _ => "FR-P2C-003",
     }
@@ -2982,6 +2987,613 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_008_f_differential_fixture_passes() {
+        let cfg = HarnessConfig::default_paths();
+        let report = run_fixture(&cfg, "fr_p2c_008_expire_evict_journey.json")
+            .expect("packet-008 fixture run");
+        assert_eq!(report.schema_version, DIFFERENTIAL_REPORT_SCHEMA_VERSION);
+        assert_eq!(report.fixture, "fr_p2c_008_expire_evict_journey.json");
+        assert_eq!(report.suite, "fr_p2c_008_expire_evict_journey");
+        assert_eq!(
+            report.total, report.passed,
+            "packet-008 fixture mismatches: {:?}",
+            report.failed
+        );
+        assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn fr_p2c_008_f_differential_expire_evict_surface_mode_split_is_stable() {
+        let mut strict = Runtime::default_strict();
+        let mut hardened = Runtime::default_hardened();
+
+        let strict_set =
+            strict.execute_frame(command_frame(&["SET", "fr:p2c:008:diff:key", "v"]), 820);
+        let hardened_set =
+            hardened.execute_frame(command_frame(&["SET", "fr:p2c:008:diff:key", "v"]), 820);
+        assert_eq!(strict_set, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(strict_set, hardened_set);
+
+        let strict_expire =
+            strict.execute_frame(command_frame(&["EXPIRE", "fr:p2c:008:diff:key", "5"]), 821);
+        let hardened_expire =
+            hardened.execute_frame(command_frame(&["EXPIRE", "fr:p2c:008:diff:key", "5"]), 821);
+        assert_eq!(strict_expire, RespFrame::Integer(1));
+        assert_eq!(strict_expire, hardened_expire);
+
+        let strict_ttl = strict.execute_frame(command_frame(&["TTL", "fr:p2c:008:diff:key"]), 821);
+        let hardened_ttl =
+            hardened.execute_frame(command_frame(&["TTL", "fr:p2c:008:diff:key"]), 821);
+        assert_eq!(strict_ttl, RespFrame::Integer(5));
+        assert_eq!(strict_ttl, hardened_ttl);
+
+        let strict_pttl =
+            strict.execute_frame(command_frame(&["PTTL", "fr:p2c:008:diff:key"]), 821);
+        let hardened_pttl =
+            hardened.execute_frame(command_frame(&["PTTL", "fr:p2c:008:diff:key"]), 821);
+        assert_eq!(strict_pttl, RespFrame::Integer(5000));
+        assert_eq!(strict_pttl, hardened_pttl);
+
+        let strict_persist =
+            strict.execute_frame(command_frame(&["PERSIST", "fr:p2c:008:diff:key"]), 822);
+        let hardened_persist =
+            hardened.execute_frame(command_frame(&["PERSIST", "fr:p2c:008:diff:key"]), 822);
+        assert_eq!(strict_persist, RespFrame::Integer(1));
+        assert_eq!(strict_persist, hardened_persist);
+
+        let strict_ttl_after_persist =
+            strict.execute_frame(command_frame(&["TTL", "fr:p2c:008:diff:key"]), 822);
+        let hardened_ttl_after_persist =
+            hardened.execute_frame(command_frame(&["TTL", "fr:p2c:008:diff:key"]), 822);
+        assert_eq!(strict_ttl_after_persist, RespFrame::Integer(-1));
+        assert_eq!(strict_ttl_after_persist, hardened_ttl_after_persist);
+
+        let strict_set_soon = strict.execute_frame(
+            command_frame(&["SET", "fr:p2c:008:diff:soon", "tmp", "PX", "50"]),
+            822,
+        );
+        let hardened_set_soon = hardened.execute_frame(
+            command_frame(&["SET", "fr:p2c:008:diff:soon", "tmp", "PX", "50"]),
+            822,
+        );
+        assert_eq!(strict_set_soon, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(strict_set_soon, hardened_set_soon);
+
+        let strict_get_expired =
+            strict.execute_frame(command_frame(&["GET", "fr:p2c:008:diff:soon"]), 900);
+        let hardened_get_expired =
+            hardened.execute_frame(command_frame(&["GET", "fr:p2c:008:diff:soon"]), 900);
+        assert_eq!(strict_get_expired, RespFrame::BulkString(None));
+        assert_eq!(strict_get_expired, hardened_get_expired);
+
+        let strict_dbsize = strict.execute_frame(command_frame(&["DBSIZE"]), 900);
+        let hardened_dbsize = hardened.execute_frame(command_frame(&["DBSIZE"]), 900);
+        assert_eq!(strict_dbsize, RespFrame::Integer(1));
+        assert_eq!(strict_dbsize, hardened_dbsize);
+
+        let strict_missing_expire = strict.execute_frame(
+            command_frame(&["EXPIRE", "fr:p2c:008:diff:missing", "10"]),
+            901,
+        );
+        let hardened_missing_expire = hardened.execute_frame(
+            command_frame(&["EXPIRE", "fr:p2c:008:diff:missing", "10"]),
+            901,
+        );
+        assert_eq!(strict_missing_expire, RespFrame::Integer(0));
+        assert_eq!(strict_missing_expire, hardened_missing_expire);
+
+        let strict_event = EvidenceEvent {
+            ts_utc: "unix_ms:901".to_string(),
+            ts_ms: 901,
+            packet_id: 8,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "expire_differential",
+            action: "mode_split_compare",
+            reason_code: "parity_ok",
+            reason: "strict and hardened packet-008 expire/evict contract surface remain output-equivalent".to_string(),
+            input_digest: "fr_p2c_008_f_diff_input".to_string(),
+            output_digest: "fr_p2c_008_f_diff_output".to_string(),
+            state_digest_before: "mode_split_start".to_string(),
+            state_digest_after: "mode_split_verified".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_differential_expire_evict_surface_mode_split_is_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-008/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        let hardened_event = EvidenceEvent {
+            ts_utc: "unix_ms:901".to_string(),
+            ts_ms: 901,
+            packet_id: 8,
+            mode: Mode::Hardened,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "expire_differential",
+            action: "mode_split_compare",
+            reason_code: "parity_ok",
+            reason: "hardened mode preserves strict-equivalent outputs for scoped packet-008 expire/evict surface".to_string(),
+            input_digest: "fr_p2c_008_f_diff_input".to_string(),
+            output_digest: "fr_p2c_008_f_diff_output".to_string(),
+            state_digest_before: "mode_split_start".to_string(),
+            state_digest_after: "mode_split_verified".to_string(),
+            replay_cmd: "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_differential_expire_evict_surface_mode_split_is_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-008/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_008",
+                fixture_name: "fr_p2c_008_runtime_strict",
+                case_name: "f_differential_mode_split_strict",
+                verification_path: VerificationPath::Property,
+                now_ms: 901,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&strict_event),
+        )
+        .expect("packet-008 strict differential structured log should validate");
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_008",
+                fixture_name: "fr_p2c_008_runtime_hardened",
+                case_name: "f_differential_mode_split_hardened",
+                verification_path: VerificationPath::Property,
+                now_ms: 901,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&hardened_event),
+        )
+        .expect("packet-008 hardened differential structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_008_f_metamorphic_expire_and_pexpire_equivalence_holds() {
+        fn run_variant(expire_argv: &[&str]) -> (RespFrame, RespFrame, RespFrame, RespFrame) {
+            let mut runtime = Runtime::default_strict();
+            assert_eq!(
+                runtime.execute_frame(command_frame(&["SET", "fr:p2c:008:mm:key", "v"]), 840),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                runtime.execute_frame(command_frame(expire_argv), 840),
+                RespFrame::Integer(1)
+            );
+            let ttl = runtime.execute_frame(command_frame(&["TTL", "fr:p2c:008:mm:key"]), 840);
+            let pttl = runtime.execute_frame(command_frame(&["PTTL", "fr:p2c:008:mm:key"]), 840);
+            let expiretime =
+                runtime.execute_frame(command_frame(&["EXPIRETIME", "fr:p2c:008:mm:key"]), 840);
+            let pexpiretime =
+                runtime.execute_frame(command_frame(&["PEXPIRETIME", "fr:p2c:008:mm:key"]), 840);
+            (ttl, pttl, expiretime, pexpiretime)
+        }
+
+        let expire_variant = run_variant(&["EXPIRE", "fr:p2c:008:mm:key", "5"]);
+        let pexpire_variant = run_variant(&["PEXPIRE", "fr:p2c:008:mm:key", "5000"]);
+        assert_eq!(expire_variant, pexpire_variant);
+        assert_eq!(expire_variant.0, RespFrame::Integer(5));
+        assert_eq!(expire_variant.1, RespFrame::Integer(5000));
+        assert_eq!(expire_variant.2, RespFrame::Integer(6));
+        assert_eq!(expire_variant.3, RespFrame::Integer(5840));
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:840".to_string(),
+            ts_ms: 840,
+            packet_id: 8,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "expire_metamorphic",
+            action: "expire_pexpire_equivalence",
+            reason_code: "parity_ok",
+            reason: "EXPIRE and PEXPIRE paths converge to equivalent TTL-family observability".to_string(),
+            input_digest: "fr_p2c_008_f_metamorphic_input".to_string(),
+            output_digest: "fr_p2c_008_f_metamorphic_output".to_string(),
+            state_digest_before: "expire_pexpire_split".to_string(),
+            state_digest_after: "expire_pexpire_converged".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_metamorphic_expire_and_pexpire_equivalence_holds".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-008/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_008",
+                fixture_name: "fr_p2c_008_expire_metamorphic",
+                case_name: "f_metamorphic_expire_pexpire_equivalence",
+                verification_path: VerificationPath::Property,
+                now_ms: 840,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&event),
+        )
+        .expect("packet-008 metamorphic structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_008_f_adversarial_expire_reason_codes_are_stable() {
+        let mut runtime = Runtime::default_strict();
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["EXPIRE", "fr:p2c:008:adv:key"]), 860),
+            RespFrame::Error("ERR wrong number of arguments for 'EXPIRE' command".to_string()),
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                command_frame(&["PEXPIRE", "fr:p2c:008:adv:key", "not-int"]),
+                861
+            ),
+            RespFrame::Error("ERR value is not an integer or out of range".to_string()),
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["TTL", "fr:p2c:008:adv:key", "extra"]), 862),
+            RespFrame::Error("ERR wrong number of arguments for 'TTL' command".to_string()),
+        );
+        assert_eq!(
+            runtime.execute_frame(
+                command_frame(&["PERSIST", "fr:p2c:008:adv:key", "extra"]),
+                863
+            ),
+            RespFrame::Error("ERR wrong number of arguments for 'PERSIST' command".to_string()),
+        );
+
+        let command_event = EvidenceEvent {
+            ts_utc: "unix_ms:861".to_string(),
+            ts_ms: 861,
+            packet_id: 8,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "expire_parser",
+            action: "integer_parse_reject",
+            reason_code: "expire.command_semantics_violation",
+            reason: "adversarial EXPIRE/PEXPIRE integer parse drift is rejected deterministically"
+                .to_string(),
+            input_digest: "fr_p2c_008_f_adv_expire_input".to_string(),
+            output_digest: "fr_p2c_008_f_adv_expire_output".to_string(),
+            state_digest_before: "expire_parser_start".to_string(),
+            state_digest_after: "expire_parser_rejected".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_adversarial_expire_reason_codes_are_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-008/risk_note.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        let ttl_event = EvidenceEvent {
+            ts_utc: "unix_ms:862".to_string(),
+            ts_ms: 862,
+            packet_id: 8,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "expire_observability",
+            action: "ttl_arity_reject",
+            reason_code: "expire.ttl_observable_contract_violation",
+            reason: "TTL/PERSIST adversarial arity drift is rejected without observable contract ambiguity".to_string(),
+            input_digest: "fr_p2c_008_f_adv_ttl_input".to_string(),
+            output_digest: "fr_p2c_008_f_adv_ttl_output".to_string(),
+            state_digest_before: "ttl_path_start".to_string(),
+            state_digest_after: "ttl_path_rejected".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_adversarial_expire_reason_codes_are_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-008/risk_note.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        let hardened_policy_event = EvidenceEvent {
+            ts_utc: "unix_ms:863".to_string(),
+            ts_ms: 863,
+            packet_id: 8,
+            mode: Mode::Hardened,
+            severity: DriftSeverity::S1,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::RejectNonAllowlisted,
+            subsystem: "expire_policy",
+            action: "hardened_deviation_gate",
+            reason_code: "expireevict.hardened_nonallowlisted_rejected",
+            reason: "non-allowlisted hardened packet-008 expire/evict deviation remains rejected"
+                .to_string(),
+            input_digest: "fr_p2c_008_f_adv_hardened_input".to_string(),
+            output_digest: "fr_p2c_008_f_adv_hardened_output".to_string(),
+            state_digest_before: "hardened_candidate".to_string(),
+            state_digest_after: "hardened_rejected".to_string(),
+            replay_cmd: "FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_f_adversarial_expire_reason_codes_are_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-008/risk_note.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        let cases = [
+            (
+                "f_adv_expire_parse_reason",
+                command_event,
+                "expire.command_semantics_violation",
+            ),
+            (
+                "f_adv_ttl_arity_reason",
+                ttl_event,
+                "expire.ttl_observable_contract_violation",
+            ),
+            (
+                "f_adv_hardened_nonallowlisted_reason",
+                hardened_policy_event,
+                "expireevict.hardened_nonallowlisted_rejected",
+            ),
+        ];
+
+        for (case_name, event, expected_reason_code) in cases {
+            assert_eq!(
+                event.reason_code, expected_reason_code,
+                "reason-code stability mismatch for case={case_name}",
+            );
+            validate_structured_log_emission(
+                StructuredLogEmissionContext {
+                    suite_id: "fr_p2c_008",
+                    fixture_name: "fr_p2c_008_expire_adversarial",
+                    case_name,
+                    verification_path: VerificationPath::Property,
+                    now_ms: event.ts_ms,
+                    outcome: LogOutcome::Pass,
+                    persist_path: None,
+                },
+                std::slice::from_ref(&event),
+            )
+            .expect("packet-008 adversarial structured log should validate");
+        }
+    }
+
+    #[test]
+    fn fr_p2c_008_u005_nonpositive_expire_deletes_immediately_and_logs() {
+        let mut runtime = Runtime::default_strict();
+
+        let set = runtime.execute_frame(command_frame(&["SET", "fr:p2c:008:imm", "v"]), 800);
+        assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
+
+        let expire_zero =
+            runtime.execute_frame(command_frame(&["EXPIRE", "fr:p2c:008:imm", "0"]), 801);
+        assert_eq!(expire_zero, RespFrame::Integer(1));
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["GET", "fr:p2c:008:imm"]), 801),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["TTL", "fr:p2c:008:imm"]), 801),
+            RespFrame::Integer(-2)
+        );
+
+        let set_again = runtime.execute_frame(command_frame(&["SET", "fr:p2c:008:imm", "v2"]), 802);
+        assert_eq!(set_again, RespFrame::SimpleString("OK".to_string()));
+        let expire_negative =
+            runtime.execute_frame(command_frame(&["EXPIRE", "fr:p2c:008:imm", "-5"]), 803);
+        assert_eq!(expire_negative, RespFrame::Integer(1));
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["GET", "fr:p2c:008:imm"]), 803),
+            RespFrame::BulkString(None)
+        );
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:803".to_string(),
+            ts_ms: 803,
+            packet_id: 8,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "expire_command",
+            action: "expire_nonpositive_immediate_delete",
+            reason_code: "expire.immediate_delete_rewrite_violation",
+            reason: "non-positive EXPIRE values deterministically trigger immediate delete semantics"
+                .to_string(),
+            input_digest: "fr_p2c_008_u005_input".to_string(),
+            output_digest: "fr_p2c_008_u005_output".to_string(),
+            state_digest_before: "expire_nonpositive_start".to_string(),
+            state_digest_after: "expire_nonpositive_deleted".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=803 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_u005_nonpositive_expire_deletes_immediately_and_logs".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-008/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_008",
+                fixture_name: "fr_p2c_008_expire_semantics",
+                case_name: "u005_nonpositive_expire_delete",
+                verification_path: VerificationPath::Unit,
+                now_ms: 803,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&event),
+        )
+        .expect("packet-008 non-positive EXPIRE structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_008_u006_ttl_pttl_persist_contract_and_logs() {
+        let mut runtime = Runtime::default_strict();
+
+        let set = runtime.execute_frame(command_frame(&["SET", "fr:p2c:008:ttl", "v"]), 810);
+        assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
+
+        let expire = runtime.execute_frame(command_frame(&["EXPIRE", "fr:p2c:008:ttl", "5"]), 811);
+        assert_eq!(expire, RespFrame::Integer(1));
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["TTL", "fr:p2c:008:ttl"]), 811),
+            RespFrame::Integer(5)
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["PTTL", "fr:p2c:008:ttl"]), 811),
+            RespFrame::Integer(5000)
+        );
+
+        let persist = runtime.execute_frame(command_frame(&["PERSIST", "fr:p2c:008:ttl"]), 812);
+        assert_eq!(persist, RespFrame::Integer(1));
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["TTL", "fr:p2c:008:ttl"]), 812),
+            RespFrame::Integer(-1)
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["PTTL", "fr:p2c:008:ttl"]), 812),
+            RespFrame::Integer(-1)
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["PERSIST", "fr:p2c:008:ttl"]), 812),
+            RespFrame::Integer(0)
+        );
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:812".to_string(),
+            ts_ms: 812,
+            packet_id: 8,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "expire_ttl_observability",
+            action: "ttl_pttl_persist_contract",
+            reason_code: "expire.ttl_observable_contract_violation",
+            reason: "TTL/PTTL/PERSIST observable semantics remain deterministic across transitions"
+                .to_string(),
+            input_digest: "fr_p2c_008_u006_input".to_string(),
+            output_digest: "fr_p2c_008_u006_output".to_string(),
+            state_digest_before: "ttl_observability_start".to_string(),
+            state_digest_after: "ttl_observability_verified".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=812 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_u006_ttl_pttl_persist_contract_and_logs".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-008/risk_note.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_008",
+                fixture_name: "fr_p2c_008_ttl_persist",
+                case_name: "u006_ttl_pttl_persist",
+                verification_path: VerificationPath::Unit,
+                now_ms: 812,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&event),
+        )
+        .expect("packet-008 TTL/PTTL/PERSIST structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_008_u009_property_expired_keys_are_invisible_across_access_paths() {
+        fn run_visibility_sequence(
+            first_probe: &[&str],
+        ) -> (RespFrame, RespFrame, RespFrame, RespFrame) {
+            let mut runtime = Runtime::default_strict();
+            assert_eq!(
+                runtime.execute_frame(command_frame(&["SET", "fr:p2c:008:live", "1"]), 900),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            assert_eq!(
+                runtime.execute_frame(
+                    command_frame(&["SET", "fr:p2c:008:soon", "2", "PX", "100"]),
+                    900,
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+
+            let _ = runtime.execute_frame(command_frame(first_probe), 1_050);
+            let get_expired =
+                runtime.execute_frame(command_frame(&["GET", "fr:p2c:008:soon"]), 1_050);
+            let keys_after = runtime.execute_frame(command_frame(&["KEYS", "*"]), 1_050);
+            let dbsize_after = runtime.execute_frame(command_frame(&["DBSIZE"]), 1_050);
+            let ttl_after =
+                runtime.execute_frame(command_frame(&["TTL", "fr:p2c:008:soon"]), 1_050);
+            (get_expired, keys_after, dbsize_after, ttl_after)
+        }
+
+        let baseline = run_visibility_sequence(&["GET", "fr:p2c:008:soon"]);
+        let keys_first = run_visibility_sequence(&["KEYS", "*"]);
+        let dbsize_first = run_visibility_sequence(&["DBSIZE"]);
+
+        assert_eq!(baseline, keys_first);
+        assert_eq!(baseline, dbsize_first);
+
+        assert_eq!(baseline.0, RespFrame::BulkString(None));
+        assert_eq!(
+            baseline.1,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
+                b"fr:p2c:008:live".to_vec(),
+            ))]))
+        );
+        assert_eq!(baseline.2, RespFrame::Integer(1));
+        assert_eq!(baseline.3, RespFrame::Integer(-2));
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:1050".to_string(),
+            ts_ms: 1_050,
+            packet_id: 8,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "expire_lookup_guard",
+            action: "lazy_expire_visibility_reduce",
+            reason_code: "expire.lookup_guard_contract_violation",
+            reason: "expired keys are removed consistently regardless of first read-path probe"
+                .to_string(),
+            input_digest: "fr_p2c_008_u009_input".to_string(),
+            output_digest: "fr_p2c_008_u009_output".to_string(),
+            state_digest_before: "lazy_expire_visibility_start".to_string(),
+            state_digest_after: "lazy_expire_visibility_verified".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=1050 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_u009_property_expired_keys_are_invisible_across_access_paths".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-008/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_008",
+                fixture_name: "fr_p2c_008_lazy_expire_visibility",
+                case_name: "u009_property_lazy_expire_visibility",
+                verification_path: VerificationPath::Property,
+                now_ms: 1_050,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&event),
+        )
+        .expect("packet-008 lazy-expire visibility structured log should validate");
+    }
+
+    #[test]
     fn run_replay_fixture_allows_structured_log_persistence_toggle() {
         let log_root = unique_temp_log_root("fr_conformance_replay_logs");
         let mut cfg = HarnessConfig::default_paths();
@@ -3752,6 +4364,26 @@ mod tests {
         assert_eq!(
             crate::packet_family_for_fixture("fr_p2c_007_cluster_journey.json"),
             "FR-P2C-007"
+        );
+    }
+
+    #[test]
+    fn fr_p2c_008_fixture_packet_family_maps_to_packet_008() {
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_008_expire_semantics"),
+            "FR-P2C-008"
+        );
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_008_ttl_persist"),
+            "FR-P2C-008"
+        );
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_008_lazy_expire_visibility"),
+            "FR-P2C-008"
+        );
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_008_expire_evict_journey.json"),
+            "FR-P2C-008"
         );
     }
 
