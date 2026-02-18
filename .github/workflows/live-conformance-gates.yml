@@ -9,7 +9,12 @@ on:
 jobs:
   live-conformance-gates:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
+    env:
+      LIVE_RUN_ID: ci-live
+      ADV_RUN_ID: ci-adv
+      RAPTORQ_RUN_ID: ci-raptorq
+      FORENSICS_ROOT: artifacts/failure_forensics
 
     steps:
       - name: Checkout
@@ -29,50 +34,171 @@ jobs:
       - name: Start Redis Server
         run: redis-server --save "" --appendonly no --daemonize yes
 
-      - name: Run Live Oracle Differential Suites
+      - name: Prepare Failure Forensics Directories
+        run: mkdir -p "${FORENSICS_ROOT}/${LIVE_RUN_ID}"
+
+      - name: G1 - Verify Formatting
+        run: cargo fmt --check
+
+      - name: G1 - Verify Lints
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: G2 - Run Unit and Property Baseline
+        run: cargo test --workspace -- --nocapture
+
+      - name: G3+G5 - Run Live Oracle Differential Suites
         run: |
           ./scripts/run_live_oracle_diff.sh \
             --host 127.0.0.1 \
             --port 6379 \
             --output-root artifacts/e2e_orchestrator \
-            --run-id ci-live
+            --run-id "${LIVE_RUN_ID}"
 
-      - name: Enforce Coverage/Flake Budgets
-        run: ./scripts/check_coverage_flake_budget.sh artifacts/e2e_orchestrator/ci-live/coverage_summary.json
+      - name: G7 - Enforce Coverage/Flake Budgets
+        run: ./scripts/check_coverage_flake_budget.sh "artifacts/e2e_orchestrator/${LIVE_RUN_ID}/coverage_summary.json"
 
-      - name: Run Adversarial Triage
+      - name: G4 - Run Adversarial Triage
         run: |
           ./scripts/run_adversarial_triage.sh \
             --output-root artifacts/adversarial_triage \
-            --run-id ci-adv \
+            --run-id "${ADV_RUN_ID}" \
             --runner local
 
-      - name: Run RaptorQ Artifact Gate
+      - name: G6 - Run Optimization Gate
+        run: |
+          set -euo pipefail
+          cargo run -p fr-conformance --bin phase2c_schema_gate -- --optimization-gate \
+            | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/optimization_gate_stdout.log"
+
+      - name: G7 - Run User Workflow Corpus Gate
+        run: |
+          cargo run -p fr-conformance --bin user_journey_corpus_gate -- \
+            --manifest crates/fr-conformance/fixtures/user_workflow_corpus_v1.json \
+            --json-out "${FORENSICS_ROOT}/${LIVE_RUN_ID}/user_journey_corpus_report.json"
+
+      - name: G7 - Run Packet Schema Gate
+        run: |
+          set -euo pipefail
+          mapfile -t candidate_packet_dirs < <(
+            find crates/fr-conformance/fixtures/phase2c \
+              -mindepth 1 -maxdepth 1 -type d \
+              -regextype posix-extended \
+              -regex '.*/FR-P2C-[0-9]{3}$' \
+              | sort
+          )
+          packet_dirs=()
+          for dir in "${candidate_packet_dirs[@]}"; do
+            if [ -f "${dir}/parity_report.json" ]; then
+              packet_dirs+=("${dir}")
+            fi
+          done
+          if [ "${#packet_dirs[@]}" -eq 0 ]; then
+            echo "no packet directories with parity_report.json found under crates/fr-conformance/fixtures/phase2c" >&2
+            exit 1
+          fi
+          printf '%s\n' "${packet_dirs[@]}" > "${FORENSICS_ROOT}/${LIVE_RUN_ID}/phase2c_packet_dirs.txt"
+          cargo run -p fr-conformance --bin phase2c_schema_gate -- "${packet_dirs[@]}" \
+            | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/phase2c_schema_gate_stdout.log"
+
+      - name: G8 - Run RaptorQ Artifact Gate
         run: |
           ./scripts/run_raptorq_artifact_gate.sh \
             --output-root artifacts/durability/raptorq_runs \
-            --run-id ci-raptorq
+            --run-id "${RAPTORQ_RUN_ID}"
+
+      - name: G7 - Build Failure Forensics Index
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from datetime import datetime, UTC
+          from pathlib import Path
+
+          live_run_id = os.environ["LIVE_RUN_ID"]
+          adv_run_id = os.environ["ADV_RUN_ID"]
+          raptorq_run_id = os.environ["RAPTORQ_RUN_ID"]
+          forensics_root = Path(os.environ["FORENSICS_ROOT"]) / live_run_id
+          forensics_root.mkdir(parents=True, exist_ok=True)
+
+          artifact_paths = [
+              Path(f"artifacts/e2e_orchestrator/{live_run_id}/suite_status.tsv"),
+              Path(f"artifacts/e2e_orchestrator/{live_run_id}/command_trace.log"),
+              Path(f"artifacts/e2e_orchestrator/{live_run_id}/coverage_summary.json"),
+              Path(f"artifacts/e2e_orchestrator/{live_run_id}/failure_envelope.json"),
+              Path(f"artifacts/e2e_orchestrator/{live_run_id}/replay_all.sh"),
+              Path(f"artifacts/e2e_orchestrator/{live_run_id}/replay_failed.sh"),
+              Path(f"artifacts/e2e_orchestrator/{live_run_id}/reliability_budget_result.json"),
+              Path(f"artifacts/e2e_orchestrator/{live_run_id}/flake_quarantine_candidates.txt"),
+              Path(f"artifacts/adversarial_triage/{adv_run_id}/triage_report.json"),
+              Path(f"artifacts/adversarial_triage/{adv_run_id}/triage_routes.tsv"),
+              Path(f"artifacts/adversarial_triage/{adv_run_id}/env.json"),
+              Path(f"artifacts/adversarial_triage/{adv_run_id}/manifest.json"),
+              Path(f"artifacts/adversarial_triage/{adv_run_id}/repro.lock"),
+              Path(f"artifacts/durability/raptorq_runs/{raptorq_run_id}/report.json"),
+              Path(f"artifacts/durability/raptorq_runs/{raptorq_run_id}/artifacts.ndjson"),
+              forensics_root / "optimization_gate_stdout.log",
+              forensics_root / "user_journey_corpus_report.json",
+              forensics_root / "phase2c_packet_dirs.txt",
+              forensics_root / "phase2c_schema_gate_stdout.log",
+          ]
+
+          entries = []
+          for path in artifact_paths:
+              item = {
+                  "path": path.as_posix(),
+                  "exists": path.exists(),
+              }
+              if path.exists() and path.is_file():
+                  payload = path.read_bytes()
+                  item["size_bytes"] = len(payload)
+                  item["sha256"] = hashlib.sha256(payload).hexdigest()
+              entries.append(item)
+
+          index = {
+              "schema_version": "fr_failure_forensics_index/v1",
+              "run_id": live_run_id,
+              "generated_at_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "present_artifact_count": sum(1 for entry in entries if entry["exists"]),
+              "missing_artifact_count": sum(1 for entry in entries if not entry["exists"]),
+              "artifacts": entries,
+          }
+          out_path = forensics_root / "index.json"
+          out_path.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+          print(f"forensics_index: {out_path.as_posix()}")
+          print(f"present_artifact_count: {index['present_artifact_count']}")
+          print(f"missing_artifact_count: {index['missing_artifact_count']}")
+          PY
 
       - name: Upload Live Oracle Bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-orchestrator-ci-live
-          path: artifacts/e2e_orchestrator/ci-live
+          name: e2e-orchestrator-${{ env.LIVE_RUN_ID }}
+          path: artifacts/e2e_orchestrator/${{ env.LIVE_RUN_ID }}
           if-no-files-found: warn
 
       - name: Upload Adversarial Triage Bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: adversarial-triage-ci-adv
-          path: artifacts/adversarial_triage/ci-adv
+          name: adversarial-triage-${{ env.ADV_RUN_ID }}
+          path: artifacts/adversarial_triage/${{ env.ADV_RUN_ID }}
           if-no-files-found: warn
 
       - name: Upload RaptorQ Artifact Gate Bundle
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: raptorq-artifact-gate-ci-raptorq
-          path: artifacts/durability/raptorq_runs/ci-raptorq
+          name: raptorq-artifact-gate-${{ env.RAPTORQ_RUN_ID }}
+          path: artifacts/durability/raptorq_runs/${{ env.RAPTORQ_RUN_ID }}
+          if-no-files-found: warn
+
+      - name: Upload Failure Forensics Index Bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-forensics-${{ env.LIVE_RUN_ID }}
+          path: ${{ env.FORENSICS_ROOT }}/${{ env.LIVE_RUN_ID }}
           if-no-files-found: warn

@@ -108,6 +108,28 @@ The gate verifies:
 - stable `test_or_scenario_id` bindings against golden log JSONL entries
 - explicit unit/differential/e2e hook mappings with owner-bead traceability
 
+## CI Gate Topology (G1..G8)
+
+`/.github/workflows/live-conformance-gates.yml` wires the foundation gate chain
+for `bd-2wb.10` as follows:
+
+- `G1`: `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings`
+- `G2`: `cargo test --workspace -- --nocapture`
+- `G3+G5`: `./scripts/run_live_oracle_diff.sh` (differential + deterministic e2e matrix)
+- `G4`: `./scripts/run_adversarial_triage.sh`
+- `G6`: `cargo run -p fr-conformance --bin phase2c_schema_gate -- --optimization-gate`
+- `G7`: corpus gate + packet schema gate (materialized packet dirs with `parity_report.json`) + deterministic failure-forensics index
+- `G8`: `./scripts/run_raptorq_artifact_gate.sh`
+
+The CI forensics index is emitted at:
+
+```text
+artifacts/failure_forensics/ci-live/index.json
+```
+
+with per-gate evidence pointers (including live-oracle coverage/failure envelopes,
+adversarial triage outputs, schema/corpus gate outputs, and RaptorQ report paths).
+
 ## FR-P2C-003 Optimization Evidence Pack
 
 The FR-P2C-003 profile/isomorphism evidence for `bd-2wb.14.8` is stored under:
