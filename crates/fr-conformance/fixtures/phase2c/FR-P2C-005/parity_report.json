@@ -1,0 +1,33 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-005",
+  "readiness": "READY_FOR_IMPL",
+  "missing_mandatory_fields": [],
+  "strict_mode": {
+    "status": "pass",
+    "summary": "Persistence replay ordering and decode-failure contracts are deterministic and parity-aligned for packet scope."
+  },
+  "hardened_mode": {
+    "status": "pass",
+    "summary": "Only allowlisted bounded replay defenses are permitted; non-allowlisted deviations are rejected fail-closed."
+  },
+  "evidence": {
+    "unit_property": [
+      "fr_p2c_005_e001_replay_fixture_passes_with_schema_contract",
+      "fr_p2c_005_e003_roundtrip_preserves_aof_record_order_and_payloads",
+      "fr_p2c_005_e013_adversarial_replay_decode_errors_are_stable"
+    ],
+    "differential": [
+      "fr_p2c_005_f_differential_replay_fixture_passes",
+      "fr_p2c_005_f_metamorphic_noop_records_preserve_outcomes",
+      "fr_p2c_005_f_adversarial_decode_reason_taxonomy_is_stable"
+    ],
+    "e2e": [
+      "fr_p2c_005_e2e_contract_smoke"
+    ],
+    "optimization": [
+      "LEV-005-OPT-01_directory_scan_bitmask",
+      "phase2c_gate_round_dir_scan_mask_isomorphism_check"
+    ]
+  }
+}

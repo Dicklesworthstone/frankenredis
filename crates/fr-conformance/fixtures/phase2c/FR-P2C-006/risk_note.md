@@ -144,3 +144,20 @@ Required artifacts:
 - Current Rust replication subsystem is minimal; threat controls remain contractual until implementation beads land.
 - WAIT/WAITAOF correctness is sensitive to ordering across event-loop/ack/fsync updates and needs dedicated adversarial coverage.
 - Role-transition/replid drift risk remains high until full conformance loops exist for failover and reconnection permutations.
+
+## Implemented packet-006 final parity + durability artifacts (bd-2wb.17.9)
+
+- Final packet manifest + gate policy published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-006/fixture_manifest.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-006/parity_gate.yaml`
+  - hardened policy keeps `non_allowlisted_action=fail_closed`.
+- Final packet parity report published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-006/parity_report.json`
+  - readiness set to `READY_FOR_IMPL` with no missing mandatory fields.
+- RaptorQ proof chain published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-006/parity_report.raptorq.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-006/parity_report.decode_proof.json`
+  - deterministic decode reason code: `raptorq.decode_verified`
+  - replay command: `./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke`
+- Replay validation command:
+  - `rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- crates/fr-conformance/fixtures/phase2c/FR-P2C-006`

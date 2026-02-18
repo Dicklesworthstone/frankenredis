@@ -57,6 +57,23 @@ All threat detections/rejections/recoveries must emit:
 - `replay_cmd`
 - `artifact_refs`
 
+## Implemented packet-005 final parity + durability artifacts (bd-2wb.16.9)
+
+- Final packet manifest + gate policy published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-005/fixture_manifest.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-005/parity_gate.yaml`
+  - hardened policy keeps `non_allowlisted_action=fail_closed`.
+- Final packet parity report published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-005/parity_report.json`
+  - readiness set to `READY_FOR_IMPL` with no missing mandatory fields.
+- RaptorQ proof chain published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-005/parity_report.raptorq.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-005/parity_report.decode_proof.json`
+  - deterministic decode reason code: `raptorq.decode_verified`
+  - replay command: `./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke`
+- Replay validation command:
+  - `rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- crates/fr-conformance/fixtures/phase2c/FR-P2C-005`
+
 ## Expected-loss decision model
 
 ### States

@@ -145,3 +145,20 @@ Required artifacts:
 - Current Rust code has no TLS connection type/runtime handshake implementation; risk controls remain contractual until implementation beads land.
 - TLS listener/config rewrite parity depends on future runtime/config persistence surfaces not yet implemented.
 - Handshake state-machine parity requires event-loop integration work that is currently absent in Rust baseline.
+
+## Implemented packet-009 final parity + durability artifacts (bd-2wb.20.9)
+
+- Final packet manifest + gate policy published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-009/fixture_manifest.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-009/parity_gate.yaml`
+  - hardened policy keeps `non_allowlisted_action=fail_closed`.
+- Final packet parity report published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-009/parity_report.json`
+  - readiness set to `READY_FOR_IMPL` with no missing mandatory fields.
+- RaptorQ proof chain published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-009/parity_report.raptorq.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-009/parity_report.decode_proof.json`
+  - deterministic decode reason code: `raptorq.decode_verified`
+  - replay command: `./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke`
+- Replay validation command:
+  - `rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- crates/fr-conformance/fixtures/phase2c/FR-P2C-009`

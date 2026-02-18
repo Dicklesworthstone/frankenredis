@@ -161,3 +161,21 @@ Required artifacts:
 - Every contract row declares deterministic `reason_code` values.
 - Every contract row includes explicit strict/hardened expectations and fail-closed boundary.
 - Replication user-visible outcomes are explicit for replies/ordering/offset contracts.
+
+## Implemented final evidence pack (bd-2wb.17.9)
+
+- Final packet manifest + gate policy published:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-006/fixture_manifest.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-006/parity_gate.yaml`
+  - hardened policy keeps `non_allowlisted_action=fail_closed`.
+- Packet parity report finalized in `crates/fr-conformance/fixtures/phase2c/FR-P2C-006/parity_report.json` with:
+  - `readiness=READY_FOR_IMPL`
+  - `missing_mandatory_fields=[]`
+  - explicit unit/differential/e2e/optimization evidence IDs.
+- Durability sidecar + decode-proof artifacts finalized in:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-006/parity_report.raptorq.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-006/parity_report.decode_proof.json`
+  - reason code: `raptorq.decode_verified`
+  - replay command: `./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke`
+- Packet schema/readiness replay:
+  - `rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- crates/fr-conformance/fixtures/phase2c/FR-P2C-006`

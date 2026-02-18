@@ -1,0 +1,75 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-005",
+  "legacy_paths": [
+    "legacy_redis_code/redis/src/aof.c",
+    "legacy_redis_code/redis/src/rdb.c",
+    "legacy_redis_code/redis/src/server.c",
+    "legacy_redis_code/redis/src/replication.c"
+  ],
+  "legacy_symbols": [
+    "feedAppendOnlyFile",
+    "loadAppendOnlyFiles",
+    "rdbLoadRio",
+    "rdbSaveRio",
+    "waitaofCommand"
+  ],
+  "state_machine_contract": [
+    "manifest_replay_order_determinism",
+    "sync_time_aof_stop_restart_order",
+    "waitaof_ack_threshold_transition_determinism"
+  ],
+  "protocol_contract": [
+    "aof_resp_frame_replay_parse_contract",
+    "rdb_preamble_aof_tail_cursor_contract",
+    "multi_replay_atomic_rollback"
+  ],
+  "command_acl_contract": [
+    "write_deny_on_persistence_disk_error",
+    "hardened_nonallowlisted_repair_rejected"
+  ],
+  "persistence_replication_contract": [
+    "base_incr_manifest_chain_ordering",
+    "nonfinal_corruption_fails_closed",
+    "replication_fullsync_persistence_ordering"
+  ],
+  "error_contract": [
+    "persist.replay.manifest_order_mismatch",
+    "persist.replay.nonfinal_truncation_fatal",
+    "persist.hardened_nonallowlisted_rejected"
+  ],
+  "strict_mode_policy": [
+    "redis_observable_persistence_replay_ordering_parity",
+    "fail_closed_unknown_or_nonallowlisted_replay_deviation"
+  ],
+  "hardened_mode_policy": [
+    "bounded_replay_repair_allowlist_only",
+    "bounded_parser_diagnostics_only"
+  ],
+  "excluded_scope": [
+    "full_bgrewriteaof_parent_child_state_machine",
+    "full_rdb_serializer_loader_opcode_surface"
+  ],
+  "oracle_tests": [
+    "fr_p2c_005_e001_replay_fixture_passes_with_schema_contract",
+    "fr_p2c_005_e003_roundtrip_preserves_aof_record_order_and_payloads",
+    "fr_p2c_005_e013_adversarial_replay_decode_errors_are_stable",
+    "fr_p2c_005_f_differential_replay_fixture_passes",
+    "fr_p2c_005_f_metamorphic_noop_records_preserve_outcomes",
+    "fr_p2c_005_f_adversarial_decode_reason_taxonomy_is_stable",
+    "fr_p2c_005_e2e_contract_smoke"
+  ],
+  "performance_sentinels": [
+    "phase2c_gate_round_dir_scan_mask_delta_percent>0",
+    "phase2c_gate_round_dir_scan_mask_isomorphism_check_pass"
+  ],
+  "compatibility_risks": [
+    "manifest_ordering_drift",
+    "replay_repair_policy_drift",
+    "hardened_nonallowlisted_deviation_leak"
+  ],
+  "raptorq_artifacts": [
+    "parity_report.raptorq.json",
+    "parity_report.decode_proof.json"
+  ]
+}

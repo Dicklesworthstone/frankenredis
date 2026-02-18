@@ -1,0 +1,33 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-006",
+  "readiness": "READY_FOR_IMPL",
+  "missing_mandatory_fields": [],
+  "strict_mode": {
+    "status": "pass",
+    "summary": "Replication state transitions, PSYNC branch selection, and WAIT/WAITAOF threshold semantics are deterministic and parity-aligned for packet scope."
+  },
+  "hardened_mode": {
+    "status": "pass",
+    "summary": "Only allowlisted bounded defenses are permitted; non-allowlisted deviations are rejected fail-closed."
+  },
+  "evidence": {
+    "unit_property": [
+      "fr_p2c_006_u001_psync_accepts_partial_resync_inside_window",
+      "fr_p2c_006_u004_replica_ack_offsets_never_regress",
+      "fr_p2c_006_u006_waitaof_requires_local_and_replica_thresholds"
+    ],
+    "differential": [
+      "fr_p2c_006_f_handshake_contract_vectors_are_enforced",
+      "fr_p2c_006_f_psync_adversarial_matrix_prefers_safe_fallbacks",
+      "fr_p2c_006_f_waitaof_metamorphic_joint_threshold_semantics_hold"
+    ],
+    "e2e": [
+      "fr_p2c_006_e2e_contract_smoke"
+    ],
+    "optimization": [
+      "LEV-006-03_wait_threshold_unblocking_cache",
+      "fr_p2c_006_f_wait_metamorphic_ack_monotonicity_holds"
+    ]
+  }
+}

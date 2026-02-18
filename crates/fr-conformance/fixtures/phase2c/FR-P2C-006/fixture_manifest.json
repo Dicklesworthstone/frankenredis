@@ -1,0 +1,81 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-006",
+  "legacy_paths": [
+    "legacy_redis_code/redis/src/replication.c",
+    "legacy_redis_code/redis/src/networking.c",
+    "legacy_redis_code/redis/src/server.c",
+    "legacy_redis_code/redis/src/rdb.c"
+  ],
+  "legacy_symbols": [
+    "masterTryPartialResynchronization",
+    "syncWithMaster",
+    "replicationCron",
+    "replicaofCommand",
+    "waitCommand",
+    "waitaofCommand"
+  ],
+  "state_machine_contract": [
+    "backlog_lifecycle_replid_history_continuity",
+    "psync_partial_vs_full_branch_determinism",
+    "wait_and_waitaof_threshold_transition_determinism"
+  ],
+  "protocol_contract": [
+    "psync_fullresync_continue_reply_parse_contract",
+    "replconf_ack_fack_monotonicity_contract",
+    "role_reply_shape_and_metadata_contract"
+  ],
+  "command_acl_contract": [
+    "replicaof_mode_constraint_enforcement",
+    "hardened_nonallowlisted_repair_rejected"
+  ],
+  "persistence_replication_contract": [
+    "rdb_replication_metadata_restore_rebase_ordering",
+    "applied_delta_proxy_ordering_contract",
+    "replication_cron_backlog_ttl_replid_rotation_contract"
+  ],
+  "error_contract": [
+    "repl.psync_replid_or_offset_reject_mismatch",
+    "repl.wait_ack_count_mismatch",
+    "repl.waitaof_ack_semantics_mismatch",
+    "repl.hardened_nonallowlisted_rejected"
+  ],
+  "strict_mode_policy": [
+    "redis_observable_replication_reply_and_ordering_parity",
+    "fail_closed_unknown_or_nonallowlisted_replication_deviation"
+  ],
+  "hardened_mode_policy": [
+    "bounded_parser_diagnostics_only",
+    "metadata_sanitization_allowlist_only",
+    "resource_clamp_allowlist_only"
+  ],
+  "excluded_scope": [
+    "multi_primary_cluster_replication_topology",
+    "diskless_rdb_transport_specialization"
+  ],
+  "oracle_tests": [
+    "fr_p2c_006_u001_psync_accepts_partial_resync_inside_window",
+    "fr_p2c_006_u002_psync_rejects_replid_mismatch",
+    "fr_p2c_006_u003_handshake_requires_ping_first",
+    "fr_p2c_006_u004_replica_ack_offsets_never_regress",
+    "fr_p2c_006_u006_waitaof_requires_local_and_replica_thresholds",
+    "fr_p2c_006_f_handshake_contract_vectors_are_enforced",
+    "fr_p2c_006_f_psync_adversarial_matrix_prefers_safe_fallbacks",
+    "fr_p2c_006_f_wait_metamorphic_ack_monotonicity_holds",
+    "fr_p2c_006_f_waitaof_metamorphic_joint_threshold_semantics_hold",
+    "fr_p2c_006_e2e_contract_smoke"
+  ],
+  "performance_sentinels": [
+    "wait_threshold_metamorphic_semantics_stable",
+    "waitaof_joint_threshold_metamorphic_semantics_stable"
+  ],
+  "compatibility_risks": [
+    "psync_branch_selection_drift",
+    "wait_waitaof_threshold_unblock_drift",
+    "hardened_nonallowlisted_deviation_leak"
+  ],
+  "raptorq_artifacts": [
+    "parity_report.raptorq.json",
+    "parity_report.decode_proof.json"
+  ]
+}

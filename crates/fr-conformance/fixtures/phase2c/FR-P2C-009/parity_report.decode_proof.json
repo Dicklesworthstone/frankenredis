@@ -1,0 +1,14 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-009",
+  "decode_proofs": [
+    {
+      "ts_unix_ms": 1771372929000,
+      "reason": "scheduled packet-009 final evidence drill",
+      "recovered_blocks": 0,
+      "proof_hash": "sha256:b9ef1ecebd29a860952868160391d2ac314b37801e783513fe403f3f0706dfbf",
+      "reason_code": "raptorq.decode_verified",
+      "replay_cmd": "./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke"
+    }
+  ]
+}

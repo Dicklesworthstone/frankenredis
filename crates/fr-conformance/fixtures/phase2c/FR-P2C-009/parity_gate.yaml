@@ -1,0 +1,17 @@
+strict:
+  packet_id: FR-P2C-009
+  conformance_drift: 0
+  required_reason_codes:
+    - parity_ok
+    - journey_ok
+hardened:
+  allowed_deviation_classes:
+    - BoundedParserDiagnostics
+    - MetadataSanitization
+    - ResourceClamp
+  non_allowlisted_action: fail_closed
+artifacts:
+  fixture_manifest: fixture_manifest.json
+  parity_report: parity_report.json
+  raptorq_sidecar: parity_report.raptorq.json
+  decode_proof: parity_report.decode_proof.json

@@ -1,0 +1,80 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-009",
+  "legacy_paths": [
+    "legacy_redis_code/redis/src/tls.c",
+    "legacy_redis_code/redis/src/config.c",
+    "legacy_redis_code/redis/src/networking.c",
+    "legacy_redis_code/redis/src/server.c"
+  ],
+  "legacy_symbols": [
+    "tlsConfigure",
+    "tlsContextConfigFromRedisConfig",
+    "applyBind",
+    "rewriteConfig",
+    "configSetCommand"
+  ],
+  "state_machine_contract": [
+    "tls_context_build_apply_atomicity",
+    "tls_listener_lifecycle_and_bind_rollback_determinism",
+    "tls_handshake_want_state_transition_determinism"
+  ],
+  "protocol_contract": [
+    "tls_protocol_token_parse_and_normalize_contract",
+    "tls_runtime_apply_configure_hook_contract",
+    "tls_operational_knob_contract"
+  ],
+  "command_acl_contract": [
+    "directive_registry_mutability_validation_contract",
+    "hardened_nonallowlisted_repair_rejected"
+  ],
+  "persistence_replication_contract": [
+    "tls_rewrite_persistence_and_restart_contract",
+    "listener_apply_plan_atomicity_contract"
+  ],
+  "error_contract": [
+    "tlscfg.protocols_parse_contract_violation",
+    "tls.runtime_apply_contract_violation",
+    "tls.bind_atomicity_violation",
+    "tlscfg.hardened_nonallowlisted_rejected"
+  ],
+  "strict_mode_policy": [
+    "redis_observable_tls_config_apply_and_handshake_parity",
+    "fail_closed_unknown_or_nonallowlisted_tls_config_deviation"
+  ],
+  "hardened_mode_policy": [
+    "bounded_parser_diagnostics_only",
+    "metadata_sanitization_allowlist_only",
+    "resource_clamp_allowlist_only"
+  ],
+  "excluded_scope": [
+    "external_hsm_provider_integration",
+    "multi_tenant_tls_context_isolation_matrix"
+  ],
+  "oracle_tests": [
+    "fr_p2c_009_u001_protocol_parse_rejects_unknown_token",
+    "fr_p2c_009_u002_context_validation_requires_atomic_material",
+    "fr_p2c_009_u010_runtime_apply_plan_requires_configure_hook",
+    "fr_p2c_009_u011_runtime_tls_accept_limit_clamps_tls_accepts",
+    "fr_p2c_009_u013_hardened_gate_rejects_non_allowlisted_deviation",
+    "fr_p2c_009_f_differential_mode_split_contract_is_stable",
+    "fr_p2c_009_f_metamorphic_non_allowlisted_rejection_is_deterministic",
+    "fr_p2c_009_f_adversarial_tls_reason_codes_are_stable",
+    "fr_p2c_009_e013_strict_runtime_tls_rejection_matches_expected_threat_contract",
+    "fr_p2c_009_e013_hardened_non_allowlisted_rejection_matches_expected_threat_contract",
+    "fr_p2c_009_e2e_contract_smoke"
+  ],
+  "performance_sentinels": [
+    "tls_runtime_apply_decision_semantics_stable",
+    "tls_nonallowlisted_rejection_semantics_stable"
+  ],
+  "compatibility_risks": [
+    "tls_context_atomic_apply_drift",
+    "tls_listener_bind_rollback_drift",
+    "hardened_nonallowlisted_deviation_leak"
+  ],
+  "raptorq_artifacts": [
+    "parity_report.raptorq.json",
+    "parity_report.decode_proof.json"
+  ]
+}

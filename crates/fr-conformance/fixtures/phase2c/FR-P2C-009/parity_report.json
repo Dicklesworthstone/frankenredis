@@ -1,0 +1,33 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-009",
+  "readiness": "READY_FOR_IMPL",
+  "missing_mandatory_fields": [],
+  "strict_mode": {
+    "status": "pass",
+    "summary": "TLS/config parse, runtime apply, and listener rollback contracts are deterministic and parity-aligned for packet scope."
+  },
+  "hardened_mode": {
+    "status": "pass",
+    "summary": "Only allowlisted bounded defenses are permitted; non-allowlisted deviations are rejected fail-closed."
+  },
+  "evidence": {
+    "unit_property": [
+      "fr_p2c_009_u001_protocol_parse_rejects_unknown_token",
+      "fr_p2c_009_u010_runtime_apply_plan_requires_configure_hook",
+      "fr_p2c_009_u013_hardened_gate_rejects_non_allowlisted_deviation"
+    ],
+    "differential": [
+      "fr_p2c_009_f_differential_mode_split_contract_is_stable",
+      "fr_p2c_009_f_metamorphic_non_allowlisted_rejection_is_deterministic",
+      "fr_p2c_009_f_adversarial_tls_reason_codes_are_stable"
+    ],
+    "e2e": [
+      "fr_p2c_009_e2e_contract_smoke"
+    ],
+    "optimization": [
+      "LEV-009-03_tls_apply_handshake_decision_cache",
+      "fr_p2c_009_u010_runtime_apply_updates_tls_state"
+    ]
+  }
+}
