@@ -57,6 +57,7 @@ dependencies = [
  "fr-command",
  "fr-config",
  "fr-eventloop",
+ "fr-persist",
  "fr-protocol",
  "fr-store",
 ]

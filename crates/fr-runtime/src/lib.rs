@@ -16,6 +16,7 @@ use fr_eventloop::{
     validate_ae_barrier_order, validate_bootstrap, validate_fd_registration_bounds,
     validate_pending_write_delivery, validate_read_path,
 };
+use fr_persist::{AofRecord, encode_aof_stream};
 use fr_protocol::{RespFrame, RespParseError, parse_frame};
 use fr_store::Store;
 
@@ -235,6 +236,7 @@ impl EvidenceLedger {
 pub struct Runtime {
     policy: RuntimePolicy,
     store: Store,
+    aof_records: Vec<AofRecord>,
     evidence: EvidenceLedger,
     tls_state: TlsRuntimeState,
     auth_state: AuthState,
@@ -261,6 +263,7 @@ impl Runtime {
         Self {
             policy,
             store: Store::new(),
+            aof_records: Vec::new(),
             evidence: EvidenceLedger::default(),
             tls_state: TlsRuntimeState::default(),
             auth_state: AuthState::default(),
@@ -388,6 +391,16 @@ impl Runtime {
     #[must_use]
     pub fn evidence(&self) -> &EvidenceLedger {
         &self.evidence
+    }
+
+    #[must_use]
+    pub fn aof_records(&self) -> &[AofRecord] {
+        &self.aof_records
+    }
+
+    #[must_use]
+    pub fn encoded_aof_stream(&self) -> Vec<u8> {
+        encode_aof_stream(&self.aof_records)
     }
 
     #[must_use]
@@ -535,7 +548,10 @@ impl Runtime {
         }
 
         match dispatch_argv(&argv, &mut self.store, now_ms) {
-            Ok(reply) => reply,
+            Ok(reply) => {
+                self.capture_aof_record(&argv);
+                reply
+            }
             Err(err) => command_error_to_resp(err),
         }
     }
@@ -565,6 +581,15 @@ impl Runtime {
                 reply.to_bytes()
             }
         }
+    }
+
+    fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
+        if argv.is_empty() {
+            return;
+        }
+        self.aof_records.push(AofRecord {
+            argv: argv.to_vec(),
+        });
     }
 
     fn handle_auth_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -976,6 +1001,7 @@ mod tests {
         FdRegistrationError, LoopBootstrap, PendingWriteError, ReadPathError, ReadinessCallback,
         TickBudget,
     };
+    use fr_persist::decode_aof_stream;
     use fr_protocol::{RespFrame, parse_frame};
 
     use super::{
@@ -1293,6 +1319,44 @@ mod tests {
             gated,
             RespFrame::Error("NOAUTH Authentication required.".to_string())
         );
+    }
+
+    #[test]
+    fn fr_p2c_005_u001_runtime_captures_successful_dispatched_commands_for_aof() {
+        let mut rt = Runtime::default_strict();
+
+        let set = rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
+
+        let del = rt.execute_frame(command(&[b"DEL", b"k"]), 1);
+        assert_eq!(del, RespFrame::Integer(1));
+
+        let unknown = rt.execute_frame(command(&[b"NOPE"]), 2);
+        assert!(matches!(unknown, RespFrame::Error(_)));
+
+        let records = rt.aof_records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0].argv,
+            vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()]
+        );
+        assert_eq!(records[1].argv, vec![b"DEL".to_vec(), b"k".to_vec()]);
+    }
+
+    #[test]
+    fn fr_p2c_005_u002_runtime_aof_stream_export_round_trips() {
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        let _ = rt.execute_frame(command(&[b"DEL", b"k"]), 1);
+
+        let encoded = rt.encoded_aof_stream();
+        let decoded = decode_aof_stream(&encoded).expect("decode aof stream");
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(
+            decoded[0].argv,
+            vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()]
+        );
+        assert_eq!(decoded[1].argv, vec![b"DEL".to_vec(), b"k".to_vec()]);
     }
 
     #[test]
