@@ -1,0 +1,76 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-008",
+  "legacy_paths": [
+    "legacy_redis_code/redis/src/expire.c",
+    "legacy_redis_code/redis/src/evict.c",
+    "legacy_redis_code/redis/src/db.c",
+    "legacy_redis_code/redis/src/server.c"
+  ],
+  "legacy_symbols": [
+    "activeExpireCycle",
+    "expireGenericCommand",
+    "ttlGenericCommand",
+    "expireIfNeeded",
+    "performEvictions",
+    "getMaxmemoryState",
+    "propagateDeletion"
+  ],
+  "state_machine_contract": [
+    "active_expire_cycle_budget_determinism",
+    "expire_lookup_guard_mode_split_stability",
+    "eviction_loop_outcome_state_determinism"
+  ],
+  "protocol_contract": [
+    "expire_option_parse_matrix_contract",
+    "expire_immediate_delete_rewrite_contract",
+    "ttl_pttl_persist_observable_reply_contract"
+  ],
+  "command_acl_contract": [
+    "dispatch_lookup_utf8_deferral_isomorphic_contract"
+  ],
+  "persistence_replication_contract": [
+    "implicit_deletion_propagation_order_contract"
+  ],
+  "error_contract": [
+    "expire.command_semantics_violation",
+    "expire.lookup_guard_contract_violation",
+    "expireevict.hardened_nonallowlisted_rejected"
+  ],
+  "strict_mode_policy": [
+    "redis_observable_expire_evict_reply_parity",
+    "fail_closed_nonallowlisted_deviation"
+  ],
+  "hardened_mode_policy": [
+    "bounded_parser_diagnostics_only",
+    "reject_non_allowlisted_expireevict_deviation"
+  ],
+  "excluded_scope": [
+    "hash_field_subexpiry_active_cycle_engine",
+    "maxmemory_eviction_pool_runtime_engine"
+  ],
+  "oracle_tests": [
+    "fr_p2c_008_u005_nonpositive_expire_deletes_immediately_and_logs",
+    "fr_p2c_008_u006_ttl_pttl_persist_contract_and_logs",
+    "fr_p2c_008_u009_property_expired_keys_are_invisible_across_access_paths",
+    "fr_p2c_008_f_differential_fixture_passes",
+    "fr_p2c_008_f_differential_expire_evict_surface_mode_split_is_stable",
+    "fr_p2c_008_f_metamorphic_expire_and_pexpire_equivalence_holds",
+    "fr_p2c_008_f_adversarial_expire_reason_codes_are_stable",
+    "fr_p2c_008_e2e_contract_smoke",
+    "fr_p2c_008_dispatch_lookup_matches_linear_utf8_gate"
+  ],
+  "performance_sentinels": [
+    "dispatch_lookup_speedup_ratio>=1.20",
+    "dispatch_lookup_optimized_ns_per_lookup<=145"
+  ],
+  "compatibility_risks": [
+    "expire_immediate_delete_rewrite_drift",
+    "ttl_pttl_persist_reply_drift",
+    "hardened_nonallowlisted_deviation_leak"
+  ],
+  "raptorq_artifacts": [
+    "parity_report.raptorq.json",
+    "parity_report.decode_proof.json"
+  ]
+}

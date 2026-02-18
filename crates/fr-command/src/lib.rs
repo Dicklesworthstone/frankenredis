@@ -49,8 +49,8 @@ pub fn dispatch_argv(
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
-    let cmd = std::str::from_utf8(&argv[0]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    match classify_command(cmd.as_bytes()) {
+    let raw_cmd = &argv[0];
+    match classify_command(raw_cmd) {
         Some(CommandId::Ping) => return ping(argv),
         Some(CommandId::Echo) => return echo(argv),
         Some(CommandId::Set) => return set(argv, store, now_ms),
@@ -85,6 +85,7 @@ pub fn dispatch_argv(
         None => {}
     }
 
+    let cmd = std::str::from_utf8(raw_cmd).map_err(|_| CommandError::InvalidUtf8Argument)?;
     let args_preview = build_unknown_args_preview(argv);
     Err(CommandError::UnknownCommand {
         command: trim_and_cap_string(cmd, 128),
@@ -908,6 +909,11 @@ mod tests {
         None
     }
 
+    fn classify_packet_008_dispatch_linear(cmd: &[u8]) -> Option<CommandId> {
+        let text = std::str::from_utf8(cmd).ok()?;
+        classify_command(text.as_bytes())
+    }
+
     #[test]
     fn ping_works() {
         let frame = RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"PING".to_vec()))]));
@@ -1003,6 +1009,110 @@ mod tests {
                 String::from_utf8_lossy(sample)
             );
         }
+    }
+
+    #[test]
+    fn fr_p2c_008_dispatch_lookup_matches_linear_utf8_gate() {
+        let samples: &[&[u8]] = &[
+            b"EXPIRE",
+            b"PEXPIRE",
+            b"EXPIREAT",
+            b"PEXPIREAT",
+            b"TTL",
+            b"PTTL",
+            b"EXPIRETIME",
+            b"PEXPIRETIME",
+            b"PERSIST",
+            b"set",
+            b"get",
+            b"DeL",
+            b"UNKNOWN",
+            b"host:",
+            &[0xFF, 0xFE],
+            &[0xC3, 0x91, b'X'],
+        ];
+
+        for sample in samples {
+            let optimized = classify_command(sample);
+            let linear = classify_packet_008_dispatch_linear(sample);
+            assert_eq!(
+                optimized,
+                linear,
+                "dispatch lookup mismatch for {:?}",
+                String::from_utf8_lossy(sample)
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "profiling helper for FR-P2C-008-H"]
+    fn fr_p2c_008_dispatch_lookup_profile_snapshot() {
+        let workload: &[&[u8]] = &[
+            b"EXPIRE",
+            b"PEXPIRE",
+            b"EXPIREAT",
+            b"PEXPIREAT",
+            b"TTL",
+            b"PTTL",
+            b"EXPIRETIME",
+            b"PEXPIRETIME",
+            b"PERSIST",
+            b"SET",
+            b"GET",
+            b"DEL",
+            b"EXISTS",
+            b"UNKNOWN",
+            b"host:",
+            &[0xFF, 0xFE],
+            &[0xC3, 0x91, b'X'],
+        ];
+
+        let rounds = 300_000usize;
+        let total_lookups = rounds.saturating_mul(workload.len());
+
+        let mut linear_hits = 0usize;
+        let linear_start = Instant::now();
+        for _ in 0..rounds {
+            for sample in workload {
+                if classify_packet_008_dispatch_linear(sample).is_some() {
+                    linear_hits = linear_hits.saturating_add(1);
+                }
+            }
+        }
+        let linear_ns = linear_start.elapsed().as_nanos();
+
+        let mut optimized_hits = 0usize;
+        let optimized_start = Instant::now();
+        for _ in 0..rounds {
+            for sample in workload {
+                if classify_command(sample).is_some() {
+                    optimized_hits = optimized_hits.saturating_add(1);
+                }
+            }
+        }
+        let optimized_ns = optimized_start.elapsed().as_nanos();
+
+        assert_eq!(linear_hits, optimized_hits);
+        assert!(total_lookups > 0);
+
+        let linear_ns_per_lookup = linear_ns as f64 / total_lookups as f64;
+        let optimized_ns_per_lookup = optimized_ns as f64 / total_lookups as f64;
+        let speedup_ratio = if optimized_ns > 0 {
+            linear_ns as f64 / optimized_ns as f64
+        } else {
+            0.0
+        };
+
+        println!("profile.packet_id=FR-P2C-008");
+        println!("profile.benchmark=dispatch_utf8_gate");
+        println!("profile.total_lookups={total_lookups}");
+        println!("profile.linear_total_ns={linear_ns}");
+        println!("profile.optimized_total_ns={optimized_ns}");
+        println!("profile.linear_ns_per_lookup={linear_ns_per_lookup:.6}");
+        println!("profile.optimized_ns_per_lookup={optimized_ns_per_lookup:.6}");
+        println!("profile.speedup_ratio={speedup_ratio:.6}");
+        println!("profile.linear_hits={linear_hits}");
+        println!("profile.optimized_hits={optimized_hits}");
     }
 
     #[test]

@@ -117,6 +117,29 @@ Each contract-row verification result (pass/fail and divergence checks) must emi
   Fixture: `crates/fr-conformance/fixtures/fr_p2c_008_expire_evict_journey.json`  
   Replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_008_e2e_contract_smoke`
 
+## Implemented optimization evidence (bd-2wb.19.8)
+
+- `fr_p2c_008_dispatch_lookup_matches_linear_utf8_gate` (packet-008 dispatch-path equivalence against UTF-8-gated linear baseline)  
+  Replay: `rch exec -- cargo test -p fr-command -- --nocapture fr_p2c_008_dispatch_lookup_matches_linear_utf8_gate`
+- `fr_p2c_008_dispatch_lookup_profile_snapshot` (ignored benchmark helper for packet-008 dispatch path)  
+  Replay: `rch exec -- cargo test -p fr-command fr_p2c_008_dispatch_lookup_profile_snapshot -- --ignored --nocapture`  
+  Observed metrics: `linear_ns_per_lookup=176.464828`, `optimized_ns_per_lookup=137.060011`, `speedup_ratio=1.287500`
+
+## Implemented final evidence pack (bd-2wb.19.9)
+
+- Packet final manifest + parity gate authored in `crates/fr-conformance/fixtures/phase2c/FR-P2C-008/{fixture_manifest.json,parity_gate.yaml}`.
+- Packet parity report finalized in `crates/fr-conformance/fixtures/phase2c/FR-P2C-008/parity_report.json` with:
+  - `readiness=READY_FOR_IMPL`
+  - `missing_mandatory_fields=[]`
+  - explicit unit/differential/e2e/optimization evidence IDs.
+- Durability sidecar + decode-proof artifacts finalized in:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-008/parity_report.raptorq.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-008/parity_report.decode_proof.json`
+  - reason code: `raptorq.decode_verified`
+  - replay command: `./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke`
+- Packet schema/readiness replay:
+  - `rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- crates/fr-conformance/fixtures/phase2c/FR-P2C-008`
+
 ## Alien-graveyard recommendation contract card
 
 | Field | Value |
@@ -170,7 +193,7 @@ Calibration + fallback:
 
 Selected single optimization lever:
 
-- `LEV-008-02`: deterministic expiry+eviction decision memo keyed by `(key_digest, now_bucket, policy_epoch, pressure_bucket)` with strict invalidation on TTL/policy mutations.
+- `LEV-008-H1`: defer UTF-8 decoding in `dispatch_argv` until after raw-byte `classify_command` lookup so packet-008 commands stay on a byte-fast path.
 
 Required artifacts:
 

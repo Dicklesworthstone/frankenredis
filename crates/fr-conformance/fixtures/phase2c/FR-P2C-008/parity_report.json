@@ -1,0 +1,34 @@
+{
+  "schema_version": "fr_phase2c_packet_v1",
+  "packet_id": "FR-P2C-008",
+  "readiness": "READY_FOR_IMPL",
+  "missing_mandatory_fields": [],
+  "strict_mode": {
+    "status": "pass",
+    "summary": "Expire and TTL observable command semantics remain deterministic and parity-aligned for packet scope."
+  },
+  "hardened_mode": {
+    "status": "pass",
+    "summary": "Only allowlisted bounded defenses are permitted; non-allowlisted deviations are rejected fail-closed."
+  },
+  "evidence": {
+    "unit_property": [
+      "fr_p2c_008_u005_nonpositive_expire_deletes_immediately_and_logs",
+      "fr_p2c_008_u006_ttl_pttl_persist_contract_and_logs",
+      "fr_p2c_008_u009_property_expired_keys_are_invisible_across_access_paths"
+    ],
+    "differential": [
+      "fr_p2c_008_f_differential_fixture_passes",
+      "fr_p2c_008_f_differential_expire_evict_surface_mode_split_is_stable",
+      "fr_p2c_008_f_metamorphic_expire_and_pexpire_equivalence_holds",
+      "fr_p2c_008_f_adversarial_expire_reason_codes_are_stable"
+    ],
+    "e2e": [
+      "fr_p2c_008_e2e_contract_smoke"
+    ],
+    "optimization": [
+      "fr_p2c_008_dispatch_lookup_matches_linear_utf8_gate",
+      "fr_p2c_008_dispatch_lookup_profile_snapshot"
+    ]
+  }
+}

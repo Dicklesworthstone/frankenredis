@@ -94,6 +94,34 @@ All threat detections/rejections/recoveries must emit:
   Fixture: `crates/fr-conformance/fixtures/fr_p2c_008_expire_evict_journey.json`  
   Replay: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_008_e2e_contract_smoke`
 
+## Implemented packet-008 optimization evidence (bd-2wb.19.8)
+
+- `fr_p2c_008_dispatch_lookup_matches_linear_utf8_gate`  
+  Focus: packet-008 dispatch lookup parity against UTF-8-gated linear baseline  
+  Replay: `rch exec -- cargo test -p fr-command -- --nocapture fr_p2c_008_dispatch_lookup_matches_linear_utf8_gate`
+- `fr_p2c_008_dispatch_lookup_profile_snapshot`  
+  Focus: packet-008 dispatch fast-path benchmark after UTF-8 deferral  
+  Replay: `rch exec -- cargo test -p fr-command fr_p2c_008_dispatch_lookup_profile_snapshot -- --ignored --nocapture`  
+  Observed metrics: `linear_ns_per_lookup=176.464828`, `optimized_ns_per_lookup=137.060011`, `speedup_ratio=1.287500`
+
+## Implemented packet-008 final evidence pack (bd-2wb.19.9)
+
+- Final packet-manifest and policy-gate artifacts:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-008/fixture_manifest.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-008/parity_gate.yaml`
+- Final packet parity report:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-008/parity_report.json`
+  - `readiness=READY_FOR_IMPL`
+  - `missing_mandatory_fields=[]`
+  - evidence arrays include concrete unit/differential/e2e/optimization test IDs.
+- RaptorQ sidecar + decode proof artifacts:
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-008/parity_report.raptorq.json`
+  - `crates/fr-conformance/fixtures/phase2c/FR-P2C-008/parity_report.decode_proof.json`
+  - deterministic decode reason code: `raptorq.decode_verified`
+  - deterministic replay command: `./scripts/run_raptorq_artifact_gate.sh --run-id local-smoke`
+- Packet schema replay gate:
+  - `rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- crates/fr-conformance/fixtures/phase2c/FR-P2C-008`
+
 ## Alien-graveyard recommendation contract card
 
 | Field | Value |
@@ -153,7 +181,7 @@ Decision policy:
 
 Selected single optimization lever:
 
-- `LEV-008-03`: deterministic maxmemory-pressure decision cache over `(memory_level_bucket, policy_epoch, unsafe_state_mask)` with strict invalidation on accounting/flag transitions.
+- `LEV-008-H1`: defer UTF-8 decoding in `dispatch_argv` until after raw-byte `classify_command` lookup so packet-008 command dispatch stays on a byte-fast path.
 
 Required artifacts:
 
@@ -164,10 +192,10 @@ Required artifacts:
 
 ## Replay commands
 
-- Unit threat suite: `rch exec -- cargo test -p fr-expire -- --nocapture FR_P2C_008`
-- Store threat suite: `rch exec -- cargo test -p fr-store -- --nocapture FR_P2C_008`
-- E2E threat suite: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_008`
-- Hardened replay: `rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_008_HARDENED`
+- Packet command suite: `rch exec -- cargo test -p fr-command -- --nocapture fr_p2c_008_`
+- Conformance packet suite: `rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_`
+- E2E smoke replay: `rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_008_e2e_contract_smoke`
+- Optimization profile replay: `rch exec -- cargo test -p fr-command fr_p2c_008_dispatch_lookup_profile_snapshot -- --ignored --nocapture`
 
 ## Reproducibility/provenance pack references
 

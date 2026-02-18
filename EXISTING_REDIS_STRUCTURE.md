@@ -952,7 +952,7 @@ Metric evidence commands used for this pass:
 | Persistence replay ordering and assertions (`FR-P2C-005`) | `fr_p2c_005_e001_replay_fixture_passes_with_schema_contract`, `fr_p2c_005_e003_roundtrip_preserves_aof_record_order_and_payloads`, `fr_p2c_005_e013_adversarial_replay_decode_errors_are_stable`, `fr_p2c_005_fixture_maps_to_packet_family_in_structured_logs` (`crates/fr-conformance/src/lib.rs`) | `persist_replay.json` via `run_replay_fixture`, `fr_p2c_005_e2e_contract_smoke` (`crates/fr-conformance/tests/smoke.rs`), plus packet-005 F-level differential/metamorphic/adversarial tests | `log_contract_v1/FR-P2C-005.golden.jsonl`, replay JSONL under `live_log_root` when enabled | strict: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_005_f_differential_replay_fixture_passes`; hardened: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_005_e2e_contract_smoke` | implemented (`bd-2wb.16.7`) |
 | Replication handshake/PSYNC safety reducers (`FR-P2C-006`) | `fr_p2c_006_u003_handshake_requires_ping_first`, `fr_p2c_006_u002_psync_rejects_replid_mismatch` (`crates/fr-repl/src/lib.rs`) | conformance vector tests (`fr_p2c_006_f_*`) + `fr_p2c_006_e2e_contract_smoke` | `log_contract_v1/FR-P2C-006.golden.jsonl`, structured threat/log assertions in conformance | strict: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-repl -- --nocapture fr_p2c_006_u003_handshake_requires_ping_first`; hardened: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_psync_adversarial_matrix_prefers_safe_fallbacks` | implemented (`bd-2wb.17.7` closed) |
 | Cluster and client-mode boundary behavior (`FR-P2C-007`) | `fr_p2c_007_u001_cluster_subcommand_router_is_deterministic`, `fr_p2c_007_u007_client_cluster_mode_flags_transition_cleanly` | packet-specific journey fixture and smoke coverage (`fr_p2c_007_cluster_journey.json`, `fr_p2c_007_e2e_contract_smoke`) | `log_contract_v1/FR-P2C-007.golden.jsonl` | strict: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_007_u001_cluster_subcommand_router_is_deterministic`; hardened: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_007_u007_client_cluster_mode_flags_transition_cleanly` | implemented (`bd-2wb.18.7` closed) |
-| Expire/evict semantics and pressure behavior (`FR-P2C-008`) | shared runtime/store fixture coverage and packet contracts; dedicated packet unit naming remains sparse | shared foundation fixtures only; packet E2E pending | `log_contract_v1/FR-P2C-008.golden.jsonl` | strict: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture conformance_fixture_core_passes`; hardened: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture conformance_fixture_core_passes` | partial (`bd-2wb.19.7` open) |
+| Expire/evict semantics and pressure behavior (`FR-P2C-008`) | packet-tagged unit/property + differential/adversarial coverage (`fr_p2c_008_u*`, `fr_p2c_008_f_*`) with packet optimization parity checks (`fr_p2c_008_dispatch_lookup_*`) | packet journey fixture + smoke coverage (`fr_p2c_008_expire_evict_journey.json`, `fr_p2c_008_e2e_contract_smoke`) | `log_contract_v1/FR-P2C-008.golden.jsonl` | strict: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_`; hardened: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance --test smoke -- --nocapture fr_p2c_008_e2e_contract_smoke` | implemented (`bd-2wb.19.7`, `bd-2wb.19.9` closed) |
 | TLS/config fail-closed and hardened allowlist policy (`FR-P2C-009`) | `fr_p2c_009_u013_hardened_gate_rejects_non_allowlisted_deviation` (`crates/fr-config/src/lib.rs`), `fr_p2c_009_u013_hardened_non_allowlisted_tls_deviation_is_rejected` (`crates/fr-runtime/src/lib.rs`) | `fr_p2c_009_e013_hardened_non_allowlisted_rejection_matches_expected_threat_contract` (`crates/fr-conformance/src/lib.rs`) + `fr_p2c_009_e2e_contract_smoke` | `log_contract_v1/FR-P2C-009.golden.jsonl`, live bundle reports include `execution_error` surfaces | strict: `FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-runtime -- --nocapture fr_p2c_009_u013_strict_mode_rejects_unsafe_tls_config_and_records_event`; hardened: `FR_MODE=hardened FR_SEED=42 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_009_e013_hardened_non_allowlisted_rejection_matches_expected_threat_contract` | implemented (`bd-2wb.20.7` closed) |
 | Foundation live-oracle differential workflow | `live_oracle_diff` arg/parser tests (`crates/fr-conformance/src/bin/live_oracle_diff.rs`) | `scripts/run_live_oracle_diff.sh` (fixed suite order; deterministic bundle layout) | `suite_status.tsv`, `command_trace.log`, `suites/<suite>/report.json`, `replay_failed.sh`, `live_logs/` | strict+local replay: `./scripts/run_live_oracle_diff.sh --host 127.0.0.1 --port 6379 --run-id <id>`; optional remote runner: `FR_E2E_RUNNER=rch ./scripts/run_live_oracle_diff.sh --host <reachable-host> --port <port> --run-id <id>` | implemented; parity mismatches are explicitly surfaced as failure artifacts, not hidden |
 
@@ -980,7 +980,7 @@ Required evidence anchors:
 | CV-005 | Packet-specific E2E suite for `FR-P2C-005` | `bd-2wb.16.7` | packet-005 closure chain | implemented (`bd-2wb.16.7`) |
 | CV-006 | Packet-specific E2E suite for `FR-P2C-006` | `bd-2wb.17.7` | packet-006 closure chain | implemented via closed `bd-2wb.10` |
 | CV-007 | Packet-specific E2E suite for `FR-P2C-007` | `bd-2wb.18.7` | packet-007 closure chain | implemented via closed `bd-2wb.10` |
-| CV-008 | Packet-specific E2E suite for `FR-P2C-008` | `bd-2wb.19.7` | packet-008 closure chain | CI path implemented (closed `bd-2wb.10`); packet journey still open |
+| CV-008 | Packet-specific E2E suite for `FR-P2C-008` | `bd-2wb.19.7` | packet-008 closure chain | implemented (`bd-2wb.19.7` closed; CI path via closed `bd-2wb.10`) |
 | CV-009 | Packet-specific E2E suite for `FR-P2C-009` | `bd-2wb.20.7` | packet-009 closure chain | implemented via closed `bd-2wb.10` |
 | CV-010 | Reliability/flake budget policy for corpus | `bd-2wb.23` | unblocks packet test gates | implemented (closed `bd-2wb.23` + `bd-2wb.10`) |
 | CV-011 | Operator-facing failure forensics index/UX | `bd-2wb.22` | post-failure triage flow | implemented (closed `bd-2wb.22` + `bd-2wb.10`) |
@@ -999,7 +999,7 @@ Required evidence anchors:
 | ID | Claim surface | Adversarial finding | Evidence anchors | Resolution state |
 |---|---|---|---|---|
 | `XDOC-001` | Architecture chain implies fully connected runtime path through persistence and replication | Current runtime execution path is store-centric; persistence/replication kernels exist but are not integrated into `Runtime::execute_frame` flow | `crates/fr-runtime/src/lib.rs`, `crates/fr-persist/src/lib.rs`, `crates/fr-repl/src/lib.rs`, `EXHAUSTIVE_LEGACY_ANALYSIS.md` section `20.2` (`RT-001`) | bounded unresolved gap; tracked by `bd-2wb.16`, `bd-2wb.16.7`, `bd-2wb.17`, `bd-2wb.17.7` |
-| `XDOC-002` | Expire crate role can be read as complete runtime TTL orchestration | `fr-expire` currently provides a reusable decision helper while runtime behavior is implemented via store lazy-expiry path | `crates/fr-expire/src/lib.rs`, `crates/fr-store/src/lib.rs`, `EXHAUSTIVE_LEGACY_ANALYSIS.md` section `20.2` (`RT-002`) | bounded unresolved gap; tracked by `bd-2wb.19`, `bd-2wb.19.7` |
+| `XDOC-002` | Expire crate role can be read as complete runtime TTL orchestration | `fr-expire` currently provides a reusable decision helper while runtime behavior is implemented via store lazy-expiry path | `crates/fr-expire/src/lib.rs`, `crates/fr-store/src/lib.rs`, `EXHAUSTIVE_LEGACY_ANALYSIS.md` section `20.2` (`RT-002`) | bounded architecture caveat; packet-008 evidence chain is closed (`bd-2wb.19*`), while active-expire/eviction orchestration remains explicitly out of implemented scope |
 | `XDOC-003` | Cluster packet contract includes deferred `clusterBeforeSleep` actions that may be interpreted as current behavior | Runtime currently exposes deterministic scaffold (`CLUSTER HELP` plus client mode toggles); deferred tasks remain contractual backlog | `crates/fr-runtime/src/lib.rs`, `crates/fr-conformance/fixtures/phase2c/FR-P2C-007/contract_table.md`, `EXHAUSTIVE_LEGACY_ANALYSIS.md` section `20.2` (`RT-003`) | bounded unresolved gap; tracked by `bd-2wb.18`, `bd-2wb.18.7` |
 | `XDOC-004` | RaptorQ-everywhere doctrine can be read as globally complete in current repo state | Foundation sidecar + decode-proof pipeline and CI gate ingestion are now wired; remaining scope is incremental artifact-surface expansion | `scripts/run_raptorq_artifact_gate.sh`, `.github/workflows/live-conformance-gates.yml`, `EXHAUSTIVE_LEGACY_ANALYSIS.md` section `20.2` (`RT-004`) | foundation resolved (closed `bd-2wb.9`, `bd-2wb.10`); continue scaling coverage with new artifact classes |
 
@@ -1007,7 +1007,7 @@ Required evidence anchors:
 
 Independent challenge questions and outcomes:
 1. Are any packet-level closure claims present without explicit unit/e2e/log anchors?
-Answer: no; section `24` crosswalk rows include evidence anchors and open packet E2E follow-up beads where coverage is partial.
+Answer: no; section `24` crosswalk rows include evidence anchors and explicit closure status for packet E2E follow-up beads (all packet `.7` beads are closed).
 2. Are strict/hardened boundaries stated for high-risk behavior classes?
 Answer: yes, but unresolved implementation zones remain explicitly bounded by open beads; no “silent parity complete” language is allowed for those zones.
 3. Are replay commands and forensic fields concrete for high-risk claims?
@@ -1017,7 +1017,7 @@ Answer: yes; command anchors and forensic field contract are documented in secti
 
 Before `bd-2wb.24.14` sign-off, the following reconciliation checks remain mandatory:
 1. each `XDOC-*` row above must either transition to resolved-by-evidence or remain explicitly blocked with unchanged risk bounds;
-2. packet E2E closure beads (`bd-2wb.12.7`..`bd-2wb.20.7`) must stay visible in crosswalk tables with explicit closed/open status (`bd-2wb.19.7` remains open);
+2. packet E2E closure beads (`bd-2wb.12.7`..`bd-2wb.20.7`) must stay visible in crosswalk tables with explicit closure status (all packet `.7` beads are now closed);
 3. CI gate topology now ingests contradiction-bounded artifact expectations (`suite_status.tsv`, per-suite `report.json`, replay pointers, structured log contract fields); keep schema and replay pointers stable as packets close;
 4. no section may claim “parity complete” for persistence, replication, cluster deferred tasks, or full eviction orchestration until corresponding implementation and verification beads are closed.
 
@@ -1031,7 +1031,7 @@ Before `bd-2wb.24.14` sign-off, the following reconciliation checks remain manda
 | Auth/HELLO ordering semantics | clarified and validated for implemented path | `crates/fr-runtime/src/lib.rs` (`fr_p2c_004_u004_*`, `fr_p2c_004_u005_*`) | packet-specific E2E closure (`bd-2wb.15.7`) |
 | Cluster implemented subset semantics | clarified as subset-only | `crates/fr-runtime/src/lib.rs` (`fr_p2c_007_u001_*`, `fr_p2c_007_u007_*`), `FR-P2C-007` contract table deferred row | deferred-task implementation and packet E2E (`bd-2wb.18.7`) |
 | Replication reducer semantics | validated at kernel level | `crates/fr-repl/src/lib.rs` (`fr_p2c_006_u003_*`, `fr_p2c_006_u002_*`), `crates/fr-conformance/src/lib.rs` (`fr_p2c_006_f_*`) | runtime integration + packet E2E (`bd-2wb.17.7`) |
-| Expire/evict semantics | clarified as current lazy-expiry scope | `crates/fr-store/src/lib.rs` (`drop_if_expired`, `expire_*` tests), `crates/fr-expire/src/lib.rs` helper kernel | active-expire/eviction parity + packet E2E (`bd-2wb.19.7`) |
+| Expire/evict semantics | clarified as current lazy-expiry scope | `crates/fr-store/src/lib.rs` (`drop_if_expired`, `expire_*` tests), `crates/fr-expire/src/lib.rs` helper kernel | packet E2E chain is closed; remaining caveat is active-expire/eviction orchestration beyond current lazy semantics |
 | TLS/config strict-hardened boundary | validated and explicitly bounded | `crates/fr-runtime/src/lib.rs` (`fr_p2c_009_u013_*`), `crates/fr-config/src/lib.rs` (`fr_p2c_009_u013_*`), `crates/fr-conformance/src/lib.rs` (`fr_p2c_009_e013_*`) | packet E2E depth (`bd-2wb.20.7`) |
 
 ### 26.2 Cross-document carry-forward bindings
@@ -1060,24 +1060,24 @@ This structure file carries the same constraints through:
 
 | Lane | Current status | Evidence substrate | Blocker beads |
 |---|---|---|---|
-| Risk taxonomy and mitigation | foundation-ready with residual packet risk | strict/hardened threat policy types, runtime evidence hooks, CI differential/forensics gates | residual packet-008 chain (`bd-2wb.19.6`, `bd-2wb.19.7`) |
-| Performance proof loop | foundation-ready | baseline artifacts + optimization evidence pack in `artifacts/optimization/phase2c-gate/round_dir_scan_mask/` + CI optimization gate wiring | residual packet-008 closure chain (`bd-2wb.19.8`, `bd-2wb.19.9`) |
+| Risk taxonomy and mitigation | foundation-ready with packet closure evidence complete | strict/hardened threat policy types, runtime evidence hooks, CI differential/forensics gates | no remaining packet-chain blocker; maintain architecture-bound caveats (`RT-001..RT-003`) |
+| Performance proof loop | foundation-ready with packet optimization closure complete | baseline artifacts + optimization evidence pack in `artifacts/optimization/phase2c-gate/round_dir_scan_mask/` + CI optimization gate wiring | packet-008 optimization/final evidence chain closed (`bd-2wb.19.8`, `bd-2wb.19.9`) |
 | Unit/property depth | mostly ready at foundation level | packet-tagged unit tests in runtime/repl/config/store | packet `*.5` and `*.6` closure chains |
-| Deterministic E2E depth | foundation-ready, packet-near-complete | orchestrator + live differential bundle schema + packet `.7` closures for all but `FR-P2C-008` | `bd-2wb.19.7` |
-| Structured log forensics | schema-ready and CI-integrated | log contract (`TEST_LOG_SCHEMA_V1.md`, `log_contract.rs`) + failure-forensics CI index + golden packet logs | residual packet-depth completion (`bd-2wb.19.7`) |
+| Deterministic E2E depth | foundation-ready with full packet closure | orchestrator + live differential bundle schema + packet `.7` closures across `FR-P2C-001..FR-P2C-009` | none at packet `.7` layer (all closed) |
+| Structured log forensics | schema-ready and CI-integrated | log contract (`TEST_LOG_SCHEMA_V1.md`, `log_contract.rs`) + failure-forensics CI index + golden packet logs | none at packet-depth closure layer |
 | RaptorQ evidence durability | foundation-ready and CI-integrated | sidecar/decode proof artifacts + CI RaptorQ artifact gate report | incremental artifact-surface expansion (no open foundation blocker) |
 
 ### 27.2 Gate-state interpretation for final integration
 
 `bd-2wb.10` (CI gate topology) is closed and now acts as the active integration backbone.
-Current residual integration pressure is concentrated in the packet-008 chain:
-- `bd-2wb.19.6` differential/adversarial closure,
-- `bd-2wb.19.7` packet E2E journey closure,
-- `bd-2wb.19.8` optimization/isomorphism closure,
-- `bd-2wb.19.9` final evidence-pack closure.
+Packet-008 closure chain is now complete:
+- `bd-2wb.19.6` differential/adversarial closure (closed),
+- `bd-2wb.19.7` packet E2E journey closure (closed),
+- `bd-2wb.19.8` optimization/isomorphism closure (closed),
+- `bd-2wb.19.9` final evidence-pack closure (closed).
 
 Interpretation rule:
-- until these blockers are actively closed, docs may describe the target gate topology but cannot assert gate completeness.
+- with packet-008 blockers closed, docs may assert packet-chain gate completeness; keep architecture-bound caveats (`RT-001..RT-003`) explicit and unchanged.
 
 ### 27.3 Pass-C closure criteria for `bd-2wb.24.17`
 
