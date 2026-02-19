@@ -1,0 +1,139 @@
+{
+  "suite": "core_zset",
+  "cases": [
+    {
+      "name": "zadd_new_members",
+      "now_ms": 0,
+      "argv": ["ZADD", "z1", "1.0", "a", "2.0", "b", "3.0", "c"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "zadd_update_score",
+      "now_ms": 0,
+      "argv": ["ZADD", "z1", "1.5", "a"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "zscore_existing",
+      "now_ms": 0,
+      "argv": ["ZSCORE", "z1", "a"],
+      "expect": { "kind": "bulk", "value": "1.5" }
+    },
+    {
+      "name": "zscore_missing_member",
+      "now_ms": 0,
+      "argv": ["ZSCORE", "z1", "z"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "zcard",
+      "now_ms": 0,
+      "argv": ["ZCARD", "z1"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "zcard_missing_key",
+      "now_ms": 0,
+      "argv": ["ZCARD", "nokey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "zrank_first",
+      "now_ms": 0,
+      "argv": ["ZRANK", "z1", "a"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "zrank_last",
+      "now_ms": 0,
+      "argv": ["ZRANK", "z1", "c"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "zrank_missing",
+      "now_ms": 0,
+      "argv": ["ZRANK", "z1", "z"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "zrevrank_last",
+      "now_ms": 0,
+      "argv": ["ZREVRANK", "z1", "a"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "zrange_all",
+      "now_ms": 0,
+      "argv": ["ZRANGE", "z1", "0", "-1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "a" },
+          { "kind": "bulk", "value": "b" },
+          { "kind": "bulk", "value": "c" }
+        ]
+      }
+    },
+    {
+      "name": "zrevrange_all",
+      "now_ms": 0,
+      "argv": ["ZREVRANGE", "z1", "0", "-1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "c" },
+          { "kind": "bulk", "value": "b" },
+          { "kind": "bulk", "value": "a" }
+        ]
+      }
+    },
+    {
+      "name": "zrangebyscore_range",
+      "now_ms": 0,
+      "argv": ["ZRANGEBYSCORE", "z1", "1", "2"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "a" },
+          { "kind": "bulk", "value": "b" }
+        ]
+      }
+    },
+    {
+      "name": "zcount_range",
+      "now_ms": 0,
+      "argv": ["ZCOUNT", "z1", "1", "2"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "zincrby_existing",
+      "now_ms": 0,
+      "argv": ["ZINCRBY", "z1", "10", "a"],
+      "expect": { "kind": "bulk", "value": "11.5" }
+    },
+    {
+      "name": "zrem_member",
+      "now_ms": 0,
+      "argv": ["ZREM", "z1", "a"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "zrem_missing",
+      "now_ms": 0,
+      "argv": ["ZREM", "z1", "z"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "zadd_wrongtype_on_string",
+      "now_ms": 0,
+      "argv": ["SET", "strkey4", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "zadd_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["ZADD", "strkey4", "1.0", "a"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    }
+  ]
+}

@@ -1,0 +1,126 @@
+{
+  "suite": "core_list",
+  "cases": [
+    {
+      "name": "lpush_single",
+      "now_ms": 0,
+      "argv": ["LPUSH", "l1", "a"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "lpush_multiple",
+      "now_ms": 0,
+      "argv": ["LPUSH", "l1", "b", "c"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "lrange_all",
+      "now_ms": 0,
+      "argv": ["LRANGE", "l1", "0", "-1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "c" },
+          { "kind": "bulk", "value": "b" },
+          { "kind": "bulk", "value": "a" }
+        ]
+      }
+    },
+    {
+      "name": "rpush_single",
+      "now_ms": 0,
+      "argv": ["RPUSH", "l1", "d"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "llen",
+      "now_ms": 0,
+      "argv": ["LLEN", "l1"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "llen_missing_key",
+      "now_ms": 0,
+      "argv": ["LLEN", "nokey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "lindex_zero",
+      "now_ms": 0,
+      "argv": ["LINDEX", "l1", "0"],
+      "expect": { "kind": "bulk", "value": "c" }
+    },
+    {
+      "name": "lindex_negative",
+      "now_ms": 0,
+      "argv": ["LINDEX", "l1", "-1"],
+      "expect": { "kind": "bulk", "value": "d" }
+    },
+    {
+      "name": "lindex_out_of_range",
+      "now_ms": 0,
+      "argv": ["LINDEX", "l1", "100"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "lpop_head",
+      "now_ms": 0,
+      "argv": ["LPOP", "l1"],
+      "expect": { "kind": "bulk", "value": "c" }
+    },
+    {
+      "name": "rpop_tail",
+      "now_ms": 0,
+      "argv": ["RPOP", "l1"],
+      "expect": { "kind": "bulk", "value": "d" }
+    },
+    {
+      "name": "lrange_after_pops",
+      "now_ms": 0,
+      "argv": ["LRANGE", "l1", "0", "-1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "b" },
+          { "kind": "bulk", "value": "a" }
+        ]
+      }
+    },
+    {
+      "name": "lset_element",
+      "now_ms": 0,
+      "argv": ["LSET", "l1", "0", "B"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "lindex_after_set",
+      "now_ms": 0,
+      "argv": ["LINDEX", "l1", "0"],
+      "expect": { "kind": "bulk", "value": "B" }
+    },
+    {
+      "name": "lpop_empty_key",
+      "now_ms": 0,
+      "argv": ["LPOP", "nokey"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "rpop_empty_key",
+      "now_ms": 0,
+      "argv": ["RPOP", "nokey"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "lpush_wrongtype_on_string",
+      "now_ms": 0,
+      "argv": ["SET", "strkey2", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "lpush_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["LPUSH", "strkey2", "a"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    }
+  ]
+}

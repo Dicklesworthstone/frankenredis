@@ -1,0 +1,150 @@
+{
+  "suite": "core_hash",
+  "cases": [
+    {
+      "name": "hset_single_field",
+      "now_ms": 0,
+      "argv": ["HSET", "h1", "field1", "value1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "hget_existing_field",
+      "now_ms": 0,
+      "argv": ["HGET", "h1", "field1"],
+      "expect": { "kind": "bulk", "value": "value1" }
+    },
+    {
+      "name": "hget_missing_field",
+      "now_ms": 0,
+      "argv": ["HGET", "h1", "nosuch"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "hget_missing_key",
+      "now_ms": 0,
+      "argv": ["HGET", "nokey", "f"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "hset_multiple_fields",
+      "now_ms": 0,
+      "argv": ["HSET", "h1", "field2", "value2", "field3", "value3"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "hset_update_existing_field",
+      "now_ms": 0,
+      "argv": ["HSET", "h1", "field1", "updated"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "hget_updated_field",
+      "now_ms": 0,
+      "argv": ["HGET", "h1", "field1"],
+      "expect": { "kind": "bulk", "value": "updated" }
+    },
+    {
+      "name": "hdel_existing_field",
+      "now_ms": 0,
+      "argv": ["HDEL", "h1", "field2"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "hdel_missing_field",
+      "now_ms": 0,
+      "argv": ["HDEL", "h1", "nosuch"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "hexists_present",
+      "now_ms": 0,
+      "argv": ["HEXISTS", "h1", "field1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "hexists_absent",
+      "now_ms": 0,
+      "argv": ["HEXISTS", "h1", "field2"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "hlen_hash",
+      "now_ms": 0,
+      "argv": ["HLEN", "h1"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "hlen_missing_key",
+      "now_ms": 0,
+      "argv": ["HLEN", "nokey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "hmset_ok",
+      "now_ms": 0,
+      "argv": ["HMSET", "h2", "a", "1", "b", "2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "hmget_fields",
+      "now_ms": 0,
+      "argv": ["HMGET", "h2", "a", "b", "c"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "1" },
+          { "kind": "bulk", "value": "2" },
+          { "kind": "bulk", "value": null }
+        ]
+      }
+    },
+    {
+      "name": "hincrby_new_field",
+      "now_ms": 0,
+      "argv": ["HINCRBY", "h2", "counter", "5"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "hincrby_existing_field",
+      "now_ms": 0,
+      "argv": ["HINCRBY", "h2", "counter", "3"],
+      "expect": { "kind": "integer", "value": 8 }
+    },
+    {
+      "name": "hsetnx_new_field",
+      "now_ms": 0,
+      "argv": ["HSETNX", "h2", "new", "val"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "hsetnx_existing_field",
+      "now_ms": 0,
+      "argv": ["HSETNX", "h2", "new", "other"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "hstrlen_existing",
+      "now_ms": 0,
+      "argv": ["HSTRLEN", "h2", "new"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "hstrlen_missing",
+      "now_ms": 0,
+      "argv": ["HSTRLEN", "h2", "nosuch"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "hset_wrongtype_on_string",
+      "now_ms": 0,
+      "argv": ["SET", "strkey", "val"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "hset_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["HSET", "strkey", "f", "v"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    }
+  ]
+}

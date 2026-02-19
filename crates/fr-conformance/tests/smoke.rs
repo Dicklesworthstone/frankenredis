@@ -113,3 +113,35 @@ fn fr_p2c_009_e2e_contract_smoke() {
     assert_eq!(diff.total, diff.passed);
     assert!(diff.failed.is_empty());
 }
+
+#[test]
+fn core_hash_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_hash.json").expect("hash fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_list_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_list.json").expect("list fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_set_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_set.json").expect("set fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_zset_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_zset.json").expect("zset fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}

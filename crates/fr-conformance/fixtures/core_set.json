@@ -1,0 +1,119 @@
+{
+  "suite": "core_set",
+  "cases": [
+    {
+      "name": "sadd_new_members",
+      "now_ms": 0,
+      "argv": ["SADD", "s1", "a", "b", "c"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "sadd_duplicate_member",
+      "now_ms": 0,
+      "argv": ["SADD", "s1", "a"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "scard",
+      "now_ms": 0,
+      "argv": ["SCARD", "s1"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "scard_missing_key",
+      "now_ms": 0,
+      "argv": ["SCARD", "nokey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "sismember_present",
+      "now_ms": 0,
+      "argv": ["SISMEMBER", "s1", "a"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "sismember_absent",
+      "now_ms": 0,
+      "argv": ["SISMEMBER", "s1", "z"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "srem_existing",
+      "now_ms": 0,
+      "argv": ["SREM", "s1", "c"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "srem_absent",
+      "now_ms": 0,
+      "argv": ["SREM", "s1", "z"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "smembers_result",
+      "now_ms": 0,
+      "argv": ["SMEMBERS", "s1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "a" },
+          { "kind": "bulk", "value": "b" }
+        ]
+      }
+    },
+    {
+      "name": "sadd_set2",
+      "now_ms": 0,
+      "argv": ["SADD", "s2", "b", "c", "d"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "sinter_sets",
+      "now_ms": 0,
+      "argv": ["SINTER", "s1", "s2"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "b" }
+        ]
+      }
+    },
+    {
+      "name": "sunion_sets",
+      "now_ms": 0,
+      "argv": ["SUNION", "s1", "s2"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "a" },
+          { "kind": "bulk", "value": "b" },
+          { "kind": "bulk", "value": "c" },
+          { "kind": "bulk", "value": "d" }
+        ]
+      }
+    },
+    {
+      "name": "sdiff_sets",
+      "now_ms": 0,
+      "argv": ["SDIFF", "s1", "s2"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "a" }
+        ]
+      }
+    },
+    {
+      "name": "sadd_wrongtype_on_string",
+      "now_ms": 0,
+      "argv": ["SET", "strkey3", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "sadd_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["SADD", "strkey3", "a"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    }
+  ]
+}
