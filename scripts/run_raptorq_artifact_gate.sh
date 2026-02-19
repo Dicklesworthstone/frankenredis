@@ -5,14 +5,12 @@ usage() {
   cat <<'USAGE'
 Usage: run_raptorq_artifact_gate.sh [options]
 
-Generate and validate deterministic RaptorQ sidecar/decode-proof artifacts for
-durability-critical evidence files, with optional corruption simulation.
+Thin wrapper around the Rust orchestrator:
+  cargo run -p fr-conformance --bin raptorq_artifact_orchestrator -- [options]
 
 Options:
-  --output-root <path>   Output root for run artifacts (default: artifacts/durability/raptorq_runs)
-  --run-id <id>          Run identifier (default: local-<utc-timestamp>)
-  --no-phase2c           Skip auto-discovery of artifacts/phase2c evidence bundles
-  --no-corruption        Skip corruption simulation checks
+  --runner <local|rch>   Execution backend override (default from FR_RAPTORQ_RUNNER)
+  [other options]        Forwarded to raptorq_artifact_gate
   -h, --help             Show this help
 
 Runner knobs (env):
@@ -25,12 +23,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   exit 0
 fi
 
-RUNNER="${FR_RAPTORQ_RUNNER:-local}"
-cmd=(cargo run -p fr-conformance --bin raptorq_artifact_gate -- "$@")
-
-if [[ "$RUNNER" == "rch" ]]; then
-  cmd=(~/.local/bin/rch exec -- "${cmd[@]}")
-fi
+cmd=(cargo run -p fr-conformance --bin raptorq_artifact_orchestrator -- "$@")
 
 printf 'cmd='
 printf '%q ' "${cmd[@]}"
