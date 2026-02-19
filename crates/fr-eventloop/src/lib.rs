@@ -478,6 +478,60 @@ pub struct TlsAcceptPlan {
     pub total_accepted: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveExpireCycleKind {
+    Slow,
+    Fast,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveExpireCycleBudget {
+    pub slow_cycle_sample_limit: usize,
+    pub fast_cycle_sample_limit: usize,
+}
+
+impl Default for ActiveExpireCycleBudget {
+    fn default() -> Self {
+        Self {
+            slow_cycle_sample_limit: 64,
+            fast_cycle_sample_limit: 16,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveExpireCyclePlan {
+    pub kind: ActiveExpireCycleKind,
+    pub sample_limit: usize,
+    pub start_db_index: usize,
+    pub next_db_index: usize,
+}
+
+#[must_use]
+pub fn plan_active_expire_cycle(
+    kind: ActiveExpireCycleKind,
+    pending_expirable_keys: usize,
+    current_db_index: usize,
+    db_count: usize,
+    budget: ActiveExpireCycleBudget,
+) -> ActiveExpireCyclePlan {
+    let normalized_db_count = db_count.max(1);
+    let start_db_index = current_db_index % normalized_db_count;
+    let next_db_index = (start_db_index + 1) % normalized_db_count;
+    let configured_limit = match kind {
+        ActiveExpireCycleKind::Slow => budget.slow_cycle_sample_limit,
+        ActiveExpireCycleKind::Fast => budget.fast_cycle_sample_limit,
+    };
+    let sample_limit = pending_expirable_keys.min(configured_limit);
+
+    ActiveExpireCyclePlan {
+        kind,
+        sample_limit,
+        start_db_index,
+        next_db_index,
+    }
+}
+
 #[must_use]
 pub fn run_tick(pending_accepts: usize, pending_commands: usize, budget: TickBudget) -> TickStats {
     let accepted = pending_accepts.min(budget.max_accepts);
@@ -541,9 +595,10 @@ pub fn apply_tls_accept_rate_limit(
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptPathError, BarrierOrderError, BootstrapError, EVENT_LOOP_PHASE_ORDER, EventLoopMode,
-        EventLoopPhase, FdRegistrationError, LoopBootstrap, PendingWriteError, PhaseReplayError,
-        ReadPathError, ReadinessCallback, TickBudget, apply_tls_accept_rate_limit,
+        AcceptPathError, ActiveExpireCycleBudget, ActiveExpireCycleKind, BarrierOrderError,
+        BootstrapError, EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase,
+        FdRegistrationError, LoopBootstrap, PendingWriteError, PhaseReplayError, ReadPathError,
+        ReadinessCallback, TickBudget, apply_tls_accept_rate_limit, plan_active_expire_cycle,
         plan_fd_setsize_growth, plan_readiness_callback_order, plan_tick, replay_phase_trace,
         run_tick, validate_accept_path, validate_ae_barrier_order, validate_bootstrap,
         validate_fd_registration_bounds, validate_pending_write_delivery, validate_read_path,
@@ -875,5 +930,40 @@ mod tests {
         assert_eq!(plan.deferred_tls, 0);
         assert_eq!(plan.accepted_non_tls, 1);
         assert_eq!(plan.total_accepted, 3);
+    }
+
+    #[test]
+    fn fr_p2c_008_u002_active_expire_cycle_budget_is_deterministic() {
+        let budget = ActiveExpireCycleBudget::default();
+        let fast_plan = plan_active_expire_cycle(ActiveExpireCycleKind::Fast, 99, 0, 1, budget);
+        assert_eq!(fast_plan.sample_limit, budget.fast_cycle_sample_limit);
+        assert_eq!(fast_plan.start_db_index, 0);
+        assert_eq!(fast_plan.next_db_index, 0);
+
+        let slow_plan = plan_active_expire_cycle(ActiveExpireCycleKind::Slow, 99, 0, 1, budget);
+        assert_eq!(slow_plan.sample_limit, budget.slow_cycle_sample_limit);
+        assert_eq!(slow_plan.start_db_index, 0);
+        assert_eq!(slow_plan.next_db_index, 0);
+    }
+
+    #[test]
+    fn fr_p2c_008_u002_active_expire_cycle_rotates_db_index_fairly() {
+        let budget = ActiveExpireCycleBudget::default();
+        let plan = plan_active_expire_cycle(ActiveExpireCycleKind::Slow, 2, 1, 4, budget);
+        assert_eq!(plan.start_db_index, 1);
+        assert_eq!(plan.next_db_index, 2);
+        assert_eq!(plan.sample_limit, 2);
+
+        let wrapped = plan_active_expire_cycle(ActiveExpireCycleKind::Slow, 2, 3, 4, budget);
+        assert_eq!(wrapped.start_db_index, 3);
+        assert_eq!(wrapped.next_db_index, 0);
+    }
+
+    #[test]
+    fn fr_p2c_008_u002_active_expire_cycle_handles_zero_db_count() {
+        let budget = ActiveExpireCycleBudget::default();
+        let plan = plan_active_expire_cycle(ActiveExpireCycleKind::Fast, 3, 77, 0, budget);
+        assert_eq!(plan.start_db_index, 0);
+        assert_eq!(plan.next_db_index, 0);
     }
 }

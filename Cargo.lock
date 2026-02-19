@@ -111,6 +111,9 @@ dependencies = [
 [[package]]
 name = "fr-store"
 version = "0.1.0"
+dependencies = [
+ "fr-expire",
+]
 
 [[package]]
 name = "generic-array"

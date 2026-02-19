@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use fr_expire::evaluate_expiry;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
@@ -43,6 +44,13 @@ pub enum ValueType {
     List,
     Set,
     ZSet,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveExpireCycleResult {
+    pub sampled_keys: usize,
+    pub evicted_keys: usize,
+    pub next_cursor: usize,
 }
 
 impl ValueType {
@@ -192,18 +200,15 @@ impl Store {
         let Some(entry) = self.entries.get(key) else {
             return PttlValue::KeyMissing;
         };
-        match entry.expires_at_ms {
-            None => PttlValue::NoExpiry,
-            Some(expires_at_ms) => {
-                if expires_at_ms <= now_ms {
-                    self.entries.remove(key);
-                    PttlValue::KeyMissing
-                } else {
-                    let remain = expires_at_ms.saturating_sub(now_ms);
-                    let remain = i64::try_from(remain).unwrap_or(i64::MAX);
-                    PttlValue::Remaining(remain)
-                }
-            }
+        let decision = evaluate_expiry(now_ms, entry.expires_at_ms);
+        if decision.should_evict {
+            self.entries.remove(key);
+            return PttlValue::KeyMissing;
+        }
+        if decision.remaining_ms == -1 {
+            PttlValue::NoExpiry
+        } else {
+            PttlValue::Remaining(decision.remaining_ms)
         }
     }
 
@@ -644,6 +649,73 @@ impl Store {
             self.drop_if_expired(key, now_ms);
         }
         self.entries.len()
+    }
+
+    #[must_use]
+    pub fn count_expiring_keys(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|entry| entry.expires_at_ms.is_some())
+            .count()
+    }
+
+    #[must_use]
+    pub fn run_active_expire_cycle(
+        &mut self,
+        now_ms: u64,
+        start_cursor: usize,
+        sample_limit: usize,
+    ) -> ActiveExpireCycleResult {
+        if sample_limit == 0 || self.entries.is_empty() {
+            return ActiveExpireCycleResult {
+                sampled_keys: 0,
+                evicted_keys: 0,
+                next_cursor: if self.entries.is_empty() {
+                    0
+                } else {
+                    start_cursor % self.entries.len()
+                },
+            };
+        }
+
+        let mut keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
+        keys.sort();
+        let key_count = keys.len();
+        let normalized_start = start_cursor % key_count;
+        let sampled_keys = sample_limit.min(key_count);
+        let next_key_anchor = keys[(normalized_start + sampled_keys) % key_count].clone();
+        let mut evicted_keys = 0usize;
+
+        for offset in 0..sampled_keys {
+            let key_index = (normalized_start + offset) % key_count;
+            let key = &keys[key_index];
+            let should_evict = evaluate_expiry(
+                now_ms,
+                self.entries
+                    .get(key.as_slice())
+                    .and_then(|entry| entry.expires_at_ms),
+            )
+            .should_evict;
+            if should_evict {
+                self.entries.remove(key.as_slice());
+                evicted_keys = evicted_keys.saturating_add(1);
+            }
+        }
+
+        ActiveExpireCycleResult {
+            sampled_keys,
+            evicted_keys,
+            next_cursor: if self.entries.is_empty() {
+                0
+            } else {
+                let mut remaining_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
+                remaining_keys.sort();
+                remaining_keys
+                    .iter()
+                    .position(|key| *key == next_key_anchor)
+                    .unwrap_or(0)
+            },
+        }
     }
 
     pub fn flushdb(&mut self) {
@@ -1372,7 +1444,23 @@ impl Store {
     ) -> Result<Option<Vec<u8>>, StoreError> {
         self.drop_if_expired(source, now_ms);
         self.drop_if_expired(destination, now_ms);
-        // Pop from source
+
+        match self.entries.get(source) {
+            Some(entry) => {
+                if !matches!(&entry.value, Value::List(_)) {
+                    return Err(StoreError::WrongType);
+                }
+            }
+            None => return Ok(None),
+        }
+        if source != destination
+            && let Some(entry) = self.entries.get(destination)
+            && !matches!(&entry.value, Value::List(_))
+        {
+            return Err(StoreError::WrongType);
+        }
+
+        // Pop from source.
         let popped = match self.entries.get_mut(source) {
             Some(entry) => match &mut entry.value {
                 Value::List(l) => {
@@ -1389,14 +1477,14 @@ impl Store {
         let Some(val) = popped else {
             return Ok(None);
         };
-        // Clean up empty source
+        // Clean up empty source.
         if let Some(entry) = self.entries.get(source)
             && let Value::List(l) = &entry.value
             && l.is_empty()
         {
             self.entries.remove(source);
         }
-        // Push to destination
+        // Push to destination.
         match self.entries.get_mut(destination) {
             Some(entry) => match &mut entry.value {
                 Value::List(l) => {
@@ -2422,12 +2510,12 @@ impl Store {
     }
 
     fn drop_if_expired(&mut self, key: &[u8], now_ms: u64) {
-        let expired = self
-            .entries
-            .get(key)
-            .and_then(|entry| entry.expires_at_ms)
-            .is_some_and(|expires_at_ms| expires_at_ms <= now_ms);
-        if expired {
+        let should_evict = evaluate_expiry(
+            now_ms,
+            self.entries.get(key).and_then(|entry| entry.expires_at_ms),
+        )
+        .should_evict;
+        if should_evict {
             self.entries.remove(key);
         }
     }
@@ -3297,6 +3385,56 @@ mod tests {
     }
 
     #[test]
+    fn lazy_expiration_evicts_key_at_exact_deadline() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), Some(1_000), 5_000);
+        assert!(store.exists(b"k", 5_999));
+        assert!(!store.exists(b"k", 6_000));
+        assert_eq!(store.get(b"k", 6_000).unwrap(), None);
+    }
+
+    #[test]
+    fn fr_p2c_008_u001_active_expire_cycle_evicts_expired_keys() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"1".to_vec(), Some(1), 0);
+        store.set(b"b".to_vec(), b"2".to_vec(), Some(1), 0);
+        store.set(b"c".to_vec(), b"3".to_vec(), None, 0);
+
+        let result = store.run_active_expire_cycle(10, 0, 10);
+        assert_eq!(result.sampled_keys, 3);
+        assert_eq!(result.evicted_keys, 2);
+        assert_eq!(store.dbsize(10), 1);
+        assert_eq!(store.get(b"c", 10).unwrap(), Some(b"3".to_vec()));
+    }
+
+    #[test]
+    fn fr_p2c_008_u002_active_expire_cycle_cursor_is_deterministic() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"1".to_vec(), Some(1), 0);
+        store.set(b"b".to_vec(), b"2".to_vec(), None, 0);
+        store.set(b"c".to_vec(), b"3".to_vec(), Some(1), 0);
+        store.set(b"d".to_vec(), b"4".to_vec(), None, 0);
+
+        let first = store.run_active_expire_cycle(10, 0, 2);
+        assert_eq!(first.sampled_keys, 2);
+        assert_eq!(first.evicted_keys, 1);
+        assert_eq!(first.next_cursor, 1);
+
+        let second = store.run_active_expire_cycle(10, first.next_cursor, 2);
+        assert_eq!(second.sampled_keys, 2);
+        assert_eq!(second.evicted_keys, 1);
+    }
+
+    #[test]
+    fn fr_p2c_008_u002_count_expiring_keys_ignores_persistent_entries() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"1".to_vec(), Some(1_000), 0);
+        store.set(b"b".to_vec(), b"2".to_vec(), None, 0);
+        store.set(b"c".to_vec(), b"3".to_vec(), Some(500), 0);
+        assert_eq!(store.count_expiring_keys(), 2);
+    }
+
+    #[test]
     fn state_digest_changes_on_mutation() {
         let mut store = Store::new();
         let digest_a = store.state_digest();
@@ -3745,6 +3883,105 @@ mod tests {
         assert_eq!(store.lpop(b"l", 0).unwrap(), Some(b"a".to_vec()));
         assert!(!store.exists(b"l", 0));
         assert_eq!(store.lpop(b"l", 0).unwrap(), None);
+    }
+
+    #[test]
+    fn ltrim_keeps_window_and_removes_empty_key() {
+        let mut store = Store::new();
+        store
+            .rpush(
+                b"l",
+                &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"d".to_vec()],
+                0,
+            )
+            .unwrap();
+
+        store.ltrim(b"l", 1, 2, 0).unwrap();
+        assert_eq!(
+            store.lrange(b"l", 0, -1, 0).unwrap(),
+            vec![b"b".to_vec(), b"c".to_vec()]
+        );
+
+        store.ltrim(b"l", 9, 12, 0).unwrap();
+        assert!(!store.exists(b"l", 0));
+    }
+
+    #[test]
+    fn lpushx_rpushx_require_existing_key() {
+        let mut store = Store::new();
+        assert_eq!(store.lpushx(b"missing", &[b"x".to_vec()], 0).unwrap(), 0);
+        assert_eq!(store.rpushx(b"missing", &[b"y".to_vec()], 0).unwrap(), 0);
+        assert!(!store.exists(b"missing", 0));
+
+        store.rpush(b"l", &[b"a".to_vec()], 0).unwrap();
+        assert_eq!(
+            store
+                .lpushx(b"l", &[b"b".to_vec(), b"c".to_vec()], 0)
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            store
+                .rpushx(b"l", &[b"d".to_vec(), b"e".to_vec()], 0)
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            store.lrange(b"l", 0, -1, 0).unwrap(),
+            vec![
+                b"c".to_vec(),
+                b"b".to_vec(),
+                b"a".to_vec(),
+                b"d".to_vec(),
+                b"e".to_vec()
+            ]
+        );
+    }
+
+    #[test]
+    fn lmove_moves_between_lists_and_handles_missing_source() {
+        let mut store = Store::new();
+        store
+            .rpush(b"src", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 0)
+            .unwrap();
+        store.rpush(b"dst", &[b"x".to_vec()], 0).unwrap();
+
+        let moved = store
+            .lmove(b"src", b"dst", b"LEFT", b"RIGHT", 0)
+            .unwrap();
+        assert_eq!(moved, Some(b"a".to_vec()));
+
+        let moved = store
+            .lmove(b"src", b"dst", b"RIGHT", b"LEFT", 0)
+            .unwrap();
+        assert_eq!(moved, Some(b"c".to_vec()));
+
+        assert_eq!(store.lrange(b"src", 0, -1, 0).unwrap(), vec![b"b".to_vec()]);
+        assert_eq!(
+            store.lrange(b"dst", 0, -1, 0).unwrap(),
+            vec![b"c".to_vec(), b"x".to_vec(), b"a".to_vec()]
+        );
+
+        let moved = store
+            .lmove(b"missing", b"dst", b"LEFT", b"RIGHT", 0)
+            .unwrap();
+        assert_eq!(moved, None);
+    }
+
+    #[test]
+    fn lmove_wrongtype_destination_is_non_mutating() {
+        let mut store = Store::new();
+        store
+            .rpush(b"src", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 0)
+            .unwrap();
+        store.set(b"dst".to_vec(), b"value".to_vec(), None, 0);
+
+        let err = store.lmove(b"src", b"dst", b"LEFT", b"RIGHT", 0);
+        assert_eq!(err, Err(StoreError::WrongType));
+        assert_eq!(
+            store.lrange(b"src", 0, -1, 0).unwrap(),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
     }
 
     #[test]

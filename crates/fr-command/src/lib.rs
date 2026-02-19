@@ -1798,6 +1798,11 @@ fn lmove(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if argv.len() != 5 {
         return Err(CommandError::WrongArity("LMOVE"));
     }
+    if (!eq_ascii_command(&argv[3], b"LEFT") && !eq_ascii_command(&argv[3], b"RIGHT"))
+        || (!eq_ascii_command(&argv[4], b"LEFT") && !eq_ascii_command(&argv[4], b"RIGHT"))
+    {
+        return Err(CommandError::SyntaxError);
+    }
     match store.lmove(&argv[1], &argv[2], &argv[3], &argv[4], now_ms)? {
         Some(v) => Ok(RespFrame::BulkString(Some(v))),
         None => Ok(RespFrame::BulkString(None)),
@@ -5243,6 +5248,276 @@ mod tests {
         )
         .expect("lindex");
         assert_eq!(val, RespFrame::BulkString(Some(b"x".to_vec())));
+    }
+
+    #[test]
+    fn ltrim_command() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"l".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+                b"d".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("rpush");
+
+        let out = dispatch_argv(
+            &[
+                b"LTRIM".to_vec(),
+                b"l".to_vec(),
+                b"1".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("ltrim");
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+
+        let out = dispatch_argv(
+            &[
+                b"LRANGE".to_vec(),
+                b"l".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lrange");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"c".to_vec())),
+            ]))
+        );
+
+        let out = dispatch_argv(
+            &[
+                b"LTRIM".to_vec(),
+                b"l".to_vec(),
+                b"10".to_vec(),
+                b"12".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("ltrim to empty");
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+
+        let out = dispatch_argv(&[b"TYPE".to_vec(), b"l".to_vec()], &mut store, 0).expect("type");
+        assert_eq!(out, RespFrame::SimpleString("none".to_string()));
+    }
+
+    #[test]
+    fn lpushx_rpushx_commands() {
+        let mut store = Store::new();
+
+        let out = dispatch_argv(
+            &[b"LPUSHX".to_vec(), b"missing".to_vec(), b"x".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("lpushx missing");
+        assert_eq!(out, RespFrame::Integer(0));
+
+        dispatch_argv(
+            &[b"RPUSH".to_vec(), b"l".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("rpush");
+
+        let out = dispatch_argv(
+            &[
+                b"LPUSHX".to_vec(),
+                b"l".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lpushx existing");
+        assert_eq!(out, RespFrame::Integer(3));
+
+        let out = dispatch_argv(
+            &[
+                b"RPUSHX".to_vec(),
+                b"l".to_vec(),
+                b"d".to_vec(),
+                b"e".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("rpushx existing");
+        assert_eq!(out, RespFrame::Integer(5));
+
+        let out = dispatch_argv(
+            &[
+                b"LRANGE".to_vec(),
+                b"l".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lrange");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"c".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"d".to_vec())),
+                RespFrame::BulkString(Some(b"e".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn lmove_command() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"src".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("rpush src");
+        dispatch_argv(
+            &[b"RPUSH".to_vec(), b"dst".to_vec(), b"x".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("rpush dst");
+
+        let out = dispatch_argv(
+            &[
+                b"LMOVE".to_vec(),
+                b"src".to_vec(),
+                b"dst".to_vec(),
+                b"LEFT".to_vec(),
+                b"RIGHT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lmove left-right");
+        assert_eq!(out, RespFrame::BulkString(Some(b"a".to_vec())));
+
+        let out = dispatch_argv(
+            &[
+                b"LMOVE".to_vec(),
+                b"src".to_vec(),
+                b"dst".to_vec(),
+                b"RIGHT".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lmove right-left");
+        assert_eq!(out, RespFrame::BulkString(Some(b"c".to_vec())));
+
+        let out = dispatch_argv(
+            &[
+                b"LRANGE".to_vec(),
+                b"src".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lrange src");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"b".to_vec()))]))
+        );
+
+        let out = dispatch_argv(
+            &[
+                b"LRANGE".to_vec(),
+                b"dst".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lrange dst");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"c".to_vec())),
+                RespFrame::BulkString(Some(b"x".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn lmove_rejects_invalid_directions() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"src".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("rpush");
+
+        let err = dispatch_argv(
+            &[
+                b"LMOVE".to_vec(),
+                b"src".to_vec(),
+                b"dst".to_vec(),
+                b"MIDDLE".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("invalid wherefrom");
+        assert!(matches!(err, CommandError::SyntaxError));
+
+        let out = dispatch_argv(
+            &[
+                b"LRANGE".to_vec(),
+                b"src".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lrange after invalid lmove");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+            ]))
+        );
     }
 
     #[test]

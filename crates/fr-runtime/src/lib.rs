@@ -12,12 +12,13 @@ use fr_config::{
     evaluate_tls_hardened_deviation, plan_tls_runtime_apply,
 };
 use fr_eventloop::{
-    AcceptPathError, BarrierOrderError, BootstrapError, CallbackDispatchOrder, EventLoopMode,
-    EventLoopPhase, FdRegistrationError, LoopBootstrap, PendingWriteError, PhaseReplayError,
-    ReadPathError, TickBudget, TickPlan, apply_tls_accept_rate_limit, plan_fd_setsize_growth,
-    plan_readiness_callback_order, plan_tick, replay_phase_trace, validate_accept_path,
-    validate_ae_barrier_order, validate_bootstrap, validate_fd_registration_bounds,
-    validate_pending_write_delivery, validate_read_path,
+    AcceptPathError, ActiveExpireCycleBudget, ActiveExpireCycleKind, ActiveExpireCyclePlan,
+    BarrierOrderError, BootstrapError, CallbackDispatchOrder, EventLoopMode, EventLoopPhase,
+    FdRegistrationError, LoopBootstrap, PendingWriteError, PhaseReplayError, ReadPathError,
+    TickBudget, TickPlan, apply_tls_accept_rate_limit, plan_active_expire_cycle,
+    plan_fd_setsize_growth, plan_readiness_callback_order, plan_tick, replay_phase_trace,
+    validate_accept_path, validate_ae_barrier_order, validate_bootstrap,
+    validate_fd_registration_bounds, validate_pending_write_delivery, validate_read_path,
 };
 use fr_persist::{AofRecord, PersistError, decode_aof_stream, encode_aof_stream};
 use fr_protocol::{RespFrame, RespParseError, parse_frame};
@@ -303,6 +304,17 @@ pub struct Runtime {
     cluster_state: ClusterClientState,
     replication_ack_state: ReplicationAckState,
     transaction_state: TransactionState,
+    active_expire_db_cursor: usize,
+    active_expire_key_cursor: usize,
+    active_expire_budget: ActiveExpireCycleBudget,
+    last_active_expire_cycle: Option<ActiveExpireCycleStats>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ActiveExpireCycleStats {
+    pub plan: ActiveExpireCyclePlan,
+    pub sampled_keys: usize,
+    pub evicted_keys: usize,
 }
 
 struct ThreatEventInput<'a> {
@@ -332,6 +344,10 @@ impl Runtime {
             cluster_state: ClusterClientState::default(),
             replication_ack_state: ReplicationAckState::default(),
             transaction_state: TransactionState::default(),
+            active_expire_db_cursor: 0,
+            active_expire_key_cursor: 0,
+            active_expire_budget: ActiveExpireCycleBudget::default(),
+            last_active_expire_cycle: None,
         }
     }
 
@@ -377,6 +393,44 @@ impl Runtime {
         plan.stats.accepted = tls_accept_plan.total_accepted;
         plan.stats.accept_backlog_remaining = pending_accepts.saturating_sub(plan.stats.accepted);
         plan
+    }
+
+    #[must_use]
+    pub fn run_active_expire_cycle(
+        &mut self,
+        now_ms: u64,
+        cycle_kind: ActiveExpireCycleKind,
+    ) -> ActiveExpireCycleStats {
+        let plan = plan_active_expire_cycle(
+            cycle_kind,
+            self.store.count_expiring_keys(),
+            self.active_expire_db_cursor,
+            1,
+            self.active_expire_budget,
+        );
+        let cycle_result =
+            self.store
+                .run_active_expire_cycle(now_ms, self.active_expire_key_cursor, plan.sample_limit);
+        self.active_expire_db_cursor = plan.next_db_index;
+        self.active_expire_key_cursor = cycle_result.next_cursor;
+
+        let stats = ActiveExpireCycleStats {
+            plan,
+            sampled_keys: cycle_result.sampled_keys,
+            evicted_keys: cycle_result.evicted_keys,
+        };
+        self.last_active_expire_cycle = Some(stats);
+        stats
+    }
+
+    #[must_use]
+    pub fn run_server_cron_active_expire_cycle(&mut self, now_ms: u64) -> ActiveExpireCycleStats {
+        self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Slow)
+    }
+
+    #[must_use]
+    pub fn last_active_expire_cycle_stats(&self) -> Option<ActiveExpireCycleStats> {
+        self.last_active_expire_cycle
     }
 
     pub fn replay_event_loop_phase_trace(
@@ -666,6 +720,7 @@ impl Runtime {
             return RespFrame::SimpleString("QUEUED".to_string());
         }
 
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
         match dispatch_argv(&argv, &mut self.store, now_ms) {
             Ok(reply) => {
                 self.capture_aof_record(&argv);
@@ -1290,9 +1345,9 @@ mod tests {
         TlsAuthClients, TlsConfig, TlsProtocol,
     };
     use fr_eventloop::{
-        AcceptPathError, BarrierOrderError, EVENT_LOOP_PHASE_ORDER, EventLoopMode, EventLoopPhase,
-        FdRegistrationError, LoopBootstrap, PendingWriteError, ReadPathError, ReadinessCallback,
-        TickBudget,
+        AcceptPathError, ActiveExpireCycleKind, BarrierOrderError, EVENT_LOOP_PHASE_ORDER,
+        EventLoopMode, EventLoopPhase, FdRegistrationError, LoopBootstrap, PendingWriteError,
+        ReadPathError, ReadinessCallback, TickBudget,
     };
     use fr_persist::{PersistError, decode_aof_stream};
     use fr_protocol::{RespFrame, parse_frame};
@@ -1601,6 +1656,65 @@ mod tests {
                 RespFrame::BulkString(Some(b"c".to_vec())),
             ]))
         );
+    }
+
+    #[test]
+    fn fr_p2c_008_u001_runtime_command_path_fast_cycle_evicts_expired_keys() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"fr:p2c:008:exp", b"x", b"PX", b"1"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"fr:p2c:008:live", b"v"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"fr:p2c:008:live"]), 10),
+            RespFrame::BulkString(Some(b"v".to_vec()))
+        );
+
+        let stats = rt
+            .last_active_expire_cycle_stats()
+            .expect("fast active-expire cycle should run on command path");
+        assert_eq!(stats.plan.kind, ActiveExpireCycleKind::Fast);
+        assert!(stats.sampled_keys >= 1);
+        assert!(stats.evicted_keys >= 1);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"TTL", b"fr:p2c:008:exp"]), 10),
+            RespFrame::Integer(-2)
+        );
+    }
+
+    #[test]
+    fn fr_p2c_008_u002_runtime_fast_and_slow_cycle_budgets_are_deterministic() {
+        let mut rt = Runtime::default_strict();
+        for idx in 0..20 {
+            let key = format!("fr:p2c:008:ttl:{idx}");
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"SET", key.as_bytes(), b"v", b"PX", b"1"]),
+                    0
+                ),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        let fast = rt.run_active_expire_cycle(10, ActiveExpireCycleKind::Fast);
+        assert_eq!(fast.plan.kind, ActiveExpireCycleKind::Fast);
+        assert_eq!(fast.plan.sample_limit, 16);
+        assert_eq!(fast.sampled_keys, 16);
+        assert_eq!(fast.evicted_keys, 16);
+
+        let slow = rt.run_server_cron_active_expire_cycle(10);
+        assert_eq!(slow.plan.kind, ActiveExpireCycleKind::Slow);
+        assert_eq!(slow.plan.sample_limit, 4);
+        assert_eq!(slow.sampled_keys, 4);
+        assert_eq!(slow.evicted_keys, 4);
+
+        assert_eq!(rt.execute_frame(command(&[b"DBSIZE"]), 10), RespFrame::Integer(0));
     }
 
     #[test]
