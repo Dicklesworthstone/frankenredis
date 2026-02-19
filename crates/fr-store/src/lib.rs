@@ -413,10 +413,12 @@ impl Store {
             },
             None => return Ok(None),
         }
-        let entry = self.entries.remove(key).unwrap();
+        let Some(entry) = self.entries.remove(key) else {
+            return Ok(None);
+        };
         match entry.value {
             Value::String(v) => Ok(Some(v)),
-            _ => unreachable!(),
+            _ => Err(StoreError::WrongType),
         }
     }
 
@@ -2017,24 +2019,12 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
-        let zs = match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::SortedSet(zs) => zs,
-                _ => return Err(StoreError::WrongType),
-            },
-            None => {
-                self.entries.insert(
-                    key.to_vec(),
-                    Entry {
-                        value: Value::SortedSet(HashMap::new()),
-                        expires_at_ms: None,
-                    },
-                );
-                match &mut self.entries.get_mut(key).unwrap().value {
-                    Value::SortedSet(zs) => zs,
-                    _ => unreachable!(),
-                }
-            }
+        let entry = self.entries.entry(key.to_vec()).or_insert_with(|| Entry {
+            value: Value::SortedSet(HashMap::new()),
+            expires_at_ms: None,
+        });
+        let Value::SortedSet(zs) = &mut entry.value else {
+            return Err(StoreError::WrongType);
         };
         let mut added = 0;
         for (score, member) in members {
@@ -2258,24 +2248,12 @@ impl Store {
         now_ms: u64,
     ) -> Result<f64, StoreError> {
         self.drop_if_expired(key, now_ms);
-        let zs = match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::SortedSet(zs) => zs,
-                _ => return Err(StoreError::WrongType),
-            },
-            None => {
-                self.entries.insert(
-                    key.to_vec(),
-                    Entry {
-                        value: Value::SortedSet(HashMap::new()),
-                        expires_at_ms: None,
-                    },
-                );
-                match &mut self.entries.get_mut(key).unwrap().value {
-                    Value::SortedSet(zs) => zs,
-                    _ => unreachable!(),
-                }
-            }
+        let entry = self.entries.entry(key.to_vec()).or_insert_with(|| Entry {
+            value: Value::SortedSet(HashMap::new()),
+            expires_at_ms: None,
+        });
+        let Value::SortedSet(zs) = &mut entry.value else {
+            return Err(StoreError::WrongType);
         };
         let new_score = zs.get(&member).unwrap_or(&0.0) + delta;
         zs.insert(member, new_score);
@@ -2301,8 +2279,10 @@ impl Store {
         let min_member = zs
             .iter()
             .min_by(|(m1, s1), (m2, s2)| cmp_score_member(**s1, m1, **s2, m2))
-            .map(|(m, s)| (m.clone(), *s))
-            .unwrap();
+            .map(|(m, s)| (m.clone(), *s));
+        let Some(min_member) = min_member else {
+            return Ok(None);
+        };
         zs.remove(&min_member.0);
         if zs.is_empty() {
             self.entries.remove(key);
@@ -2329,8 +2309,10 @@ impl Store {
         let max_member = zs
             .iter()
             .max_by(|(m1, s1), (m2, s2)| cmp_score_member(**s1, m1, **s2, m2))
-            .map(|(m, s)| (m.clone(), *s))
-            .unwrap();
+            .map(|(m, s)| (m.clone(), *s));
+        let Some(max_member) = max_member else {
+            return Ok(None);
+        };
         zs.remove(&max_member.0);
         if zs.is_empty() {
             self.entries.remove(key);
@@ -4581,6 +4563,12 @@ mod tests {
             store.zadd(b"k", &[(1.0, b"a".to_vec())], 0),
             Err(StoreError::WrongType)
         );
+        assert_eq!(
+            store.zincrby(b"k", b"a".to_vec(), 1.0, 0),
+            Err(StoreError::WrongType)
+        );
+        assert_eq!(store.zpopmin(b"k", 0), Err(StoreError::WrongType));
+        assert_eq!(store.zpopmax(b"k", 0), Err(StoreError::WrongType));
         assert_eq!(store.zscore(b"k", b"a", 0), Err(StoreError::WrongType));
         assert_eq!(store.zcard(b"k", 0), Err(StoreError::WrongType));
     }
@@ -4641,6 +4629,13 @@ mod tests {
     fn getdel_missing_key() {
         let mut store = Store::new();
         assert_eq!(store.getdel(b"k", 0).unwrap(), None);
+    }
+
+    #[test]
+    fn getdel_wrongtype() {
+        let mut store = Store::new();
+        store.sadd(b"s", &[b"member".to_vec()], 0).unwrap();
+        assert_eq!(store.getdel(b"s", 0), Err(StoreError::WrongType));
     }
 
     #[test]
