@@ -99,6 +99,9 @@ enum RuntimeSpecialCommand {
     Cluster,
     Wait,
     Waitaof,
+    Multi,
+    Exec,
+    Discard,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -115,6 +118,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
                 Some(RuntimeSpecialCommand::Auth)
             } else if eq_ascii_token(cmd, b"WAIT") {
                 Some(RuntimeSpecialCommand::Wait)
+            } else if eq_ascii_token(cmd, b"EXEC") {
+                Some(RuntimeSpecialCommand::Exec)
             } else {
                 None
             }
@@ -122,6 +127,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
         5 => {
             if eq_ascii_token(cmd, b"HELLO") {
                 Some(RuntimeSpecialCommand::Hello)
+            } else if eq_ascii_token(cmd, b"MULTI") {
+                Some(RuntimeSpecialCommand::Multi)
             } else {
                 None
             }
@@ -138,6 +145,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
                 Some(RuntimeSpecialCommand::Cluster)
             } else if eq_ascii_token(cmd, b"WAITAOF") {
                 Some(RuntimeSpecialCommand::Waitaof)
+            } else if eq_ascii_token(cmd, b"DISCARD") {
+                Some(RuntimeSpecialCommand::Discard)
             } else {
                 None
             }
@@ -179,6 +188,12 @@ fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialC
         Some(RuntimeSpecialCommand::Wait)
     } else if command.eq_ignore_ascii_case("WAITAOF") {
         Some(RuntimeSpecialCommand::Waitaof)
+    } else if command.eq_ignore_ascii_case("MULTI") {
+        Some(RuntimeSpecialCommand::Multi)
+    } else if command.eq_ignore_ascii_case("EXEC") {
+        Some(RuntimeSpecialCommand::Exec)
+    } else if command.eq_ignore_ascii_case("DISCARD") {
+        Some(RuntimeSpecialCommand::Discard)
     } else {
         None
     }
@@ -233,6 +248,12 @@ struct ReplicationAckState {
     replica_fsync_offsets: Vec<ReplOffset>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct TransactionState {
+    in_transaction: bool,
+    command_queue: Vec<Vec<Vec<u8>>>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvidenceEvent {
     pub ts_utc: String,
@@ -281,6 +302,7 @@ pub struct Runtime {
     auth_state: AuthState,
     cluster_state: ClusterClientState,
     replication_ack_state: ReplicationAckState,
+    transaction_state: TransactionState,
 }
 
 struct ThreatEventInput<'a> {
@@ -309,6 +331,7 @@ impl Runtime {
             auth_state: AuthState::default(),
             cluster_state: ClusterClientState::default(),
             replication_ack_state: ReplicationAckState::default(),
+            transaction_state: TransactionState::default(),
         }
     }
 
@@ -631,7 +654,16 @@ impl Runtime {
             Some(RuntimeSpecialCommand::Cluster) => return self.handle_cluster_command(&argv),
             Some(RuntimeSpecialCommand::Wait) => return self.handle_wait_command(&argv),
             Some(RuntimeSpecialCommand::Waitaof) => return self.handle_waitaof_command(&argv),
+            Some(RuntimeSpecialCommand::Multi) => return self.handle_multi_command(),
+            Some(RuntimeSpecialCommand::Exec) => return self.handle_exec_command(now_ms),
+            Some(RuntimeSpecialCommand::Discard) => return self.handle_discard_command(),
             _ => {}
+        }
+
+        // If inside a MULTI transaction, queue the command instead of executing it
+        if self.transaction_state.in_transaction {
+            self.transaction_state.command_queue.push(argv);
+            return RespFrame::SimpleString("QUEUED".to_string());
         }
 
         match dispatch_argv(&argv, &mut self.store, now_ms) {
@@ -921,6 +953,48 @@ impl Runtime {
             RespFrame::Integer(local_ack),
             RespFrame::Integer(replica_acks),
         ]))
+    }
+
+    fn handle_multi_command(&mut self) -> RespFrame {
+        if self.transaction_state.in_transaction {
+            return RespFrame::Error("ERR MULTI calls can not be nested".to_string());
+        }
+        self.transaction_state.in_transaction = true;
+        self.transaction_state.command_queue.clear();
+        RespFrame::SimpleString("OK".to_string())
+    }
+
+    fn handle_exec_command(&mut self, now_ms: u64) -> RespFrame {
+        if !self.transaction_state.in_transaction {
+            return RespFrame::Error(
+                "ERR EXEC without MULTI".to_string(),
+            );
+        }
+        let queued = std::mem::take(&mut self.transaction_state.command_queue);
+        self.transaction_state.in_transaction = false;
+
+        let mut results = Vec::with_capacity(queued.len());
+        for argv in &queued {
+            match dispatch_argv(argv, &mut self.store, now_ms) {
+                Ok(reply) => {
+                    self.capture_aof_record(argv);
+                    results.push(reply);
+                }
+                Err(err) => results.push(command_error_to_resp(err)),
+            }
+        }
+        RespFrame::Array(Some(results))
+    }
+
+    fn handle_discard_command(&mut self) -> RespFrame {
+        if !self.transaction_state.in_transaction {
+            return RespFrame::Error(
+                "ERR DISCARD without MULTI".to_string(),
+            );
+        }
+        self.transaction_state.in_transaction = false;
+        self.transaction_state.command_queue.clear();
+        RespFrame::SimpleString("OK".to_string())
     }
 
     fn preflight_gate(
