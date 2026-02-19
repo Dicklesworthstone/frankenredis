@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-mkdir -p baselines
+usage() {
+  cat <<'USAGE'
+Usage:
+  ./scripts/benchmark_round1.sh
 
-hyperfine \
-  --warmup 2 \
-  --runs 5 \
-  --export-json baselines/round1_conformance_baseline.json \
-  'cargo test -p fr-conformance smoke_report_is_stable --test smoke -- --exact --nocapture'
+Description:
+  Thin wrapper around:
+  cargo run -p fr-conformance --bin conformance_benchmark_runner -- --round round1
+USAGE
+}
 
-strace -c -o baselines/round1_conformance_strace.txt \
-  cargo test -p fr-conformance smoke_report_is_stable --test smoke -- --exact --nocapture
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  usage
+  exit 0
+fi
 
-echo "wrote baselines/round1_conformance_baseline.json"
-echo "wrote baselines/round1_conformance_strace.txt"
+cmd=(cargo run -p fr-conformance --bin conformance_benchmark_runner -- --round round1 "$@")
+printf 'cmd='
+printf '%q ' "${cmd[@]}"
+echo
+"${cmd[@]}"
