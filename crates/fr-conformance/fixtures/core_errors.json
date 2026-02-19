@@ -56,15 +56,33 @@
       "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
     },
     {
+      "name": "wait_invalid_timeout",
+      "now_ms": 0,
+      "argv": ["WAIT", "1", "-1"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
       "name": "waitaof_wrong_arity",
       "now_ms": 0,
       "argv": ["WAITAOF", "1", "0"],
       "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'WAITAOF' command" }
     },
     {
+      "name": "waitaof_invalid_local_integer",
+      "now_ms": 0,
+      "argv": ["WAITAOF", "nope", "1", "0"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
       "name": "waitaof_invalid_integer",
       "now_ms": 0,
       "argv": ["WAITAOF", "1", "nope", "0"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "waitaof_invalid_timeout",
+      "now_ms": 0,
+      "argv": ["WAITAOF", "1", "0", "-1"],
       "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
     },
     {

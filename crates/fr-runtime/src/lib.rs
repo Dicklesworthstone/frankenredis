@@ -1762,6 +1762,12 @@ mod tests {
             invalid_integer,
             RespFrame::Error("ERR value is not an integer or out of range".to_string())
         );
+
+        let invalid_timeout = rt.execute_frame(command(&[b"WAIT", b"1", b"-1"]), 2);
+        assert_eq!(
+            invalid_timeout,
+            RespFrame::Error("ERR value is not an integer or out of range".to_string())
+        );
     }
 
     #[test]
@@ -1794,6 +1800,23 @@ mod tests {
         assert_eq!(
             local_and_replica_ready,
             RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(2)]))
+        );
+    }
+
+    #[test]
+    fn fr_p2c_006_u006_waitaof_rejects_invalid_integer_arguments() {
+        let mut rt = Runtime::default_strict();
+
+        let invalid_local = rt.execute_frame(command(&[b"WAITAOF", b"nope", b"1", b"0"]), 0);
+        assert_eq!(
+            invalid_local,
+            RespFrame::Error("ERR value is not an integer or out of range".to_string())
+        );
+
+        let invalid_timeout = rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"-1"]), 1);
+        assert_eq!(
+            invalid_timeout,
+            RespFrame::Error("ERR value is not an integer or out of range".to_string())
         );
     }
 
