@@ -53,6 +53,66 @@ pub struct ActiveExpireCycleResult {
     pub next_cursor: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaxmemoryPressureLevel {
+    None,
+    Soft,
+    Hard,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaxmemoryPressureState {
+    pub maxmemory_bytes: usize,
+    pub logical_usage_bytes: usize,
+    pub not_counted_bytes: usize,
+    pub counted_usage_bytes: usize,
+    pub bytes_to_free: usize,
+    pub level: MaxmemoryPressureLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EvictionSafetyGateState {
+    pub loading: bool,
+    pub command_yielding: bool,
+    pub replica_ignore_maxmemory: bool,
+    pub asm_importing: bool,
+    pub paused_for_evict: bool,
+}
+
+impl EvictionSafetyGateState {
+    #[must_use]
+    pub fn blocks_eviction(self) -> bool {
+        self.loading
+            || self.command_yielding
+            || self.replica_ignore_maxmemory
+            || self.asm_importing
+            || self.paused_for_evict
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvictionLoopStatus {
+    Ok,
+    Running,
+    Fail,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvictionLoopFailure {
+    SafetyGateSuppressed,
+    NoCandidates,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvictionLoopResult {
+    pub status: EvictionLoopStatus,
+    pub failure: Option<EvictionLoopFailure>,
+    pub sampled_keys: usize,
+    pub evicted_keys: usize,
+    pub bytes_freed: usize,
+    pub bytes_to_free_after: usize,
+}
+
 impl ValueType {
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -657,6 +717,142 @@ impl Store {
             .values()
             .filter(|entry| entry.expires_at_ms.is_some())
             .count()
+    }
+
+    #[must_use]
+    pub fn classify_maxmemory_pressure(
+        &self,
+        maxmemory_bytes: usize,
+        not_counted_bytes: usize,
+    ) -> MaxmemoryPressureState {
+        let logical_usage_bytes = self.estimate_memory_usage_bytes();
+        let counted_usage_bytes = logical_usage_bytes.saturating_sub(not_counted_bytes);
+        let bytes_to_free = if maxmemory_bytes == 0 {
+            0
+        } else {
+            counted_usage_bytes.saturating_sub(maxmemory_bytes)
+        };
+        let level = if bytes_to_free == 0 {
+            MaxmemoryPressureLevel::None
+        } else if bytes_to_free.saturating_mul(20) <= maxmemory_bytes {
+            MaxmemoryPressureLevel::Soft
+        } else {
+            MaxmemoryPressureLevel::Hard
+        };
+
+        MaxmemoryPressureState {
+            maxmemory_bytes,
+            logical_usage_bytes,
+            not_counted_bytes,
+            counted_usage_bytes,
+            bytes_to_free,
+            level,
+        }
+    }
+
+    #[must_use]
+    pub fn run_bounded_eviction_loop(
+        &mut self,
+        now_ms: u64,
+        maxmemory_bytes: usize,
+        not_counted_bytes: usize,
+        sample_limit: usize,
+        max_cycles: usize,
+        safety_gate: EvictionSafetyGateState,
+    ) -> EvictionLoopResult {
+        let initial_state = self.classify_maxmemory_pressure(maxmemory_bytes, not_counted_bytes);
+        if initial_state.bytes_to_free == 0 {
+            return EvictionLoopResult {
+                status: EvictionLoopStatus::Ok,
+                failure: None,
+                sampled_keys: 0,
+                evicted_keys: 0,
+                bytes_freed: 0,
+                bytes_to_free_after: 0,
+            };
+        }
+
+        if safety_gate.blocks_eviction() {
+            return EvictionLoopResult {
+                status: EvictionLoopStatus::Fail,
+                failure: Some(EvictionLoopFailure::SafetyGateSuppressed),
+                sampled_keys: 0,
+                evicted_keys: 0,
+                bytes_freed: 0,
+                bytes_to_free_after: initial_state.bytes_to_free,
+            };
+        }
+
+        let sample_limit = sample_limit.max(1);
+        let mut cursor = 0usize;
+        let mut sampled_keys = 0usize;
+        let mut evicted_keys = 0usize;
+        let mut bytes_freed = 0usize;
+
+        for _ in 0..max_cycles {
+            let before_state = self.classify_maxmemory_pressure(maxmemory_bytes, not_counted_bytes);
+            if before_state.bytes_to_free == 0 {
+                return EvictionLoopResult {
+                    status: EvictionLoopStatus::Ok,
+                    failure: None,
+                    sampled_keys,
+                    evicted_keys,
+                    bytes_freed,
+                    bytes_to_free_after: 0,
+                };
+            }
+
+            let cycle = self.run_active_expire_cycle(now_ms, cursor, sample_limit);
+            sampled_keys = sampled_keys.saturating_add(cycle.sampled_keys);
+            evicted_keys = evicted_keys.saturating_add(cycle.evicted_keys);
+            cursor = cycle.next_cursor;
+
+            if cycle.evicted_keys == 0 {
+                let Some(candidate) = self.select_eviction_candidate(now_ms) else {
+                    break;
+                };
+                if self.entries.remove(candidate.as_slice()).is_some() {
+                    evicted_keys = evicted_keys.saturating_add(1);
+                }
+            }
+
+            let after_state = self.classify_maxmemory_pressure(maxmemory_bytes, not_counted_bytes);
+            bytes_freed = bytes_freed.saturating_add(
+                before_state
+                    .counted_usage_bytes
+                    .saturating_sub(after_state.counted_usage_bytes),
+            );
+        }
+
+        let final_state = self.classify_maxmemory_pressure(maxmemory_bytes, not_counted_bytes);
+        if final_state.bytes_to_free == 0 {
+            EvictionLoopResult {
+                status: EvictionLoopStatus::Ok,
+                failure: None,
+                sampled_keys,
+                evicted_keys,
+                bytes_freed,
+                bytes_to_free_after: 0,
+            }
+        } else if evicted_keys > 0 {
+            EvictionLoopResult {
+                status: EvictionLoopStatus::Running,
+                failure: None,
+                sampled_keys,
+                evicted_keys,
+                bytes_freed,
+                bytes_to_free_after: final_state.bytes_to_free,
+            }
+        } else {
+            EvictionLoopResult {
+                status: EvictionLoopStatus::Fail,
+                failure: Some(EvictionLoopFailure::NoCandidates),
+                sampled_keys,
+                evicted_keys,
+                bytes_freed,
+                bytes_to_free_after: final_state.bytes_to_free,
+            }
+        }
     }
 
     #[must_use]
@@ -3031,6 +3227,66 @@ impl Store {
         }
         format!("{hash:016x}")
     }
+
+    fn estimate_memory_usage_bytes(&self) -> usize {
+        self.entries
+            .iter()
+            .map(|(key, entry)| estimate_entry_memory_usage_bytes(key, entry))
+            .sum()
+    }
+
+    fn select_eviction_candidate(&mut self, now_ms: u64) -> Option<Vec<u8>> {
+        let mut keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
+        keys.sort();
+        for key in keys {
+            self.drop_if_expired(&key, now_ms);
+            if self.entries.contains_key(key.as_slice()) {
+                return Some(key);
+            }
+        }
+        None
+    }
+}
+
+const ENTRY_BASE_OVERHEAD_BYTES: usize = 32;
+const EXPIRY_METADATA_BYTES: usize = 8;
+const SORTED_SET_SCORE_BYTES: usize = 8;
+const HASHMAP_BUCKET_OVERHEAD_BYTES: usize = 16;
+
+fn estimate_entry_memory_usage_bytes(key: &[u8], entry: &Entry) -> usize {
+    key.len()
+        .saturating_add(ENTRY_BASE_OVERHEAD_BYTES)
+        .saturating_add(EXPIRY_METADATA_BYTES)
+        .saturating_add(estimate_value_memory_usage_bytes(&entry.value))
+}
+
+fn estimate_value_memory_usage_bytes(value: &Value) -> usize {
+    match value {
+        Value::String(bytes) => bytes.len(),
+        Value::Hash(fields) => fields
+            .iter()
+            .map(|(field, value)| {
+                field
+                    .len()
+                    .saturating_add(value.len())
+                    .saturating_add(HASHMAP_BUCKET_OVERHEAD_BYTES)
+            })
+            .sum(),
+        Value::List(items) => items.iter().map(Vec::len).sum(),
+        Value::Set(members) => members
+            .iter()
+            .map(|member| member.len().saturating_add(HASHMAP_BUCKET_OVERHEAD_BYTES))
+            .sum(),
+        Value::SortedSet(members) => members
+            .keys()
+            .map(|member| {
+                member
+                    .len()
+                    .saturating_add(SORTED_SET_SCORE_BYTES)
+                    .saturating_add(HASHMAP_BUCKET_OVERHEAD_BYTES)
+            })
+            .sum(),
+    }
 }
 
 fn eq_ascii_ci(a: &[u8], b: &[u8]) -> bool {
@@ -3305,7 +3561,10 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 
 #[cfg(test)]
 mod tests {
-    use super::{PttlValue, Store, StoreError, ValueType};
+    use super::{
+        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState,
+        MaxmemoryPressureLevel, PttlValue, Store, StoreError, ValueType,
+    };
 
     #[test]
     fn set_get_and_del() {
@@ -3432,6 +3691,91 @@ mod tests {
         store.set(b"b".to_vec(), b"2".to_vec(), None, 0);
         store.set(b"c".to_vec(), b"3".to_vec(), Some(500), 0);
         assert_eq!(store.count_expiring_keys(), 2);
+    }
+
+    #[test]
+    fn fr_p2c_008_u010_maxmemory_pressure_excludes_not_counted_bytes() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), vec![b'x'; 64], None, 0);
+        store.set(b"b".to_vec(), vec![b'y'; 64], None, 0);
+
+        let pressure = store.classify_maxmemory_pressure(120, 64);
+        assert!(pressure.logical_usage_bytes > pressure.counted_usage_bytes);
+        assert_eq!(pressure.bytes_to_free, pressure.counted_usage_bytes.saturating_sub(120));
+        assert!(matches!(
+            pressure.level,
+            MaxmemoryPressureLevel::Soft | MaxmemoryPressureLevel::Hard
+        ));
+    }
+
+    #[test]
+    fn fr_p2c_008_u012_bounded_eviction_loop_reports_running_when_budget_exhausted() {
+        let mut store = Store::new();
+        for idx in 0..8 {
+            let key = format!("fr:p2c:008:evict:{idx}");
+            store.set(key.into_bytes(), vec![b'v'; 32], None, 0);
+        }
+
+        let result = store.run_bounded_eviction_loop(
+            0,
+            64,
+            0,
+            1,
+            1,
+            EvictionSafetyGateState::default(),
+        );
+        assert_eq!(result.status, EvictionLoopStatus::Running);
+        assert!(result.evicted_keys >= 1);
+        assert!(result.bytes_to_free_after > 0);
+    }
+
+    #[test]
+    fn fr_p2c_008_u012_bounded_eviction_loop_reports_ok_when_pressure_cleared() {
+        let mut store = Store::new();
+        for idx in 0..6 {
+            let key = format!("fr:p2c:008:evict:ok:{idx}");
+            store.set(key.into_bytes(), vec![b'v'; 24], None, 0);
+        }
+
+        let result = store.run_bounded_eviction_loop(
+            0,
+            64,
+            0,
+            2,
+            16,
+            EvictionSafetyGateState::default(),
+        );
+        assert_eq!(result.status, EvictionLoopStatus::Ok);
+        assert!(result.evicted_keys >= 1);
+        assert_eq!(result.bytes_to_free_after, 0);
+    }
+
+    #[test]
+    fn fr_p2c_008_u013_safety_gate_suppresses_eviction() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), vec![b'x'; 96], None, 0);
+        store.set(b"b".to_vec(), vec![b'y'; 96], None, 0);
+        let before_dbsize = store.dbsize(0);
+
+        let result = store.run_bounded_eviction_loop(
+            0,
+            64,
+            0,
+            4,
+            8,
+            EvictionSafetyGateState {
+                loading: true,
+                ..EvictionSafetyGateState::default()
+            },
+        );
+
+        assert_eq!(result.status, EvictionLoopStatus::Fail);
+        assert_eq!(
+            result.failure,
+            Some(EvictionLoopFailure::SafetyGateSuppressed)
+        );
+        assert_eq!(store.dbsize(0), before_dbsize);
+        assert_eq!(result.evicted_keys, 0);
     }
 
     #[test]

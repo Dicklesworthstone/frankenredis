@@ -23,7 +23,9 @@ use fr_eventloop::{
 use fr_persist::{AofRecord, PersistError, decode_aof_stream, encode_aof_stream};
 use fr_protocol::{RespFrame, RespParseError, parse_frame};
 use fr_repl::{ReplOffset, WaitAofThreshold, WaitThreshold, evaluate_wait, evaluate_waitaof};
-use fr_store::Store;
+use fr_store::{
+    EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState, Store,
+};
 
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_AUTH_USER: &[u8] = b"default";
@@ -304,6 +306,12 @@ pub struct Runtime {
     cluster_state: ClusterClientState,
     replication_ack_state: ReplicationAckState,
     transaction_state: TransactionState,
+    maxmemory_bytes: usize,
+    maxmemory_not_counted_bytes: usize,
+    maxmemory_eviction_sample_limit: usize,
+    maxmemory_eviction_max_cycles: usize,
+    eviction_safety_gate: EvictionSafetyGateState,
+    last_eviction_loop: Option<EvictionLoopResult>,
     active_expire_db_cursor: usize,
     active_expire_key_cursor: usize,
     active_expire_budget: ActiveExpireCycleBudget,
@@ -344,6 +352,12 @@ impl Runtime {
             cluster_state: ClusterClientState::default(),
             replication_ack_state: ReplicationAckState::default(),
             transaction_state: TransactionState::default(),
+            maxmemory_bytes: 0,
+            maxmemory_not_counted_bytes: 0,
+            maxmemory_eviction_sample_limit: 16,
+            maxmemory_eviction_max_cycles: 4,
+            eviction_safety_gate: EvictionSafetyGateState::default(),
+            last_eviction_loop: None,
             active_expire_db_cursor: 0,
             active_expire_key_cursor: 0,
             active_expire_budget: ActiveExpireCycleBudget::default(),
@@ -546,6 +560,34 @@ impl Runtime {
         &self.tls_state
     }
 
+    pub fn configure_maxmemory_enforcement(
+        &mut self,
+        maxmemory_bytes: usize,
+        not_counted_bytes: usize,
+        sample_limit: usize,
+        max_cycles: usize,
+    ) {
+        self.maxmemory_bytes = maxmemory_bytes;
+        self.maxmemory_not_counted_bytes = not_counted_bytes;
+        self.maxmemory_eviction_sample_limit = sample_limit.max(1);
+        self.maxmemory_eviction_max_cycles = max_cycles;
+    }
+
+    pub fn set_eviction_safety_gate(&mut self, safety_gate: EvictionSafetyGateState) {
+        self.eviction_safety_gate = safety_gate;
+    }
+
+    #[must_use]
+    pub fn maxmemory_pressure_state(&self) -> fr_store::MaxmemoryPressureState {
+        self.store
+            .classify_maxmemory_pressure(self.maxmemory_bytes, self.maxmemory_not_counted_bytes)
+    }
+
+    #[must_use]
+    pub fn last_eviction_loop_result(&self) -> Option<EvictionLoopResult> {
+        self.last_eviction_loop
+    }
+
     pub fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
         self.auth_state.set_requirepass(requirepass);
     }
@@ -720,6 +762,16 @@ impl Runtime {
             return RespFrame::SimpleString("QUEUED".to_string());
         }
 
+        if let Some(reply) = self.enforce_maxmemory_before_dispatch(
+            &argv,
+            now_ms,
+            packet_id,
+            &input_digest,
+            &state_before,
+        ) {
+            return reply;
+        }
+
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
         match dispatch_argv(&argv, &mut self.store, now_ms) {
             Ok(reply) => {
@@ -755,6 +807,83 @@ impl Runtime {
                 reply.to_bytes()
             }
         }
+    }
+
+    fn enforce_maxmemory_before_dispatch(
+        &mut self,
+        argv: &[Vec<u8>],
+        now_ms: u64,
+        packet_id: u64,
+        input_digest: &str,
+        state_before: &str,
+    ) -> Option<RespFrame> {
+        if self.maxmemory_bytes == 0 {
+            self.last_eviction_loop = None;
+            return None;
+        }
+
+        let loop_result = self.store.run_bounded_eviction_loop(
+            now_ms,
+            self.maxmemory_bytes,
+            self.maxmemory_not_counted_bytes,
+            self.maxmemory_eviction_sample_limit,
+            self.maxmemory_eviction_max_cycles,
+            self.eviction_safety_gate,
+        );
+        self.last_eviction_loop = Some(loop_result);
+
+        if loop_result.status == EvictionLoopStatus::Ok {
+            return None;
+        }
+
+        if !Self::command_advances_replication_offset(argv) {
+            return None;
+        }
+
+        let hardened_nonallowlisted = self.policy.mode == Mode::Hardened
+            && !self
+                .policy
+                .is_deviation_allowed(HardenedDeviationCategory::ResourceClamp);
+
+        let reason_code = if hardened_nonallowlisted {
+            "expireevict.hardened_nonallowlisted_rejected"
+        } else if loop_result.failure == Some(EvictionLoopFailure::SafetyGateSuppressed) {
+            "evict.safety_gate_contract_violation"
+        } else {
+            "evict.eviction_loop_contract_violation"
+        };
+
+        let reason = if hardened_nonallowlisted {
+            format!(
+                "hardened maxmemory pressure handling rejected because resource clamp is not allowlisted (bytes_to_free_after={})",
+                loop_result.bytes_to_free_after
+            )
+        } else if loop_result.failure == Some(EvictionLoopFailure::SafetyGateSuppressed) {
+            "eviction suppressed by safety gate while over maxmemory".to_string()
+        } else if loop_result.failure == Some(EvictionLoopFailure::NoCandidates) {
+            "eviction loop found no candidates while over maxmemory".to_string()
+        } else {
+            format!(
+                "bounded eviction loop exhausted with status {:?} (bytes_to_free_after={})",
+                loop_result.status, loop_result.bytes_to_free_after
+            )
+        };
+
+        let reply = RespFrame::Error("OOM command not allowed when used memory > 'maxmemory'.".to_string());
+        self.record_threat_event(ThreatEventInput {
+            now_ms,
+            packet_id,
+            threat_class: ThreatClass::ResourceExhaustion,
+            preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+            subsystem: "eviction",
+            action: "maxmemory_enforcement",
+            reason_code,
+            reason,
+            input_digest: input_digest.to_string(),
+            state_before,
+            output: &reply,
+        });
+        Some(reply)
     }
 
     fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
