@@ -164,6 +164,27 @@ pub fn dispatch_argv(
         Some(CommandId::Pfadd) => return pfadd(argv, store, now_ms),
         Some(CommandId::Pfcount) => return pfcount(argv, store, now_ms),
         Some(CommandId::Pfmerge) => return pfmerge(argv, store, now_ms),
+        Some(CommandId::Quit) => return quit(argv),
+        Some(CommandId::Select) => return select(argv),
+        Some(CommandId::Info) => return info(argv, store, now_ms),
+        Some(CommandId::Command) => return command_cmd(argv),
+        Some(CommandId::Config) => return config_cmd(argv),
+        Some(CommandId::Client) => return client_cmd(argv),
+        Some(CommandId::Time) => return time_cmd(argv, now_ms),
+        Some(CommandId::Randomkey) => return randomkey(argv, store, now_ms),
+        Some(CommandId::Scan) => return scan(argv, store, now_ms),
+        Some(CommandId::Hscan) => return hscan(argv, store, now_ms),
+        Some(CommandId::Sscan) => return sscan(argv, store, now_ms),
+        Some(CommandId::Zscan) => return zscan(argv, store, now_ms),
+        Some(CommandId::Object) => return object_cmd(argv),
+        Some(CommandId::Wait) => return wait_cmd(argv),
+        Some(CommandId::Reset) => return reset_cmd(argv),
+        Some(CommandId::Unlink) => return del(argv, store, now_ms),
+        Some(CommandId::Touch) => return touch(argv, store, now_ms),
+        Some(CommandId::Dump) => return dump_cmd(argv),
+        Some(CommandId::Restore) => return restore_cmd(argv),
+        Some(CommandId::Sort) => return sort_cmd(argv),
+        Some(CommandId::Copy) => return copy_cmd(argv, store, now_ms),
         None => {}
     }
 
@@ -288,6 +309,27 @@ enum CommandId {
     Pfadd,
     Pfcount,
     Pfmerge,
+    Quit,
+    Select,
+    Info,
+    Command,
+    Config,
+    Client,
+    Time,
+    Randomkey,
+    Scan,
+    Hscan,
+    Sscan,
+    Zscan,
+    Object,
+    Wait,
+    Reset,
+    Unlink,
+    Touch,
+    Dump,
+    Restore,
+    Sort,
+    Copy,
 }
 
 #[inline]
@@ -355,6 +397,22 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Lpos)
             } else if eq_ascii_command(cmd, b"LREM") {
                 Some(CommandId::Lrem)
+            } else if eq_ascii_command(cmd, b"QUIT") {
+                Some(CommandId::Quit)
+            } else if eq_ascii_command(cmd, b"INFO") {
+                Some(CommandId::Info)
+            } else if eq_ascii_command(cmd, b"TIME") {
+                Some(CommandId::Time)
+            } else if eq_ascii_command(cmd, b"WAIT") {
+                Some(CommandId::Wait)
+            } else if eq_ascii_command(cmd, b"DUMP") {
+                Some(CommandId::Dump)
+            } else if eq_ascii_command(cmd, b"SORT") {
+                Some(CommandId::Sort)
+            } else if eq_ascii_command(cmd, b"COPY") {
+                Some(CommandId::Copy)
+            } else if eq_ascii_command(cmd, b"SCAN") {
+                Some(CommandId::Scan)
             } else {
                 None
             }
@@ -392,6 +450,16 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Lmove)
             } else if eq_ascii_command(cmd, b"SMOVE") {
                 Some(CommandId::Smove)
+            } else if eq_ascii_command(cmd, b"HSCAN") {
+                Some(CommandId::Hscan)
+            } else if eq_ascii_command(cmd, b"SSCAN") {
+                Some(CommandId::Sscan)
+            } else if eq_ascii_command(cmd, b"ZSCAN") {
+                Some(CommandId::Zscan)
+            } else if eq_ascii_command(cmd, b"TOUCH") {
+                Some(CommandId::Touch)
+            } else if eq_ascii_command(cmd, b"RESET") {
+                Some(CommandId::Reset)
             } else {
                 None
             }
@@ -445,6 +513,16 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Lpushx)
             } else if eq_ascii_command(cmd, b"RPUSHX") {
                 Some(CommandId::Rpushx)
+            } else if eq_ascii_command(cmd, b"SELECT") {
+                Some(CommandId::Select)
+            } else if eq_ascii_command(cmd, b"CONFIG") {
+                Some(CommandId::Config)
+            } else if eq_ascii_command(cmd, b"CLIENT") {
+                Some(CommandId::Client)
+            } else if eq_ascii_command(cmd, b"OBJECT") {
+                Some(CommandId::Object)
+            } else if eq_ascii_command(cmd, b"UNLINK") {
+                Some(CommandId::Unlink)
             } else {
                 None
             }
@@ -478,6 +556,10 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Pfmerge)
             } else if eq_ascii_command(cmd, b"ZMSCORE") {
                 Some(CommandId::Zmscore)
+            } else if eq_ascii_command(cmd, b"COMMAND") {
+                Some(CommandId::Command)
+            } else if eq_ascii_command(cmd, b"RESTORE") {
+                Some(CommandId::Restore)
             } else {
                 None
             }
@@ -514,6 +596,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Rpoplpush)
             } else if eq_ascii_command(cmd, b"ZLEXCOUNT") {
                 Some(CommandId::Zlexcount)
+            } else if eq_ascii_command(cmd, b"RANDOMKEY") {
+                Some(CommandId::Randomkey)
             } else {
                 None
             }
@@ -2138,6 +2222,420 @@ fn trim_and_cap_string(input: &str, cap: usize) -> String {
         }
     }
     out
+}
+
+// ── Server / connection commands ──────────────────────────────────────
+
+fn quit(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() != 1 {
+        return Err(CommandError::WrongArity("QUIT"));
+    }
+    Ok(RespFrame::SimpleString("OK".to_string()))
+}
+
+fn select(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() != 2 {
+        return Err(CommandError::WrongArity("SELECT"));
+    }
+    let db = std::str::from_utf8(&argv[1])
+        .map_err(|_| CommandError::InvalidInteger)?
+        .parse::<i64>()
+        .map_err(|_| CommandError::InvalidInteger)?;
+    if db == 0 {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else {
+        Ok(RespFrame::Error(
+            "ERR DB index is out of range".to_string(),
+        ))
+    }
+}
+
+fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() > 2 {
+        // Redis allows INFO [section] but we accept 0 or 1 extra args
+    }
+    let keyspace_size = store.dbsize(now_ms);
+    let section = if argv.len() >= 2 {
+        std::str::from_utf8(&argv[1]).unwrap_or("all")
+    } else {
+        "all"
+    };
+
+    let mut info = String::new();
+    // Server section
+    if section == "all" || section.eq_ignore_ascii_case("server") {
+        info.push_str("# Server\r\n");
+        info.push_str("redis_version:7.0.0-frankenredis\r\n");
+        info.push_str("redis_mode:standalone\r\n");
+        info.push_str("arch_bits:64\r\n");
+        info.push_str("tcp_port:6379\r\n");
+        info.push_str("\r\n");
+    }
+    // Keyspace section
+    if section == "all" || section.eq_ignore_ascii_case("keyspace") {
+        info.push_str("# Keyspace\r\n");
+        info.push_str(&format!("db0:keys={keyspace_size},expires=0,avg_ttl=0\r\n"));
+        info.push_str("\r\n");
+    }
+    // Memory section
+    if section == "all" || section.eq_ignore_ascii_case("memory") {
+        info.push_str("# Memory\r\n");
+        info.push_str("used_memory:0\r\n");
+        info.push_str("used_memory_human:0B\r\n");
+        info.push_str("\r\n");
+    }
+    // Replication section
+    if section == "all" || section.eq_ignore_ascii_case("replication") {
+        info.push_str("# Replication\r\n");
+        info.push_str("role:master\r\n");
+        info.push_str("connected_slaves:0\r\n");
+        info.push_str("\r\n");
+    }
+
+    Ok(RespFrame::BulkString(Some(info.into_bytes())))
+}
+
+fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // COMMAND, COMMAND COUNT, COMMAND DOCS, etc.
+    if argv.len() == 1 {
+        // COMMAND with no sub-command: return empty array (stub)
+        return Ok(RespFrame::Array(Some(Vec::new())));
+    }
+    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if sub.eq_ignore_ascii_case("COUNT") {
+        // Return approximate command count
+        Ok(RespFrame::Integer(100))
+    } else {
+        // DOCS, INFO, and other subcommands return empty array
+        Ok(RespFrame::Array(Some(Vec::new())))
+    }
+}
+
+fn config_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("CONFIG"));
+    }
+    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if sub.eq_ignore_ascii_case("GET") {
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("CONFIG"));
+        }
+        // Return empty array for all CONFIG GET queries (stub)
+        Ok(RespFrame::Array(Some(Vec::new())))
+    } else if sub.eq_ignore_ascii_case("SET")
+        || sub.eq_ignore_ascii_case("RESETSTAT")
+        || sub.eq_ignore_ascii_case("REWRITE")
+    {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else {
+        Ok(RespFrame::Error(format!(
+            "ERR Unknown subcommand or wrong number of arguments for CONFIG {sub}"
+        )))
+    }
+}
+
+fn client_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("CLIENT"));
+    }
+    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if sub.eq_ignore_ascii_case("SETNAME") {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("GETNAME") {
+        Ok(RespFrame::BulkString(None))
+    } else if sub.eq_ignore_ascii_case("ID") {
+        Ok(RespFrame::Integer(1))
+    } else if sub.eq_ignore_ascii_case("LIST") || sub.eq_ignore_ascii_case("INFO") {
+        Ok(RespFrame::BulkString(Some(
+            b"id=1 addr=127.0.0.1:0 fd=0 name= db=0\r\n".to_vec(),
+        )))
+    } else if sub.eq_ignore_ascii_case("NO-EVICT")
+        || sub.eq_ignore_ascii_case("NO-TOUCH")
+        || sub.eq_ignore_ascii_case("REPLY")
+    {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else {
+        Ok(RespFrame::Error(format!(
+            "ERR Unknown subcommand or wrong number of arguments for CLIENT {sub}"
+        )))
+    }
+}
+
+fn time_cmd(argv: &[Vec<u8>], now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() != 1 {
+        return Err(CommandError::WrongArity("TIME"));
+    }
+    let secs = now_ms / 1000;
+    let usecs = (now_ms % 1000) * 1000;
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(secs.to_string().into_bytes())),
+        RespFrame::BulkString(Some(usecs.to_string().into_bytes())),
+    ])))
+}
+
+fn randomkey(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() != 1 {
+        return Err(CommandError::WrongArity("RANDOMKEY"));
+    }
+    match store.randomkey(now_ms) {
+        Some(key) => Ok(RespFrame::BulkString(Some(key))),
+        None => Ok(RespFrame::BulkString(None)),
+    }
+}
+
+// ── SCAN family ──────────────────────────────────────────────────────
+
+fn parse_scan_args(argv: &[Vec<u8>], start_idx: usize) -> (Option<Vec<u8>>, usize) {
+    let mut pattern: Option<Vec<u8>> = None;
+    let mut count: usize = 10;
+    let mut i = start_idx;
+    while i + 1 < argv.len() {
+        let kw = std::str::from_utf8(&argv[i]).unwrap_or("");
+        if kw.eq_ignore_ascii_case("MATCH") {
+            pattern = Some(argv[i + 1].clone());
+            i += 2;
+        } else if kw.eq_ignore_ascii_case("COUNT") {
+            count = std::str::from_utf8(&argv[i + 1])
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    (pattern, count)
+}
+
+fn scan(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("SCAN"));
+    }
+    let cursor = std::str::from_utf8(&argv[1])
+        .map_err(|_| CommandError::InvalidInteger)?
+        .parse::<u64>()
+        .map_err(|_| CommandError::InvalidInteger)?;
+
+    let (pattern, count) = parse_scan_args(argv, 2);
+    let (next_cursor, keys) =
+        store.scan(cursor, pattern.as_deref(), count, now_ms);
+
+    let key_frames: Vec<RespFrame> = keys
+        .into_iter()
+        .map(|k| RespFrame::BulkString(Some(k)))
+        .collect();
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(next_cursor.to_string().into_bytes())),
+        RespFrame::Array(Some(key_frames)),
+    ])))
+}
+
+fn hscan(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("HSCAN"));
+    }
+    let key = &argv[1];
+    let cursor = std::str::from_utf8(&argv[2])
+        .map_err(|_| CommandError::InvalidInteger)?
+        .parse::<u64>()
+        .map_err(|_| CommandError::InvalidInteger)?;
+
+    let (pattern, count) = parse_scan_args(argv, 3);
+    let (next_cursor, pairs) = store
+        .hscan(key, cursor, pattern.as_deref(), count, now_ms)
+        .map_err(CommandError::Store)?;
+
+    let mut items = Vec::with_capacity(pairs.len() * 2);
+    for (field, value) in pairs {
+        items.push(RespFrame::BulkString(Some(field)));
+        items.push(RespFrame::BulkString(Some(value)));
+    }
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(next_cursor.to_string().into_bytes())),
+        RespFrame::Array(Some(items)),
+    ])))
+}
+
+fn sscan(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("SSCAN"));
+    }
+    let key = &argv[1];
+    let cursor = std::str::from_utf8(&argv[2])
+        .map_err(|_| CommandError::InvalidInteger)?
+        .parse::<u64>()
+        .map_err(|_| CommandError::InvalidInteger)?;
+
+    let (pattern, count) = parse_scan_args(argv, 3);
+    let (next_cursor, members) = store
+        .sscan(key, cursor, pattern.as_deref(), count, now_ms)
+        .map_err(CommandError::Store)?;
+
+    let member_frames: Vec<RespFrame> = members
+        .into_iter()
+        .map(|m| RespFrame::BulkString(Some(m)))
+        .collect();
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(next_cursor.to_string().into_bytes())),
+        RespFrame::Array(Some(member_frames)),
+    ])))
+}
+
+fn zscan(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("ZSCAN"));
+    }
+    let key = &argv[1];
+    let cursor = std::str::from_utf8(&argv[2])
+        .map_err(|_| CommandError::InvalidInteger)?
+        .parse::<u64>()
+        .map_err(|_| CommandError::InvalidInteger)?;
+
+    let (pattern, count) = parse_scan_args(argv, 3);
+    let (next_cursor, pairs) = store
+        .zscan(key, cursor, pattern.as_deref(), count, now_ms)
+        .map_err(CommandError::Store)?;
+
+    let mut items = Vec::with_capacity(pairs.len() * 2);
+    for (member, score) in pairs {
+        items.push(RespFrame::BulkString(Some(member)));
+        items.push(RespFrame::BulkString(Some(
+            score.to_string().into_bytes(),
+        )));
+    }
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(next_cursor.to_string().into_bytes())),
+        RespFrame::Array(Some(items)),
+    ])))
+}
+
+fn object_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("OBJECT"));
+    }
+    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if sub.eq_ignore_ascii_case("ENCODING") {
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("OBJECT"));
+        }
+        // Stub: always return "raw" encoding
+        Ok(RespFrame::BulkString(Some(b"raw".to_vec())))
+    } else if sub.eq_ignore_ascii_case("REFCOUNT") {
+        Ok(RespFrame::Integer(1))
+    } else if sub.eq_ignore_ascii_case("IDLETIME") || sub.eq_ignore_ascii_case("FREQ") {
+        Ok(RespFrame::Integer(0))
+    } else if sub.eq_ignore_ascii_case("HELP") {
+        Ok(RespFrame::Array(Some(Vec::new())))
+    } else {
+        Ok(RespFrame::Error(format!(
+            "ERR Unknown subcommand or wrong number of arguments for OBJECT {sub}"
+        )))
+    }
+}
+
+fn wait_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("WAIT"));
+    }
+    // WAIT numreplicas timeout - in standalone mode, return 0 replicas
+    Ok(RespFrame::Integer(0))
+}
+
+fn reset_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() != 1 {
+        return Err(CommandError::WrongArity("RESET"));
+    }
+    Ok(RespFrame::SimpleString("RESET".to_string()))
+}
+
+fn touch(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("TOUCH"));
+    }
+    let keys: Vec<&[u8]> = argv[1..].iter().map(|v| v.as_slice()).collect();
+    let count = store.touch(&keys, now_ms);
+    Ok(RespFrame::Integer(count))
+}
+
+fn dump_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() != 2 {
+        return Err(CommandError::WrongArity("DUMP"));
+    }
+    // Stub: DUMP is not fully supported
+    Ok(RespFrame::BulkString(None))
+}
+
+fn restore_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 4 {
+        return Err(CommandError::WrongArity("RESTORE"));
+    }
+    // Stub: RESTORE is not fully supported
+    Ok(RespFrame::Error(
+        "ERR DUMP/RESTORE serialization not supported".to_string(),
+    ))
+}
+
+fn sort_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("SORT"));
+    }
+    // Stub: basic SORT returning empty array
+    Ok(RespFrame::Array(Some(Vec::new())))
+}
+
+fn copy_cmd(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("COPY"));
+    }
+    let source = &argv[1];
+    let destination = &argv[2];
+
+    // Parse optional REPLACE flag
+    let mut replace = false;
+    let mut i = 3;
+    while i < argv.len() {
+        let arg = std::str::from_utf8(&argv[i]).unwrap_or("");
+        if arg.eq_ignore_ascii_case("REPLACE") {
+            replace = true;
+        } else if arg.eq_ignore_ascii_case("DESTINATION") {
+            // COPY source destination DESTINATION db - ignore DB (single-db mode)
+            i += 1;
+        }
+        i += 1;
+    }
+
+    let copied = store
+        .copy(source, destination, replace, now_ms)
+        .map_err(CommandError::Store)?;
+    Ok(RespFrame::Integer(i64::from(copied)))
 }
 
 #[cfg(test)]

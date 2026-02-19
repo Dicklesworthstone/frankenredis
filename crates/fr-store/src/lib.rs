@@ -2432,6 +2432,251 @@ impl Store {
         }
     }
 
+    // ── Server / utility operations ────────────────────────────────
+
+    /// Return a random live key, or None if the keyspace is empty.
+    #[must_use]
+    pub fn randomkey(&mut self, now_ms: u64) -> Option<Vec<u8>> {
+        // Expire all keys first so we don't return expired ones.
+        let all_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
+        for key in &all_keys {
+            self.drop_if_expired(key, now_ms);
+        }
+        self.entries.keys().next().cloned()
+    }
+
+    /// SCAN cursor-based iteration.
+    /// Returns (next_cursor, keys). Cursor 0 means start / complete.
+    /// This uses a simple sorted-keys approach for determinism.
+    #[must_use]
+    pub fn scan(
+        &mut self,
+        cursor: u64,
+        pattern: Option<&[u8]>,
+        count: usize,
+        now_ms: u64,
+    ) -> (u64, Vec<Vec<u8>>) {
+        // Expire stale keys
+        let all_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
+        for key in &all_keys {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let mut keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
+        keys.sort();
+
+        let start = cursor as usize;
+        if start >= keys.len() {
+            return (0, Vec::new());
+        }
+
+        let batch_size = count.max(1);
+        let mut result = Vec::new();
+        let mut pos = start;
+
+        while pos < keys.len() && result.len() < batch_size {
+            if let Some(pat) = pattern {
+                if glob_match(pat, &keys[pos]) {
+                    result.push(keys[pos].clone());
+                }
+            } else {
+                result.push(keys[pos].clone());
+            }
+            pos += 1;
+        }
+
+        let next_cursor = if pos >= keys.len() { 0 } else { pos as u64 };
+        (next_cursor, result)
+    }
+
+    /// HSCAN: cursor-based iteration over hash fields.
+    #[allow(clippy::type_complexity)]
+    pub fn hscan(
+        &mut self,
+        key: &[u8],
+        cursor: u64,
+        pattern: Option<&[u8]>,
+        count: usize,
+        now_ms: u64,
+    ) -> Result<(u64, Vec<(Vec<u8>, Vec<u8>)>), StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Hash(h) => {
+                    let mut fields: Vec<(Vec<u8>, Vec<u8>)> =
+                        h.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    fields.sort_by(|a, b| a.0.cmp(&b.0));
+
+                    let start = cursor as usize;
+                    if start >= fields.len() {
+                        return Ok((0, Vec::new()));
+                    }
+
+                    let batch_size = count.max(1);
+                    let mut result = Vec::new();
+                    let mut pos = start;
+                    while pos < fields.len() && result.len() < batch_size {
+                        if let Some(pat) = pattern {
+                            if glob_match(pat, &fields[pos].0) {
+                                result.push(fields[pos].clone());
+                            }
+                        } else {
+                            result.push(fields[pos].clone());
+                        }
+                        pos += 1;
+                    }
+
+                    let next = if pos >= fields.len() {
+                        0
+                    } else {
+                        pos as u64
+                    };
+                    Ok((next, result))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok((0, Vec::new())),
+        }
+    }
+
+    /// SSCAN: cursor-based iteration over set members.
+    pub fn sscan(
+        &mut self,
+        key: &[u8],
+        cursor: u64,
+        pattern: Option<&[u8]>,
+        count: usize,
+        now_ms: u64,
+    ) -> Result<(u64, Vec<Vec<u8>>), StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => {
+                    let mut members: Vec<Vec<u8>> = s.iter().cloned().collect();
+                    members.sort();
+
+                    let start = cursor as usize;
+                    if start >= members.len() {
+                        return Ok((0, Vec::new()));
+                    }
+
+                    let batch_size = count.max(1);
+                    let mut result = Vec::new();
+                    let mut pos = start;
+                    while pos < members.len() && result.len() < batch_size {
+                        if let Some(pat) = pattern {
+                            if glob_match(pat, &members[pos]) {
+                                result.push(members[pos].clone());
+                            }
+                        } else {
+                            result.push(members[pos].clone());
+                        }
+                        pos += 1;
+                    }
+
+                    let next = if pos >= members.len() {
+                        0
+                    } else {
+                        pos as u64
+                    };
+                    Ok((next, result))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok((0, Vec::new())),
+        }
+    }
+
+    /// ZSCAN: cursor-based iteration over sorted set members.
+    #[allow(clippy::type_complexity)]
+    pub fn zscan(
+        &mut self,
+        key: &[u8],
+        cursor: u64,
+        pattern: Option<&[u8]>,
+        count: usize,
+        now_ms: u64,
+    ) -> Result<(u64, Vec<(Vec<u8>, f64)>), StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => {
+                    let mut pairs: Vec<(Vec<u8>, f64)> =
+                        zs.iter().map(|(m, &s)| (m.clone(), s)).collect();
+                    pairs.sort_by(|a, b| {
+                        a.1.partial_cmp(&b.1)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                            .then(a.0.cmp(&b.0))
+                    });
+
+                    let start = cursor as usize;
+                    if start >= pairs.len() {
+                        return Ok((0, Vec::new()));
+                    }
+
+                    let batch_size = count.max(1);
+                    let mut result = Vec::new();
+                    let mut pos = start;
+                    while pos < pairs.len() && result.len() < batch_size {
+                        if let Some(pat) = pattern {
+                            if glob_match(pat, &pairs[pos].0) {
+                                result.push(pairs[pos].clone());
+                            }
+                        } else {
+                            result.push(pairs[pos].clone());
+                        }
+                        pos += 1;
+                    }
+
+                    let next = if pos >= pairs.len() {
+                        0
+                    } else {
+                        pos as u64
+                    };
+                    Ok((next, result))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok((0, Vec::new())),
+        }
+    }
+
+    /// TOUCH: returns count of keys that exist (and updates last access time in Redis, here just checks existence).
+    pub fn touch(&mut self, keys: &[&[u8]], now_ms: u64) -> i64 {
+        let mut count = 0i64;
+        for &key in keys {
+            self.drop_if_expired(key, now_ms);
+            if self.entries.contains_key(key) {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// COPY: copy value from source to destination.
+    pub fn copy(
+        &mut self,
+        source: &[u8],
+        destination: &[u8],
+        replace: bool,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.drop_if_expired(source, now_ms);
+        self.drop_if_expired(destination, now_ms);
+
+        let entry = match self.entries.get(source) {
+            Some(e) => e.clone(),
+            None => return Ok(false),
+        };
+
+        if !replace && self.entries.contains_key(destination) {
+            return Ok(false);
+        }
+
+        self.entries.insert(destination.to_vec(), entry);
+        Ok(true)
+    }
+
     #[must_use]
     pub fn state_digest(&self) -> String {
         let mut rows = self.entries.iter().collect::<Vec<_>>();
