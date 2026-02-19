@@ -99,6 +99,10 @@ cargo run -p fr-conformance --bin phase2c_schema_gate -- --optimization-gate
 cargo bench
 ```
 
+## License
+
+MIT License (with OpenAI/Anthropic Rider). See `LICENSE`.
+
 ## Round 1 Benchmark Script
 
 ```bash
