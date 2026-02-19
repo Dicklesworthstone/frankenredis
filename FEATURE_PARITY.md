@@ -15,7 +15,7 @@ Non-negotiable policy:
 
 | Feature Family | Status | Notes |
 |---|---|---|
-| RESP protocol and command dispatch | in_progress | parser + 95+ commands implemented in strict mode: strings, keys, hash, list, set, sorted set, HyperLogLog, bitmap, server/connection (QUIT, SELECT, INFO, COMMAND, CONFIG, CLIENT, TIME, RANDOMKEY, SCAN/HSCAN/SSCAN/ZSCAN, OBJECT, WAIT, RESET, TOUCH, COPY, SORT, DUMP/RESTORE stubs), cluster stubs |
+| RESP protocol and command dispatch | in_progress | parser + 100+ commands: strings (GETEX, SUBSTR), keys, hash, list (extended), set (SMISMEMBER), sorted set (ZUNIONSTORE, ZINTERSTORE), HyperLogLog, bitmap (BITOP), MULTI/EXEC/DISCARD transactions, SCAN family, server/connection commands, cluster stubs |
 | Core data types and keyspace | in_progress | String, Hash, List, Set, Sorted Set, HyperLogLog types implemented with full WRONGTYPE enforcement; Streams and Geo pending |
 | TTL and eviction behavior | in_progress | lazy expiry and `PTTL` semantics scaffolded (`-2/-1/remaining`) |
 | RDB/AOF persistence | in_progress | AOF record frame contract scaffolded; full replay fidelity pending |
