@@ -15,13 +15,13 @@ Non-negotiable policy:
 
 | Feature Family | Status | Notes |
 |---|---|---|
-| RESP protocol and command dispatch | in_progress | parser + bootstrap commands (`PING/ECHO/SET/GET/DEL/INCR/EXPIRE/PTTL`) implemented in strict mode with Redis-style arity/unknown-command strings |
-| Core data types and keyspace | in_progress | string path implemented; non-string types pending |
+| RESP protocol and command dispatch | in_progress | parser + 68+ commands implemented in strict mode: strings, keys, hash, list, set, sorted set, HyperLogLog, bitmap, cluster stubs |
+| Core data types and keyspace | in_progress | String, Hash, List, Set, Sorted Set, HyperLogLog types implemented with full WRONGTYPE enforcement; Streams and Geo pending |
 | TTL and eviction behavior | in_progress | lazy expiry and `PTTL` semantics scaffolded (`-2/-1/remaining`) |
 | RDB/AOF persistence | in_progress | AOF record frame contract scaffolded; full replay fidelity pending |
 | Replication baseline | in_progress | state/offset progression scaffolded; protocol sync semantics pending |
 | ACL/config mode split | not_started | policy model exists; ACL behavior parity not yet implemented |
-| Differential conformance harness | in_progress | fixture runner online for `core_strings`, `core_errors`, `protocol_negative`, and `persist_replay` suites |
+| Differential conformance harness | in_progress | fixture runner online for `core_strings`, `core_errors`, `core_hash`, `core_list`, `core_set`, `core_zset`, `protocol_negative`, and `persist_replay` suites |
 | Benchmark + optimization artifacts | in_progress | round1 + round2 baseline JSON, syscall profile, and expanded golden checksum artifacts added |
 | Full command/API surface closure | not_started | program-level closure row; all deferred families must roll up here before release sign-off |
 
@@ -37,6 +37,10 @@ Non-negotiable policy:
 - `crates/fr-conformance/fixtures/core_strings.json`
 - `crates/fr-conformance/fixtures/core_errors.json`
 - `crates/fr-conformance/fixtures/protocol_negative.json`
+- `crates/fr-conformance/fixtures/core_hash.json`
+- `crates/fr-conformance/fixtures/core_list.json`
+- `crates/fr-conformance/fixtures/core_set.json`
+- `crates/fr-conformance/fixtures/core_zset.json`
 - `crates/fr-conformance/fixtures/persist_replay.json`
 - `baselines/round1_conformance_baseline.json`
 - `baselines/round1_conformance_strace.txt`

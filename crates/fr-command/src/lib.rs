@@ -148,6 +148,19 @@ pub fn dispatch_argv(
         Some(CommandId::Zrangebylex) => return zrangebylex(argv, store, now_ms),
         Some(CommandId::Zrevrangebylex) => return zrevrangebylex(argv, store, now_ms),
         Some(CommandId::Zlexcount) => return zlexcount(argv, store, now_ms),
+        Some(CommandId::Ltrim) => return ltrim(argv, store, now_ms),
+        Some(CommandId::Lpushx) => return lpushx(argv, store, now_ms),
+        Some(CommandId::Rpushx) => return rpushx(argv, store, now_ms),
+        Some(CommandId::Lmove) => return lmove(argv, store, now_ms),
+        Some(CommandId::Smove) => return smove(argv, store, now_ms),
+        Some(CommandId::Sinterstore) => return sinterstore(argv, store, now_ms),
+        Some(CommandId::Sunionstore) => return sunionstore(argv, store, now_ms),
+        Some(CommandId::Sdiffstore) => return sdiffstore(argv, store, now_ms),
+        Some(CommandId::Zremrangebyrank) => return zremrangebyrank(argv, store, now_ms),
+        Some(CommandId::Zremrangebyscore) => return zremrangebyscore(argv, store, now_ms),
+        Some(CommandId::Zremrangebylex) => return zremrangebylex(argv, store, now_ms),
+        Some(CommandId::Zrandmember) => return zrandmember(argv, store, now_ms),
+        Some(CommandId::Zmscore) => return zmscore(argv, store, now_ms),
         Some(CommandId::Pfadd) => return pfadd(argv, store, now_ms),
         Some(CommandId::Pfcount) => return pfcount(argv, store, now_ms),
         Some(CommandId::Pfmerge) => return pfmerge(argv, store, now_ms),
@@ -259,6 +272,19 @@ enum CommandId {
     Zrangebylex,
     Zrevrangebylex,
     Zlexcount,
+    Ltrim,
+    Lpushx,
+    Rpushx,
+    Lmove,
+    Smove,
+    Sinterstore,
+    Sunionstore,
+    Sdiffstore,
+    Zremrangebyrank,
+    Zremrangebyscore,
+    Zremrangebylex,
+    Zrandmember,
+    Zmscore,
     Pfadd,
     Pfcount,
     Pfmerge,
@@ -360,6 +386,12 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Sdiff)
             } else if eq_ascii_command(cmd, b"PFADD") {
                 Some(CommandId::Pfadd)
+            } else if eq_ascii_command(cmd, b"LTRIM") {
+                Some(CommandId::Ltrim)
+            } else if eq_ascii_command(cmd, b"LMOVE") {
+                Some(CommandId::Lmove)
+            } else if eq_ascii_command(cmd, b"SMOVE") {
+                Some(CommandId::Smove)
             } else {
                 None
             }
@@ -409,6 +441,10 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Getbit)
             } else if eq_ascii_command(cmd, b"BITPOS") {
                 Some(CommandId::Bitpos)
+            } else if eq_ascii_command(cmd, b"LPUSHX") {
+                Some(CommandId::Lpushx)
+            } else if eq_ascii_command(cmd, b"RPUSHX") {
+                Some(CommandId::Rpushx)
             } else {
                 None
             }
@@ -440,6 +476,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Pfcount)
             } else if eq_ascii_command(cmd, b"PFMERGE") {
                 Some(CommandId::Pfmerge)
+            } else if eq_ascii_command(cmd, b"ZMSCORE") {
+                Some(CommandId::Zmscore)
             } else {
                 None
             }
@@ -485,6 +523,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Expiretime)
             } else if eq_ascii_command(cmd, b"HRANDFIELD") {
                 Some(CommandId::Hrandfield)
+            } else if eq_ascii_command(cmd, b"SDIFFSTORE") {
+                Some(CommandId::Sdiffstore)
             } else {
                 None
             }
@@ -498,6 +538,12 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Srandmember)
             } else if eq_ascii_command(cmd, b"ZRANGEBYLEX") {
                 Some(CommandId::Zrangebylex)
+            } else if eq_ascii_command(cmd, b"SINTERSTORE") {
+                Some(CommandId::Sinterstore)
+            } else if eq_ascii_command(cmd, b"SUNIONSTORE") {
+                Some(CommandId::Sunionstore)
+            } else if eq_ascii_command(cmd, b"ZRANDMEMBER") {
+                Some(CommandId::Zrandmember)
             } else {
                 None
             }
@@ -519,6 +565,15 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
         14 => {
             if eq_ascii_command(cmd, b"ZREVRANGEBYLEX") {
                 Some(CommandId::Zrevrangebylex)
+            } else if eq_ascii_command(cmd, b"ZREMRANGEBYLEX") {
+                Some(CommandId::Zremrangebylex)
+            } else {
+                None
+            }
+        }
+        15 => {
+            if eq_ascii_command(cmd, b"ZREMRANGEBYRANK") {
+                Some(CommandId::Zremrangebyrank)
             } else {
                 None
             }
@@ -526,6 +581,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
         16 => {
             if eq_ascii_command(cmd, b"ZREVRANGEBYSCORE") {
                 Some(CommandId::Zrevrangebyscore)
+            } else if eq_ascii_command(cmd, b"ZREMRANGEBYSCORE") {
+                Some(CommandId::Zremrangebyscore)
             } else {
                 None
             }
@@ -1558,6 +1615,163 @@ fn srandmember(
     }
 }
 
+fn smove(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() != 4 {
+        return Err(CommandError::WrongArity("SMOVE"));
+    }
+    let moved = store.smove(&argv[1], &argv[2], &argv[3], now_ms)?;
+    Ok(RespFrame::Integer(if moved { 1 } else { 0 }))
+}
+
+fn sinterstore(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("SINTERSTORE"));
+    }
+    let keys: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
+    let count = store.sinterstore(&argv[1], &keys, now_ms)?;
+    Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
+}
+
+fn sunionstore(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("SUNIONSTORE"));
+    }
+    let keys: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
+    let count = store.sunionstore(&argv[1], &keys, now_ms)?;
+    Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
+}
+
+fn sdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("SDIFFSTORE"));
+    }
+    let keys: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
+    let count = store.sdiffstore(&argv[1], &keys, now_ms)?;
+    Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
+}
+
+fn ltrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() != 4 {
+        return Err(CommandError::WrongArity("LTRIM"));
+    }
+    let start = parse_i64_arg(&argv[2])?;
+    let stop = parse_i64_arg(&argv[3])?;
+    store.ltrim(&argv[1], start, stop, now_ms)?;
+    Ok(RespFrame::SimpleString("OK".to_string()))
+}
+
+fn lpushx(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("LPUSHX"));
+    }
+    let values: Vec<Vec<u8>> = argv[2..].to_vec();
+    let len = store.lpushx(&argv[1], &values, now_ms)?;
+    Ok(RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)))
+}
+
+fn rpushx(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("RPUSHX"));
+    }
+    let values: Vec<Vec<u8>> = argv[2..].to_vec();
+    let len = store.rpushx(&argv[1], &values, now_ms)?;
+    Ok(RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)))
+}
+
+fn lmove(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() != 5 {
+        return Err(CommandError::WrongArity("LMOVE"));
+    }
+    match store.lmove(&argv[1], &argv[2], &argv[3], &argv[4], now_ms)? {
+        Some(v) => Ok(RespFrame::BulkString(Some(v))),
+        None => Ok(RespFrame::BulkString(None)),
+    }
+}
+
+fn zremrangebyrank(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() != 4 {
+        return Err(CommandError::WrongArity("ZREMRANGEBYRANK"));
+    }
+    let start = parse_i64_arg(&argv[2])?;
+    let stop = parse_i64_arg(&argv[3])?;
+    let removed = store.zremrangebyrank(&argv[1], start, stop, now_ms)?;
+    Ok(RespFrame::Integer(
+        i64::try_from(removed).unwrap_or(i64::MAX),
+    ))
+}
+
+fn zremrangebyscore(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() != 4 {
+        return Err(CommandError::WrongArity("ZREMRANGEBYSCORE"));
+    }
+    let min = parse_score_bound(&argv[2])?;
+    let max = parse_score_bound(&argv[3])?;
+    let removed = store.zremrangebyscore(&argv[1], min, max, now_ms)?;
+    Ok(RespFrame::Integer(
+        i64::try_from(removed).unwrap_or(i64::MAX),
+    ))
+}
+
+fn zremrangebylex(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() != 4 {
+        return Err(CommandError::WrongArity("ZREMRANGEBYLEX"));
+    }
+    let removed = store.zremrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
+    Ok(RespFrame::Integer(
+        i64::try_from(removed).unwrap_or(i64::MAX),
+    ))
+}
+
+fn zrandmember(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() != 2 {
+        return Err(CommandError::WrongArity("ZRANDMEMBER"));
+    }
+    match store.zrandmember(&argv[1], now_ms)? {
+        Some(m) => Ok(RespFrame::BulkString(Some(m))),
+        None => Ok(RespFrame::BulkString(None)),
+    }
+}
+
+fn zmscore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("ZMSCORE"));
+    }
+    let members: Vec<&[u8]> = argv[2..].iter().map(|a| a.as_slice()).collect();
+    let scores = store.zmscore(&argv[1], &members, now_ms)?;
+    let frames = scores
+        .into_iter()
+        .map(|s| match s {
+            Some(score) => RespFrame::BulkString(Some(score.to_string().into_bytes())),
+            None => RespFrame::BulkString(None),
+        })
+        .collect();
+    Ok(RespFrame::Array(Some(frames)))
+}
+
 fn setbit(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() != 4 {
         return Err(CommandError::WrongArity("SETBIT"));
@@ -2231,6 +2445,45 @@ mod tests {
         }
         if eq_ascii_command(cmd, b"PFMERGE") {
             return Some(CommandId::Pfmerge);
+        }
+        if eq_ascii_command(cmd, b"LTRIM") {
+            return Some(CommandId::Ltrim);
+        }
+        if eq_ascii_command(cmd, b"LPUSHX") {
+            return Some(CommandId::Lpushx);
+        }
+        if eq_ascii_command(cmd, b"RPUSHX") {
+            return Some(CommandId::Rpushx);
+        }
+        if eq_ascii_command(cmd, b"LMOVE") {
+            return Some(CommandId::Lmove);
+        }
+        if eq_ascii_command(cmd, b"SMOVE") {
+            return Some(CommandId::Smove);
+        }
+        if eq_ascii_command(cmd, b"SINTERSTORE") {
+            return Some(CommandId::Sinterstore);
+        }
+        if eq_ascii_command(cmd, b"SUNIONSTORE") {
+            return Some(CommandId::Sunionstore);
+        }
+        if eq_ascii_command(cmd, b"SDIFFSTORE") {
+            return Some(CommandId::Sdiffstore);
+        }
+        if eq_ascii_command(cmd, b"ZREMRANGEBYRANK") {
+            return Some(CommandId::Zremrangebyrank);
+        }
+        if eq_ascii_command(cmd, b"ZREMRANGEBYSCORE") {
+            return Some(CommandId::Zremrangebyscore);
+        }
+        if eq_ascii_command(cmd, b"ZREMRANGEBYLEX") {
+            return Some(CommandId::Zremrangebylex);
+        }
+        if eq_ascii_command(cmd, b"ZRANDMEMBER") {
+            return Some(CommandId::Zrandmember);
+        }
+        if eq_ascii_command(cmd, b"ZMSCORE") {
+            return Some(CommandId::Zmscore);
         }
         None
     }

@@ -1287,6 +1287,146 @@ impl Store {
         Ok(Some(val))
     }
 
+    pub fn ltrim(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::List(l) => {
+                    let len = l.len() as i64;
+                    let s = normalize_index(start, len);
+                    let e = normalize_index(stop, len);
+                    if s > e || s >= len as usize {
+                        l.clear();
+                    } else {
+                        let end = (e + 1).min(len as usize);
+                        let trimmed: VecDeque<Vec<u8>> =
+                            l.iter().skip(s).take(end - s).cloned().collect();
+                        *l = trimmed;
+                    }
+                    if l.is_empty() {
+                        self.entries.remove(key);
+                    }
+                    Ok(())
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(()),
+        }
+    }
+
+    pub fn lpushx(
+        &mut self,
+        key: &[u8],
+        values: &[Vec<u8>],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::List(l) => {
+                    for v in values {
+                        l.push_front(v.clone());
+                    }
+                    Ok(l.len())
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
+    pub fn rpushx(
+        &mut self,
+        key: &[u8],
+        values: &[Vec<u8>],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::List(l) => {
+                    for v in values {
+                        l.push_back(v.clone());
+                    }
+                    Ok(l.len())
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
+    pub fn lmove(
+        &mut self,
+        source: &[u8],
+        destination: &[u8],
+        wherefrom: &[u8],
+        whereto: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.drop_if_expired(source, now_ms);
+        self.drop_if_expired(destination, now_ms);
+        // Pop from source
+        let popped = match self.entries.get_mut(source) {
+            Some(entry) => match &mut entry.value {
+                Value::List(l) => {
+                    if eq_ascii_ci(wherefrom, b"LEFT") {
+                        l.pop_front()
+                    } else {
+                        l.pop_back()
+                    }
+                }
+                _ => return Err(StoreError::WrongType),
+            },
+            None => return Ok(None),
+        };
+        let Some(val) = popped else {
+            return Ok(None);
+        };
+        // Clean up empty source
+        if let Some(entry) = self.entries.get(source)
+            && let Value::List(l) = &entry.value
+            && l.is_empty()
+        {
+            self.entries.remove(source);
+        }
+        // Push to destination
+        match self.entries.get_mut(destination) {
+            Some(entry) => match &mut entry.value {
+                Value::List(l) => {
+                    if eq_ascii_ci(whereto, b"LEFT") {
+                        l.push_front(val.clone());
+                    } else {
+                        l.push_back(val.clone());
+                    }
+                }
+                _ => return Err(StoreError::WrongType),
+            },
+            None => {
+                let mut l = VecDeque::new();
+                if eq_ascii_ci(whereto, b"LEFT") {
+                    l.push_front(val.clone());
+                } else {
+                    l.push_back(val.clone());
+                }
+                self.entries.insert(
+                    destination.to_vec(),
+                    Entry {
+                        value: Value::List(l),
+                        expires_at_ms: None,
+                    },
+                );
+            }
+        }
+        Ok(Some(val))
+    }
+
     // ── Set operations ──────────────────────────────────────────
 
     pub fn sadd(
@@ -1483,6 +1623,104 @@ impl Store {
             },
             None => Ok(None),
         }
+    }
+
+    pub fn smove(
+        &mut self,
+        source: &[u8],
+        destination: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.drop_if_expired(source, now_ms);
+        self.drop_if_expired(destination, now_ms);
+        // Remove from source
+        let removed = match self.entries.get_mut(source) {
+            Some(entry) => match &mut entry.value {
+                Value::Set(s) => s.remove(member),
+                _ => return Err(StoreError::WrongType),
+            },
+            None => return Ok(false),
+        };
+        if !removed {
+            return Ok(false);
+        }
+        // Clean up empty source
+        if let Some(entry) = self.entries.get(source)
+            && let Value::Set(s) = &entry.value
+            && s.is_empty()
+        {
+            self.entries.remove(source);
+        }
+        // Add to destination
+        self.sadd(destination, &[member.to_vec()], now_ms)?;
+        Ok(true)
+    }
+
+    pub fn sinterstore(
+        &mut self,
+        destination: &[u8],
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        let result = self.sinter(keys, now_ms)?;
+        let count = result.len();
+        self.entries.remove(destination);
+        if !result.is_empty() {
+            let set: HashSet<Vec<u8>> = result.into_iter().collect();
+            self.entries.insert(
+                destination.to_vec(),
+                Entry {
+                    value: Value::Set(set),
+                    expires_at_ms: None,
+                },
+            );
+        }
+        Ok(count)
+    }
+
+    pub fn sunionstore(
+        &mut self,
+        destination: &[u8],
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        let result = self.sunion(keys, now_ms)?;
+        let count = result.len();
+        self.entries.remove(destination);
+        if !result.is_empty() {
+            let set: HashSet<Vec<u8>> = result.into_iter().collect();
+            self.entries.insert(
+                destination.to_vec(),
+                Entry {
+                    value: Value::Set(set),
+                    expires_at_ms: None,
+                },
+            );
+        }
+        Ok(count)
+    }
+
+    pub fn sdiffstore(
+        &mut self,
+        destination: &[u8],
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        let result = self.sdiff(keys, now_ms)?;
+        let count = result.len();
+        self.entries.remove(destination);
+        if !result.is_empty() {
+            let set: HashSet<Vec<u8>> = result.into_iter().collect();
+            self.entries.insert(
+                destination.to_vec(),
+                Entry {
+                    value: Value::Set(set),
+                    expires_at_ms: None,
+                },
+            );
+        }
+        Ok(count)
     }
 
     // ── Sorted Set (ZSet) operations ─────────────────────────────
@@ -1921,6 +2159,132 @@ impl Store {
         Ok(members.len())
     }
 
+    pub fn zremrangebyrank(
+        &mut self,
+        key: &[u8],
+        start: i64,
+        stop: i64,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::SortedSet(zs) => {
+                    let sorted = sorted_members_asc(zs);
+                    let len = sorted.len();
+                    let s = normalize_index(start, len as i64);
+                    let e = normalize_index(stop, len as i64);
+                    if s > e || s >= len {
+                        return Ok(0);
+                    }
+                    let end = (e + 1).min(len);
+                    let to_remove: Vec<Vec<u8>> =
+                        sorted[s..end].iter().map(|(_, m)| m.clone()).collect();
+                    let count = to_remove.len();
+                    for m in &to_remove {
+                        zs.remove(m);
+                    }
+                    if zs.is_empty() {
+                        self.entries.remove(key);
+                    }
+                    Ok(count)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
+    pub fn zremrangebyscore(
+        &mut self,
+        key: &[u8],
+        min: f64,
+        max: f64,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::SortedSet(zs) => {
+                    let to_remove: Vec<Vec<u8>> = zs
+                        .iter()
+                        .filter(|(_, score)| **score >= min && **score <= max)
+                        .map(|(m, _)| m.clone())
+                        .collect();
+                    let count = to_remove.len();
+                    for m in &to_remove {
+                        zs.remove(m);
+                    }
+                    if zs.is_empty() {
+                        self.entries.remove(key);
+                    }
+                    Ok(count)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
+    pub fn zremrangebylex(
+        &mut self,
+        key: &[u8],
+        min: &[u8],
+        max: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::SortedSet(zs) => {
+                    let sorted = sorted_members_asc(zs);
+                    let to_remove: Vec<Vec<u8>> = sorted
+                        .into_iter()
+                        .filter(|(_, m)| lex_in_range(m, min, max))
+                        .map(|(_, m)| m)
+                        .collect();
+                    let count = to_remove.len();
+                    for m in &to_remove {
+                        zs.remove(m);
+                    }
+                    if zs.is_empty() {
+                        self.entries.remove(key);
+                    }
+                    Ok(count)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
+    pub fn zrandmember(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => Ok(zs.keys().next().cloned()),
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn zmscore(
+        &mut self,
+        key: &[u8],
+        members: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<Vec<Option<f64>>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => Ok(members.iter().map(|m| zs.get(*m).copied()).collect()),
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(members.iter().map(|_| None).collect()),
+        }
+    }
+
     // ── HyperLogLog commands ───────────────────────────────────────────
 
     /// PFADD: add elements to a HyperLogLog. Returns `true` if any internal
@@ -2118,6 +2482,10 @@ impl Store {
         }
         format!("{hash:016x}")
     }
+}
+
+fn eq_ascii_ci(a: &[u8], b: &[u8]) -> bool {
+    a.eq_ignore_ascii_case(b)
 }
 
 fn parse_i64(bytes: &[u8]) -> Result<i64, StoreError> {
