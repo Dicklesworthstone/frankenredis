@@ -82,8 +82,17 @@
       }
     },
     {
-      "name": "waitaof_rejects_wrong_arity",
+      "name": "wait_rejects_negative_timeout",
       "now_ms": 11,
+      "argv": ["WAIT", "1", "-1"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "waitaof_rejects_wrong_arity",
+      "now_ms": 12,
       "argv": ["WAITAOF", "1", "0"],
       "expect": {
         "kind": "error",
@@ -91,8 +100,17 @@
       }
     },
     {
+      "name": "waitaof_rejects_non_integer_local_threshold",
+      "now_ms": 13,
+      "argv": ["WAITAOF", "nope", "1", "0"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
       "name": "waitaof_rejects_non_integer_replica_threshold",
-      "now_ms": 12,
+      "now_ms": 14,
       "argv": ["WAITAOF", "1", "nope", "0"],
       "expect": {
         "kind": "error",
@@ -100,20 +118,29 @@
       }
     },
     {
+      "name": "waitaof_rejects_negative_timeout",
+      "now_ms": 15,
+      "argv": ["WAITAOF", "1", "0", "-1"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
       "name": "dbsize_before_flush",
-      "now_ms": 13,
+      "now_ms": 16,
       "argv": ["DBSIZE"],
       "expect": { "kind": "integer", "value": 4 }
     },
     {
       "name": "flush_replication_workspace",
-      "now_ms": 14,
+      "now_ms": 17,
       "argv": ["FLUSHDB"],
       "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "dbsize_after_flush",
-      "now_ms": 15,
+      "now_ms": 18,
       "argv": ["DBSIZE"],
       "expect": { "kind": "integer", "value": 0 }
     }
