@@ -1148,10 +1148,19 @@ fn command_error_to_resp(error: CommandError) -> RespFrame {
             fr_store::StoreError::ValueNotInteger => {
                 RespFrame::Error("ERR value is not an integer or out of range".to_string())
             }
+            fr_store::StoreError::ValueNotFloat => {
+                RespFrame::Error("ERR value is not a valid float".to_string())
+            }
             fr_store::StoreError::IntegerOverflow => {
                 RespFrame::Error("ERR increment or decrement would overflow".to_string())
             }
             fr_store::StoreError::KeyNotFound => RespFrame::Error("ERR no such key".to_string()),
+            fr_store::StoreError::WrongType => RespFrame::Error(
+                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
+            ),
+            fr_store::StoreError::InvalidHllValue => RespFrame::Error(
+                "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
+            ),
         },
     }
 }
