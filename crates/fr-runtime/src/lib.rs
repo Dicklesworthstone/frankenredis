@@ -1807,9 +1807,21 @@ mod tests {
     fn fr_p2c_006_u006_waitaof_rejects_invalid_integer_arguments() {
         let mut rt = Runtime::default_strict();
 
+        let wrong_arity = rt.execute_frame(command(&[b"WAITAOF", b"1", b"0"]), 0);
+        assert_eq!(
+            wrong_arity,
+            RespFrame::Error("ERR wrong number of arguments for 'WAITAOF' command".to_string())
+        );
+
         let invalid_local = rt.execute_frame(command(&[b"WAITAOF", b"nope", b"1", b"0"]), 0);
         assert_eq!(
             invalid_local,
+            RespFrame::Error("ERR value is not an integer or out of range".to_string())
+        );
+
+        let invalid_replica = rt.execute_frame(command(&[b"WAITAOF", b"1", b"nope", b"0"]), 1);
+        assert_eq!(
+            invalid_replica,
             RespFrame::Error("ERR value is not an integer or out of range".to_string())
         );
 
