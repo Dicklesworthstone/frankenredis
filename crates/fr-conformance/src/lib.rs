@@ -98,6 +98,7 @@ pub enum ExpectedFrame {
     Error { value: String },
     Integer { value: i64 },
     Bulk { value: Option<String> },
+    Array { value: Vec<ExpectedFrame> },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -785,6 +786,9 @@ fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
         ExpectedFrame::Bulk { value } => {
             RespFrame::BulkString(value.as_ref().map(|v| v.as_bytes().to_vec()))
         }
+        ExpectedFrame::Array { value } => {
+            RespFrame::Array(Some(value.iter().map(expected_to_frame).collect()))
+        }
     }
 }
 
@@ -1028,10 +1032,11 @@ mod tests {
     use fr_runtime::Runtime;
 
     use super::{
-        CaseOutcome, DIFFERENTIAL_REPORT_SCHEMA_VERSION, EvidenceEvent, ExpectedThreat,
-        HarnessConfig, LiveOracleConfig, ReplayFixture, StructuredLogEmissionContext,
-        build_differential_report, run_fixture, run_live_redis_diff, run_live_redis_protocol_diff,
-        run_protocol_fixture, run_replay_fixture, run_smoke, validate_structured_log_emission,
+        CaseOutcome, DIFFERENTIAL_REPORT_SCHEMA_VERSION, EvidenceEvent, ExpectedFrame,
+        ExpectedThreat, HarnessConfig, LiveOracleConfig, ReplayFixture,
+        StructuredLogEmissionContext, build_differential_report, expected_to_frame, run_fixture,
+        run_live_redis_diff, run_live_redis_protocol_diff, run_protocol_fixture,
+        run_replay_fixture, run_smoke, validate_structured_log_emission,
         validate_threat_expectation,
     };
     use crate::log_contract::{
@@ -4071,6 +4076,23 @@ mod tests {
 
         let err = validate_threat_expectation(None, &[event]).expect_err("must fail");
         assert!(err.contains("unexpected threat event"));
+    }
+
+    #[test]
+    fn expected_frame_array_kind_deserializes_and_maps_to_resp_array() {
+        let raw = r#"{
+            "kind": "array",
+            "value": [
+                { "kind": "integer", "value": 1 },
+                { "kind": "integer", "value": 0 }
+            ]
+        }"#;
+        let expected: ExpectedFrame =
+            serde_json::from_str(raw).expect("array expected-frame JSON should parse");
+        assert_eq!(
+            expected_to_frame(&expected),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
+        );
     }
 
     #[test]

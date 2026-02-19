@@ -61,20 +61,32 @@
       "expect": { "kind": "integer", "value": 0 }
     },
     {
-      "name": "dbsize_before_flush",
+      "name": "waitaof_reports_local_and_replica_ack_tuple",
       "now_ms": 9,
+      "argv": ["WAITAOF", "1", "0", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 1 },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "dbsize_before_flush",
+      "now_ms": 10,
       "argv": ["DBSIZE"],
       "expect": { "kind": "integer", "value": 4 }
     },
     {
       "name": "flush_replication_workspace",
-      "now_ms": 10,
+      "now_ms": 11,
       "argv": ["FLUSHDB"],
       "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "dbsize_after_flush",
-      "now_ms": 11,
+      "now_ms": 12,
       "argv": ["DBSIZE"],
       "expect": { "kind": "integer", "value": 0 }
     }
