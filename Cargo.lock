@@ -59,6 +59,7 @@ dependencies = [
  "fr-eventloop",
  "fr-persist",
  "fr-protocol",
+ "fr-repl",
  "fr-store",
 ]
 

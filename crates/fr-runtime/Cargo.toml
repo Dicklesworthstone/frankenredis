@@ -9,4 +9,5 @@ fr-config = { version = "0.1.0", path = "../fr-config" }
 fr-eventloop = { version = "0.1.0", path = "../fr-eventloop" }
 fr-persist = { version = "0.1.0", path = "../fr-persist" }
 fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
+fr-repl = { version = "0.1.0", path = "../fr-repl" }
 fr-store = { version = "0.1.0", path = "../fr-store" }

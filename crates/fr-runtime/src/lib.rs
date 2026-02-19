@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::BTreeMap,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use fr_command::{CommandError, dispatch_argv, frame_to_argv};
 use fr_config::{
@@ -16,8 +19,9 @@ use fr_eventloop::{
     validate_ae_barrier_order, validate_bootstrap, validate_fd_registration_bounds,
     validate_pending_write_delivery, validate_read_path,
 };
-use fr_persist::{AofRecord, encode_aof_stream};
+use fr_persist::{AofRecord, PersistError, decode_aof_stream, encode_aof_stream};
 use fr_protocol::{RespFrame, RespParseError, parse_frame};
+use fr_repl::{ReplOffset, WaitAofThreshold, WaitThreshold, evaluate_wait, evaluate_waitaof};
 use fr_store::Store;
 
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -31,6 +35,7 @@ const CLUSTER_UNKNOWN_SUBCOMMAND_ERROR: &str =
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AuthState {
     requirepass: Option<Vec<u8>>,
+    users: BTreeMap<Vec<u8>, Vec<u8>>,
     authenticated_user: Option<Vec<u8>>,
 }
 
@@ -38,6 +43,7 @@ impl Default for AuthState {
     fn default() -> Self {
         Self {
             requirepass: None,
+            users: BTreeMap::new(),
             authenticated_user: Some(DEFAULT_AUTH_USER.to_vec()),
         }
     }
@@ -46,20 +52,35 @@ impl Default for AuthState {
 impl AuthState {
     fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
         self.requirepass = requirepass;
-        if self.requirepass.is_some() {
+        if self.auth_required() {
             self.authenticated_user = None;
         } else {
             self.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
         }
     }
 
+    fn add_user(&mut self, username: Vec<u8>, password: Vec<u8>) {
+        self.users.insert(username, password);
+        self.authenticated_user = None;
+    }
+
     fn is_authenticated(&self) -> bool {
         self.authenticated_user.is_some()
     }
 
-    fn requires_auth(&self) -> bool {
-        self.requirepass.is_some() && !self.is_authenticated()
+    fn auth_required(&self) -> bool {
+        self.requirepass.is_some() || !self.users.is_empty()
     }
+
+    fn requires_auth(&self) -> bool {
+        self.auth_required() && !self.is_authenticated()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AuthFailure {
+    NotConfigured,
+    WrongPass,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +97,8 @@ enum RuntimeSpecialCommand {
     Readonly,
     Readwrite,
     Cluster,
+    Wait,
+    Waitaof,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +113,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
         4 => {
             if eq_ascii_token(cmd, b"AUTH") {
                 Some(RuntimeSpecialCommand::Auth)
+            } else if eq_ascii_token(cmd, b"WAIT") {
+                Some(RuntimeSpecialCommand::Wait)
             } else {
                 None
             }
@@ -111,6 +136,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
         7 => {
             if eq_ascii_token(cmd, b"CLUSTER") {
                 Some(RuntimeSpecialCommand::Cluster)
+            } else if eq_ascii_token(cmd, b"WAITAOF") {
+                Some(RuntimeSpecialCommand::Waitaof)
             } else {
                 None
             }
@@ -148,6 +175,10 @@ fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialC
         Some(RuntimeSpecialCommand::Readwrite)
     } else if command.eq_ignore_ascii_case("CLUSTER") {
         Some(RuntimeSpecialCommand::Cluster)
+    } else if command.eq_ignore_ascii_case("WAIT") {
+        Some(RuntimeSpecialCommand::Wait)
+    } else if command.eq_ignore_ascii_case("WAITAOF") {
+        Some(RuntimeSpecialCommand::Waitaof)
     } else {
         None
     }
@@ -192,6 +223,14 @@ impl Default for ClusterClientState {
             asking: false,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct ReplicationAckState {
+    primary_offset: ReplOffset,
+    local_fsync_offset: ReplOffset,
+    replica_ack_offsets: Vec<ReplOffset>,
+    replica_fsync_offsets: Vec<ReplOffset>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -241,6 +280,7 @@ pub struct Runtime {
     tls_state: TlsRuntimeState,
     auth_state: AuthState,
     cluster_state: ClusterClientState,
+    replication_ack_state: ReplicationAckState,
 }
 
 struct ThreatEventInput<'a> {
@@ -268,6 +308,7 @@ impl Runtime {
             tls_state: TlsRuntimeState::default(),
             auth_state: AuthState::default(),
             cluster_state: ClusterClientState::default(),
+            replication_ack_state: ReplicationAckState::default(),
         }
     }
 
@@ -403,6 +444,26 @@ impl Runtime {
         encode_aof_stream(&self.aof_records)
     }
 
+    pub fn replay_aof_stream(
+        &mut self,
+        input: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<RespFrame>, PersistError> {
+        let records = decode_aof_stream(input)?;
+        Ok(self.replay_aof_records(&records, now_ms))
+    }
+
+    #[must_use]
+    pub fn replay_aof_records(&mut self, records: &[AofRecord], now_ms: u64) -> Vec<RespFrame> {
+        let mut replies = Vec::with_capacity(records.len());
+        for (index, record) in records.iter().enumerate() {
+            let replay_now_ms = now_ms.saturating_add(index as u64);
+            let reply = self.execute_frame(record.to_resp_frame(), replay_now_ms);
+            replies.push(reply);
+        }
+        replies
+    }
+
     #[must_use]
     pub fn tls_runtime_state(&self) -> &TlsRuntimeState {
         &self.tls_state
@@ -410,6 +471,10 @@ impl Runtime {
 
     pub fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
         self.auth_state.set_requirepass(requirepass);
+    }
+
+    pub fn add_user(&mut self, username: Vec<u8>, password: Vec<u8>) {
+        self.auth_state.add_user(username, password);
     }
 
     #[must_use]
@@ -425,6 +490,26 @@ impl Runtime {
     #[must_use]
     pub fn is_cluster_asking(&self) -> bool {
         self.cluster_state.asking
+    }
+
+    #[cfg(test)]
+    fn set_replication_ack_state_for_tests(
+        &mut self,
+        primary_offset: u64,
+        local_fsync_offset: u64,
+        replica_ack_offsets: &[u64],
+        replica_fsync_offsets: &[u64],
+    ) {
+        self.replication_ack_state.primary_offset = ReplOffset(primary_offset);
+        self.replication_ack_state.local_fsync_offset = ReplOffset(local_fsync_offset);
+        self.replication_ack_state.replica_ack_offsets = replica_ack_offsets
+            .iter()
+            .map(|offset| ReplOffset(*offset))
+            .collect();
+        self.replication_ack_state.replica_fsync_offsets = replica_fsync_offsets
+            .iter()
+            .map(|offset| ReplOffset(*offset))
+            .collect();
     }
 
     pub fn apply_tls_config(
@@ -544,6 +629,8 @@ impl Runtime {
             Some(RuntimeSpecialCommand::Readonly) => return self.handle_readonly_command(&argv),
             Some(RuntimeSpecialCommand::Readwrite) => return self.handle_readwrite_command(&argv),
             Some(RuntimeSpecialCommand::Cluster) => return self.handle_cluster_command(&argv),
+            Some(RuntimeSpecialCommand::Wait) => return self.handle_wait_command(&argv),
+            Some(RuntimeSpecialCommand::Waitaof) => return self.handle_waitaof_command(&argv),
             _ => {}
         }
 
@@ -590,6 +677,36 @@ impl Runtime {
         self.aof_records.push(AofRecord {
             argv: argv.to_vec(),
         });
+        if !Self::command_advances_replication_offset(argv) {
+            return;
+        }
+        self.replication_ack_state.primary_offset.0 = self
+            .replication_ack_state
+            .primary_offset
+            .0
+            .saturating_add(1);
+        self.replication_ack_state.local_fsync_offset = self.replication_ack_state.primary_offset;
+    }
+
+    fn command_advances_replication_offset(argv: &[Vec<u8>]) -> bool {
+        let Some(command) = argv.first() else {
+            return false;
+        };
+        !eq_ascii_token(command, b"PING")
+            && !eq_ascii_token(command, b"ECHO")
+            && !eq_ascii_token(command, b"GET")
+            && !eq_ascii_token(command, b"TTL")
+            && !eq_ascii_token(command, b"PTTL")
+            && !eq_ascii_token(command, b"EXPIRETIME")
+            && !eq_ascii_token(command, b"PEXPIRETIME")
+            && !eq_ascii_token(command, b"STRLEN")
+            && !eq_ascii_token(command, b"MGET")
+            && !eq_ascii_token(command, b"EXISTS")
+            && !eq_ascii_token(command, b"TYPE")
+            && !eq_ascii_token(command, b"KEYS")
+            && !eq_ascii_token(command, b"DBSIZE")
+            && !eq_ascii_token(command, b"WAIT")
+            && !eq_ascii_token(command, b"WAITAOF")
     }
 
     fn handle_auth_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -597,22 +714,19 @@ impl Runtime {
             return command_error_to_resp(CommandError::WrongArity("AUTH"));
         }
 
-        let Some(required_password) = self.auth_state.requirepass.as_deref() else {
-            return RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string());
-        };
-
         let (username, password) = if argv.len() == 2 {
             (DEFAULT_AUTH_USER, argv[1].as_slice())
         } else {
             (argv[1].as_slice(), argv[2].as_slice())
         };
 
-        if username == DEFAULT_AUTH_USER && password == required_password {
-            self.auth_state.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
-            return RespFrame::SimpleString("OK".to_string());
+        match self.authenticate_user(username, password) {
+            Ok(()) => RespFrame::SimpleString("OK".to_string()),
+            Err(AuthFailure::NotConfigured) => {
+                RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string())
+            }
+            Err(AuthFailure::WrongPass) => RespFrame::Error(WRONGPASS_ERROR.to_string()),
         }
-
-        RespFrame::Error(WRONGPASS_ERROR.to_string())
     }
 
     fn handle_hello_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -632,37 +746,66 @@ impl Runtime {
             ));
         }
 
-        let mut index = 2;
         let mut auth_credentials: Option<(&[u8], &[u8])> = None;
-        while index < argv.len() {
-            let option = match std::str::from_utf8(&argv[index]) {
+        let mut options = argv[2..].iter();
+        while let Some(option_arg) = options.next() {
+            let option = match std::str::from_utf8(option_arg) {
                 Ok(option) => option,
                 Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
             };
             if option.eq_ignore_ascii_case("AUTH") {
-                if index + 2 >= argv.len() {
+                let Some(username) = options.next() else {
                     return command_error_to_resp(CommandError::SyntaxError);
-                }
-                auth_credentials = Some((argv[index + 1].as_slice(), argv[index + 2].as_slice()));
-                index += 3;
+                };
+                let Some(password) = options.next() else {
+                    return command_error_to_resp(CommandError::SyntaxError);
+                };
+                auth_credentials = Some((username.as_slice(), password.as_slice()));
                 continue;
             }
             return command_error_to_resp(CommandError::SyntaxError);
         }
 
         if let Some((username, password)) = auth_credentials {
-            let Some(required_password) = self.auth_state.requirepass.as_deref() else {
-                return RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string());
-            };
-            if username != DEFAULT_AUTH_USER || password != required_password {
-                return RespFrame::Error(WRONGPASS_ERROR.to_string());
+            match self.authenticate_user(username, password) {
+                Ok(()) => {}
+                Err(AuthFailure::NotConfigured) => {
+                    return RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string());
+                }
+                Err(AuthFailure::WrongPass) => {
+                    return RespFrame::Error(WRONGPASS_ERROR.to_string());
+                }
             }
-            self.auth_state.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
         } else if self.auth_state.requires_auth() {
             return RespFrame::Error(NOAUTH_ERROR.to_string());
         }
 
         build_hello_response(protocol_version)
+    }
+
+    fn authenticate_user(&mut self, username: &[u8], password: &[u8]) -> Result<(), AuthFailure> {
+        if !self.auth_state.auth_required() {
+            return Err(AuthFailure::NotConfigured);
+        }
+
+        let stored_password = if username == DEFAULT_AUTH_USER {
+            self.auth_state
+                .requirepass
+                .as_deref()
+                .or_else(|| self.auth_state.users.get(username).map(Vec::as_slice))
+        } else {
+            self.auth_state.users.get(username).map(Vec::as_slice)
+        };
+
+        let Some(stored_password) = stored_password else {
+            return Err(AuthFailure::WrongPass);
+        };
+        if stored_password != password {
+            return Err(AuthFailure::WrongPass);
+        }
+
+        self.auth_state.authenticated_user = Some(username.to_vec());
+        Ok(())
     }
 
     fn handle_asking_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -711,6 +854,73 @@ impl Runtime {
         }
 
         RespFrame::Error(CLUSTER_UNKNOWN_SUBCOMMAND_ERROR.to_string())
+    }
+
+    fn handle_wait_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return command_error_to_resp(CommandError::WrongArity("WAIT"));
+        }
+        let required_replicas = match parse_i64_arg(&argv[1]) {
+            Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
+            _ => return command_error_to_resp(CommandError::InvalidInteger),
+        };
+        if !matches!(parse_i64_arg(&argv[2]), Ok(value) if value >= 0) {
+            return command_error_to_resp(CommandError::InvalidInteger);
+        }
+
+        let outcome = evaluate_wait(
+            &self.replication_ack_state.replica_ack_offsets,
+            WaitThreshold {
+                required_offset: self.replication_ack_state.primary_offset,
+                required_replicas,
+            },
+        );
+        let acked_replicas = i64::try_from(outcome.acked_replicas).unwrap_or(i64::MAX);
+        RespFrame::Integer(acked_replicas)
+    }
+
+    fn handle_waitaof_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 4 {
+            return command_error_to_resp(CommandError::WrongArity("WAITAOF"));
+        }
+        let required_local = match parse_i64_arg(&argv[1]) {
+            Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
+            _ => return command_error_to_resp(CommandError::InvalidInteger),
+        };
+        let required_replicas = match parse_i64_arg(&argv[2]) {
+            Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
+            _ => return command_error_to_resp(CommandError::InvalidInteger),
+        };
+        if !matches!(parse_i64_arg(&argv[3]), Ok(value) if value >= 0) {
+            return command_error_to_resp(CommandError::InvalidInteger);
+        }
+
+        let required_local_offset = if required_local == 0 {
+            ReplOffset(0)
+        } else {
+            self.replication_ack_state.primary_offset
+        };
+        let required_replica_offset = if required_replicas == 0 {
+            ReplOffset(0)
+        } else {
+            self.replication_ack_state.primary_offset
+        };
+
+        let outcome = evaluate_waitaof(
+            self.replication_ack_state.local_fsync_offset,
+            &self.replication_ack_state.replica_fsync_offsets,
+            WaitAofThreshold {
+                required_local_offset,
+                required_replica_offset,
+                required_replicas,
+            },
+        );
+        let local_ack = if outcome.local_satisfied { 1 } else { 0 };
+        let replica_acks = i64::try_from(outcome.acked_replicas).unwrap_or(i64::MAX);
+        RespFrame::Array(Some(vec![
+            RespFrame::Integer(local_ack),
+            RespFrame::Integer(replica_acks),
+        ]))
     }
 
     fn preflight_gate(
@@ -1001,7 +1211,7 @@ mod tests {
         FdRegistrationError, LoopBootstrap, PendingWriteError, ReadPathError, ReadinessCallback,
         TickBudget,
     };
-    use fr_persist::decode_aof_stream;
+    use fr_persist::{PersistError, decode_aof_stream};
     use fr_protocol::{RespFrame, parse_frame};
 
     use super::{
@@ -1246,6 +1456,71 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_008_u010_runtime_keys_glob_class_edge_passthrough() {
+        let mut rt = Runtime::default_strict();
+        for key in [
+            b"!".as_slice(),
+            b"a",
+            b"b",
+            b"c",
+            b"m",
+            b"z",
+            b"-",
+            b"]",
+            b"[abc",
+        ] {
+            let set = rt.execute_frame(command(&[b"SET", key, b"1"]), 0);
+            assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
+        }
+
+        let range = rt.execute_frame(command(&[b"KEYS", b"[z-a]"]), 1);
+        assert_eq!(
+            range,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"c".to_vec())),
+                RespFrame::BulkString(Some(b"m".to_vec())),
+                RespFrame::BulkString(Some(b"z".to_vec())),
+            ]))
+        );
+
+        let escaped = rt.execute_frame(command(&[b"KEYS", b"[\\-]"]), 2);
+        assert_eq!(
+            escaped,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"-".to_vec()))]))
+        );
+
+        let trailing_dash = rt.execute_frame(command(&[b"KEYS", b"[a-]"]), 3);
+        assert_eq!(
+            trailing_dash,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"]".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+            ]))
+        );
+
+        let literal_bang = rt.execute_frame(command(&[b"KEYS", b"[!a]"]), 4);
+        assert_eq!(
+            literal_bang,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"!".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+            ]))
+        );
+
+        let malformed = rt.execute_frame(command(&[b"KEYS", b"[abc"]), 5);
+        assert_eq!(
+            malformed,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"c".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
     fn fr_p2c_004_u001_default_bootstrap_is_authenticated() {
         let rt = Runtime::default_strict();
         assert!(rt.is_authenticated());
@@ -1322,6 +1597,82 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_004_u008_auth_user_password_success() {
+        let mut rt = Runtime::default_strict();
+        rt.add_user(b"alice".to_vec(), b"secret2".to_vec());
+        assert!(!rt.is_authenticated());
+
+        let out = rt.execute_frame(command(&[b"AUTH", b"alice", b"secret2"]), 0);
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        assert!(rt.is_authenticated());
+    }
+
+    #[test]
+    fn fr_p2c_004_u009_hello_auth_user_password_success() {
+        let mut rt = Runtime::default_strict();
+        rt.add_user(b"alice".to_vec(), b"secret2".to_vec());
+
+        let out = rt.execute_frame(command(&[b"HELLO", b"3", b"AUTH", b"alice", b"secret2"]), 0);
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"server".to_vec())),
+                RespFrame::BulkString(Some(b"frankenredis".to_vec())),
+                RespFrame::BulkString(Some(b"version".to_vec())),
+                RespFrame::BulkString(Some(env!("CARGO_PKG_VERSION").as_bytes().to_vec())),
+                RespFrame::BulkString(Some(b"proto".to_vec())),
+                RespFrame::Integer(3),
+            ]))
+        );
+        assert!(rt.is_authenticated());
+    }
+
+    #[test]
+    fn fr_p2c_004_u009a_hello_auth_missing_credentials_returns_syntax_error() {
+        let mut rt = Runtime::default_strict();
+        rt.add_user(b"alice".to_vec(), b"secret2".to_vec());
+
+        let missing_password = rt.execute_frame(command(&[b"HELLO", b"3", b"AUTH", b"alice"]), 0);
+        assert_eq!(
+            missing_password,
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+
+        let missing_username_and_password =
+            rt.execute_frame(command(&[b"HELLO", b"3", b"AUTH"]), 0);
+        assert_eq!(
+            missing_username_and_password,
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+    }
+
+    #[test]
+    fn fr_p2c_004_u010_user_auth_requires_authentication_before_dispatch() {
+        let mut rt = Runtime::default_strict();
+        rt.add_user(b"alice".to_vec(), b"secret2".to_vec());
+
+        let gated = rt.execute_frame(command(&[b"GET", b"k"]), 0);
+        assert_eq!(
+            gated,
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
+
+        let wrong = rt.execute_frame(command(&[b"AUTH", b"alice", b"bad"]), 1);
+        assert_eq!(
+            wrong,
+            RespFrame::Error(
+                "WRONGPASS invalid username-password pair or user is disabled.".to_string()
+            )
+        );
+
+        let ok = rt.execute_frame(command(&[b"AUTH", b"alice", b"secret2"]), 2);
+        assert_eq!(ok, RespFrame::SimpleString("OK".to_string()));
+
+        let after_auth = rt.execute_frame(command(&[b"GET", b"k"]), 3);
+        assert_eq!(after_auth, RespFrame::BulkString(None));
+    }
+
+    #[test]
     fn fr_p2c_005_u001_runtime_captures_successful_dispatched_commands_for_aof() {
         let mut rt = Runtime::default_strict();
 
@@ -1360,6 +1711,93 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_005_u003_runtime_replay_aof_stream_applies_records() {
+        let mut source = Runtime::default_strict();
+        let _ = source.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        let _ = source.execute_frame(command(&[b"INCR", b"counter"]), 1);
+        let encoded = source.encoded_aof_stream();
+        let decoded = decode_aof_stream(&encoded).expect("decode source stream");
+
+        let mut target = Runtime::default_strict();
+        let replies = target
+            .replay_aof_stream(&encoded, 10)
+            .expect("replay aof stream");
+        assert_eq!(
+            replies,
+            vec![
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::Integer(1)
+            ]
+        );
+        assert_eq!(target.aof_records(), decoded.as_slice());
+
+        let get = target.execute_frame(command(&[b"GET", b"k"]), 100);
+        assert_eq!(get, RespFrame::BulkString(Some(b"v".to_vec())));
+        let get_counter = target.execute_frame(command(&[b"GET", b"counter"]), 101);
+        assert_eq!(get_counter, RespFrame::BulkString(Some(b"1".to_vec())));
+    }
+
+    #[test]
+    fn fr_p2c_005_u004_runtime_replay_aof_stream_rejects_invalid_payload() {
+        let mut rt = Runtime::default_strict();
+        let err = rt
+            .replay_aof_stream(b"$3\r\nbad\r\n", 0)
+            .expect_err("invalid stream must fail");
+        assert_eq!(err, PersistError::InvalidFrame);
+        assert!(rt.aof_records().is_empty());
+    }
+
+    #[test]
+    fn fr_p2c_006_u005_wait_requires_arity_and_integer_args() {
+        let mut rt = Runtime::default_strict();
+
+        let wrong_arity = rt.execute_frame(command(&[b"WAIT", b"1"]), 0);
+        assert_eq!(
+            wrong_arity,
+            RespFrame::Error("ERR wrong number of arguments for 'WAIT' command".to_string())
+        );
+
+        let invalid_integer = rt.execute_frame(command(&[b"WAIT", b"nope", b"0"]), 1);
+        assert_eq!(
+            invalid_integer,
+            RespFrame::Error("ERR value is not an integer or out of range".to_string())
+        );
+    }
+
+    #[test]
+    fn fr_p2c_006_u005_wait_returns_acked_replica_count_at_primary_offset() {
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_frame(command(&[b"SET", b"fr:p2c:006:key", b"value"]), 0);
+        rt.set_replication_ack_state_for_tests(1, 1, &[1, 0, 2], &[1, 0, 2]);
+
+        let two = rt.execute_frame(command(&[b"WAIT", b"2", b"0"]), 1);
+        assert_eq!(two, RespFrame::Integer(2));
+
+        let still_two = rt.execute_frame(command(&[b"WAIT", b"3", b"0"]), 2);
+        assert_eq!(still_two, RespFrame::Integer(2));
+    }
+
+    #[test]
+    fn fr_p2c_006_u006_waitaof_requires_local_and_replica_thresholds() {
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_frame(command(&[b"SET", b"fr:p2c:006:aof", b"value"]), 0);
+
+        rt.set_replication_ack_state_for_tests(1, 0, &[1, 0], &[1, 0]);
+        let local_not_ready = rt.execute_frame(command(&[b"WAITAOF", b"1", b"1", b"0"]), 1);
+        assert_eq!(
+            local_not_ready,
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(1)]))
+        );
+
+        rt.set_replication_ack_state_for_tests(1, 1, &[1, 0, 2], &[1, 0, 2]);
+        let local_and_replica_ready = rt.execute_frame(command(&[b"WAITAOF", b"1", b"2", b"0"]), 2);
+        assert_eq!(
+            local_and_replica_ready,
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(2)]))
+        );
+    }
+
+    #[test]
     fn fr_p2c_004_runtime_special_command_classifier_matches_linear_reference() {
         let samples: &[&[u8]] = &[
             b"AUTH",
@@ -1369,6 +1807,8 @@ mod tests {
             b"readonly",
             b"READWRITE",
             b"cluster",
+            b"WAIT",
+            b"WAITAOF",
             b"PING",
             b"GET",
             b"SET",
@@ -1512,6 +1952,8 @@ mod tests {
             b"READWRITE",
             b"CLUSTER",
             b"ASKING",
+            b"WAIT",
+            b"WAITAOF",
             b"DEL",
             b"MGET",
             b"MSET",
