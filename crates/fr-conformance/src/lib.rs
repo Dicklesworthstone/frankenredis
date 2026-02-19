@@ -3599,6 +3599,287 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_008_u009b_keys_glob_class_edge_semantics_are_stable() {
+        fn bulk_array(values: &[&[u8]]) -> RespFrame {
+            RespFrame::Array(Some(
+                values
+                    .iter()
+                    .map(|value| RespFrame::BulkString(Some((*value).to_vec())))
+                    .collect(),
+            ))
+        }
+
+        let mut runtime = Runtime::default_strict();
+        for key in ["!", "a", "b", "c", "m", "z", "-", "]", "[abc"] {
+            assert_eq!(
+                runtime.execute_frame(command_frame(&["SET", key, "1"]), 1_100),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["KEYS", "[z-a]"]), 1_110),
+            bulk_array(&[b"a", b"b", b"c", b"m", b"z"])
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["KEYS", "[\\-]"]), 1_111),
+            bulk_array(&[b"-"])
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["KEYS", "[a-]"]), 1_112),
+            bulk_array(&[b"]", b"a"])
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["KEYS", "[!a]"]), 1_113),
+            bulk_array(&[b"!", b"a"])
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["KEYS", "[abc"]), 1_114),
+            bulk_array(&[b"a", b"b", b"c"])
+        );
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:1114".to_string(),
+            ts_ms: 1_114,
+            packet_id: 8,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "expire_lookup_guard",
+            action: "keys_glob_class_edge_passthrough",
+            reason_code: "expire.lookup_guard_contract_violation",
+            reason:
+                "KEYS glob class edge semantics remain deterministic in conformance runtime path"
+                    .to_string(),
+            input_digest: "fr_p2c_008_u009b_input".to_string(),
+            output_digest: "fr_p2c_008_u009b_output".to_string(),
+            state_digest_before: "keys_glob_edge_start".to_string(),
+            state_digest_after: "keys_glob_edge_verified".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=1114 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_u009b_keys_glob_class_edge_semantics_are_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-008/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_008",
+                fixture_name: "fr_p2c_008_keys_glob_edge",
+                case_name: "u009b_keys_glob_class_edge",
+                verification_path: VerificationPath::Unit,
+                now_ms: 1_114,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&event),
+        )
+        .expect("packet-008 KEYS glob edge structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_008_u009c_keys_glob_baseline_patterns_are_stable() {
+        fn bulk_array(values: &[&[u8]]) -> RespFrame {
+            RespFrame::Array(Some(
+                values
+                    .iter()
+                    .map(|value| RespFrame::BulkString(Some((*value).to_vec())))
+                    .collect(),
+            ))
+        }
+
+        let mut runtime = Runtime::default_strict();
+        for key in [
+            "hello",
+            "hallo",
+            "hillo",
+            "hcllo",
+            "hllo",
+            "foobar",
+            "fooXYZbar",
+            "*literal",
+            "world",
+        ] {
+            assert_eq!(
+                runtime.execute_frame(command_frame(&["SET", key, "1"]), 1_200),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["KEYS", "*"]), 1_210),
+            bulk_array(&[
+                b"*literal",
+                b"fooXYZbar",
+                b"foobar",
+                b"hallo",
+                b"hcllo",
+                b"hello",
+                b"hillo",
+                b"hllo",
+                b"world",
+            ])
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["KEYS", "h?llo"]), 1_211),
+            bulk_array(&[b"hallo", b"hcllo", b"hello", b"hillo"])
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["KEYS", "h[ae]llo"]), 1_212),
+            bulk_array(&[b"hallo", b"hello"])
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["KEYS", "h[^e]llo"]), 1_213),
+            bulk_array(&[b"hallo", b"hcllo", b"hillo"])
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["KEYS", "h[a-e]llo"]), 1_214),
+            bulk_array(&[b"hallo", b"hcllo", b"hello"])
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["KEYS", "foo*bar"]), 1_215),
+            bulk_array(&[b"fooXYZbar", b"foobar"])
+        );
+        assert_eq!(
+            runtime.execute_frame(command_frame(&["KEYS", "\\*literal"]), 1_216),
+            bulk_array(&[b"*literal"])
+        );
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:1216".to_string(),
+            ts_ms: 1_216,
+            packet_id: 8,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "expire_lookup_guard",
+            action: "keys_glob_baseline_pattern_passthrough",
+            reason_code: "expire.lookup_guard_contract_violation",
+            reason: "KEYS baseline glob wildcard semantics remain deterministic in conformance path"
+                .to_string(),
+            input_digest: "fr_p2c_008_u009c_input".to_string(),
+            output_digest: "fr_p2c_008_u009c_output".to_string(),
+            state_digest_before: "keys_glob_baseline_start".to_string(),
+            state_digest_after: "keys_glob_baseline_verified".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=1216 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_u009c_keys_glob_baseline_patterns_are_stable".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-008/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_008",
+                fixture_name: "fr_p2c_008_keys_glob_baseline",
+                case_name: "u009c_keys_glob_baseline_patterns",
+                verification_path: VerificationPath::Unit,
+                now_ms: 1_216,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&event),
+        )
+        .expect("packet-008 KEYS baseline glob structured log should validate");
+    }
+
+    #[test]
+    fn fr_p2c_008_u009d_malformed_glob_classes_do_not_fallback_to_literal_brackets() {
+        fn bulk_array(values: &[&[u8]]) -> RespFrame {
+            RespFrame::Array(Some(
+                values
+                    .iter()
+                    .map(|value| RespFrame::BulkString(Some((*value).to_vec())))
+                    .collect(),
+            ))
+        }
+
+        let mut malformed_literal_rt = Runtime::default_strict();
+        for key in ["[literal", "a"] {
+            assert_eq!(
+                malformed_literal_rt.execute_frame(command_frame(&["SET", key, "1"]), 1_300),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+        assert_eq!(
+            malformed_literal_rt.execute_frame(command_frame(&["KEYS", "[literal"]), 1_310),
+            bulk_array(&[b"a"])
+        );
+
+        let mut trailing_dash_rt = Runtime::default_strict();
+        for key in ["[a-", "-", "a"] {
+            assert_eq!(
+                trailing_dash_rt.execute_frame(command_frame(&["SET", key, "1"]), 1_320),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+        assert_eq!(
+            trailing_dash_rt.execute_frame(command_frame(&["KEYS", "[a-"]), 1_321),
+            bulk_array(&[b"-", b"a"])
+        );
+
+        let mut malformed_class_rt = Runtime::default_strict();
+        for key in ["[abc", "a", "b", "c"] {
+            assert_eq!(
+                malformed_class_rt.execute_frame(command_frame(&["SET", key, "1"]), 1_325),
+                RespFrame::SimpleString("OK".to_string())
+            );
+        }
+        assert_eq!(
+            malformed_class_rt.execute_frame(command_frame(&["KEYS", "[abc"]), 1_326),
+            bulk_array(&[b"a", b"b", b"c"])
+        );
+        assert_eq!(
+            malformed_class_rt.execute_frame(command_frame(&["KEYS", "\\[abc"]), 1_327),
+            bulk_array(&[b"[abc"])
+        );
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:1327".to_string(),
+            ts_ms: 1_327,
+            packet_id: 8,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::ResourceExhaustion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "expire_lookup_guard",
+            action: "keys_glob_malformed_class_literal_guard",
+            reason_code: "expire.lookup_guard_contract_violation",
+            reason:
+                "Malformed KEYS bracket classes keep class-byte semantics and require escaping for literal '['"
+                    .to_string(),
+            input_digest: "fr_p2c_008_u009d_input".to_string(),
+            output_digest: "fr_p2c_008_u009d_output".to_string(),
+            state_digest_before: "keys_glob_malformed_start".to_string(),
+            state_digest_after: "keys_glob_malformed_verified".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=1327 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_008_u009d_malformed_glob_classes_do_not_fallback_to_literal_brackets".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-008/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_008",
+                fixture_name: "fr_p2c_008_keys_glob_malformed_class",
+                case_name: "u009d_keys_glob_malformed_class",
+                verification_path: VerificationPath::Unit,
+                now_ms: 1_327,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&event),
+        )
+        .expect("packet-008 malformed KEYS glob class structured log should validate");
+    }
+
+    #[test]
     fn run_replay_fixture_allows_structured_log_persistence_toggle() {
         let log_root = unique_temp_log_root("fr_conformance_replay_logs");
         let mut cfg = HarnessConfig::default_paths();

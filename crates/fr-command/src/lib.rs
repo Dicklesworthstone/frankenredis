@@ -49,7 +49,9 @@ pub fn dispatch_argv(
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
-    let raw_cmd = &argv[0];
+    let Some(raw_cmd) = argv.first() else {
+        return Err(CommandError::InvalidCommandFrame);
+    };
     match classify_command(raw_cmd) {
         Some(CommandId::Ping) => return ping(argv),
         Some(CommandId::Echo) => return echo(argv),
@@ -277,23 +279,21 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
     let mut xx = false;
     let mut get = false;
 
-    let mut i = 3;
-    while i < argv.len() {
+    let mut options = argv[3..].iter();
+    while let Some(option_arg) = options.next() {
         let option =
-            std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            std::str::from_utf8(option_arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if option.eq_ignore_ascii_case("PX") {
-            i += 1;
-            if i >= argv.len() {
+            let Some(ttl_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
-            }
-            let ttl = parse_u64_arg(&argv[i])?;
+            };
+            let ttl = parse_u64_arg(ttl_arg)?;
             px_ttl_ms = Some(ttl);
         } else if option.eq_ignore_ascii_case("EX") {
-            i += 1;
-            if i >= argv.len() {
+            let Some(seconds_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
-            }
-            let seconds = parse_u64_arg(&argv[i])?;
+            };
+            let seconds = parse_u64_arg(seconds_arg)?;
             px_ttl_ms = Some(seconds.saturating_mul(1000));
         } else if option.eq_ignore_ascii_case("NX") {
             nx = true;
@@ -304,7 +304,6 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         } else {
             return Err(CommandError::SyntaxError);
         }
-        i += 1;
     }
 
     if nx && xx {
@@ -810,7 +809,9 @@ mod tests {
     use fr_protocol::RespFrame;
     use fr_store::Store;
 
-    use super::{CommandId, classify_command, dispatch_argv, eq_ascii_command, frame_to_argv};
+    use super::{
+        CommandError, CommandId, classify_command, dispatch_argv, eq_ascii_command, frame_to_argv,
+    };
 
     fn classify_command_linear(cmd: &[u8]) -> Option<CommandId> {
         if eq_ascii_command(cmd, b"PING") {
@@ -951,11 +952,68 @@ mod tests {
     }
 
     #[test]
+    fn unknown_command_preview_sanitizes_and_caps_output() {
+        let mut store = Store::new();
+        let argv = vec![vec![b'X'; 200], b"line1\r\nline2".to_vec(), vec![b'a'; 200]];
+        let err = dispatch_argv(&argv, &mut store, 0).expect_err("must fail");
+        match err {
+            CommandError::UnknownCommand {
+                command,
+                args_preview,
+            } => {
+                assert_eq!(command.len(), 128);
+                assert!(command.chars().all(|ch| ch == 'X'));
+                let preview = args_preview.expect("args preview");
+                assert!(preview.len() <= 128);
+                assert!(!preview.contains('\r'));
+                assert!(!preview.contains('\n'));
+                assert!(preview.starts_with("'line1  line2' "));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
     fn dispatch_invalid_utf8_command_name_errors_invalid_utf8_argument() {
         let mut store = Store::new();
         let argv = vec![vec![0xFF], b"k".to_vec()];
         let err = dispatch_argv(&argv, &mut store, 0).expect_err("must fail");
         assert!(matches!(err, super::CommandError::InvalidUtf8Argument));
+    }
+
+    #[test]
+    fn dispatch_empty_argv_returns_invalid_command_frame() {
+        let mut store = Store::new();
+        let err = dispatch_argv(&[], &mut store, 0).expect_err("must fail");
+        assert!(matches!(err, CommandError::InvalidCommandFrame));
+    }
+
+    #[test]
+    fn frame_to_argv_rejects_non_array_and_null_array_frames() {
+        let invalid = [
+            RespFrame::SimpleString("PING".to_string()),
+            RespFrame::BulkString(Some(b"PING".to_vec())),
+            RespFrame::Array(None),
+        ];
+
+        for frame in invalid {
+            let err = frame_to_argv(&frame).expect_err("must fail");
+            assert!(matches!(err, CommandError::InvalidCommandFrame));
+        }
+    }
+
+    #[test]
+    fn frame_to_argv_rejects_empty_or_unsupported_array_items() {
+        let empty = RespFrame::Array(Some(vec![]));
+        let err = frame_to_argv(&empty).expect_err("must fail");
+        assert!(matches!(err, CommandError::InvalidCommandFrame));
+
+        let invalid_items = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"SET".to_vec())),
+            RespFrame::BulkString(None),
+        ]));
+        let err = frame_to_argv(&invalid_items).expect_err("must fail");
+        assert!(matches!(err, CommandError::InvalidCommandFrame));
     }
 
     #[test]
@@ -1222,6 +1280,32 @@ mod tests {
     }
 
     #[test]
+    fn set_with_px_missing_ttl_returns_syntax_error() {
+        let mut store = Store::new();
+        let argv = vec![
+            b"SET".to_vec(),
+            b"k".to_vec(),
+            b"v".to_vec(),
+            b"PX".to_vec(),
+        ];
+        let err = dispatch_argv(&argv, &mut store, 0).expect_err("set should fail");
+        assert!(matches!(err, CommandError::SyntaxError));
+    }
+
+    #[test]
+    fn set_with_ex_missing_seconds_returns_syntax_error() {
+        let mut store = Store::new();
+        let argv = vec![
+            b"SET".to_vec(),
+            b"k".to_vec(),
+            b"v".to_vec(),
+            b"EX".to_vec(),
+        ];
+        let err = dispatch_argv(&argv, &mut store, 0).expect_err("set should fail");
+        assert!(matches!(err, CommandError::SyntaxError));
+    }
+
+    #[test]
     fn set_with_nx_only_sets_if_absent() {
         let mut store = Store::new();
         let argv = vec![
@@ -1278,6 +1362,32 @@ mod tests {
         let get = vec![b"GET".to_vec(), b"k".to_vec()];
         let val = dispatch_argv(&get, &mut store, 0).expect("get");
         assert_eq!(val, RespFrame::BulkString(Some(b"new".to_vec())));
+    }
+
+    #[test]
+    fn set_with_mixed_xx_get_px_options_returns_old_and_sets_ttl() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"old".to_vec(), None, 1_000);
+
+        let argv = vec![
+            b"SET".to_vec(),
+            b"k".to_vec(),
+            b"new".to_vec(),
+            b"XX".to_vec(),
+            b"GET".to_vec(),
+            b"PX".to_vec(),
+            b"500".to_vec(),
+        ];
+        let out = dispatch_argv(&argv, &mut store, 1_000).expect("set XX GET PX");
+        assert_eq!(out, RespFrame::BulkString(Some(b"old".to_vec())));
+
+        let get = vec![b"GET".to_vec(), b"k".to_vec()];
+        let val = dispatch_argv(&get, &mut store, 1_000).expect("get");
+        assert_eq!(val, RespFrame::BulkString(Some(b"new".to_vec())));
+
+        let pttl = vec![b"PTTL".to_vec(), b"k".to_vec()];
+        let ttl_out = dispatch_argv(&pttl, &mut store, 1_000).expect("pttl");
+        assert_eq!(ttl_out, RespFrame::Integer(500));
     }
 
     #[test]
@@ -1488,11 +1598,75 @@ mod tests {
         store.set(b"world".to_vec(), b"3".to_vec(), None, 0);
         let argv = vec![b"KEYS".to_vec(), b"h*".to_vec()];
         let out = dispatch_argv(&argv, &mut store, 0).expect("keys");
-        if let RespFrame::Array(Some(items)) = out {
-            assert_eq!(items.len(), 2);
-        } else {
-            panic!("expected array");
-        }
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"hallo".to_vec())),
+                RespFrame::BulkString(Some(b"hello".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn keys_command_glob_class_edge_semantics() {
+        let mut store = Store::new();
+        store.set(b"!".to_vec(), b"0".to_vec(), None, 0);
+        store.set(b"a".to_vec(), b"1".to_vec(), None, 0);
+        store.set(b"b".to_vec(), b"2".to_vec(), None, 0);
+        store.set(b"m".to_vec(), b"3".to_vec(), None, 0);
+        store.set(b"z".to_vec(), b"4".to_vec(), None, 0);
+        store.set(b"-".to_vec(), b"5".to_vec(), None, 0);
+        store.set(b"]".to_vec(), b"6".to_vec(), None, 0);
+        store.set(b"[abc".to_vec(), b"7".to_vec(), None, 0);
+
+        let range_out =
+            dispatch_argv(&[b"KEYS".to_vec(), b"[z-a]".to_vec()], &mut store, 0).expect("keys");
+        assert_eq!(
+            range_out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"m".to_vec())),
+                RespFrame::BulkString(Some(b"z".to_vec())),
+            ]))
+        );
+
+        let escaped_out =
+            dispatch_argv(&[b"KEYS".to_vec(), b"[\\-]".to_vec()], &mut store, 0).expect("keys");
+        assert_eq!(
+            escaped_out,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"-".to_vec()))]))
+        );
+
+        let trailing_dash_out =
+            dispatch_argv(&[b"KEYS".to_vec(), b"[a-]".to_vec()], &mut store, 0).expect("keys");
+        assert_eq!(
+            trailing_dash_out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"]".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+            ]))
+        );
+
+        let literal_bang_out =
+            dispatch_argv(&[b"KEYS".to_vec(), b"[!a]".to_vec()], &mut store, 0).expect("keys");
+        assert_eq!(
+            literal_bang_out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"!".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+            ]))
+        );
+
+        let malformed_out =
+            dispatch_argv(&[b"KEYS".to_vec(), b"[abc".to_vec()], &mut store, 0).expect("keys");
+        assert_eq!(
+            malformed_out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+            ]))
+        );
     }
 
     #[test]

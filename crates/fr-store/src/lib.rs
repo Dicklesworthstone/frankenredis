@@ -22,6 +22,20 @@ pub enum PttlValue {
     Remaining(i64),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueType {
+    String,
+}
+
+impl ValueType {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::String => "string",
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Store {
     entries: HashMap<Vec<u8>, Entry>,
@@ -211,12 +225,15 @@ impl Store {
 
     pub fn getset(&mut self, key: Vec<u8>, value: Vec<u8>, now_ms: u64) -> Option<Vec<u8>> {
         self.drop_if_expired(&key, now_ms);
-        let old = self.entries.get(&key).map(|entry| entry.value.clone());
+        let (old, expires_at_ms) = match self.entries.get(&key) {
+            Some(entry) => (Some(entry.value.clone()), entry.expires_at_ms),
+            None => (None, None),
+        };
         self.entries.insert(
             key,
             Entry {
                 value,
-                expires_at_ms: None,
+                expires_at_ms,
             },
         );
         old
@@ -253,13 +270,18 @@ impl Store {
     }
 
     #[must_use]
-    pub fn key_type(&mut self, key: &[u8], now_ms: u64) -> Option<&'static str> {
+    pub fn value_type(&mut self, key: &[u8], now_ms: u64) -> Option<ValueType> {
         self.drop_if_expired(key, now_ms);
         if self.entries.contains_key(key) {
-            Some("string")
+            Some(ValueType::String)
         } else {
             None
         }
+    }
+
+    #[must_use]
+    pub fn key_type(&mut self, key: &[u8], now_ms: u64) -> Option<&'static str> {
+        self.value_type(key, now_ms).map(ValueType::as_str)
     }
 
     pub fn rename(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> Result<(), StoreError> {
@@ -279,7 +301,9 @@ impl Store {
         if self.entries.contains_key(newkey) {
             return Ok(false);
         }
-        let entry = self.entries.remove(key).expect("checked above");
+        let Some(entry) = self.entries.remove(key) else {
+            return Err(StoreError::KeyNotFound);
+        };
         self.entries.insert(newkey.to_vec(), entry);
         Ok(true)
     }
@@ -356,7 +380,7 @@ fn fnv1a_update(mut hash: u64, bytes: &[u8]) -> u64 {
 /// Redis-compatible glob pattern matching.
 ///
 /// Supports `*` (match any sequence), `?` (match one byte),
-/// `[abc]` (character class), `[^abc]` / `[!abc]` (negated class),
+/// `[abc]` (character class), `[^abc]` (negated class),
 /// and `\x` (escape).
 fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
     glob_match_inner(pattern, string, 0, 0)
@@ -420,47 +444,60 @@ fn glob_match_inner(pattern: &[u8], string: &[u8], mut pi: usize, mut si: usize)
 fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usize)> {
     debug_assert_eq!(pattern[pi], b'[');
     let mut i = pi + 1;
-    if i >= pattern.len() {
-        return None;
-    }
-
-    let negate = pattern[i] == b'^' || pattern[i] == b'!';
+    let negate = i < pattern.len() && pattern[i] == b'^';
     if negate {
         i += 1;
     }
 
     let mut matched = false;
-    let start = i;
-
-    while i < pattern.len() && (pattern[i] != b']' || i == start) {
-        if i + 2 < pattern.len() && pattern[i + 1] == b'-' {
-            // Range: a-z.
-            let lo = pattern[i];
-            let hi = pattern[i + 2];
-            if ch >= lo && ch <= hi {
-                matched = true;
-            }
-            i += 3;
-        } else {
+    loop {
+        if i + 1 < pattern.len() && pattern[i] == b'\\' {
+            i += 1;
             if pattern[i] == ch {
                 matched = true;
             }
             i += 1;
+            continue;
         }
+
+        if i >= pattern.len() {
+            // Redis malformed-class behavior: treat the final class byte as the terminator.
+            if i > pi + 1 {
+                i -= 1;
+            }
+            break;
+        }
+
+        if pattern[i] == b']' {
+            break;
+        }
+
+        if i + 2 < pattern.len() && pattern[i + 1] == b'-' {
+            let mut lo = pattern[i];
+            let mut hi = pattern[i + 2];
+            if lo > hi {
+                std::mem::swap(&mut lo, &mut hi);
+            }
+            if ch >= lo && ch <= hi {
+                matched = true;
+            }
+            i += 3;
+            continue;
+        }
+
+        if pattern[i] == ch {
+            matched = true;
+        }
+        i += 1;
     }
 
-    if i >= pattern.len() {
-        return None; // Malformed: no closing bracket.
-    }
-
-    // i is now at the closing ']'.
     let result = if negate { !matched } else { matched };
-    Some((result, i + 1))
+    Some((result, (i + 1).min(pattern.len())))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PttlValue, Store, StoreError};
+    use super::{PttlValue, Store, StoreError, ValueType};
 
     #[test]
     fn set_get_and_del() {
@@ -599,6 +636,21 @@ mod tests {
     }
 
     #[test]
+    fn getset_preserves_existing_ttl() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v1".to_vec(), Some(5_000), 1_000);
+        assert_eq!(store.pttl(b"k", 1_000), PttlValue::Remaining(5_000));
+
+        assert_eq!(
+            store.getset(b"k".to_vec(), b"v2".to_vec(), 2_000),
+            Some(b"v1".to_vec())
+        );
+        assert_eq!(store.get(b"k", 2_000), Some(b"v2".to_vec()));
+        assert_eq!(store.pttl(b"k", 2_000), PttlValue::Remaining(4_000));
+        assert_eq!(store.get(b"k", 6_001), None);
+    }
+
+    #[test]
     fn incrby_adds_delta() {
         let mut store = Store::new();
         assert_eq!(store.incrby(b"n", 5, 0).expect("incrby"), 5);
@@ -624,6 +676,14 @@ mod tests {
         assert_eq!(store.key_type(b"missing", 0), None);
         store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
         assert_eq!(store.key_type(b"k", 0), Some("string"));
+    }
+
+    #[test]
+    fn value_type_returns_string_or_none() {
+        let mut store = Store::new();
+        assert_eq!(store.value_type(b"missing", 0), None);
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+        assert_eq!(store.value_type(b"k", 0), Some(ValueType::String));
     }
 
     #[test]
@@ -670,6 +730,13 @@ mod tests {
     }
 
     #[test]
+    fn renamenx_missing_key_errors() {
+        let mut store = Store::new();
+        let err = store.renamenx(b"missing", b"new", 0).expect_err("renamenx");
+        assert_eq!(err, StoreError::KeyNotFound);
+    }
+
+    #[test]
     fn keys_matching_with_glob() {
         let mut store = Store::new();
         store.set(b"hello".to_vec(), b"1".to_vec(), None, 0);
@@ -681,6 +748,50 @@ mod tests {
         assert_eq!(result.len(), 3);
         let result = store.keys_matching(b"h*", 0);
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn keys_matching_malformed_class_contract_matches_redis() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"1".to_vec(), None, 0);
+        store.set(b"b".to_vec(), b"2".to_vec(), None, 0);
+        store.set(b"c".to_vec(), b"3".to_vec(), None, 0);
+        store.set(b"[abc".to_vec(), b"1".to_vec(), None, 0);
+        // Redis treats malformed "[abc" as a class of bytes {'a','b','c'}.
+        assert_eq!(
+            store.keys_matching(b"[abc", 0),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+        // The malformed class does not match literal '[' prefixed keys.
+        assert!(!store.keys_matching(b"[abc", 0).iter().any(|k| k == b"[abc"));
+        // "[a-" is malformed too; with this key set Redis matches only 'a'.
+        assert_eq!(store.keys_matching(b"[a-", 0), vec![b"a".to_vec()]);
+    }
+
+    #[test]
+    fn keys_matching_range_and_escape_contract_matches_redis() {
+        let mut store = Store::new();
+        store.set(b"!".to_vec(), b"0".to_vec(), None, 0);
+        store.set(b"a".to_vec(), b"1".to_vec(), None, 0);
+        store.set(b"b".to_vec(), b"6".to_vec(), None, 0);
+        store.set(b"m".to_vec(), b"2".to_vec(), None, 0);
+        store.set(b"z".to_vec(), b"3".to_vec(), None, 0);
+        store.set(b"-".to_vec(), b"4".to_vec(), None, 0);
+        store.set(b"]".to_vec(), b"5".to_vec(), None, 0);
+
+        assert_eq!(
+            store.keys_matching(b"[z-a]", 0),
+            vec![b"a".to_vec(), b"b".to_vec(), b"m".to_vec(), b"z".to_vec()]
+        );
+        assert_eq!(store.keys_matching(b"[\\-]", 0), vec![b"-".to_vec()]);
+        assert_eq!(
+            store.keys_matching(b"[a-]", 0),
+            vec![b"]".to_vec(), b"a".to_vec()]
+        );
+        assert_eq!(
+            store.keys_matching(b"[!a]", 0),
+            vec![b"!".to_vec(), b"a".to_vec()]
+        );
     }
 
     #[test]
@@ -729,5 +840,18 @@ mod tests {
         assert!(glob_match(b"foo*bar", b"fooXYZbar"));
         assert!(glob_match(b"foo*bar", b"foobar"));
         assert!(glob_match(b"\\*literal", b"*literal"));
+        assert!(glob_match(b"[z-a]", b"m"));
+        assert!(glob_match(b"[\\-]", b"-"));
+        assert!(glob_match(b"[a-]", b"]"));
+        assert!(glob_match(b"[a-]", b"a"));
+        assert!(glob_match(b"[abc", b"a"));
+        assert!(glob_match(b"[abc", b"c"));
+        assert!(!glob_match(b"[abc", b"["));
+        assert!(glob_match(b"[!a]", b"!"));
+        assert!(glob_match(b"[!a]", b"a"));
+        assert!(!glob_match(b"[!a]", b"b"));
+        assert!(!glob_match(b"[literal", b"[literal"));
+        assert!(!glob_match(b"[a-", b"[a-"));
+        assert!(!glob_match(b"[literal", b"literal"));
     }
 }
