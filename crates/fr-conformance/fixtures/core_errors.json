@@ -44,6 +44,30 @@
       "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'EXPIRETIME' command" }
     },
     {
+      "name": "wait_wrong_arity",
+      "now_ms": 0,
+      "argv": ["WAIT", "1"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'WAIT' command" }
+    },
+    {
+      "name": "wait_invalid_integer",
+      "now_ms": 0,
+      "argv": ["WAIT", "nope", "0"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "waitaof_wrong_arity",
+      "now_ms": 0,
+      "argv": ["WAITAOF", "1", "0"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'WAITAOF' command" }
+    },
+    {
+      "name": "waitaof_invalid_integer",
+      "now_ms": 0,
+      "argv": ["WAITAOF", "1", "nope", "0"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
       "name": "set_expire_options_key",
       "now_ms": 0,
       "argv": ["SET", "expire_opts_key", "value"],
