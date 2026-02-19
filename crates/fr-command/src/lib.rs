@@ -164,6 +164,12 @@ pub fn dispatch_argv(
         Some(CommandId::Pfadd) => return pfadd(argv, store, now_ms),
         Some(CommandId::Pfcount) => return pfcount(argv, store, now_ms),
         Some(CommandId::Pfmerge) => return pfmerge(argv, store, now_ms),
+        Some(CommandId::Getex) => return getex(argv, store, now_ms),
+        Some(CommandId::Smismember) => return smismember(argv, store, now_ms),
+        Some(CommandId::Substr) => return getrange(argv, store, now_ms),
+        Some(CommandId::Bitop) => return bitop(argv, store, now_ms),
+        Some(CommandId::Zunionstore) => return zunionstore(argv, store, now_ms),
+        Some(CommandId::Zinterstore) => return zinterstore(argv, store, now_ms),
         Some(CommandId::Quit) => return quit(argv),
         Some(CommandId::Select) => return select(argv),
         Some(CommandId::Info) => return info(argv, store, now_ms),
@@ -309,6 +315,12 @@ enum CommandId {
     Pfadd,
     Pfcount,
     Pfmerge,
+    Getex,
+    Smismember,
+    Substr,
+    Bitop,
+    Zunionstore,
+    Zinterstore,
     Quit,
     Select,
     Info,
@@ -450,6 +462,10 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Lmove)
             } else if eq_ascii_command(cmd, b"SMOVE") {
                 Some(CommandId::Smove)
+            } else if eq_ascii_command(cmd, b"GETEX") {
+                Some(CommandId::Getex)
+            } else if eq_ascii_command(cmd, b"BITOP") {
+                Some(CommandId::Bitop)
             } else if eq_ascii_command(cmd, b"HSCAN") {
                 Some(CommandId::Hscan)
             } else if eq_ascii_command(cmd, b"SSCAN") {
@@ -523,6 +539,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Object)
             } else if eq_ascii_command(cmd, b"UNLINK") {
                 Some(CommandId::Unlink)
+            } else if eq_ascii_command(cmd, b"SUBSTR") {
+                Some(CommandId::Substr)
             } else {
                 None
             }
@@ -609,6 +627,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Hrandfield)
             } else if eq_ascii_command(cmd, b"SDIFFSTORE") {
                 Some(CommandId::Sdiffstore)
+            } else if eq_ascii_command(cmd, b"SMISMEMBER") {
+                Some(CommandId::Smismember)
             } else {
                 None
             }
@@ -628,6 +648,10 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Sunionstore)
             } else if eq_ascii_command(cmd, b"ZRANDMEMBER") {
                 Some(CommandId::Zrandmember)
+            } else if eq_ascii_command(cmd, b"ZUNIONSTORE") {
+                Some(CommandId::Zunionstore)
+            } else if eq_ascii_command(cmd, b"ZINTERSTORE") {
+                Some(CommandId::Zinterstore)
             } else {
                 None
             }
@@ -2222,6 +2246,194 @@ fn trim_and_cap_string(input: &str, cap: usize) -> String {
         }
     }
     out
+}
+
+fn getex(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("GETEX"));
+    }
+    let key = &argv[1];
+
+    // Parse expiration options
+    let new_expires: Option<Option<u64>> = if argv.len() == 2 {
+        None // No expiration change
+    } else {
+        let opt = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::SyntaxError)?;
+        if opt.eq_ignore_ascii_case("EX") {
+            if argv.len() != 4 {
+                return Err(CommandError::SyntaxError);
+            }
+            let secs = std::str::from_utf8(&argv[3])
+                .map_err(|_| CommandError::InvalidInteger)?
+                .parse::<u64>()
+                .map_err(|_| CommandError::InvalidInteger)?;
+            Some(Some(now_ms.saturating_add(secs * 1000)))
+        } else if opt.eq_ignore_ascii_case("PX") {
+            if argv.len() != 4 {
+                return Err(CommandError::SyntaxError);
+            }
+            let ms = std::str::from_utf8(&argv[3])
+                .map_err(|_| CommandError::InvalidInteger)?
+                .parse::<u64>()
+                .map_err(|_| CommandError::InvalidInteger)?;
+            Some(Some(now_ms.saturating_add(ms)))
+        } else if opt.eq_ignore_ascii_case("EXAT") {
+            if argv.len() != 4 {
+                return Err(CommandError::SyntaxError);
+            }
+            let ts = std::str::from_utf8(&argv[3])
+                .map_err(|_| CommandError::InvalidInteger)?
+                .parse::<u64>()
+                .map_err(|_| CommandError::InvalidInteger)?;
+            Some(Some(ts * 1000))
+        } else if opt.eq_ignore_ascii_case("PXAT") {
+            if argv.len() != 4 {
+                return Err(CommandError::SyntaxError);
+            }
+            let ts_ms = std::str::from_utf8(&argv[3])
+                .map_err(|_| CommandError::InvalidInteger)?
+                .parse::<u64>()
+                .map_err(|_| CommandError::InvalidInteger)?;
+            Some(Some(ts_ms))
+        } else if opt.eq_ignore_ascii_case("PERSIST") {
+            Some(None)
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    };
+
+    match store.getex(key, new_expires, now_ms)? {
+        Some(v) => Ok(RespFrame::BulkString(Some(v))),
+        None => Ok(RespFrame::BulkString(None)),
+    }
+}
+
+fn smismember(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("SMISMEMBER"));
+    }
+    let key = &argv[1];
+    let members: Vec<&[u8]> = argv[2..].iter().map(|v| v.as_slice()).collect();
+    let results = store
+        .smismember(key, &members, now_ms)
+        .map_err(CommandError::Store)?;
+    let frames: Vec<RespFrame> = results
+        .into_iter()
+        .map(|b| RespFrame::Integer(i64::from(b)))
+        .collect();
+    Ok(RespFrame::Array(Some(frames)))
+}
+
+fn bitop(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 4 {
+        return Err(CommandError::WrongArity("BITOP"));
+    }
+    let op = &argv[1];
+    let dest = &argv[2];
+    let keys: Vec<&[u8]> = argv[3..].iter().map(|v| v.as_slice()).collect();
+    let len = store
+        .bitop(op, dest, &keys, now_ms)
+        .map_err(CommandError::Store)?;
+    Ok(RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)))
+}
+
+fn parse_zstore_args(argv: &[Vec<u8>], start: usize) -> (Vec<f64>, Vec<u8>) {
+    let mut weights: Vec<f64> = Vec::new();
+    let mut aggregate: Vec<u8> = b"SUM".to_vec();
+    let mut i = start;
+    while i < argv.len() {
+        let kw = std::str::from_utf8(&argv[i]).unwrap_or("");
+        if kw.eq_ignore_ascii_case("WEIGHTS") {
+            i += 1;
+            while i < argv.len() {
+                if let Ok(w) = std::str::from_utf8(&argv[i])
+                    .ok()
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .ok_or(())
+                {
+                    weights.push(w);
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+        } else if kw.eq_ignore_ascii_case("AGGREGATE") {
+            i += 1;
+            if i < argv.len() {
+                aggregate = argv[i].clone();
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    (weights, aggregate)
+}
+
+fn zunionstore(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 4 {
+        return Err(CommandError::WrongArity("ZUNIONSTORE"));
+    }
+    let dest = &argv[1];
+    let numkeys = std::str::from_utf8(&argv[2])
+        .map_err(|_| CommandError::InvalidInteger)?
+        .parse::<usize>()
+        .map_err(|_| CommandError::InvalidInteger)?;
+    if argv.len() < 3 + numkeys {
+        return Err(CommandError::SyntaxError);
+    }
+    let keys: Vec<&[u8]> = argv[3..3 + numkeys]
+        .iter()
+        .map(|v| v.as_slice())
+        .collect();
+    let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys);
+    let count = store
+        .zunionstore(dest, &keys, &weights, &aggregate, now_ms)
+        .map_err(CommandError::Store)?;
+    Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
+}
+
+fn zinterstore(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    if argv.len() < 4 {
+        return Err(CommandError::WrongArity("ZINTERSTORE"));
+    }
+    let dest = &argv[1];
+    let numkeys = std::str::from_utf8(&argv[2])
+        .map_err(|_| CommandError::InvalidInteger)?
+        .parse::<usize>()
+        .map_err(|_| CommandError::InvalidInteger)?;
+    if argv.len() < 3 + numkeys {
+        return Err(CommandError::SyntaxError);
+    }
+    let keys: Vec<&[u8]> = argv[3..3 + numkeys]
+        .iter()
+        .map(|v| v.as_slice())
+        .collect();
+    let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys);
+    let count = store
+        .zinterstore(dest, &keys, &weights, &aggregate, now_ms)
+        .map_err(CommandError::Store)?;
+    Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
 
 // ── Server / connection commands ──────────────────────────────────────

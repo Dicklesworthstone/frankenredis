@@ -2432,6 +2432,222 @@ impl Store {
         }
     }
 
+    /// GETEX: get string value and optionally set/remove expiration.
+    pub fn getex(
+        &mut self,
+        key: &[u8],
+        new_expires_at_ms: Option<Option<u64>>,
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::String(v) => {
+                    let result = v.clone();
+                    if let Some(exp) = new_expires_at_ms {
+                        entry.expires_at_ms = exp;
+                    }
+                    Ok(Some(result))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    /// BITOP: perform bitwise operation between strings.
+    pub fn bitop(
+        &mut self,
+        op: &[u8],
+        dest: &[u8],
+        keys: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        // Collect values, treating missing keys as empty strings
+        let mut values: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
+        for &key in keys {
+            self.drop_if_expired(key, now_ms);
+            match self.entries.get(key) {
+                Some(entry) => match &entry.value {
+                    Value::String(v) => values.push(v.clone()),
+                    _ => return Err(StoreError::WrongType),
+                },
+                None => values.push(Vec::new()),
+            }
+        }
+
+        let max_len = values.iter().map(|v| v.len()).max().unwrap_or(0);
+        let mut result = vec![0u8; max_len];
+
+        if eq_ascii_ci(op, b"NOT") {
+            if values.len() != 1 {
+                return Err(StoreError::WrongType);
+            }
+            for (i, byte) in result.iter_mut().enumerate() {
+                *byte = !values[0].get(i).copied().unwrap_or(0);
+            }
+        } else {
+            // Initialize with first value
+            if let Some(first) = values.first() {
+                for (i, byte) in result.iter_mut().enumerate() {
+                    *byte = first.get(i).copied().unwrap_or(0);
+                }
+            }
+            for val in values.iter().skip(1) {
+                for (i, byte) in result.iter_mut().enumerate() {
+                    let b = val.get(i).copied().unwrap_or(0);
+                    if eq_ascii_ci(op, b"AND") {
+                        *byte &= b;
+                    } else if eq_ascii_ci(op, b"OR") {
+                        *byte |= b;
+                    } else if eq_ascii_ci(op, b"XOR") {
+                        *byte ^= b;
+                    }
+                }
+            }
+        }
+
+        let len = result.len();
+        self.entries.insert(
+            dest.to_vec(),
+            Entry {
+                value: Value::String(result),
+                expires_at_ms: None,
+            },
+        );
+        Ok(len)
+    }
+
+    // ── Sorted Set algebra operations ──────────────────────────────
+
+    /// ZUNIONSTORE: store union of sorted sets.
+    pub fn zunionstore(
+        &mut self,
+        dest: &[u8],
+        keys: &[&[u8]],
+        weights: &[f64],
+        aggregate: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        let mut combined: std::collections::HashMap<Vec<u8>, f64> =
+            std::collections::HashMap::new();
+
+        for (i, &key) in keys.iter().enumerate() {
+            self.drop_if_expired(key, now_ms);
+            let weight = weights.get(i).copied().unwrap_or(1.0);
+            if let Some(entry) = self.entries.get(key) {
+                match &entry.value {
+                    Value::SortedSet(zs) => {
+                        for (member, &score) in zs {
+                            let weighted = score * weight;
+                            let current = combined.entry(member.clone()).or_insert(0.0);
+                            *current = aggregate_scores(*current, weighted, aggregate);
+                        }
+                    }
+                    _ => return Err(StoreError::WrongType),
+                }
+            }
+        }
+
+        let count = combined.len();
+        self.entries.insert(
+            dest.to_vec(),
+            Entry {
+                value: Value::SortedSet(combined),
+                expires_at_ms: None,
+            },
+        );
+        Ok(count)
+    }
+
+    /// ZINTERSTORE: store intersection of sorted sets.
+    pub fn zinterstore(
+        &mut self,
+        dest: &[u8],
+        keys: &[&[u8]],
+        weights: &[f64],
+        aggregate: &[u8],
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        if keys.is_empty() {
+            self.entries.insert(
+                dest.to_vec(),
+                Entry {
+                    value: Value::SortedSet(std::collections::HashMap::new()),
+                    expires_at_ms: None,
+                },
+            );
+            return Ok(0);
+        }
+
+        // Start with members from the first key
+        self.drop_if_expired(keys[0], now_ms);
+        let mut result: std::collections::HashMap<Vec<u8>, f64> = match self.entries.get(keys[0]) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => {
+                    let w = weights.first().copied().unwrap_or(1.0);
+                    zs.iter().map(|(m, &s)| (m.clone(), s * w)).collect()
+                }
+                _ => return Err(StoreError::WrongType),
+            },
+            None => std::collections::HashMap::new(),
+        };
+
+        // Intersect with remaining keys
+        for (i, &key) in keys.iter().enumerate().skip(1) {
+            self.drop_if_expired(key, now_ms);
+            let weight = weights.get(i).copied().unwrap_or(1.0);
+            match self.entries.get(key) {
+                Some(entry) => match &entry.value {
+                    Value::SortedSet(zs) => {
+                        result.retain(|member, score| {
+                            if let Some(&other_score) = zs.get(member) {
+                                *score =
+                                    aggregate_scores(*score, other_score * weight, aggregate);
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                    }
+                    _ => return Err(StoreError::WrongType),
+                },
+                None => {
+                    result.clear();
+                }
+            }
+        }
+
+        let count = result.len();
+        self.entries.insert(
+            dest.to_vec(),
+            Entry {
+                value: Value::SortedSet(result),
+                expires_at_ms: None,
+            },
+        );
+        Ok(count)
+    }
+
+    /// SMISMEMBER: check membership for multiple members.
+    pub fn smismember(
+        &mut self,
+        key: &[u8],
+        members: &[&[u8]],
+        now_ms: u64,
+    ) -> Result<Vec<bool>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => {
+                    Ok(members.iter().map(|m| s.contains(*m)).collect())
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(vec![false; members.len()]),
+        }
+    }
+
     // ── Server / utility operations ────────────────────────────────
 
     /// Return a random live key, or None if the keyspace is empty.
@@ -2731,6 +2947,17 @@ impl Store {
 
 fn eq_ascii_ci(a: &[u8], b: &[u8]) -> bool {
     a.eq_ignore_ascii_case(b)
+}
+
+fn aggregate_scores(a: f64, b: f64, aggregate: &[u8]) -> f64 {
+    if eq_ascii_ci(aggregate, b"MIN") {
+        a.min(b)
+    } else if eq_ascii_ci(aggregate, b"MAX") {
+        a.max(b)
+    } else {
+        // Default is SUM
+        a + b
+    }
 }
 
 fn parse_i64(bytes: &[u8]) -> Result<i64, StoreError> {
