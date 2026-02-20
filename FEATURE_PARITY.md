@@ -16,7 +16,7 @@ Non-negotiable policy:
 | Feature Family | Status | Notes |
 |---|---|---|
 | RESP protocol and command dispatch | in_progress | parser + 100+ commands: strings (GETEX, SUBSTR), keys, hash, list (extended), set (SMISMEMBER), sorted set (ZUNIONSTORE, ZINTERSTORE), HyperLogLog, bitmap (BITOP), MULTI/EXEC/DISCARD transactions, SCAN family, server/connection commands, cluster stubs |
-| Core data types and keyspace | in_progress | String, Hash, List, Set, Sorted Set, HyperLogLog, and Geo data types implemented with full WRONGTYPE enforcement; Streams starter slice (`XADD`, `XLEN`, `XDEL`, `XTRIM`, `XREAD`, `XINFO STREAM/GROUPS`, `XGROUP CREATE`, `XGROUP DESTROY`, `XGROUP SETID`, `XRANGE`, `XREVRANGE`) implemented, broader stream surface pending |
+| Core data types and keyspace | in_progress | String, Hash, List, Set, Sorted Set, HyperLogLog, and Geo data types implemented with full WRONGTYPE enforcement; Streams starter slice (`XADD`, `XLEN`, `XDEL`, `XTRIM`, `XREAD`, `XINFO STREAM/GROUPS`, `XGROUP CREATE`, `XGROUP DESTROY`, `XGROUP SETID`, `XGROUP CREATECONSUMER`, `XGROUP DELCONSUMER`, `XRANGE`, `XREVRANGE`) implemented, broader stream surface pending |
 | TTL and eviction behavior | in_progress | lazy expiry and `PTTL` semantics scaffolded (`-2/-1/remaining`) |
 | RDB/AOF persistence | in_progress | AOF record frame contract scaffolded; full replay fidelity pending |
 | Replication baseline | in_progress | state/offset progression scaffolded; protocol sync semantics pending |

@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use fr_expire::evaluate_expiry;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Unbounded};
 
 pub type StreamId = (u64, u64);
@@ -9,8 +9,15 @@ pub type StreamField = (Vec<u8>, Vec<u8>);
 pub type StreamEntries = BTreeMap<StreamId, Vec<StreamField>>;
 pub type StreamRecord = (StreamId, Vec<StreamField>);
 pub type StreamInfoBounds = (usize, Option<StreamRecord>, Option<StreamRecord>);
-pub type StreamGroupState = BTreeMap<Vec<u8>, StreamId>;
-pub type StreamGroupInfo = (Vec<u8>, StreamId);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamGroup {
+    pub last_delivered_id: StreamId,
+    pub consumers: BTreeSet<Vec<u8>>,
+}
+
+pub type StreamGroupState = BTreeMap<Vec<u8>, StreamGroup>;
+pub type StreamGroupInfo = (Vec<u8>, usize, StreamId);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
@@ -2827,7 +2834,13 @@ impl Store {
         if groups.contains_key(group) {
             return Ok(false);
         }
-        groups.insert(group.to_vec(), start_id);
+        groups.insert(
+            group.to_vec(),
+            StreamGroup {
+                last_delivered_id: start_id,
+                consumers: BTreeSet::new(),
+            },
+        );
         Ok(true)
     }
 
@@ -2870,9 +2883,9 @@ impl Store {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => {
                     if let Some(groups) = self.stream_groups.get_mut(key)
-                        && let Some(current_id) = groups.get_mut(group)
+                        && let Some(current_group) = groups.get_mut(group)
                     {
-                        *current_id = last_delivered_id;
+                        current_group.last_delivered_id = last_delivered_id;
                         return Ok(true);
                     }
                     Ok(false)
@@ -2898,11 +2911,65 @@ impl Store {
                         .map(|groups| {
                             groups
                                 .iter()
-                                .map(|(name, last_id)| (name.clone(), *last_id))
+                                .map(|(name, group)| {
+                                    (name.clone(), group.consumers.len(), group.last_delivered_id)
+                                })
                                 .collect()
                         })
                         .unwrap_or_default();
                     Ok(Some(groups))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn xgroup_createconsumer(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        consumer: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<bool>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(_) => {
+                    let Some(groups) = self.stream_groups.get_mut(key) else {
+                        return Ok(None);
+                    };
+                    let Some(group_state) = groups.get_mut(group) else {
+                        return Ok(None);
+                    };
+                    Ok(Some(group_state.consumers.insert(consumer.to_vec())))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn xgroup_delconsumer(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        consumer: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<u64>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(_) => {
+                    let Some(groups) = self.stream_groups.get_mut(key) else {
+                        return Ok(None);
+                    };
+                    let Some(group_state) = groups.get_mut(group) else {
+                        return Ok(None);
+                    };
+                    group_state.consumers.remove(consumer);
+                    // Pending-entry ownership is not implemented yet, so the count is always zero.
+                    Ok(Some(0))
                 }
                 _ => Err(StoreError::WrongType),
             },
@@ -5284,7 +5351,7 @@ mod tests {
         assert!(!duplicate);
 
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), (0, 0))]);
+        assert_eq!(groups, vec![(b"g1".to_vec(), 0, (0, 0))]);
     }
 
     #[test]
@@ -5327,7 +5394,7 @@ mod tests {
 
         assert!(store.xgroup_destroy(b"s", b"g1", 0).unwrap());
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g2".to_vec(), (0, 0))]);
+        assert_eq!(groups, vec![(b"g2".to_vec(), 0, (0, 0))]);
 
         assert!(store.xgroup_destroy(b"s", b"g2", 0).unwrap());
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
@@ -5353,7 +5420,7 @@ mod tests {
 
         assert!(store.xgroup_setid(b"s", b"g1", (1000, 0), 0).unwrap());
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), (1000, 0))]);
+        assert_eq!(groups, vec![(b"g1".to_vec(), 0, (1000, 0))]);
 
         assert!(!store.xgroup_setid(b"s", b"missing", (1000, 0), 0).unwrap());
     }
@@ -5369,6 +5436,108 @@ mod tests {
         store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
         assert_eq!(
             store.xgroup_setid(b"str", b"g1", (0, 0), 0),
+            Err(StoreError::WrongType)
+        );
+    }
+
+    #[test]
+    fn stream_xgroup_createconsumer_tracks_consumers_and_errors() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        assert!(store.xgroup_create(b"s", b"g1", (0, 0), false, 0).unwrap());
+
+        assert_eq!(
+            store
+                .xgroup_createconsumer(b"s", b"g1", b"alice", 0)
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            store
+                .xgroup_createconsumer(b"s", b"g1", b"alice", 0)
+                .unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            store.xgroup_createconsumer(b"s", b"g1", b"bob", 0).unwrap(),
+            Some(true)
+        );
+
+        let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
+        assert_eq!(groups, vec![(b"g1".to_vec(), 2, (0, 0))]);
+
+        assert_eq!(
+            store
+                .xgroup_createconsumer(b"s", b"missing", b"alice", 0)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .xgroup_createconsumer(b"missing", b"g1", b"alice", 0)
+                .unwrap(),
+            None
+        );
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        assert_eq!(
+            store.xgroup_createconsumer(b"str", b"g1", b"alice", 0),
+            Err(StoreError::WrongType)
+        );
+    }
+
+    #[test]
+    fn stream_xgroup_delconsumer_returns_pending_count_and_updates_membership() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        assert!(store.xgroup_create(b"s", b"g1", (0, 0), false, 0).unwrap());
+        assert_eq!(
+            store
+                .xgroup_createconsumer(b"s", b"g1", b"alice", 0)
+                .unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            store.xgroup_createconsumer(b"s", b"g1", b"bob", 0).unwrap(),
+            Some(true)
+        );
+
+        assert_eq!(
+            store.xgroup_delconsumer(b"s", b"g1", b"alice", 0).unwrap(),
+            Some(0)
+        );
+        let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
+        assert_eq!(groups, vec![(b"g1".to_vec(), 1, (0, 0))]);
+
+        assert_eq!(
+            store
+                .xgroup_delconsumer(b"s", b"g1", b"missing_consumer", 0)
+                .unwrap(),
+            Some(0)
+        );
+        let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
+        assert_eq!(groups, vec![(b"g1".to_vec(), 1, (0, 0))]);
+
+        assert_eq!(
+            store
+                .xgroup_delconsumer(b"s", b"missing", b"alice", 0)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .xgroup_delconsumer(b"missing", b"g1", b"alice", 0)
+                .unwrap(),
+            None
+        );
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        assert_eq!(
+            store.xgroup_delconsumer(b"str", b"g1", b"alice", 0),
             Err(StoreError::WrongType)
         );
     }

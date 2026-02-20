@@ -673,6 +673,90 @@
       }
     },
     {
+      "name": "xgroup_createconsumer_read1_c1_created",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "CREATECONSUMER", "read1", "g1", "c1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xgroup_createconsumer_read1_c1_duplicate",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "CREATECONSUMER", "read1", "g1", "c1"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "xgroup_createconsumer_read1_c2_created",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "CREATECONSUMER", "read1", "g1", "c2"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xinfo_groups_read1_after_createconsumer",
+      "now_ms": 1000,
+      "argv": ["XINFO", "GROUPS", "read1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "name" },
+              { "kind": "bulk", "value": "g1" },
+              { "kind": "bulk", "value": "consumers" },
+              { "kind": "integer", "value": 2 },
+              { "kind": "bulk", "value": "pending" },
+              { "kind": "integer", "value": 0 },
+              { "kind": "bulk", "value": "last-delivered-id" },
+              { "kind": "bulk", "value": "2000-1" },
+              { "kind": "bulk", "value": "entries-read" },
+              { "kind": "bulk", "value": null },
+              { "kind": "bulk", "value": "lag" },
+              { "kind": "bulk", "value": null }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xgroup_delconsumer_read1_c1_zero",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "DELCONSUMER", "read1", "g1", "c1"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "xinfo_groups_read1_after_delconsumer",
+      "now_ms": 1000,
+      "argv": ["XINFO", "GROUPS", "read1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "name" },
+              { "kind": "bulk", "value": "g1" },
+              { "kind": "bulk", "value": "consumers" },
+              { "kind": "integer", "value": 1 },
+              { "kind": "bulk", "value": "pending" },
+              { "kind": "integer", "value": 0 },
+              { "kind": "bulk", "value": "last-delivered-id" },
+              { "kind": "bulk", "value": "2000-1" },
+              { "kind": "bulk", "value": "entries-read" },
+              { "kind": "bulk", "value": null },
+              { "kind": "bulk", "value": "lag" },
+              { "kind": "bulk", "value": null }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xgroup_delconsumer_read1_missing_consumer_zero",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "DELCONSUMER", "read1", "g1", "missing-consumer"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
       "name": "xgroup_create_duplicate_error",
       "now_ms": 1000,
       "argv": ["XGROUP", "CREATE", "read1", "g1", "0"],
@@ -721,6 +805,42 @@
       "expect": {
         "kind": "error",
         "value": "NOGROUP No such key 'read1' or consumer group 'missing_group' in XGROUP command"
+      }
+    },
+    {
+      "name": "xgroup_createconsumer_missing_group_error",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "CREATECONSUMER", "read1", "missing_group", "c1"],
+      "expect": {
+        "kind": "error",
+        "value": "NOGROUP No such key 'read1' or consumer group 'missing_group' in XGROUP command"
+      }
+    },
+    {
+      "name": "xgroup_createconsumer_missing_key_error",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "CREATECONSUMER", "missing_stream", "g1", "c1"],
+      "expect": {
+        "kind": "error",
+        "value": "NOGROUP No such key 'missing_stream' or consumer group 'g1' in XGROUP command"
+      }
+    },
+    {
+      "name": "xgroup_delconsumer_missing_group_error",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "DELCONSUMER", "read1", "missing_group", "c1"],
+      "expect": {
+        "kind": "error",
+        "value": "NOGROUP No such key 'read1' or consumer group 'missing_group' in XGROUP command"
+      }
+    },
+    {
+      "name": "xgroup_delconsumer_missing_key_error",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "DELCONSUMER", "missing_stream", "g1", "c1"],
+      "expect": {
+        "kind": "error",
+        "value": "NOGROUP No such key 'missing_stream' or consumer group 'g1' in XGROUP command"
       }
     },
     {
@@ -883,6 +1003,18 @@
       "name": "xgroup_setid_wrongtype_error",
       "now_ms": 0,
       "argv": ["XGROUP", "SETID", "strkey_stream_range", "g1", "0"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "xgroup_createconsumer_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["XGROUP", "CREATECONSUMER", "strkey_stream_range", "g1", "c1"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "xgroup_delconsumer_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["XGROUP", "DELCONSUMER", "strkey_stream_range", "g1", "c1"],
       "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
     }
   ]

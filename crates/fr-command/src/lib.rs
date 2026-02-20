@@ -2185,12 +2185,16 @@ fn stream_record_to_frame(id: StreamId, fields: Vec<(Vec<u8>, Vec<u8>)>) -> Resp
     ]))
 }
 
-fn stream_group_info_to_frame(name: Vec<u8>, last_delivered_id: StreamId) -> RespFrame {
+fn stream_group_info_to_frame(
+    name: Vec<u8>,
+    consumers: usize,
+    last_delivered_id: StreamId,
+) -> RespFrame {
     RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(b"name".to_vec())),
         RespFrame::BulkString(Some(name)),
         RespFrame::BulkString(Some(b"consumers".to_vec())),
-        RespFrame::Integer(0),
+        RespFrame::Integer(i64::try_from(consumers).unwrap_or(i64::MAX)),
         RespFrame::BulkString(Some(b"pending".to_vec())),
         RespFrame::Integer(0),
         RespFrame::BulkString(Some(b"last-delivered-id".to_vec())),
@@ -2347,19 +2351,45 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         };
         return match store.xgroup_setid(&argv[2], &argv[3], last_delivered_id, now_ms) {
             Ok(true) => Ok(RespFrame::SimpleString("OK".to_string())),
-            Ok(false) => {
-                let key = String::from_utf8_lossy(&argv[2]);
-                let group = String::from_utf8_lossy(&argv[3]);
-                Ok(RespFrame::Error(format!(
-                    "NOGROUP No such key '{key}' or consumer group '{group}' in XGROUP command"
-                )))
-            }
+            Ok(false) => Ok(xgroup_nogroup_error(&argv[2], &argv[3])),
             Err(StoreError::KeyNotFound) => Err(CommandError::NoSuchKey),
             Err(err) => Err(CommandError::Store(err)),
         };
     }
 
+    if eq_ascii_command(&argv[1], b"CREATECONSUMER") {
+        if argv.len() != 5 {
+            return Err(CommandError::WrongArity("XGROUP"));
+        }
+        return match store.xgroup_createconsumer(&argv[2], &argv[3], &argv[4], now_ms) {
+            Ok(Some(created)) => Ok(RespFrame::Integer(if created { 1 } else { 0 })),
+            Ok(None) => Ok(xgroup_nogroup_error(&argv[2], &argv[3])),
+            Err(err) => Err(CommandError::Store(err)),
+        };
+    }
+
+    if eq_ascii_command(&argv[1], b"DELCONSUMER") {
+        if argv.len() != 5 {
+            return Err(CommandError::WrongArity("XGROUP"));
+        }
+        return match store.xgroup_delconsumer(&argv[2], &argv[3], &argv[4], now_ms) {
+            Ok(Some(deleted_pending)) => Ok(RespFrame::Integer(
+                i64::try_from(deleted_pending).unwrap_or(i64::MAX),
+            )),
+            Ok(None) => Ok(xgroup_nogroup_error(&argv[2], &argv[3])),
+            Err(err) => Err(CommandError::Store(err)),
+        };
+    }
+
     Err(CommandError::SyntaxError)
+}
+
+fn xgroup_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
+    let key = String::from_utf8_lossy(key);
+    let group = String::from_utf8_lossy(group);
+    RespFrame::Error(format!(
+        "NOGROUP No such key '{key}' or consumer group '{group}' in XGROUP command"
+    ))
 }
 
 fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -2374,8 +2404,12 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             return Err(CommandError::NoSuchKey);
         };
         let mut out = Vec::with_capacity(groups.len());
-        for (name, last_delivered_id) in groups {
-            out.push(stream_group_info_to_frame(name, last_delivered_id));
+        for (name, consumers, last_delivered_id) in groups {
+            out.push(stream_group_info_to_frame(
+                name,
+                consumers,
+                last_delivered_id,
+            ));
         }
         return Ok(RespFrame::Array(Some(out)));
     }
@@ -9221,6 +9255,253 @@ mod tests {
             wrongtype,
             CommandError::Store(fr_store::StoreError::WrongType)
         ));
+    }
+
+    #[test]
+    fn xgroup_createconsumer_and_delconsumer_update_group_consumer_counts() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1000-0".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd");
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+
+        let create_1 = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup createconsumer c1");
+        assert_eq!(create_1, RespFrame::Integer(1));
+
+        let create_dup = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup createconsumer duplicate");
+        assert_eq!(create_dup, RespFrame::Integer(0));
+
+        let create_2 = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup createconsumer c2");
+        assert_eq!(create_2, RespFrame::Integer(1));
+
+        let groups_with_two = dispatch_argv(
+            &[b"XINFO".to_vec(), b"GROUPS".to_vec(), b"s".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xinfo groups after createconsumer");
+        assert_eq!(
+            groups_with_two,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"name".to_vec())),
+                RespFrame::BulkString(Some(b"g1".to_vec())),
+                RespFrame::BulkString(Some(b"consumers".to_vec())),
+                RespFrame::Integer(2),
+                RespFrame::BulkString(Some(b"pending".to_vec())),
+                RespFrame::Integer(0),
+                RespFrame::BulkString(Some(b"last-delivered-id".to_vec())),
+                RespFrame::BulkString(Some(b"0-0".to_vec())),
+                RespFrame::BulkString(Some(b"entries-read".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::BulkString(Some(b"lag".to_vec())),
+                RespFrame::BulkString(None),
+            ]))]))
+        );
+
+        let del_1 = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"DELCONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup delconsumer c1");
+        assert_eq!(del_1, RespFrame::Integer(0));
+
+        let groups_with_one = dispatch_argv(
+            &[b"XINFO".to_vec(), b"GROUPS".to_vec(), b"s".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xinfo groups after delconsumer");
+        assert_eq!(
+            groups_with_one,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"name".to_vec())),
+                RespFrame::BulkString(Some(b"g1".to_vec())),
+                RespFrame::BulkString(Some(b"consumers".to_vec())),
+                RespFrame::Integer(1),
+                RespFrame::BulkString(Some(b"pending".to_vec())),
+                RespFrame::Integer(0),
+                RespFrame::BulkString(Some(b"last-delivered-id".to_vec())),
+                RespFrame::BulkString(Some(b"0-0".to_vec())),
+                RespFrame::BulkString(Some(b"entries-read".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::BulkString(Some(b"lag".to_vec())),
+                RespFrame::BulkString(None),
+            ]))]))
+        );
+
+        let del_missing_consumer = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"DELCONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"missing".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup delconsumer missing consumer");
+        assert_eq!(del_missing_consumer, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn xgroup_consumer_commands_validate_nogroup_wrongtype_and_arity() {
+        let mut store = Store::new();
+
+        let missing_key = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"missing".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup createconsumer missing key");
+        assert_eq!(
+            missing_key,
+            RespFrame::Error(
+                "NOGROUP No such key 'missing' or consumer group 'g1' in XGROUP command"
+                    .to_string()
+            )
+        );
+
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1000-0".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd");
+        let missing_group = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"DELCONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup delconsumer missing group");
+        assert_eq!(
+            missing_group,
+            RespFrame::Error(
+                "NOGROUP No such key 's' or consumer group 'g1' in XGROUP command".to_string()
+            )
+        );
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        let wrongtype = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"str".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("xgroup createconsumer wrongtype");
+        assert!(matches!(
+            wrongtype,
+            CommandError::Store(fr_store::StoreError::WrongType)
+        ));
+
+        let arity_create = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("xgroup createconsumer arity");
+        assert!(matches!(arity_create, CommandError::WrongArity("XGROUP")));
+
+        let arity_del = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"DELCONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("xgroup delconsumer arity");
+        assert!(matches!(arity_del, CommandError::WrongArity("XGROUP")));
     }
 
     // ── String extension command tests ──────────────────────────────────
