@@ -1380,6 +1380,46 @@ mod tests {
                 ":abc\r\n",
                 "ERR Protocol error: invalid integer payload",
             ),
+            (
+                "invalid_bulk_length_non_numeric",
+                "$x\r\n",
+                "ERR Protocol error: invalid bulk length",
+            ),
+            (
+                "invalid_multibulk_length_non_numeric",
+                "*x\r\n",
+                "ERR Protocol error: invalid multibulk length",
+            ),
+            (
+                "incomplete_array_tail_bulk",
+                "*2\r\n$4\r\nPING\r\n$3\r\nab",
+                "ERR Protocol error: unexpected EOF while reading request",
+            ),
+            (
+                "incomplete_simple_string_line",
+                "+OK\r",
+                "ERR Protocol error: unexpected EOF while reading request",
+            ),
+            (
+                "unsupported_resp3_boolean_prefix",
+                "#t\r\n",
+                "ERR Protocol error: unsupported RESP3 type prefix '#'",
+            ),
+            (
+                "unsupported_resp3_push_prefix",
+                ">1\r\n",
+                "ERR Protocol error: unsupported RESP3 type prefix '>'",
+            ),
+            (
+                "unsupported_resp3_blob_error_prefix",
+                "!\r\n",
+                "ERR Protocol error: unsupported RESP3 type prefix '!'",
+            ),
+            (
+                "unsupported_resp3_nested_in_array",
+                "*2\r\n$4\r\nPING\r\n~1\r\n",
+                "ERR Protocol error: unsupported RESP3 type prefix '~'",
+            ),
         ];
 
         let mut runtime = Runtime::default_strict();

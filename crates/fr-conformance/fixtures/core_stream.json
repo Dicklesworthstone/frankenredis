@@ -1080,6 +1080,197 @@
       }
     },
     {
+      "name": "xreadgroup_group_read_stream_pending_replay_owner",
+      "now_ms": 1000,
+      "argv": ["XREADGROUP", "GROUP", "g1", "c1", "STREAMS", "group_read_stream", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "group_read_stream" },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "4000-0" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "field" },
+                          { "kind": "bulk", "value": "v1" }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "4000-1" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "field" },
+                          { "kind": "bulk", "value": "v2" }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "4000-2" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "field" },
+                          { "kind": "bulk", "value": "v3" }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xreadgroup_group_read_stream_pending_replay_other_consumer_nil",
+      "now_ms": 1000,
+      "argv": ["XREADGROUP", "GROUP", "g1", "c2", "STREAMS", "group_read_stream", "0"],
+      "expect": { "kind": "null_array" }
+    },
+    {
+      "name": "xinfo_groups_group_read_stream_after_pending_replay",
+      "now_ms": 1000,
+      "argv": ["XINFO", "GROUPS", "group_read_stream"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "name" },
+              { "kind": "bulk", "value": "g1" },
+              { "kind": "bulk", "value": "consumers" },
+              { "kind": "integer", "value": 2 },
+              { "kind": "bulk", "value": "pending" },
+              { "kind": "integer", "value": 3 },
+              { "kind": "bulk", "value": "last-delivered-id" },
+              { "kind": "bulk", "value": "4000-2" },
+              { "kind": "bulk", "value": "entries-read" },
+              { "kind": "bulk", "value": null },
+              { "kind": "bulk", "value": "lag" },
+              { "kind": "bulk", "value": null }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xadd_group_noack_stream_first",
+      "now_ms": 1000,
+      "argv": ["XADD", "group_noack_stream", "5000-0", "field", "n1"],
+      "expect": { "kind": "bulk", "value": "5000-0" }
+    },
+    {
+      "name": "xadd_group_noack_stream_second",
+      "now_ms": 1000,
+      "argv": ["XADD", "group_noack_stream", "5000-1", "field", "n2"],
+      "expect": { "kind": "bulk", "value": "5000-1" }
+    },
+    {
+      "name": "xgroup_create_group_noack_stream",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "CREATE", "group_noack_stream", "g1", "0"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xreadgroup_group_noack_stream_noack",
+      "now_ms": 1000,
+      "argv": ["XREADGROUP", "GROUP", "g1", "c1", "NOACK", "STREAMS", "group_noack_stream", ">"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "group_noack_stream" },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "5000-0" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "field" },
+                          { "kind": "bulk", "value": "n1" }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "5000-1" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "field" },
+                          { "kind": "bulk", "value": "n2" }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xreadgroup_group_noack_stream_replay_after_noack_nil",
+      "now_ms": 1000,
+      "argv": ["XREADGROUP", "GROUP", "g1", "c1", "STREAMS", "group_noack_stream", "0"],
+      "expect": { "kind": "null_array" }
+    },
+    {
+      "name": "xinfo_groups_group_noack_stream_after_noack",
+      "now_ms": 1000,
+      "argv": ["XINFO", "GROUPS", "group_noack_stream"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "name" },
+              { "kind": "bulk", "value": "g1" },
+              { "kind": "bulk", "value": "consumers" },
+              { "kind": "integer", "value": 1 },
+              { "kind": "bulk", "value": "pending" },
+              { "kind": "integer", "value": 0 },
+              { "kind": "bulk", "value": "last-delivered-id" },
+              { "kind": "bulk", "value": "5000-1" },
+              { "kind": "bulk", "value": "entries-read" },
+              { "kind": "bulk", "value": null },
+              { "kind": "bulk", "value": "lag" },
+              { "kind": "bulk", "value": null }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "name": "xreadgroup_missing_group_error",
       "now_ms": 1000,
       "argv": ["XREADGROUP", "GROUP", "missing_group", "c1", "STREAMS", "group_read_stream", ">"],

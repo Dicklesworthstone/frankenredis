@@ -142,6 +142,118 @@
       }
     },
     {
+      "name": "invalid_bulk_length_non_numeric",
+      "now_ms": 0,
+      "raw_request": "$x\r\n",
+      "expect": { "kind": "error", "value": "ERR Protocol error: invalid bulk length" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
+    },
+    {
+      "name": "invalid_multibulk_length_non_numeric",
+      "now_ms": 0,
+      "raw_request": "*x\r\n",
+      "expect": { "kind": "error", "value": "ERR Protocol error: invalid multibulk length" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
+    },
+    {
+      "name": "incomplete_array_tail_bulk",
+      "now_ms": 0,
+      "raw_request": "*2\r\n$4\r\nPING\r\n$3\r\nab",
+      "expect": { "kind": "error", "value": "ERR Protocol error: unexpected EOF while reading request" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
+    },
+    {
+      "name": "incomplete_simple_string_line",
+      "now_ms": 0,
+      "raw_request": "+OK\r",
+      "expect": { "kind": "error", "value": "ERR Protocol error: unexpected EOF while reading request" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
+    },
+    {
+      "name": "unsupported_resp3_boolean_prefix",
+      "now_ms": 0,
+      "raw_request": "#t\r\n",
+      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '#'" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
+    },
+    {
+      "name": "unsupported_resp3_push_prefix",
+      "now_ms": 0,
+      "raw_request": ">1\r\n",
+      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '>'" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
+    },
+    {
+      "name": "unsupported_resp3_blob_error_prefix",
+      "now_ms": 0,
+      "raw_request": "!\r\n",
+      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '!'" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
+    },
+    {
+      "name": "unsupported_resp3_nested_in_array",
+      "now_ms": 0,
+      "raw_request": "*2\r\n$4\r\nPING\r\n~1\r\n",
+      "expect": { "kind": "error", "value": "ERR Protocol error: unsupported RESP3 type prefix '~'" },
+      "expect_threat": {
+        "threat_class": "parser_abuse",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "protocol_parse_failure",
+        "subsystem": "protocol",
+        "action": "parse_failure"
+      }
+    },
+    {
       "name": "valid_ping",
       "now_ms": 0,
       "raw_request": "*1\r\n$4\r\nPING\r\n",
