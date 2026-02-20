@@ -2206,6 +2206,19 @@ fn stream_group_info_to_frame(
     ]))
 }
 
+fn stream_consumer_info_to_frame(name: Vec<u8>) -> RespFrame {
+    RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(b"name".to_vec())),
+        RespFrame::BulkString(Some(name)),
+        RespFrame::BulkString(Some(b"pending".to_vec())),
+        RespFrame::Integer(0),
+        RespFrame::BulkString(Some(b"idle".to_vec())),
+        RespFrame::Integer(0),
+        RespFrame::BulkString(Some(b"inactive".to_vec())),
+        RespFrame::Integer(0),
+    ]))
+}
+
 fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("XREAD"));
@@ -2392,9 +2405,33 @@ fn xgroup_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     ))
 }
 
+fn xinfo_nogroup_consumers_error(key: &[u8], group: &[u8]) -> RespFrame {
+    let key = String::from_utf8_lossy(key);
+    let group = String::from_utf8_lossy(group);
+    RespFrame::Error(format!(
+        "NOGROUP No such consumer group '{group}' for key name '{key}'"
+    ))
+}
+
 fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("XINFO"));
+    }
+    if eq_ascii_command(&argv[1], b"CONSUMERS") {
+        if argv.len() != 4 {
+            return Err(CommandError::WrongArity("XINFO"));
+        }
+        let consumers = match store.xinfo_consumers(&argv[2], &argv[3], now_ms) {
+            Ok(Some(consumers)) => consumers,
+            Ok(None) => return Ok(xinfo_nogroup_consumers_error(&argv[2], &argv[3])),
+            Err(StoreError::KeyNotFound) => return Err(CommandError::NoSuchKey),
+            Err(err) => return Err(CommandError::Store(err)),
+        };
+        let out = consumers
+            .into_iter()
+            .map(stream_consumer_info_to_frame)
+            .collect();
+        return Ok(RespFrame::Array(Some(out)));
     }
     if eq_ascii_command(&argv[1], b"GROUPS") {
         if argv.len() != 3 {
@@ -8705,6 +8742,181 @@ mod tests {
         )
         .expect_err("xinfo groups missing");
         assert!(matches!(missing, CommandError::NoSuchKey));
+    }
+
+    #[test]
+    fn xinfo_consumers_reports_group_membership() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1000-0".to_vec(),
+                b"field".to_vec(),
+                b"value".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd");
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+
+        let empty = dispatch_argv(
+            &[
+                b"XINFO".to_vec(),
+                b"CONSUMERS".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xinfo consumers empty");
+        assert_eq!(empty, RespFrame::Array(Some(Vec::new())));
+
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("createconsumer c2");
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("createconsumer c1");
+
+        let consumers = dispatch_argv(
+            &[
+                b"XINFO".to_vec(),
+                b"CONSUMERS".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xinfo consumers");
+        assert_eq!(
+            consumers,
+            RespFrame::Array(Some(vec![
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"name".to_vec())),
+                    RespFrame::BulkString(Some(b"c1".to_vec())),
+                    RespFrame::BulkString(Some(b"pending".to_vec())),
+                    RespFrame::Integer(0),
+                    RespFrame::BulkString(Some(b"idle".to_vec())),
+                    RespFrame::Integer(0),
+                    RespFrame::BulkString(Some(b"inactive".to_vec())),
+                    RespFrame::Integer(0),
+                ])),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"name".to_vec())),
+                    RespFrame::BulkString(Some(b"c2".to_vec())),
+                    RespFrame::BulkString(Some(b"pending".to_vec())),
+                    RespFrame::Integer(0),
+                    RespFrame::BulkString(Some(b"idle".to_vec())),
+                    RespFrame::Integer(0),
+                    RespFrame::BulkString(Some(b"inactive".to_vec())),
+                    RespFrame::Integer(0),
+                ])),
+            ]))
+        );
+    }
+
+    #[test]
+    fn xinfo_consumers_validation_missing_group_key_wrongtype_and_arity() {
+        let mut store = Store::new();
+
+        let missing_key = dispatch_argv(
+            &[
+                b"XINFO".to_vec(),
+                b"CONSUMERS".to_vec(),
+                b"missing".to_vec(),
+                b"g1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("xinfo consumers missing key");
+        assert!(matches!(missing_key, CommandError::NoSuchKey));
+
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1000-0".to_vec(),
+                b"field".to_vec(),
+                b"value".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd");
+        let missing_group = dispatch_argv(
+            &[
+                b"XINFO".to_vec(),
+                b"CONSUMERS".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xinfo consumers missing group");
+        assert_eq!(
+            missing_group,
+            RespFrame::Error("NOGROUP No such consumer group 'g1' for key name 's'".to_string())
+        );
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        let wrongtype = dispatch_argv(
+            &[
+                b"XINFO".to_vec(),
+                b"CONSUMERS".to_vec(),
+                b"str".to_vec(),
+                b"g1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("xinfo consumers wrongtype");
+        assert!(matches!(
+            wrongtype,
+            CommandError::Store(fr_store::StoreError::WrongType)
+        ));
+
+        let arity = dispatch_argv(
+            &[b"XINFO".to_vec(), b"CONSUMERS".to_vec(), b"s".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("xinfo consumers arity");
+        assert!(matches!(arity, CommandError::WrongArity("XINFO")));
     }
 
     #[test]

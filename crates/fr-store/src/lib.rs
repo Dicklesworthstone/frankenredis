@@ -9,6 +9,7 @@ pub type StreamField = (Vec<u8>, Vec<u8>);
 pub type StreamEntries = BTreeMap<StreamId, Vec<StreamField>>;
 pub type StreamRecord = (StreamId, Vec<StreamField>);
 pub type StreamInfoBounds = (usize, Option<StreamRecord>, Option<StreamRecord>);
+pub type StreamConsumerInfo = Vec<u8>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamGroup {
@@ -2950,6 +2951,30 @@ impl Store {
         }
     }
 
+    pub fn xinfo_consumers(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<StreamConsumerInfo>>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(_) => {
+                    let Some(groups) = self.stream_groups.get(key) else {
+                        return Ok(None);
+                    };
+                    let Some(group_state) = groups.get(group) else {
+                        return Ok(None);
+                    };
+                    Ok(Some(group_state.consumers.iter().cloned().collect()))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Err(StoreError::KeyNotFound),
+        }
+    }
+
     pub fn xgroup_delconsumer(
         &mut self,
         key: &[u8],
@@ -5538,6 +5563,47 @@ mod tests {
         store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
         assert_eq!(
             store.xgroup_delconsumer(b"str", b"g1", b"alice", 0),
+            Err(StoreError::WrongType)
+        );
+    }
+
+    #[test]
+    fn stream_xinfo_consumers_returns_membership_and_errors() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        assert!(store.xgroup_create(b"s", b"g1", (0, 0), false, 0).unwrap());
+
+        let empty = store
+            .xinfo_consumers(b"s", b"g1", 0)
+            .unwrap()
+            .expect("consumers");
+        assert!(empty.is_empty());
+
+        assert_eq!(
+            store.xgroup_createconsumer(b"s", b"g1", b"c2", 0).unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            store.xgroup_createconsumer(b"s", b"g1", b"c1", 0).unwrap(),
+            Some(true)
+        );
+        let consumers = store
+            .xinfo_consumers(b"s", b"g1", 0)
+            .unwrap()
+            .expect("consumers");
+        assert_eq!(consumers, vec![b"c1".to_vec(), b"c2".to_vec()]);
+
+        assert_eq!(store.xinfo_consumers(b"s", b"missing", 0).unwrap(), None);
+        assert_eq!(
+            store.xinfo_consumers(b"missing", b"g1", 0),
+            Err(StoreError::KeyNotFound)
+        );
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        assert_eq!(
+            store.xinfo_consumers(b"str", b"g1", 0),
             Err(StoreError::WrongType)
         );
     }
