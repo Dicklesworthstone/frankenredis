@@ -1,7 +1,16 @@
 #![forbid(unsafe_code)]
 
-use std::collections::{HashMap, HashSet, VecDeque};
 use fr_expire::evaluate_expiry;
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::ops::Bound::{Excluded, Unbounded};
+
+pub type StreamId = (u64, u64);
+pub type StreamField = (Vec<u8>, Vec<u8>);
+pub type StreamEntries = BTreeMap<StreamId, Vec<StreamField>>;
+pub type StreamRecord = (StreamId, Vec<StreamField>);
+pub type StreamInfoBounds = (usize, Option<StreamRecord>, Option<StreamRecord>);
+pub type StreamGroupState = BTreeMap<Vec<u8>, StreamId>;
+pub type StreamGroupInfo = (Vec<u8>, StreamId);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
@@ -22,6 +31,8 @@ pub enum Value {
     Set(HashSet<Vec<u8>>),
     /// Sorted set: member -> score mapping. Ordered iteration is done on demand.
     SortedSet(HashMap<Vec<u8>, f64>),
+    /// Stream entries keyed by `(milliseconds, sequence)` stream IDs.
+    Stream(StreamEntries),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -44,6 +55,7 @@ pub enum ValueType {
     List,
     Set,
     ZSet,
+    Stream,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -122,6 +134,7 @@ impl ValueType {
             Self::List => "list",
             Self::Set => "set",
             Self::ZSet => "zset",
+            Self::Stream => "stream",
         }
     }
 }
@@ -129,6 +142,7 @@ impl ValueType {
 #[derive(Debug, Default)]
 pub struct Store {
     entries: HashMap<Vec<u8>, Entry>,
+    stream_groups: HashMap<Vec<u8>, StreamGroupState>,
 }
 
 impl Store {
@@ -162,6 +176,7 @@ impl Store {
 
     pub fn set(&mut self, key: Vec<u8>, value: Vec<u8>, px_ttl_ms: Option<u64>, now_ms: u64) {
         let expires_at_ms = px_ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
+        self.stream_groups.remove(key.as_slice());
         self.entries.insert(
             key,
             Entry {
@@ -176,6 +191,7 @@ impl Store {
         for key in keys {
             self.drop_if_expired(key, now_ms);
             if self.entries.remove(key.as_slice()).is_some() {
+                self.stream_groups.remove(key.as_slice());
                 removed = removed.saturating_add(1);
             }
         }
@@ -655,6 +671,7 @@ impl Store {
             Value::List(_) => ValueType::List,
             Value::Set(_) => ValueType::Set,
             Value::SortedSet(_) => ValueType::ZSet,
+            Value::Stream(_) => ValueType::Stream,
         })
     }
 
@@ -666,8 +683,13 @@ impl Store {
     pub fn rename(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> Result<(), StoreError> {
         self.drop_if_expired(key, now_ms);
         let entry = self.entries.remove(key).ok_or(StoreError::KeyNotFound)?;
+        let moved_groups = self.stream_groups.remove(key);
         self.entries.remove(newkey);
+        self.stream_groups.remove(newkey);
         self.entries.insert(newkey.to_vec(), entry);
+        if let Some(groups) = moved_groups {
+            self.stream_groups.insert(newkey.to_vec(), groups);
+        }
         Ok(())
     }
 
@@ -683,7 +705,11 @@ impl Store {
         let Some(entry) = self.entries.remove(key) else {
             return Err(StoreError::KeyNotFound);
         };
+        let moved_groups = self.stream_groups.remove(key);
         self.entries.insert(newkey.to_vec(), entry);
+        if let Some(groups) = moved_groups {
+            self.stream_groups.insert(newkey.to_vec(), groups);
+        }
         Ok(true)
     }
 
@@ -918,6 +944,7 @@ impl Store {
 
     pub fn flushdb(&mut self) {
         self.entries.clear();
+        self.stream_groups.clear();
     }
 
     // ── Hash operations ─────────────────────────────────────────
@@ -2551,6 +2578,338 @@ impl Store {
         }
     }
 
+    pub fn xlast_id(&mut self, key: &[u8], now_ms: u64) -> Result<Option<StreamId>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => Ok(entries.last_key_value().map(|(id, _)| *id)),
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn xadd(
+        &mut self,
+        key: &[u8],
+        id: StreamId,
+        fields: &[StreamField],
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::Stream(entries) => {
+                    entries.insert(id, fields.to_vec());
+                    Ok(())
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => {
+                let mut entries = BTreeMap::new();
+                entries.insert(id, fields.to_vec());
+                self.stream_groups.remove(key);
+                self.entries.insert(
+                    key.to_vec(),
+                    Entry {
+                        value: Value::Stream(entries),
+                        expires_at_ms: None,
+                    },
+                );
+                Ok(())
+            }
+        }
+    }
+
+    pub fn xlen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => Ok(entries.len()),
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
+    pub fn xrange(
+        &mut self,
+        key: &[u8],
+        start: StreamId,
+        end: StreamId,
+        count: Option<usize>,
+        now_ms: u64,
+    ) -> Result<Vec<StreamRecord>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => {
+                    if start > end {
+                        return Ok(Vec::new());
+                    }
+                    let mut out = Vec::new();
+                    for (id, fields) in entries.range(start..=end) {
+                        out.push((*id, fields.clone()));
+                        if let Some(limit) = count
+                            && out.len() >= limit
+                        {
+                            break;
+                        }
+                    }
+                    Ok(out)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn xrevrange(
+        &mut self,
+        key: &[u8],
+        end: StreamId,
+        start: StreamId,
+        count: Option<usize>,
+        now_ms: u64,
+    ) -> Result<Vec<StreamRecord>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => {
+                    if start > end {
+                        return Ok(Vec::new());
+                    }
+                    let mut out = Vec::new();
+                    for (id, fields) in entries.range(start..=end).rev() {
+                        out.push((*id, fields.clone()));
+                        if let Some(limit) = count
+                            && out.len() >= limit
+                        {
+                            break;
+                        }
+                    }
+                    Ok(out)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn xdel(&mut self, key: &[u8], ids: &[StreamId], now_ms: u64) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::Stream(entries) => {
+                    let mut removed = 0usize;
+                    for id in ids {
+                        if entries.remove(id).is_some() {
+                            removed = removed.saturating_add(1);
+                        }
+                    }
+                    Ok(removed)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
+    pub fn xtrim(&mut self, key: &[u8], max_len: usize, now_ms: u64) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::Stream(entries) => {
+                    if entries.len() <= max_len {
+                        return Ok(0);
+                    }
+                    let to_remove = entries.len() - max_len;
+                    let remove_ids: Vec<StreamId> =
+                        entries.keys().copied().take(to_remove).collect();
+                    for id in remove_ids {
+                        entries.remove(&id);
+                    }
+                    Ok(to_remove)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
+    pub fn xread(
+        &mut self,
+        key: &[u8],
+        start_exclusive: StreamId,
+        count: Option<usize>,
+        now_ms: u64,
+    ) -> Result<Vec<StreamRecord>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => {
+                    if matches!(count, Some(0)) {
+                        return Ok(Vec::new());
+                    }
+                    let mut out = Vec::new();
+                    for (id, fields) in entries.range((Excluded(start_exclusive), Unbounded)) {
+                        out.push((*id, fields.clone()));
+                        if let Some(limit) = count
+                            && out.len() >= limit
+                        {
+                            break;
+                        }
+                    }
+                    Ok(out)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn xinfo_stream(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<StreamInfoBounds>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => {
+                    let len = entries.len();
+                    let first = entries
+                        .first_key_value()
+                        .map(|(id, fields)| (*id, fields.clone()));
+                    let last = entries
+                        .last_key_value()
+                        .map(|(id, fields)| (*id, fields.clone()));
+                    Ok(Some((len, first, last)))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn xgroup_create(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        start_id: StreamId,
+        mkstream: bool,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        let key_exists_as_stream = match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(_) => true,
+                _ => return Err(StoreError::WrongType),
+            },
+            None => false,
+        };
+
+        if !key_exists_as_stream {
+            if !mkstream {
+                return Err(StoreError::KeyNotFound);
+            }
+            self.stream_groups.remove(key);
+            self.entries.insert(
+                key.to_vec(),
+                Entry {
+                    value: Value::Stream(BTreeMap::new()),
+                    expires_at_ms: None,
+                },
+            );
+        }
+
+        let groups = self.stream_groups.entry(key.to_vec()).or_default();
+        if groups.contains_key(group) {
+            return Ok(false);
+        }
+        groups.insert(group.to_vec(), start_id);
+        Ok(true)
+    }
+
+    pub fn xgroup_destroy(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(_) => {
+                    let mut removed = false;
+                    let mut remove_groups_key = false;
+                    if let Some(groups) = self.stream_groups.get_mut(key) {
+                        removed = groups.remove(group).is_some();
+                        remove_groups_key = groups.is_empty();
+                    }
+                    if remove_groups_key {
+                        self.stream_groups.remove(key);
+                    }
+                    Ok(removed)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(false),
+        }
+    }
+
+    pub fn xgroup_setid(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        last_delivered_id: StreamId,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(_) => {
+                    if let Some(groups) = self.stream_groups.get_mut(key)
+                        && let Some(current_id) = groups.get_mut(group)
+                    {
+                        *current_id = last_delivered_id;
+                        return Ok(true);
+                    }
+                    Ok(false)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Err(StoreError::KeyNotFound),
+        }
+    }
+
+    pub fn xinfo_groups(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<StreamGroupInfo>>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(_) => {
+                    let groups = self
+                        .stream_groups
+                        .get(key)
+                        .map(|groups| {
+                            groups
+                                .iter()
+                                .map(|(name, last_id)| (name.clone(), *last_id))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    Ok(Some(groups))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
     // ── HyperLogLog commands ───────────────────────────────────────────
 
     /// PFADD: add elements to a HyperLogLog. Returns `true` if any internal
@@ -2695,6 +3054,7 @@ impl Store {
         .should_evict;
         if should_evict {
             self.entries.remove(key);
+            self.stream_groups.remove(key);
         }
     }
 
@@ -2868,8 +3228,7 @@ impl Store {
                     Value::SortedSet(zs) => {
                         result.retain(|member, score| {
                             if let Some(&other_score) = zs.get(member) {
-                                *score =
-                                    aggregate_scores(*score, other_score * weight, aggregate);
+                                *score = aggregate_scores(*score, other_score * weight, aggregate);
                                 true
                             } else {
                                 false
@@ -2905,9 +3264,7 @@ impl Store {
         self.drop_if_expired(key, now_ms);
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::Set(s) => {
-                    Ok(members.iter().map(|m| s.contains(*m)).collect())
-                }
+                Value::Set(s) => Ok(members.iter().map(|m| s.contains(*m)).collect()),
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(vec![false; members.len()]),
@@ -3008,11 +3365,7 @@ impl Store {
                         pos += 1;
                     }
 
-                    let next = if pos >= fields.len() {
-                        0
-                    } else {
-                        pos as u64
-                    };
+                    let next = if pos >= fields.len() { 0 } else { pos as u64 };
                     Ok((next, result))
                 }
                 _ => Err(StoreError::WrongType),
@@ -3056,11 +3409,7 @@ impl Store {
                         pos += 1;
                     }
 
-                    let next = if pos >= members.len() {
-                        0
-                    } else {
-                        pos as u64
-                    };
+                    let next = if pos >= members.len() { 0 } else { pos as u64 };
                     Ok((next, result))
                 }
                 _ => Err(StoreError::WrongType),
@@ -3110,11 +3459,7 @@ impl Store {
                         pos += 1;
                     }
 
-                    let next = if pos >= pairs.len() {
-                        0
-                    } else {
-                        pos as u64
-                    };
+                    let next = if pos >= pairs.len() { 0 } else { pos as u64 };
                     Ok((next, result))
                 }
                 _ => Err(StoreError::WrongType),
@@ -3203,6 +3548,17 @@ impl Store {
                         hash = fnv1a_update(hash, &score.to_bits().to_le_bytes());
                     }
                 }
+                Value::Stream(entries) => {
+                    hash = fnv1a_update(hash, b"X");
+                    for ((ms, seq), fields) in entries {
+                        hash = fnv1a_update(hash, &ms.to_le_bytes());
+                        hash = fnv1a_update(hash, &seq.to_le_bytes());
+                        for (field, value) in fields {
+                            hash = fnv1a_update(hash, field);
+                            hash = fnv1a_update(hash, value);
+                        }
+                    }
+                }
             }
             let expiry_bytes = entry.expires_at_ms.unwrap_or(0).to_le_bytes();
             hash = fnv1a_update(hash, &expiry_bytes);
@@ -3233,6 +3589,7 @@ impl Store {
 const ENTRY_BASE_OVERHEAD_BYTES: usize = 32;
 const EXPIRY_METADATA_BYTES: usize = 8;
 const SORTED_SET_SCORE_BYTES: usize = 8;
+const STREAM_ID_BYTES: usize = 16;
 const HASHMAP_BUCKET_OVERHEAD_BYTES: usize = 16;
 
 fn estimate_entry_memory_usage_bytes(key: &[u8], entry: &Entry) -> usize {
@@ -3266,6 +3623,17 @@ fn estimate_value_memory_usage_bytes(value: &Value) -> usize {
                     .len()
                     .saturating_add(SORTED_SET_SCORE_BYTES)
                     .saturating_add(HASHMAP_BUCKET_OVERHEAD_BYTES)
+            })
+            .sum(),
+        Value::Stream(entries) => entries
+            .values()
+            .map(|fields| {
+                STREAM_ID_BYTES.saturating_add(
+                    fields
+                        .iter()
+                        .map(|(field, value)| field.len().saturating_add(value.len()))
+                        .sum::<usize>(),
+                )
             })
             .sum(),
     }
@@ -3544,8 +3912,8 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 #[cfg(test)]
 mod tests {
     use super::{
-        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState,
-        MaxmemoryPressureLevel, PttlValue, Store, StoreError, ValueType,
+        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPressureLevel,
+        PttlValue, Store, StoreError, ValueType,
     };
 
     #[test]
@@ -3683,7 +4051,10 @@ mod tests {
 
         let pressure = store.classify_maxmemory_pressure(120, 64);
         assert!(pressure.logical_usage_bytes > pressure.counted_usage_bytes);
-        assert_eq!(pressure.bytes_to_free, pressure.counted_usage_bytes.saturating_sub(120));
+        assert_eq!(
+            pressure.bytes_to_free,
+            pressure.counted_usage_bytes.saturating_sub(120)
+        );
         assert!(matches!(
             pressure.level,
             MaxmemoryPressureLevel::Soft | MaxmemoryPressureLevel::Hard
@@ -3698,14 +4069,8 @@ mod tests {
             store.set(key.into_bytes(), vec![b'v'; 32], None, 0);
         }
 
-        let result = store.run_bounded_eviction_loop(
-            0,
-            64,
-            0,
-            1,
-            1,
-            EvictionSafetyGateState::default(),
-        );
+        let result =
+            store.run_bounded_eviction_loop(0, 64, 0, 1, 1, EvictionSafetyGateState::default());
         assert_eq!(result.status, EvictionLoopStatus::Running);
         assert!(result.evicted_keys >= 1);
         assert!(result.bytes_to_free_after > 0);
@@ -3719,14 +4084,8 @@ mod tests {
             store.set(key.into_bytes(), vec![b'v'; 24], None, 0);
         }
 
-        let result = store.run_bounded_eviction_loop(
-            0,
-            64,
-            0,
-            2,
-            16,
-            EvictionSafetyGateState::default(),
-        );
+        let result =
+            store.run_bounded_eviction_loop(0, 64, 0, 2, 16, EvictionSafetyGateState::default());
         assert_eq!(result.status, EvictionLoopStatus::Ok);
         assert!(result.evicted_keys >= 1);
         assert_eq!(result.bytes_to_free_after, 0);
@@ -4272,14 +4631,10 @@ mod tests {
             .unwrap();
         store.rpush(b"dst", &[b"x".to_vec()], 0).unwrap();
 
-        let moved = store
-            .lmove(b"src", b"dst", b"LEFT", b"RIGHT", 0)
-            .unwrap();
+        let moved = store.lmove(b"src", b"dst", b"LEFT", b"RIGHT", 0).unwrap();
         assert_eq!(moved, Some(b"a".to_vec()));
 
-        let moved = store
-            .lmove(b"src", b"dst", b"RIGHT", b"LEFT", 0)
-            .unwrap();
+        let moved = store.lmove(b"src", b"dst", b"RIGHT", b"LEFT", 0).unwrap();
         assert_eq!(moved, Some(b"c".to_vec()));
 
         assert_eq!(store.lrange(b"src", 0, -1, 0).unwrap(), vec![b"b".to_vec()]);
@@ -4590,6 +4945,432 @@ mod tests {
             .unwrap();
         let range = store.zrange(b"z", 0, -1, 0).unwrap();
         assert_eq!(range, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    }
+
+    #[test]
+    fn stream_add_len_last_id_and_type() {
+        let mut store = Store::new();
+        assert_eq!(store.xlen(b"s", 0).unwrap(), 0);
+        assert_eq!(store.xlast_id(b"s", 0).unwrap(), None);
+
+        store
+            .xadd(
+                b"s",
+                (1_000, 0),
+                &[(b"field1".to_vec(), b"value1".to_vec())],
+                0,
+            )
+            .unwrap();
+        // Intentionally insert an older ID after a newer one; store ordering should stay by ID.
+        store
+            .xadd(
+                b"s",
+                (999, 9),
+                &[(b"field0".to_vec(), b"value0".to_vec())],
+                0,
+            )
+            .unwrap();
+        store
+            .xadd(
+                b"s",
+                (1_000, 1),
+                &[
+                    (b"field2".to_vec(), b"value2".to_vec()),
+                    (b"field3".to_vec(), b"value3".to_vec()),
+                ],
+                0,
+            )
+            .unwrap();
+
+        assert_eq!(store.xlen(b"s", 0).unwrap(), 3);
+        assert_eq!(store.xlast_id(b"s", 0).unwrap(), Some((1_000, 1)));
+        assert_eq!(store.key_type(b"s", 0), Some("stream"));
+        assert_eq!(store.value_type(b"s", 0), Some(ValueType::Stream));
+    }
+
+    #[test]
+    fn stream_wrongtype_on_string_key() {
+        let mut store = Store::new();
+        store.set(b"s".to_vec(), b"value".to_vec(), None, 0);
+
+        assert_eq!(store.xlast_id(b"s", 0), Err(StoreError::WrongType));
+        assert_eq!(
+            store.xadd(b"s", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 0),
+            Err(StoreError::WrongType)
+        );
+        assert_eq!(store.xlen(b"s", 0), Err(StoreError::WrongType));
+    }
+
+    #[test]
+    fn stream_xrange_orders_and_filters_entries() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 1), &[(b"f2".to_vec(), b"v2".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f1".to_vec(), b"v1".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1001, 0), &[(b"f3".to_vec(), b"v3".to_vec())], 0)
+            .unwrap();
+
+        let all = store
+            .xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 0)
+            .unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].0, (1000, 0));
+        assert_eq!(all[1].0, (1000, 1));
+        assert_eq!(all[2].0, (1001, 0));
+
+        let window = store.xrange(b"s", (1000, 1), (1001, 0), None, 0).unwrap();
+        assert_eq!(window.len(), 2);
+        assert_eq!(window[0].0, (1000, 1));
+        assert_eq!(window[1].0, (1001, 0));
+    }
+
+    #[test]
+    fn stream_xrange_count_limit_and_wrongtype() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f1".to_vec(), b"v1".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1000, 1), &[(b"f2".to_vec(), b"v2".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1001, 0), &[(b"f3".to_vec(), b"v3".to_vec())], 0)
+            .unwrap();
+
+        let limited = store
+            .xrange(b"s", (1000, 0), (u64::MAX, u64::MAX), Some(2), 0)
+            .unwrap();
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0].0, (1000, 0));
+        assert_eq!(limited[1].0, (1000, 1));
+
+        assert_eq!(
+            store
+                .xrange(b"s", (1001, 0), (1000, 0), None, 0)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            store
+                .xrange(b"missing", (0, 0), (u64::MAX, u64::MAX), None, 0)
+                .unwrap()
+                .len(),
+            0
+        );
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        assert_eq!(
+            store.xrange(b"str", (0, 0), (u64::MAX, u64::MAX), None, 0),
+            Err(StoreError::WrongType)
+        );
+    }
+
+    #[test]
+    fn stream_xrevrange_orders_descending_and_respects_count() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f1".to_vec(), b"v1".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1000, 1), &[(b"f2".to_vec(), b"v2".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1001, 0), &[(b"f3".to_vec(), b"v3".to_vec())], 0)
+            .unwrap();
+
+        let all = store
+            .xrevrange(b"s", (u64::MAX, u64::MAX), (0, 0), None, 0)
+            .unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].0, (1001, 0));
+        assert_eq!(all[1].0, (1000, 1));
+        assert_eq!(all[2].0, (1000, 0));
+
+        let limited = store
+            .xrevrange(b"s", (1001, 0), (1000, 0), Some(1), 0)
+            .unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].0, (1001, 0));
+    }
+
+    #[test]
+    fn stream_xrevrange_empty_and_wrongtype() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f1".to_vec(), b"v1".to_vec())], 0)
+            .unwrap();
+
+        assert_eq!(
+            store
+                .xrevrange(b"s", (1000, 0), (2000, 0), None, 0)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            store
+                .xrevrange(b"missing", (u64::MAX, u64::MAX), (0, 0), None, 0)
+                .unwrap()
+                .len(),
+            0
+        );
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        assert_eq!(
+            store.xrevrange(b"str", (u64::MAX, u64::MAX), (0, 0), None, 0),
+            Err(StoreError::WrongType)
+        );
+    }
+
+    #[test]
+    fn stream_xdel_removes_existing_ids_and_ignores_missing() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f1".to_vec(), b"v1".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1000, 1), &[(b"f2".to_vec(), b"v2".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1001, 0), &[(b"f3".to_vec(), b"v3".to_vec())], 0)
+            .unwrap();
+
+        let removed = store
+            .xdel(b"s", &[(1000, 1), (9999, 0), (1000, 1)], 0)
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(store.xlen(b"s", 0).unwrap(), 2);
+
+        let remaining = store
+            .xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 0)
+            .unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].0, (1000, 0));
+        assert_eq!(remaining[1].0, (1001, 0));
+    }
+
+    #[test]
+    fn stream_xdel_missing_key_and_wrongtype() {
+        let mut store = Store::new();
+        assert_eq!(store.xdel(b"missing", &[(1, 0)], 0).unwrap(), 0);
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        assert_eq!(store.xdel(b"str", &[(1, 0)], 0), Err(StoreError::WrongType));
+    }
+
+    #[test]
+    fn stream_xtrim_maxlen_removes_oldest_entries() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f1".to_vec(), b"v1".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1000, 1), &[(b"f2".to_vec(), b"v2".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1001, 0), &[(b"f3".to_vec(), b"v3".to_vec())], 0)
+            .unwrap();
+
+        let removed = store.xtrim(b"s", 2, 0).unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(store.xlen(b"s", 0).unwrap(), 2);
+
+        let remaining = store
+            .xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 0)
+            .unwrap();
+        assert_eq!(remaining.len(), 2);
+        assert_eq!(remaining[0].0, (1000, 1));
+        assert_eq!(remaining[1].0, (1001, 0));
+    }
+
+    #[test]
+    fn stream_xtrim_zero_missing_and_wrongtype() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f1".to_vec(), b"v1".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1000, 1), &[(b"f2".to_vec(), b"v2".to_vec())], 0)
+            .unwrap();
+
+        assert_eq!(store.xtrim(b"s", 0, 0).unwrap(), 2);
+        assert_eq!(store.xlen(b"s", 0).unwrap(), 0);
+        assert_eq!(store.key_type(b"s", 0), Some("stream"));
+
+        assert_eq!(store.xtrim(b"missing", 1, 0).unwrap(), 0);
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        assert_eq!(store.xtrim(b"str", 1, 0), Err(StoreError::WrongType));
+    }
+
+    #[test]
+    fn stream_xread_returns_entries_after_id_and_respects_count() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f1".to_vec(), b"v1".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1000, 1), &[(b"f2".to_vec(), b"v2".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1001, 0), &[(b"f3".to_vec(), b"v3".to_vec())], 0)
+            .unwrap();
+
+        let all_after = store.xread(b"s", (1000, 0), None, 0).unwrap();
+        assert_eq!(all_after.len(), 2);
+        assert_eq!(all_after[0].0, (1000, 1));
+        assert_eq!(all_after[1].0, (1001, 0));
+
+        let limited = store.xread(b"s", (0, 0), Some(1), 0).unwrap();
+        assert_eq!(limited.len(), 1);
+        assert_eq!(limited[0].0, (1000, 0));
+
+        let none = store.xread(b"s", (u64::MAX, u64::MAX), None, 0).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn stream_xread_missing_key_and_wrongtype() {
+        let mut store = Store::new();
+        assert!(store.xread(b"missing", (0, 0), None, 0).unwrap().is_empty());
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        assert_eq!(
+            store.xread(b"str", (0, 0), None, 0),
+            Err(StoreError::WrongType)
+        );
+    }
+
+    #[test]
+    fn stream_xinfo_returns_len_and_entry_bounds() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f1".to_vec(), b"v1".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1001, 0), &[(b"f2".to_vec(), b"v2".to_vec())], 0)
+            .unwrap();
+
+        let info = store.xinfo_stream(b"s", 0).unwrap().expect("stream info");
+        assert_eq!(info.0, 2);
+        assert_eq!(info.1.expect("first").0, (1000, 0));
+        assert_eq!(info.2.expect("last").0, (1001, 0));
+    }
+
+    #[test]
+    fn stream_xinfo_missing_and_wrongtype() {
+        let mut store = Store::new();
+        assert_eq!(store.xinfo_stream(b"missing", 0).unwrap(), None);
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        assert_eq!(store.xinfo_stream(b"str", 0), Err(StoreError::WrongType));
+    }
+
+    #[test]
+    fn stream_xgroup_create_and_xinfo_groups() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+
+        let created = store.xgroup_create(b"s", b"g1", (0, 0), false, 0).unwrap();
+        assert!(created);
+        let duplicate = store.xgroup_create(b"s", b"g1", (1, 0), false, 0).unwrap();
+        assert!(!duplicate);
+
+        let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
+        assert_eq!(groups, vec![(b"g1".to_vec(), (0, 0))]);
+    }
+
+    #[test]
+    fn stream_xgroup_create_mkstream_missing_and_wrongtype() {
+        let mut store = Store::new();
+        assert_eq!(
+            store.xgroup_create(b"missing", b"g1", (0, 0), false, 0),
+            Err(StoreError::KeyNotFound)
+        );
+        assert!(
+            store
+                .xgroup_create(b"missing", b"g1", (0, 0), true, 0)
+                .unwrap()
+        );
+        assert_eq!(store.xlen(b"missing", 0).unwrap(), 0);
+
+        let removed = store.del(&[b"missing".to_vec()], 0);
+        assert_eq!(removed, 1);
+        store
+            .xadd(b"missing", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        let groups = store.xinfo_groups(b"missing", 0).unwrap().expect("groups");
+        assert!(groups.is_empty());
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        assert_eq!(
+            store.xgroup_create(b"str", b"g1", (0, 0), true, 0),
+            Err(StoreError::WrongType)
+        );
+    }
+
+    #[test]
+    fn stream_xgroup_destroy_existing_missing_and_wrongtype() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        assert!(store.xgroup_create(b"s", b"g1", (0, 0), false, 0).unwrap());
+        assert!(store.xgroup_create(b"s", b"g2", (0, 0), false, 0).unwrap());
+
+        assert!(store.xgroup_destroy(b"s", b"g1", 0).unwrap());
+        let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
+        assert_eq!(groups, vec![(b"g2".to_vec(), (0, 0))]);
+
+        assert!(store.xgroup_destroy(b"s", b"g2", 0).unwrap());
+        let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
+        assert!(groups.is_empty());
+
+        assert!(!store.xgroup_destroy(b"s", b"missing", 0).unwrap());
+        assert!(!store.xgroup_destroy(b"missing", b"g1", 0).unwrap());
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        assert_eq!(
+            store.xgroup_destroy(b"str", b"g1", 0),
+            Err(StoreError::WrongType)
+        );
+    }
+
+    #[test]
+    fn stream_xgroup_setid_updates_existing_group_cursor() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        assert!(store.xgroup_create(b"s", b"g1", (0, 0), false, 0).unwrap());
+
+        assert!(store.xgroup_setid(b"s", b"g1", (1000, 0), 0).unwrap());
+        let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
+        assert_eq!(groups, vec![(b"g1".to_vec(), (1000, 0))]);
+
+        assert!(!store.xgroup_setid(b"s", b"missing", (1000, 0), 0).unwrap());
+    }
+
+    #[test]
+    fn stream_xgroup_setid_missing_key_and_wrongtype() {
+        let mut store = Store::new();
+        assert_eq!(
+            store.xgroup_setid(b"missing", b"g1", (0, 0), 0),
+            Err(StoreError::KeyNotFound)
+        );
+
+        store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
+        assert_eq!(
+            store.xgroup_setid(b"str", b"g1", (0, 0), 0),
+            Err(StoreError::WrongType)
+        );
     }
 
     // ── String extension store tests ────────────────────────────────────

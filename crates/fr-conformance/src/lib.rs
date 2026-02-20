@@ -99,6 +99,7 @@ pub enum ExpectedFrame {
     Integer { value: i64 },
     Bulk { value: Option<String> },
     Array { value: Vec<ExpectedFrame> },
+    NullArray,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -789,6 +790,7 @@ fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
         ExpectedFrame::Array { value } => {
             RespFrame::Array(Some(value.iter().map(expected_to_frame).collect()))
         }
+        ExpectedFrame::NullArray => RespFrame::Array(None),
     }
 }
 
@@ -4374,6 +4376,16 @@ mod tests {
             expected_to_frame(&expected),
             RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
         );
+    }
+
+    #[test]
+    fn expected_frame_null_array_kind_deserializes_and_maps_to_resp_null_array() {
+        let raw = r#"{
+            "kind": "null_array"
+        }"#;
+        let expected: ExpectedFrame =
+            serde_json::from_str(raw).expect("null-array expected-frame JSON should parse");
+        assert_eq!(expected_to_frame(&expected), RespFrame::Array(None));
     }
 
     #[test]

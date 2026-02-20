@@ -422,9 +422,11 @@ impl Runtime {
             1,
             self.active_expire_budget,
         );
-        let cycle_result =
-            self.store
-                .run_active_expire_cycle(now_ms, self.active_expire_key_cursor, plan.sample_limit);
+        let cycle_result = self.store.run_active_expire_cycle(
+            now_ms,
+            self.active_expire_key_cursor,
+            plan.sample_limit,
+        );
         self.active_expire_db_cursor = plan.next_db_index;
         self.active_expire_key_cursor = cycle_result.next_cursor;
 
@@ -869,7 +871,8 @@ impl Runtime {
             )
         };
 
-        let reply = RespFrame::Error("OOM command not allowed when used memory > 'maxmemory'.".to_string());
+        let reply =
+            RespFrame::Error("OOM command not allowed when used memory > 'maxmemory'.".to_string());
         self.record_threat_event(ThreatEventInput {
             now_ms,
             packet_id,
@@ -1150,9 +1153,7 @@ impl Runtime {
 
     fn handle_exec_command(&mut self, now_ms: u64) -> RespFrame {
         if !self.transaction_state.in_transaction {
-            return RespFrame::Error(
-                "ERR EXEC without MULTI".to_string(),
-            );
+            return RespFrame::Error("ERR EXEC without MULTI".to_string());
         }
         let queued = std::mem::take(&mut self.transaction_state.command_queue);
         self.transaction_state.in_transaction = false;
@@ -1172,9 +1173,7 @@ impl Runtime {
 
     fn handle_discard_command(&mut self) -> RespFrame {
         if !self.transaction_state.in_transaction {
-            return RespFrame::Error(
-                "ERR DISCARD without MULTI".to_string(),
-            );
+            return RespFrame::Error("ERR DISCARD without MULTI".to_string());
         }
         self.transaction_state.in_transaction = false;
         self.transaction_state.command_queue.clear();
@@ -1823,10 +1822,7 @@ mod tests {
         for idx in 0..20 {
             let key = format!("fr:p2c:008:ttl:{idx}");
             assert_eq!(
-                rt.execute_frame(
-                    command(&[b"SET", key.as_bytes(), b"v", b"PX", b"1"]),
-                    0
-                ),
+                rt.execute_frame(command(&[b"SET", key.as_bytes(), b"v", b"PX", b"1"]), 0),
                 RespFrame::SimpleString("OK".to_string())
             );
         }
@@ -1843,7 +1839,10 @@ mod tests {
         assert_eq!(slow.sampled_keys, 4);
         assert_eq!(slow.evicted_keys, 4);
 
-        assert_eq!(rt.execute_frame(command(&[b"DBSIZE"]), 10), RespFrame::Integer(0));
+        assert_eq!(
+            rt.execute_frame(command(&[b"DBSIZE"]), 10),
+            RespFrame::Integer(0)
+        );
     }
 
     #[test]

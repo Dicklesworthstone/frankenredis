@@ -16,12 +16,12 @@ Non-negotiable policy:
 | Feature Family | Status | Notes |
 |---|---|---|
 | RESP protocol and command dispatch | in_progress | parser + 100+ commands: strings (GETEX, SUBSTR), keys, hash, list (extended), set (SMISMEMBER), sorted set (ZUNIONSTORE, ZINTERSTORE), HyperLogLog, bitmap (BITOP), MULTI/EXEC/DISCARD transactions, SCAN family, server/connection commands, cluster stubs |
-| Core data types and keyspace | in_progress | String, Hash, List, Set, Sorted Set, HyperLogLog, and Geo data types implemented with full WRONGTYPE enforcement; Streams pending |
+| Core data types and keyspace | in_progress | String, Hash, List, Set, Sorted Set, HyperLogLog, and Geo data types implemented with full WRONGTYPE enforcement; Streams starter slice (`XADD`, `XLEN`, `XDEL`, `XTRIM`, `XREAD`, `XINFO STREAM/GROUPS`, `XGROUP CREATE`, `XGROUP DESTROY`, `XGROUP SETID`, `XRANGE`, `XREVRANGE`) implemented, broader stream surface pending |
 | TTL and eviction behavior | in_progress | lazy expiry and `PTTL` semantics scaffolded (`-2/-1/remaining`) |
 | RDB/AOF persistence | in_progress | AOF record frame contract scaffolded; full replay fidelity pending |
 | Replication baseline | in_progress | state/offset progression scaffolded; protocol sync semantics pending |
 | ACL/config mode split | not_started | policy model exists; ACL behavior parity not yet implemented |
-| Differential conformance harness | in_progress | fixture runner online for `core_strings`, `core_errors`, `core_hash`, `core_list`, `core_set`, `core_zset`, `core_geo`, `protocol_negative`, and `persist_replay` suites |
+| Differential conformance harness | in_progress | fixture runner online for `core_strings`, `core_errors`, `core_hash`, `core_list`, `core_set`, `core_zset`, `core_geo`, `core_stream`, `protocol_negative`, and `persist_replay` suites |
 | Benchmark + optimization artifacts | in_progress | round1 + round2 baseline JSON, syscall profile, and expanded golden checksum artifacts added |
 | Full command/API surface closure | not_started | program-level closure row; all deferred families must roll up here before release sign-off |
 
@@ -42,6 +42,7 @@ Non-negotiable policy:
 - `crates/fr-conformance/fixtures/core_set.json`
 - `crates/fr-conformance/fixtures/core_zset.json`
 - `crates/fr-conformance/fixtures/core_geo.json`
+- `crates/fr-conformance/fixtures/core_stream.json`
 - `crates/fr-conformance/fixtures/persist_replay.json`
 - `baselines/round1_conformance_baseline.json`
 - `baselines/round1_conformance_strace.txt`

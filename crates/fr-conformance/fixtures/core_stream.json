@@ -1,0 +1,889 @@
+{
+  "suite": "core_stream",
+  "cases": [
+    {
+      "name": "xlen_missing_key",
+      "now_ms": 0,
+      "argv": ["XLEN", "stream"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "xadd_auto_first",
+      "now_ms": 1000,
+      "argv": ["XADD", "stream", "*", "field1", "value1"],
+      "expect": { "kind": "bulk", "value": "1000-0" }
+    },
+    {
+      "name": "xadd_auto_same_millisecond",
+      "now_ms": 1000,
+      "argv": ["XADD", "stream", "*", "field2", "value2"],
+      "expect": { "kind": "bulk", "value": "1000-1" }
+    },
+    {
+      "name": "xlen_after_two_entries",
+      "now_ms": 1000,
+      "argv": ["XLEN", "stream"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "type_reports_stream",
+      "now_ms": 1000,
+      "argv": ["TYPE", "stream"],
+      "expect": { "kind": "simple", "value": "stream" }
+    },
+    {
+      "name": "xadd_explicit_higher_id",
+      "now_ms": 1000,
+      "argv": ["XADD", "stream", "1000-2", "field3", "value3"],
+      "expect": { "kind": "bulk", "value": "1000-2" }
+    },
+    {
+      "name": "xrange_all_entries",
+      "now_ms": 1000,
+      "argv": ["XRANGE", "stream", "-", "+"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1000-0" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field1" },
+                  { "kind": "bulk", "value": "value1" }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1000-1" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field2" },
+                  { "kind": "bulk", "value": "value2" }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1000-2" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field3" },
+                  { "kind": "bulk", "value": "value3" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xrange_with_count",
+      "now_ms": 1000,
+      "argv": ["XRANGE", "stream", "1000", "+", "COUNT", "1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1000-0" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field1" },
+                  { "kind": "bulk", "value": "value1" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xrange_single_id_window",
+      "now_ms": 1000,
+      "argv": ["XRANGE", "stream", "1000-1", "1000-1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1000-1" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field2" },
+                  { "kind": "bulk", "value": "value2" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xrange_invalid_bound_error",
+      "now_ms": 1000,
+      "argv": ["XRANGE", "stream", "bad-id", "+"],
+      "expect": { "kind": "error", "value": "ERR Invalid stream ID specified as stream command argument" }
+    },
+    {
+      "name": "xrevrange_all_entries",
+      "now_ms": 1000,
+      "argv": ["XREVRANGE", "stream", "+", "-"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1000-2" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field3" },
+                  { "kind": "bulk", "value": "value3" }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1000-1" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field2" },
+                  { "kind": "bulk", "value": "value2" }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1000-0" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field1" },
+                  { "kind": "bulk", "value": "value1" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xrevrange_with_count",
+      "now_ms": 1000,
+      "argv": ["XREVRANGE", "stream", "1000-2", "1000-0", "COUNT", "1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1000-2" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field3" },
+                  { "kind": "bulk", "value": "value3" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xrevrange_invalid_bound_error",
+      "now_ms": 1000,
+      "argv": ["XREVRANGE", "stream", "bad-id", "-"],
+      "expect": { "kind": "error", "value": "ERR Invalid stream ID specified as stream command argument" }
+    },
+    {
+      "name": "xdel_removes_existing_and_missing_ids",
+      "now_ms": 1000,
+      "argv": ["XDEL", "stream", "1000-1", "9999-0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xlen_after_xdel",
+      "now_ms": 1000,
+      "argv": ["XLEN", "stream"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "xrange_after_xdel",
+      "now_ms": 1000,
+      "argv": ["XRANGE", "stream", "-", "+"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1000-0" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field1" },
+                  { "kind": "bulk", "value": "value1" }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1000-2" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field3" },
+                  { "kind": "bulk", "value": "value3" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xdel_missing_key",
+      "now_ms": 1000,
+      "argv": ["XDEL", "missing_stream", "1-0"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "xdel_invalid_id_error",
+      "now_ms": 1000,
+      "argv": ["XDEL", "stream", "bad-id"],
+      "expect": { "kind": "error", "value": "ERR Invalid stream ID specified as stream command argument" }
+    },
+    {
+      "name": "xadd_for_xtrim",
+      "now_ms": 1000,
+      "argv": ["XADD", "stream", "1001-1", "field4", "value4"],
+      "expect": { "kind": "bulk", "value": "1001-1" }
+    },
+    {
+      "name": "xtrim_maxlen_two",
+      "now_ms": 1000,
+      "argv": ["XTRIM", "stream", "MAXLEN", "2"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xrange_after_xtrim_maxlen_two",
+      "now_ms": 1000,
+      "argv": ["XRANGE", "stream", "-", "+"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1000-2" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field3" },
+                  { "kind": "bulk", "value": "value3" }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1001-1" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field4" },
+                  { "kind": "bulk", "value": "value4" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xtrim_maxlen_equals_one",
+      "now_ms": 1000,
+      "argv": ["XTRIM", "stream", "MAXLEN", "=", "1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xrange_after_xtrim_maxlen_equals_one",
+      "now_ms": 1000,
+      "argv": ["XRANGE", "stream", "-", "+"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "1001-1" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "field4" },
+                  { "kind": "bulk", "value": "value4" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xtrim_invalid_mode_syntax_error",
+      "now_ms": 1000,
+      "argv": ["XTRIM", "stream", "MINID", "1"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
+      "name": "xtrim_invalid_integer_error",
+      "now_ms": 1000,
+      "argv": ["XTRIM", "stream", "MAXLEN", "-1"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "xadd_read1_first",
+      "now_ms": 1000,
+      "argv": ["XADD", "read1", "2000-0", "fieldA", "valueA"],
+      "expect": { "kind": "bulk", "value": "2000-0" }
+    },
+    {
+      "name": "xadd_read1_second",
+      "now_ms": 1000,
+      "argv": ["XADD", "read1", "2000-1", "fieldB", "valueB"],
+      "expect": { "kind": "bulk", "value": "2000-1" }
+    },
+    {
+      "name": "xadd_read2_first",
+      "now_ms": 1000,
+      "argv": ["XADD", "read2", "3000-0", "fieldC", "valueC"],
+      "expect": { "kind": "bulk", "value": "3000-0" }
+    },
+    {
+      "name": "xread_single_stream_after_id",
+      "now_ms": 1000,
+      "argv": ["XREAD", "STREAMS", "read1", "2000-0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "read1" },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "2000-1" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "fieldB" },
+                          { "kind": "bulk", "value": "valueB" }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xread_count_one",
+      "now_ms": 1000,
+      "argv": ["XREAD", "COUNT", "1", "STREAMS", "read1", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "read1" },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "2000-0" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "fieldA" },
+                          { "kind": "bulk", "value": "valueA" }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xread_multi_streams",
+      "now_ms": 1000,
+      "argv": ["XREAD", "STREAMS", "read1", "read2", "0", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "read1" },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "2000-0" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "fieldA" },
+                          { "kind": "bulk", "value": "valueA" }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "2000-1" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "fieldB" },
+                          { "kind": "bulk", "value": "valueB" }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "read2" },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "3000-0" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "fieldC" },
+                          { "kind": "bulk", "value": "valueC" }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xread_dollar_nil",
+      "now_ms": 1000,
+      "argv": ["XREAD", "STREAMS", "read1", "read2", "$", "$"],
+      "expect": { "kind": "null_array" }
+    },
+    {
+      "name": "xread_invalid_id_error",
+      "now_ms": 1000,
+      "argv": ["XREAD", "STREAMS", "read1", "bad-id"],
+      "expect": { "kind": "error", "value": "ERR Invalid stream ID specified as stream command argument" }
+    },
+    {
+      "name": "xread_invalid_mode_error",
+      "now_ms": 1000,
+      "argv": ["XREAD", "BLOCK", "0", "STREAMS", "read1", "0"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
+      "name": "xinfo_stream_read1",
+      "now_ms": 1000,
+      "argv": ["XINFO", "STREAM", "read1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "length" },
+          { "kind": "integer", "value": 2 },
+          { "kind": "bulk", "value": "radix-tree-keys" },
+          { "kind": "integer", "value": 1 },
+          { "kind": "bulk", "value": "radix-tree-nodes" },
+          { "kind": "integer", "value": 2 },
+          { "kind": "bulk", "value": "last-generated-id" },
+          { "kind": "bulk", "value": "2000-1" },
+          { "kind": "bulk", "value": "max-deleted-entry-id" },
+          { "kind": "bulk", "value": "0-0" },
+          { "kind": "bulk", "value": "entries-added" },
+          { "kind": "integer", "value": 2 },
+          { "kind": "bulk", "value": "recorded-first-entry-id" },
+          { "kind": "bulk", "value": "2000-0" },
+          { "kind": "bulk", "value": "groups" },
+          { "kind": "integer", "value": 0 },
+          { "kind": "bulk", "value": "first-entry" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "2000-0" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "fieldA" },
+                  { "kind": "bulk", "value": "valueA" }
+                ]
+              }
+            ]
+          },
+          { "kind": "bulk", "value": "last-entry" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "2000-1" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "fieldB" },
+                  { "kind": "bulk", "value": "valueB" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xinfo_groups_read1_empty",
+      "now_ms": 1000,
+      "argv": ["XINFO", "GROUPS", "read1"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "xgroup_create_read1_ok",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "CREATE", "read1", "g1", "$"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xgroup_setid_read1_ok",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "SETID", "read1", "g1", "2000-0"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xinfo_groups_read1_after_setid",
+      "now_ms": 1000,
+      "argv": ["XINFO", "GROUPS", "read1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "name" },
+              { "kind": "bulk", "value": "g1" },
+              { "kind": "bulk", "value": "consumers" },
+              { "kind": "integer", "value": 0 },
+              { "kind": "bulk", "value": "pending" },
+              { "kind": "integer", "value": 0 },
+              { "kind": "bulk", "value": "last-delivered-id" },
+              { "kind": "bulk", "value": "2000-0" },
+              { "kind": "bulk", "value": "entries-read" },
+              { "kind": "bulk", "value": null },
+              { "kind": "bulk", "value": "lag" },
+              { "kind": "bulk", "value": null }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xgroup_setid_read1_dollar_ok",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "SETID", "read1", "g1", "$"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xinfo_groups_read1_after_group_create",
+      "now_ms": 1000,
+      "argv": ["XINFO", "GROUPS", "read1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "name" },
+              { "kind": "bulk", "value": "g1" },
+              { "kind": "bulk", "value": "consumers" },
+              { "kind": "integer", "value": 0 },
+              { "kind": "bulk", "value": "pending" },
+              { "kind": "integer", "value": 0 },
+              { "kind": "bulk", "value": "last-delivered-id" },
+              { "kind": "bulk", "value": "2000-1" },
+              { "kind": "bulk", "value": "entries-read" },
+              { "kind": "bulk", "value": null },
+              { "kind": "bulk", "value": "lag" },
+              { "kind": "bulk", "value": null }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xgroup_create_duplicate_error",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "CREATE", "read1", "g1", "0"],
+      "expect": { "kind": "error", "value": "BUSYGROUP Consumer Group name already exists" }
+    },
+    {
+      "name": "xgroup_destroy_read1_ok",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "DESTROY", "read1", "g1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xinfo_groups_read1_after_group_destroy",
+      "now_ms": 1000,
+      "argv": ["XINFO", "GROUPS", "read1"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "xgroup_destroy_read1_missing_group_zero",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "DESTROY", "read1", "g1"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "xgroup_destroy_missing_key_zero",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "DESTROY", "missing_stream", "g1"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "xgroup_create_missing_key_error",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "CREATE", "missing_stream", "g1", "0"],
+      "expect": { "kind": "error", "value": "ERR no such key" }
+    },
+    {
+      "name": "xgroup_create_invalid_id_error",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "CREATE", "read1", "g2", "bad-id"],
+      "expect": { "kind": "error", "value": "ERR Invalid stream ID specified as stream command argument" }
+    },
+    {
+      "name": "xgroup_setid_missing_group_error",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "SETID", "read1", "missing_group", "0"],
+      "expect": {
+        "kind": "error",
+        "value": "NOGROUP No such key 'read1' or consumer group 'missing_group' in XGROUP command"
+      }
+    },
+    {
+      "name": "xgroup_setid_missing_key_error",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "SETID", "missing_stream", "g1", "0"],
+      "expect": { "kind": "error", "value": "ERR no such key" }
+    },
+    {
+      "name": "xgroup_setid_invalid_id_error",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "SETID", "read1", "g1", "bad-id"],
+      "expect": { "kind": "error", "value": "ERR Invalid stream ID specified as stream command argument" }
+    },
+    {
+      "name": "xgroup_create_mkstream_ok",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "CREATE", "mkstream_stream", "g1", "0", "MKSTREAM"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xinfo_groups_mkstream_stream",
+      "now_ms": 1000,
+      "argv": ["XINFO", "GROUPS", "mkstream_stream"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "name" },
+              { "kind": "bulk", "value": "g1" },
+              { "kind": "bulk", "value": "consumers" },
+              { "kind": "integer", "value": 0 },
+              { "kind": "bulk", "value": "pending" },
+              { "kind": "integer", "value": 0 },
+              { "kind": "bulk", "value": "last-delivered-id" },
+              { "kind": "bulk", "value": "0-0" },
+              { "kind": "bulk", "value": "entries-read" },
+              { "kind": "bulk", "value": null },
+              { "kind": "bulk", "value": "lag" },
+              { "kind": "bulk", "value": null }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xgroup_invalid_subcommand_error",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "HELP", "read1", "g1", "0"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
+      "name": "xinfo_invalid_subcommand_error",
+      "now_ms": 1000,
+      "argv": ["XINFO", "HELP", "read1"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
+      "name": "xinfo_missing_key_error",
+      "now_ms": 1000,
+      "argv": ["XINFO", "STREAM", "missing_stream"],
+      "expect": { "kind": "error", "value": "ERR no such key" }
+    },
+    {
+      "name": "xinfo_groups_missing_key_error",
+      "now_ms": 1000,
+      "argv": ["XINFO", "GROUPS", "missing_stream"],
+      "expect": { "kind": "error", "value": "ERR no such key" }
+    },
+    {
+      "name": "xadd_equal_or_lower_id_error",
+      "now_ms": 1000,
+      "argv": ["XADD", "stream", "1000-2", "field4", "value4"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR The ID specified in XADD is equal or smaller than the target stream top item"
+      }
+    },
+    {
+      "name": "xadd_zero_zero_error",
+      "now_ms": 0,
+      "argv": ["XADD", "stream2", "0-0", "field", "value"],
+      "expect": { "kind": "error", "value": "ERR The ID specified in XADD must be greater than 0-0" }
+    },
+    {
+      "name": "xadd_invalid_id_error",
+      "now_ms": 0,
+      "argv": ["XADD", "stream2", "bad-id", "field", "value"],
+      "expect": { "kind": "error", "value": "ERR Invalid stream ID specified as stream command argument" }
+    },
+    {
+      "name": "xadd_wrongtype_seed",
+      "now_ms": 0,
+      "argv": ["SET", "strkey_stream", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xadd_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["XADD", "strkey_stream", "*", "field", "value"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "xrange_wrongtype_seed",
+      "now_ms": 0,
+      "argv": ["SET", "strkey_stream_range", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xrange_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["XRANGE", "strkey_stream_range", "-", "+"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "xrevrange_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["XREVRANGE", "strkey_stream_range", "+", "-"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "xdel_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["XDEL", "strkey_stream_range", "1-0"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "xtrim_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["XTRIM", "strkey_stream_range", "MAXLEN", "1"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "xread_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["XREAD", "STREAMS", "strkey_stream_range", "0"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "xinfo_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["XINFO", "STREAM", "strkey_stream_range"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "xinfo_groups_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["XINFO", "GROUPS", "strkey_stream_range"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "xgroup_destroy_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["XGROUP", "DESTROY", "strkey_stream_range", "g1"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "xgroup_setid_wrongtype_error",
+      "now_ms": 0,
+      "argv": ["XGROUP", "SETID", "strkey_stream_range", "g1", "0"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    }
+  ]
+}
