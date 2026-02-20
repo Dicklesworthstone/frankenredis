@@ -123,6 +123,10 @@ pub fn dispatch_argv(
         Some(CommandId::Zincrby) => return zincrby(argv, store, now_ms),
         Some(CommandId::Zpopmin) => return zpopmin(argv, store, now_ms),
         Some(CommandId::Zpopmax) => return zpopmax(argv, store, now_ms),
+        Some(CommandId::Geoadd) => return geoadd(argv, store, now_ms),
+        Some(CommandId::Geopos) => return geopos(argv, store, now_ms),
+        Some(CommandId::Geodist) => return geodist(argv, store, now_ms),
+        Some(CommandId::Geohash) => return geohash(argv, store, now_ms),
         Some(CommandId::Setex) => return setex(argv, store, now_ms),
         Some(CommandId::Psetex) => return psetex(argv, store, now_ms),
         Some(CommandId::Getdel) => return getdel(argv, store, now_ms),
@@ -274,6 +278,10 @@ enum CommandId {
     Zincrby,
     Zpopmin,
     Zpopmax,
+    Geoadd,
+    Geopos,
+    Geodist,
+    Geohash,
     Setex,
     Psetex,
     Getdel,
@@ -541,6 +549,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Unlink)
             } else if eq_ascii_command(cmd, b"SUBSTR") {
                 Some(CommandId::Substr)
+            } else if eq_ascii_command(cmd, b"GEOADD") {
+                Some(CommandId::Geoadd)
             } else {
                 None
             }
@@ -578,6 +588,12 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Command)
             } else if eq_ascii_command(cmd, b"RESTORE") {
                 Some(CommandId::Restore)
+            } else if eq_ascii_command(cmd, b"GEOPOS") {
+                Some(CommandId::Geopos)
+            } else if eq_ascii_command(cmd, b"GEODIST") {
+                Some(CommandId::Geodist)
+            } else if eq_ascii_command(cmd, b"GEOHASH") {
+                Some(CommandId::Geohash)
             } else {
                 None
             }
@@ -1375,6 +1391,223 @@ fn parse_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
         .map_err(|_| CommandError::InvalidInteger)
 }
 
+const GEO_STEP_MAX: u8 = 26;
+const GEO_LONG_MIN: f64 = -180.0;
+const GEO_LONG_MAX: f64 = 180.0;
+const GEO_LAT_MIN: f64 = -85.051_128_78;
+const GEO_LAT_MAX: f64 = 85.051_128_78;
+const GEO_STANDARD_LAT_MIN: f64 = -90.0;
+const GEO_STANDARD_LAT_MAX: f64 = 90.0;
+const GEO_EARTH_RADIUS_IN_METERS: f64 = 6_372_797.560_856;
+const GEO_BASE32_ALPHABET: &[u8; 32] = b"0123456789bcdefghjkmnpqrstuvwxyz";
+
+#[inline]
+fn geo_interleave64(xlo: u32, ylo: u32) -> u64 {
+    const B: [u64; 5] = [
+        0x5555_5555_5555_5555,
+        0x3333_3333_3333_3333,
+        0x0F0F_0F0F_0F0F_0F0F,
+        0x00FF_00FF_00FF_00FF,
+        0x0000_FFFF_0000_FFFF,
+    ];
+    let mut x = u64::from(xlo);
+    let mut y = u64::from(ylo);
+
+    x = (x | (x << 16)) & B[4];
+    y = (y | (y << 16)) & B[4];
+    x = (x | (x << 8)) & B[3];
+    y = (y | (y << 8)) & B[3];
+    x = (x | (x << 4)) & B[2];
+    y = (y | (y << 4)) & B[2];
+    x = (x | (x << 2)) & B[1];
+    y = (y | (y << 2)) & B[1];
+    x = (x | (x << 1)) & B[0];
+    y = (y | (y << 1)) & B[0];
+
+    x | (y << 1)
+}
+
+#[inline]
+fn geo_deinterleave64(interleaved: u64) -> u64 {
+    const B: [u64; 6] = [
+        0x5555_5555_5555_5555,
+        0x3333_3333_3333_3333,
+        0x0F0F_0F0F_0F0F_0F0F,
+        0x00FF_00FF_00FF_00FF,
+        0x0000_FFFF_0000_FFFF,
+        0x0000_0000_FFFF_FFFF,
+    ];
+    let mut x = interleaved;
+    let mut y = interleaved >> 1;
+
+    x &= B[0];
+    y &= B[0];
+    x = (x | (x >> 1)) & B[1];
+    y = (y | (y >> 1)) & B[1];
+    x = (x | (x >> 2)) & B[2];
+    y = (y | (y >> 2)) & B[2];
+    x = (x | (x >> 4)) & B[3];
+    y = (y | (y >> 4)) & B[3];
+    x = (x | (x >> 8)) & B[4];
+    y = (y | (y >> 8)) & B[4];
+    x = (x | (x >> 16)) & B[5];
+    y = (y | (y >> 16)) & B[5];
+
+    x | (y << 32)
+}
+
+#[inline]
+fn geo_encode(
+    longitude: f64,
+    latitude: f64,
+    long_min: f64,
+    long_max: f64,
+    lat_min: f64,
+    lat_max: f64,
+    step: u8,
+) -> Option<u64> {
+    if step == 0 || step > 32 {
+        return None;
+    }
+    if longitude < long_min || longitude > long_max || latitude < lat_min || latitude > lat_max {
+        return None;
+    }
+
+    let scale = (1_u64 << u32::from(step)) as f64;
+    let lat_offset = ((latitude - lat_min) / (lat_max - lat_min) * scale) as u32;
+    let long_offset = ((longitude - long_min) / (long_max - long_min) * scale) as u32;
+    Some(geo_interleave64(lat_offset, long_offset))
+}
+
+#[inline]
+fn geo_encode_wgs84(longitude: f64, latitude: f64) -> Option<u64> {
+    geo_encode(
+        longitude,
+        latitude,
+        GEO_LONG_MIN,
+        GEO_LONG_MAX,
+        GEO_LAT_MIN,
+        GEO_LAT_MAX,
+        GEO_STEP_MAX,
+    )
+}
+
+#[inline]
+fn geo_decode(bits: u64, long_min: f64, long_max: f64, lat_min: f64, lat_max: f64) -> (f64, f64) {
+    let step = u32::from(GEO_STEP_MAX);
+    let scale = (1_u64 << step) as f64;
+    let hash_sep = geo_deinterleave64(bits);
+
+    let ilato = hash_sep as u32;
+    let ilono = (hash_sep >> 32) as u32;
+    let lat_scale = lat_max - lat_min;
+    let long_scale = long_max - long_min;
+
+    let lat_lo = lat_min + (f64::from(ilato) / scale) * lat_scale;
+    let lat_hi = lat_min + (f64::from(ilato.saturating_add(1)) / scale) * lat_scale;
+    let long_lo = long_min + (f64::from(ilono) / scale) * long_scale;
+    let long_hi = long_min + (f64::from(ilono.saturating_add(1)) / scale) * long_scale;
+
+    let longitude = ((long_lo + long_hi) / 2.0).clamp(long_min, long_max);
+    let latitude = ((lat_lo + lat_hi) / 2.0).clamp(lat_min, lat_max);
+    (longitude, latitude)
+}
+
+#[inline]
+fn geo_decode_score(score: f64) -> Option<(f64, f64)> {
+    if !score.is_finite() {
+        return None;
+    }
+    Some(geo_decode(
+        score as u64,
+        GEO_LONG_MIN,
+        GEO_LONG_MAX,
+        GEO_LAT_MIN,
+        GEO_LAT_MAX,
+    ))
+}
+
+#[inline]
+fn parse_geo_f64(arg: &[u8]) -> Result<f64, RespFrame> {
+    let text = std::str::from_utf8(arg)
+        .map_err(|_| RespFrame::Error("ERR value is not a valid float".to_string()))?;
+    text.parse::<f64>()
+        .map_err(|_| RespFrame::Error("ERR value is not a valid float".to_string()))
+}
+
+#[inline]
+fn geo_invalid_pair_error(longitude: f64, latitude: f64) -> RespFrame {
+    RespFrame::Error(format!(
+        "ERR invalid longitude,latitude pair {longitude:.6},{latitude:.6}"
+    ))
+}
+
+#[inline]
+fn geo_unit_to_meters(unit: &[u8]) -> Option<f64> {
+    if eq_ascii_command(unit, b"M") {
+        Some(1.0)
+    } else if eq_ascii_command(unit, b"KM") {
+        Some(1000.0)
+    } else if eq_ascii_command(unit, b"FT") {
+        Some(0.3048)
+    } else if eq_ascii_command(unit, b"MI") {
+        Some(1609.34)
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn geo_lat_distance_m(lat1: f64, lat2: f64) -> f64 {
+    GEO_EARTH_RADIUS_IN_METERS * (lat2.to_radians() - lat1.to_radians()).abs()
+}
+
+#[inline]
+fn geo_distance_m(lon1: f64, lat1: f64, lon2: f64, lat2: f64) -> f64 {
+    let lon1r = lon1.to_radians();
+    let lon2r = lon2.to_radians();
+    let v = ((lon2r - lon1r) / 2.0).sin();
+    if v == 0.0 {
+        return geo_lat_distance_m(lat1, lat2);
+    }
+    let lat1r = lat1.to_radians();
+    let lat2r = lat2.to_radians();
+    let u = ((lat2r - lat1r) / 2.0).sin();
+    let a = (u * u + lat1r.cos() * lat2r.cos() * v * v).clamp(0.0, 1.0);
+    2.0 * GEO_EARTH_RADIUS_IN_METERS * a.sqrt().asin()
+}
+
+#[inline]
+fn geo_distance_reply(distance: f64) -> RespFrame {
+    let normalized = if distance == 0.0 { 0.0 } else { distance };
+    RespFrame::BulkString(Some(format!("{normalized:.4}").into_bytes()))
+}
+
+#[inline]
+fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
+    let (longitude, latitude) = geo_decode_score(score)?;
+    let bits = geo_encode(
+        longitude,
+        latitude,
+        GEO_LONG_MIN,
+        GEO_LONG_MAX,
+        GEO_STANDARD_LAT_MIN,
+        GEO_STANDARD_LAT_MAX,
+        GEO_STEP_MAX,
+    )?;
+
+    let mut buf = [0_u8; 11];
+    for (i, slot) in buf.iter_mut().enumerate() {
+        let idx = if i == 10 {
+            0
+        } else {
+            ((bits >> (52 - ((i + 1) * 5))) & 0x1f) as usize
+        };
+        *slot = GEO_BASE32_ALPHABET[idx];
+    }
+    Some(buf.to_vec())
+}
+
 fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // ZADD key score member [score member ...]
     if argv.len() < 4 || !(argv.len() - 2).is_multiple_of(2) {
@@ -1567,6 +1800,166 @@ fn zpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         ]))),
         None => Ok(RespFrame::Array(Some(vec![]))),
     }
+}
+
+fn geoadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 5 {
+        return Err(CommandError::WrongArity("GEOADD"));
+    }
+
+    let mut xx = false;
+    let mut nx = false;
+    let mut ch = false;
+    let mut long_idx = 2;
+    while long_idx < argv.len() {
+        if eq_ascii_command(&argv[long_idx], b"NX") {
+            nx = true;
+        } else if eq_ascii_command(&argv[long_idx], b"XX") {
+            xx = true;
+        } else if eq_ascii_command(&argv[long_idx], b"CH") {
+            ch = true;
+        } else {
+            break;
+        }
+        long_idx += 1;
+    }
+
+    if xx && nx {
+        return Err(CommandError::SyntaxError);
+    }
+
+    let remaining = argv.len().saturating_sub(long_idx);
+    if remaining == 0 {
+        return Err(CommandError::WrongArity("GEOADD"));
+    }
+    if !remaining.is_multiple_of(3) {
+        return Err(CommandError::SyntaxError);
+    }
+
+    let mut pairs = Vec::with_capacity(remaining / 3);
+    let mut idx = long_idx;
+    while idx + 2 < argv.len() {
+        let longitude = match parse_geo_f64(&argv[idx]) {
+            Ok(value) => value,
+            Err(reply) => return Ok(reply),
+        };
+        let latitude = match parse_geo_f64(&argv[idx + 1]) {
+            Ok(value) => value,
+            Err(reply) => return Ok(reply),
+        };
+        if longitude < GEO_LONG_MIN
+            || longitude > GEO_LONG_MAX
+            || latitude < GEO_LAT_MIN
+            || latitude > GEO_LAT_MAX
+        {
+            return Ok(geo_invalid_pair_error(longitude, latitude));
+        }
+        let Some(bits) = geo_encode_wgs84(longitude, latitude) else {
+            return Ok(geo_invalid_pair_error(longitude, latitude));
+        };
+        pairs.push((bits as f64, argv[idx + 2].clone()));
+        idx += 3;
+    }
+
+    let mut added = 0_i64;
+    let mut changed = 0_i64;
+    for (score, member) in pairs {
+        let existing = store.zscore(&argv[1], &member, now_ms)?;
+        if nx && existing.is_some() {
+            continue;
+        }
+        if xx && existing.is_none() {
+            continue;
+        }
+
+        store.zadd(&argv[1], &[(score, member)], now_ms)?;
+        match existing {
+            Some(old_score) => {
+                if old_score != score {
+                    changed += 1;
+                }
+            }
+            None => {
+                added += 1;
+                changed += 1;
+            }
+        }
+    }
+
+    Ok(RespFrame::Integer(if ch { changed } else { added }))
+}
+
+fn geohash(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("GEOHASH"));
+    }
+    let mut frames = Vec::with_capacity(argv.len().saturating_sub(2));
+    for member in &argv[2..] {
+        let frame = match store.zscore(&argv[1], member, now_ms)? {
+            Some(score) => match geo_hash_string_from_score(score) {
+                Some(hash) => RespFrame::BulkString(Some(hash)),
+                None => RespFrame::BulkString(None),
+            },
+            None => RespFrame::BulkString(None),
+        };
+        frames.push(frame);
+    }
+    Ok(RespFrame::Array(Some(frames)))
+}
+
+fn geopos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("GEOPOS"));
+    }
+    let mut frames = Vec::with_capacity(argv.len().saturating_sub(2));
+    for member in &argv[2..] {
+        let frame = match store.zscore(&argv[1], member, now_ms)? {
+            Some(score) => match geo_decode_score(score) {
+                Some((longitude, latitude)) => RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(longitude.to_string().into_bytes())),
+                    RespFrame::BulkString(Some(latitude.to_string().into_bytes())),
+                ])),
+                None => RespFrame::Array(None),
+            },
+            None => RespFrame::Array(None),
+        };
+        frames.push(frame);
+    }
+    Ok(RespFrame::Array(Some(frames)))
+}
+
+fn geodist(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() != 4 && argv.len() != 5 {
+        return Err(CommandError::WrongArity("GEODIST"));
+    }
+    let to_meter = if argv.len() == 5 {
+        match geo_unit_to_meters(&argv[4]) {
+            Some(unit) => unit,
+            None => {
+                return Ok(RespFrame::Error(
+                    "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+                ));
+            }
+        }
+    } else {
+        1.0
+    };
+
+    let score1 = store.zscore(&argv[1], &argv[2], now_ms)?;
+    let score2 = store.zscore(&argv[1], &argv[3], now_ms)?;
+    let (Some(score1), Some(score2)) = (score1, score2) else {
+        return Ok(RespFrame::BulkString(None));
+    };
+
+    let Some((lon1, lat1)) = geo_decode_score(score1) else {
+        return Ok(RespFrame::BulkString(None));
+    };
+    let Some((lon2, lat2)) = geo_decode_score(score2) else {
+        return Ok(RespFrame::BulkString(None));
+    };
+
+    let distance = geo_distance_m(lon1, lat1, lon2, lat2) / to_meter;
+    Ok(geo_distance_reply(distance))
 }
 
 fn parse_score_bound(arg: &[u8]) -> Result<f64, CommandError> {
@@ -3077,6 +3470,18 @@ mod tests {
         if eq_ascii_command(cmd, b"ZPOPMAX") {
             return Some(CommandId::Zpopmax);
         }
+        if eq_ascii_command(cmd, b"GEOADD") {
+            return Some(CommandId::Geoadd);
+        }
+        if eq_ascii_command(cmd, b"GEOPOS") {
+            return Some(CommandId::Geopos);
+        }
+        if eq_ascii_command(cmd, b"GEODIST") {
+            return Some(CommandId::Geodist);
+        }
+        if eq_ascii_command(cmd, b"GEOHASH") {
+            return Some(CommandId::Geohash);
+        }
         if eq_ascii_command(cmd, b"SETEX") {
             return Some(CommandId::Setex);
         }
@@ -3392,8 +3797,14 @@ mod tests {
             b"ZINCRBY",
             b"ZPOPMIN",
             b"ZPOPMAX",
+            b"GEOADD",
+            b"GEOPOS",
+            b"GEODIST",
+            b"GEOHASH",
             b"zadd",
             b"zRangeByScore",
+            b"geoadd",
+            b"geoPos",
             b"SETEX",
             b"PSETEX",
             b"GETDEL",
@@ -6148,6 +6559,283 @@ mod tests {
         )
         .expect_err("wrong arity");
         assert!(matches!(err, CommandError::WrongArity("ZADD")));
+    }
+
+    #[test]
+    fn geoadd_geodist_geohash_and_geopos() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"geo".to_vec(),
+                b"13.361389".to_vec(),
+                b"38.115556".to_vec(),
+                b"Palermo".to_vec(),
+                b"15.087269".to_vec(),
+                b"37.502669".to_vec(),
+                b"Catania".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geoadd");
+        assert_eq!(out, RespFrame::Integer(2));
+
+        let dist = dispatch_argv(
+            &[
+                b"GEODIST".to_vec(),
+                b"geo".to_vec(),
+                b"Palermo".to_vec(),
+                b"Catania".to_vec(),
+                b"km".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geodist");
+        assert_eq!(dist, RespFrame::BulkString(Some(b"166.2742".to_vec())));
+
+        let hashes = dispatch_argv(
+            &[
+                b"GEOHASH".to_vec(),
+                b"geo".to_vec(),
+                b"Palermo".to_vec(),
+                b"Catania".to_vec(),
+                b"Missing".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geohash");
+        assert_eq!(
+            hashes,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"sqc8b49rny0".to_vec())),
+                RespFrame::BulkString(Some(b"sqdtr74hyu0".to_vec())),
+                RespFrame::BulkString(None),
+            ]))
+        );
+
+        let pos = dispatch_argv(
+            &[
+                b"GEOPOS".to_vec(),
+                b"geo".to_vec(),
+                b"Palermo".to_vec(),
+                b"Catania".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geopos");
+        let RespFrame::Array(Some(items)) = pos else {
+            panic!("geopos should return array");
+        };
+        assert_eq!(items.len(), 2);
+        for item in items {
+            let RespFrame::Array(Some(coords)) = item else {
+                panic!("geopos entry should be coord array");
+            };
+            assert_eq!(coords.len(), 2);
+            let RespFrame::BulkString(Some(longitude_raw)) = &coords[0] else {
+                panic!("geopos longitude should be bulk");
+            };
+            let RespFrame::BulkString(Some(latitude_raw)) = &coords[1] else {
+                panic!("geopos latitude should be bulk");
+            };
+            let longitude = std::str::from_utf8(longitude_raw)
+                .expect("longitude utf8")
+                .parse::<f64>()
+                .expect("longitude float");
+            let latitude = std::str::from_utf8(latitude_raw)
+                .expect("latitude utf8")
+                .parse::<f64>()
+                .expect("latitude float");
+            assert!((-180.0..=180.0).contains(&longitude));
+            assert!((-85.051_128_78..=85.051_128_78).contains(&latitude));
+        }
+    }
+
+    #[test]
+    fn geoadd_options_and_errors() {
+        let mut store = Store::new();
+
+        let out = dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"geo".to_vec(),
+                b"CH".to_vec(),
+                b"13.361389".to_vec(),
+                b"38.115556".to_vec(),
+                b"Palermo".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geoadd ch initial");
+        assert_eq!(out, RespFrame::Integer(1));
+
+        let unchanged = dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"geo".to_vec(),
+                b"CH".to_vec(),
+                b"13.361389".to_vec(),
+                b"38.115556".to_vec(),
+                b"Palermo".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geoadd same coords");
+        assert_eq!(unchanged, RespFrame::Integer(0));
+
+        let changed = dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"geo".to_vec(),
+                b"CH".to_vec(),
+                b"13.362".to_vec(),
+                b"38.115".to_vec(),
+                b"Palermo".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geoadd changed coords");
+        assert_eq!(changed, RespFrame::Integer(1));
+
+        let nx_skip = dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"geo".to_vec(),
+                b"NX".to_vec(),
+                b"13.1".to_vec(),
+                b"38.1".to_vec(),
+                b"Palermo".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geoadd nx skip");
+        assert_eq!(nx_skip, RespFrame::Integer(0));
+
+        let xx_skip = dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"geo".to_vec(),
+                b"XX".to_vec(),
+                b"15.087269".to_vec(),
+                b"37.502669".to_vec(),
+                b"Catania".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geoadd xx skip on missing");
+        assert_eq!(xx_skip, RespFrame::Integer(0));
+
+        let invalid = dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"geo".to_vec(),
+                b"181".to_vec(),
+                b"0".to_vec(),
+                b"bad".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geoadd invalid pair");
+        assert_eq!(
+            invalid,
+            RespFrame::Error("ERR invalid longitude,latitude pair 181.000000,0.000000".to_string())
+        );
+
+        let syntax = dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"geo".to_vec(),
+                b"NX".to_vec(),
+                b"XX".to_vec(),
+                b"13.0".to_vec(),
+                b"38.0".to_vec(),
+                b"x".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("geoadd nx+xx should be syntax error");
+        assert!(matches!(syntax, CommandError::SyntaxError));
+    }
+
+    #[test]
+    fn geodist_units_and_missing_members() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"geo".to_vec(),
+                b"13.361389".to_vec(),
+                b"38.115556".to_vec(),
+                b"Palermo".to_vec(),
+                b"15.087269".to_vec(),
+                b"37.502669".to_vec(),
+                b"Catania".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geoadd");
+
+        let meters = dispatch_argv(
+            &[
+                b"GEODIST".to_vec(),
+                b"geo".to_vec(),
+                b"Palermo".to_vec(),
+                b"Catania".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geodist meters");
+        let RespFrame::BulkString(Some(distance_raw)) = meters else {
+            panic!("geodist should return bulk distance");
+        };
+        let meters_value = std::str::from_utf8(&distance_raw)
+            .expect("distance utf8")
+            .parse::<f64>()
+            .expect("distance float");
+        assert!(meters_value > 166_000.0);
+
+        let invalid_unit = dispatch_argv(
+            &[
+                b"GEODIST".to_vec(),
+                b"geo".to_vec(),
+                b"Palermo".to_vec(),
+                b"Catania".to_vec(),
+                b"yards".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geodist invalid unit");
+        assert_eq!(
+            invalid_unit,
+            RespFrame::Error("ERR unsupported unit provided. please use M, KM, FT, MI".to_string())
+        );
+
+        let missing = dispatch_argv(
+            &[
+                b"GEODIST".to_vec(),
+                b"geo".to_vec(),
+                b"Palermo".to_vec(),
+                b"Missing".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geodist missing");
+        assert_eq!(missing, RespFrame::BulkString(None));
     }
 
     // ── String extension command tests ──────────────────────────────────
