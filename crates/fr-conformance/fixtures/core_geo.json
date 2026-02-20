@@ -1,0 +1,88 @@
+{
+  "suite": "core_geo",
+  "cases": [
+    {
+      "name": "geoadd_seed",
+      "now_ms": 0,
+      "argv": ["GEOADD", "geo", "13.361389", "38.115556", "Palermo", "15.087269", "37.502669", "Catania"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "geohash_known_members",
+      "now_ms": 0,
+      "argv": ["GEOHASH", "geo", "Palermo", "Catania"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "sqc8b49rny0" },
+          { "kind": "bulk", "value": "sqdtr74hyu0" }
+        ]
+      }
+    },
+    {
+      "name": "geohash_missing_member",
+      "now_ms": 0,
+      "argv": ["GEOHASH", "geo", "Missing"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": null }
+        ]
+      }
+    },
+    {
+      "name": "geodist_kilometers",
+      "now_ms": 0,
+      "argv": ["GEODIST", "geo", "Palermo", "Catania", "km"],
+      "expect": { "kind": "bulk", "value": "166.2742" }
+    },
+    {
+      "name": "geodist_missing_member",
+      "now_ms": 0,
+      "argv": ["GEODIST", "geo", "Palermo", "Missing"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "geoadd_ch_same_coordinate_is_zero",
+      "now_ms": 0,
+      "argv": ["GEOADD", "geo", "CH", "13.361389", "38.115556", "Palermo"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "geoadd_ch_changed_coordinate_counts_update",
+      "now_ms": 0,
+      "argv": ["GEOADD", "geo", "CH", "13.362", "38.115", "Palermo"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "geoadd_nx_skips_existing",
+      "now_ms": 0,
+      "argv": ["GEOADD", "geo", "NX", "13.1", "38.1", "Palermo"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "geoadd_xx_skips_missing",
+      "now_ms": 0,
+      "argv": ["GEOADD", "geo", "XX", "13.1", "38.1", "Missing"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "geoadd_invalid_long_lat_pair",
+      "now_ms": 0,
+      "argv": ["GEOADD", "geo", "181", "0", "Bad"],
+      "expect": { "kind": "error", "value": "ERR invalid longitude,latitude pair 181.000000,0.000000" }
+    },
+    {
+      "name": "geodist_invalid_unit",
+      "now_ms": 0,
+      "argv": ["GEODIST", "geo", "Palermo", "Catania", "yards"],
+      "expect": { "kind": "error", "value": "ERR unsupported unit provided. please use M, KM, FT, MI" }
+    },
+    {
+      "name": "geoadd_nx_xx_is_syntax_error",
+      "now_ms": 0,
+      "argv": ["GEOADD", "geo", "NX", "XX", "13.0", "38.0", "bad"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    }
+  ]
+}
