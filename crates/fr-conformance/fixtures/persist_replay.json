@@ -25,6 +25,84 @@
       "assertions": [
         { "key": "k", "expect": null }
       ]
+    },
+    {
+      "name": "ttl_overwrite_and_persist_chain",
+      "now_ms": 4000,
+      "records": [
+        ["SET", "ttl:key", "seed"],
+        ["PEXPIRE", "ttl:key", "25"],
+        ["SET", "ttl:key", "overwrite"],
+        ["PEXPIRE", "ttl:key", "5"],
+        ["PERSIST", "ttl:key"],
+        ["APPEND", "ttl:key", "-tail"]
+      ],
+      "assertions": [
+        { "key": "ttl:key", "expect": "overwrite-tail", "at_ms": 4000 },
+        { "key": "ttl:key", "expect": "overwrite-tail", "at_ms": 4010 },
+        { "key": "ttl:key", "expect": "overwrite-tail", "at_ms": 4100 }
+      ]
+    },
+    {
+      "name": "rename_and_recreate_source_ordering",
+      "now_ms": 5000,
+      "records": [
+        ["SET", "rename:src", "v1"],
+        ["RENAME", "rename:src", "rename:dst"],
+        ["SET", "rename:src", "v2"],
+        ["DEL", "rename:dst"],
+        ["SET", "rename:dst", "v3"]
+      ],
+      "assertions": [
+        { "key": "rename:src", "expect": "v2" },
+        { "key": "rename:dst", "expect": "v3" }
+      ]
+    },
+    {
+      "name": "mset_incr_getset_chain",
+      "now_ms": 6000,
+      "records": [
+        ["MSET", "chain:a", "1", "chain:b", "x"],
+        ["INCRBY", "chain:a", "9"],
+        ["GETSET", "chain:a", "5"],
+        ["INCR", "chain:a"],
+        ["APPEND", "chain:b", "y"]
+      ],
+      "assertions": [
+        { "key": "chain:a", "expect": "6" },
+        { "key": "chain:b", "expect": "xy" }
+      ]
+    },
+    {
+      "name": "expiration_boundary_and_recreate_order",
+      "now_ms": 7000,
+      "records": [
+        ["SET", "exp:key", "live"],
+        ["PEXPIRE", "exp:key", "3"],
+        ["SET", "exp:survivor", "s"],
+        ["DEL", "exp:key"],
+        ["SET", "exp:key", "reborn"],
+        ["PEXPIRE", "exp:key", "2"]
+      ],
+      "assertions": [
+        { "key": "exp:key", "expect": "reborn", "at_ms": 7001 },
+        { "key": "exp:key", "expect": null, "at_ms": 7004 },
+        { "key": "exp:survivor", "expect": "s", "at_ms": 7005 }
+      ]
+    },
+    {
+      "name": "setex_psetex_persist_interleave",
+      "now_ms": 8000,
+      "records": [
+        ["SETEX", "sx:key", "1", "short"],
+        ["PSETEX", "psx:key", "5", "mini"],
+        ["PERSIST", "psx:key"],
+        ["SET", "sx:key", "long"]
+      ],
+      "assertions": [
+        { "key": "sx:key", "expect": "long", "at_ms": 8500 },
+        { "key": "psx:key", "expect": "mini", "at_ms": 9000 }
+      ]
     }
   ]
 }
