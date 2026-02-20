@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 use fr_protocol::RespFrame;
-use fr_store::{PttlValue, Store, StoreError, StreamId};
+use fr_store::{
+    PttlValue, Store, StoreError, StreamGroupReadCursor, StreamGroupReadOptions, StreamId,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandError {
@@ -132,6 +134,7 @@ pub fn dispatch_argv(
         Some(CommandId::Xdel) => return xdel(argv, store, now_ms),
         Some(CommandId::Xtrim) => return xtrim(argv, store, now_ms),
         Some(CommandId::Xread) => return xread(argv, store, now_ms),
+        Some(CommandId::Xreadgroup) => return xreadgroup(argv, store, now_ms),
         Some(CommandId::Xinfo) => return xinfo(argv, store, now_ms),
         Some(CommandId::Xgroup) => return xgroup(argv, store, now_ms),
         Some(CommandId::Xrange) => return xrange(argv, store, now_ms),
@@ -296,6 +299,7 @@ enum CommandId {
     Xdel,
     Xtrim,
     Xread,
+    Xreadgroup,
     Xinfo,
     Xgroup,
     Xrange,
@@ -681,6 +685,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Sdiffstore)
             } else if eq_ascii_command(cmd, b"SMISMEMBER") {
                 Some(CommandId::Smismember)
+            } else if eq_ascii_command(cmd, b"XREADGROUP") {
+                Some(CommandId::Xreadgroup)
             } else {
                 None
             }
@@ -2188,6 +2194,7 @@ fn stream_record_to_frame(id: StreamId, fields: Vec<(Vec<u8>, Vec<u8>)>) -> Resp
 fn stream_group_info_to_frame(
     name: Vec<u8>,
     consumers: usize,
+    pending: usize,
     last_delivered_id: StreamId,
 ) -> RespFrame {
     RespFrame::Array(Some(vec![
@@ -2196,7 +2203,7 @@ fn stream_group_info_to_frame(
         RespFrame::BulkString(Some(b"consumers".to_vec())),
         RespFrame::Integer(i64::try_from(consumers).unwrap_or(i64::MAX)),
         RespFrame::BulkString(Some(b"pending".to_vec())),
-        RespFrame::Integer(0),
+        RespFrame::Integer(i64::try_from(pending).unwrap_or(i64::MAX)),
         RespFrame::BulkString(Some(b"last-delivered-id".to_vec())),
         RespFrame::BulkString(Some(format_stream_id(last_delivered_id))),
         RespFrame::BulkString(Some(b"entries-read".to_vec())),
@@ -2270,6 +2277,99 @@ fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         };
 
         let records = store.xread(key, cursor, count, now_ms)?;
+        if records.is_empty() {
+            continue;
+        }
+
+        let mut entry_frames = Vec::with_capacity(records.len());
+        for (id, fields) in records {
+            entry_frames.push(stream_record_to_frame(id, fields));
+        }
+
+        out.push(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(key.clone())),
+            RespFrame::Array(Some(entry_frames)),
+        ])));
+    }
+
+    if out.is_empty() {
+        Ok(RespFrame::Array(None))
+    } else {
+        Ok(RespFrame::Array(Some(out)))
+    }
+}
+
+fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 7 {
+        return Err(CommandError::WrongArity("XREADGROUP"));
+    }
+    if !eq_ascii_command(&argv[1], b"GROUP") {
+        return Err(CommandError::SyntaxError);
+    }
+
+    let group = &argv[2];
+    let consumer = &argv[3];
+
+    let mut idx = 4usize;
+    let mut count: Option<usize> = None;
+    let mut noack = false;
+    while idx < argv.len() {
+        if eq_ascii_command(&argv[idx], b"COUNT") {
+            if idx + 1 >= argv.len() {
+                return Err(CommandError::WrongArity("XREADGROUP"));
+            }
+            let parsed = parse_i64_arg(&argv[idx + 1])?;
+            if parsed < 0 {
+                return Err(CommandError::InvalidInteger);
+            }
+            count = Some(usize::try_from(parsed).unwrap_or(usize::MAX));
+            idx += 2;
+            continue;
+        }
+        if eq_ascii_command(&argv[idx], b"BLOCK") {
+            return Err(CommandError::SyntaxError);
+        }
+        if eq_ascii_command(&argv[idx], b"NOACK") {
+            noack = true;
+            idx += 1;
+            continue;
+        }
+        break;
+    }
+
+    if idx >= argv.len() || !eq_ascii_command(&argv[idx], b"STREAMS") {
+        return Err(CommandError::SyntaxError);
+    }
+    idx += 1;
+
+    let tail = argv.len().saturating_sub(idx);
+    if tail < 2 || !tail.is_multiple_of(2) {
+        return Err(CommandError::WrongArity("XREADGROUP"));
+    }
+    let stream_count = tail / 2;
+    let keys = &argv[idx..idx + stream_count];
+    let ids = &argv[idx + stream_count..];
+
+    let mut out = Vec::new();
+    for (key, id_arg) in keys.iter().zip(ids.iter()) {
+        let cursor = if id_arg.as_slice() == b">" {
+            StreamGroupReadCursor::NewEntries
+        } else {
+            let parsed = match parse_xread_id(id_arg) {
+                Ok(id) => id,
+                Err(reply) => return Ok(reply),
+            };
+            StreamGroupReadCursor::Id(parsed)
+        };
+
+        let read_options = StreamGroupReadOptions {
+            cursor,
+            noack,
+            count,
+        };
+        let Some(records) = store.xreadgroup(key, group, consumer, read_options, now_ms)? else {
+            return Ok(xreadgroup_nogroup_error(key, group));
+        };
         if records.is_empty() {
             continue;
         }
@@ -2397,6 +2497,14 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     Err(CommandError::SyntaxError)
 }
 
+fn xreadgroup_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
+    let key = String::from_utf8_lossy(key);
+    let group = String::from_utf8_lossy(group);
+    RespFrame::Error(format!(
+        "NOGROUP No such key '{key}' or consumer group '{group}' in XREADGROUP with GROUP option"
+    ))
+}
+
 fn xgroup_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     let key = String::from_utf8_lossy(key);
     let group = String::from_utf8_lossy(group);
@@ -2441,10 +2549,11 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             return Err(CommandError::NoSuchKey);
         };
         let mut out = Vec::with_capacity(groups.len());
-        for (name, consumers, last_delivered_id) in groups {
+        for (name, consumers, pending, last_delivered_id) in groups {
             out.push(stream_group_info_to_frame(
                 name,
                 consumers,
+                pending,
                 last_delivered_id,
             ));
         }
@@ -4205,6 +4314,9 @@ mod tests {
         if eq_ascii_command(cmd, b"XREAD") {
             return Some(CommandId::Xread);
         }
+        if eq_ascii_command(cmd, b"XREADGROUP") {
+            return Some(CommandId::Xreadgroup);
+        }
         if eq_ascii_command(cmd, b"XINFO") {
             return Some(CommandId::Xinfo);
         }
@@ -4461,6 +4573,8 @@ mod tests {
             b"xdel",
             b"XREAD",
             b"xread",
+            b"XREADGROUP",
+            b"xreadgroup",
             b"XINFO",
             b"xinfo",
             b"XGROUP",
@@ -8598,6 +8712,528 @@ mod tests {
             wrongtype,
             CommandError::Store(fr_store::StoreError::WrongType)
         ));
+    }
+
+    #[test]
+    fn xreadgroup_reads_new_entries_and_advances_group_cursor() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"2000-0".to_vec(),
+                b"field1".to_vec(),
+                b"value1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd 1");
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"2000-1".to_vec(),
+                b"field2".to_vec(),
+                b"value2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd 2");
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+
+        let first = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xreadgroup first");
+        assert_eq!(
+            first,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"s".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"2000-0".to_vec())),
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(b"field1".to_vec())),
+                            RespFrame::BulkString(Some(b"value1".to_vec())),
+                        ])),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"2000-1".to_vec())),
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(b"field2".to_vec())),
+                            RespFrame::BulkString(Some(b"value2".to_vec())),
+                        ])),
+                    ])),
+                ])),
+            ]))]))
+        );
+
+        let second = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xreadgroup no new entries");
+        assert_eq!(second, RespFrame::Array(None));
+
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"2000-2".to_vec(),
+                b"field3".to_vec(),
+                b"value3".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd 3");
+
+        let third = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"COUNT".to_vec(),
+                b"1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xreadgroup count");
+        assert_eq!(
+            third,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"s".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"2000-2".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"field3".to_vec())),
+                        RespFrame::BulkString(Some(b"value3".to_vec())),
+                    ])),
+                ]))])),
+            ]))]))
+        );
+
+        let groups = dispatch_argv(
+            &[b"XINFO".to_vec(), b"GROUPS".to_vec(), b"s".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xinfo groups");
+        assert_eq!(
+            groups,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"name".to_vec())),
+                RespFrame::BulkString(Some(b"g1".to_vec())),
+                RespFrame::BulkString(Some(b"consumers".to_vec())),
+                RespFrame::Integer(1),
+                RespFrame::BulkString(Some(b"pending".to_vec())),
+                RespFrame::Integer(3),
+                RespFrame::BulkString(Some(b"last-delivered-id".to_vec())),
+                RespFrame::BulkString(Some(b"2000-2".to_vec())),
+                RespFrame::BulkString(Some(b"entries-read".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::BulkString(Some(b"lag".to_vec())),
+                RespFrame::BulkString(None),
+            ]))]))
+        );
+    }
+
+    #[test]
+    fn xreadgroup_validation_nogroup_and_wrongtype() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1000-0".to_vec(),
+                b"field".to_vec(),
+                b"value".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd");
+
+        let nogroup = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g-missing".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xreadgroup missing group");
+        assert_eq!(
+            nogroup,
+            RespFrame::Error(
+                "NOGROUP No such key 's' or consumer group 'g-missing' in XREADGROUP with GROUP option"
+                    .to_string()
+            )
+        );
+
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+
+        let invalid_id = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b"bad-id".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xreadgroup invalid id");
+        assert_eq!(
+            invalid_id,
+            RespFrame::Error(
+                "ERR Invalid stream ID specified as stream command argument".to_string()
+            )
+        );
+
+        let syntax_block = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"BLOCK".to_vec(),
+                b"0".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("xreadgroup block unsupported");
+        assert!(matches!(syntax_block, CommandError::SyntaxError));
+
+        let syntax_streams = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"NOTSTREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("xreadgroup missing STREAMS");
+        assert!(matches!(syntax_streams, CommandError::SyntaxError));
+
+        let arity = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b"s2".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("xreadgroup keys/ids mismatch");
+        assert!(matches!(arity, CommandError::WrongArity("XREADGROUP")));
+
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+        let wrongtype = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"k".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("xreadgroup wrongtype");
+        assert!(matches!(
+            wrongtype,
+            CommandError::Store(fr_store::StoreError::WrongType)
+        ));
+    }
+
+    #[test]
+    fn xreadgroup_pending_replay_and_noack_behavior() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1000-0".to_vec(),
+                b"field".to_vec(),
+                b"v0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd 0");
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1000-1".to_vec(),
+                b"field".to_vec(),
+                b"v1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd 1");
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1000-2".to_vec(),
+                b"field".to_vec(),
+                b"v2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd 2");
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+
+        let first_pending = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"COUNT".to_vec(),
+                b"1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("first pending read");
+        assert_eq!(
+            first_pending,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"s".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"1000-0".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"field".to_vec())),
+                        RespFrame::BulkString(Some(b"v0".to_vec())),
+                    ])),
+                ]))])),
+            ]))]))
+        );
+
+        let replay_for_owner = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("owner replay");
+        assert_eq!(
+            replay_for_owner,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"s".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"1000-0".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"field".to_vec())),
+                        RespFrame::BulkString(Some(b"v0".to_vec())),
+                    ])),
+                ]))])),
+            ]))]))
+        );
+
+        let replay_for_other_consumer = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c2".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("other consumer replay");
+        assert_eq!(replay_for_other_consumer, RespFrame::Array(None));
+
+        let noack_read = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"NOACK".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("noack read");
+        assert_eq!(
+            noack_read,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"s".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"1000-1".to_vec())),
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(b"field".to_vec())),
+                            RespFrame::BulkString(Some(b"v1".to_vec())),
+                        ])),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"1000-2".to_vec())),
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(b"field".to_vec())),
+                            RespFrame::BulkString(Some(b"v2".to_vec())),
+                        ])),
+                    ])),
+                ])),
+            ]))]))
+        );
+
+        let replay_after_noack = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("replay after noack");
+        assert_eq!(
+            replay_after_noack,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"s".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"1000-0".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"field".to_vec())),
+                        RespFrame::BulkString(Some(b"v0".to_vec())),
+                    ])),
+                ]))])),
+            ]))]))
+        );
+
+        let groups = dispatch_argv(
+            &[b"XINFO".to_vec(), b"GROUPS".to_vec(), b"s".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xinfo groups");
+        assert_eq!(
+            groups,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"name".to_vec())),
+                RespFrame::BulkString(Some(b"g1".to_vec())),
+                RespFrame::BulkString(Some(b"consumers".to_vec())),
+                RespFrame::Integer(2),
+                RespFrame::BulkString(Some(b"pending".to_vec())),
+                RespFrame::Integer(1),
+                RespFrame::BulkString(Some(b"last-delivered-id".to_vec())),
+                RespFrame::BulkString(Some(b"1000-2".to_vec())),
+                RespFrame::BulkString(Some(b"entries-read".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::BulkString(Some(b"lag".to_vec())),
+                RespFrame::BulkString(None),
+            ]))]))
+        );
     }
 
     #[test]

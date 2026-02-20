@@ -969,6 +969,132 @@
       "expect": { "kind": "error", "value": "ERR syntax error" }
     },
     {
+      "name": "xadd_group_read_stream_first",
+      "now_ms": 1000,
+      "argv": ["XADD", "group_read_stream", "4000-0", "field", "v1"],
+      "expect": { "kind": "bulk", "value": "4000-0" }
+    },
+    {
+      "name": "xadd_group_read_stream_second",
+      "now_ms": 1000,
+      "argv": ["XADD", "group_read_stream", "4000-1", "field", "v2"],
+      "expect": { "kind": "bulk", "value": "4000-1" }
+    },
+    {
+      "name": "xgroup_create_group_read_stream",
+      "now_ms": 1000,
+      "argv": ["XGROUP", "CREATE", "group_read_stream", "g1", "0"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xreadgroup_group_read_stream_first",
+      "now_ms": 1000,
+      "argv": ["XREADGROUP", "GROUP", "g1", "c1", "STREAMS", "group_read_stream", ">"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "group_read_stream" },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "4000-0" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "field" },
+                          { "kind": "bulk", "value": "v1" }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "4000-1" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "field" },
+                          { "kind": "bulk", "value": "v2" }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xreadgroup_group_read_stream_second_nil",
+      "now_ms": 1000,
+      "argv": ["XREADGROUP", "GROUP", "g1", "c1", "STREAMS", "group_read_stream", ">"],
+      "expect": { "kind": "null_array" }
+    },
+    {
+      "name": "xadd_group_read_stream_third",
+      "now_ms": 1000,
+      "argv": ["XADD", "group_read_stream", "4000-2", "field", "v3"],
+      "expect": { "kind": "bulk", "value": "4000-2" }
+    },
+    {
+      "name": "xreadgroup_group_read_stream_count_one",
+      "now_ms": 1000,
+      "argv": ["XREADGROUP", "GROUP", "g1", "c1", "COUNT", "1", "STREAMS", "group_read_stream", ">"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "group_read_stream" },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "4000-2" },
+                      {
+                        "kind": "array",
+                        "value": [
+                          { "kind": "bulk", "value": "field" },
+                          { "kind": "bulk", "value": "v3" }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "xreadgroup_missing_group_error",
+      "now_ms": 1000,
+      "argv": ["XREADGROUP", "GROUP", "missing_group", "c1", "STREAMS", "group_read_stream", ">"],
+      "expect": {
+        "kind": "error",
+        "value": "NOGROUP No such key 'group_read_stream' or consumer group 'missing_group' in XREADGROUP with GROUP option"
+      }
+    },
+    {
+      "name": "xreadgroup_invalid_mode_error",
+      "now_ms": 1000,
+      "argv": ["XREADGROUP", "GROUP", "g1", "c1", "BLOCK", "0", "STREAMS", "group_read_stream", ">"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
       "name": "xinfo_invalid_subcommand_error",
       "now_ms": 1000,
       "argv": ["XINFO", "HELP", "read1"],
