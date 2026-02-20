@@ -551,6 +551,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Substr)
             } else if eq_ascii_command(cmd, b"GEOADD") {
                 Some(CommandId::Geoadd)
+            } else if eq_ascii_command(cmd, b"GEOPOS") {
+                Some(CommandId::Geopos)
             } else {
                 None
             }
@@ -588,8 +590,6 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Command)
             } else if eq_ascii_command(cmd, b"RESTORE") {
                 Some(CommandId::Restore)
-            } else if eq_ascii_command(cmd, b"GEOPOS") {
-                Some(CommandId::Geopos)
             } else if eq_ascii_command(cmd, b"GEODIST") {
                 Some(CommandId::Geodist)
             } else if eq_ascii_command(cmd, b"GEOHASH") {
@@ -1847,10 +1847,8 @@ fn geoadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             Ok(value) => value,
             Err(reply) => return Ok(reply),
         };
-        if longitude < GEO_LONG_MIN
-            || longitude > GEO_LONG_MAX
-            || latitude < GEO_LAT_MIN
-            || latitude > GEO_LAT_MAX
+        if !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&longitude)
+            || !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&latitude)
         {
             return Ok(geo_invalid_pair_error(longitude, latitude));
         }
@@ -2646,11 +2644,7 @@ fn trim_and_cap_string(input: &str, cap: usize) -> String {
     out
 }
 
-fn getex(
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, CommandError> {
+fn getex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("GETEX"));
     }
@@ -2710,11 +2704,7 @@ fn getex(
     }
 }
 
-fn smismember(
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, CommandError> {
+fn smismember(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("SMISMEMBER"));
     }
@@ -2730,11 +2720,7 @@ fn smismember(
     Ok(RespFrame::Array(Some(frames)))
 }
 
-fn bitop(
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, CommandError> {
+fn bitop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("BITOP"));
     }
@@ -2796,10 +2782,7 @@ fn zunionstore(
     if argv.len() < 3 + numkeys {
         return Err(CommandError::SyntaxError);
     }
-    let keys: Vec<&[u8]> = argv[3..3 + numkeys]
-        .iter()
-        .map(|v| v.as_slice())
-        .collect();
+    let keys: Vec<&[u8]> = argv[3..3 + numkeys].iter().map(|v| v.as_slice()).collect();
     let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys);
     let count = store
         .zunionstore(dest, &keys, &weights, &aggregate, now_ms)
@@ -2823,10 +2806,7 @@ fn zinterstore(
     if argv.len() < 3 + numkeys {
         return Err(CommandError::SyntaxError);
     }
-    let keys: Vec<&[u8]> = argv[3..3 + numkeys]
-        .iter()
-        .map(|v| v.as_slice())
-        .collect();
+    let keys: Vec<&[u8]> = argv[3..3 + numkeys].iter().map(|v| v.as_slice()).collect();
     let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys);
     let count = store
         .zinterstore(dest, &keys, &weights, &aggregate, now_ms)
@@ -2854,9 +2834,7 @@ fn select(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     if db == 0 {
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else {
-        Ok(RespFrame::Error(
-            "ERR DB index is out of range".to_string(),
-        ))
+        Ok(RespFrame::Error("ERR DB index is out of range".to_string()))
     }
 }
 
@@ -2983,11 +2961,7 @@ fn time_cmd(argv: &[Vec<u8>], now_ms: u64) -> Result<RespFrame, CommandError> {
     ])))
 }
 
-fn randomkey(
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, CommandError> {
+fn randomkey(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() != 1 {
         return Err(CommandError::WrongArity("RANDOMKEY"));
     }
@@ -3021,11 +2995,7 @@ fn parse_scan_args(argv: &[Vec<u8>], start_idx: usize) -> (Option<Vec<u8>>, usiz
     (pattern, count)
 }
 
-fn scan(
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, CommandError> {
+fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SCAN"));
     }
@@ -3035,8 +3005,7 @@ fn scan(
         .map_err(|_| CommandError::InvalidInteger)?;
 
     let (pattern, count) = parse_scan_args(argv, 2);
-    let (next_cursor, keys) =
-        store.scan(cursor, pattern.as_deref(), count, now_ms);
+    let (next_cursor, keys) = store.scan(cursor, pattern.as_deref(), count, now_ms);
 
     let key_frames: Vec<RespFrame> = keys
         .into_iter()
@@ -3048,11 +3017,7 @@ fn scan(
     ])))
 }
 
-fn hscan(
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, CommandError> {
+fn hscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("HSCAN"));
     }
@@ -3078,11 +3043,7 @@ fn hscan(
     ])))
 }
 
-fn sscan(
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, CommandError> {
+fn sscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("SSCAN"));
     }
@@ -3107,11 +3068,7 @@ fn sscan(
     ])))
 }
 
-fn zscan(
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, CommandError> {
+fn zscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("ZSCAN"));
     }
@@ -3129,9 +3086,7 @@ fn zscan(
     let mut items = Vec::with_capacity(pairs.len() * 2);
     for (member, score) in pairs {
         items.push(RespFrame::BulkString(Some(member)));
-        items.push(RespFrame::BulkString(Some(
-            score.to_string().into_bytes(),
-        )));
+        items.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
     }
     Ok(RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(next_cursor.to_string().into_bytes())),
@@ -3178,11 +3133,7 @@ fn reset_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     Ok(RespFrame::SimpleString("RESET".to_string()))
 }
 
-fn touch(
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, CommandError> {
+fn touch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("TOUCH"));
     }
@@ -3217,11 +3168,7 @@ fn sort_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     Ok(RespFrame::Array(Some(Vec::new())))
 }
 
-fn copy_cmd(
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, CommandError> {
+fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("COPY"));
     }
