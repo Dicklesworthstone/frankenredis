@@ -35,14 +35,47 @@
       "expect": { "kind": "error", "value": "ERR syntax error" }
     },
     {
-      "name": "set_acl_contract_key",
+      "name": "auth_wrong_arity_is_rejected",
       "now_ms": 4,
+      "argv": ["AUTH"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'AUTH' command"
+      }
+    },
+    {
+      "name": "hello_wrong_arity_is_rejected",
+      "now_ms": 5,
+      "argv": ["HELLO"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'HELLO' command"
+      }
+    },
+    {
+      "name": "auth_user_without_config_is_rejected",
+      "now_ms": 6,
+      "argv": ["AUTH", "alice", "secret2"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?"
+      }
+    },
+    {
+      "name": "hello_unknown_option_is_syntax_error",
+      "now_ms": 7,
+      "argv": ["HELLO", "3", "SETNAME", "client-a"],
+      "expect": { "kind": "error", "value": "ERR syntax error" }
+    },
+    {
+      "name": "set_acl_contract_key",
+      "now_ms": 8,
       "argv": ["SET", "fr:p2c:004:key", "value"],
       "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "get_acl_contract_key",
-      "now_ms": 5,
+      "now_ms": 9,
       "argv": ["GET", "fr:p2c:004:key"],
       "expect": { "kind": "bulk", "value": "value" }
     }

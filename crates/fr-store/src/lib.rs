@@ -10,7 +10,61 @@ pub type StreamEntries = BTreeMap<StreamId, Vec<StreamField>>;
 pub type StreamRecord = (StreamId, Vec<StreamField>);
 pub type StreamInfoBounds = (usize, Option<StreamRecord>, Option<StreamRecord>);
 pub type StreamConsumerInfo = Vec<u8>;
-pub type StreamPendingEntries = BTreeMap<StreamId, Vec<u8>>;
+pub type StreamPendingEntries = BTreeMap<StreamId, StreamPendingEntry>;
+pub type StreamPendingSummaryConsumer = (Vec<u8>, usize);
+pub type StreamPendingSummary = (
+    usize,
+    Option<StreamId>,
+    Option<StreamId>,
+    Vec<StreamPendingSummaryConsumer>,
+);
+pub type StreamPendingRecord = (StreamId, Vec<u8>, u64, u64);
+pub type StreamAutoClaimDeleted = Vec<StreamId>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamPendingEntry {
+    pub consumer: Vec<u8>,
+    pub deliveries: u64,
+    pub last_delivered_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamClaimOptions {
+    pub min_idle_time_ms: u64,
+    pub idle_ms: Option<u64>,
+    pub time_ms: Option<u64>,
+    pub retry_count: Option<u64>,
+    pub force: bool,
+    pub justid: bool,
+    pub last_id: Option<StreamId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamClaimReply {
+    Entries(Vec<StreamRecord>),
+    Ids(Vec<StreamId>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamAutoClaimOptions {
+    pub min_idle_time_ms: u64,
+    pub count: usize,
+    pub justid: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamAutoClaimReply {
+    Entries {
+        next_start: StreamId,
+        entries: Vec<StreamRecord>,
+        deleted_ids: StreamAutoClaimDeleted,
+    },
+    Ids {
+        next_start: StreamId,
+        ids: Vec<StreamId>,
+        deleted_ids: StreamAutoClaimDeleted,
+    },
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamGroupReadCursor {
@@ -2844,10 +2898,10 @@ impl Store {
                                 }
                             }
                             StreamGroupReadCursor::Id(start_id) => {
-                                for (id, owner) in
+                                for (id, pending_entry) in
                                     group_state.pending.range((Excluded(start_id), Unbounded))
                                 {
-                                    if owner.as_slice() != consumer {
+                                    if pending_entry.consumer.as_slice() != consumer {
                                         continue;
                                     }
                                     if let Some(fields) = entries.get(id) {
@@ -2882,12 +2936,340 @@ impl Store {
             group_state.last_delivered_id = last_seen_id;
             if !noack {
                 for (id, _) in &records {
-                    group_state.pending.insert(*id, consumer.clone());
+                    let pending_entry =
+                        group_state
+                            .pending
+                            .entry(*id)
+                            .or_insert_with(|| StreamPendingEntry {
+                                consumer: consumer.clone(),
+                                deliveries: 0,
+                                last_delivered_ms: now_ms,
+                            });
+                    pending_entry.consumer = consumer.clone();
+                    pending_entry.deliveries = pending_entry.deliveries.saturating_add(1);
+                    pending_entry.last_delivered_ms = now_ms;
+                }
+            }
+        } else if let StreamGroupReadCursor::Id(_) = cursor {
+            for (id, _) in &records {
+                if let Some(pending_entry) = group_state.pending.get_mut(id) {
+                    pending_entry.deliveries = pending_entry.deliveries.saturating_add(1);
+                    pending_entry.last_delivered_ms = now_ms;
                 }
             }
         }
 
         Ok(Some(records))
+    }
+
+    pub fn xpending_summary(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<StreamPendingSummary>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(_) => {
+                    let Some(groups) = self.stream_groups.get(key) else {
+                        return Ok(None);
+                    };
+                    let Some(group_state) = groups.get(group) else {
+                        return Ok(None);
+                    };
+
+                    let mut per_consumer: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+                    for pending_entry in group_state.pending.values() {
+                        *per_consumer
+                            .entry(pending_entry.consumer.clone())
+                            .or_default() += 1;
+                    }
+
+                    Ok(Some((
+                        group_state.pending.len(),
+                        group_state.pending.first_key_value().map(|(id, _)| *id),
+                        group_state.pending.last_key_value().map(|(id, _)| *id),
+                        per_consumer.into_iter().collect(),
+                    )))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn xpending_entries(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        bounds: (StreamId, StreamId),
+        count: usize,
+        consumer: Option<&[u8]>,
+        now_ms: u64,
+    ) -> Result<Option<Vec<StreamPendingRecord>>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(_) => {
+                    let Some(groups) = self.stream_groups.get(key) else {
+                        return Ok(None);
+                    };
+                    let Some(group_state) = groups.get(group) else {
+                        return Ok(None);
+                    };
+                    let (start, end) = bounds;
+                    if count == 0 || start > end {
+                        return Ok(Some(Vec::new()));
+                    }
+
+                    let mut out = Vec::new();
+                    for (id, pending_entry) in group_state.pending.range(start..=end) {
+                        if let Some(filter_consumer) = consumer
+                            && pending_entry.consumer.as_slice() != filter_consumer
+                        {
+                            continue;
+                        }
+                        out.push((
+                            *id,
+                            pending_entry.consumer.clone(),
+                            now_ms.saturating_sub(pending_entry.last_delivered_ms),
+                            pending_entry.deliveries,
+                        ));
+                        if out.len() >= count {
+                            break;
+                        }
+                    }
+                    Ok(Some(out))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn xclaim(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        consumer: &[u8],
+        ids: &[StreamId],
+        options: StreamClaimOptions,
+        now_ms: u64,
+    ) -> Result<Option<StreamClaimReply>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+
+        let stream_records = match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => {
+                    let mut out = BTreeMap::new();
+                    for id in ids {
+                        if let Some(fields) = entries.get(id) {
+                            out.insert(*id, fields.clone());
+                        }
+                    }
+                    out
+                }
+                _ => return Err(StoreError::WrongType),
+            },
+            None => return Ok(None),
+        };
+
+        let Some(groups) = self.stream_groups.get_mut(key) else {
+            return Ok(None);
+        };
+        let Some(group_state) = groups.get_mut(group) else {
+            return Ok(None);
+        };
+
+        if let Some(last_id) = options.last_id {
+            group_state.last_delivered_id = last_id;
+        }
+
+        let mut claimed_ids = Vec::new();
+        let mut claimed_entries = Vec::new();
+        let consumer_vec = consumer.to_vec();
+
+        for id in ids {
+            let Some(fields) = stream_records.get(id) else {
+                group_state.pending.remove(id);
+                continue;
+            };
+
+            let mut created_by_force = false;
+            if !group_state.pending.contains_key(id) {
+                if !options.force {
+                    continue;
+                }
+                group_state.pending.insert(
+                    *id,
+                    StreamPendingEntry {
+                        consumer: consumer_vec.clone(),
+                        deliveries: 0,
+                        last_delivered_ms: now_ms,
+                    },
+                );
+                created_by_force = true;
+            }
+
+            let Some(pending_entry) = group_state.pending.get_mut(id) else {
+                continue;
+            };
+            if !created_by_force {
+                let idle_ms = now_ms.saturating_sub(pending_entry.last_delivered_ms);
+                if idle_ms <= options.min_idle_time_ms {
+                    continue;
+                }
+            }
+
+            pending_entry.consumer = consumer_vec.clone();
+            pending_entry.last_delivered_ms = if let Some(time_ms) = options.time_ms {
+                time_ms
+            } else if let Some(idle_ms) = options.idle_ms {
+                now_ms.saturating_sub(idle_ms)
+            } else {
+                now_ms
+            };
+
+            if let Some(retry_count) = options.retry_count {
+                pending_entry.deliveries = retry_count;
+            } else if !options.justid {
+                pending_entry.deliveries = pending_entry.deliveries.saturating_add(1);
+            }
+
+            claimed_ids.push(*id);
+            if !options.justid {
+                claimed_entries.push((*id, fields.clone()));
+            }
+        }
+
+        if !claimed_ids.is_empty() {
+            group_state.consumers.insert(consumer_vec);
+        }
+
+        if options.justid {
+            Ok(Some(StreamClaimReply::Ids(claimed_ids)))
+        } else {
+            Ok(Some(StreamClaimReply::Entries(claimed_entries)))
+        }
+    }
+
+    pub fn xautoclaim(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        consumer: &[u8],
+        start: StreamId,
+        options: StreamAutoClaimOptions,
+        now_ms: u64,
+    ) -> Result<Option<StreamAutoClaimReply>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+
+        let (stream_records, pending_snapshot) = match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => {
+                    let Some(groups) = self.stream_groups.get(key) else {
+                        return Ok(None);
+                    };
+                    let Some(group_state) = groups.get(group) else {
+                        return Ok(None);
+                    };
+
+                    let scan_limit = options.count.saturating_mul(10).max(1);
+                    let snapshot: Vec<(StreamId, StreamPendingEntry)> = group_state
+                        .pending
+                        .range(start..)
+                        .take(scan_limit)
+                        .map(|(id, pending_entry)| (*id, pending_entry.clone()))
+                        .collect();
+
+                    let mut fields_by_id = BTreeMap::new();
+                    for (id, _) in &snapshot {
+                        if let Some(fields) = entries.get(id) {
+                            fields_by_id.insert(*id, fields.clone());
+                        }
+                    }
+
+                    (fields_by_id, snapshot)
+                }
+                _ => return Err(StoreError::WrongType),
+            },
+            None => return Ok(None),
+        };
+
+        let mut claimed_ids = Vec::new();
+        let mut deleted_ids = Vec::new();
+        let mut scanned_last: Option<StreamId> = None;
+        for (id, pending_entry) in &pending_snapshot {
+            scanned_last = Some(*id);
+            if !stream_records.contains_key(id) {
+                deleted_ids.push(*id);
+                continue;
+            }
+
+            let idle_ms = now_ms.saturating_sub(pending_entry.last_delivered_ms);
+            if idle_ms <= options.min_idle_time_ms {
+                continue;
+            }
+
+            claimed_ids.push(*id);
+            if claimed_ids.len() >= options.count {
+                break;
+            }
+        }
+
+        let Some(groups) = self.stream_groups.get_mut(key) else {
+            return Ok(None);
+        };
+        let Some(group_state) = groups.get_mut(group) else {
+            return Ok(None);
+        };
+
+        for id in &deleted_ids {
+            group_state.pending.remove(id);
+        }
+
+        let consumer_vec = consumer.to_vec();
+        for id in &claimed_ids {
+            if let Some(pending_entry) = group_state.pending.get_mut(id) {
+                pending_entry.consumer = consumer_vec.clone();
+                pending_entry.last_delivered_ms = now_ms;
+                if !options.justid {
+                    pending_entry.deliveries = pending_entry.deliveries.saturating_add(1);
+                }
+            }
+        }
+        if !claimed_ids.is_empty() {
+            group_state.consumers.insert(consumer_vec);
+        }
+
+        let next_start = scanned_last
+            .and_then(|id| {
+                group_state
+                    .pending
+                    .range((Excluded(id), Unbounded))
+                    .next()
+                    .map(|(next_id, _)| *next_id)
+            })
+            .unwrap_or((0, 0));
+
+        if options.justid {
+            Ok(Some(StreamAutoClaimReply::Ids {
+                next_start,
+                ids: claimed_ids,
+                deleted_ids,
+            }))
+        } else {
+            let entries = claimed_ids
+                .iter()
+                .filter_map(|id| stream_records.get(id).cloned().map(|fields| (*id, fields)))
+                .collect();
+            Ok(Some(StreamAutoClaimReply::Entries {
+                next_start,
+                entries,
+                deleted_ids,
+            }))
+        }
     }
 
     pub fn xinfo_stream(
@@ -3114,8 +3496,8 @@ impl Store {
                     };
                     group_state.consumers.remove(consumer);
                     let mut removed_pending = 0_u64;
-                    group_state.pending.retain(|_, owner| {
-                        let keep = owner.as_slice() != consumer;
+                    group_state.pending.retain(|_, pending_entry| {
+                        let keep = pending_entry.consumer.as_slice() != consumer;
                         if !keep {
                             removed_pending = removed_pending.saturating_add(1);
                         }
@@ -4132,7 +4514,9 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 mod tests {
     use super::{
         EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPressureLevel,
-        PttlValue, Store, StoreError, StreamGroupReadCursor, StreamGroupReadOptions, ValueType,
+        PttlValue, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
+        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
+        StreamPendingEntry, ValueType,
     };
 
     fn group_read_options(
@@ -5685,6 +6069,256 @@ mod tests {
     }
 
     #[test]
+    fn stream_xpending_summary_and_entries_track_idle_and_delivery_count() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f".to_vec(), b"v0".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1000, 1), &[(b"f".to_vec(), b"v1".to_vec())], 0)
+            .unwrap();
+        assert!(store.xgroup_create(b"s", b"g1", (0, 0), false, 0).unwrap());
+
+        store
+            .xreadgroup(
+                b"s",
+                b"g1",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(1)),
+                5,
+            )
+            .unwrap()
+            .expect("new entries");
+        store
+            .xreadgroup(
+                b"s",
+                b"g1",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::Id((0, 0)), false, None),
+                20,
+            )
+            .unwrap()
+            .expect("pending replay");
+        store
+            .xreadgroup(
+                b"s",
+                b"g1",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, None),
+                25,
+            )
+            .unwrap()
+            .expect("second new entry");
+
+        let summary = store
+            .xpending_summary(b"s", b"g1", 30)
+            .unwrap()
+            .expect("pending summary");
+        assert_eq!(
+            summary,
+            (
+                2,
+                Some((1000, 0)),
+                Some((1000, 1)),
+                vec![(b"c1".to_vec(), 2)],
+            )
+        );
+
+        let all_entries = store
+            .xpending_entries(b"s", b"g1", ((0, 0), (u64::MAX, u64::MAX)), 10, None, 30)
+            .unwrap()
+            .expect("pending entries");
+        assert_eq!(
+            all_entries,
+            vec![
+                ((1000, 0), b"c1".to_vec(), 10, 2),
+                ((1000, 1), b"c1".to_vec(), 5, 1),
+            ]
+        );
+
+        let filtered = store
+            .xpending_entries(
+                b"s",
+                b"g1",
+                ((0, 0), (u64::MAX, u64::MAX)),
+                10,
+                Some(b"c2"),
+                30,
+            )
+            .unwrap()
+            .expect("filtered entries");
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn stream_xclaim_transfers_pending_owner_and_supports_justid() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1000, 0), &[(b"f".to_vec(), b"v0".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (1000, 1), &[(b"f".to_vec(), b"v1".to_vec())], 0)
+            .unwrap();
+        assert!(store.xgroup_create(b"s", b"g1", (0, 0), false, 0).unwrap());
+        store
+            .xreadgroup(
+                b"s",
+                b"g1",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, None),
+                10,
+            )
+            .unwrap()
+            .expect("seed pending");
+
+        let claimed = store
+            .xclaim(
+                b"s",
+                b"g1",
+                b"c2",
+                &[(1000, 0)],
+                StreamClaimOptions {
+                    min_idle_time_ms: 5,
+                    idle_ms: None,
+                    time_ms: None,
+                    retry_count: None,
+                    force: false,
+                    justid: false,
+                    last_id: None,
+                },
+                30,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            claimed,
+            StreamClaimReply::Entries(vec![((1000, 0), vec![(b"f".to_vec(), b"v0".to_vec())],)])
+        );
+
+        let summary = store
+            .xpending_summary(b"s", b"g1", 40)
+            .unwrap()
+            .expect("summary");
+        assert_eq!(
+            summary,
+            (
+                2,
+                Some((1000, 0)),
+                Some((1000, 1)),
+                vec![(b"c1".to_vec(), 1), (b"c2".to_vec(), 1)],
+            )
+        );
+
+        let justid = store
+            .xclaim(
+                b"s",
+                b"g1",
+                b"c2",
+                &[(1000, 1)],
+                StreamClaimOptions {
+                    min_idle_time_ms: 5,
+                    idle_ms: None,
+                    time_ms: None,
+                    retry_count: None,
+                    force: false,
+                    justid: true,
+                    last_id: None,
+                },
+                50,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(justid, StreamClaimReply::Ids(vec![(1000, 1)]));
+    }
+
+    #[test]
+    fn stream_xautoclaim_claims_entries_by_cursor_and_tracks_deleted_ids() {
+        let mut store = Store::new();
+        for (id, value) in [((1000, 0), b"v0"), ((1000, 1), b"v1"), ((1000, 2), b"v2")] {
+            store
+                .xadd(b"s", id, &[(b"f".to_vec(), value.to_vec())], 0)
+                .unwrap();
+        }
+        assert!(store.xgroup_create(b"s", b"g1", (0, 0), false, 0).unwrap());
+        store
+            .xreadgroup(
+                b"s",
+                b"g1",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, None),
+                10,
+            )
+            .unwrap()
+            .expect("seed pending");
+
+        // Simulate a deleted entry lingering in the pending table.
+        assert_eq!(store.xdel(b"s", &[(1000, 1)], 15).unwrap(), 1);
+        if let Some(groups) = store.stream_groups.get_mut(b"s".as_slice())
+            && let Some(group_state) = groups.get_mut(b"g1".as_slice())
+        {
+            group_state.pending.insert(
+                (1000, 1),
+                StreamPendingEntry {
+                    consumer: b"c1".to_vec(),
+                    deliveries: 1,
+                    last_delivered_ms: 10,
+                },
+            );
+        }
+
+        let first = store
+            .xautoclaim(
+                b"s",
+                b"g1",
+                b"c2",
+                (0, 0),
+                StreamAutoClaimOptions {
+                    min_idle_time_ms: 5,
+                    count: 2,
+                    justid: false,
+                },
+                30,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            first,
+            StreamAutoClaimReply::Entries {
+                next_start: (0, 0),
+                entries: vec![
+                    ((1000, 0), vec![(b"f".to_vec(), b"v0".to_vec())]),
+                    ((1000, 2), vec![(b"f".to_vec(), b"v2".to_vec())]),
+                ],
+                deleted_ids: vec![(1000, 1)],
+            }
+        );
+
+        let second = store
+            .xautoclaim(
+                b"s",
+                b"g1",
+                b"c3",
+                (0, 0),
+                StreamAutoClaimOptions {
+                    min_idle_time_ms: 0,
+                    count: 10,
+                    justid: true,
+                },
+                31,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            second,
+            StreamAutoClaimReply::Ids {
+                next_start: (0, 0),
+                ids: vec![(1000, 0), (1000, 2)],
+                deleted_ids: vec![],
+            }
+        );
+    }
+
+    #[test]
     fn stream_xinfo_returns_len_and_entry_bounds() {
         let mut store = Store::new();
         store
@@ -5893,7 +6527,7 @@ mod tests {
             Some(1)
         );
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), 1, 0, (0, 0))]);
+        assert_eq!(groups, vec![(b"g1".to_vec(), 1, 0, (1000, 0))]);
 
         assert_eq!(
             store
@@ -5902,7 +6536,7 @@ mod tests {
             Some(0)
         );
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), 1, 0, (0, 0))]);
+        assert_eq!(groups, vec![(b"g1".to_vec(), 1, 0, (1000, 0))]);
 
         assert_eq!(
             store

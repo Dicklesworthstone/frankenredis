@@ -11,6 +11,7 @@ use std::time::Duration;
 use fr_config::{DecisionAction, DriftSeverity, ThreatClass};
 use fr_persist::{AofRecord, decode_aof_stream, encode_aof_stream};
 use fr_protocol::{RespFrame, parse_frame};
+use fr_repl::{HandshakeFsm, HandshakeState, HandshakeStep};
 use fr_runtime::{EvidenceEvent, Runtime};
 use serde::{Deserialize, Serialize};
 
@@ -316,6 +317,46 @@ pub struct ProtocolCase {
     pub expect_threat: Option<ExpectedThreat>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReplicationHandshakeFixture {
+    pub suite: String,
+    pub cases: Vec<ReplicationHandshakeCase>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ReplicationHandshakeCase {
+    pub name: String,
+    pub now_ms: u64,
+    #[serde(default)]
+    pub auth_required: bool,
+    pub steps: Vec<ReplicationHandshakeStep>,
+    #[serde(default)]
+    pub accept_psync_reply: bool,
+    pub expect_state: ReplicationHandshakeState,
+    #[serde(default)]
+    pub expect_reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicationHandshakeStep {
+    Ping,
+    Auth,
+    Replconf,
+    Psync,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplicationHandshakeState {
+    Init,
+    PingSeen,
+    AuthSeen,
+    ReplconfSeen,
+    PsyncSent,
+    Online,
+}
+
 pub fn run_protocol_fixture(
     config: &HarnessConfig,
     fixture_name: &str,
@@ -451,6 +492,116 @@ pub fn run_live_redis_protocol_diff(
 
     Ok(build_differential_report(
         suite,
+        fixture_name,
+        total,
+        failed,
+    ))
+}
+
+pub fn run_replication_handshake_fixture(
+    config: &HarnessConfig,
+    fixture_name: &str,
+) -> Result<DifferentialReport, String> {
+    let fixture = load_replication_handshake_fixture(config, fixture_name)?;
+    let fixture_log_path = config
+        .live_log_root
+        .as_ref()
+        .map(|root| live_log_output_path(root, &fixture.suite, fixture_name));
+    let mut failed = Vec::new();
+    let total = fixture.cases.len();
+
+    for case in fixture.cases {
+        let mut fsm = HandshakeFsm::new(case.auth_required);
+        let mut observed_reason_code: Option<&'static str> = None;
+
+        for &step in &case.steps {
+            if let Err(err) = fsm.on_step(step.into_repl_step()) {
+                observed_reason_code = Some(err.reason_code());
+                break;
+            }
+        }
+
+        if observed_reason_code.is_none()
+            && case.accept_psync_reply
+            && let Err(err) = fsm.on_psync_accepted()
+        {
+            observed_reason_code = Some(err.reason_code());
+        }
+
+        let observed_state = fsm.state();
+        let expected_state = case.expect_state.into_repl_state();
+        let expected_reason_code = case.expect_reason_code.clone();
+        let state_ok = observed_state == expected_state;
+        let reason_ok = observed_reason_code == expected_reason_code.as_deref();
+        let frame_ok = state_ok && reason_ok;
+        let outcome = if frame_ok {
+            LogOutcome::Pass
+        } else {
+            LogOutcome::Fail
+        };
+        let event = handshake_evidence_event(
+            &case,
+            fixture_name,
+            observed_state,
+            observed_reason_code,
+            outcome,
+        );
+        let log_result = validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: &fixture.suite,
+                fixture_name,
+                case_name: &case.name,
+                verification_path: VerificationPath::Property,
+                now_ms: case.now_ms,
+                outcome,
+                persist_path: fixture_log_path.as_deref(),
+            },
+            &[event],
+        );
+
+        if !frame_ok || log_result.is_err() {
+            let expected = handshake_outcome_frame(expected_state, expected_reason_code.as_deref());
+            let actual = handshake_outcome_frame(observed_state, observed_reason_code);
+            let mut detail = Vec::new();
+            if !state_ok {
+                detail.push(format!(
+                    "state mismatch: expected={}, got={}",
+                    handshake_state_label(expected_state),
+                    handshake_state_label(observed_state)
+                ));
+            }
+            if !reason_ok {
+                detail.push(format!(
+                    "reason code mismatch: expected={:?}, got={:?}",
+                    expected_reason_code, observed_reason_code
+                ));
+            }
+            if let Err(err) = log_result {
+                detail.push(format!("structured log emission failed: {err}"));
+            }
+
+            failed.push(CaseOutcome {
+                name: case.name.clone(),
+                passed: false,
+                expected,
+                actual,
+                detail: Some(detail.join("; ")),
+                reason_code: observed_reason_code.map(str::to_string),
+                replay_cmd: Some(format!(
+                    "FR_MODE=strict FR_SEED={} rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_handshake_fixture_vectors_are_enforced -- {}",
+                    case.now_ms, case.name
+                )),
+                artifact_refs: vec![
+                    format!("crates/fr-conformance/fixtures/{fixture_name}"),
+                    "crates/fr-conformance/fixtures/phase2c/FR-P2C-006/contract_table.md"
+                        .to_string(),
+                ],
+            });
+        }
+    }
+
+    Ok(build_differential_report(
+        fixture.suite,
         fixture_name,
         total,
         failed,
@@ -710,6 +861,17 @@ fn load_protocol_fixture(
         .map_err(|err| format!("invalid fixture JSON {}: {err}", path.display()))
 }
 
+fn load_replication_handshake_fixture(
+    config: &HarnessConfig,
+    fixture_name: &str,
+) -> Result<ReplicationHandshakeFixture, String> {
+    let path = config.fixture_root.join(fixture_name);
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read fixture {}: {err}", path.display()))?;
+    serde_json::from_str(&raw)
+        .map_err(|err| format!("invalid fixture JSON {}: {err}", path.display()))
+}
+
 fn connect_live_redis(oracle: &LiveOracleConfig) -> Result<TcpStream, String> {
     let addr = format!("{}:{}", oracle.host, oracle.port);
     let stream = TcpStream::connect(&addr)
@@ -791,6 +953,111 @@ fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
             RespFrame::Array(Some(value.iter().map(expected_to_frame).collect()))
         }
         ExpectedFrame::NullArray => RespFrame::Array(None),
+    }
+}
+
+impl ReplicationHandshakeStep {
+    const fn into_repl_step(self) -> HandshakeStep {
+        match self {
+            Self::Ping => HandshakeStep::Ping,
+            Self::Auth => HandshakeStep::Auth,
+            Self::Replconf => HandshakeStep::Replconf,
+            Self::Psync => HandshakeStep::Psync,
+        }
+    }
+}
+
+impl ReplicationHandshakeState {
+    const fn into_repl_state(self) -> HandshakeState {
+        match self {
+            Self::Init => HandshakeState::Init,
+            Self::PingSeen => HandshakeState::PingSeen,
+            Self::AuthSeen => HandshakeState::AuthSeen,
+            Self::ReplconfSeen => HandshakeState::ReplconfSeen,
+            Self::PsyncSent => HandshakeState::PsyncSent,
+            Self::Online => HandshakeState::Online,
+        }
+    }
+}
+
+fn handshake_state_label(state: HandshakeState) -> &'static str {
+    match state {
+        HandshakeState::Init => "init",
+        HandshakeState::PingSeen => "ping_seen",
+        HandshakeState::AuthSeen => "auth_seen",
+        HandshakeState::ReplconfSeen => "replconf_seen",
+        HandshakeState::PsyncSent => "psync_sent",
+        HandshakeState::Online => "online",
+    }
+}
+
+fn handshake_outcome_frame(state: HandshakeState, reason_code: Option<&str>) -> RespFrame {
+    RespFrame::Array(Some(vec![
+        RespFrame::SimpleString(handshake_state_label(state).to_string()),
+        RespFrame::BulkString(reason_code.map(|value| value.as_bytes().to_vec())),
+    ]))
+}
+
+fn handshake_evidence_event(
+    case: &ReplicationHandshakeCase,
+    fixture_name: &str,
+    observed_state: HandshakeState,
+    observed_reason_code: Option<&'static str>,
+    outcome: LogOutcome,
+) -> EvidenceEvent {
+    let (reason_code, reason): (&'static str, String) = match (outcome, observed_reason_code) {
+        (LogOutcome::Pass, _) => (
+            "repl.handshake_contract_ok",
+            format!(
+                "state machine accepted sequence and ended in {}",
+                handshake_state_label(observed_state)
+            ),
+        ),
+        (LogOutcome::Fail, Some(reason_code)) => (
+            reason_code,
+            format!("state machine rejected sequence with reason_code={reason_code}"),
+        ),
+        (LogOutcome::Fail, None) => (
+            "repl.handshake_contract_violation",
+            "state machine ended in unexpected state without explicit rejection reason".to_string(),
+        ),
+    };
+
+    EvidenceEvent {
+        ts_utc: format!("unix_ms:{}", case.now_ms),
+        ts_ms: case.now_ms,
+        packet_id: 6,
+        mode: fr_config::Mode::Strict,
+        severity: DriftSeverity::S0,
+        threat_class: ThreatClass::ReplicationOrderAttack,
+        decision_action: DecisionAction::FailClosed,
+        subsystem: "replication_handshake",
+        action: "contract_fixture_vector",
+        reason_code,
+        reason,
+        input_digest: format!(
+            "name={} auth_required={} steps={:?} accept_psync_reply={}",
+            case.name, case.auth_required, case.steps, case.accept_psync_reply
+        ),
+        output_digest: format!(
+            "state={} reason_code={:?}",
+            handshake_state_label(observed_state),
+            observed_reason_code
+        ),
+        state_digest_before: "replication_handshake::init".to_string(),
+        state_digest_after: format!(
+            "replication_handshake::{}",
+            handshake_state_label(observed_state)
+        ),
+        replay_cmd: format!(
+            "FR_MODE=strict FR_SEED={} rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_006_f_handshake_fixture_vectors_are_enforced -- {}",
+            case.now_ms, case.name
+        ),
+        artifact_refs: vec![
+            format!("crates/fr-conformance/fixtures/{fixture_name}"),
+            "crates/fr-conformance/fixtures/phase2c/FR-P2C-006/contract_table.md".to_string(),
+        ],
+        confidence: Some(1.0),
     }
 }
 
@@ -1028,8 +1295,8 @@ mod tests {
     use fr_persist::{AofRecord, decode_aof_stream, encode_aof_stream};
     use fr_protocol::{RespFrame, RespParseError, parse_frame};
     use fr_repl::{
-        BacklogWindow, HandshakeFsm, HandshakeState, HandshakeStep, PsyncDecision, PsyncRejection,
-        ReplOffset, WaitAofThreshold, WaitThreshold, decide_psync, evaluate_wait, evaluate_waitaof,
+        BacklogWindow, PsyncDecision, PsyncRejection, ReplOffset, WaitAofThreshold, WaitThreshold,
+        decide_psync, evaluate_wait, evaluate_waitaof,
     };
     use fr_runtime::Runtime;
 
@@ -1038,8 +1305,8 @@ mod tests {
         ExpectedThreat, HarnessConfig, LiveOracleConfig, ReplayFixture,
         StructuredLogEmissionContext, build_differential_report, expected_to_frame, run_fixture,
         run_live_redis_diff, run_live_redis_protocol_diff, run_protocol_fixture,
-        run_replay_fixture, run_smoke, validate_structured_log_emission,
-        validate_threat_expectation,
+        run_replay_fixture, run_replication_handshake_fixture, run_smoke,
+        validate_structured_log_emission, validate_threat_expectation,
     };
     use crate::log_contract::{
         LogOutcome, StructuredLogEvent, VerificationPath, live_log_output_path,
@@ -3948,98 +4215,41 @@ mod tests {
 
     #[test]
     fn fr_p2c_006_f_handshake_contract_vectors_are_enforced() {
-        #[derive(Debug, Clone)]
-        struct HandshakeVector {
-            name: &'static str,
-            auth_required: bool,
-            steps: &'static [HandshakeStep],
-            accept_psync_reply: bool,
-            expected_state: HandshakeState,
-            expected_reason_code: Option<&'static str>,
-        }
+        let cfg = HarnessConfig::default_paths();
+        let report =
+            run_replication_handshake_fixture(&cfg, "fr_p2c_006_replication_handshake.json")
+                .expect("packet-006 handshake fixture run");
+        assert_eq!(report.schema_version, DIFFERENTIAL_REPORT_SCHEMA_VERSION);
+        assert_eq!(report.suite, "fr_p2c_006_replication_handshake");
+        assert_eq!(report.fixture, "fr_p2c_006_replication_handshake.json");
+        assert_eq!(
+            report.total, report.passed,
+            "packet-006 handshake fixture mismatches: {:?}",
+            report.failed
+        );
+        assert!(report.failed.is_empty());
+        assert_eq!(report.failed_without_reason_code, 0);
+        assert!(report.reason_code_counts.is_empty());
+    }
 
-        let vectors = [
-            HandshakeVector {
-                name: "happy_path_no_auth",
-                auth_required: false,
-                steps: &[
-                    HandshakeStep::Ping,
-                    HandshakeStep::Replconf,
-                    HandshakeStep::Psync,
-                ],
-                accept_psync_reply: true,
-                expected_state: HandshakeState::Online,
-                expected_reason_code: None,
-            },
-            HandshakeVector {
-                name: "happy_path_auth_required",
-                auth_required: true,
-                steps: &[
-                    HandshakeStep::Ping,
-                    HandshakeStep::Auth,
-                    HandshakeStep::Replconf,
-                    HandshakeStep::Psync,
-                ],
-                accept_psync_reply: true,
-                expected_state: HandshakeState::Online,
-                expected_reason_code: None,
-            },
-            HandshakeVector {
-                name: "reject_replconf_before_ping",
-                auth_required: false,
-                steps: &[HandshakeStep::Replconf],
-                accept_psync_reply: false,
-                expected_state: HandshakeState::Init,
-                expected_reason_code: Some("repl.handshake_state_machine_mismatch"),
-            },
-            HandshakeVector {
-                name: "reject_psync_without_replconf",
-                auth_required: false,
-                steps: &[HandshakeStep::Ping, HandshakeStep::Psync],
-                accept_psync_reply: false,
-                expected_state: HandshakeState::PingSeen,
-                expected_reason_code: Some("repl.handshake_state_machine_mismatch"),
-            },
-            HandshakeVector {
-                name: "reject_psync_reply_before_psync_sent",
-                auth_required: false,
-                steps: &[HandshakeStep::Ping, HandshakeStep::Replconf],
-                accept_psync_reply: true,
-                expected_state: HandshakeState::ReplconfSeen,
-                expected_reason_code: Some("repl.fullresync_reply_parse_violation"),
-            },
-        ];
+    #[test]
+    fn fr_p2c_006_f_handshake_fixture_runs_are_deterministic() {
+        let cfg = HarnessConfig::default_paths();
+        let first =
+            run_replication_handshake_fixture(&cfg, "fr_p2c_006_replication_handshake.json")
+                .expect("first packet-006 handshake fixture run");
+        let second =
+            run_replication_handshake_fixture(&cfg, "fr_p2c_006_replication_handshake.json")
+                .expect("second packet-006 handshake fixture run");
 
-        for vector in vectors {
-            let mut fsm = HandshakeFsm::new(vector.auth_required);
-            let mut observed_reason_code = None;
-
-            for step in vector.steps {
-                if let Err(err) = fsm.on_step(*step) {
-                    observed_reason_code = Some(err.reason_code());
-                    break;
-                }
-            }
-
-            if observed_reason_code.is_none()
-                && vector.accept_psync_reply
-                && let Err(err) = fsm.on_psync_accepted()
-            {
-                observed_reason_code = Some(err.reason_code());
-            }
-
-            assert_eq!(
-                observed_reason_code, vector.expected_reason_code,
-                "vector={} reason code mismatch",
-                vector.name
-            );
-            assert_eq!(
-                fsm.state(),
-                vector.expected_state,
-                "vector={} state mismatch",
-                vector.name
-            );
-        }
+        assert_eq!(first.total, second.total);
+        assert_eq!(first.passed, second.passed);
+        assert_eq!(first.reason_code_counts, second.reason_code_counts);
+        assert_eq!(
+            first.failed_without_reason_code,
+            second.failed_without_reason_code
+        );
+        assert_eq!(first.failed, second.failed);
     }
 
     #[test]
@@ -4703,6 +4913,22 @@ mod tests {
         assert_eq!(
             crate::packet_family_for_fixture("fr_p2c_009_tls_config_journey.json"),
             "FR-P2C-009"
+        );
+    }
+
+    #[test]
+    fn fr_p2c_006_fixture_packet_family_maps_to_packet_006() {
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_006_replication_journey.json"),
+            "FR-P2C-006"
+        );
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_006_replication_handshake.json"),
+            "FR-P2C-006"
+        );
+        assert_eq!(
+            crate::packet_family_for_fixture("fr_p2c_006_handshake_contract"),
+            "FR-P2C-006"
         );
     }
 

@@ -2,7 +2,8 @@
 
 use fr_protocol::RespFrame;
 use fr_store::{
-    PttlValue, Store, StoreError, StreamGroupReadCursor, StreamGroupReadOptions, StreamId,
+    PttlValue, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
+    StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,6 +136,9 @@ pub fn dispatch_argv(
         Some(CommandId::Xtrim) => return xtrim(argv, store, now_ms),
         Some(CommandId::Xread) => return xread(argv, store, now_ms),
         Some(CommandId::Xreadgroup) => return xreadgroup(argv, store, now_ms),
+        Some(CommandId::Xclaim) => return xclaim(argv, store, now_ms),
+        Some(CommandId::Xautoclaim) => return xautoclaim(argv, store, now_ms),
+        Some(CommandId::Xpending) => return xpending(argv, store, now_ms),
         Some(CommandId::Xinfo) => return xinfo(argv, store, now_ms),
         Some(CommandId::Xgroup) => return xgroup(argv, store, now_ms),
         Some(CommandId::Xrange) => return xrange(argv, store, now_ms),
@@ -300,6 +304,9 @@ enum CommandId {
     Xtrim,
     Xread,
     Xreadgroup,
+    Xclaim,
+    Xautoclaim,
+    Xpending,
     Xinfo,
     Xgroup,
     Xrange,
@@ -555,6 +562,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Xgroup)
             } else if eq_ascii_command(cmd, b"XRANGE") {
                 Some(CommandId::Xrange)
+            } else if eq_ascii_command(cmd, b"XCLAIM") {
+                Some(CommandId::Xclaim)
             } else if eq_ascii_command(cmd, b"ZCOUNT") {
                 Some(CommandId::Zcount)
             } else if eq_ascii_command(cmd, b"PSETEX") {
@@ -653,6 +662,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Setrange)
             } else if eq_ascii_command(cmd, b"BITCOUNT") {
                 Some(CommandId::Bitcount)
+            } else if eq_ascii_command(cmd, b"XPENDING") {
+                Some(CommandId::Xpending)
             } else {
                 None
             }
@@ -685,6 +696,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Sdiffstore)
             } else if eq_ascii_command(cmd, b"SMISMEMBER") {
                 Some(CommandId::Smismember)
+            } else if eq_ascii_command(cmd, b"XAUTOCLAIM") {
+                Some(CommandId::Xautoclaim)
             } else if eq_ascii_command(cmd, b"XREADGROUP") {
                 Some(CommandId::Xreadgroup)
             } else {
@@ -2392,6 +2405,317 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     }
 }
 
+fn xclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 6 {
+        return Err(CommandError::WrongArity("XCLAIM"));
+    }
+
+    let min_idle_raw = parse_i64_arg(&argv[4])?;
+    if min_idle_raw < 0 {
+        return Err(CommandError::InvalidInteger);
+    }
+    let min_idle_time_ms = u64::try_from(min_idle_raw).unwrap_or(u64::MAX);
+
+    let mut ids = Vec::new();
+    let mut idx = 5usize;
+    while idx < argv.len() {
+        let arg = &argv[idx];
+        if eq_ascii_command(arg, b"IDLE")
+            || eq_ascii_command(arg, b"TIME")
+            || eq_ascii_command(arg, b"RETRYCOUNT")
+            || eq_ascii_command(arg, b"FORCE")
+            || eq_ascii_command(arg, b"JUSTID")
+            || eq_ascii_command(arg, b"LASTID")
+        {
+            break;
+        }
+        let id = match parse_stream_id(arg) {
+            Ok(id) => id,
+            Err(reply) => return Ok(reply),
+        };
+        ids.push(id);
+        idx += 1;
+    }
+    if ids.is_empty() {
+        return Err(CommandError::WrongArity("XCLAIM"));
+    }
+
+    let mut idle_ms: Option<u64> = None;
+    let mut time_ms: Option<u64> = None;
+    let mut retry_count: Option<u64> = None;
+    let mut force = false;
+    let mut justid = false;
+    let mut last_id: Option<StreamId> = None;
+
+    while idx < argv.len() {
+        if eq_ascii_command(&argv[idx], b"IDLE") {
+            if idx + 1 >= argv.len() {
+                return Err(CommandError::WrongArity("XCLAIM"));
+            }
+            let parsed = parse_i64_arg(&argv[idx + 1])?;
+            if parsed < 0 {
+                return Err(CommandError::InvalidInteger);
+            }
+            idle_ms = Some(u64::try_from(parsed).unwrap_or(u64::MAX));
+            idx += 2;
+            continue;
+        }
+        if eq_ascii_command(&argv[idx], b"TIME") {
+            if idx + 1 >= argv.len() {
+                return Err(CommandError::WrongArity("XCLAIM"));
+            }
+            let parsed = parse_i64_arg(&argv[idx + 1])?;
+            if parsed < 0 {
+                return Err(CommandError::InvalidInteger);
+            }
+            time_ms = Some(u64::try_from(parsed).unwrap_or(u64::MAX));
+            idx += 2;
+            continue;
+        }
+        if eq_ascii_command(&argv[idx], b"RETRYCOUNT") {
+            if idx + 1 >= argv.len() {
+                return Err(CommandError::WrongArity("XCLAIM"));
+            }
+            let parsed = parse_i64_arg(&argv[idx + 1])?;
+            if parsed < 0 {
+                return Err(CommandError::InvalidInteger);
+            }
+            retry_count = Some(u64::try_from(parsed).unwrap_or(u64::MAX));
+            idx += 2;
+            continue;
+        }
+        if eq_ascii_command(&argv[idx], b"FORCE") {
+            force = true;
+            idx += 1;
+            continue;
+        }
+        if eq_ascii_command(&argv[idx], b"JUSTID") {
+            justid = true;
+            idx += 1;
+            continue;
+        }
+        if eq_ascii_command(&argv[idx], b"LASTID") {
+            if idx + 1 >= argv.len() {
+                return Err(CommandError::WrongArity("XCLAIM"));
+            }
+            let parsed = match parse_stream_id(&argv[idx + 1]) {
+                Ok(id) => id,
+                Err(reply) => return Ok(reply),
+            };
+            last_id = Some(parsed);
+            idx += 2;
+            continue;
+        }
+        return Err(CommandError::SyntaxError);
+    }
+
+    if idle_ms.is_some() && time_ms.is_some() {
+        return Err(CommandError::SyntaxError);
+    }
+
+    let Some(reply) = store.xclaim(
+        &argv[1],
+        &argv[2],
+        &argv[3],
+        &ids,
+        StreamClaimOptions {
+            min_idle_time_ms,
+            idle_ms,
+            time_ms,
+            retry_count,
+            force,
+            justid,
+            last_id,
+        },
+        now_ms,
+    )?
+    else {
+        return Ok(xclaim_nogroup_error(&argv[1], &argv[2]));
+    };
+
+    match reply {
+        StreamClaimReply::Entries(entries) => Ok(RespFrame::Array(Some(
+            entries
+                .into_iter()
+                .map(|(id, fields)| stream_record_to_frame(id, fields))
+                .collect(),
+        ))),
+        StreamClaimReply::Ids(ids) => Ok(RespFrame::Array(Some(
+            ids.into_iter()
+                .map(|id| RespFrame::BulkString(Some(format_stream_id(id))))
+                .collect(),
+        ))),
+    }
+}
+
+fn xautoclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 6 {
+        return Err(CommandError::WrongArity("XAUTOCLAIM"));
+    }
+
+    let min_idle_raw = parse_i64_arg(&argv[4])?;
+    if min_idle_raw < 0 {
+        return Err(CommandError::InvalidInteger);
+    }
+    let min_idle_time_ms = u64::try_from(min_idle_raw).unwrap_or(u64::MAX);
+
+    let start = match parse_stream_id(&argv[5]) {
+        Ok(id) => id,
+        Err(reply) => return Ok(reply),
+    };
+
+    let mut count = 100usize;
+    let mut justid = false;
+    let mut idx = 6usize;
+    while idx < argv.len() {
+        if eq_ascii_command(&argv[idx], b"COUNT") {
+            if idx + 1 >= argv.len() {
+                return Err(CommandError::WrongArity("XAUTOCLAIM"));
+            }
+            let parsed = parse_i64_arg(&argv[idx + 1])?;
+            if parsed <= 0 {
+                return Err(CommandError::InvalidInteger);
+            }
+            count = usize::try_from(parsed).unwrap_or(usize::MAX);
+            idx += 2;
+            continue;
+        }
+        if eq_ascii_command(&argv[idx], b"JUSTID") {
+            justid = true;
+            idx += 1;
+            continue;
+        }
+        return Err(CommandError::SyntaxError);
+    }
+
+    let Some(reply) = store.xautoclaim(
+        &argv[1],
+        &argv[2],
+        &argv[3],
+        start,
+        StreamAutoClaimOptions {
+            min_idle_time_ms,
+            count,
+            justid,
+        },
+        now_ms,
+    )?
+    else {
+        return Ok(xautoclaim_nogroup_error(&argv[1], &argv[2]));
+    };
+
+    match reply {
+        StreamAutoClaimReply::Entries {
+            next_start,
+            entries,
+            deleted_ids,
+        } => {
+            let mut entry_frames = Vec::with_capacity(entries.len());
+            for (id, fields) in entries {
+                entry_frames.push(stream_record_to_frame(id, fields));
+            }
+            let deleted_frames = deleted_ids
+                .into_iter()
+                .map(|id| RespFrame::BulkString(Some(format_stream_id(id))))
+                .collect();
+            Ok(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(format_stream_id(next_start))),
+                RespFrame::Array(Some(entry_frames)),
+                RespFrame::Array(Some(deleted_frames)),
+            ])))
+        }
+        StreamAutoClaimReply::Ids {
+            next_start,
+            ids,
+            deleted_ids,
+        } => {
+            let id_frames = ids
+                .into_iter()
+                .map(|id| RespFrame::BulkString(Some(format_stream_id(id))))
+                .collect();
+            let deleted_frames = deleted_ids
+                .into_iter()
+                .map(|id| RespFrame::BulkString(Some(format_stream_id(id))))
+                .collect();
+            Ok(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(format_stream_id(next_start))),
+                RespFrame::Array(Some(id_frames)),
+                RespFrame::Array(Some(deleted_frames)),
+            ])))
+        }
+    }
+}
+
+fn xpending(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() == 3 {
+        let Some((total, min_id, max_id, per_consumer)) =
+            store.xpending_summary(&argv[1], &argv[2], now_ms)?
+        else {
+            return Ok(xpending_nogroup_error(&argv[1], &argv[2]));
+        };
+
+        let mut consumer_frames = Vec::with_capacity(per_consumer.len());
+        for (consumer, pending_count) in per_consumer {
+            consumer_frames.push(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(consumer)),
+                RespFrame::Integer(i64::try_from(pending_count).unwrap_or(i64::MAX)),
+            ])));
+        }
+
+        return Ok(RespFrame::Array(Some(vec![
+            RespFrame::Integer(i64::try_from(total).unwrap_or(i64::MAX)),
+            min_id
+                .map(|id| RespFrame::BulkString(Some(format_stream_id(id))))
+                .unwrap_or(RespFrame::BulkString(None)),
+            max_id
+                .map(|id| RespFrame::BulkString(Some(format_stream_id(id))))
+                .unwrap_or(RespFrame::BulkString(None)),
+            RespFrame::Array(Some(consumer_frames)),
+        ])));
+    }
+
+    if argv.len() != 6 && argv.len() != 7 {
+        return Err(CommandError::WrongArity("XPENDING"));
+    }
+
+    let start = match parse_stream_range_bound(&argv[3], true) {
+        Ok(id) => id,
+        Err(reply) => return Ok(reply),
+    };
+    let end = match parse_stream_range_bound(&argv[4], false) {
+        Ok(id) => id,
+        Err(reply) => return Ok(reply),
+    };
+
+    let count_raw = parse_i64_arg(&argv[5])?;
+    if count_raw < 0 {
+        return Err(CommandError::InvalidInteger);
+    }
+    let count = usize::try_from(count_raw).unwrap_or(usize::MAX);
+    let consumer = if argv.len() == 7 {
+        Some(argv[6].as_slice())
+    } else {
+        None
+    };
+
+    let Some(entries) =
+        store.xpending_entries(&argv[1], &argv[2], (start, end), count, consumer, now_ms)?
+    else {
+        return Ok(xpending_nogroup_error(&argv[1], &argv[2]));
+    };
+
+    let mut out = Vec::with_capacity(entries.len());
+    for (id, owner, idle_ms, deliveries) in entries {
+        out.push(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(format_stream_id(id))),
+            RespFrame::BulkString(Some(owner)),
+            RespFrame::Integer(i64::try_from(idle_ms).unwrap_or(i64::MAX)),
+            RespFrame::Integer(i64::try_from(deliveries).unwrap_or(i64::MAX)),
+        ])));
+    }
+    Ok(RespFrame::Array(Some(out)))
+}
+
 fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("XGROUP"));
@@ -2510,6 +2834,30 @@ fn xgroup_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
         "NOGROUP No such key '{key}' or consumer group '{group}' in XGROUP command"
+    ))
+}
+
+fn xclaim_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
+    let key = String::from_utf8_lossy(key);
+    let group = String::from_utf8_lossy(group);
+    RespFrame::Error(format!(
+        "NOGROUP No such key '{key}' or consumer group '{group}' in XCLAIM command"
+    ))
+}
+
+fn xautoclaim_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
+    let key = String::from_utf8_lossy(key);
+    let group = String::from_utf8_lossy(group);
+    RespFrame::Error(format!(
+        "NOGROUP No such key '{key}' or consumer group '{group}' in XAUTOCLAIM command"
+    ))
+}
+
+fn xpending_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
+    let key = String::from_utf8_lossy(key);
+    let group = String::from_utf8_lossy(group);
+    RespFrame::Error(format!(
+        "NOGROUP No such key '{key}' or consumer group '{group}' in XPENDING command"
     ))
 }
 
@@ -4317,6 +4665,15 @@ mod tests {
         if eq_ascii_command(cmd, b"XREADGROUP") {
             return Some(CommandId::Xreadgroup);
         }
+        if eq_ascii_command(cmd, b"XCLAIM") {
+            return Some(CommandId::Xclaim);
+        }
+        if eq_ascii_command(cmd, b"XAUTOCLAIM") {
+            return Some(CommandId::Xautoclaim);
+        }
+        if eq_ascii_command(cmd, b"XPENDING") {
+            return Some(CommandId::Xpending);
+        }
         if eq_ascii_command(cmd, b"XINFO") {
             return Some(CommandId::Xinfo);
         }
@@ -4575,6 +4932,12 @@ mod tests {
             b"xread",
             b"XREADGROUP",
             b"xreadgroup",
+            b"XCLAIM",
+            b"xclaim",
+            b"XAUTOCLAIM",
+            b"xautoclaim",
+            b"XPENDING",
+            b"xpending",
             b"XINFO",
             b"xinfo",
             b"XGROUP",
@@ -9233,6 +9596,518 @@ mod tests {
                 RespFrame::BulkString(Some(b"lag".to_vec())),
                 RespFrame::BulkString(None),
             ]))]))
+        );
+    }
+
+    #[test]
+    fn xpending_reports_summary_and_detailed_pending_entries() {
+        let mut store = Store::new();
+        for (id, value) in [("1000-0", "v0"), ("1000-1", "v1"), ("1000-2", "v2")] {
+            dispatch_argv(
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    id.as_bytes().to_vec(),
+                    b"field".to_vec(),
+                    value.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("xadd");
+        }
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+
+        dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"COUNT".to_vec(),
+                b"2".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            10,
+        )
+        .expect("xreadgroup first");
+        dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            20,
+        )
+        .expect("xreadgroup replay");
+        dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c2".to_vec(),
+                b"COUNT".to_vec(),
+                b"1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            30,
+        )
+        .expect("xreadgroup second consumer");
+
+        let summary = dispatch_argv(
+            &[b"XPENDING".to_vec(), b"s".to_vec(), b"g1".to_vec()],
+            &mut store,
+            40,
+        )
+        .expect("xpending summary");
+        assert_eq!(
+            summary,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(3),
+                RespFrame::BulkString(Some(b"1000-0".to_vec())),
+                RespFrame::BulkString(Some(b"1000-2".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"c1".to_vec())),
+                        RespFrame::Integer(2),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"c2".to_vec())),
+                        RespFrame::Integer(1),
+                    ])),
+                ])),
+            ]))
+        );
+
+        let detail = dispatch_argv(
+            &[
+                b"XPENDING".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"-".to_vec(),
+                b"+".to_vec(),
+                b"10".to_vec(),
+            ],
+            &mut store,
+            40,
+        )
+        .expect("xpending detail");
+        assert_eq!(
+            detail,
+            RespFrame::Array(Some(vec![
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"1000-0".to_vec())),
+                    RespFrame::BulkString(Some(b"c1".to_vec())),
+                    RespFrame::Integer(20),
+                    RespFrame::Integer(2),
+                ])),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"1000-1".to_vec())),
+                    RespFrame::BulkString(Some(b"c1".to_vec())),
+                    RespFrame::Integer(20),
+                    RespFrame::Integer(2),
+                ])),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"1000-2".to_vec())),
+                    RespFrame::BulkString(Some(b"c2".to_vec())),
+                    RespFrame::Integer(10),
+                    RespFrame::Integer(1),
+                ])),
+            ]))
+        );
+
+        let filtered = dispatch_argv(
+            &[
+                b"XPENDING".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"-".to_vec(),
+                b"+".to_vec(),
+                b"10".to_vec(),
+                b"c1".to_vec(),
+            ],
+            &mut store,
+            40,
+        )
+        .expect("xpending filtered");
+        assert_eq!(
+            filtered,
+            RespFrame::Array(Some(vec![
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"1000-0".to_vec())),
+                    RespFrame::BulkString(Some(b"c1".to_vec())),
+                    RespFrame::Integer(20),
+                    RespFrame::Integer(2),
+                ])),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"1000-1".to_vec())),
+                    RespFrame::BulkString(Some(b"c1".to_vec())),
+                    RespFrame::Integer(20),
+                    RespFrame::Integer(2),
+                ])),
+            ]))
+        );
+    }
+
+    #[test]
+    fn xpending_validation_and_nogroup_behavior() {
+        let mut store = Store::new();
+        let arity = dispatch_argv(&[b"XPENDING".to_vec(), b"s".to_vec()], &mut store, 0)
+            .expect_err("xpending arity");
+        assert!(matches!(arity, CommandError::WrongArity("XPENDING")));
+
+        let invalid_count = dispatch_argv(
+            &[
+                b"XPENDING".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"-".to_vec(),
+                b"+".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("xpending invalid count");
+        assert_eq!(invalid_count, CommandError::InvalidInteger);
+
+        let missing = dispatch_argv(
+            &[b"XPENDING".to_vec(), b"s".to_vec(), b"g1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xpending missing group");
+        assert_eq!(
+            missing,
+            RespFrame::Error(
+                "NOGROUP No such key 's' or consumer group 'g1' in XPENDING command".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn xclaim_transfers_pending_entries_and_supports_justid() {
+        let mut store = Store::new();
+        for (id, value) in [("1000-0", "v0"), ("1000-1", "v1")] {
+            dispatch_argv(
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    id.as_bytes().to_vec(),
+                    b"field".to_vec(),
+                    value.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("xadd");
+        }
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+        dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            10,
+        )
+        .expect("seed pending");
+
+        let claimed = dispatch_argv(
+            &[
+                b"XCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c2".to_vec(),
+                b"5".to_vec(),
+                b"1000-0".to_vec(),
+            ],
+            &mut store,
+            30,
+        )
+        .expect("xclaim");
+        assert_eq!(
+            claimed,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"1000-0".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"field".to_vec())),
+                    RespFrame::BulkString(Some(b"v0".to_vec())),
+                ])),
+            ]))]))
+        );
+
+        let summary = dispatch_argv(
+            &[b"XPENDING".to_vec(), b"s".to_vec(), b"g1".to_vec()],
+            &mut store,
+            30,
+        )
+        .expect("xpending summary");
+        assert_eq!(
+            summary,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(2),
+                RespFrame::BulkString(Some(b"1000-0".to_vec())),
+                RespFrame::BulkString(Some(b"1000-1".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"c1".to_vec())),
+                        RespFrame::Integer(1),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"c2".to_vec())),
+                        RespFrame::Integer(1),
+                    ])),
+                ])),
+            ]))
+        );
+
+        let justid = dispatch_argv(
+            &[
+                b"XCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c2".to_vec(),
+                b"5".to_vec(),
+                b"1000-1".to_vec(),
+                b"JUSTID".to_vec(),
+            ],
+            &mut store,
+            40,
+        )
+        .expect("xclaim justid");
+        assert_eq!(
+            justid,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"1000-1".to_vec()))]))
+        );
+    }
+
+    #[test]
+    fn xautoclaim_claims_by_cursor_and_returns_next_start() {
+        let mut store = Store::new();
+        for (id, value) in [("1000-0", "v0"), ("1000-1", "v1"), ("1000-2", "v2")] {
+            dispatch_argv(
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    id.as_bytes().to_vec(),
+                    b"field".to_vec(),
+                    value.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("xadd");
+        }
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+        dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            10,
+        )
+        .expect("seed pending");
+
+        let first = dispatch_argv(
+            &[
+                b"XAUTOCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c2".to_vec(),
+                b"5".to_vec(),
+                b"0-0".to_vec(),
+                b"COUNT".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            30,
+        )
+        .expect("xautoclaim first");
+        assert_eq!(
+            first,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"1000-2".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"1000-0".to_vec())),
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(b"field".to_vec())),
+                            RespFrame::BulkString(Some(b"v0".to_vec())),
+                        ])),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"1000-1".to_vec())),
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(b"field".to_vec())),
+                            RespFrame::BulkString(Some(b"v1".to_vec())),
+                        ])),
+                    ])),
+                ])),
+                RespFrame::Array(Some(vec![])),
+            ]))
+        );
+
+        let second = dispatch_argv(
+            &[
+                b"XAUTOCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c3".to_vec(),
+                b"0".to_vec(),
+                b"1000-2".to_vec(),
+                b"COUNT".to_vec(),
+                b"5".to_vec(),
+                b"JUSTID".to_vec(),
+            ],
+            &mut store,
+            31,
+        )
+        .expect("xautoclaim second");
+        assert_eq!(
+            second,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"0-0".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"1000-2".to_vec()))])),
+                RespFrame::Array(Some(vec![])),
+            ]))
+        );
+    }
+
+    #[test]
+    fn xclaim_and_xautoclaim_validation_and_nogroup_errors() {
+        let mut store = Store::new();
+        let xclaim_arity = dispatch_argv(
+            &[
+                b"XCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("xclaim arity");
+        assert!(matches!(xclaim_arity, CommandError::WrongArity("XCLAIM")));
+
+        let xautoclaim_arity =
+            dispatch_argv(&[b"XAUTOCLAIM".to_vec(), b"s".to_vec()], &mut store, 0)
+                .expect_err("xautoclaim arity");
+        assert!(matches!(
+            xautoclaim_arity,
+            CommandError::WrongArity("XAUTOCLAIM")
+        ));
+
+        let invalid_count = dispatch_argv(
+            &[
+                b"XAUTOCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"0".to_vec(),
+                b"0-0".to_vec(),
+                b"COUNT".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("xautoclaim invalid count");
+        assert_eq!(invalid_count, CommandError::InvalidInteger);
+
+        let xclaim_missing = dispatch_argv(
+            &[
+                b"XCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"0".to_vec(),
+                b"1-0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xclaim nogroup");
+        assert_eq!(
+            xclaim_missing,
+            RespFrame::Error(
+                "NOGROUP No such key 's' or consumer group 'g1' in XCLAIM command".to_string()
+            )
+        );
+
+        let xautoclaim_missing = dispatch_argv(
+            &[
+                b"XAUTOCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"0".to_vec(),
+                b"0-0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xautoclaim nogroup");
+        assert_eq!(
+            xautoclaim_missing,
+            RespFrame::Error(
+                "NOGROUP No such key 's' or consumer group 'g1' in XAUTOCLAIM command".to_string()
+            )
         );
     }
 

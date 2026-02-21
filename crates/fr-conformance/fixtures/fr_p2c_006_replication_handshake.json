@@ -1,0 +1,74 @@
+{
+  "suite": "fr_p2c_006_replication_handshake",
+  "cases": [
+    {
+      "name": "happy_path_no_auth",
+      "now_ms": 600,
+      "auth_required": false,
+      "steps": ["ping", "replconf", "psync"],
+      "accept_psync_reply": true,
+      "expect_state": "online"
+    },
+    {
+      "name": "happy_path_auth_required",
+      "now_ms": 601,
+      "auth_required": true,
+      "steps": ["ping", "auth", "replconf", "psync"],
+      "accept_psync_reply": true,
+      "expect_state": "online"
+    },
+    {
+      "name": "reject_replconf_before_ping",
+      "now_ms": 602,
+      "auth_required": false,
+      "steps": ["replconf"],
+      "accept_psync_reply": false,
+      "expect_state": "init",
+      "expect_reason_code": "repl.handshake_state_machine_mismatch"
+    },
+    {
+      "name": "reject_psync_without_replconf",
+      "now_ms": 603,
+      "auth_required": false,
+      "steps": ["ping", "psync"],
+      "accept_psync_reply": false,
+      "expect_state": "ping_seen",
+      "expect_reason_code": "repl.handshake_state_machine_mismatch"
+    },
+    {
+      "name": "reject_psync_reply_before_psync_sent",
+      "now_ms": 604,
+      "auth_required": false,
+      "steps": ["ping", "replconf"],
+      "accept_psync_reply": true,
+      "expect_state": "replconf_seen",
+      "expect_reason_code": "repl.fullresync_reply_parse_violation"
+    },
+    {
+      "name": "reject_auth_step_when_auth_not_required",
+      "now_ms": 605,
+      "auth_required": false,
+      "steps": ["ping", "auth"],
+      "accept_psync_reply": false,
+      "expect_state": "ping_seen",
+      "expect_reason_code": "repl.handshake_state_machine_mismatch"
+    },
+    {
+      "name": "reject_replconf_before_auth_when_auth_required",
+      "now_ms": 606,
+      "auth_required": true,
+      "steps": ["ping", "replconf"],
+      "accept_psync_reply": false,
+      "expect_state": "ping_seen",
+      "expect_reason_code": "repl.handshake_state_machine_mismatch"
+    },
+    {
+      "name": "allow_multiple_replconf_before_psync",
+      "now_ms": 607,
+      "auth_required": false,
+      "steps": ["ping", "replconf", "replconf", "psync"],
+      "accept_psync_reply": true,
+      "expect_state": "online"
+    }
+  ]
+}
