@@ -1525,8 +1525,12 @@ fn sismember(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 
 fn parse_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
     let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    text.parse::<f64>()
-        .map_err(|_| CommandError::InvalidInteger)
+    let val = text.parse::<f64>()
+        .map_err(|_| CommandError::Store(StoreError::ValueNotFloat))?;
+    if val.is_nan() {
+        return Err(CommandError::Store(StoreError::ValueNotFloat));
+    }
+    Ok(val)
 }
 
 const GEO_STEP_MAX: u8 = 26;
@@ -3879,6 +3883,9 @@ fn getex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                 .map_err(|_| CommandError::InvalidInteger)?;
             Some(Some(ts_ms))
         } else if opt.eq_ignore_ascii_case("PERSIST") {
+            if argv.len() != 3 {
+                return Err(CommandError::SyntaxError);
+            }
             Some(None)
         } else {
             return Err(CommandError::SyntaxError);
@@ -3927,7 +3934,7 @@ fn bitop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     Ok(RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)))
 }
 
-fn parse_zstore_args(argv: &[Vec<u8>], start: usize) -> (Vec<f64>, Vec<u8>) {
+fn parse_zstore_args(argv: &[Vec<u8>], start: usize, numkeys: usize) -> Result<(Vec<f64>, Vec<u8>), CommandError> {
     let mut weights: Vec<f64> = Vec::new();
     let mut aggregate: Vec<u8> = b"SUM".to_vec();
     let mut i = start;
@@ -3935,29 +3942,30 @@ fn parse_zstore_args(argv: &[Vec<u8>], start: usize) -> (Vec<f64>, Vec<u8>) {
         let kw = std::str::from_utf8(&argv[i]).unwrap_or("");
         if kw.eq_ignore_ascii_case("WEIGHTS") {
             i += 1;
-            while i < argv.len() {
-                if let Ok(w) = std::str::from_utf8(&argv[i])
-                    .ok()
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .ok_or(())
-                {
-                    weights.push(w);
-                    i += 1;
-                } else {
-                    break;
-                }
+            if i + numkeys > argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            for _ in 0..numkeys {
+                let w = std::str::from_utf8(&argv[i])
+                    .map_err(|_| CommandError::InvalidInteger)?
+                    .parse::<f64>()
+                    .map_err(|_| CommandError::InvalidInteger)?;
+                weights.push(w);
+                i += 1;
             }
         } else if kw.eq_ignore_ascii_case("AGGREGATE") {
             i += 1;
             if i < argv.len() {
                 aggregate = argv[i].clone();
                 i += 1;
+            } else {
+                return Err(CommandError::SyntaxError);
             }
         } else {
-            i += 1;
+            return Err(CommandError::SyntaxError);
         }
     }
-    (weights, aggregate)
+    Ok((weights, aggregate))
 }
 
 fn zunionstore(
@@ -3982,7 +3990,7 @@ fn zunionstore(
         return Err(CommandError::SyntaxError);
     }
     let keys: Vec<&[u8]> = argv[3..3 + numkeys].iter().map(|v| v.as_slice()).collect();
-    let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys);
+    let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys, numkeys)?;
     let count = store
         .zunionstore(dest, &keys, &weights, &aggregate, now_ms)
         .map_err(CommandError::Store)?;
@@ -4011,7 +4019,7 @@ fn zinterstore(
         return Err(CommandError::SyntaxError);
     }
     let keys: Vec<&[u8]> = argv[3..3 + numkeys].iter().map(|v| v.as_slice()).collect();
-    let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys);
+    let (weights, aggregate) = parse_zstore_args(argv, 3 + numkeys, numkeys)?;
     let count = store
         .zinterstore(dest, &keys, &weights, &aggregate, now_ms)
         .map_err(CommandError::Store)?;
