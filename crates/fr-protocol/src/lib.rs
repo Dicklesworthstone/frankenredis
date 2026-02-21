@@ -157,7 +157,7 @@ fn parse_bulk(input: &[u8], start: usize) -> Result<(RespFrame, usize), RespPars
         return Err(RespParseError::Incomplete);
     }
     if input[consumed + data_len] != b'\r' || input[consumed + data_len + 1] != b'\n' {
-        return Err(RespParseError::Incomplete);
+        return Err(RespParseError::InvalidBulkLength);
     }
     let bytes = input[consumed..consumed + data_len].to_vec();
     Ok((RespFrame::BulkString(Some(bytes)), end))
@@ -179,7 +179,7 @@ fn parse_array(input: &[u8], start: usize) -> Result<(RespFrame, usize), RespPar
         return Err(RespParseError::InvalidMultibulkLength);
     }
     let count = usize::try_from(len).map_err(|_| RespParseError::InvalidMultibulkLength)?;
-    let mut items = Vec::with_capacity(count);
+    let mut items = Vec::with_capacity(count.min(1024));
     for _ in 0..count {
         let (item, consumed) = parse_frame_internal(input, cursor)?;
         items.push(item);

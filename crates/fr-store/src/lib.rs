@@ -97,6 +97,7 @@ pub enum StoreError {
     KeyNotFound,
     WrongType,
     InvalidHllValue,
+    IndexOutOfRange,
 }
 
 /// The inner value held by a key in the store.
@@ -318,6 +319,7 @@ impl Store {
         }
         if milliseconds <= 0 {
             self.entries.remove(key);
+            self.stream_groups.remove(key);
             return true;
         }
 
@@ -337,6 +339,7 @@ impl Store {
 
         if i128::from(when_ms) <= i128::from(now_ms) {
             self.entries.remove(key);
+            self.stream_groups.remove(key);
             return true;
         }
 
@@ -356,6 +359,7 @@ impl Store {
         let decision = evaluate_expiry(now_ms, entry.expires_at_ms);
         if decision.should_evict {
             self.entries.remove(key);
+            self.stream_groups.remove(key);
             return PttlValue::KeyMissing;
         }
         if decision.remaining_ms == -1 {
@@ -509,6 +513,7 @@ impl Store {
         let Some(entry) = self.entries.remove(key) else {
             return Ok(None);
         };
+        self.stream_groups.remove(key);
         match entry.value {
             Value::String(v) => Ok(Some(v)),
             _ => Err(StoreError::WrongType),
@@ -917,6 +922,7 @@ impl Store {
                     break;
                 };
                 if self.entries.remove(candidate.as_slice()).is_some() {
+                    self.stream_groups.remove(candidate.as_slice());
                     evicted_keys = evicted_keys.saturating_add(1);
                 }
             }
@@ -999,6 +1005,7 @@ impl Store {
             .should_evict;
             if should_evict {
                 self.entries.remove(key.as_slice());
+                self.stream_groups.remove(key.as_slice());
                 evicted_keys = evicted_keys.saturating_add(1);
             }
         }
@@ -1087,6 +1094,7 @@ impl Store {
                     }
                     if m.is_empty() {
                         self.entries.remove(key);
+                        self.stream_groups.remove(key);
                     }
                     Ok(removed)
                 }
@@ -1403,6 +1411,7 @@ impl Store {
                     let val = l.pop_front();
                     if l.is_empty() {
                         self.entries.remove(key);
+                        self.stream_groups.remove(key);
                     }
                     Ok(val)
                 }
@@ -1420,6 +1429,7 @@ impl Store {
                     let val = l.pop_back();
                     if l.is_empty() {
                         self.entries.remove(key);
+                        self.stream_groups.remove(key);
                     }
                     Ok(val)
                 }
@@ -1477,6 +1487,9 @@ impl Store {
             Some(entry) => match &entry.value {
                 Value::List(l) => {
                     let len = l.len() as i64;
+                    if index < -len || index >= len {
+                        return Ok(None);
+                    }
                     let idx = normalize_index(index, len);
                     Ok(l.get(idx).cloned())
                 }
@@ -1498,10 +1511,10 @@ impl Store {
             Some(entry) => match &mut entry.value {
                 Value::List(l) => {
                     let len = l.len() as i64;
-                    let idx = normalize_index(index, len);
-                    if idx >= l.len() {
-                        return Err(StoreError::KeyNotFound);
+                    if index < -len || index >= len {
+                        return Err(StoreError::IndexOutOfRange);
                     }
+                    let idx = normalize_index(index, len);
                     l[idx] = value;
                     Ok(())
                 }
@@ -1613,6 +1626,10 @@ impl Store {
                         l.retain(|v| v.as_slice() != value);
                         removed = (old_len - l.len()) as u64;
                     }
+                    if l.is_empty() {
+                        self.entries.remove(key);
+                        self.stream_groups.remove(key);
+                    }
                     Ok(removed)
                 }
                 _ => Err(StoreError::WrongType),
@@ -1629,6 +1646,22 @@ impl Store {
     ) -> Result<Option<Vec<u8>>, StoreError> {
         self.drop_if_expired(source, now_ms);
         self.drop_if_expired(destination, now_ms);
+
+        match self.entries.get(source) {
+            Some(entry) => {
+                if !matches!(&entry.value, Value::List(_)) {
+                    return Err(StoreError::WrongType);
+                }
+            }
+            None => return Ok(None),
+        }
+        if source != destination
+            && let Some(entry) = self.entries.get(destination)
+            && !matches!(&entry.value, Value::List(_))
+        {
+            return Err(StoreError::WrongType);
+        }
+
         // Pop from source
         let popped = match self.entries.get_mut(source) {
             Some(entry) => match &mut entry.value {
@@ -1640,6 +1673,23 @@ impl Store {
         let Some(val) = popped else {
             return Ok(None);
         };
+
+        let mut source_ttl = None;
+        if source == destination {
+            if let Some(entry) = self.entries.get(source) {
+                source_ttl = entry.expires_at_ms;
+            }
+        }
+        
+        // Clean up empty source.
+        if let Some(entry) = self.entries.get(source)
+            && let Value::List(l) = &entry.value
+            && l.is_empty()
+        {
+            self.entries.remove(source);
+            self.stream_groups.remove(source);
+        }
+        
         // Push to destination
         match self.entries.get_mut(destination) {
             Some(entry) => match &mut entry.value {
@@ -1653,7 +1703,7 @@ impl Store {
                     destination.to_vec(),
                     Entry {
                         value: Value::List(l),
-                        expires_at_ms: None,
+                        expires_at_ms: source_ttl,
                     },
                 );
             }
@@ -1685,6 +1735,7 @@ impl Store {
                     }
                     if l.is_empty() {
                         self.entries.remove(key);
+                        self.stream_groups.remove(key);
                     }
                     Ok(())
                 }
@@ -1779,12 +1830,21 @@ impl Store {
         let Some(val) = popped else {
             return Ok(None);
         };
+
+        let mut source_ttl = None;
+        if source == destination {
+            if let Some(entry) = self.entries.get(source) {
+                source_ttl = entry.expires_at_ms;
+            }
+        }
+
         // Clean up empty source.
         if let Some(entry) = self.entries.get(source)
             && let Value::List(l) = &entry.value
             && l.is_empty()
         {
             self.entries.remove(source);
+            self.stream_groups.remove(source);
         }
         // Push to destination.
         match self.entries.get_mut(destination) {
@@ -1809,7 +1869,7 @@ impl Store {
                     destination.to_vec(),
                     Entry {
                         value: Value::List(l),
-                        expires_at_ms: None,
+                        expires_at_ms: source_ttl,
                     },
                 );
             }
@@ -1872,6 +1932,7 @@ impl Store {
                     }
                     if s.is_empty() {
                         self.entries.remove(key);
+                        self.stream_groups.remove(key);
                     }
                     Ok(removed)
                 }
@@ -1923,30 +1984,34 @@ impl Store {
         }
     }
 
-    /// Helper: get the set for a key, or an empty set if key doesn't exist.
-    fn get_set_or_empty(
-        &mut self,
-        key: &[u8],
-        now_ms: u64,
-    ) -> Result<HashSet<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::Set(s) => Ok(s.clone()),
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(HashSet::new()),
-        }
-    }
-
     pub fn sinter(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let mut result = self.get_set_or_empty(keys[0], now_ms)?;
+        for key in keys {
+            self.drop_if_expired(key, now_ms);
+        }
+        let mut result = match self.entries.get(keys[0]) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => s.clone(),
+                _ => return Err(StoreError::WrongType),
+            },
+            None => return Ok(Vec::new()),
+        };
         for key in &keys[1..] {
-            let other = self.get_set_or_empty(key, now_ms)?;
-            result.retain(|m| other.contains(m));
+            if result.is_empty() {
+                break;
+            }
+            match self.entries.get(*key) {
+                Some(entry) => match &entry.value {
+                    Value::Set(s) => result.retain(|m| s.contains(m)),
+                    _ => return Err(StoreError::WrongType),
+                },
+                None => {
+                    result.clear();
+                    break;
+                }
+            }
         }
         let mut v: Vec<Vec<u8>> = result.into_iter().collect();
         v.sort();
@@ -1954,10 +2019,17 @@ impl Store {
     }
 
     pub fn sunion(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
+        for key in keys {
+            self.drop_if_expired(key, now_ms);
+        }
         let mut result = HashSet::new();
         for key in keys {
-            let s = self.get_set_or_empty(key, now_ms)?;
-            result.extend(s);
+            if let Some(entry) = self.entries.get(*key) {
+                match &entry.value {
+                    Value::Set(s) => result.extend(s.iter().cloned()),
+                    _ => return Err(StoreError::WrongType),
+                }
+            }
         }
         let mut v: Vec<Vec<u8>> = result.into_iter().collect();
         v.sort();
@@ -1968,10 +2040,26 @@ impl Store {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-        let mut result = self.get_set_or_empty(keys[0], now_ms)?;
+        for key in keys {
+            self.drop_if_expired(key, now_ms);
+        }
+        let mut result = match self.entries.get(keys[0]) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => s.clone(),
+                _ => return Err(StoreError::WrongType),
+            },
+            None => return Ok(Vec::new()),
+        };
         for key in &keys[1..] {
-            let other = self.get_set_or_empty(key, now_ms)?;
-            result.retain(|m| !other.contains(m));
+            if result.is_empty() {
+                break;
+            }
+            if let Some(entry) = self.entries.get(*key) {
+                match &entry.value {
+                    Value::Set(s) => result.retain(|m| !s.contains(m)),
+                    _ => return Err(StoreError::WrongType),
+                }
+            }
         }
         let mut v: Vec<Vec<u8>> = result.into_iter().collect();
         v.sort();
@@ -2000,6 +2088,7 @@ impl Store {
         }?;
         if should_remove_key {
             self.entries.remove(key);
+            self.stream_groups.remove(key);
         }
         Ok(member)
     }
@@ -2024,6 +2113,22 @@ impl Store {
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(source, now_ms);
         self.drop_if_expired(destination, now_ms);
+
+        match self.entries.get(source) {
+            Some(entry) => {
+                if !matches!(&entry.value, Value::Set(_)) {
+                    return Err(StoreError::WrongType);
+                }
+            }
+            None => return Ok(false),
+        }
+        if source != destination
+            && let Some(entry) = self.entries.get(destination)
+            && !matches!(&entry.value, Value::Set(_))
+        {
+            return Err(StoreError::WrongType);
+        }
+
         // Remove from source
         let removed = match self.entries.get_mut(source) {
             Some(entry) => match &mut entry.value {
@@ -2041,6 +2146,7 @@ impl Store {
             && s.is_empty()
         {
             self.entries.remove(source);
+            self.stream_groups.remove(source);
         }
         // Add to destination
         self.sadd(destination, &[member.to_vec()], now_ms)?;
@@ -2056,6 +2162,7 @@ impl Store {
         let result = self.sinter(keys, now_ms)?;
         let count = result.len();
         self.entries.remove(destination);
+        self.stream_groups.remove(destination);
         if !result.is_empty() {
             let set: HashSet<Vec<u8>> = result.into_iter().collect();
             self.entries.insert(
@@ -2078,6 +2185,7 @@ impl Store {
         let result = self.sunion(keys, now_ms)?;
         let count = result.len();
         self.entries.remove(destination);
+        self.stream_groups.remove(destination);
         if !result.is_empty() {
             let set: HashSet<Vec<u8>> = result.into_iter().collect();
             self.entries.insert(
@@ -2100,6 +2208,7 @@ impl Store {
         let result = self.sdiff(keys, now_ms)?;
         let count = result.len();
         self.entries.remove(destination);
+        self.stream_groups.remove(destination);
         if !result.is_empty() {
             let set: HashSet<Vec<u8>> = result.into_iter().collect();
             self.entries.insert(
@@ -2156,6 +2265,7 @@ impl Store {
         }
         if zs.is_empty() {
             self.entries.remove(key);
+            self.stream_groups.remove(key);
         }
         Ok(removed)
     }
@@ -2390,6 +2500,7 @@ impl Store {
         zs.remove(&min_member.0);
         if zs.is_empty() {
             self.entries.remove(key);
+            self.stream_groups.remove(key);
         }
         Ok(Some(min_member))
     }
@@ -2420,6 +2531,7 @@ impl Store {
         zs.remove(&max_member.0);
         if zs.is_empty() {
             self.entries.remove(key);
+            self.stream_groups.remove(key);
         }
         Ok(Some(max_member))
     }
@@ -2556,6 +2668,7 @@ impl Store {
                     }
                     if zs.is_empty() {
                         self.entries.remove(key);
+                        self.stream_groups.remove(key);
                     }
                     Ok(count)
                 }
@@ -2587,6 +2700,7 @@ impl Store {
                     }
                     if zs.is_empty() {
                         self.entries.remove(key);
+                        self.stream_groups.remove(key);
                     }
                     Ok(count)
                 }
@@ -2619,6 +2733,7 @@ impl Store {
                     }
                     if zs.is_empty() {
                         self.entries.remove(key);
+                        self.stream_groups.remove(key);
                     }
                     Ok(count)
                 }
@@ -3735,6 +3850,7 @@ impl Store {
         }
 
         let len = result.len();
+        self.stream_groups.remove(dest);
         self.entries.insert(
             dest.to_vec(),
             Entry {
@@ -3767,8 +3883,16 @@ impl Store {
                     Value::SortedSet(zs) => {
                         for (member, &score) in zs {
                             let weighted = score * weight;
-                            let current = combined.entry(member.clone()).or_insert(0.0);
-                            *current = aggregate_scores(*current, weighted, aggregate);
+                            use std::collections::hash_map::Entry as HEntry;
+                            match combined.entry(member.clone()) {
+                                HEntry::Vacant(e) => {
+                                    e.insert(weighted);
+                                }
+                                HEntry::Occupied(mut e) => {
+                                    let current = e.get_mut();
+                                    *current = aggregate_scores(*current, weighted, aggregate);
+                                }
+                            }
                         }
                     }
                     _ => return Err(StoreError::WrongType),
@@ -3777,6 +3901,7 @@ impl Store {
         }
 
         let count = combined.len();
+        self.stream_groups.remove(dest);
         self.entries.insert(
             dest.to_vec(),
             Entry {
@@ -3797,6 +3922,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         if keys.is_empty() {
+            self.stream_groups.remove(dest);
             self.entries.insert(
                 dest.to_vec(),
                 Entry {
@@ -3845,6 +3971,7 @@ impl Store {
         }
 
         let count = result.len();
+        self.stream_groups.remove(dest);
         self.entries.insert(
             dest.to_vec(),
             Entry {
@@ -4101,6 +4228,7 @@ impl Store {
             return Ok(false);
         }
 
+        self.stream_groups.remove(destination);
         self.entries.insert(destination.to_vec(), entry);
         Ok(true)
     }

@@ -222,6 +222,89 @@ pub fn dispatch_argv(
     })
 }
 
+pub fn is_write_command(cmd: &[u8]) -> bool {
+    let Some(id) = classify_command(cmd) else {
+        return false;
+    };
+    matches!(
+        id,
+        CommandId::Set
+            | CommandId::Del
+            | CommandId::Incr
+            | CommandId::Expire
+            | CommandId::Pexpire
+            | CommandId::Expireat
+            | CommandId::Pexpireat
+            | CommandId::Append
+            | CommandId::Mset
+            | CommandId::Setnx
+            | CommandId::Getset
+            | CommandId::Incrby
+            | CommandId::Decrby
+            | CommandId::Decr
+            | CommandId::Persist
+            | CommandId::Rename
+            | CommandId::Renamenx
+            | CommandId::Flushdb
+            | CommandId::Hset
+            | CommandId::Hdel
+            | CommandId::Hmset
+            | CommandId::Hincrby
+            | CommandId::Hsetnx
+            | CommandId::Lpush
+            | CommandId::Rpush
+            | CommandId::Lpop
+            | CommandId::Rpop
+            | CommandId::Lset
+            | CommandId::Sadd
+            | CommandId::Srem
+            | CommandId::Zadd
+            | CommandId::Zrem
+            | CommandId::Zincrby
+            | CommandId::Zpopmin
+            | CommandId::Zpopmax
+            | CommandId::Geoadd
+            | CommandId::Xadd
+            | CommandId::Xdel
+            | CommandId::Xtrim
+            | CommandId::Xgroup
+            | CommandId::Xclaim
+            | CommandId::Xautoclaim
+            | CommandId::Setex
+            | CommandId::Psetex
+            | CommandId::Getdel
+            | CommandId::Setrange
+            | CommandId::Incrbyfloat
+            | CommandId::Spop
+            | CommandId::Setbit
+            | CommandId::Linsert
+            | CommandId::Lrem
+            | CommandId::Rpoplpush
+            | CommandId::Hincrbyfloat
+            | CommandId::Ltrim
+            | CommandId::Lpushx
+            | CommandId::Rpushx
+            | CommandId::Lmove
+            | CommandId::Smove
+            | CommandId::Sinterstore
+            | CommandId::Sunionstore
+            | CommandId::Sdiffstore
+            | CommandId::Zremrangebyrank
+            | CommandId::Zremrangebyscore
+            | CommandId::Zremrangebylex
+            | CommandId::Pfadd
+            | CommandId::Pfmerge
+            | CommandId::Getex
+            | CommandId::Bitop
+            | CommandId::Zunionstore
+            | CommandId::Zinterstore
+            | CommandId::Restore
+            | CommandId::Sort
+            | CommandId::Copy
+            | CommandId::Unlink
+    )
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CommandId {
     Ping,
@@ -1075,7 +1158,7 @@ fn ttl(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
     let value = match store.pttl(&argv[1], now_ms) {
         PttlValue::KeyMissing => -2,
         PttlValue::NoExpiry => -1,
-        PttlValue::Remaining(ms) => ms / 1000,
+        PttlValue::Remaining(ms) => ms.saturating_add(500) / 1000,
     };
     Ok(RespFrame::Integer(value))
 }
@@ -3128,6 +3211,12 @@ fn setrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     if offset < 0 {
         return Err(CommandError::InvalidInteger);
     }
+    let max_len = offset as usize + argv[3].len();
+    if max_len > 536_870_912 {
+        return Ok(RespFrame::Error(
+            "ERR string exceeds maximum allowed size (512MB)".to_string(),
+        ));
+    }
     let new_len = store.setrange(&argv[1], offset as usize, &argv[3], now_ms)?;
     Ok(RespFrame::Integer(
         i64::try_from(new_len).unwrap_or(i64::MAX),
@@ -3379,7 +3468,7 @@ fn setbit(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("SETBIT"));
     }
     let offset = parse_i64_arg(&argv[2])?;
-    if offset < 0 {
+    if offset < 0 || offset >= 4_294_967_296 {
         return Err(CommandError::InvalidInteger);
     }
     let bit_val = parse_i64_arg(&argv[3])?;
@@ -3825,6 +3914,13 @@ fn bitop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let op = &argv[1];
     let dest = &argv[2];
     let keys: Vec<&[u8]> = argv[3..].iter().map(|v| v.as_slice()).collect();
+
+    if eq_ascii_command(op, b"NOT") && keys.len() != 1 {
+        return Ok(RespFrame::Error(
+            "ERR BITOP NOT must be called with a single source key.".to_string(),
+        ));
+    }
+
     let len = store
         .bitop(op, dest, &keys, now_ms)
         .map_err(CommandError::Store)?;
@@ -3877,6 +3973,11 @@ fn zunionstore(
         .map_err(|_| CommandError::InvalidInteger)?
         .parse::<usize>()
         .map_err(|_| CommandError::InvalidInteger)?;
+    if numkeys == 0 {
+        return Ok(RespFrame::Error(
+            "ERR at least 1 input key is needed for ZUNIONSTORE/ZINTERSTORE".to_string(),
+        ));
+    }
     if argv.len() < 3 + numkeys {
         return Err(CommandError::SyntaxError);
     }
@@ -3901,6 +4002,11 @@ fn zinterstore(
         .map_err(|_| CommandError::InvalidInteger)?
         .parse::<usize>()
         .map_err(|_| CommandError::InvalidInteger)?;
+    if numkeys == 0 {
+        return Ok(RespFrame::Error(
+            "ERR at least 1 input key is needed for ZUNIONSTORE/ZINTERSTORE".to_string(),
+        ));
+    }
     if argv.len() < 3 + numkeys {
         return Err(CommandError::SyntaxError);
     }
@@ -4071,26 +4177,36 @@ fn randomkey(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 
 // ── SCAN family ──────────────────────────────────────────────────────
 
-fn parse_scan_args(argv: &[Vec<u8>], start_idx: usize) -> (Option<Vec<u8>>, usize) {
+fn parse_scan_args(argv: &[Vec<u8>], start_idx: usize) -> Result<(Option<Vec<u8>>, usize), CommandError> {
     let mut pattern: Option<Vec<u8>> = None;
     let mut count: usize = 10;
     let mut i = start_idx;
-    while i + 1 < argv.len() {
+    while i < argv.len() {
         let kw = std::str::from_utf8(&argv[i]).unwrap_or("");
         if kw.eq_ignore_ascii_case("MATCH") {
+            if i + 1 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
             pattern = Some(argv[i + 1].clone());
             i += 2;
         } else if kw.eq_ignore_ascii_case("COUNT") {
-            count = std::str::from_utf8(&argv[i + 1])
+            if i + 1 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let c = std::str::from_utf8(&argv[i + 1])
                 .ok()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(10);
+                .and_then(|s| s.parse::<i64>().ok())
+                .ok_or(CommandError::InvalidInteger)?;
+            if c <= 0 {
+                return Err(CommandError::InvalidInteger);
+            }
+            count = c as usize;
             i += 2;
         } else {
-            i += 1;
+            return Err(CommandError::SyntaxError);
         }
     }
-    (pattern, count)
+    Ok((pattern, count))
 }
 
 fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -4102,7 +4218,7 @@ fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         .parse::<u64>()
         .map_err(|_| CommandError::InvalidInteger)?;
 
-    let (pattern, count) = parse_scan_args(argv, 2);
+    let (pattern, count) = parse_scan_args(argv, 2)?;
     let (next_cursor, keys) = store.scan(cursor, pattern.as_deref(), count, now_ms);
 
     let key_frames: Vec<RespFrame> = keys
@@ -4125,7 +4241,7 @@ fn hscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         .parse::<u64>()
         .map_err(|_| CommandError::InvalidInteger)?;
 
-    let (pattern, count) = parse_scan_args(argv, 3);
+    let (pattern, count) = parse_scan_args(argv, 3)?;
     let (next_cursor, pairs) = store
         .hscan(key, cursor, pattern.as_deref(), count, now_ms)
         .map_err(CommandError::Store)?;
@@ -4151,7 +4267,7 @@ fn sscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         .parse::<u64>()
         .map_err(|_| CommandError::InvalidInteger)?;
 
-    let (pattern, count) = parse_scan_args(argv, 3);
+    let (pattern, count) = parse_scan_args(argv, 3)?;
     let (next_cursor, members) = store
         .sscan(key, cursor, pattern.as_deref(), count, now_ms)
         .map_err(CommandError::Store)?;
@@ -4176,7 +4292,7 @@ fn zscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         .parse::<u64>()
         .map_err(|_| CommandError::InvalidInteger)?;
 
-    let (pattern, count) = parse_scan_args(argv, 3);
+    let (pattern, count) = parse_scan_args(argv, 3)?;
     let (next_cursor, pairs) = store
         .zscan(key, cursor, pattern.as_deref(), count, now_ms)
         .map_err(CommandError::Store)?;

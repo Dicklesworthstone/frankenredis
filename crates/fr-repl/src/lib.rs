@@ -162,7 +162,7 @@ pub struct BacklogWindow {
 impl BacklogWindow {
     #[must_use]
     pub fn contains(&self, offset: ReplOffset) -> bool {
-        self.start_offset <= offset && offset <= self.end_offset
+        self.start_offset <= offset && offset.0 <= self.end_offset.0.saturating_add(1)
     }
 
     pub fn rotate(&mut self, replid: String, start_offset: ReplOffset, end_offset: ReplOffset) {

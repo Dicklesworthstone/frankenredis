@@ -105,6 +105,7 @@ enum RuntimeSpecialCommand {
     Multi,
     Exec,
     Discard,
+    Quit,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -123,6 +124,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
                 Some(RuntimeSpecialCommand::Wait)
             } else if eq_ascii_token(cmd, b"EXEC") {
                 Some(RuntimeSpecialCommand::Exec)
+            } else if eq_ascii_token(cmd, b"QUIT") {
+                Some(RuntimeSpecialCommand::Quit)
             } else {
                 None
             }
@@ -197,6 +200,8 @@ fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialC
         Some(RuntimeSpecialCommand::Exec)
     } else if command.eq_ignore_ascii_case("DISCARD") {
         Some(RuntimeSpecialCommand::Discard)
+    } else if command.eq_ignore_ascii_case("QUIT") {
+        Some(RuntimeSpecialCommand::Quit)
     } else {
         None
     }
@@ -753,8 +758,9 @@ impl Runtime {
             Some(RuntimeSpecialCommand::Wait) => return self.handle_wait_command(&argv),
             Some(RuntimeSpecialCommand::Waitaof) => return self.handle_waitaof_command(&argv),
             Some(RuntimeSpecialCommand::Multi) => return self.handle_multi_command(),
-            Some(RuntimeSpecialCommand::Exec) => return self.handle_exec_command(now_ms),
+            Some(RuntimeSpecialCommand::Exec) => return self.handle_exec_command(now_ms, packet_id, &input_digest, &state_before),
             Some(RuntimeSpecialCommand::Discard) => return self.handle_discard_command(),
+            Some(RuntimeSpecialCommand::Quit) => return RespFrame::SimpleString("OK".to_string()),
             _ => {}
         }
 
@@ -893,12 +899,12 @@ impl Runtime {
         if argv.is_empty() {
             return;
         }
-        self.aof_records.push(AofRecord {
-            argv: argv.to_vec(),
-        });
         if !Self::command_advances_replication_offset(argv) {
             return;
         }
+        self.aof_records.push(AofRecord {
+            argv: argv.to_vec(),
+        });
         self.replication_ack_state.primary_offset.0 = self
             .replication_ack_state
             .primary_offset
@@ -911,21 +917,7 @@ impl Runtime {
         let Some(command) = argv.first() else {
             return false;
         };
-        !eq_ascii_token(command, b"PING")
-            && !eq_ascii_token(command, b"ECHO")
-            && !eq_ascii_token(command, b"GET")
-            && !eq_ascii_token(command, b"TTL")
-            && !eq_ascii_token(command, b"PTTL")
-            && !eq_ascii_token(command, b"EXPIRETIME")
-            && !eq_ascii_token(command, b"PEXPIRETIME")
-            && !eq_ascii_token(command, b"STRLEN")
-            && !eq_ascii_token(command, b"MGET")
-            && !eq_ascii_token(command, b"EXISTS")
-            && !eq_ascii_token(command, b"TYPE")
-            && !eq_ascii_token(command, b"KEYS")
-            && !eq_ascii_token(command, b"DBSIZE")
-            && !eq_ascii_token(command, b"WAIT")
-            && !eq_ascii_token(command, b"WAITAOF")
+        fr_command::is_write_command(command)
     }
 
     fn handle_auth_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -1151,7 +1143,13 @@ impl Runtime {
         RespFrame::SimpleString("OK".to_string())
     }
 
-    fn handle_exec_command(&mut self, now_ms: u64) -> RespFrame {
+    fn handle_exec_command(
+        &mut self,
+        now_ms: u64,
+        packet_id: u64,
+        input_digest: &str,
+        state_before: &str,
+    ) -> RespFrame {
         if !self.transaction_state.in_transaction {
             return RespFrame::Error("ERR EXEC without MULTI".to_string());
         }
@@ -1160,6 +1158,18 @@ impl Runtime {
 
         let mut results = Vec::with_capacity(queued.len());
         for argv in &queued {
+            if let Some(reply) = self.enforce_maxmemory_before_dispatch(
+                argv,
+                now_ms,
+                packet_id,
+                input_digest,
+                state_before,
+            ) {
+                results.push(reply);
+                continue;
+            }
+
+            let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
             match dispatch_argv(argv, &mut self.store, now_ms) {
                 Ok(reply) => {
                     self.capture_aof_record(argv);
@@ -1418,6 +1428,7 @@ fn command_error_to_resp(error: CommandError) -> RespFrame {
             fr_store::StoreError::InvalidHllValue => RespFrame::Error(
                 "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
             ),
+            fr_store::StoreError::IndexOutOfRange => RespFrame::Error("ERR index out of range".to_string()),
         },
     }
 }
@@ -2169,6 +2180,8 @@ mod tests {
             b"cluster",
             b"WAIT",
             b"WAITAOF",
+            b"QUIT",
+            b"quit",
             b"PING",
             b"GET",
             b"SET",
@@ -2317,6 +2330,7 @@ mod tests {
             b"DEL",
             b"MGET",
             b"MSET",
+            b"QUIT",
             b"UNKNOWN",
             b"host:",
             b"post",

@@ -427,8 +427,9 @@ pub fn validate_pending_write_delivery(
     }
 
     let mut seen = BTreeSet::new();
-    validate_delivery_slice(flushed_now, &queue_positions, &mut seen)?;
-    validate_delivery_slice(pending_after_flush, &queue_positions, &mut seen)?;
+    let mut prev_index = None;
+    validate_delivery_slice(flushed_now, &queue_positions, &mut seen, &mut prev_index)?;
+    validate_delivery_slice(pending_after_flush, &queue_positions, &mut seen, &mut prev_index)?;
 
     for client_id in queued_before_flush {
         if !seen.contains(client_id) {
@@ -445,8 +446,8 @@ fn validate_delivery_slice(
     sequence: &[u64],
     queue_positions: &BTreeMap<u64, usize>,
     seen: &mut BTreeSet<u64>,
+    prev_index: &mut Option<usize>,
 ) -> Result<(), PendingWriteError> {
-    let mut prev_index = None;
     for client_id in sequence {
         let Some(&index) = queue_positions.get(client_id) else {
             return Err(PendingWriteError::PendingReplyLost {
@@ -458,14 +459,14 @@ fn validate_delivery_slice(
                 client_id: *client_id,
             });
         }
-        if let Some(previous) = prev_index
+        if let Some(previous) = *prev_index
             && index < previous
         {
             return Err(PendingWriteError::FlushOrderViolation {
                 client_id: *client_id,
             });
         }
-        prev_index = Some(index);
+        *prev_index = Some(index);
     }
     Ok(())
 }
