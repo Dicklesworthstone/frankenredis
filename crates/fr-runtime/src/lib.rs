@@ -123,11 +123,7 @@ impl AuthState {
     }
 
     fn auth_required(&self) -> bool {
-        self.requirepass.is_some()
-            || self
-                .acl_users
-                .values()
-                .any(|u| !u.passwords.is_empty())
+        self.requirepass.is_some() || self.acl_users.values().any(|u| !u.passwords.is_empty())
     }
 
     fn requires_auth(&self) -> bool {
@@ -182,8 +178,7 @@ impl AuthState {
             } else if let Some(pass) = rule_str.strip_prefix('>') {
                 user.passwords.push(pass.as_bytes().to_vec());
             } else if let Some(pass) = rule_str.strip_prefix('<') {
-                user.passwords
-                    .retain(|p| p.as_slice() != pass.as_bytes());
+                user.passwords.retain(|p| p.as_slice() != pass.as_bytes());
             } else {
                 return Err(format!(
                     "ERR Error in ACL SETUSER modifier '{}': Syntax error",
@@ -891,7 +886,9 @@ impl Runtime {
             Some(RuntimeSpecialCommand::Wait) => return self.handle_wait_command(&argv),
             Some(RuntimeSpecialCommand::Waitaof) => return self.handle_waitaof_command(&argv),
             Some(RuntimeSpecialCommand::Multi) => return self.handle_multi_command(),
-            Some(RuntimeSpecialCommand::Exec) => return self.handle_exec_command(now_ms, packet_id, &input_digest, &state_before),
+            Some(RuntimeSpecialCommand::Exec) => {
+                return self.handle_exec_command(now_ms, packet_id, &input_digest, &state_before);
+            }
             Some(RuntimeSpecialCommand::Discard) => return self.handle_discard_command(),
             Some(RuntimeSpecialCommand::Quit) => return RespFrame::SimpleString("OK".to_string()),
             _ => {}
@@ -1240,9 +1237,7 @@ impl Runtime {
         let mut deleted = 0i64;
         for username in &argv[2..] {
             if username.as_slice() == DEFAULT_AUTH_USER {
-                return RespFrame::Error(
-                    "ERR The 'default' user cannot be removed".to_string(),
-                );
+                return RespFrame::Error("ERR The 'default' user cannot be removed".to_string());
             }
             if self.auth_state.del_user(username) {
                 deleted += 1;
@@ -1325,15 +1320,10 @@ impl Runtime {
                 Ok(c) => c,
                 Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
             };
-            if CATEGORIES
-                .iter()
-                .any(|c| c.eq_ignore_ascii_case(cat))
-            {
+            if CATEGORIES.iter().any(|c| c.eq_ignore_ascii_case(cat)) {
                 RespFrame::Array(Some(Vec::new()))
             } else {
-                RespFrame::Error(format!(
-                    "ERR Unknown ACL cat category '{cat}'"
-                ))
+                RespFrame::Error(format!("ERR Unknown ACL cat category '{cat}'"))
             }
         } else {
             RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string())
@@ -1397,7 +1387,9 @@ impl Runtime {
         RespFrame::Array(Some(vec![
             hello_bulk("ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
             hello_bulk("CAT [<category>]"),
-            hello_bulk("    List all commands that belong to <category>, or all command categories"),
+            hello_bulk(
+                "    List all commands that belong to <category>, or all command categories",
+            ),
             hello_bulk("    when no category is specified."),
             hello_bulk("DELUSER <username> [<username> ...]"),
             hello_bulk("    Delete a list of users."),
@@ -1833,7 +1825,9 @@ fn command_error_to_resp(error: CommandError) -> RespFrame {
             fr_store::StoreError::InvalidHllValue => RespFrame::Error(
                 "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
             ),
-            fr_store::StoreError::IndexOutOfRange => RespFrame::Error("ERR index out of range".to_string()),
+            fr_store::StoreError::IndexOutOfRange => {
+                RespFrame::Error("ERR index out of range".to_string())
+            }
         },
     }
 }

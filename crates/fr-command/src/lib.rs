@@ -1525,7 +1525,8 @@ fn sismember(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 
 fn parse_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
     let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    let val = text.parse::<f64>()
+    let val = text
+        .parse::<f64>()
         .map_err(|_| CommandError::Store(StoreError::ValueNotFloat))?;
     if val.is_nan() {
         return Err(CommandError::Store(StoreError::ValueNotFloat));
@@ -3934,7 +3935,11 @@ fn bitop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     Ok(RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)))
 }
 
-fn parse_zstore_args(argv: &[Vec<u8>], start: usize, numkeys: usize) -> Result<(Vec<f64>, Vec<u8>), CommandError> {
+fn parse_zstore_args(
+    argv: &[Vec<u8>],
+    start: usize,
+    numkeys: usize,
+) -> Result<(Vec<f64>, Vec<u8>), CommandError> {
     let mut weights: Vec<f64> = Vec::new();
     let mut aggregate: Vec<u8> = b"SUM".to_vec();
     let mut i = start;
@@ -4185,7 +4190,10 @@ fn randomkey(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 
 // ── SCAN family ──────────────────────────────────────────────────────
 
-fn parse_scan_args(argv: &[Vec<u8>], start_idx: usize) -> Result<(Option<Vec<u8>>, usize), CommandError> {
+fn parse_scan_args(
+    argv: &[Vec<u8>],
+    start_idx: usize,
+) -> Result<(Option<Vec<u8>>, usize), CommandError> {
     let mut pattern: Option<Vec<u8>> = None;
     let mut count: usize = 10;
     let mut i = start_idx;

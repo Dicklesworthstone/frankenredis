@@ -429,7 +429,12 @@ pub fn validate_pending_write_delivery(
     let mut seen = BTreeSet::new();
     let mut prev_index = None;
     validate_delivery_slice(flushed_now, &queue_positions, &mut seen, &mut prev_index)?;
-    validate_delivery_slice(pending_after_flush, &queue_positions, &mut seen, &mut prev_index)?;
+    validate_delivery_slice(
+        pending_after_flush,
+        &queue_positions,
+        &mut seen,
+        &mut prev_index,
+    )?;
 
     for client_id in queued_before_flush {
         if !seen.contains(client_id) {

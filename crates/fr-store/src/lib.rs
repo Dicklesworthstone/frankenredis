@@ -1689,7 +1689,7 @@ impl Store {
             self.entries.remove(source);
             self.stream_groups.remove(source);
         }
-        
+
         // Push to destination
         match self.entries.get_mut(destination) {
             Some(entry) => match &mut entry.value {

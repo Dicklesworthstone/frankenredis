@@ -2782,26 +2782,20 @@ mod tests {
         let mut strict = Runtime::default_strict();
         let mut hardened = Runtime::default_hardened();
 
-        let strict_whoami =
-            strict.execute_frame(command_frame(&["ACL", "WHOAMI"]), 550);
-        let hardened_whoami =
-            hardened.execute_frame(command_frame(&["ACL", "WHOAMI"]), 550);
+        let strict_whoami = strict.execute_frame(command_frame(&["ACL", "WHOAMI"]), 550);
+        let hardened_whoami = hardened.execute_frame(command_frame(&["ACL", "WHOAMI"]), 550);
         assert_eq!(
             strict_whoami,
             RespFrame::BulkString(Some(b"default".to_vec()))
         );
         assert_eq!(strict_whoami, hardened_whoami);
 
-        let strict_list =
-            strict.execute_frame(command_frame(&["ACL", "LIST"]), 551);
-        let hardened_list =
-            hardened.execute_frame(command_frame(&["ACL", "LIST"]), 551);
+        let strict_list = strict.execute_frame(command_frame(&["ACL", "LIST"]), 551);
+        let hardened_list = hardened.execute_frame(command_frame(&["ACL", "LIST"]), 551);
         assert_eq!(strict_list, hardened_list);
 
-        let strict_cat =
-            strict.execute_frame(command_frame(&["ACL", "CAT"]), 552);
-        let hardened_cat =
-            hardened.execute_frame(command_frame(&["ACL", "CAT"]), 552);
+        let strict_cat = strict.execute_frame(command_frame(&["ACL", "CAT"]), 552);
+        let hardened_cat = hardened.execute_frame(command_frame(&["ACL", "CAT"]), 552);
         assert_eq!(strict_cat, hardened_cat);
     }
 
@@ -2822,10 +2816,7 @@ mod tests {
             panic!("expected array from ACL USERS");
         }
 
-        let del = runtime.execute_frame(
-            command_frame(&["ACL", "DELUSER", "testuser"]),
-            562,
-        );
+        let del = runtime.execute_frame(command_frame(&["ACL", "DELUSER", "testuser"]), 562);
         assert_eq!(del, RespFrame::Integer(1));
 
         let users_after = runtime.execute_frame(command_frame(&["ACL", "USERS"]), 563);
@@ -2851,10 +2842,7 @@ mod tests {
         assert_eq!(auth, RespFrame::SimpleString("OK".to_string()));
 
         let whoami = runtime.execute_frame(command_frame(&["ACL", "WHOAMI"]), 572);
-        assert_eq!(
-            whoami,
-            RespFrame::BulkString(Some(b"default".to_vec()))
-        );
+        assert_eq!(whoami, RespFrame::BulkString(Some(b"default".to_vec())));
     }
 
     #[test]
