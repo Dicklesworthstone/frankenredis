@@ -1675,12 +1675,12 @@ impl Store {
         };
 
         let mut source_ttl = None;
-        if source == destination {
-            if let Some(entry) = self.entries.get(source) {
-                source_ttl = entry.expires_at_ms;
-            }
+        if source == destination
+            && let Some(entry) = self.entries.get(source)
+        {
+            source_ttl = entry.expires_at_ms;
         }
-        
+
         // Clean up empty source.
         if let Some(entry) = self.entries.get(source)
             && let Value::List(l) = &entry.value
@@ -1832,10 +1832,10 @@ impl Store {
         };
 
         let mut source_ttl = None;
-        if source == destination {
-            if let Some(entry) = self.entries.get(source) {
-                source_ttl = entry.expires_at_ms;
-            }
+        if source == destination
+            && let Some(entry) = self.entries.get(source)
+        {
+            source_ttl = entry.expires_at_ms;
         }
 
         // Clean up empty source.

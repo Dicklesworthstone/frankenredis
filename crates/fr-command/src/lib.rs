@@ -3472,7 +3472,7 @@ fn setbit(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("SETBIT"));
     }
     let offset = parse_i64_arg(&argv[2])?;
-    if offset < 0 || offset >= 4_294_967_296 {
+    if !(0..4_294_967_296).contains(&offset) {
         return Err(CommandError::InvalidInteger);
     }
     let bit_val = parse_i64_arg(&argv[3])?;

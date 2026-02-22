@@ -34,19 +34,59 @@ const WRONGPASS_ERROR: &str = "WRONGPASS invalid username-password pair or user 
 const AUTH_NOT_CONFIGURED_ERROR: &str = "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?";
 const CLUSTER_UNKNOWN_SUBCOMMAND_ERROR: &str =
     "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP.";
+const ACL_UNKNOWN_SUBCOMMAND_ERROR: &str =
+    "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP.";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AclUser {
+    passwords: Vec<Vec<u8>>,
+    enabled: bool,
+}
+
+impl AclUser {
+    fn new_default() -> Self {
+        Self {
+            passwords: Vec::new(),
+            enabled: true,
+        }
+    }
+
+    fn check_password(&self, password: &[u8]) -> bool {
+        if self.passwords.is_empty() {
+            return true;
+        }
+        self.passwords.iter().any(|p| p.as_slice() == password)
+    }
+
+    fn acl_list_line(&self, username: &[u8]) -> String {
+        let username_str = String::from_utf8_lossy(username);
+        let on_off = if self.enabled { "on" } else { "off" };
+        let pass_part = if self.passwords.is_empty() {
+            " nopass".to_string()
+        } else {
+            self.passwords
+                .iter()
+                .map(|_| " #<hidden>".to_string())
+                .collect::<String>()
+        };
+        format!("user {username_str} {on_off}{pass_part} ~* &* +@all")
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AuthState {
     requirepass: Option<Vec<u8>>,
-    users: BTreeMap<Vec<u8>, Vec<u8>>,
+    acl_users: BTreeMap<Vec<u8>, AclUser>,
     authenticated_user: Option<Vec<u8>>,
 }
 
 impl Default for AuthState {
     fn default() -> Self {
+        let mut acl_users = BTreeMap::new();
+        acl_users.insert(DEFAULT_AUTH_USER.to_vec(), AclUser::new_default());
         Self {
             requirepass: None,
-            users: BTreeMap::new(),
+            acl_users,
             authenticated_user: Some(DEFAULT_AUTH_USER.to_vec()),
         }
     }
@@ -54,7 +94,14 @@ impl Default for AuthState {
 
 impl AuthState {
     fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
-        self.requirepass = requirepass;
+        self.requirepass = requirepass.clone();
+        if let Some(ref pass) = requirepass {
+            let user = self
+                .acl_users
+                .entry(DEFAULT_AUTH_USER.to_vec())
+                .or_insert_with(AclUser::new_default);
+            user.passwords = vec![pass.clone()];
+        }
         if self.auth_required() {
             self.authenticated_user = None;
         } else {
@@ -63,7 +110,11 @@ impl AuthState {
     }
 
     fn add_user(&mut self, username: Vec<u8>, password: Vec<u8>) {
-        self.users.insert(username, password);
+        let user = self
+            .acl_users
+            .entry(username)
+            .or_insert_with(AclUser::new_default);
+        user.passwords = vec![password];
         self.authenticated_user = None;
     }
 
@@ -72,11 +123,82 @@ impl AuthState {
     }
 
     fn auth_required(&self) -> bool {
-        self.requirepass.is_some() || !self.users.is_empty()
+        self.requirepass.is_some()
+            || self
+                .acl_users
+                .values()
+                .any(|u| !u.passwords.is_empty())
     }
 
     fn requires_auth(&self) -> bool {
         self.auth_required() && !self.is_authenticated()
+    }
+
+    fn current_user_name(&self) -> &[u8] {
+        self.authenticated_user
+            .as_deref()
+            .unwrap_or(DEFAULT_AUTH_USER)
+    }
+
+    fn user_names(&self) -> Vec<&[u8]> {
+        self.acl_users.keys().map(Vec::as_slice).collect()
+    }
+
+    fn acl_list_entries(&self) -> Vec<String> {
+        self.acl_users
+            .iter()
+            .map(|(name, user)| user.acl_list_line(name))
+            .collect()
+    }
+
+    fn get_user(&self, username: &[u8]) -> Option<&AclUser> {
+        self.acl_users.get(username)
+    }
+
+    fn set_user(&mut self, username: Vec<u8>, rules: &[&[u8]]) -> Result<(), String> {
+        let user = self
+            .acl_users
+            .entry(username)
+            .or_insert_with(AclUser::new_default);
+        for rule in rules {
+            let rule_str = std::str::from_utf8(rule).unwrap_or("");
+            if rule_str.eq_ignore_ascii_case("on") {
+                user.enabled = true;
+            } else if rule_str.eq_ignore_ascii_case("off") {
+                user.enabled = false;
+            } else if rule_str.eq_ignore_ascii_case("nopass") {
+                user.passwords.clear();
+            } else if rule_str.eq_ignore_ascii_case("resetpass") {
+                user.passwords.clear();
+                user.enabled = false;
+            } else if rule_str.eq_ignore_ascii_case("allcommands")
+                || rule_str == "+@all"
+                || rule_str.eq_ignore_ascii_case("allkeys")
+                || rule_str == "~*"
+                || rule_str.eq_ignore_ascii_case("allchannels")
+                || rule_str == "&*"
+            {
+                // Accepted but no-op for now (all users have full access)
+            } else if let Some(pass) = rule_str.strip_prefix('>') {
+                user.passwords.push(pass.as_bytes().to_vec());
+            } else if let Some(pass) = rule_str.strip_prefix('<') {
+                user.passwords
+                    .retain(|p| p.as_slice() != pass.as_bytes());
+            } else {
+                return Err(format!(
+                    "ERR Error in ACL SETUSER modifier '{}': Syntax error",
+                    rule_str
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn del_user(&mut self, username: &[u8]) -> bool {
+        if username == DEFAULT_AUTH_USER {
+            return false;
+        }
+        self.acl_users.remove(username).is_some()
     }
 }
 
@@ -94,6 +216,7 @@ enum ClusterClientMode {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeSpecialCommand {
+    Acl,
     Auth,
     Hello,
     Asking,
@@ -117,6 +240,13 @@ enum ClusterSubcommand {
 #[inline]
 fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand> {
     match cmd.len() {
+        3 => {
+            if eq_ascii_token(cmd, b"ACL") {
+                Some(RuntimeSpecialCommand::Acl)
+            } else {
+                None
+            }
+        }
         4 => {
             if eq_ascii_token(cmd, b"AUTH") {
                 Some(RuntimeSpecialCommand::Auth)
@@ -178,7 +308,9 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
 #[cfg(test)]
 fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialCommand> {
     let command = std::str::from_utf8(cmd).ok()?;
-    if command.eq_ignore_ascii_case("AUTH") {
+    if command.eq_ignore_ascii_case("ACL") {
+        Some(RuntimeSpecialCommand::Acl)
+    } else if command.eq_ignore_ascii_case("AUTH") {
         Some(RuntimeSpecialCommand::Auth)
     } else if command.eq_ignore_ascii_case("HELLO") {
         Some(RuntimeSpecialCommand::Hello)
@@ -751,6 +883,7 @@ impl Runtime {
         }
 
         match special_command {
+            Some(RuntimeSpecialCommand::Acl) => return self.handle_acl_command(&argv),
             Some(RuntimeSpecialCommand::Asking) => return self.handle_asking_command(&argv),
             Some(RuntimeSpecialCommand::Readonly) => return self.handle_readonly_command(&argv),
             Some(RuntimeSpecialCommand::Readwrite) => return self.handle_readwrite_command(&argv),
@@ -999,24 +1132,296 @@ impl Runtime {
             return Err(AuthFailure::NotConfigured);
         }
 
-        let stored_password = if username == DEFAULT_AUTH_USER {
-            self.auth_state
-                .requirepass
-                .as_deref()
-                .or_else(|| self.auth_state.users.get(username).map(Vec::as_slice))
-        } else {
-            self.auth_state.users.get(username).map(Vec::as_slice)
-        };
-
-        let Some(stored_password) = stored_password else {
+        let Some(acl_user) = self.auth_state.acl_users.get(username) else {
             return Err(AuthFailure::WrongPass);
         };
-        if stored_password != password {
+
+        if !acl_user.enabled {
+            return Err(AuthFailure::WrongPass);
+        }
+
+        if !acl_user.check_password(password) {
             return Err(AuthFailure::WrongPass);
         }
 
         self.auth_state.authenticated_user = Some(username.to_vec());
         Ok(())
+    }
+
+    fn handle_acl_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
+        }
+        let sub = match std::str::from_utf8(&argv[1]) {
+            Ok(s) => s,
+            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+        };
+
+        if sub.eq_ignore_ascii_case("WHOAMI") {
+            self.handle_acl_whoami(argv)
+        } else if sub.eq_ignore_ascii_case("LIST") {
+            self.handle_acl_list(argv)
+        } else if sub.eq_ignore_ascii_case("USERS") {
+            self.handle_acl_users(argv)
+        } else if sub.eq_ignore_ascii_case("SETUSER") {
+            self.handle_acl_setuser(argv)
+        } else if sub.eq_ignore_ascii_case("DELUSER") {
+            self.handle_acl_deluser(argv)
+        } else if sub.eq_ignore_ascii_case("GETUSER") {
+            self.handle_acl_getuser(argv)
+        } else if sub.eq_ignore_ascii_case("CAT") {
+            self.handle_acl_cat(argv)
+        } else if sub.eq_ignore_ascii_case("GENPASS") {
+            self.handle_acl_genpass(argv)
+        } else if sub.eq_ignore_ascii_case("LOG") {
+            self.handle_acl_log(argv)
+        } else if sub.eq_ignore_ascii_case("SAVE") || sub.eq_ignore_ascii_case("LOAD") {
+            if argv.len() != 2 {
+                return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
+            }
+            RespFrame::SimpleString("OK".to_string())
+        } else if sub.eq_ignore_ascii_case("HELP") {
+            self.handle_acl_help()
+        } else {
+            RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string())
+        }
+    }
+
+    fn handle_acl_whoami(&self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
+        }
+        let username = self.auth_state.current_user_name();
+        RespFrame::BulkString(Some(username.to_vec()))
+    }
+
+    fn handle_acl_list(&self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
+        }
+        let entries = self.auth_state.acl_list_entries();
+        RespFrame::Array(Some(
+            entries
+                .into_iter()
+                .map(|e| RespFrame::BulkString(Some(e.into_bytes())))
+                .collect(),
+        ))
+    }
+
+    fn handle_acl_users(&self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
+        }
+        let names = self.auth_state.user_names();
+        RespFrame::Array(Some(
+            names
+                .into_iter()
+                .map(|n| RespFrame::BulkString(Some(n.to_vec())))
+                .collect(),
+        ))
+    }
+
+    fn handle_acl_setuser(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
+        }
+        let username = argv[2].clone();
+        let rules: Vec<&[u8]> = argv[3..].iter().map(Vec::as_slice).collect();
+        match self.auth_state.set_user(username, &rules) {
+            Ok(()) => RespFrame::SimpleString("OK".to_string()),
+            Err(msg) => RespFrame::Error(msg),
+        }
+    }
+
+    fn handle_acl_deluser(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 3 {
+            return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
+        }
+        let mut deleted = 0i64;
+        for username in &argv[2..] {
+            if username.as_slice() == DEFAULT_AUTH_USER {
+                return RespFrame::Error(
+                    "ERR The 'default' user cannot be removed".to_string(),
+                );
+            }
+            if self.auth_state.del_user(username) {
+                deleted += 1;
+            }
+        }
+        RespFrame::Integer(deleted)
+    }
+
+    fn handle_acl_getuser(&self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
+        }
+        let Some(user) = self.auth_state.get_user(&argv[2]) else {
+            return RespFrame::BulkString(None);
+        };
+        let flags_str = if user.enabled {
+            if user.passwords.is_empty() {
+                "on nopass"
+            } else {
+                "on"
+            }
+        } else {
+            "off"
+        };
+        RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"flags".to_vec())),
+            RespFrame::Array(Some(
+                flags_str
+                    .split_whitespace()
+                    .map(|f| RespFrame::BulkString(Some(f.as_bytes().to_vec())))
+                    .collect(),
+            )),
+            RespFrame::BulkString(Some(b"passwords".to_vec())),
+            RespFrame::Array(Some(Vec::new())),
+            RespFrame::BulkString(Some(b"commands".to_vec())),
+            RespFrame::BulkString(Some(b"+@all".to_vec())),
+            RespFrame::BulkString(Some(b"keys".to_vec())),
+            RespFrame::BulkString(Some(b"~*".to_vec())),
+            RespFrame::BulkString(Some(b"channels".to_vec())),
+            RespFrame::BulkString(Some(b"&*".to_vec())),
+        ]))
+    }
+
+    fn handle_acl_cat(&self, argv: &[Vec<u8>]) -> RespFrame {
+        const CATEGORIES: &[&str] = &[
+            "keyspace",
+            "read",
+            "write",
+            "set",
+            "sortedset",
+            "list",
+            "hash",
+            "string",
+            "bitmap",
+            "hyperloglog",
+            "geo",
+            "stream",
+            "pubsub",
+            "admin",
+            "fast",
+            "slow",
+            "blocking",
+            "dangerous",
+            "connection",
+            "transaction",
+            "scripting",
+            "server",
+            "generic",
+        ];
+
+        if argv.len() == 2 {
+            RespFrame::Array(Some(
+                CATEGORIES
+                    .iter()
+                    .map(|c| RespFrame::BulkString(Some(c.as_bytes().to_vec())))
+                    .collect(),
+            ))
+        } else if argv.len() == 3 {
+            let cat = match std::str::from_utf8(&argv[2]) {
+                Ok(c) => c,
+                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+            };
+            if CATEGORIES
+                .iter()
+                .any(|c| c.eq_ignore_ascii_case(cat))
+            {
+                RespFrame::Array(Some(Vec::new()))
+            } else {
+                RespFrame::Error(format!(
+                    "ERR Unknown ACL cat category '{cat}'"
+                ))
+            }
+        } else {
+            RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string())
+        }
+    }
+
+    fn handle_acl_genpass(&self, argv: &[Vec<u8>]) -> RespFrame {
+        let bits = if argv.len() == 3 {
+            match parse_i64_arg(&argv[2]) {
+                Ok(b) if b > 0 && b <= 4096 => b as usize,
+                _ => {
+                    return RespFrame::Error(
+                        "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
+                            .to_string(),
+                    );
+                }
+            }
+        } else if argv.len() == 2 {
+            256
+        } else {
+            return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
+        };
+
+        let hex_chars = bits.div_ceil(4);
+        let bytes_needed = hex_chars.div_ceil(2);
+        let mut buf = vec![0u8; bytes_needed];
+        // Simple deterministic pseudo-random for now (seeded from packet counter)
+        let seed = PACKET_COUNTER.load(Ordering::Relaxed);
+        let mut state = seed.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
+        for byte in &mut buf {
+            state = state.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
+            *byte = (state >> 33) as u8;
+        }
+        let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
+        let truncated = &hex[..hex_chars];
+        RespFrame::BulkString(Some(truncated.as_bytes().to_vec()))
+    }
+
+    fn handle_acl_log(&self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() == 2 {
+            RespFrame::Array(Some(Vec::new()))
+        } else if argv.len() == 3 {
+            let sub = match std::str::from_utf8(&argv[2]) {
+                Ok(s) => s,
+                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+            };
+            if sub.eq_ignore_ascii_case("RESET") {
+                RespFrame::SimpleString("OK".to_string())
+            } else {
+                match sub.parse::<i64>() {
+                    Ok(_) => RespFrame::Array(Some(Vec::new())),
+                    Err(_) => RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string()),
+                }
+            }
+        } else {
+            RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string())
+        }
+    }
+
+    fn handle_acl_help(&self) -> RespFrame {
+        RespFrame::Array(Some(vec![
+            hello_bulk("ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
+            hello_bulk("CAT [<category>]"),
+            hello_bulk("    List all commands that belong to <category>, or all command categories"),
+            hello_bulk("    when no category is specified."),
+            hello_bulk("DELUSER <username> [<username> ...]"),
+            hello_bulk("    Delete a list of users."),
+            hello_bulk("GENPASS [<bits>]"),
+            hello_bulk("    Generate a secure password."),
+            hello_bulk("GETUSER <username>"),
+            hello_bulk("    Get the user's details."),
+            hello_bulk("LIST"),
+            hello_bulk("    List users access rules in the ACL format."),
+            hello_bulk("LOAD"),
+            hello_bulk("    Reload users from the ACL file."),
+            hello_bulk("LOG [<count> | RESET]"),
+            hello_bulk("    List latest events denied because of ACLs."),
+            hello_bulk("SAVE"),
+            hello_bulk("    Save the current ACL rules to the ACL file."),
+            hello_bulk("SETUSER <username> <property> [<property> ...]"),
+            hello_bulk("    Create or modify a user with the specified properties."),
+            hello_bulk("USERS"),
+            hello_bulk("    List all usernames."),
+            hello_bulk("WHOAMI"),
+            hello_bulk("    Return the current connection username."),
+            hello_bulk("HELP"),
+            hello_bulk("    Print this help."),
+        ]))
     }
 
     fn handle_asking_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {

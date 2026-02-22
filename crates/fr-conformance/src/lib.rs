@@ -1228,7 +1228,8 @@ fn packet_family_for_fixture(fixture_name: &str) -> &'static str {
     match fixture_name {
         "fr_p2c_001_eventloop_journey.json" => "FR-P2C-001",
         "protocol_negative.json" => "FR-P2C-002",
-        "fr_p2c_004_auth_unit"
+        "core_acl.json"
+        | "fr_p2c_004_auth_unit"
         | "fr_p2c_004_acl_rules"
         | "fr_p2c_004_acl_permissions"
         | "fr_p2c_004_acl_journey.json" => "FR-P2C-004",
@@ -2760,6 +2761,100 @@ mod tests {
             )
             .expect("packet-004 adversarial structured log should validate");
         }
+    }
+
+    #[test]
+    fn fr_p2c_004_f_differential_core_acl_fixture_passes() {
+        let cfg = HarnessConfig::default_paths();
+        let report = run_fixture(&cfg, "core_acl.json").expect("core_acl fixture run");
+        assert_eq!(report.fixture, "core_acl.json");
+        assert_eq!(report.suite, "core_acl");
+        assert_eq!(
+            report.total, report.passed,
+            "core_acl fixture mismatches: {:?}",
+            report.failed
+        );
+        assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn fr_p2c_004_u_acl_whoami_strict_vs_hardened_mode_split() {
+        let mut strict = Runtime::default_strict();
+        let mut hardened = Runtime::default_hardened();
+
+        let strict_whoami =
+            strict.execute_frame(command_frame(&["ACL", "WHOAMI"]), 550);
+        let hardened_whoami =
+            hardened.execute_frame(command_frame(&["ACL", "WHOAMI"]), 550);
+        assert_eq!(
+            strict_whoami,
+            RespFrame::BulkString(Some(b"default".to_vec()))
+        );
+        assert_eq!(strict_whoami, hardened_whoami);
+
+        let strict_list =
+            strict.execute_frame(command_frame(&["ACL", "LIST"]), 551);
+        let hardened_list =
+            hardened.execute_frame(command_frame(&["ACL", "LIST"]), 551);
+        assert_eq!(strict_list, hardened_list);
+
+        let strict_cat =
+            strict.execute_frame(command_frame(&["ACL", "CAT"]), 552);
+        let hardened_cat =
+            hardened.execute_frame(command_frame(&["ACL", "CAT"]), 552);
+        assert_eq!(strict_cat, hardened_cat);
+    }
+
+    #[test]
+    fn fr_p2c_004_u_acl_setuser_deluser_lifecycle() {
+        let mut runtime = Runtime::default_strict();
+
+        let create = runtime.execute_frame(
+            command_frame(&["ACL", "SETUSER", "testuser", "on", ">pass1"]),
+            560,
+        );
+        assert_eq!(create, RespFrame::SimpleString("OK".to_string()));
+
+        let users = runtime.execute_frame(command_frame(&["ACL", "USERS"]), 561);
+        if let RespFrame::Array(Some(items)) = &users {
+            assert_eq!(items.len(), 2);
+        } else {
+            panic!("expected array from ACL USERS");
+        }
+
+        let del = runtime.execute_frame(
+            command_frame(&["ACL", "DELUSER", "testuser"]),
+            562,
+        );
+        assert_eq!(del, RespFrame::Integer(1));
+
+        let users_after = runtime.execute_frame(command_frame(&["ACL", "USERS"]), 563);
+        if let RespFrame::Array(Some(items)) = &users_after {
+            assert_eq!(items.len(), 1);
+        } else {
+            panic!("expected array from ACL USERS after delete");
+        }
+    }
+
+    #[test]
+    fn fr_p2c_004_u_acl_requires_auth_after_setuser_with_password() {
+        let mut runtime = Runtime::default_strict();
+        runtime.set_requirepass(Some(b"secret".to_vec()));
+
+        let noauth = runtime.execute_frame(command_frame(&["ACL", "WHOAMI"]), 570);
+        assert_eq!(
+            noauth,
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
+
+        let auth = runtime.execute_frame(command_frame(&["AUTH", "secret"]), 571);
+        assert_eq!(auth, RespFrame::SimpleString("OK".to_string()));
+
+        let whoami = runtime.execute_frame(command_frame(&["ACL", "WHOAMI"]), 572);
+        assert_eq!(
+            whoami,
+            RespFrame::BulkString(Some(b"default".to_vec()))
+        );
     }
 
     #[test]
@@ -4980,6 +5075,10 @@ mod tests {
         );
         assert_eq!(
             crate::packet_family_for_fixture("fr_p2c_004_acl_journey.json"),
+            "FR-P2C-004"
+        );
+        assert_eq!(
+            crate::packet_family_for_fixture("core_acl.json"),
             "FR-P2C-004"
         );
     }

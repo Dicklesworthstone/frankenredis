@@ -1,0 +1,264 @@
+{
+  "suite": "core_acl",
+  "cases": [
+    {
+      "name": "acl_whoami_returns_default",
+      "now_ms": 0,
+      "argv": ["ACL", "WHOAMI"],
+      "expect": { "kind": "bulk", "value": "default" }
+    },
+    {
+      "name": "acl_users_returns_default",
+      "now_ms": 1,
+      "argv": ["ACL", "USERS"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "default" }
+        ]
+      }
+    },
+    {
+      "name": "acl_list_returns_default_user_rule",
+      "now_ms": 2,
+      "argv": ["ACL", "LIST"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "user default on nopass ~* &* +@all" }
+        ]
+      }
+    },
+    {
+      "name": "acl_setuser_creates_new_user",
+      "now_ms": 3,
+      "argv": ["ACL", "SETUSER", "alice", "on", ">password123"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_users_includes_alice",
+      "now_ms": 4,
+      "argv": ["ACL", "USERS"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "alice" },
+          { "kind": "bulk", "value": "default" }
+        ]
+      }
+    },
+    {
+      "name": "acl_getuser_alice_returns_details",
+      "now_ms": 5,
+      "argv": ["ACL", "GETUSER", "alice"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "flags" },
+          { "kind": "array", "value": [{ "kind": "bulk", "value": "on" }] },
+          { "kind": "bulk", "value": "passwords" },
+          { "kind": "array", "value": [] },
+          { "kind": "bulk", "value": "commands" },
+          { "kind": "bulk", "value": "+@all" },
+          { "kind": "bulk", "value": "keys" },
+          { "kind": "bulk", "value": "~*" },
+          { "kind": "bulk", "value": "channels" },
+          { "kind": "bulk", "value": "&*" }
+        ]
+      }
+    },
+    {
+      "name": "acl_getuser_nonexistent_returns_nil",
+      "now_ms": 6,
+      "argv": ["ACL", "GETUSER", "bob"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "acl_deluser_alice_returns_count",
+      "now_ms": 7,
+      "argv": ["ACL", "DELUSER", "alice"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "acl_deluser_default_is_rejected",
+      "now_ms": 8,
+      "argv": ["ACL", "DELUSER", "default"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR The 'default' user cannot be removed"
+      }
+    },
+    {
+      "name": "acl_deluser_nonexistent_returns_zero",
+      "now_ms": 9,
+      "argv": ["ACL", "DELUSER", "nonexistent"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "acl_cat_returns_categories",
+      "now_ms": 10,
+      "argv": ["ACL", "CAT"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "keyspace" },
+          { "kind": "bulk", "value": "read" },
+          { "kind": "bulk", "value": "write" },
+          { "kind": "bulk", "value": "set" },
+          { "kind": "bulk", "value": "sortedset" },
+          { "kind": "bulk", "value": "list" },
+          { "kind": "bulk", "value": "hash" },
+          { "kind": "bulk", "value": "string" },
+          { "kind": "bulk", "value": "bitmap" },
+          { "kind": "bulk", "value": "hyperloglog" },
+          { "kind": "bulk", "value": "geo" },
+          { "kind": "bulk", "value": "stream" },
+          { "kind": "bulk", "value": "pubsub" },
+          { "kind": "bulk", "value": "admin" },
+          { "kind": "bulk", "value": "fast" },
+          { "kind": "bulk", "value": "slow" },
+          { "kind": "bulk", "value": "blocking" },
+          { "kind": "bulk", "value": "dangerous" },
+          { "kind": "bulk", "value": "connection" },
+          { "kind": "bulk", "value": "transaction" },
+          { "kind": "bulk", "value": "scripting" },
+          { "kind": "bulk", "value": "server" },
+          { "kind": "bulk", "value": "generic" }
+        ]
+      }
+    },
+    {
+      "name": "acl_cat_unknown_category_is_rejected",
+      "now_ms": 11,
+      "argv": ["ACL", "CAT", "foobar"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown ACL cat category 'foobar'"
+      }
+    },
+    {
+      "name": "acl_log_returns_empty_array",
+      "now_ms": 12,
+      "argv": ["ACL", "LOG"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "acl_log_reset_returns_ok",
+      "now_ms": 13,
+      "argv": ["ACL", "LOG", "RESET"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_save_returns_ok",
+      "now_ms": 14,
+      "argv": ["ACL", "SAVE"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_load_returns_ok",
+      "now_ms": 15,
+      "argv": ["ACL", "LOAD"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_unknown_subcommand_is_rejected",
+      "now_ms": 16,
+      "argv": ["ACL", "BADCMD"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
+      }
+    },
+    {
+      "name": "acl_no_subcommand_is_rejected",
+      "now_ms": 17,
+      "argv": ["ACL"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
+      }
+    },
+    {
+      "name": "acl_setuser_invalid_rule_is_rejected",
+      "now_ms": 18,
+      "argv": ["ACL", "SETUSER", "bob", "invalidrule"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error in ACL SETUSER modifier 'invalidrule': Syntax error"
+      }
+    },
+    {
+      "name": "acl_setuser_disable_user",
+      "now_ms": 19,
+      "argv": ["ACL", "SETUSER", "carol", "off"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_getuser_carol_is_disabled",
+      "now_ms": 20,
+      "argv": ["ACL", "GETUSER", "carol"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "flags" },
+          { "kind": "array", "value": [{ "kind": "bulk", "value": "off" }] },
+          { "kind": "bulk", "value": "passwords" },
+          { "kind": "array", "value": [] },
+          { "kind": "bulk", "value": "commands" },
+          { "kind": "bulk", "value": "+@all" },
+          { "kind": "bulk", "value": "keys" },
+          { "kind": "bulk", "value": "~*" },
+          { "kind": "bulk", "value": "channels" },
+          { "kind": "bulk", "value": "&*" }
+        ]
+      }
+    },
+    {
+      "name": "acl_setuser_nopass",
+      "now_ms": 21,
+      "argv": ["ACL", "SETUSER", "dave", "on", "nopass"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_getuser_dave_nopass",
+      "now_ms": 22,
+      "argv": ["ACL", "GETUSER", "dave"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "flags" },
+          { "kind": "array", "value": [{ "kind": "bulk", "value": "on" }, { "kind": "bulk", "value": "nopass" }] },
+          { "kind": "bulk", "value": "passwords" },
+          { "kind": "array", "value": [] },
+          { "kind": "bulk", "value": "commands" },
+          { "kind": "bulk", "value": "+@all" },
+          { "kind": "bulk", "value": "keys" },
+          { "kind": "bulk", "value": "~*" },
+          { "kind": "bulk", "value": "channels" },
+          { "kind": "bulk", "value": "&*" }
+        ]
+      }
+    },
+    {
+      "name": "acl_whoami_extra_args_rejected",
+      "now_ms": 23,
+      "argv": ["ACL", "WHOAMI", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
+      }
+    },
+    {
+      "name": "acl_genpass_error_on_invalid_bits",
+      "now_ms": 24,
+      "argv": ["ACL", "GENPASS", "0"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
+      }
+    }
+  ]
+}
