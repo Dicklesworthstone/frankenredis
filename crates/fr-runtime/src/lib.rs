@@ -244,6 +244,8 @@ enum RuntimeSpecialCommand {
     Multi,
     Exec,
     Discard,
+    Watch,
+    Unwatch,
     Quit,
 }
 
@@ -281,6 +283,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
                 Some(RuntimeSpecialCommand::Hello)
             } else if eq_ascii_token(cmd, b"MULTI") {
                 Some(RuntimeSpecialCommand::Multi)
+            } else if eq_ascii_token(cmd, b"WATCH") {
+                Some(RuntimeSpecialCommand::Watch)
             } else {
                 None
             }
@@ -301,6 +305,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
                 Some(RuntimeSpecialCommand::Waitaof)
             } else if eq_ascii_token(cmd, b"DISCARD") {
                 Some(RuntimeSpecialCommand::Discard)
+            } else if eq_ascii_token(cmd, b"UNWATCH") {
+                Some(RuntimeSpecialCommand::Unwatch)
             } else {
                 None
             }
@@ -352,6 +358,10 @@ fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialC
         Some(RuntimeSpecialCommand::Exec)
     } else if command.eq_ignore_ascii_case("DISCARD") {
         Some(RuntimeSpecialCommand::Discard)
+    } else if command.eq_ignore_ascii_case("WATCH") {
+        Some(RuntimeSpecialCommand::Watch)
+    } else if command.eq_ignore_ascii_case("UNWATCH") {
+        Some(RuntimeSpecialCommand::Unwatch)
     } else if command.eq_ignore_ascii_case("QUIT") {
         Some(RuntimeSpecialCommand::Quit)
     } else {
@@ -412,6 +422,8 @@ struct ReplicationAckState {
 struct TransactionState {
     in_transaction: bool,
     command_queue: Vec<Vec<Vec<u8>>>,
+    watched_keys: Vec<(Vec<u8>, u64)>,
+    watch_dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -918,6 +930,8 @@ impl Runtime {
                 return self.handle_exec_command(now_ms, packet_id, &input_digest, &state_before);
             }
             Some(RuntimeSpecialCommand::Discard) => return self.handle_discard_command(),
+            Some(RuntimeSpecialCommand::Watch) => return self.handle_watch_command(&argv, now_ms),
+            Some(RuntimeSpecialCommand::Unwatch) => return self.handle_unwatch_command(&argv),
             Some(RuntimeSpecialCommand::Quit) => return RespFrame::SimpleString("OK".to_string()),
             _ => {}
         }
@@ -1691,6 +1705,25 @@ impl Runtime {
         let queued = std::mem::take(&mut self.transaction_state.command_queue);
         self.transaction_state.in_transaction = false;
 
+        // Check watched keys: if any were modified, abort the transaction
+        let watch_failed = self.transaction_state.watch_dirty || {
+            let mut dirty = false;
+            for (key, original_fp) in &self.transaction_state.watched_keys {
+                let current_fp = self.store.key_fingerprint(key, now_ms);
+                if current_fp != *original_fp {
+                    dirty = true;
+                    break;
+                }
+            }
+            dirty
+        };
+        self.transaction_state.watched_keys.clear();
+        self.transaction_state.watch_dirty = false;
+
+        if watch_failed {
+            return RespFrame::Array(None);
+        }
+
         let mut results = Vec::with_capacity(queued.len());
         for argv in &queued {
             if let Some(reply) = self.enforce_maxmemory_before_dispatch(
@@ -1722,6 +1755,35 @@ impl Runtime {
         }
         self.transaction_state.in_transaction = false;
         self.transaction_state.command_queue.clear();
+        self.transaction_state.watched_keys.clear();
+        self.transaction_state.watch_dirty = false;
+        RespFrame::SimpleString("OK".to_string())
+    }
+
+    fn handle_watch_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
+        if argv.len() < 2 {
+            return RespFrame::Error(
+                "ERR wrong number of arguments for 'watch' command".to_string(),
+            );
+        }
+        if self.transaction_state.in_transaction {
+            return RespFrame::Error("ERR WATCH inside MULTI is not allowed".to_string());
+        }
+        for key in &argv[1..] {
+            let fp = self.store.key_fingerprint(key, now_ms);
+            self.transaction_state.watched_keys.push((key.clone(), fp));
+        }
+        RespFrame::SimpleString("OK".to_string())
+    }
+
+    fn handle_unwatch_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            return RespFrame::Error(
+                "ERR wrong number of arguments for 'unwatch' command".to_string(),
+            );
+        }
+        self.transaction_state.watched_keys.clear();
+        self.transaction_state.watch_dirty = false;
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -3214,5 +3276,223 @@ mod tests {
         assert_eq!(event.reason_code, "tlscfg.hardened_nonallowlisted_rejected");
         assert_eq!(event.decision_action, DecisionAction::RejectNonAllowlisted);
         assert_eq!(event.severity, DriftSeverity::S2);
+    }
+
+    // ── WATCH / UNWATCH tests ──
+
+    #[test]
+    fn watch_exec_succeeds_when_key_unchanged() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        // WATCH k
+        assert_eq!(
+            rt.execute_frame(command(&[b"WATCH", b"k"]), 1),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        // MULTI
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 2),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        // Queue a SET inside the transaction
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"new"]), 3),
+            RespFrame::SimpleString("QUEUED".to_string()),
+        );
+        // EXEC should succeed (key not modified between WATCH and EXEC)
+        let result = rt.execute_frame(command(&[b"EXEC"]), 4);
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![RespFrame::SimpleString("OK".to_string())])),
+        );
+    }
+
+    #[test]
+    fn watch_exec_aborts_when_key_modified() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        // WATCH k
+        assert_eq!(
+            rt.execute_frame(command(&[b"WATCH", b"k"]), 1),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        // Modify k outside the transaction (simulates another client)
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"changed"]), 2),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        // MULTI
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 3),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        // Queue a GET
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 4),
+            RespFrame::SimpleString("QUEUED".to_string()),
+        );
+        // EXEC should return null array (transaction aborted)
+        let result = rt.execute_frame(command(&[b"EXEC"]), 5);
+        assert_eq!(result, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn watch_nonexistent_key_aborts_on_creation() {
+        let mut rt = Runtime::default_strict();
+        // WATCH a key that doesn't exist
+        assert_eq!(
+            rt.execute_frame(command(&[b"WATCH", b"missing"]), 0),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        // Create the key
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"missing", b"now_exists"]), 1),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        // MULTI + EXEC
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 2),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"missing"]), 3),
+            RespFrame::SimpleString("QUEUED".to_string()),
+        );
+        // Should abort because the watched key was created
+        let result = rt.execute_frame(command(&[b"EXEC"]), 4);
+        assert_eq!(result, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn watch_multiple_keys() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"a", b"1"]), 0);
+        rt.execute_frame(command(&[b"SET", b"b", b"2"]), 0);
+        // WATCH multiple keys in one command
+        assert_eq!(
+            rt.execute_frame(command(&[b"WATCH", b"a", b"b"]), 1),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        // Only modify b
+        rt.execute_frame(command(&[b"SET", b"b", b"changed"]), 2);
+        // MULTI + EXEC
+        rt.execute_frame(command(&[b"MULTI"]), 3);
+        rt.execute_frame(command(&[b"GET", b"a"]), 4);
+        let result = rt.execute_frame(command(&[b"EXEC"]), 5);
+        assert_eq!(result, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn unwatch_clears_watched_keys() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        rt.execute_frame(command(&[b"WATCH", b"k"]), 1);
+        // Modify k
+        rt.execute_frame(command(&[b"SET", b"k", b"changed"]), 2);
+        // UNWATCH clears the watch
+        assert_eq!(
+            rt.execute_frame(command(&[b"UNWATCH"]), 3),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        // MULTI + EXEC should succeed now
+        rt.execute_frame(command(&[b"MULTI"]), 4);
+        rt.execute_frame(command(&[b"GET", b"k"]), 5);
+        let result = rt.execute_frame(command(&[b"EXEC"]), 6);
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"changed".to_vec()))])),
+        );
+    }
+
+    #[test]
+    fn watch_inside_multi_returns_error() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"MULTI"]), 0);
+        let result = rt.execute_frame(command(&[b"WATCH", b"k"]), 1);
+        assert!(matches!(result, RespFrame::Error(ref msg) if msg.contains("WATCH inside MULTI")));
+    }
+
+    #[test]
+    fn watch_wrong_arity() {
+        let mut rt = Runtime::default_strict();
+        let result = rt.execute_frame(command(&[b"WATCH"]), 0);
+        assert!(
+            matches!(result, RespFrame::Error(ref msg) if msg.contains("wrong number of arguments"))
+        );
+    }
+
+    #[test]
+    fn unwatch_wrong_arity() {
+        let mut rt = Runtime::default_strict();
+        let result = rt.execute_frame(command(&[b"UNWATCH", b"extra"]), 0);
+        assert!(
+            matches!(result, RespFrame::Error(ref msg) if msg.contains("wrong number of arguments"))
+        );
+    }
+
+    #[test]
+    fn discard_clears_watched_keys() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        rt.execute_frame(command(&[b"WATCH", b"k"]), 1);
+        rt.execute_frame(command(&[b"SET", b"k", b"changed"]), 2);
+        rt.execute_frame(command(&[b"MULTI"]), 3);
+        // DISCARD clears both transaction and watch state
+        assert_eq!(
+            rt.execute_frame(command(&[b"DISCARD"]), 4),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        // A new MULTI+EXEC without WATCH should succeed
+        rt.execute_frame(command(&[b"MULTI"]), 5);
+        rt.execute_frame(command(&[b"GET", b"k"]), 6);
+        let result = rt.execute_frame(command(&[b"EXEC"]), 7);
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"changed".to_vec()))])),
+        );
+    }
+
+    #[test]
+    fn exec_clears_watch_state() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        // WATCH + successful EXEC
+        rt.execute_frame(command(&[b"WATCH", b"k"]), 1);
+        rt.execute_frame(command(&[b"MULTI"]), 2);
+        rt.execute_frame(command(&[b"SET", b"k", b"new"]), 3);
+        let r1 = rt.execute_frame(command(&[b"EXEC"]), 4);
+        assert!(matches!(r1, RespFrame::Array(Some(_))));
+        // Now modify k and do another MULTI+EXEC without re-WATCHing
+        rt.execute_frame(command(&[b"SET", b"k", b"changed_again"]), 5);
+        rt.execute_frame(command(&[b"MULTI"]), 6);
+        rt.execute_frame(command(&[b"GET", b"k"]), 7);
+        // Should succeed - previous WATCH was cleared by EXEC
+        let r2 = rt.execute_frame(command(&[b"EXEC"]), 8);
+        assert_eq!(
+            r2,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
+                b"changed_again".to_vec()
+            ))])),
+        );
+    }
+
+    #[test]
+    fn watch_key_deleted_aborts_transaction() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        rt.execute_frame(command(&[b"WATCH", b"k"]), 1);
+        // Delete the watched key
+        rt.execute_frame(command(&[b"DEL", b"k"]), 2);
+        // MULTI + EXEC
+        rt.execute_frame(command(&[b"MULTI"]), 3);
+        rt.execute_frame(command(&[b"SET", b"k", b"new"]), 4);
+        let result = rt.execute_frame(command(&[b"EXEC"]), 5);
+        assert_eq!(result, RespFrame::Array(None));
     }
 }

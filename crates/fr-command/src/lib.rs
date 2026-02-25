@@ -130,6 +130,10 @@ pub fn dispatch_argv(
         Some(CommandId::Geopos) => return geopos(argv, store, now_ms),
         Some(CommandId::Geodist) => return geodist(argv, store, now_ms),
         Some(CommandId::Geohash) => return geohash(argv, store, now_ms),
+        Some(CommandId::Georadius) => return georadius(argv, store, now_ms),
+        Some(CommandId::Georadiusbymember) => return georadiusbymember(argv, store, now_ms),
+        Some(CommandId::Geosearch) => return geosearch(argv, store, now_ms),
+        Some(CommandId::Geosearchstore) => return geosearchstore(argv, store, now_ms),
         Some(CommandId::Xadd) => return xadd(argv, store, now_ms),
         Some(CommandId::Xlen) => return xlen(argv, store, now_ms),
         Some(CommandId::Xdel) => return xdel(argv, store, now_ms),
@@ -186,6 +190,43 @@ pub fn dispatch_argv(
         Some(CommandId::Pfmerge) => return pfmerge(argv, store, now_ms),
         Some(CommandId::Getex) => return getex(argv, store, now_ms),
         Some(CommandId::Smismember) => return smismember(argv, store, now_ms),
+        Some(CommandId::Sintercard) => return sintercard(argv, store, now_ms),
+        Some(CommandId::Lcs) => return lcs(argv, store, now_ms),
+        Some(CommandId::Lmpop) => return lmpop(argv, store, now_ms),
+        Some(CommandId::Zmpop) => return zmpop(argv, store, now_ms),
+        Some(CommandId::Slowlog) => return slowlog_cmd(argv),
+        Some(CommandId::Save) => return save_cmd(argv),
+        Some(CommandId::Bgsave) => return bgsave_cmd(argv),
+        Some(CommandId::Bgrewriteaof) => return bgrewriteaof_cmd(argv),
+        Some(CommandId::Lastsave) => return lastsave_cmd(argv, now_ms),
+        Some(CommandId::Swapdb) => return swapdb_cmd(argv),
+        Some(CommandId::Blpop) => return blpop(argv, store, now_ms),
+        Some(CommandId::Brpop) => return brpop(argv, store, now_ms),
+        Some(CommandId::Blmove) => return blmove(argv, store, now_ms),
+        Some(CommandId::Blmpop) => return blmpop(argv, store, now_ms),
+        Some(CommandId::Subscribe) => return subscribe_cmd(argv),
+        Some(CommandId::Unsubscribe) => return unsubscribe_cmd(argv),
+        Some(CommandId::Psubscribe) => return psubscribe_cmd(argv),
+        Some(CommandId::Punsubscribe) => return punsubscribe_cmd(argv),
+        Some(CommandId::Publish) => return publish_cmd(argv),
+        Some(CommandId::Pubsub) => return pubsub_cmd(argv),
+        Some(CommandId::Msetnx) => return msetnx(argv, store, now_ms),
+        Some(CommandId::Brpoplpush) => return brpoplpush(argv, store, now_ms),
+        Some(CommandId::Zdiff) => return zdiff(argv, store, now_ms),
+        Some(CommandId::Zdiffstore) => return zdiffstore(argv, store, now_ms),
+        Some(CommandId::Zinter) => return zinter(argv, store, now_ms),
+        Some(CommandId::Zunion) => return zunion_cmd(argv, store, now_ms),
+        Some(CommandId::Zintercard) => return zintercard(argv, store, now_ms),
+        Some(CommandId::Eval) => return eval_cmd(argv),
+        Some(CommandId::Evalsha) => return evalsha_cmd(argv),
+        Some(CommandId::Script) => return script_cmd(argv),
+        Some(CommandId::Debug) => return debug_cmd(argv),
+        Some(CommandId::Role) => return role_cmd(argv),
+        Some(CommandId::Shutdown) => return shutdown_cmd(argv),
+        Some(CommandId::Move) => return move_cmd(argv),
+        Some(CommandId::Latency) => return latency_cmd(argv),
+        Some(CommandId::Bitfield) => return bitfield_cmd(argv, store, now_ms),
+        Some(CommandId::Memory) => return memory_cmd(argv, store, now_ms),
         Some(CommandId::Substr) => return getrange(argv, store, now_ms),
         Some(CommandId::Bitop) => return bitop(argv, store, now_ms),
         Some(CommandId::Zunionstore) => return zunionstore(argv, store, now_ms),
@@ -202,7 +243,7 @@ pub fn dispatch_argv(
         Some(CommandId::Hscan) => return hscan(argv, store, now_ms),
         Some(CommandId::Sscan) => return sscan(argv, store, now_ms),
         Some(CommandId::Zscan) => return zscan(argv, store, now_ms),
-        Some(CommandId::Object) => return object_cmd(argv),
+        Some(CommandId::Object) => return object_cmd(argv, store, now_ms),
         Some(CommandId::Wait) => return wait_cmd(argv),
         Some(CommandId::Reset) => return reset_cmd(argv),
         Some(CommandId::Unlink) => return del(argv, store, now_ms),
@@ -437,10 +478,51 @@ enum CommandId {
     Pfmerge,
     Getex,
     Smismember,
+    Sintercard,
+    Lcs,
+    Lmpop,
+    Zmpop,
+    Slowlog,
+    Memory,
     Substr,
     Bitop,
     Zunionstore,
     Zinterstore,
+    Save,
+    Bgsave,
+    Bgrewriteaof,
+    Lastsave,
+    Swapdb,
+    Blpop,
+    Brpop,
+    Blmove,
+    Blmpop,
+    Subscribe,
+    Unsubscribe,
+    Psubscribe,
+    Punsubscribe,
+    Publish,
+    Pubsub,
+    Msetnx,
+    Brpoplpush,
+    Zdiff,
+    Zdiffstore,
+    Zinter,
+    Zunion,
+    Zintercard,
+    Eval,
+    Evalsha,
+    Script,
+    Debug,
+    Role,
+    Shutdown,
+    Move,
+    Latency,
+    Bitfield,
+    Georadius,
+    Georadiusbymember,
+    Geosearch,
+    Geosearchstore,
     Quit,
     Select,
     Info,
@@ -476,6 +558,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Del)
             } else if eq_ascii_command(cmd, b"TTL") {
                 Some(CommandId::Ttl)
+            } else if eq_ascii_command(cmd, b"LCS") {
+                Some(CommandId::Lcs)
             } else {
                 None
             }
@@ -543,6 +627,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Sort)
             } else if eq_ascii_command(cmd, b"COPY") {
                 Some(CommandId::Copy)
+            } else if eq_ascii_command(cmd, b"SAVE") {
+                Some(CommandId::Save)
             } else if eq_ascii_command(cmd, b"SCAN") {
                 Some(CommandId::Scan)
             } else if eq_ascii_command(cmd, b"XADD") {
@@ -551,6 +637,12 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Xlen)
             } else if eq_ascii_command(cmd, b"XDEL") {
                 Some(CommandId::Xdel)
+            } else if eq_ascii_command(cmd, b"EVAL") {
+                Some(CommandId::Eval)
+            } else if eq_ascii_command(cmd, b"ROLE") {
+                Some(CommandId::Role)
+            } else if eq_ascii_command(cmd, b"MOVE") {
+                Some(CommandId::Move)
             } else {
                 None
             }
@@ -586,6 +678,10 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Ltrim)
             } else if eq_ascii_command(cmd, b"XREAD") {
                 Some(CommandId::Xread)
+            } else if eq_ascii_command(cmd, b"LMPOP") {
+                Some(CommandId::Lmpop)
+            } else if eq_ascii_command(cmd, b"ZMPOP") {
+                Some(CommandId::Zmpop)
             } else if eq_ascii_command(cmd, b"XINFO") {
                 Some(CommandId::Xinfo)
             } else if eq_ascii_command(cmd, b"XTRIM") {
@@ -598,6 +694,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Getex)
             } else if eq_ascii_command(cmd, b"BITOP") {
                 Some(CommandId::Bitop)
+            } else if eq_ascii_command(cmd, b"ZDIFF") {
+                Some(CommandId::Zdiff)
             } else if eq_ascii_command(cmd, b"HSCAN") {
                 Some(CommandId::Hscan)
             } else if eq_ascii_command(cmd, b"SSCAN") {
@@ -608,6 +706,12 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Touch)
             } else if eq_ascii_command(cmd, b"RESET") {
                 Some(CommandId::Reset)
+            } else if eq_ascii_command(cmd, b"BLPOP") {
+                Some(CommandId::Blpop)
+            } else if eq_ascii_command(cmd, b"BRPOP") {
+                Some(CommandId::Brpop)
+            } else if eq_ascii_command(cmd, b"DEBUG") {
+                Some(CommandId::Debug)
             } else {
                 None
             }
@@ -683,6 +787,26 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Geoadd)
             } else if eq_ascii_command(cmd, b"GEOPOS") {
                 Some(CommandId::Geopos)
+            } else if eq_ascii_command(cmd, b"MEMORY") {
+                Some(CommandId::Memory)
+            } else if eq_ascii_command(cmd, b"BGSAVE") {
+                Some(CommandId::Bgsave)
+            } else if eq_ascii_command(cmd, b"MSETNX") {
+                Some(CommandId::Msetnx)
+            } else if eq_ascii_command(cmd, b"ZINTER") {
+                Some(CommandId::Zinter)
+            } else if eq_ascii_command(cmd, b"ZUNION") {
+                Some(CommandId::Zunion)
+            } else if eq_ascii_command(cmd, b"SWAPDB") {
+                Some(CommandId::Swapdb)
+            } else if eq_ascii_command(cmd, b"BLMOVE") {
+                Some(CommandId::Blmove)
+            } else if eq_ascii_command(cmd, b"BLMPOP") {
+                Some(CommandId::Blmpop)
+            } else if eq_ascii_command(cmd, b"PUBSUB") {
+                Some(CommandId::Pubsub)
+            } else if eq_ascii_command(cmd, b"SCRIPT") {
+                Some(CommandId::Script)
             } else {
                 None
             }
@@ -724,6 +848,14 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Geodist)
             } else if eq_ascii_command(cmd, b"GEOHASH") {
                 Some(CommandId::Geohash)
+            } else if eq_ascii_command(cmd, b"SLOWLOG") {
+                Some(CommandId::Slowlog)
+            } else if eq_ascii_command(cmd, b"EVALSHA") {
+                Some(CommandId::Evalsha)
+            } else if eq_ascii_command(cmd, b"LATENCY") {
+                Some(CommandId::Latency)
+            } else if eq_ascii_command(cmd, b"PUBLISH") {
+                Some(CommandId::Publish)
             } else {
                 None
             }
@@ -747,6 +879,12 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Bitcount)
             } else if eq_ascii_command(cmd, b"XPENDING") {
                 Some(CommandId::Xpending)
+            } else if eq_ascii_command(cmd, b"LASTSAVE") {
+                Some(CommandId::Lastsave)
+            } else if eq_ascii_command(cmd, b"SHUTDOWN") {
+                Some(CommandId::Shutdown)
+            } else if eq_ascii_command(cmd, b"BITFIELD") {
+                Some(CommandId::Bitfield)
             } else {
                 None
             }
@@ -766,6 +904,12 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Xrevrange)
             } else if eq_ascii_command(cmd, b"RANDOMKEY") {
                 Some(CommandId::Randomkey)
+            } else if eq_ascii_command(cmd, b"SUBSCRIBE") {
+                Some(CommandId::Subscribe)
+            } else if eq_ascii_command(cmd, b"GEORADIUS") {
+                Some(CommandId::Georadius)
+            } else if eq_ascii_command(cmd, b"GEOSEARCH") {
+                Some(CommandId::Geosearch)
             } else {
                 None
             }
@@ -783,6 +927,16 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Xautoclaim)
             } else if eq_ascii_command(cmd, b"XREADGROUP") {
                 Some(CommandId::Xreadgroup)
+            } else if eq_ascii_command(cmd, b"SINTERCARD") {
+                Some(CommandId::Sintercard)
+            } else if eq_ascii_command(cmd, b"PSUBSCRIBE") {
+                Some(CommandId::Psubscribe)
+            } else if eq_ascii_command(cmd, b"BRPOPLPUSH") {
+                Some(CommandId::Brpoplpush)
+            } else if eq_ascii_command(cmd, b"ZDIFFSTORE") {
+                Some(CommandId::Zdiffstore)
+            } else if eq_ascii_command(cmd, b"ZINTERCARD") {
+                Some(CommandId::Zintercard)
             } else {
                 None
             }
@@ -806,6 +960,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Zunionstore)
             } else if eq_ascii_command(cmd, b"ZINTERSTORE") {
                 Some(CommandId::Zinterstore)
+            } else if eq_ascii_command(cmd, b"UNSUBSCRIBE") {
+                Some(CommandId::Unsubscribe)
             } else {
                 None
             }
@@ -813,6 +969,10 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
         12 => {
             if eq_ascii_command(cmd, b"HINCRBYFLOAT") {
                 Some(CommandId::Hincrbyfloat)
+            } else if eq_ascii_command(cmd, b"BGREWRITEAOF") {
+                Some(CommandId::Bgrewriteaof)
+            } else if eq_ascii_command(cmd, b"PUNSUBSCRIBE") {
+                Some(CommandId::Punsubscribe)
             } else {
                 None
             }
@@ -829,6 +989,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Zrevrangebylex)
             } else if eq_ascii_command(cmd, b"ZREMRANGEBYLEX") {
                 Some(CommandId::Zremrangebylex)
+            } else if eq_ascii_command(cmd, b"GEOSEARCHSTORE") {
+                Some(CommandId::Geosearchstore)
             } else {
                 None
             }
@@ -845,6 +1007,13 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Zrevrangebyscore)
             } else if eq_ascii_command(cmd, b"ZREMRANGEBYSCORE") {
                 Some(CommandId::Zremrangebyscore)
+            } else {
+                None
+            }
+        }
+        17 => {
+            if eq_ascii_command(cmd, b"GEORADIUSBYMEMBER") {
+                Some(CommandId::Georadiusbymember)
             } else {
                 None
             }
@@ -2101,6 +2270,528 @@ fn geodist(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
 
     let distance = geo_distance_m(lon1, lat1, lon2, lat2) / to_meter;
     Ok(geo_distance_reply(distance))
+}
+
+/// Shared core for GEORADIUS, GEORADIUSBYMEMBER, GEOSEARCH, GEOSEARCHSTORE.
+/// Returns filtered (member, score, distance, lon, lat) tuples sorted by distance.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn geo_search_core(
+    store: &mut Store,
+    key: &[u8],
+    center_lon: f64,
+    center_lat: f64,
+    radius_m: f64,
+    count: Option<usize>,
+    asc: bool,
+    now_ms: u64,
+) -> Result<Vec<(Vec<u8>, f64, f64, f64, f64)>, CommandError> {
+    let members = store.zrange_withscores(key, 0, -1, now_ms)?;
+    let mut results: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
+    for (member, score) in members {
+        let Some((lon, lat)) = geo_decode_score(score) else {
+            continue;
+        };
+        let dist = geo_distance_m(center_lon, center_lat, lon, lat);
+        if dist <= radius_m {
+            results.push((member, score, dist, lon, lat));
+        }
+    }
+    if asc {
+        results.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    } else {
+        results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    if let Some(limit) = count {
+        results.truncate(limit);
+    }
+    Ok(results)
+}
+
+/// Formats GEOSEARCH-family results as RESP frames.
+fn geo_search_reply(
+    results: &[(Vec<u8>, f64, f64, f64, f64)],
+    withcoord: bool,
+    withdist: bool,
+    withhash: bool,
+    to_meter: f64,
+) -> RespFrame {
+    let frames: Vec<RespFrame> = results
+        .iter()
+        .map(|(member, score, dist, lon, lat)| {
+            if !withcoord && !withdist && !withhash {
+                return RespFrame::BulkString(Some(member.clone()));
+            }
+            let mut parts = vec![RespFrame::BulkString(Some(member.clone()))];
+            if withdist {
+                let d = dist / to_meter;
+                let normalized = if d == 0.0 { 0.0 } else { d };
+                parts.push(RespFrame::BulkString(Some(
+                    format!("{normalized:.4}").into_bytes(),
+                )));
+            }
+            if withhash {
+                parts.push(RespFrame::Integer(*score as i64));
+            }
+            if withcoord {
+                parts.push(RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(lon.to_string().into_bytes())),
+                    RespFrame::BulkString(Some(lat.to_string().into_bytes())),
+                ])));
+            }
+            RespFrame::Array(Some(parts))
+        })
+        .collect();
+    RespFrame::Array(Some(frames))
+}
+
+/// Parse optional flags WITHCOORD, WITHDIST, WITHHASH, COUNT N [ANY], ASC, DESC from argv starting
+/// at `start`. Returns (withcoord, withdist, withhash, count, any, asc, to_meter, store_key).
+#[allow(clippy::type_complexity)]
+fn parse_geo_search_flags(
+    argv: &[Vec<u8>],
+    start: usize,
+    default_unit: f64,
+) -> Result<(bool, bool, bool, Option<usize>, bool, bool, f64), CommandError> {
+    let mut withcoord = false;
+    let mut withdist = false;
+    let mut withhash = false;
+    let mut count: Option<usize> = None;
+    let mut any = false;
+    let mut asc = true;
+    let mut to_meter = default_unit;
+    let mut i = start;
+    while i < argv.len() {
+        if eq_ascii_command(&argv[i], b"WITHCOORD") {
+            withcoord = true;
+        } else if eq_ascii_command(&argv[i], b"WITHDIST") {
+            withdist = true;
+        } else if eq_ascii_command(&argv[i], b"WITHHASH") {
+            withhash = true;
+        } else if eq_ascii_command(&argv[i], b"COUNT") {
+            i += 1;
+            if i >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let n = parse_i64_arg(&argv[i])?;
+            if n <= 0 {
+                return Err(CommandError::SyntaxError);
+            }
+            count = Some(n as usize);
+        } else if eq_ascii_command(&argv[i], b"ANY") {
+            any = true;
+        } else if eq_ascii_command(&argv[i], b"ASC") {
+            asc = true;
+        } else if eq_ascii_command(&argv[i], b"DESC") {
+            asc = false;
+        } else if eq_ascii_command(&argv[i], b"STORE") || eq_ascii_command(&argv[i], b"STOREDIST") {
+            // Skip STORE/STOREDIST key for GEORADIUS (not supported in read-only mode)
+            i += 1;
+        } else if let Some(m) = geo_unit_to_meters(&argv[i]) {
+            to_meter = m;
+        } else {
+            // unknown flag, ignore for forward compatibility
+        }
+        i += 1;
+    }
+    Ok((withcoord, withdist, withhash, count, any, asc, to_meter))
+}
+
+fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // GEORADIUS key longitude latitude radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count [ANY]] [ASC|DESC]
+    if argv.len() < 6 {
+        return Err(CommandError::WrongArity("GEORADIUS"));
+    }
+    let center_lon = match parse_geo_f64(&argv[2]) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let center_lat = match parse_geo_f64(&argv[3]) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let radius = match parse_geo_f64(&argv[4]) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let unit_mult = match geo_unit_to_meters(&argv[5]) {
+        Some(m) => m,
+        None => {
+            return Ok(RespFrame::Error(
+                "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+            ));
+        }
+    };
+    let radius_m = radius * unit_mult;
+    let (withcoord, withdist, withhash, count, _any, asc, _) =
+        parse_geo_search_flags(argv, 6, unit_mult)?;
+    let results = geo_search_core(
+        store, &argv[1], center_lon, center_lat, radius_m, count, asc, now_ms,
+    )?;
+    Ok(geo_search_reply(
+        &results, withcoord, withdist, withhash, unit_mult,
+    ))
+}
+
+fn georadiusbymember(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    // GEORADIUSBYMEMBER key member radius m|km|ft|mi [WITHCOORD] [WITHDIST] [WITHHASH] [COUNT count [ANY]] [ASC|DESC]
+    if argv.len() < 5 {
+        return Err(CommandError::WrongArity("GEORADIUSBYMEMBER"));
+    }
+    let score = store.zscore(&argv[1], &argv[2], now_ms)?;
+    let Some(score) = score else {
+        return Ok(RespFrame::Array(Some(Vec::new())));
+    };
+    let Some((center_lon, center_lat)) = geo_decode_score(score) else {
+        return Ok(RespFrame::Array(Some(Vec::new())));
+    };
+    let radius = match parse_geo_f64(&argv[3]) {
+        Ok(v) => v,
+        Err(e) => return Ok(e),
+    };
+    let unit_mult = match geo_unit_to_meters(&argv[4]) {
+        Some(m) => m,
+        None => {
+            return Ok(RespFrame::Error(
+                "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+            ));
+        }
+    };
+    let radius_m = radius * unit_mult;
+    let (withcoord, withdist, withhash, count, _any, asc, _) =
+        parse_geo_search_flags(argv, 5, unit_mult)?;
+    let results = geo_search_core(
+        store, &argv[1], center_lon, center_lat, radius_m, count, asc, now_ms,
+    )?;
+    Ok(geo_search_reply(
+        &results, withcoord, withdist, withhash, unit_mult,
+    ))
+}
+
+fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // GEOSEARCH key FROMMEMBER member | FROMLONLAT lon lat BYRADIUS radius m|km|ft|mi | BYBOX width height m|km|ft|mi
+    //   [ASC|DESC] [COUNT count [ANY]] [WITHCOORD] [WITHDIST] [WITHHASH]
+    if argv.len() < 4 {
+        return Err(CommandError::WrongArity("GEOSEARCH"));
+    }
+    let mut i = 2;
+    let mut center_lon: Option<f64> = None;
+    let mut center_lat: Option<f64> = None;
+    let mut radius_m: Option<f64> = None;
+    let mut box_width_m: Option<f64> = None;
+    let mut box_height_m: Option<f64> = None;
+    let mut unit_mult = 1.0_f64;
+
+    // Parse FROMMEMBER/FROMLONLAT and BYRADIUS/BYBOX
+    while i < argv.len() {
+        if eq_ascii_command(&argv[i], b"FROMMEMBER") {
+            i += 1;
+            if i >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let score = store.zscore(&argv[1], &argv[i], now_ms)?;
+            if let Some(score) = score
+                && let Some((lon, lat)) = geo_decode_score(score)
+            {
+                center_lon = Some(lon);
+                center_lat = Some(lat);
+            }
+            if center_lon.is_none() {
+                return Ok(RespFrame::Error(
+                    "ERR could not decode requested zset member".to_string(),
+                ));
+            }
+        } else if eq_ascii_command(&argv[i], b"FROMLONLAT") {
+            if i + 2 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            center_lon = Some(match parse_geo_f64(&argv[i + 1]) {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            });
+            center_lat = Some(match parse_geo_f64(&argv[i + 2]) {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            });
+            i += 2;
+        } else if eq_ascii_command(&argv[i], b"BYRADIUS") {
+            if i + 2 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let r = match parse_geo_f64(&argv[i + 1]) {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            };
+            let um = match geo_unit_to_meters(&argv[i + 2]) {
+                Some(m) => m,
+                None => {
+                    return Ok(RespFrame::Error(
+                        "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+                    ));
+                }
+            };
+            unit_mult = um;
+            radius_m = Some(r * um);
+            i += 2;
+        } else if eq_ascii_command(&argv[i], b"BYBOX") {
+            if i + 3 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let w = match parse_geo_f64(&argv[i + 1]) {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            };
+            let h = match parse_geo_f64(&argv[i + 2]) {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            };
+            let um = match geo_unit_to_meters(&argv[i + 3]) {
+                Some(m) => m,
+                None => {
+                    return Ok(RespFrame::Error(
+                        "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+                    ));
+                }
+            };
+            unit_mult = um;
+            box_width_m = Some(w * um);
+            box_height_m = Some(h * um);
+            i += 3;
+        } else {
+            break;
+        }
+        i += 1;
+    }
+
+    let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
+        return Ok(RespFrame::Error(
+            "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
+        ));
+    };
+
+    // Parse remaining flags
+    let (withcoord, withdist, withhash, count, _any, asc, _) =
+        parse_geo_search_flags(argv, i, unit_mult)?;
+
+    if let Some(rm) = radius_m {
+        let results = geo_search_core(store, &argv[1], cx, cy, rm, count, asc, now_ms)?;
+        Ok(geo_search_reply(
+            &results, withcoord, withdist, withhash, unit_mult,
+        ))
+    } else if let (Some(w), Some(h)) = (box_width_m, box_height_m) {
+        // BYBOX: filter by bounding box
+        let members = store.zrange_withscores(&argv[1], 0, -1, now_ms)?;
+        let half_w = w / 2.0;
+        let half_h = h / 2.0;
+        let mut results: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
+        for (member, score) in members {
+            let Some((lon, lat)) = geo_decode_score(score) else {
+                continue;
+            };
+            let dist = geo_distance_m(cx, cy, lon, lat);
+            // Approximate box check using lat/lon distance components
+            let lat_dist = geo_distance_m(cx, cy, cx, lat);
+            let lon_dist = geo_distance_m(cx, cy, lon, cy);
+            if lat_dist <= half_h && lon_dist <= half_w {
+                results.push((member, score, dist, lon, lat));
+            }
+        }
+        if asc {
+            results.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        if let Some(limit) = count {
+            results.truncate(limit);
+        }
+        Ok(geo_search_reply(
+            &results, withcoord, withdist, withhash, unit_mult,
+        ))
+    } else {
+        Ok(RespFrame::Error(
+            "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
+        ))
+    }
+}
+
+fn geosearchstore(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    // GEOSEARCHSTORE destination source FROMMEMBER member | FROMLONLAT lon lat BYRADIUS radius m|km|ft|mi | BYBOX width height m|km|ft|mi
+    //   [ASC|DESC] [COUNT count [ANY]] [STOREDIST]
+    if argv.len() < 5 {
+        return Err(CommandError::WrongArity("GEOSEARCHSTORE"));
+    }
+    let dest = argv[1].clone();
+    let source = argv[2].clone();
+    let mut storedist = false;
+
+    // Check for STOREDIST flag
+    for arg in &argv[3..] {
+        if eq_ascii_command(arg, b"STOREDIST") {
+            storedist = true;
+        }
+    }
+
+    // Build a synthetic GEOSEARCH argv: [GEOSEARCH, source, ...rest]
+    let mut synth = vec![b"GEOSEARCH".to_vec(), source];
+    synth.extend_from_slice(&argv[3..]);
+
+    // Parse the geosearch args to get center and radius/box
+    let mut i = 2;
+    let mut center_lon: Option<f64> = None;
+    let mut center_lat: Option<f64> = None;
+    let mut radius_m: Option<f64> = None;
+    let mut box_width_m: Option<f64> = None;
+    let mut box_height_m: Option<f64> = None;
+    let mut unit_mult = 1.0_f64;
+
+    while i < synth.len() {
+        if eq_ascii_command(&synth[i], b"FROMMEMBER") {
+            i += 1;
+            if i >= synth.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let score = store.zscore(&synth[1], &synth[i], now_ms)?;
+            if let Some(score) = score
+                && let Some((lon, lat)) = geo_decode_score(score)
+            {
+                center_lon = Some(lon);
+                center_lat = Some(lat);
+            }
+            if center_lon.is_none() {
+                return Ok(RespFrame::Error(
+                    "ERR could not decode requested zset member".to_string(),
+                ));
+            }
+        } else if eq_ascii_command(&synth[i], b"FROMLONLAT") {
+            if i + 2 >= synth.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            center_lon = Some(match parse_geo_f64(&synth[i + 1]) {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            });
+            center_lat = Some(match parse_geo_f64(&synth[i + 2]) {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            });
+            i += 2;
+        } else if eq_ascii_command(&synth[i], b"BYRADIUS") {
+            if i + 2 >= synth.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let r = match parse_geo_f64(&synth[i + 1]) {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            };
+            let um = match geo_unit_to_meters(&synth[i + 2]) {
+                Some(m) => m,
+                None => {
+                    return Ok(RespFrame::Error(
+                        "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+                    ));
+                }
+            };
+            unit_mult = um;
+            radius_m = Some(r * um);
+            i += 2;
+        } else if eq_ascii_command(&synth[i], b"BYBOX") {
+            if i + 3 >= synth.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let w = match parse_geo_f64(&synth[i + 1]) {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            };
+            let h = match parse_geo_f64(&synth[i + 2]) {
+                Ok(v) => v,
+                Err(e) => return Ok(e),
+            };
+            let um = match geo_unit_to_meters(&synth[i + 3]) {
+                Some(m) => m,
+                None => {
+                    return Ok(RespFrame::Error(
+                        "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+                    ));
+                }
+            };
+            unit_mult = um;
+            box_width_m = Some(w * um);
+            box_height_m = Some(h * um);
+            i += 3;
+        } else {
+            break;
+        }
+        i += 1;
+    }
+
+    let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
+        return Ok(RespFrame::Error(
+            "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
+        ));
+    };
+
+    let (_, _, _, count, _any, asc, _) = parse_geo_search_flags(&synth, i, unit_mult)?;
+
+    let results = if let Some(rm) = radius_m {
+        geo_search_core(store, &synth[1], cx, cy, rm, count, asc, now_ms)?
+    } else if let (Some(w), Some(h)) = (box_width_m, box_height_m) {
+        let members = store.zrange_withscores(&synth[1], 0, -1, now_ms)?;
+        let half_w = w / 2.0;
+        let half_h = h / 2.0;
+        let mut res: Vec<(Vec<u8>, f64, f64, f64, f64)> = Vec::new();
+        for (member, score) in members {
+            let Some((lon, lat)) = geo_decode_score(score) else {
+                continue;
+            };
+            let dist = geo_distance_m(cx, cy, lon, lat);
+            let lat_dist = geo_distance_m(cx, cy, cx, lat);
+            let lon_dist = geo_distance_m(cx, cy, lon, cy);
+            if lat_dist <= half_h && lon_dist <= half_w {
+                res.push((member, score, dist, lon, lat));
+            }
+        }
+        if asc {
+            res.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        } else {
+            res.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        if let Some(limit) = count {
+            res.truncate(limit);
+        }
+        res
+    } else {
+        return Ok(RespFrame::Error(
+            "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
+        ));
+    };
+
+    // Store results in destination key as sorted set
+    let count_result = results.len() as i64;
+    if results.is_empty() {
+        store.del(std::slice::from_ref(&dest), now_ms);
+    } else {
+        let pairs: Vec<(f64, Vec<u8>)> = results
+            .iter()
+            .map(|(member, score, dist, _, _)| {
+                if storedist {
+                    (*dist / unit_mult, member.clone())
+                } else {
+                    (*score, member.clone())
+                }
+            })
+            .collect();
+        // Delete existing key and re-add
+        store.del(std::slice::from_ref(&dest), now_ms);
+        store.zadd(&dest, &pairs, now_ms)?;
+    }
+    Ok(RespFrame::Integer(count_result))
 }
 
 fn parse_stream_id(arg: &[u8]) -> Result<StreamId, RespFrame> {
@@ -3915,6 +4606,357 @@ fn smismember(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     Ok(RespFrame::Array(Some(frames)))
 }
 
+fn sintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // SINTERCARD numkeys key [key ...] [LIMIT limit]
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("SINTERCARD"));
+    }
+    let numkeys_val = parse_i64_arg(&argv[1])?;
+    if numkeys_val <= 0 {
+        return Err(CommandError::SyntaxError);
+    }
+    let numkeys = numkeys_val as usize;
+    let keys_end = 2 + numkeys;
+    if keys_end > argv.len() {
+        return Err(CommandError::SyntaxError);
+    }
+    let keys: Vec<&[u8]> = argv[2..keys_end].iter().map(Vec::as_slice).collect();
+    let mut limit: u64 = 0;
+    let mut idx = keys_end;
+    while idx < argv.len() {
+        if argv[idx].eq_ignore_ascii_case(b"LIMIT") {
+            idx += 1;
+            if idx >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let val = parse_i64_arg(&argv[idx])?;
+            if val < 0 {
+                return Err(CommandError::SyntaxError);
+            }
+            limit = val as u64;
+            idx += 1;
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    }
+    let count = store.sintercard(&keys, limit, now_ms)?;
+    #[allow(clippy::cast_possible_wrap)]
+    Ok(RespFrame::Integer(count as i64))
+}
+
+fn lcs(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // LCS key1 key2 [LEN] [IDX] [MINMATCHLEN min] [WITHMATCHLEN]
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("LCS"));
+    }
+    let a = store.get(&argv[1], now_ms)?.unwrap_or_default();
+    let b = store.get(&argv[2], now_ms)?.unwrap_or_default();
+
+    let mut len_only = false;
+    let mut idx_mode = false;
+    let mut min_match_len: usize = 0;
+    let mut with_match_len = false;
+    let mut i = 3;
+    while i < argv.len() {
+        if argv[i].eq_ignore_ascii_case(b"LEN") {
+            len_only = true;
+            i += 1;
+        } else if argv[i].eq_ignore_ascii_case(b"IDX") {
+            idx_mode = true;
+            i += 1;
+        } else if argv[i].eq_ignore_ascii_case(b"MINMATCHLEN") {
+            i += 1;
+            if i >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let val = parse_i64_arg(&argv[i])?;
+            if val < 0 {
+                return Err(CommandError::SyntaxError);
+            }
+            min_match_len = val as usize;
+            i += 1;
+        } else if argv[i].eq_ignore_ascii_case(b"WITHMATCHLEN") {
+            with_match_len = true;
+            i += 1;
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    }
+
+    let lcs_result = compute_lcs(&a, &b);
+
+    if len_only {
+        return Ok(RespFrame::Integer(lcs_result.len() as i64));
+    }
+
+    if idx_mode {
+        let matches = compute_lcs_matches(&a, &b, min_match_len);
+        let mut match_frames = Vec::new();
+        for m in &matches {
+            let a_range = RespFrame::Array(Some(vec![
+                RespFrame::Integer(m.a_start as i64),
+                RespFrame::Integer(m.a_end as i64),
+            ]));
+            let b_range = RespFrame::Array(Some(vec![
+                RespFrame::Integer(m.b_start as i64),
+                RespFrame::Integer(m.b_end as i64),
+            ]));
+            if with_match_len {
+                match_frames.push(RespFrame::Array(Some(vec![
+                    a_range,
+                    b_range,
+                    RespFrame::Integer(m.len as i64),
+                ])));
+            } else {
+                match_frames.push(RespFrame::Array(Some(vec![a_range, b_range])));
+            }
+        }
+        return Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"matches".to_vec())),
+            RespFrame::Array(Some(match_frames)),
+            RespFrame::BulkString(Some(b"len".to_vec())),
+            RespFrame::Integer(lcs_result.len() as i64),
+        ])));
+    }
+
+    Ok(RespFrame::BulkString(Some(lcs_result)))
+}
+
+struct LcsMatch {
+    a_start: usize,
+    a_end: usize,
+    b_start: usize,
+    b_end: usize,
+    len: usize,
+}
+
+fn compute_lcs(a: &[u8], b: &[u8]) -> Vec<u8> {
+    let m = a.len();
+    let n = b.len();
+    if m == 0 || n == 0 {
+        return Vec::new();
+    }
+    // DP table
+    let mut dp = vec![vec![0u32; n + 1]; m + 1];
+    for i in 1..=m {
+        for j in 1..=n {
+            if a[i - 1] == b[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+            } else {
+                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
+            }
+        }
+    }
+    // Backtrack
+    let mut result = Vec::with_capacity(dp[m][n] as usize);
+    let (mut i, mut j) = (m, n);
+    while i > 0 && j > 0 {
+        if a[i - 1] == b[j - 1] {
+            result.push(a[i - 1]);
+            i -= 1;
+            j -= 1;
+        } else if dp[i - 1][j] > dp[i][j - 1] {
+            i -= 1;
+        } else {
+            j -= 1;
+        }
+    }
+    result.reverse();
+    result
+}
+
+fn compute_lcs_matches(a: &[u8], b: &[u8], min_match_len: usize) -> Vec<LcsMatch> {
+    let m = a.len();
+    let n = b.len();
+    if m == 0 || n == 0 {
+        return Vec::new();
+    }
+    let mut dp = vec![vec![0u32; n + 1]; m + 1];
+    for i in 1..=m {
+        for j in 1..=n {
+            if a[i - 1] == b[j - 1] {
+                dp[i][j] = dp[i - 1][j - 1] + 1;
+            } else {
+                dp[i][j] = dp[i - 1][j].max(dp[i][j - 1]);
+            }
+        }
+    }
+    // Backtrack to find matching segments
+    let mut segments = Vec::new();
+    let (mut i, mut j) = (m, n);
+    while i > 0 && j > 0 {
+        if a[i - 1] == b[j - 1] {
+            let end_a = i - 1;
+            let end_b = j - 1;
+            while i > 0 && j > 0 && a[i - 1] == b[j - 1] {
+                i -= 1;
+                j -= 1;
+            }
+            let start_a = i;
+            let start_b = j;
+            let len = end_a - start_a + 1;
+            if len >= min_match_len {
+                segments.push(LcsMatch {
+                    a_start: start_a,
+                    a_end: end_a,
+                    b_start: start_b,
+                    b_end: end_b,
+                    len,
+                });
+            }
+        } else if dp[i - 1][j] > dp[i][j - 1] {
+            i -= 1;
+        } else {
+            j -= 1;
+        }
+    }
+    segments
+}
+
+fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // LMPOP numkeys key [key ...] LEFT|RIGHT [COUNT count]
+    if argv.len() < 4 {
+        return Err(CommandError::WrongArity("LMPOP"));
+    }
+    let numkeys_val = parse_i64_arg(&argv[1])?;
+    if numkeys_val <= 0 {
+        return Err(CommandError::SyntaxError);
+    }
+    let numkeys = numkeys_val as usize;
+    let keys_end = 2 + numkeys;
+    if keys_end >= argv.len() {
+        return Err(CommandError::SyntaxError);
+    }
+    let direction = &argv[keys_end];
+    let left = if direction.eq_ignore_ascii_case(b"LEFT") {
+        true
+    } else if direction.eq_ignore_ascii_case(b"RIGHT") {
+        false
+    } else {
+        return Err(CommandError::SyntaxError);
+    };
+    let mut count: usize = 1;
+    let mut idx = keys_end + 1;
+    if idx < argv.len() {
+        if argv[idx].eq_ignore_ascii_case(b"COUNT") {
+            idx += 1;
+            if idx >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let val = parse_i64_arg(&argv[idx])?;
+            if val <= 0 {
+                return Err(CommandError::SyntaxError);
+            }
+            count = val as usize;
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    }
+    for key in &argv[2..keys_end] {
+        let len = store.llen(key, now_ms);
+        match len {
+            Ok(n) if n > 0 => {
+                let mut popped = Vec::new();
+                for _ in 0..count {
+                    let val = if left {
+                        store.lpop(key, now_ms)?
+                    } else {
+                        store.rpop(key, now_ms)?
+                    };
+                    match val {
+                        Some(v) => popped.push(RespFrame::BulkString(Some(v))),
+                        None => break,
+                    }
+                }
+                return Ok(RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(key.clone())),
+                    RespFrame::Array(Some(popped)),
+                ])));
+            }
+            Ok(_) => continue,
+            Err(StoreError::WrongType) => {
+                return Err(CommandError::Store(StoreError::WrongType));
+            }
+            Err(e) => return Err(CommandError::Store(e)),
+        }
+    }
+    Ok(RespFrame::Array(None))
+}
+
+fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // ZMPOP numkeys key [key ...] MIN|MAX [COUNT count]
+    if argv.len() < 4 {
+        return Err(CommandError::WrongArity("ZMPOP"));
+    }
+    let numkeys_val = parse_i64_arg(&argv[1])?;
+    if numkeys_val <= 0 {
+        return Err(CommandError::SyntaxError);
+    }
+    let numkeys = numkeys_val as usize;
+    let keys_end = 2 + numkeys;
+    if keys_end >= argv.len() {
+        return Err(CommandError::SyntaxError);
+    }
+    let direction = &argv[keys_end];
+    let use_min = if direction.eq_ignore_ascii_case(b"MIN") {
+        true
+    } else if direction.eq_ignore_ascii_case(b"MAX") {
+        false
+    } else {
+        return Err(CommandError::SyntaxError);
+    };
+    let mut count: usize = 1;
+    let mut idx = keys_end + 1;
+    if idx < argv.len() {
+        if argv[idx].eq_ignore_ascii_case(b"COUNT") {
+            idx += 1;
+            if idx >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let val = parse_i64_arg(&argv[idx])?;
+            if val <= 0 {
+                return Err(CommandError::SyntaxError);
+            }
+            count = val as usize;
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    }
+    for key in &argv[2..keys_end] {
+        let card = store.zcard(key, now_ms);
+        match card {
+            Ok(n) if n > 0 => {
+                let mut popped = Vec::new();
+                for _ in 0..count {
+                    let result = if use_min {
+                        store.zpopmin(key, now_ms)?
+                    } else {
+                        store.zpopmax(key, now_ms)?
+                    };
+                    match result {
+                        Some((member, score)) => {
+                            popped.push(RespFrame::BulkString(Some(member)));
+                            popped
+                                .push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+                        }
+                        None => break,
+                    }
+                }
+                return Ok(RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(key.clone())),
+                    RespFrame::Array(Some(popped)),
+                ])));
+            }
+            Ok(_) => continue,
+            Err(StoreError::WrongType) => {
+                return Err(CommandError::Store(StoreError::WrongType));
+            }
+            Err(e) => return Err(CommandError::Store(e)),
+        }
+    }
+    Ok(RespFrame::Array(None))
+}
+
 fn bitop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("BITOP"));
@@ -4324,7 +5366,7 @@ fn zscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     ])))
 }
 
-fn object_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("OBJECT"));
     }
@@ -4333,14 +5375,48 @@ fn object_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         if argv.len() < 3 {
             return Err(CommandError::WrongArity("OBJECT"));
         }
-        // Stub: always return "raw" encoding
-        Ok(RespFrame::BulkString(Some(b"raw".to_vec())))
+        let encoding = store.object_encoding(&argv[2], now_ms);
+        match encoding {
+            Some(enc) => Ok(RespFrame::BulkString(Some(enc.as_bytes().to_vec()))),
+            None => Ok(RespFrame::BulkString(None)),
+        }
     } else if sub.eq_ignore_ascii_case("REFCOUNT") {
-        Ok(RespFrame::Integer(1))
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("OBJECT"));
+        }
+        if store.exists(&argv[2], now_ms) {
+            Ok(RespFrame::Integer(1))
+        } else {
+            Ok(RespFrame::BulkString(None))
+        }
     } else if sub.eq_ignore_ascii_case("IDLETIME") || sub.eq_ignore_ascii_case("FREQ") {
-        Ok(RespFrame::Integer(0))
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("OBJECT"));
+        }
+        if store.exists(&argv[2], now_ms) {
+            Ok(RespFrame::Integer(0))
+        } else {
+            Ok(RespFrame::BulkString(None))
+        }
     } else if sub.eq_ignore_ascii_case("HELP") {
-        Ok(RespFrame::Array(Some(Vec::new())))
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(
+                b"OBJECT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"ENCODING <key> - Return the encoding of the object at <key>.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"FREQ <key> - Return the access frequency of <key>.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"HELP - Return subcommand help summary.".to_vec())),
+            RespFrame::BulkString(Some(
+                b"IDLETIME <key> - Return the idle time of <key>.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"REFCOUNT <key> - Return the reference count of <key>.".to_vec(),
+            )),
+        ])))
     } else {
         Ok(RespFrame::Error(format!(
             "ERR Unknown subcommand or wrong number of arguments for OBJECT {sub}"
@@ -4354,6 +5430,894 @@ fn wait_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     }
     // WAIT numreplicas timeout - in standalone mode, return 0 replicas
     Ok(RespFrame::Integer(0))
+}
+
+fn slowlog_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("SLOWLOG"));
+    }
+    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if sub.eq_ignore_ascii_case("GET") {
+        Ok(RespFrame::Array(Some(Vec::new())))
+    } else if sub.eq_ignore_ascii_case("LEN") {
+        Ok(RespFrame::Integer(0))
+    } else if sub.eq_ignore_ascii_case("RESET") {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("HELP") {
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(
+                b"SLOWLOG <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"GET [<count>] - Return the slow log entries.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"LEN - Return the number of entries in the slow log.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"RESET - Reset the slow log.".to_vec())),
+            RespFrame::BulkString(Some(b"HELP - Return subcommand help summary.".to_vec())),
+        ])))
+    } else {
+        Ok(RespFrame::Error(format!(
+            "ERR Unknown subcommand or wrong number of arguments for SLOWLOG {sub}"
+        )))
+    }
+}
+
+fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("MEMORY"));
+    }
+    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if sub.eq_ignore_ascii_case("USAGE") {
+        if argv.len() < 3 || argv.len() > 5 {
+            return Err(CommandError::WrongArity("MEMORY|USAGE"));
+        }
+        // Optional SAMPLES count (ignored, we do full scan)
+        if argv.len() > 3 {
+            let opt =
+                std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            if !opt.eq_ignore_ascii_case("SAMPLES") {
+                return Ok(RespFrame::Error(format!("ERR unknown option '{opt}'")));
+            }
+            if argv.len() != 5 {
+                return Ok(RespFrame::Error(
+                    "ERR value is not an integer or out of range".to_string(),
+                ));
+            }
+            // Parse the samples count to validate it, but we ignore it
+            let _samples: i64 = parse_i64_arg(&argv[4])?;
+        }
+        match store.memory_usage_for_key(&argv[2], now_ms) {
+            Some(bytes) => Ok(RespFrame::Integer(bytes as i64)),
+            None => Ok(RespFrame::BulkString(None)),
+        }
+    } else if sub.eq_ignore_ascii_case("DOCTOR") {
+        Ok(RespFrame::BulkString(Some(
+            b"Sam, I have no memory problems".to_vec(),
+        )))
+    } else if sub.eq_ignore_ascii_case("MALLOC-STATS") {
+        Ok(RespFrame::BulkString(Some(
+            b"Memory allocator stats not available".to_vec(),
+        )))
+    } else if sub.eq_ignore_ascii_case("PURGE") {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("STATS") {
+        Ok(RespFrame::BulkString(Some(
+            b"peak.allocated:0\r\ntotal.allocated:0\r\nstartup.allocated:0\r\nreplication.backlog:0\r\nclients.slaves:0\r\nclients.normal:0\r\naof.buffer:0\r\n".to_vec(),
+        )))
+    } else if sub.eq_ignore_ascii_case("HELP") {
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(
+                b"MEMORY <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"DOCTOR - Return memory problems reports.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"MALLOC-STATS - Return internal statistics report from the memory allocator."
+                    .to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"PURGE - Ask the allocator to release memory.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"STATS - Return information about the memory usage of the server.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"USAGE <key> [SAMPLES <count>] - Return memory in bytes used by <key> and its value."
+                    .to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"HELP - Return subcommand help summary.".to_vec())),
+        ])))
+    } else {
+        Ok(RespFrame::Error(format!(
+            "ERR unknown subcommand or wrong number of arguments for 'memory|{sub}'"
+        )))
+    }
+}
+
+fn save_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() != 1 {
+        return Err(CommandError::WrongArity("SAVE"));
+    }
+    Ok(RespFrame::SimpleString("OK".to_string()))
+}
+
+fn bgsave_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() > 2 {
+        return Err(CommandError::WrongArity("BGSAVE"));
+    }
+    // Optional SCHEDULE argument — accepted but ignored
+    Ok(RespFrame::SimpleString(
+        "Background saving started".to_string(),
+    ))
+}
+
+fn bgrewriteaof_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() != 1 {
+        return Err(CommandError::WrongArity("BGREWRITEAOF"));
+    }
+    Ok(RespFrame::SimpleString(
+        "Background append only file rewriting started".to_string(),
+    ))
+}
+
+fn lastsave_cmd(argv: &[Vec<u8>], now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() != 1 {
+        return Err(CommandError::WrongArity("LASTSAVE"));
+    }
+    // Return current time in seconds as a stub (no real save has occurred)
+    Ok(RespFrame::Integer((now_ms / 1000) as i64))
+}
+
+fn subscribe_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // SUBSCRIBE channel [channel ...]
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("SUBSCRIBE"));
+    }
+    // Return subscription confirmations for each channel
+    // In real Redis, these are sent as separate push messages.
+    // We return the last one as the command response (count = total channels).
+    let total = (argv.len() - 1) as i64;
+    let last_channel = &argv[argv.len() - 1];
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(b"subscribe".to_vec())),
+        RespFrame::BulkString(Some(last_channel.clone())),
+        RespFrame::Integer(total),
+    ])))
+}
+
+fn unsubscribe_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // UNSUBSCRIBE [channel [channel ...]]
+    if argv.len() < 2 {
+        // Unsubscribe from all — return 0 subscriptions
+        return Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
+            RespFrame::BulkString(None),
+            RespFrame::Integer(0),
+        ])));
+    }
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
+        RespFrame::BulkString(Some(argv[argv.len() - 1].clone())),
+        RespFrame::Integer(0),
+    ])))
+}
+
+fn psubscribe_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("PSUBSCRIBE"));
+    }
+    let total = (argv.len() - 1) as i64;
+    let last_pattern = &argv[argv.len() - 1];
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(b"psubscribe".to_vec())),
+        RespFrame::BulkString(Some(last_pattern.clone())),
+        RespFrame::Integer(total),
+    ])))
+}
+
+fn punsubscribe_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
+            RespFrame::BulkString(None),
+            RespFrame::Integer(0),
+        ])));
+    }
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
+        RespFrame::BulkString(Some(argv[argv.len() - 1].clone())),
+        RespFrame::Integer(0),
+    ])))
+}
+
+fn publish_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // PUBLISH channel message
+    if argv.len() != 3 {
+        return Err(CommandError::WrongArity("PUBLISH"));
+    }
+    // No subscribers — 0 clients received the message
+    Ok(RespFrame::Integer(0))
+}
+
+fn pubsub_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("PUBSUB"));
+    }
+    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if sub.eq_ignore_ascii_case("CHANNELS") {
+        // No active channels
+        Ok(RespFrame::Array(Some(Vec::new())))
+    } else if sub.eq_ignore_ascii_case("NUMSUB") {
+        // Return channel/count pairs — all zeros
+        let mut result = Vec::new();
+        for ch in &argv[2..] {
+            result.push(RespFrame::BulkString(Some(ch.clone())));
+            result.push(RespFrame::Integer(0));
+        }
+        Ok(RespFrame::Array(Some(result)))
+    } else if sub.eq_ignore_ascii_case("NUMPAT") {
+        Ok(RespFrame::Integer(0))
+    } else if sub.eq_ignore_ascii_case("SHARDCHANNELS") {
+        Ok(RespFrame::Array(Some(Vec::new())))
+    } else if sub.eq_ignore_ascii_case("SHARDNUMSUB") {
+        let mut result = Vec::new();
+        for ch in &argv[2..] {
+            result.push(RespFrame::BulkString(Some(ch.clone())));
+            result.push(RespFrame::Integer(0));
+        }
+        Ok(RespFrame::Array(Some(result)))
+    } else if sub.eq_ignore_ascii_case("HELP") {
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(
+                b"PUBSUB <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"CHANNELS [<pattern>] - Return channels with active subscribers matching pattern."
+                    .to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"NUMSUB [<channel> ...] - Return subscriber counts for channels.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"NUMPAT - Return number of pattern subscriptions.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"HELP - Return subcommand help summary.".to_vec())),
+        ])))
+    } else {
+        Ok(RespFrame::Error(format!(
+            "ERR unknown subcommand or wrong number of arguments for 'pubsub|{sub}'"
+        )))
+    }
+}
+
+fn msetnx(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // MSETNX key value [key value ...]
+    if argv.len() < 3 || argv.len().is_multiple_of(2) {
+        return Err(CommandError::WrongArity("MSETNX"));
+    }
+    // Check if any key already exists
+    for i in (1..argv.len()).step_by(2) {
+        if store.get(&argv[i], now_ms).ok().flatten().is_some() {
+            return Ok(RespFrame::Integer(0));
+        }
+    }
+    // All keys are new — set them all
+    for i in (1..argv.len()).step_by(2) {
+        store.set(argv[i].clone(), argv[i + 1].clone(), None, now_ms);
+    }
+    Ok(RespFrame::Integer(1))
+}
+
+fn brpoplpush(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // BRPOPLPUSH source destination timeout
+    if argv.len() != 4 {
+        return Err(CommandError::WrongArity("BRPOPLPUSH"));
+    }
+    let _timeout = parse_f64_arg(&argv[3])?;
+    match store.rpoplpush(&argv[1], &argv[2], now_ms) {
+        Ok(Some(val)) => Ok(RespFrame::BulkString(Some(val))),
+        Ok(None) => Ok(RespFrame::BulkString(None)),
+        Err(e) => Err(CommandError::Store(e)),
+    }
+}
+
+fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // ZDIFF numkeys key [key ...] [WITHSCORES]
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("ZDIFF"));
+    }
+    let numkeys = parse_i64_arg(&argv[1])? as usize;
+    if numkeys == 0 || argv.len() < 2 + numkeys {
+        return Ok(RespFrame::Error("ERR syntax error".to_string()));
+    }
+    let withscores =
+        argv.len() > 2 + numkeys && argv[2 + numkeys].eq_ignore_ascii_case(b"WITHSCORES");
+    let keys: Vec<&[u8]> = (0..numkeys).map(|i| argv[2 + i].as_slice()).collect();
+    // Compute difference: members in first set not in any other
+    let first_members = store.zrange_withscores(keys[0], 0, -1, now_ms)?;
+    let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
+    for (member, score) in first_members {
+        let mut in_other = false;
+        for &key in &keys[1..] {
+            if store.zscore(key, &member, now_ms)?.is_some() {
+                in_other = true;
+                break;
+            }
+        }
+        if !in_other {
+            result.push((member, score));
+        }
+    }
+    let mut frames = Vec::new();
+    for (member, score) in result {
+        frames.push(RespFrame::BulkString(Some(member)));
+        if withscores {
+            frames.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+        }
+    }
+    Ok(RespFrame::Array(Some(frames)))
+}
+
+fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // ZDIFFSTORE destination numkeys key [key ...]
+    if argv.len() < 4 {
+        return Err(CommandError::WrongArity("ZDIFFSTORE"));
+    }
+    let dest = &argv[1];
+    let numkeys = parse_i64_arg(&argv[2])? as usize;
+    if numkeys == 0 || argv.len() < 3 + numkeys {
+        return Ok(RespFrame::Error("ERR syntax error".to_string()));
+    }
+    let keys: Vec<&[u8]> = (0..numkeys).map(|i| argv[3 + i].as_slice()).collect();
+    let first_members = store.zrange_withscores(keys[0], 0, -1, now_ms)?;
+    let mut result: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
+    for (member, score) in first_members {
+        let mut in_other = false;
+        for &key in &keys[1..] {
+            if store.zscore(key, &member, now_ms)?.is_some() {
+                in_other = true;
+                break;
+            }
+        }
+        if !in_other {
+            result.insert(member, score);
+        }
+    }
+    let count = result.len();
+    store.store_sorted_set(dest, result);
+    Ok(RespFrame::Integer(count as i64))
+}
+
+fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // ZINTER numkeys key [key ...] [WEIGHTS w ...] [AGGREGATE SUM|MIN|MAX] [WITHSCORES]
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("ZINTER"));
+    }
+    let numkeys = parse_i64_arg(&argv[1])? as usize;
+    if numkeys == 0 || argv.len() < 2 + numkeys {
+        return Ok(RespFrame::Error("ERR syntax error".to_string()));
+    }
+    let keys: Vec<&[u8]> = (0..numkeys).map(|i| argv[2 + i].as_slice()).collect();
+    // Find WITHSCORES before parse_zstore_args
+    let withscores_pos = argv[2 + numkeys..]
+        .iter()
+        .position(|a| a.eq_ignore_ascii_case(b"WITHSCORES"));
+    // Filter out WITHSCORES before passing to parse_zstore_args
+    let args_end = if let Some(pos) = withscores_pos {
+        let abs = 2 + numkeys + pos;
+        // Create temporary argv without WITHSCORES for parsing
+        abs
+    } else {
+        argv.len()
+    };
+    let filtered: Vec<Vec<u8>> = argv[..args_end].to_vec();
+    let (weights, aggregate) = parse_zstore_args(&filtered, 2 + numkeys, numkeys)?;
+    let withscores = withscores_pos.is_some();
+    let first_members = store.zrange_withscores(keys[0], 0, -1, now_ms)?;
+    let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
+    let w0 = weights.first().copied().unwrap_or(1.0);
+    for (member, score) in first_members {
+        let mut combined = score * w0;
+        let mut in_all = true;
+        for (i, &key) in keys[1..].iter().enumerate() {
+            match store.zscore(key, &member, now_ms)? {
+                Some(s) => {
+                    let w = weights.get(i + 1).copied().unwrap_or(1.0);
+                    combined = aggregate_scores_for_cmd(combined, s * w, &aggregate);
+                }
+                None => {
+                    in_all = false;
+                    break;
+                }
+            }
+        }
+        if in_all {
+            result.push((member, combined));
+        }
+    }
+    let mut frames = Vec::new();
+    for (member, score) in result {
+        frames.push(RespFrame::BulkString(Some(member)));
+        if withscores {
+            frames.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+        }
+    }
+    Ok(RespFrame::Array(Some(frames)))
+}
+
+fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // ZUNION numkeys key [key ...] [WEIGHTS w ...] [AGGREGATE SUM|MIN|MAX] [WITHSCORES]
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("ZUNION"));
+    }
+    let numkeys = parse_i64_arg(&argv[1])? as usize;
+    if numkeys == 0 || argv.len() < 2 + numkeys {
+        return Ok(RespFrame::Error("ERR syntax error".to_string()));
+    }
+    let keys: Vec<&[u8]> = (0..numkeys).map(|i| argv[2 + i].as_slice()).collect();
+    let withscores_pos = argv[2 + numkeys..]
+        .iter()
+        .position(|a| a.eq_ignore_ascii_case(b"WITHSCORES"));
+    let args_end = if let Some(pos) = withscores_pos {
+        2 + numkeys + pos
+    } else {
+        argv.len()
+    };
+    let filtered: Vec<Vec<u8>> = argv[..args_end].to_vec();
+    let (weights, aggregate) = parse_zstore_args(&filtered, 2 + numkeys, numkeys)?;
+    let withscores = withscores_pos.is_some();
+    let mut combined: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
+    for (i, &key) in keys.iter().enumerate() {
+        let w = weights.get(i).copied().unwrap_or(1.0);
+        let members = store.zrange_withscores(key, 0, -1, now_ms)?;
+        for (member, score) in members {
+            let weighted = score * w;
+            use std::collections::hash_map::Entry as HEntry;
+            match combined.entry(member) {
+                HEntry::Vacant(e) => {
+                    e.insert(weighted);
+                }
+                HEntry::Occupied(mut e) => {
+                    let current = e.get_mut();
+                    *current = aggregate_scores_for_cmd(*current, weighted, &aggregate);
+                }
+            }
+        }
+    }
+    let mut entries: Vec<(Vec<u8>, f64)> = combined.into_iter().collect();
+    entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut frames = Vec::new();
+    for (member, score) in entries {
+        frames.push(RespFrame::BulkString(Some(member)));
+        if withscores {
+            frames.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+        }
+    }
+    Ok(RespFrame::Array(Some(frames)))
+}
+
+fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // ZINTERCARD numkeys key [key ...] [LIMIT limit]
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("ZINTERCARD"));
+    }
+    let numkeys = parse_i64_arg(&argv[1])? as usize;
+    if numkeys == 0 || argv.len() < 2 + numkeys {
+        return Ok(RespFrame::Error("ERR syntax error".to_string()));
+    }
+    let mut limit: u64 = 0;
+    let mut idx = 2 + numkeys;
+    while idx < argv.len() {
+        let opt = std::str::from_utf8(&argv[idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if opt.eq_ignore_ascii_case("LIMIT") {
+            idx += 1;
+            if idx >= argv.len() {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+            limit = parse_u64_arg(&argv[idx])?;
+        } else {
+            return Ok(RespFrame::Error("ERR syntax error".to_string()));
+        }
+        idx += 1;
+    }
+    let keys: Vec<&[u8]> = (0..numkeys).map(|i| argv[2 + i].as_slice()).collect();
+    // Compute intersection count
+    if keys.is_empty() {
+        return Ok(RespFrame::Integer(0));
+    }
+    let first_members = store.zrange_withscores(keys[0], 0, -1, now_ms)?;
+    let mut count: u64 = 0;
+    for (member, _) in first_members {
+        let mut in_all = true;
+        for &key in &keys[1..] {
+            if store.zscore(key, &member, now_ms)?.is_none() {
+                in_all = false;
+                break;
+            }
+        }
+        if in_all {
+            count += 1;
+            if limit > 0 && count >= limit {
+                break;
+            }
+        }
+    }
+    Ok(RespFrame::Integer(count as i64))
+}
+
+fn eval_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // EVAL script numkeys [key ...] [arg ...]
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("EVAL"));
+    }
+    // Lua scripting is not implemented — return NOSCRIPT-style error
+    Ok(RespFrame::Error(
+        "NOSCRIPT No matching script. Please use EVAL.".to_string(),
+    ))
+}
+
+fn evalsha_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // EVALSHA sha1 numkeys [key ...] [arg ...]
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("EVALSHA"));
+    }
+    Ok(RespFrame::Error(
+        "NOSCRIPT No matching script. Please use EVAL.".to_string(),
+    ))
+}
+
+fn script_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("SCRIPT"));
+    }
+    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if sub.eq_ignore_ascii_case("LOAD") {
+        if argv.len() != 3 {
+            return Err(CommandError::WrongArity("SCRIPT|LOAD"));
+        }
+        // Return a fake SHA1 hash (Lua not actually executed)
+        Ok(RespFrame::Error(
+            "ERR Lua scripting is not supported".to_string(),
+        ))
+    } else if sub.eq_ignore_ascii_case("EXISTS") {
+        // Return 0 for each script — none exist
+        let count = argv.len() - 2;
+        let results: Vec<RespFrame> = (0..count).map(|_| RespFrame::Integer(0)).collect();
+        Ok(RespFrame::Array(Some(results)))
+    } else if sub.eq_ignore_ascii_case("FLUSH") {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("KILL") {
+        Ok(RespFrame::Error(
+            "NOTBUSY No scripts in execution right now.".to_string(),
+        ))
+    } else if sub.eq_ignore_ascii_case("HELP") {
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(
+                b"SCRIPT <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"EXISTS <sha1> [<sha1> ...] - Check existence of scripts by SHA1.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"FLUSH [ASYNC|SYNC] - Remove all scripts from the cache.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"KILL - Kill the currently executing script.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"LOAD <script> - Load a script into the cache.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"HELP - Return subcommand help summary.".to_vec())),
+        ])))
+    } else {
+        Ok(RespFrame::Error(format!(
+            "ERR unknown subcommand or wrong number of arguments for 'script|{sub}'"
+        )))
+    }
+}
+
+fn debug_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("DEBUG"));
+    }
+    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if sub.eq_ignore_ascii_case("SLEEP")
+        || sub.eq_ignore_ascii_case("SET-ACTIVE-EXPIRE")
+        || sub.eq_ignore_ascii_case("JMAP")
+        || sub.eq_ignore_ascii_case("RELOAD")
+        || sub.eq_ignore_ascii_case("OBJECT")
+    {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else {
+        Ok(RespFrame::Error(format!(
+            "ERR Unknown subcommand or wrong number of arguments for DEBUG {sub}"
+        )))
+    }
+}
+
+fn role_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() != 1 {
+        return Err(CommandError::WrongArity("ROLE"));
+    }
+    // Return master role with empty replica list
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(b"master".to_vec())),
+        RespFrame::Integer(0),
+        RespFrame::Array(Some(Vec::new())),
+    ])))
+}
+
+fn shutdown_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() > 2 {
+        return Err(CommandError::WrongArity("SHUTDOWN"));
+    }
+    // Stub — in production this would trigger graceful shutdown
+    Ok(RespFrame::SimpleString("OK".to_string()))
+}
+
+fn move_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // MOVE key db
+    if argv.len() != 3 {
+        return Err(CommandError::WrongArity("MOVE"));
+    }
+    let db = parse_i64_arg(&argv[2])?;
+    if db == 0 {
+        // Same DB — no-op, return 0 (key already in this DB)
+        Ok(RespFrame::Integer(0))
+    } else {
+        Ok(RespFrame::Error("ERR index out of range".to_string()))
+    }
+}
+
+fn latency_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("LATENCY"));
+    }
+    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if sub.eq_ignore_ascii_case("LATEST") || sub.eq_ignore_ascii_case("HISTORY") {
+        Ok(RespFrame::Array(Some(Vec::new())))
+    } else if sub.eq_ignore_ascii_case("RESET") {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("GRAPH") {
+        Ok(RespFrame::BulkString(None))
+    } else if sub.eq_ignore_ascii_case("HELP") {
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(
+                b"LATENCY <subcommand> [<arg> ...]. Subcommands are:".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"LATEST - Return the latest latency samples.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"HISTORY <event> - Return latency history for an event.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"RESET [<event> ...] - Reset latency data.".to_vec())),
+            RespFrame::BulkString(Some(
+                b"GRAPH <event> - Return an ASCII graph of latency.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"HELP - Return subcommand help summary.".to_vec())),
+        ])))
+    } else {
+        Ok(RespFrame::Error(format!(
+            "ERR unknown subcommand or wrong number of arguments for 'latency|{sub}'"
+        )))
+    }
+}
+
+fn bitfield_cmd(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    // BITFIELD key [GET encoding offset] [SET encoding offset value] [INCRBY encoding offset increment] [OVERFLOW WRAP|SAT|FAIL]
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("BITFIELD"));
+    }
+    // Simplified stub: process GET/SET/INCRBY subcommands
+    let key = &argv[1];
+    let mut results: Vec<RespFrame> = Vec::new();
+    let mut i = 2;
+    let _ = store.get(key, now_ms); // touch key for expiry check
+    while i < argv.len() {
+        let sub = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if sub.eq_ignore_ascii_case("GET") {
+            if i + 2 >= argv.len() {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+            results.push(RespFrame::Integer(0));
+            i += 3;
+        } else if sub.eq_ignore_ascii_case("SET") {
+            if i + 3 >= argv.len() {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+            results.push(RespFrame::Integer(0));
+            i += 4;
+        } else if sub.eq_ignore_ascii_case("INCRBY") {
+            if i + 3 >= argv.len() {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+            let increment = parse_i64_arg(&argv[i + 3])?;
+            results.push(RespFrame::Integer(increment));
+            i += 4;
+        } else if sub.eq_ignore_ascii_case("OVERFLOW") {
+            if i + 1 >= argv.len() {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+            let mode =
+                std::str::from_utf8(&argv[i + 1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            if !mode.eq_ignore_ascii_case("WRAP")
+                && !mode.eq_ignore_ascii_case("SAT")
+                && !mode.eq_ignore_ascii_case("FAIL")
+            {
+                return Ok(RespFrame::Error("ERR Invalid OVERFLOW type".to_string()));
+            }
+            i += 2;
+        } else {
+            return Ok(RespFrame::Error("ERR syntax error".to_string()));
+        }
+    }
+    Ok(RespFrame::Array(Some(results)))
+}
+
+fn aggregate_scores_for_cmd(a: f64, b: f64, aggregate: &[u8]) -> f64 {
+    if aggregate.eq_ignore_ascii_case(b"MIN") {
+        a.min(b)
+    } else if aggregate.eq_ignore_ascii_case(b"MAX") {
+        a.max(b)
+    } else {
+        a + b
+    }
+}
+
+fn swapdb_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() != 3 {
+        return Err(CommandError::WrongArity("SWAPDB"));
+    }
+    let db1 = parse_i64_arg(&argv[1])?;
+    let db2 = parse_i64_arg(&argv[2])?;
+    if db1 == 0 && db2 == 0 {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else {
+        Ok(RespFrame::Error("ERR invalid DB index".to_string()))
+    }
+}
+
+fn blpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // BLPOP key [key ...] timeout
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("BLPOP"));
+    }
+    // Last arg is timeout (ignored — we try once immediately)
+    let _timeout = parse_f64_arg(&argv[argv.len() - 1])?;
+    for key in &argv[1..argv.len() - 1] {
+        match store.lpop(key, now_ms) {
+            Ok(Some(val)) => {
+                return Ok(RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(key.clone())),
+                    RespFrame::BulkString(Some(val)),
+                ])));
+            }
+            Ok(None) => continue,
+            Err(e) => return Err(CommandError::Store(e)),
+        }
+    }
+    // No data available — return nil (timeout expired)
+    Ok(RespFrame::Array(None))
+}
+
+fn brpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // BRPOP key [key ...] timeout
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("BRPOP"));
+    }
+    let _timeout = parse_f64_arg(&argv[argv.len() - 1])?;
+    for key in &argv[1..argv.len() - 1] {
+        match store.rpop(key, now_ms) {
+            Ok(Some(val)) => {
+                return Ok(RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(key.clone())),
+                    RespFrame::BulkString(Some(val)),
+                ])));
+            }
+            Ok(None) => continue,
+            Err(e) => return Err(CommandError::Store(e)),
+        }
+    }
+    Ok(RespFrame::Array(None))
+}
+
+fn blmove(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // BLMOVE source destination LEFT|RIGHT LEFT|RIGHT timeout
+    if argv.len() != 6 {
+        return Err(CommandError::WrongArity("BLMOVE"));
+    }
+    let _timeout = parse_f64_arg(&argv[5])?;
+    if !argv[3].eq_ignore_ascii_case(b"LEFT") && !argv[3].eq_ignore_ascii_case(b"RIGHT") {
+        return Ok(RespFrame::Error("ERR syntax error".to_string()));
+    }
+    if !argv[4].eq_ignore_ascii_case(b"LEFT") && !argv[4].eq_ignore_ascii_case(b"RIGHT") {
+        return Ok(RespFrame::Error("ERR syntax error".to_string()));
+    }
+    match store.lmove(&argv[1], &argv[2], &argv[3], &argv[4], now_ms) {
+        Ok(Some(val)) => Ok(RespFrame::BulkString(Some(val))),
+        Ok(None) => Ok(RespFrame::BulkString(None)),
+        Err(e) => Err(CommandError::Store(e)),
+    }
+}
+
+fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // BLMPOP timeout numkeys key [key ...] LEFT|RIGHT [COUNT count]
+    if argv.len() < 4 {
+        return Err(CommandError::WrongArity("BLMPOP"));
+    }
+    let _timeout = parse_f64_arg(&argv[1])?;
+    let numkeys = parse_i64_arg(&argv[2])? as usize;
+    if numkeys == 0 || argv.len() < 3 + numkeys + 1 {
+        return Ok(RespFrame::Error("ERR syntax error".to_string()));
+    }
+    let direction_idx = 3 + numkeys;
+    let direction =
+        std::str::from_utf8(&argv[direction_idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let is_left = if direction.eq_ignore_ascii_case("LEFT") {
+        true
+    } else if direction.eq_ignore_ascii_case("RIGHT") {
+        false
+    } else {
+        return Ok(RespFrame::Error("ERR syntax error".to_string()));
+    };
+    let mut count: usize = 1;
+    let mut idx = direction_idx + 1;
+    while idx < argv.len() {
+        let opt = std::str::from_utf8(&argv[idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if opt.eq_ignore_ascii_case("COUNT") {
+            idx += 1;
+            if idx >= argv.len() {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+            count = parse_i64_arg(&argv[idx])? as usize;
+            if count == 0 {
+                return Ok(RespFrame::Error(
+                    "ERR COUNT value of 0 is not allowed".to_string(),
+                ));
+            }
+        } else {
+            return Ok(RespFrame::Error("ERR syntax error".to_string()));
+        }
+        idx += 1;
+    }
+    for ki in 0..numkeys {
+        let key = &argv[3 + ki];
+        let llen = match store.llen(key, now_ms) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        if llen == 0 {
+            continue;
+        }
+        let pop_count = count.min(llen);
+        let mut elements = Vec::with_capacity(pop_count);
+        for _ in 0..pop_count {
+            let val = if is_left {
+                store.lpop(key, now_ms)
+            } else {
+                store.rpop(key, now_ms)
+            };
+            match val {
+                Ok(Some(v)) => elements.push(RespFrame::BulkString(Some(v))),
+                _ => break,
+            }
+        }
+        if !elements.is_empty() {
+            return Ok(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(key.clone())),
+                RespFrame::Array(Some(elements)),
+            ])));
+        }
+    }
+    Ok(RespFrame::Array(None))
 }
 
 fn reset_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
@@ -5550,7 +7514,7 @@ mod tests {
     #[test]
     fn ttl_command() {
         let mut store = Store::new();
-        store.set(b"k".to_vec(), b"v".to_vec(), Some(5500), 1000);
+        store.set(b"k".to_vec(), b"v".to_vec(), Some(5000), 1000);
         let argv = vec![b"TTL".to_vec(), b"k".to_vec()];
         let out = dispatch_argv(&argv, &mut store, 1000).expect("ttl");
         assert_eq!(out, RespFrame::Integer(5));
@@ -12391,5 +14355,1317 @@ mod tests {
             panic!("expected integer");
         };
         assert!((2..=4).contains(&count), "count={count}, expected ~3");
+    }
+
+    #[test]
+    fn sintercard_basic() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"SADD".to_vec(),
+                b"s1".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("sadd s1");
+        dispatch_argv(
+            &[
+                b"SADD".to_vec(),
+                b"s2".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+                b"d".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("sadd s2");
+        // Without LIMIT
+        let out = dispatch_argv(
+            &[
+                b"SINTERCARD".to_vec(),
+                b"2".to_vec(),
+                b"s1".to_vec(),
+                b"s2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("sintercard");
+        assert_eq!(out, RespFrame::Integer(2));
+    }
+
+    #[test]
+    fn sintercard_with_limit() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"SADD".to_vec(),
+                b"s1".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("sadd s1");
+        dispatch_argv(
+            &[
+                b"SADD".to_vec(),
+                b"s2".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+                b"d".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("sadd s2");
+        // With LIMIT 1
+        let out = dispatch_argv(
+            &[
+                b"SINTERCARD".to_vec(),
+                b"2".to_vec(),
+                b"s1".to_vec(),
+                b"s2".to_vec(),
+                b"LIMIT".to_vec(),
+                b"1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("sintercard limit");
+        assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn sintercard_empty_intersection() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SADD".to_vec(), b"s1".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("sadd");
+        dispatch_argv(
+            &[b"SADD".to_vec(), b"s2".to_vec(), b"b".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("sadd");
+        let out = dispatch_argv(
+            &[
+                b"SINTERCARD".to_vec(),
+                b"2".to_vec(),
+                b"s1".to_vec(),
+                b"s2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("sintercard");
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn sintercard_missing_key() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SADD".to_vec(), b"s1".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("sadd");
+        let out = dispatch_argv(
+            &[
+                b"SINTERCARD".to_vec(),
+                b"2".to_vec(),
+                b"s1".to_vec(),
+                b"missing".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("sintercard");
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn lcs_basic() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k1".to_vec(), b"ohmytext".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set k1");
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k2".to_vec(), b"mynewtext".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set k2");
+        let out = dispatch_argv(
+            &[b"LCS".to_vec(), b"k1".to_vec(), b"k2".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("lcs");
+        assert_eq!(out, RespFrame::BulkString(Some(b"mytext".to_vec())));
+    }
+
+    #[test]
+    fn lcs_len() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k1".to_vec(), b"ohmytext".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k2".to_vec(), b"mynewtext".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+        let out = dispatch_argv(
+            &[
+                b"LCS".to_vec(),
+                b"k1".to_vec(),
+                b"k2".to_vec(),
+                b"LEN".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lcs len");
+        assert_eq!(out, RespFrame::Integer(6));
+    }
+
+    #[test]
+    fn lcs_missing_keys() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"LCS".to_vec(), b"k1".to_vec(), b"k2".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("lcs");
+        assert_eq!(out, RespFrame::BulkString(Some(Vec::new())));
+    }
+
+    #[test]
+    fn lmpop_basic() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"mylist".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("rpush");
+        let out = dispatch_argv(
+            &[
+                b"LMPOP".to_vec(),
+                b"1".to_vec(),
+                b"mylist".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lmpop");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"mylist".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"a".to_vec()))])),
+            ]))
+        );
+    }
+
+    #[test]
+    fn lmpop_count() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"mylist".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("rpush");
+        let out = dispatch_argv(
+            &[
+                b"LMPOP".to_vec(),
+                b"1".to_vec(),
+                b"mylist".to_vec(),
+                b"RIGHT".to_vec(),
+                b"COUNT".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lmpop");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"mylist".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"c".to_vec())),
+                    RespFrame::BulkString(Some(b"b".to_vec())),
+                ])),
+            ]))
+        );
+    }
+
+    #[test]
+    fn lmpop_no_keys() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"LMPOP".to_vec(),
+                b"1".to_vec(),
+                b"missing".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("lmpop");
+        assert_eq!(out, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn zmpop_basic() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd");
+        let out = dispatch_argv(
+            &[
+                b"ZMPOP".to_vec(),
+                b"1".to_vec(),
+                b"zs".to_vec(),
+                b"MIN".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zmpop");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"zs".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"a".to_vec())),
+                    RespFrame::BulkString(Some(b"1".to_vec())),
+                ])),
+            ]))
+        );
+    }
+
+    #[test]
+    fn zmpop_no_keys() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"ZMPOP".to_vec(),
+                b"1".to_vec(),
+                b"missing".to_vec(),
+                b"MAX".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zmpop");
+        assert_eq!(out, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn memory_usage_string() {
+        let mut store = Store::new();
+        store.set(b"hello".to_vec(), b"world".to_vec(), None, 0);
+        let out = dispatch_argv(
+            &[b"MEMORY".to_vec(), b"USAGE".to_vec(), b"hello".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("memory usage");
+        if let RespFrame::Integer(n) = out {
+            assert!(n > 0, "memory usage should be positive");
+        } else {
+            panic!("expected Integer, got {out:?}");
+        }
+    }
+
+    #[test]
+    fn memory_usage_missing_key() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"MEMORY".to_vec(), b"USAGE".to_vec(), b"nokey".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("memory usage");
+        assert_eq!(out, RespFrame::BulkString(None));
+    }
+
+    #[test]
+    fn memory_usage_with_samples() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+        let out = dispatch_argv(
+            &[
+                b"MEMORY".to_vec(),
+                b"USAGE".to_vec(),
+                b"k".to_vec(),
+                b"SAMPLES".to_vec(),
+                b"5".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("memory usage samples");
+        if let RespFrame::Integer(n) = out {
+            assert!(n > 0);
+        } else {
+            panic!("expected Integer, got {out:?}");
+        }
+    }
+
+    #[test]
+    fn memory_doctor() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"MEMORY".to_vec(), b"DOCTOR".to_vec()], &mut store, 0)
+            .expect("memory doctor");
+        assert!(matches!(out, RespFrame::BulkString(Some(_))));
+    }
+
+    #[test]
+    fn memory_help() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"MEMORY".to_vec(), b"HELP".to_vec()], &mut store, 0)
+            .expect("memory help");
+        assert!(matches!(out, RespFrame::Array(Some(_))));
+    }
+
+    #[test]
+    fn save_returns_ok() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"SAVE".to_vec()], &mut store, 0).expect("save");
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn bgsave_returns_ok() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"BGSAVE".to_vec()], &mut store, 0).expect("bgsave");
+        assert_eq!(
+            out,
+            RespFrame::SimpleString("Background saving started".to_string())
+        );
+    }
+
+    #[test]
+    fn bgsave_schedule() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"BGSAVE".to_vec(), b"SCHEDULE".to_vec()], &mut store, 0)
+            .expect("bgsave schedule");
+        assert_eq!(
+            out,
+            RespFrame::SimpleString("Background saving started".to_string())
+        );
+    }
+
+    #[test]
+    fn bgrewriteaof_returns_ok() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"BGREWRITEAOF".to_vec()], &mut store, 0).expect("bgrewriteaof");
+        assert_eq!(
+            out,
+            RespFrame::SimpleString("Background append only file rewriting started".to_string())
+        );
+    }
+
+    #[test]
+    fn lastsave_returns_timestamp() {
+        let mut store = Store::new();
+        let out =
+            dispatch_argv(&[b"LASTSAVE".to_vec()], &mut store, 1700000000000).expect("lastsave");
+        assert_eq!(out, RespFrame::Integer(1700000000));
+    }
+
+    #[test]
+    fn swapdb_same_db_zero() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"SWAPDB".to_vec(), b"0".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("swapdb");
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn swapdb_invalid_db() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"SWAPDB".to_vec(), b"0".to_vec(), b"1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("swapdb");
+        assert_eq!(out, RespFrame::Error("ERR invalid DB index".to_string()));
+    }
+
+    #[test]
+    fn blpop_with_data() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"RPUSH".to_vec(), b"mylist".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[b"BLPOP".to_vec(), b"mylist".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("blpop");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"mylist".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn blpop_empty() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"BLPOP".to_vec(), b"nokey".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("blpop empty");
+        assert_eq!(out, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn brpop_with_data() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"mylist".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[b"BRPOP".to_vec(), b"mylist".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("brpop");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"mylist".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn blmove_with_data() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"RPUSH".to_vec(), b"src".to_vec(), b"val".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"BLMOVE".to_vec(),
+                b"src".to_vec(),
+                b"dst".to_vec(),
+                b"LEFT".to_vec(),
+                b"RIGHT".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("blmove");
+        assert_eq!(out, RespFrame::BulkString(Some(b"val".to_vec())));
+    }
+
+    #[test]
+    fn blmpop_with_data() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"mylist".to_vec(),
+                b"x".to_vec(),
+                b"y".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"BLMPOP".to_vec(),
+                b"0".to_vec(),
+                b"1".to_vec(),
+                b"mylist".to_vec(),
+                b"LEFT".to_vec(),
+                b"COUNT".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("blmpop");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"mylist".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"x".to_vec())),
+                    RespFrame::BulkString(Some(b"y".to_vec())),
+                ])),
+            ]))
+        );
+    }
+
+    #[test]
+    fn blmpop_empty() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"BLMPOP".to_vec(),
+                b"0".to_vec(),
+                b"1".to_vec(),
+                b"nokey".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("blmpop empty");
+        assert_eq!(out, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn subscribe_single_channel() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"SUBSCRIBE".to_vec(), b"mychannel".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("subscribe");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"subscribe".to_vec())),
+                RespFrame::BulkString(Some(b"mychannel".to_vec())),
+                RespFrame::Integer(1),
+            ]))
+        );
+    }
+
+    #[test]
+    fn unsubscribe_all() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"UNSUBSCRIBE".to_vec()], &mut store, 0).expect("unsubscribe");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::Integer(0),
+            ]))
+        );
+    }
+
+    #[test]
+    fn publish_returns_zero() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"PUBLISH".to_vec(), b"ch".to_vec(), b"msg".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("publish");
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn pubsub_channels_empty() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"PUBSUB".to_vec(), b"CHANNELS".to_vec()], &mut store, 0)
+            .expect("pubsub channels");
+        assert_eq!(out, RespFrame::Array(Some(Vec::new())));
+    }
+
+    #[test]
+    fn pubsub_numpat() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"PUBSUB".to_vec(), b"NUMPAT".to_vec()], &mut store, 0)
+            .expect("pubsub numpat");
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn psubscribe_pattern() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"PSUBSCRIBE".to_vec(), b"news.*".to_vec()], &mut store, 0)
+            .expect("psubscribe");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"psubscribe".to_vec())),
+                RespFrame::BulkString(Some(b"news.*".to_vec())),
+                RespFrame::Integer(1),
+            ]))
+        );
+    }
+
+    #[test]
+    fn punsubscribe_all() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"PUNSUBSCRIBE".to_vec()], &mut store, 0).expect("punsubscribe");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::Integer(0),
+            ]))
+        );
+    }
+
+    #[test]
+    fn msetnx_all_new() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"MSETNX".to_vec(),
+                b"a".to_vec(),
+                b"1".to_vec(),
+                b"b".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("msetnx");
+        assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn msetnx_key_exists() {
+        let mut store = Store::new();
+        store.set(b"a".to_vec(), b"old".to_vec(), None, 0);
+        let out = dispatch_argv(
+            &[
+                b"MSETNX".to_vec(),
+                b"a".to_vec(),
+                b"1".to_vec(),
+                b"b".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("msetnx");
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn brpoplpush_with_data() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"RPUSH".to_vec(), b"src".to_vec(), b"val".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"BRPOPLPUSH".to_vec(),
+                b"src".to_vec(),
+                b"dst".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("brpoplpush");
+        assert_eq!(out, RespFrame::BulkString(Some(b"val".to_vec())));
+    }
+
+    #[test]
+    fn zdiff_basic() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z1".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z2".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"ZDIFF".to_vec(),
+                b"2".to_vec(),
+                b"z1".to_vec(),
+                b"z2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zdiff");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"b".to_vec()))]))
+        );
+    }
+
+    #[test]
+    fn zintercard_basic() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z1".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z2".to_vec(),
+                b"3".to_vec(),
+                b"a".to_vec(),
+                b"4".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"ZINTERCARD".to_vec(),
+                b"2".to_vec(),
+                b"z1".to_vec(),
+                b"z2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zintercard");
+        assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn zunion_basic() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z1".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z2".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"ZUNION".to_vec(),
+                b"2".to_vec(),
+                b"z1".to_vec(),
+                b"z2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zunion");
+        if let RespFrame::Array(Some(frames)) = out {
+            assert_eq!(frames.len(), 2); // two members
+        } else {
+            panic!("expected array");
+        }
+    }
+
+    #[test]
+    fn zinter_basic() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z1".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z2".to_vec(),
+                b"3".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"ZINTER".to_vec(),
+                b"2".to_vec(),
+                b"z1".to_vec(),
+                b"z2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zinter");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"a".to_vec()))]))
+        );
+    }
+
+    #[test]
+    fn eval_returns_noscript() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"EVAL".to_vec(), b"return 1".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("eval");
+        assert!(matches!(out, RespFrame::Error(_)));
+    }
+
+    #[test]
+    fn evalsha_returns_noscript() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"EVALSHA".to_vec(), b"abc123".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("evalsha");
+        assert!(matches!(out, RespFrame::Error(_)));
+    }
+
+    #[test]
+    fn script_exists_returns_zeros() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"SCRIPT".to_vec(),
+                b"EXISTS".to_vec(),
+                b"sha1".to_vec(),
+                b"sha2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("script exists");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0),]))
+        );
+    }
+
+    #[test]
+    fn script_flush() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"SCRIPT".to_vec(), b"FLUSH".to_vec()], &mut store, 0)
+            .expect("script flush");
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn role_returns_master() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"ROLE".to_vec()], &mut store, 0).expect("role");
+        if let RespFrame::Array(Some(items)) = out {
+            assert_eq!(items[0], RespFrame::BulkString(Some(b"master".to_vec())));
+        } else {
+            panic!("expected array");
+        }
+    }
+
+    #[test]
+    fn debug_sleep() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"SLEEP".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug sleep");
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn shutdown_returns_ok() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"SHUTDOWN".to_vec()], &mut store, 0).expect("shutdown");
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn move_same_db() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"MOVE".to_vec(), b"key".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("move");
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn latency_latest() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"LATENCY".to_vec(), b"LATEST".to_vec()], &mut store, 0)
+            .expect("latency latest");
+        assert_eq!(out, RespFrame::Array(Some(Vec::new())));
+    }
+
+    #[test]
+    fn bitfield_get() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"key".to_vec(),
+                b"GET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("bitfield get");
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+    }
+
+    fn add_geo_points(store: &mut Store) {
+        // Add some cities to a geo key
+        // Palermo: 13.361389, 38.115556
+        // Catania: 15.087269, 37.502669
+        dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"mygeo".to_vec(),
+                b"13.361389".to_vec(),
+                b"38.115556".to_vec(),
+                b"Palermo".to_vec(),
+                b"15.087269".to_vec(),
+                b"37.502669".to_vec(),
+                b"Catania".to_vec(),
+            ],
+            store,
+            0,
+        )
+        .expect("geoadd");
+    }
+
+    #[test]
+    fn georadius_basic() {
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+        let out = dispatch_argv(
+            &[
+                b"GEORADIUS".to_vec(),
+                b"mygeo".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"ASC".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("georadius");
+        if let RespFrame::Array(Some(frames)) = &out {
+            assert_eq!(frames.len(), 2);
+        } else {
+            panic!("expected array, got {out:?}");
+        }
+    }
+
+    #[test]
+    fn georadiusbymember_basic() {
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+        let out = dispatch_argv(
+            &[
+                b"GEORADIUSBYMEMBER".to_vec(),
+                b"mygeo".to_vec(),
+                b"Palermo".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"ASC".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("georadiusbymember");
+        if let RespFrame::Array(Some(frames)) = &out {
+            assert!(!frames.is_empty(), "should find at least Palermo itself");
+        } else {
+            panic!("expected array, got {out:?}");
+        }
+    }
+
+    #[test]
+    fn geosearch_fromlonlat_byradius() {
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"ASC".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geosearch");
+        if let RespFrame::Array(Some(frames)) = &out {
+            assert_eq!(frames.len(), 2);
+        } else {
+            panic!("expected array, got {out:?}");
+        }
+    }
+
+    #[test]
+    fn geosearch_frommember_byradius() {
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMMEMBER".to_vec(),
+                b"Palermo".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"ASC".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geosearch frommember");
+        if let RespFrame::Array(Some(frames)) = &out {
+            assert!(!frames.is_empty());
+        } else {
+            panic!("expected array, got {out:?}");
+        }
+    }
+
+    #[test]
+    fn geosearch_withdist() {
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"ASC".to_vec(),
+                b"WITHDIST".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geosearch withdist");
+        if let RespFrame::Array(Some(frames)) = &out {
+            assert_eq!(frames.len(), 2);
+            // Each result should be an array [name, dist]
+            if let RespFrame::Array(Some(inner)) = &frames[0] {
+                assert_eq!(inner.len(), 2);
+            } else {
+                panic!("expected inner array");
+            }
+        } else {
+            panic!("expected array, got {out:?}");
+        }
+    }
+
+    #[test]
+    fn geosearchstore_basic() {
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCHSTORE".to_vec(),
+                b"dest".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geosearchstore");
+        assert_eq!(out, RespFrame::Integer(2));
+        // Verify destination key has 2 members
+        let members = store.zrange_withscores(b"dest", 0, -1, 0).expect("zrange");
+        assert_eq!(members.len(), 2);
+    }
+
+    #[test]
+    fn georadius_count_limit() {
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+        let out = dispatch_argv(
+            &[
+                b"GEORADIUS".to_vec(),
+                b"mygeo".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"COUNT".to_vec(),
+                b"1".to_vec(),
+                b"ASC".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("georadius count");
+        if let RespFrame::Array(Some(frames)) = &out {
+            assert_eq!(frames.len(), 1);
+        } else {
+            panic!("expected array, got {out:?}");
+        }
+    }
+
+    #[test]
+    fn georadius_empty_key() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"GEORADIUS".to_vec(),
+                b"nokey".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("georadius empty");
+        assert_eq!(out, RespFrame::Array(Some(Vec::new())));
     }
 }

@@ -762,6 +762,58 @@ impl Store {
         self.value_type(key, now_ms).map(ValueType::as_str)
     }
 
+    /// Return the Redis-compatible encoding name for the value at `key`.
+    #[must_use]
+    pub fn object_encoding(&mut self, key: &[u8], now_ms: u64) -> Option<&'static str> {
+        self.drop_if_expired(key, now_ms);
+        self.entries.get(key).map(|entry| match &entry.value {
+            Value::String(v) => {
+                // Redis returns "int" for strings that can be parsed as i64
+                // and "embstr" for strings <= 44 bytes, "raw" otherwise
+                if std::str::from_utf8(v)
+                    .ok()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .is_some()
+                {
+                    "int"
+                } else if v.len() <= 44 {
+                    "embstr"
+                } else {
+                    "raw"
+                }
+            }
+            Value::Hash(m) => {
+                if m.len() <= 128 && m.iter().all(|(k, v)| k.len() <= 64 && v.len() <= 64) {
+                    "listpack"
+                } else {
+                    "hashtable"
+                }
+            }
+            Value::List(l) => {
+                if l.len() <= 128 && l.iter().all(|v| v.len() <= 64) {
+                    "listpack"
+                } else {
+                    "quicklist"
+                }
+            }
+            Value::Set(s) => {
+                if s.len() <= 128 {
+                    "listpack"
+                } else {
+                    "hashtable"
+                }
+            }
+            Value::SortedSet(zs) => {
+                if zs.len() <= 128 && zs.keys().all(|k| k.len() <= 64) {
+                    "listpack"
+                } else {
+                    "skiplist"
+                }
+            }
+            Value::Stream(_) => "stream",
+        })
+    }
+
     pub fn rename(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> Result<(), StoreError> {
         self.drop_if_expired(key, now_ms);
         let entry = self.entries.remove(key).ok_or(StoreError::KeyNotFound)?;
@@ -2016,6 +2068,48 @@ impl Store {
         let mut v: Vec<Vec<u8>> = result.into_iter().collect();
         v.sort();
         Ok(v)
+    }
+
+    pub fn sintercard(
+        &mut self,
+        keys: &[&[u8]],
+        limit: u64,
+        now_ms: u64,
+    ) -> Result<u64, StoreError> {
+        if keys.is_empty() {
+            return Ok(0);
+        }
+        for key in keys {
+            self.drop_if_expired(key, now_ms);
+        }
+        let mut result = match self.entries.get(keys[0]) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => s.clone(),
+                _ => return Err(StoreError::WrongType),
+            },
+            None => return Ok(0),
+        };
+        for key in &keys[1..] {
+            if result.is_empty() {
+                break;
+            }
+            match self.entries.get(*key) {
+                Some(entry) => match &entry.value {
+                    Value::Set(s) => result.retain(|m| s.contains(m)),
+                    _ => return Err(StoreError::WrongType),
+                },
+                None => {
+                    result.clear();
+                    break;
+                }
+            }
+        }
+        let count = u64::try_from(result.len()).unwrap_or(u64::MAX);
+        if limit > 0 && count > limit {
+            Ok(limit)
+        } else {
+            Ok(count)
+        }
     }
 
     pub fn sunion(&mut self, keys: &[&[u8]], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
@@ -4233,6 +4327,76 @@ impl Store {
         Ok(true)
     }
 
+    /// Compute a fingerprint for a single key's current state.
+    /// Returns 0 if the key does not exist or is expired.
+    /// Used by WATCH/EXEC to detect key modifications.
+    #[must_use]
+    pub fn key_fingerprint(&self, key: &[u8], now_ms: u64) -> u64 {
+        let entry = match self.entries.get(key) {
+            Some(e) => e,
+            None => return 0,
+        };
+        if let Some(exp) = entry.expires_at_ms
+            && now_ms >= exp
+        {
+            return 0;
+        }
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        hash = fnv1a_update(hash, key);
+        match &entry.value {
+            Value::String(v) => {
+                hash = fnv1a_update(hash, b"S");
+                hash = fnv1a_update(hash, v);
+            }
+            Value::Hash(m) => {
+                hash = fnv1a_update(hash, b"H");
+                let mut fields: Vec<_> = m.iter().collect();
+                fields.sort_by_key(|(k, _)| *k);
+                for (k, v) in fields {
+                    hash = fnv1a_update(hash, k);
+                    hash = fnv1a_update(hash, v);
+                }
+            }
+            Value::List(l) => {
+                hash = fnv1a_update(hash, b"L");
+                for item in l {
+                    hash = fnv1a_update(hash, item);
+                }
+            }
+            Value::Set(s) => {
+                hash = fnv1a_update(hash, b"E");
+                let mut members: Vec<_> = s.iter().collect();
+                members.sort();
+                for m in members {
+                    hash = fnv1a_update(hash, m);
+                }
+            }
+            Value::SortedSet(zs) => {
+                hash = fnv1a_update(hash, b"Z");
+                let mut pairs: Vec<_> = zs.iter().collect();
+                pairs.sort_by(|a, b| a.0.cmp(b.0));
+                for (member, score) in pairs {
+                    hash = fnv1a_update(hash, member);
+                    hash = fnv1a_update(hash, &score.to_bits().to_le_bytes());
+                }
+            }
+            Value::Stream(entries) => {
+                hash = fnv1a_update(hash, b"X");
+                for ((ms, seq), fields) in entries {
+                    hash = fnv1a_update(hash, &ms.to_le_bytes());
+                    hash = fnv1a_update(hash, &seq.to_le_bytes());
+                    for (field, value) in fields {
+                        hash = fnv1a_update(hash, field);
+                        hash = fnv1a_update(hash, value);
+                    }
+                }
+            }
+        }
+        let expiry_bytes = entry.expires_at_ms.unwrap_or(0).to_le_bytes();
+        hash = fnv1a_update(hash, &expiry_bytes);
+        hash
+    }
+
     #[must_use]
     pub fn state_digest(&self) -> String {
         let mut rows = self.entries.iter().collect::<Vec<_>>();
@@ -4293,6 +4457,28 @@ impl Store {
             hash = fnv1a_update(hash, &expiry_bytes);
         }
         format!("{hash:016x}")
+    }
+
+    pub fn store_sorted_set(
+        &mut self,
+        dest: &[u8],
+        members: std::collections::HashMap<Vec<u8>, f64>,
+    ) {
+        self.stream_groups.remove(dest);
+        self.entries.insert(
+            dest.to_vec(),
+            Entry {
+                value: Value::SortedSet(members),
+                expires_at_ms: None,
+            },
+        );
+    }
+
+    pub fn memory_usage_for_key(&mut self, key: &[u8], now_ms: u64) -> Option<usize> {
+        self.drop_if_expired(key, now_ms);
+        self.entries
+            .get(key)
+            .map(|entry| estimate_entry_memory_usage_bytes(key, entry))
     }
 
     fn estimate_memory_usage_bytes(&self) -> usize {
