@@ -78,6 +78,60 @@
       "now_ms": 9,
       "argv": ["GET", "fr:p2c:004:key"],
       "expect": { "kind": "bulk", "value": "value" }
+    },
+    {
+      "name": "config_set_requirepass_bridges_default_acl_user",
+      "now_ms": 10,
+      "argv": ["CONFIG", "SET", "requirepass", "secret"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "config_get_requirepass_after_bridge",
+      "now_ms": 11,
+      "argv": ["CONFIG", "GET", "requirepass"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "requirepass" },
+          { "kind": "bulk", "value": "secret" }
+        ]
+      }
+    },
+    {
+      "name": "config_set_acllog_max_len",
+      "now_ms": 12,
+      "argv": ["CONFIG", "SET", "acllog-max-len", "256"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "config_get_acllog_max_len_with_pattern",
+      "now_ms": 13,
+      "argv": ["CONFIG", "GET", "acl*"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "acllog-max-len" },
+          { "kind": "bulk", "value": "256" }
+        ]
+      }
+    },
+    {
+      "name": "config_clear_requirepass_restores_nopass_bridge",
+      "now_ms": 14,
+      "argv": ["CONFIG", "SET", "requirepass", ""],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "config_get_requirepass_after_clear",
+      "now_ms": 15,
+      "argv": ["CONFIG", "GET", "requirepass"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "requirepass" },
+          { "kind": "bulk", "value": "" }
+        ]
+      }
     }
   ]
 }

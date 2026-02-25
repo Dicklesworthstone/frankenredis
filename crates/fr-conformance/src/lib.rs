@@ -2846,6 +2846,73 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_004_u010_config_requirepass_bridge_mode_split_is_stable() {
+        let mut strict = Runtime::default_strict();
+        let mut hardened = Runtime::default_hardened();
+
+        let strict_set = strict.execute_frame(
+            command_frame(&["CONFIG", "SET", "requirepass", "secret"]),
+            580,
+        );
+        let hardened_set = hardened.execute_frame(
+            command_frame(&["CONFIG", "SET", "requirepass", "secret"]),
+            580,
+        );
+        assert_eq!(strict_set, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(strict_set, hardened_set);
+
+        let strict_get =
+            strict.execute_frame(command_frame(&["CONFIG", "GET", "requirepass"]), 581);
+        let hardened_get =
+            hardened.execute_frame(command_frame(&["CONFIG", "GET", "requirepass"]), 581);
+        let expected_requirepass = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"requirepass".to_vec())),
+            RespFrame::BulkString(Some(b"secret".to_vec())),
+        ]));
+        assert_eq!(strict_get, expected_requirepass);
+        assert_eq!(strict_get, hardened_get);
+
+        let strict_clear =
+            strict.execute_frame(command_frame(&["CONFIG", "SET", "requirepass", ""]), 582);
+        let hardened_clear =
+            hardened.execute_frame(command_frame(&["CONFIG", "SET", "requirepass", ""]), 582);
+        assert_eq!(strict_clear, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(strict_clear, hardened_clear);
+
+        let strict_cleared =
+            strict.execute_frame(command_frame(&["CONFIG", "GET", "requirepass"]), 583);
+        let hardened_cleared =
+            hardened.execute_frame(command_frame(&["CONFIG", "GET", "requirepass"]), 583);
+        let expected_cleared = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"requirepass".to_vec())),
+            RespFrame::BulkString(Some(Vec::new())),
+        ]));
+        assert_eq!(strict_cleared, expected_cleared);
+        assert_eq!(strict_cleared, hardened_cleared);
+
+        let strict_log_cfg = strict.execute_frame(
+            command_frame(&["CONFIG", "SET", "acllog-max-len", "256"]),
+            584,
+        );
+        let hardened_log_cfg = hardened.execute_frame(
+            command_frame(&["CONFIG", "SET", "acllog-max-len", "256"]),
+            584,
+        );
+        assert_eq!(strict_log_cfg, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(strict_log_cfg, hardened_log_cfg);
+
+        let strict_log_get = strict.execute_frame(command_frame(&["CONFIG", "GET", "acl*"]), 585);
+        let hardened_log_get =
+            hardened.execute_frame(command_frame(&["CONFIG", "GET", "acl*"]), 585);
+        let expected_log_get = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"acllog-max-len".to_vec())),
+            RespFrame::BulkString(Some(b"256".to_vec())),
+        ]));
+        assert_eq!(strict_log_get, expected_log_get);
+        assert_eq!(strict_log_get, hardened_log_get);
+    }
+
+    #[test]
     fn fr_p2c_007_u001_cluster_subcommand_router_contract_and_logs() {
         let mut runtime = Runtime::default_strict();
 

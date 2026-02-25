@@ -36,6 +36,7 @@ const CLUSTER_UNKNOWN_SUBCOMMAND_ERROR: &str =
     "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP.";
 const ACL_UNKNOWN_SUBCOMMAND_ERROR: &str =
     "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP.";
+const DEFAULT_ACLLOG_MAX_LEN: i64 = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AclUser {
@@ -94,18 +95,33 @@ impl Default for AuthState {
 
 impl AuthState {
     fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
+        self.set_requirepass_with_session_policy(requirepass, false);
+    }
+
+    fn set_requirepass_with_session_policy(
+        &mut self,
+        requirepass: Option<Vec<u8>>,
+        preserve_authenticated_user: bool,
+    ) {
+        let previous_authenticated_user = self.authenticated_user.clone();
         self.requirepass = requirepass.clone();
-        if let Some(ref pass) = requirepass {
-            let user = self
-                .acl_users
-                .entry(DEFAULT_AUTH_USER.to_vec())
-                .or_insert_with(AclUser::new_default);
-            user.passwords = vec![pass.clone()];
-        }
-        if self.auth_required() {
-            self.authenticated_user = None;
+        let default_user = self
+            .acl_users
+            .entry(DEFAULT_AUTH_USER.to_vec())
+            .or_insert_with(AclUser::new_default);
+        if let Some(pass) = requirepass {
+            default_user.passwords = vec![pass];
         } else {
+            // Redis bridge behavior: empty requirepass maps back to default-user nopass.
+            default_user.passwords.clear();
+        }
+
+        if !self.auth_required() {
             self.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
+        } else if preserve_authenticated_user {
+            self.authenticated_user = previous_authenticated_user;
+        } else {
+            self.authenticated_user = None;
         }
     }
 
@@ -124,6 +140,10 @@ impl AuthState {
 
     fn auth_required(&self) -> bool {
         self.requirepass.is_some() || self.acl_users.values().any(|u| !u.passwords.is_empty())
+    }
+
+    fn requirepass(&self) -> Option<&[u8]> {
+        self.requirepass.as_deref()
     }
 
     fn requires_auth(&self) -> bool {
@@ -212,6 +232,7 @@ enum ClusterClientMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RuntimeSpecialCommand {
     Acl,
+    Config,
     Auth,
     Hello,
     Asking,
@@ -267,6 +288,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
         6 => {
             if eq_ascii_token(cmd, b"ASKING") {
                 Some(RuntimeSpecialCommand::Asking)
+            } else if eq_ascii_token(cmd, b"CONFIG") {
+                Some(RuntimeSpecialCommand::Config)
             } else {
                 None
             }
@@ -305,6 +328,8 @@ fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialC
     let command = std::str::from_utf8(cmd).ok()?;
     if command.eq_ignore_ascii_case("ACL") {
         Some(RuntimeSpecialCommand::Acl)
+    } else if command.eq_ignore_ascii_case("CONFIG") {
+        Some(RuntimeSpecialCommand::Config)
     } else if command.eq_ignore_ascii_case("AUTH") {
         Some(RuntimeSpecialCommand::Auth)
     } else if command.eq_ignore_ascii_case("HELLO") {
@@ -435,6 +460,7 @@ pub struct Runtime {
     evidence: EvidenceLedger,
     tls_state: TlsRuntimeState,
     auth_state: AuthState,
+    acllog_max_len: i64,
     cluster_state: ClusterClientState,
     replication_ack_state: ReplicationAckState,
     transaction_state: TransactionState,
@@ -481,6 +507,7 @@ impl Runtime {
             evidence: EvidenceLedger::default(),
             tls_state: TlsRuntimeState::default(),
             auth_state: AuthState::default(),
+            acllog_max_len: DEFAULT_ACLLOG_MAX_LEN,
             cluster_state: ClusterClientState::default(),
             replication_ack_state: ReplicationAckState::default(),
             transaction_state: TransactionState::default(),
@@ -879,6 +906,7 @@ impl Runtime {
 
         match special_command {
             Some(RuntimeSpecialCommand::Acl) => return self.handle_acl_command(&argv),
+            Some(RuntimeSpecialCommand::Config) => return self.handle_config_command(&argv),
             Some(RuntimeSpecialCommand::Asking) => return self.handle_asking_command(&argv),
             Some(RuntimeSpecialCommand::Readonly) => return self.handle_readonly_command(&argv),
             Some(RuntimeSpecialCommand::Readwrite) => return self.handle_readwrite_command(&argv),
@@ -1414,6 +1442,116 @@ impl Runtime {
             hello_bulk("HELP"),
             hello_bulk("    Print this help."),
         ]))
+    }
+
+    fn handle_config_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return command_error_to_resp(CommandError::WrongArity("CONFIG"));
+        }
+        let sub = match std::str::from_utf8(&argv[1]) {
+            Ok(sub) => sub,
+            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+        };
+        if sub.eq_ignore_ascii_case("GET") {
+            return self.handle_config_get(argv);
+        }
+        if sub.eq_ignore_ascii_case("SET") {
+            return self.handle_config_set(argv);
+        }
+        if sub.eq_ignore_ascii_case("RESETSTAT") || sub.eq_ignore_ascii_case("REWRITE") {
+            if argv.len() != 2 {
+                return command_error_to_resp(CommandError::WrongArity("CONFIG"));
+            }
+            return RespFrame::SimpleString("OK".to_string());
+        }
+        RespFrame::Error(format!(
+            "ERR Unknown subcommand or wrong number of arguments for CONFIG {sub}",
+        ))
+    }
+
+    fn handle_config_get(&self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 3 {
+            return command_error_to_resp(CommandError::WrongArity("CONFIG"));
+        }
+        let raw_pattern = match std::str::from_utf8(&argv[2]) {
+            Ok(pattern) => pattern,
+            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+        };
+        let pattern = raw_pattern.to_ascii_lowercase();
+        let mut entries = Vec::new();
+        if Self::config_pattern_matches(&pattern, "requirepass") {
+            entries.push(RespFrame::BulkString(Some(b"requirepass".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.auth_state.requirepass().unwrap_or_default().to_vec(),
+            )));
+        }
+        if Self::config_pattern_matches(&pattern, "acllog-max-len") {
+            entries.push(RespFrame::BulkString(Some(b"acllog-max-len".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.acllog_max_len.to_string().into_bytes(),
+            )));
+        }
+        RespFrame::Array(Some(entries))
+    }
+
+    fn handle_config_set(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 4 || !argv.len().is_multiple_of(2) {
+            return command_error_to_resp(CommandError::WrongArity("CONFIG"));
+        }
+
+        let mut next_requirepass: Option<Option<Vec<u8>>> = None;
+        let mut next_acllog_max_len = self.acllog_max_len;
+
+        for pair in argv[2..].chunks_exact(2) {
+            let parameter = match std::str::from_utf8(&pair[0]) {
+                Ok(parameter) => parameter,
+                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+            };
+            if parameter.eq_ignore_ascii_case("requirepass") {
+                next_requirepass = Some(if pair[1].is_empty() {
+                    None
+                } else {
+                    Some(pair[1].clone())
+                });
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("acllog-max-len") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR CONFIG SET acllog-max-len must be a non-negative integer"
+                                .to_string(),
+                        );
+                    }
+                    Err(err) => return command_error_to_resp(err),
+                };
+                next_acllog_max_len = parsed;
+                continue;
+            }
+            return RespFrame::Error(format!("ERR Unsupported CONFIG parameter '{parameter}'"));
+        }
+
+        if let Some(requirepass) = next_requirepass {
+            // CONFIG SET requirepass should bridge ACL defaults without dropping this session.
+            self.auth_state
+                .set_requirepass_with_session_policy(requirepass, true);
+        }
+        self.acllog_max_len = next_acllog_max_len;
+        RespFrame::SimpleString("OK".to_string())
+    }
+
+    fn config_pattern_matches(pattern: &str, parameter: &str) -> bool {
+        if pattern == "*" {
+            return true;
+        }
+        if pattern == parameter {
+            return true;
+        }
+        if let Some(prefix) = pattern.strip_suffix('*') {
+            return parameter.starts_with(prefix);
+        }
+        false
     }
 
     fn handle_asking_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -2408,6 +2546,69 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_004_u011_config_set_requirepass_bridge_preserves_authenticated_session() {
+        let mut rt = Runtime::default_strict();
+        let set = rt.execute_frame(command(&[b"CONFIG", b"SET", b"requirepass", b"secret"]), 0);
+        assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
+        assert!(rt.is_authenticated());
+
+        let get = rt.execute_frame(command(&[b"CONFIG", b"GET", b"requirepass"]), 1);
+        assert_eq!(
+            get,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"requirepass".to_vec())),
+                RespFrame::BulkString(Some(b"secret".to_vec())),
+            ]))
+        );
+
+        let clear = rt.execute_frame(command(&[b"CONFIG", b"SET", b"requirepass", b""]), 2);
+        assert_eq!(clear, RespFrame::SimpleString("OK".to_string()));
+        assert!(rt.is_authenticated());
+
+        let cleared = rt.execute_frame(command(&[b"CONFIG", b"GET", b"requirepass"]), 3);
+        assert_eq!(
+            cleared,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"requirepass".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn fr_p2c_004_u012_config_acllog_max_len_round_trips() {
+        let mut rt = Runtime::default_strict();
+        let default_get = rt.execute_frame(command(&[b"CONFIG", b"GET", b"acllog-max-len"]), 0);
+        assert_eq!(
+            default_get,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"acllog-max-len".to_vec())),
+                RespFrame::BulkString(Some(b"128".to_vec())),
+            ]))
+        );
+
+        let set = rt.execute_frame(command(&[b"CONFIG", b"SET", b"acllog-max-len", b"256"]), 1);
+        assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
+
+        let wildcard_get = rt.execute_frame(command(&[b"CONFIG", b"GET", b"acl*"]), 2);
+        assert_eq!(
+            wildcard_get,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"acllog-max-len".to_vec())),
+                RespFrame::BulkString(Some(b"256".to_vec())),
+            ]))
+        );
+
+        let invalid = rt.execute_frame(command(&[b"CONFIG", b"SET", b"acllog-max-len", b"-1"]), 3);
+        assert_eq!(
+            invalid,
+            RespFrame::Error(
+                "ERR CONFIG SET acllog-max-len must be a non-negative integer".to_string()
+            )
+        );
+    }
+
+    #[test]
     fn fr_p2c_005_u001_runtime_captures_successful_dispatched_commands_for_aof() {
         let mut rt = Runtime::default_strict();
 
@@ -2574,6 +2775,7 @@ mod tests {
             b"auth",
             b"HeLlO",
             b"ASKING",
+            b"CONFIG",
             b"readonly",
             b"READWRITE",
             b"cluster",
@@ -2718,6 +2920,7 @@ mod tests {
             b"PING",
             b"SET",
             b"GET",
+            b"CONFIG",
             b"AUTH",
             b"HELLO",
             b"READONLY",
