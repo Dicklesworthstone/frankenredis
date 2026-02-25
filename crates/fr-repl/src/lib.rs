@@ -162,7 +162,7 @@ pub struct BacklogWindow {
 impl BacklogWindow {
     #[must_use]
     pub fn contains(&self, offset: ReplOffset) -> bool {
-        self.start_offset <= offset && offset.0 <= self.end_offset.0.saturating_add(1)
+        self.start_offset <= offset && offset <= self.end_offset
     }
 
     pub fn rotate(&mut self, replid: String, start_offset: ReplOffset, end_offset: ReplOffset) {
@@ -342,6 +342,28 @@ mod tests {
             end_offset: ReplOffset(200),
         };
         let decision = decide_psync(&backlog, "replid-a", ReplOffset(99));
+        assert_eq!(
+            decision,
+            PsyncDecision::FullResync {
+                rejection: PsyncRejection::OffsetOutOfRange
+            }
+        );
+        if let PsyncDecision::FullResync { rejection } = decision {
+            assert_eq!(
+                rejection.reason_code(),
+                "repl.psync_fullresync_fallback_mismatch"
+            );
+        }
+    }
+
+    #[test]
+    fn fr_p2c_006_u005_psync_rejects_offset_past_backlog_end() {
+        let backlog = BacklogWindow {
+            replid: "replid-a".to_string(),
+            start_offset: ReplOffset(100),
+            end_offset: ReplOffset(200),
+        };
+        let decision = decide_psync(&backlog, "replid-a", ReplOffset(201));
         assert_eq!(
             decision,
             PsyncDecision::FullResync {
