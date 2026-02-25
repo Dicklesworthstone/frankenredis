@@ -38,6 +38,65 @@ const ACL_UNKNOWN_SUBCOMMAND_ERROR: &str =
     "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP.";
 const DEFAULT_ACLLOG_MAX_LEN: i64 = 128;
 
+/// Static configuration parameters returned by CONFIG GET.
+/// These represent sensible defaults for a standalone FrankenRedis instance.
+const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
+    ("bind", "127.0.0.1"),
+    ("port", "6379"),
+    ("databases", "16"),
+    ("maxmemory", "0"),
+    ("maxmemory-policy", "noeviction"),
+    ("hz", "10"),
+    ("timeout", "0"),
+    ("tcp-keepalive", "300"),
+    ("tcp-backlog", "511"),
+    ("loglevel", "notice"),
+    ("logfile", ""),
+    ("maxclients", "10000"),
+    ("save", ""),
+    ("appendonly", "no"),
+    ("dir", "."),
+    ("dbfilename", "dump.rdb"),
+    ("appendfilename", "appendonly.aof"),
+    ("protected-mode", "yes"),
+    ("daemonize", "no"),
+    ("pidfile", ""),
+    ("lfu-log-factor", "10"),
+    ("lfu-decay-time", "1"),
+    ("activedefrag", "no"),
+    ("lazyfree-lazy-eviction", "no"),
+    ("lazyfree-lazy-expire", "no"),
+    ("lazyfree-lazy-server-del", "no"),
+    ("lazyfree-lazy-user-del", "no"),
+    ("latency-tracking", "yes"),
+    ("latency-tracking-info-percentiles", "50 99 99.9"),
+    ("proto-max-bulk-len", "512000000"),
+    ("lua-time-limit", "5000"),
+    ("slowlog-log-slower-than", "10000"),
+    ("slowlog-max-len", "128"),
+    ("list-max-listpack-size", "-2"),
+    ("set-max-listpack-entries", "128"),
+    ("hash-max-listpack-entries", "128"),
+    ("hash-max-listpack-value", "64"),
+    ("zset-max-listpack-entries", "128"),
+    ("zset-max-listpack-value", "64"),
+    ("stream-node-max-bytes", "4096"),
+    ("stream-node-max-entries", "100"),
+    ("cluster-enabled", "no"),
+    ("cluster-config-file", ""),
+    ("cluster-node-timeout", "15000"),
+    ("repl-backlog-size", "1048576"),
+    ("repl-backlog-ttl", "3600"),
+    ("min-replicas-to-write", "0"),
+    ("min-replicas-max-lag", "10"),
+    ("notify-keyspace-events", ""),
+    ("always-show-logo", "yes"),
+    ("rename-command", ""),
+    ("io-threads", "1"),
+    ("io-threads-do-reads", "no"),
+    ("jemalloc-bg-thread", "yes"),
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AclUser {
     passwords: Vec<Vec<u8>>,
@@ -1504,6 +1563,13 @@ impl Runtime {
             entries.push(RespFrame::BulkString(Some(
                 self.acllog_max_len.to_string().into_bytes(),
             )));
+        }
+        // Static configuration parameters that clients commonly probe
+        for &(name, value) in CONFIG_STATIC_PARAMS {
+            if Self::config_pattern_matches(&pattern, name) {
+                entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
+                entries.push(RespFrame::BulkString(Some(value.as_bytes().to_vec())));
+            }
         }
         RespFrame::Array(Some(entries))
     }

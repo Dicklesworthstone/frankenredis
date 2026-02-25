@@ -3,7 +3,7 @@
 use fr_protocol::RespFrame;
 use fr_store::{
     PttlValue, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
-    StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamId,
+    StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamId, ValueType,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -143,6 +143,8 @@ pub fn dispatch_argv(
         Some(CommandId::Xclaim) => return xclaim(argv, store, now_ms),
         Some(CommandId::Xautoclaim) => return xautoclaim(argv, store, now_ms),
         Some(CommandId::Xpending) => return xpending(argv, store, now_ms),
+        Some(CommandId::Xack) => return xack_cmd(argv, store, now_ms),
+        Some(CommandId::Xsetid) => return xsetid_cmd(argv, store, now_ms),
         Some(CommandId::Xinfo) => return xinfo(argv, store, now_ms),
         Some(CommandId::Xgroup) => return xgroup(argv, store, now_ms),
         Some(CommandId::Xrange) => return xrange(argv, store, now_ms),
@@ -250,8 +252,20 @@ pub fn dispatch_argv(
         Some(CommandId::Touch) => return touch(argv, store, now_ms),
         Some(CommandId::Dump) => return dump_cmd(argv),
         Some(CommandId::Restore) => return restore_cmd(argv),
-        Some(CommandId::Sort) => return sort_cmd(argv),
+        Some(CommandId::Sort) => return sort_cmd(argv, store, now_ms),
         Some(CommandId::Copy) => return copy_cmd(argv, store, now_ms),
+        Some(CommandId::Lolwut) => return lolwut_cmd(argv),
+        Some(CommandId::Waitaof) => return waitaof_cmd(argv),
+        Some(CommandId::Cluster) => return cluster_cmd(argv),
+        Some(CommandId::Replicaof) => return replicaof_cmd(argv),
+        Some(CommandId::Function) => return function_cmd(argv),
+        Some(CommandId::Ssubscribe) => return ssubscribe_cmd(argv),
+        Some(CommandId::Sunsubscribe) => return sunsubscribe_cmd(argv),
+        Some(CommandId::Spublish) => return spublish_cmd(argv),
+        Some(CommandId::SortRo) => return sort_cmd(argv, store, now_ms),
+        Some(CommandId::Readonly) => return readonly_cmd(argv),
+        Some(CommandId::Readwrite) => return readwrite_cmd(argv),
+        Some(CommandId::Zrangestore) => return zrangestore_cmd(argv, store, now_ms),
         None => {}
     }
 
@@ -343,6 +357,9 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
             | CommandId::Sort
             | CommandId::Copy
             | CommandId::Unlink
+            | CommandId::Xack
+            | CommandId::Xsetid
+            | CommandId::Zrangestore
     )
 }
 
@@ -544,6 +561,20 @@ enum CommandId {
     Restore,
     Sort,
     Copy,
+    Xack,
+    Xsetid,
+    Lolwut,
+    Waitaof,
+    Cluster,
+    Replicaof,
+    Function,
+    Ssubscribe,
+    Sunsubscribe,
+    Spublish,
+    SortRo,
+    Readonly,
+    Readwrite,
+    Zrangestore,
 }
 
 #[inline]
@@ -637,6 +668,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Xlen)
             } else if eq_ascii_command(cmd, b"XDEL") {
                 Some(CommandId::Xdel)
+            } else if eq_ascii_command(cmd, b"XACK") {
+                Some(CommandId::Xack)
             } else if eq_ascii_command(cmd, b"EVAL") {
                 Some(CommandId::Eval)
             } else if eq_ascii_command(cmd, b"ROLE") {
@@ -807,6 +840,10 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Pubsub)
             } else if eq_ascii_command(cmd, b"SCRIPT") {
                 Some(CommandId::Script)
+            } else if eq_ascii_command(cmd, b"XSETID") {
+                Some(CommandId::Xsetid)
+            } else if eq_ascii_command(cmd, b"LOLWUT") {
+                Some(CommandId::Lolwut)
             } else {
                 None
             }
@@ -856,6 +893,14 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Latency)
             } else if eq_ascii_command(cmd, b"PUBLISH") {
                 Some(CommandId::Publish)
+            } else if eq_ascii_command(cmd, b"WAITAOF") {
+                Some(CommandId::Waitaof)
+            } else if eq_ascii_command(cmd, b"CLUSTER") {
+                Some(CommandId::Cluster)
+            } else if eq_ascii_command(cmd, b"SLAVEOF") {
+                Some(CommandId::Replicaof)
+            } else if eq_ascii_command(cmd, b"SORT_RO") {
+                Some(CommandId::SortRo)
             } else {
                 None
             }
@@ -885,6 +930,12 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Shutdown)
             } else if eq_ascii_command(cmd, b"BITFIELD") {
                 Some(CommandId::Bitfield)
+            } else if eq_ascii_command(cmd, b"FUNCTION") {
+                Some(CommandId::Function)
+            } else if eq_ascii_command(cmd, b"SPUBLISH") {
+                Some(CommandId::Spublish)
+            } else if eq_ascii_command(cmd, b"READONLY") {
+                Some(CommandId::Readonly)
             } else {
                 None
             }
@@ -910,6 +961,10 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Georadius)
             } else if eq_ascii_command(cmd, b"GEOSEARCH") {
                 Some(CommandId::Geosearch)
+            } else if eq_ascii_command(cmd, b"REPLICAOF") {
+                Some(CommandId::Replicaof)
+            } else if eq_ascii_command(cmd, b"READWRITE") {
+                Some(CommandId::Readwrite)
             } else {
                 None
             }
@@ -937,6 +992,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Zdiffstore)
             } else if eq_ascii_command(cmd, b"ZINTERCARD") {
                 Some(CommandId::Zintercard)
+            } else if eq_ascii_command(cmd, b"SSUBSCRIBE") {
+                Some(CommandId::Ssubscribe)
             } else {
                 None
             }
@@ -962,6 +1019,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Zinterstore)
             } else if eq_ascii_command(cmd, b"UNSUBSCRIBE") {
                 Some(CommandId::Unsubscribe)
+            } else if eq_ascii_command(cmd, b"ZRANGESTORE") {
+                Some(CommandId::Zrangestore)
             } else {
                 None
             }
@@ -973,6 +1032,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Bgrewriteaof)
             } else if eq_ascii_command(cmd, b"PUNSUBSCRIBE") {
                 Some(CommandId::Punsubscribe)
+            } else if eq_ascii_command(cmd, b"SUNSUBSCRIBE") {
+                Some(CommandId::Sunsubscribe)
             } else {
                 None
             }
@@ -1050,7 +1111,17 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("SET"));
     }
-    let mut px_ttl_ms = None;
+
+    // Expiry mode: at most one of EX/PX/EXAT/PXAT/KEEPTTL
+    enum ExpiryMode {
+        None,
+        Px(u64),
+        Ex(u64),
+        Pxat(u64),
+        Exat(u64),
+        KeepTtl,
+    }
+    let mut expiry_mode = ExpiryMode::None;
     let mut nx = false;
     let mut xx = false;
     let mut get = false;
@@ -1060,17 +1131,42 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         let option =
             std::str::from_utf8(option_arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if option.eq_ignore_ascii_case("PX") {
+            if !matches!(expiry_mode, ExpiryMode::None) {
+                return Err(CommandError::SyntaxError);
+            }
             let Some(ttl_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            let ttl = parse_u64_arg(ttl_arg)?;
-            px_ttl_ms = Some(ttl);
+            expiry_mode = ExpiryMode::Px(parse_u64_arg(ttl_arg)?);
         } else if option.eq_ignore_ascii_case("EX") {
+            if !matches!(expiry_mode, ExpiryMode::None) {
+                return Err(CommandError::SyntaxError);
+            }
             let Some(seconds_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            let seconds = parse_u64_arg(seconds_arg)?;
-            px_ttl_ms = Some(seconds.saturating_mul(1000));
+            expiry_mode = ExpiryMode::Ex(parse_u64_arg(seconds_arg)?);
+        } else if option.eq_ignore_ascii_case("PXAT") {
+            if !matches!(expiry_mode, ExpiryMode::None) {
+                return Err(CommandError::SyntaxError);
+            }
+            let Some(ts_arg) = options.next() else {
+                return Err(CommandError::SyntaxError);
+            };
+            expiry_mode = ExpiryMode::Pxat(parse_u64_arg(ts_arg)?);
+        } else if option.eq_ignore_ascii_case("EXAT") {
+            if !matches!(expiry_mode, ExpiryMode::None) {
+                return Err(CommandError::SyntaxError);
+            }
+            let Some(ts_arg) = options.next() else {
+                return Err(CommandError::SyntaxError);
+            };
+            expiry_mode = ExpiryMode::Exat(parse_u64_arg(ts_arg)?);
+        } else if option.eq_ignore_ascii_case("KEEPTTL") {
+            if !matches!(expiry_mode, ExpiryMode::None) {
+                return Err(CommandError::SyntaxError);
+            }
+            expiry_mode = ExpiryMode::KeepTtl;
         } else if option.eq_ignore_ascii_case("NX") {
             nx = true;
         } else if option.eq_ignore_ascii_case("XX") {
@@ -1104,7 +1200,36 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         return Ok(RespFrame::BulkString(None));
     }
 
-    store.set(argv[1].clone(), argv[2].clone(), px_ttl_ms, now_ms);
+    match expiry_mode {
+        ExpiryMode::None => {
+            store.set(argv[1].clone(), argv[2].clone(), None, now_ms);
+        }
+        ExpiryMode::Px(ms) => {
+            store.set(argv[1].clone(), argv[2].clone(), Some(ms), now_ms);
+        }
+        ExpiryMode::Ex(sec) => {
+            store.set(
+                argv[1].clone(),
+                argv[2].clone(),
+                Some(sec.saturating_mul(1000)),
+                now_ms,
+            );
+        }
+        ExpiryMode::Pxat(abs_ms) => {
+            store.set_with_abs_expiry(argv[1].clone(), argv[2].clone(), Some(abs_ms));
+        }
+        ExpiryMode::Exat(abs_sec) => {
+            store.set_with_abs_expiry(
+                argv[1].clone(),
+                argv[2].clone(),
+                Some(abs_sec.saturating_mul(1000)),
+            );
+        }
+        ExpiryMode::KeepTtl => {
+            let existing_expiry = store.get_expires_at_ms(&argv[1], now_ms);
+            store.set_with_abs_expiry(argv[1].clone(), argv[2].clone(), existing_expiry);
+        }
+    }
 
     if get {
         Ok(RespFrame::BulkString(old_value))
@@ -1590,16 +1715,38 @@ fn rpush(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
 }
 
 fn lpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 2 {
+    if argv.len() < 2 || argv.len() > 3 {
         return Err(CommandError::WrongArity("LPOP"));
+    }
+    if argv.len() == 3 {
+        let count = parse_u64_arg(&argv[2])? as usize;
+        let mut result = Vec::new();
+        for _ in 0..count {
+            match store.lpop(&argv[1], now_ms)? {
+                Some(v) => result.push(RespFrame::BulkString(Some(v))),
+                None => break,
+            }
+        }
+        return Ok(RespFrame::Array(Some(result)));
     }
     let value = store.lpop(&argv[1], now_ms)?;
     Ok(RespFrame::BulkString(value))
 }
 
 fn rpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 2 {
+    if argv.len() < 2 || argv.len() > 3 {
         return Err(CommandError::WrongArity("RPOP"));
+    }
+    if argv.len() == 3 {
+        let count = parse_u64_arg(&argv[2])? as usize;
+        let mut result = Vec::new();
+        for _ in 0..count {
+            match store.rpop(&argv[1], now_ms)? {
+                Some(v) => result.push(RespFrame::BulkString(Some(v))),
+                None => break,
+            }
+        }
+        return Ok(RespFrame::Array(Some(result)));
     }
     let value = store.rpop(&argv[1], now_ms)?;
     Ok(RespFrame::BulkString(value))
@@ -1986,21 +2133,122 @@ fn zrevrank(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
 }
 
 fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    // ZRANGE key start stop [WITHSCORES]
-    if argv.len() < 4 || argv.len() > 5 {
+    // ZRANGE key min max [BYSCORE | BYLEX] [REV] [LIMIT offset count] [WITHSCORES]
+    if argv.len() < 4 {
         return Err(CommandError::WrongArity("ZRANGE"));
     }
-    let start = parse_i64_arg(&argv[2])?;
-    let stop = parse_i64_arg(&argv[3])?;
-    let withscores = argv.len() == 5
-        && std::str::from_utf8(&argv[4])
-            .map(|s| s.eq_ignore_ascii_case("WITHSCORES"))
-            .unwrap_or(false);
-    if argv.len() == 5 && !withscores {
+
+    let mut byscore = false;
+    let mut bylex = false;
+    let mut rev = false;
+    let mut withscores = false;
+    let mut limit_offset: Option<usize> = None;
+    let mut limit_count: Option<usize> = None;
+
+    let mut i = 4;
+    while i < argv.len() {
+        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if opt.eq_ignore_ascii_case("BYSCORE") {
+            byscore = true;
+            i += 1;
+        } else if opt.eq_ignore_ascii_case("BYLEX") {
+            bylex = true;
+            i += 1;
+        } else if opt.eq_ignore_ascii_case("REV") {
+            rev = true;
+            i += 1;
+        } else if opt.eq_ignore_ascii_case("WITHSCORES") {
+            withscores = true;
+            i += 1;
+        } else if opt.eq_ignore_ascii_case("LIMIT") {
+            if i + 2 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            limit_offset = Some(parse_u64_arg(&argv[i + 1])? as usize);
+            limit_count = Some(parse_u64_arg(&argv[i + 2])? as usize);
+            i += 3;
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    }
+
+    if byscore && bylex {
         return Err(CommandError::SyntaxError);
     }
+
+    // LIMIT only valid with BYSCORE or BYLEX
+    if limit_offset.is_some() && !byscore && !bylex {
+        return Err(CommandError::SyntaxError);
+    }
+
+    if byscore {
+        let min = parse_score_bound(&argv[2])?;
+        let max = parse_score_bound(&argv[3])?;
+        let (lo, hi) = if rev { (max, min) } else { (min, max) };
+        let mut pairs = store.zrangebyscore_withscores(&argv[1], lo, hi, now_ms)?;
+        if rev {
+            pairs.reverse();
+        }
+        if let (Some(offset), Some(count)) = (limit_offset, limit_count) {
+            pairs = pairs.into_iter().skip(offset).take(count).collect();
+        }
+        zrange_emit(pairs, withscores)
+    } else if bylex {
+        let min_lex = &argv[2];
+        let max_lex = &argv[3];
+        let (lo, hi) = if rev {
+            (max_lex.as_slice(), min_lex.as_slice())
+        } else {
+            (min_lex.as_slice(), max_lex.as_slice())
+        };
+        let mut members = store.zrangebylex(&argv[1], lo, hi, now_ms)?;
+        if rev {
+            members.reverse();
+        }
+        if let (Some(offset), Some(count)) = (limit_offset, limit_count) {
+            members = members.into_iter().skip(offset).take(count).collect();
+        }
+        if withscores {
+            // For lex ranges, get scores individually
+            let mut frames = Vec::with_capacity(members.len() * 2);
+            for m in &members {
+                let score = store.zscore(&argv[1], m, now_ms)?.unwrap_or(0.0);
+                frames.push(RespFrame::BulkString(Some(m.clone())));
+                frames.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+            }
+            Ok(RespFrame::Array(Some(frames)))
+        } else {
+            let frames = members
+                .into_iter()
+                .map(|m| RespFrame::BulkString(Some(m)))
+                .collect();
+            Ok(RespFrame::Array(Some(frames)))
+        }
+    } else {
+        // Default: by rank (index)
+        let start = parse_i64_arg(&argv[2])?;
+        let stop = parse_i64_arg(&argv[3])?;
+        if rev {
+            let mut pairs = store.zrange_withscores(&argv[1], start, stop, now_ms)?;
+            pairs.reverse();
+            zrange_emit(pairs, withscores)
+        } else if withscores {
+            let pairs = store.zrange_withscores(&argv[1], start, stop, now_ms)?;
+            zrange_emit(pairs, true)
+        } else {
+            let members = store.zrange(&argv[1], start, stop, now_ms)?;
+            let frames = members
+                .into_iter()
+                .map(|m| RespFrame::BulkString(Some(m)))
+                .collect();
+            Ok(RespFrame::Array(Some(frames)))
+        }
+    }
+}
+
+/// Helper to emit ZRANGE results with optional WITHSCORES.
+fn zrange_emit(pairs: Vec<(Vec<u8>, f64)>, withscores: bool) -> Result<RespFrame, CommandError> {
     if withscores {
-        let pairs = store.zrange_withscores(&argv[1], start, stop, now_ms)?;
         let mut frames = Vec::with_capacity(pairs.len() * 2);
         for (member, score) in pairs {
             frames.push(RespFrame::BulkString(Some(member)));
@@ -2008,10 +2256,9 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         }
         Ok(RespFrame::Array(Some(frames)))
     } else {
-        let members = store.zrange(&argv[1], start, stop, now_ms)?;
-        let frames = members
+        let frames = pairs
             .into_iter()
-            .map(|m| RespFrame::BulkString(Some(m)))
+            .map(|(m, _)| RespFrame::BulkString(Some(m)))
             .collect();
         Ok(RespFrame::Array(Some(frames)))
     }
@@ -2049,22 +2296,51 @@ fn zrevrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     }
 }
 
+/// Parse optional WITHSCORES / LIMIT offset count from argv starting at `start_idx`.
+fn parse_zrangebyscore_opts(
+    argv: &[Vec<u8>],
+    start_idx: usize,
+) -> Result<(bool, Option<usize>, Option<usize>), CommandError> {
+    let mut withscores = false;
+    let mut limit_offset = None;
+    let mut limit_count = None;
+    let mut i = start_idx;
+    while i < argv.len() {
+        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if opt.eq_ignore_ascii_case("WITHSCORES") {
+            withscores = true;
+            i += 1;
+        } else if opt.eq_ignore_ascii_case("LIMIT") {
+            if i + 2 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            limit_offset = Some(parse_u64_arg(&argv[i + 1])? as usize);
+            limit_count = Some(parse_u64_arg(&argv[i + 2])? as usize);
+            i += 3;
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    }
+    Ok((withscores, limit_offset, limit_count))
+}
+
 fn zrangebyscore(
     argv: &[Vec<u8>],
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
-    if argv.len() != 4 {
+    // ZRANGEBYSCORE key min max [WITHSCORES] [LIMIT offset count]
+    if argv.len() < 4 {
         return Err(CommandError::WrongArity("ZRANGEBYSCORE"));
     }
     let min = parse_score_bound(&argv[2])?;
     let max = parse_score_bound(&argv[3])?;
-    let members = store.zrangebyscore(&argv[1], min, max, now_ms)?;
-    let frames = members
-        .into_iter()
-        .map(|m| RespFrame::BulkString(Some(m)))
-        .collect();
-    Ok(RespFrame::Array(Some(frames)))
+    let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
+    let mut pairs = store.zrangebyscore_withscores(&argv[1], min, max, now_ms)?;
+    if let (Some(offset), Some(count)) = (limit_offset, limit_count) {
+        pairs = pairs.into_iter().skip(offset).take(count).collect();
+    }
+    zrange_emit(pairs, withscores)
 }
 
 fn zcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -2089,8 +2365,18 @@ fn zincrby(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
 }
 
 fn zpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 2 {
+    if argv.len() < 2 || argv.len() > 3 {
         return Err(CommandError::WrongArity("ZPOPMIN"));
+    }
+    if argv.len() == 3 {
+        let count = parse_u64_arg(&argv[2])? as usize;
+        let pairs = store.zpopmin_count(&argv[1], count, now_ms)?;
+        let mut frames = Vec::with_capacity(pairs.len() * 2);
+        for (member, score) in pairs {
+            frames.push(RespFrame::BulkString(Some(member)));
+            frames.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+        }
+        return Ok(RespFrame::Array(Some(frames)));
     }
     match store.zpopmin(&argv[1], now_ms)? {
         Some((member, score)) => Ok(RespFrame::Array(Some(vec![
@@ -2102,8 +2388,18 @@ fn zpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
 }
 
 fn zpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 2 {
+    if argv.len() < 2 || argv.len() > 3 {
         return Err(CommandError::WrongArity("ZPOPMAX"));
+    }
+    if argv.len() == 3 {
+        let count = parse_u64_arg(&argv[2])? as usize;
+        let pairs = store.zpopmax_count(&argv[1], count, now_ms)?;
+        let mut frames = Vec::with_capacity(pairs.len() * 2);
+        for (member, score) in pairs {
+            frames.push(RespFrame::BulkString(Some(member)));
+            frames.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+        }
+        return Ok(RespFrame::Array(Some(frames)));
     }
     match store.zpopmax(&argv[1], now_ms)? {
         Some((member, score)) => Ok(RespFrame::Array(Some(vec![
@@ -3837,6 +4133,426 @@ fn xrevrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     Ok(RespFrame::Array(Some(out)))
 }
 
+// ── XACK ────────────────────────────────────────────────────────────
+
+fn xack_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() < 4 {
+        return Err(CommandError::WrongArity("XACK"));
+    }
+    let key = &argv[1];
+    let group = &argv[2];
+    let mut ids = Vec::with_capacity(argv.len() - 3);
+    for arg in &argv[3..] {
+        let id = match parse_stream_id(arg) {
+            Ok(id) => id,
+            Err(reply) => return Ok(reply),
+        };
+        ids.push(id);
+    }
+    let acked = store.xack(key, group, &ids, now_ms)?;
+    Ok(RespFrame::Integer(acked as i64))
+}
+
+// ── XSETID ──────────────────────────────────────────────────────────
+
+fn xsetid_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // XSETID key last-id [ENTRIESADDED entries-added] [MAXDELETEDID max-deleted-id]
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("XSETID"));
+    }
+    let key = &argv[1];
+    let last_id = match parse_stream_id(&argv[2]) {
+        Ok(id) => id,
+        Err(reply) => return Ok(reply),
+    };
+    // parse optional ENTRIESADDED / MAXDELETEDID (accept but ignore)
+    let mut i = 3;
+    while i < argv.len() {
+        let kw = std::str::from_utf8(&argv[i]).unwrap_or("");
+        if kw.eq_ignore_ascii_case("ENTRIESADDED") {
+            i += 2; // skip arg
+        } else if kw.eq_ignore_ascii_case("MAXDELETEDID") {
+            i += 2;
+        } else {
+            return Ok(RespFrame::Error("ERR syntax error".to_string()));
+        }
+    }
+    match store.xsetid(key, last_id, now_ms) {
+        Ok(true) => Ok(RespFrame::SimpleString("OK".to_string())),
+        Ok(false) => Ok(RespFrame::Error(
+            "ERR The ID specified in XSETID is not present in the target stream".to_string(),
+        )),
+        Err(e) => Err(e.into()),
+    }
+}
+
+// ── LOLWUT ──────────────────────────────────────────────────────────
+
+fn lolwut_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // LOLWUT [VERSION version]
+    let _ = argv;
+    Ok(RespFrame::BulkString(Some(
+        b"FrankenRedis ver. 0.1.0\n".to_vec(),
+    )))
+}
+
+// ── WAITAOF ─────────────────────────────────────────────────────────
+
+fn waitaof_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // WAITAOF numlocal numreplicas timeout
+    if argv.len() < 4 {
+        return Err(CommandError::WrongArity("WAITAOF"));
+    }
+    // In standalone mode: local=0, replicas=0
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::Integer(0),
+        RespFrame::Integer(0),
+    ])))
+}
+
+// ── CLUSTER ─────────────────────────────────────────────────────────
+
+fn cluster_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("CLUSTER"));
+    }
+    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if sub.eq_ignore_ascii_case("INFO") {
+        Ok(RespFrame::BulkString(Some(
+            b"cluster_enabled:0\r\n\
+              cluster_state:ok\r\n\
+              cluster_slots_assigned:0\r\n\
+              cluster_slots_ok:0\r\n\
+              cluster_slots_pfail:0\r\n\
+              cluster_slots_fail:0\r\n\
+              cluster_known_nodes:0\r\n\
+              cluster_size:0\r\n\
+              cluster_current_epoch:0\r\n\
+              cluster_my_epoch:0\r\n\
+              cluster_stats_messages_sent:0\r\n\
+              cluster_stats_messages_received:0\r\n\
+              total_cluster_links_buffer_limit_exceeded:0\r\n"
+                .to_vec(),
+        )))
+    } else if sub.eq_ignore_ascii_case("MYID") {
+        Ok(RespFrame::BulkString(Some(
+            b"0000000000000000000000000000000000000000".to_vec(),
+        )))
+    } else if sub.eq_ignore_ascii_case("SLOTS")
+        || sub.eq_ignore_ascii_case("SHARDS")
+        || sub.eq_ignore_ascii_case("GETKEYSINSLOT")
+    {
+        Ok(RespFrame::Array(Some(Vec::new())))
+    } else if sub.eq_ignore_ascii_case("NODES") {
+        Ok(RespFrame::BulkString(Some(Vec::new())))
+    } else if sub.eq_ignore_ascii_case("RESET") {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("KEYSLOT") {
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("CLUSTER"));
+        }
+        // CRC16 slot computation
+        let slot = crc16_slot(&argv[2]);
+        Ok(RespFrame::Integer(slot as i64))
+    } else if sub.eq_ignore_ascii_case("COUNTKEYSINSLOT") {
+        Ok(RespFrame::Integer(0))
+    } else if sub.eq_ignore_ascii_case("HELP") {
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"CLUSTER INFO".to_vec())),
+            RespFrame::BulkString(Some(b"CLUSTER MYID".to_vec())),
+            RespFrame::BulkString(Some(b"CLUSTER KEYSLOT <key>".to_vec())),
+            RespFrame::BulkString(Some(b"CLUSTER SLOTS".to_vec())),
+            RespFrame::BulkString(Some(b"CLUSTER SHARDS".to_vec())),
+            RespFrame::BulkString(Some(b"CLUSTER NODES".to_vec())),
+            RespFrame::BulkString(Some(b"CLUSTER RESET".to_vec())),
+        ])))
+    } else {
+        Ok(RespFrame::Error(format!(
+            "ERR Unknown subcommand or wrong number of arguments for CLUSTER {sub}"
+        )))
+    }
+}
+
+// ── REPLICAOF / SLAVEOF ─────────────────────────────────────────────
+
+fn replicaof_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // REPLICAOF host port / REPLICAOF NO ONE
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("REPLICAOF"));
+    }
+    let host = std::str::from_utf8(&argv[1]).unwrap_or("");
+    let port = std::str::from_utf8(&argv[2]).unwrap_or("");
+    if host.eq_ignore_ascii_case("NO") && port.eq_ignore_ascii_case("ONE") {
+        Ok(RespFrame::SimpleString("OK Already a master".to_string()))
+    } else {
+        // Accept but don't actually replicate - standalone mode
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    }
+}
+
+// ── READONLY / READWRITE ────────────────────────────────────────────
+
+fn readonly_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() != 1 {
+        return Err(CommandError::WrongArity("READONLY"));
+    }
+    Ok(RespFrame::SimpleString("OK".to_string()))
+}
+
+fn readwrite_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() != 1 {
+        return Err(CommandError::WrongArity("READWRITE"));
+    }
+    Ok(RespFrame::SimpleString("OK".to_string()))
+}
+
+// ── ZRANGESTORE ────────────────────────────────────────────────────
+
+fn zrangestore_cmd(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    // ZRANGESTORE dst src min max [BYSCORE | BYLEX] [REV] [LIMIT offset count]
+    if argv.len() < 5 {
+        return Err(CommandError::WrongArity("ZRANGESTORE"));
+    }
+    let dst = &argv[1];
+    let src = &argv[2];
+
+    let mut byscore = false;
+    let mut bylex = false;
+    let mut rev = false;
+    let mut limit_offset: Option<usize> = None;
+    let mut limit_count: Option<usize> = None;
+
+    let mut i = 5;
+    while i < argv.len() {
+        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if opt.eq_ignore_ascii_case("BYSCORE") {
+            byscore = true;
+            i += 1;
+        } else if opt.eq_ignore_ascii_case("BYLEX") {
+            bylex = true;
+            i += 1;
+        } else if opt.eq_ignore_ascii_case("REV") {
+            rev = true;
+            i += 1;
+        } else if opt.eq_ignore_ascii_case("LIMIT") {
+            if i + 2 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            limit_offset = Some(parse_u64_arg(&argv[i + 1])? as usize);
+            limit_count = Some(parse_u64_arg(&argv[i + 2])? as usize);
+            i += 3;
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    }
+
+    if byscore && bylex {
+        return Err(CommandError::SyntaxError);
+    }
+
+    let pairs: Vec<(Vec<u8>, f64)> = if byscore {
+        let min = parse_score_bound(&argv[3])?;
+        let max = parse_score_bound(&argv[4])?;
+        let (lo, hi) = if rev { (max, min) } else { (min, max) };
+        let mut result = store.zrangebyscore_withscores(src, lo, hi, now_ms)?;
+        if rev {
+            result.reverse();
+        }
+        result
+    } else if bylex {
+        let min_lex = &argv[3];
+        let max_lex = &argv[4];
+        let (lo, hi) = if rev {
+            (max_lex.as_slice(), min_lex.as_slice())
+        } else {
+            (min_lex.as_slice(), max_lex.as_slice())
+        };
+        let mut members = store.zrangebylex(src, lo, hi, now_ms)?;
+        if rev {
+            members.reverse();
+        }
+        // Look up scores for each member
+        let mut result = Vec::with_capacity(members.len());
+        for m in members {
+            let score = store.zscore(src, &m, now_ms)?.unwrap_or(0.0);
+            result.push((m, score));
+        }
+        result
+    } else {
+        // Default: by rank (index)
+        let start = parse_i64_arg(&argv[3])?;
+        let stop = parse_i64_arg(&argv[4])?;
+        if rev {
+            let mut result = store.zrange_withscores(src, start, stop, now_ms)?;
+            result.reverse();
+            result
+        } else {
+            store.zrange_withscores(src, start, stop, now_ms)?
+        }
+    };
+
+    // Apply LIMIT
+    let pairs = if let (Some(offset), Some(count)) = (limit_offset, limit_count) {
+        pairs.into_iter().skip(offset).take(count).collect()
+    } else {
+        pairs
+    };
+
+    let count = pairs.len() as i64;
+    if pairs.is_empty() {
+        // Delete dst if it exists
+        store.del(std::slice::from_ref(dst), now_ms);
+    } else {
+        store.zstore_from_pairs(dst.clone(), pairs, now_ms);
+    }
+    Ok(RespFrame::Integer(count))
+}
+
+// ── FUNCTION ────────────────────────────────────────────────────────
+
+fn function_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("FUNCTION"));
+    }
+    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if sub.eq_ignore_ascii_case("LIST") {
+        Ok(RespFrame::Array(Some(Vec::new())))
+    } else if sub.eq_ignore_ascii_case("STATS") {
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"running_script".to_vec())),
+            RespFrame::Integer(0),
+            RespFrame::BulkString(Some(b"engines".to_vec())),
+            RespFrame::Array(Some(Vec::new())),
+        ])))
+    } else if sub.eq_ignore_ascii_case("DUMP") {
+        Ok(RespFrame::BulkString(Some(Vec::new())))
+    } else if sub.eq_ignore_ascii_case("FLUSH") {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("DELETE") {
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("FUNCTION"));
+        }
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("LOAD") || sub.eq_ignore_ascii_case("RESTORE") {
+        Ok(RespFrame::Error(
+            "ERR Function library loading is not supported".to_string(),
+        ))
+    } else if sub.eq_ignore_ascii_case("HELP") {
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(
+                b"FUNCTION LIST [LIBRARYNAME pattern] [WITHCODE]".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"FUNCTION STATS".to_vec())),
+            RespFrame::BulkString(Some(b"FUNCTION DUMP".to_vec())),
+            RespFrame::BulkString(Some(b"FUNCTION FLUSH [ASYNC|SYNC]".to_vec())),
+            RespFrame::BulkString(Some(b"FUNCTION DELETE <library-name>".to_vec())),
+            RespFrame::BulkString(Some(b"FUNCTION HELP".to_vec())),
+        ])))
+    } else {
+        Ok(RespFrame::Error(format!(
+            "ERR Unknown subcommand or wrong number of arguments for FUNCTION {sub}"
+        )))
+    }
+}
+
+// ── SSUBSCRIBE / SUNSUBSCRIBE / SPUBLISH (shard Pub/Sub) ───────────
+
+fn ssubscribe_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // SSUBSCRIBE shardchannel [shardchannel ...]
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("SSUBSCRIBE"));
+    }
+    let last = &argv[argv.len() - 1];
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(b"ssubscribe".to_vec())),
+        RespFrame::BulkString(Some(last.clone())),
+        RespFrame::Integer((argv.len() - 1) as i64),
+    ])))
+}
+
+fn sunsubscribe_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // SUNSUBSCRIBE [shardchannel ...]
+    let count = if argv.len() > 1 { argv.len() - 1 } else { 0 };
+    Ok(RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(b"sunsubscribe".to_vec())),
+        RespFrame::BulkString(None),
+        RespFrame::Integer(count as i64),
+    ])))
+}
+
+fn spublish_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // SPUBLISH shardchannel message
+    if argv.len() != 3 {
+        return Err(CommandError::WrongArity("SPUBLISH"));
+    }
+    // No subscribers in standalone mode
+    Ok(RespFrame::Integer(0))
+}
+
+/// CRC16/CCITT for Redis cluster hash slot computation.
+fn crc16_slot(key: &[u8]) -> u16 {
+    // If key contains {hashtag}, use only the content between first { and next }
+    let data = if let Some(start) = key.iter().position(|&b| b == b'{') {
+        if let Some(end) = key[start + 1..].iter().position(|&b| b == b'}') {
+            if end > 0 {
+                &key[start + 1..start + 1 + end]
+            } else {
+                key
+            }
+        } else {
+            key
+        }
+    } else {
+        key
+    };
+    let mut crc: u16 = 0;
+    for &byte in data {
+        crc = ((crc << 8) & 0xFF00) ^ CRC16_TAB[((crc >> 8) as u8 ^ byte) as usize];
+    }
+    crc % 16384
+}
+
+/// CRC16 lookup table from Redis source (CRC-16/XMODEM, poly 0x1021).
+#[rustfmt::skip]
+const CRC16_TAB: [u16; 256] = [
+    0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7,
+    0x8108, 0x9129, 0xa14a, 0xb16b, 0xc18c, 0xd1ad, 0xe1ce, 0xf1ef,
+    0x1231, 0x0210, 0x3273, 0x2252, 0x52b5, 0x4294, 0x72f7, 0x62d6,
+    0x9339, 0x8318, 0xb37b, 0xa35a, 0xd3bd, 0xc39c, 0xf3ff, 0xe3de,
+    0x2462, 0x3443, 0x0420, 0x1401, 0x64e6, 0x74c7, 0x44a4, 0x5485,
+    0xa56a, 0xb54b, 0x8528, 0x9509, 0xe5ee, 0xf5cf, 0xc5ac, 0xd58d,
+    0x3653, 0x2672, 0x1611, 0x0630, 0x76d7, 0x66f6, 0x5695, 0x46b4,
+    0xb75b, 0xa77a, 0x9719, 0x8738, 0xf7df, 0xe7fe, 0xd79d, 0xc7bc,
+    0x48c4, 0x58e5, 0x6886, 0x78a7, 0x0840, 0x1861, 0x2802, 0x3823,
+    0xc9cc, 0xd9ed, 0xe98e, 0xf9af, 0x8948, 0x9969, 0xa90a, 0xb92b,
+    0x5af5, 0x4ad4, 0x7ab7, 0x6a96, 0x1a71, 0x0a50, 0x3a33, 0x2a12,
+    0xdbfd, 0xcbdc, 0xfbbf, 0xeb9e, 0x9b79, 0x8b58, 0xbb3b, 0xab1a,
+    0x6ca6, 0x7c87, 0x4ce4, 0x5cc5, 0x2c22, 0x3c03, 0x0c60, 0x1c41,
+    0xedae, 0xfd8f, 0xcdec, 0xddcd, 0xad2a, 0xbd0b, 0x8d68, 0x9d49,
+    0x7e97, 0x6eb6, 0x5ed5, 0x4ef4, 0x3e13, 0x2e32, 0x1e51, 0x0e70,
+    0xff9f, 0xefbe, 0xdfdd, 0xcffc, 0xbf1b, 0xaf3a, 0x9f59, 0x8f78,
+    0x9188, 0x81a9, 0xb1ca, 0xa1eb, 0xd10c, 0xc12d, 0xf14e, 0xe16f,
+    0x1080, 0x00a1, 0x30c2, 0x20e3, 0x5004, 0x4025, 0x7046, 0x6067,
+    0x83b9, 0x9398, 0xa3fb, 0xb3da, 0xc33d, 0xd31c, 0xe37f, 0xf35e,
+    0x02b1, 0x1290, 0x22f3, 0x32d2, 0x4235, 0x5214, 0x6277, 0x7256,
+    0xb5ea, 0xa5cb, 0x95a8, 0x8589, 0xf56e, 0xe54f, 0xd52c, 0xc50d,
+    0x34e2, 0x24c3, 0x14a0, 0x0481, 0x7466, 0x6447, 0x5424, 0x4405,
+    0xa7db, 0xb7fa, 0x8799, 0x97b8, 0xe75f, 0xf77e, 0xc71d, 0xd73c,
+    0x26d3, 0x36f2, 0x0691, 0x16b0, 0x6657, 0x7676, 0x4615, 0x5634,
+    0xd94c, 0xc96d, 0xf90e, 0xe92f, 0x99c8, 0x89e9, 0xb98a, 0xa9ab,
+    0x5844, 0x4865, 0x7806, 0x6827, 0x18c0, 0x08e1, 0x3882, 0x28a3,
+    0xcb7d, 0xdb5c, 0xeb3f, 0xfb1e, 0x8bf9, 0x9bd8, 0xabbb, 0xbb9a,
+    0x4a75, 0x5a54, 0x6a37, 0x7a16, 0x0af1, 0x1ad0, 0x2ab3, 0x3a92,
+    0xfd2e, 0xed0f, 0xdd6c, 0xcd4d, 0xbdaa, 0xad8b, 0x9de8, 0x8dc9,
+    0x7c26, 0x6c07, 0x5c64, 0x4c45, 0x3ca2, 0x2c83, 0x1ce0, 0x0cc1,
+    0xef1f, 0xff3e, 0xcf5d, 0xdf7c, 0xaf9b, 0xbfba, 0x8fd9, 0x9ff8,
+    0x6e17, 0x7e36, 0x4e55, 0x5e74, 0x2e93, 0x3eb2, 0x0ed1, 0x1ef0,
+];
+
 fn parse_score_bound(arg: &[u8]) -> Result<f64, CommandError> {
     let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if text == "-inf" {
@@ -3974,8 +4690,17 @@ fn sdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
 }
 
 fn spop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 2 {
+    if argv.len() < 2 || argv.len() > 3 {
         return Err(CommandError::WrongArity("SPOP"));
+    }
+    if argv.len() == 3 {
+        let count = parse_u64_arg(&argv[2])? as usize;
+        let members = store.spop_count(&argv[1], count, now_ms)?;
+        let arr = members
+            .into_iter()
+            .map(|m| RespFrame::BulkString(Some(m)))
+            .collect();
+        return Ok(RespFrame::Array(Some(arr)));
     }
     match store.spop(&argv[1], now_ms)? {
         Some(m) => Ok(RespFrame::BulkString(Some(m))),
@@ -3988,12 +4713,24 @@ fn srandmember(
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
-    if argv.len() != 2 {
+    if argv.len() < 2 || argv.len() > 3 {
         return Err(CommandError::WrongArity("SRANDMEMBER"));
     }
-    match store.srandmember(&argv[1], now_ms)? {
-        Some(m) => Ok(RespFrame::BulkString(Some(m))),
-        None => Ok(RespFrame::BulkString(None)),
+    if argv.len() == 2 {
+        // No count: return single element or nil
+        match store.srandmember(&argv[1], now_ms)? {
+            Some(m) => Ok(RespFrame::BulkString(Some(m))),
+            None => Ok(RespFrame::BulkString(None)),
+        }
+    } else {
+        // With count: return array
+        let count = parse_i64_arg(&argv[2])?;
+        let members = store.srandmember_count(&argv[1], count, now_ms)?;
+        let arr: Vec<RespFrame> = members
+            .into_iter()
+            .map(|m| RespFrame::BulkString(Some(m)))
+            .collect();
+        Ok(RespFrame::Array(Some(arr)))
     }
 }
 
@@ -4303,18 +5040,19 @@ fn zrevrangebyscore(
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
-    // ZREVRANGEBYSCORE key max min
-    if argv.len() != 4 {
+    // ZREVRANGEBYSCORE key max min [WITHSCORES] [LIMIT offset count]
+    if argv.len() < 4 {
         return Err(CommandError::WrongArity("ZREVRANGEBYSCORE"));
     }
     let max = parse_score_bound(&argv[2])?;
     let min = parse_score_bound(&argv[3])?;
-    let members = store.zrevrangebyscore(&argv[1], max, min, now_ms)?;
-    let frames = members
-        .into_iter()
-        .map(|m| RespFrame::BulkString(Some(m)))
-        .collect();
-    Ok(RespFrame::Array(Some(frames)))
+    let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
+    let mut pairs = store.zrangebyscore_withscores(&argv[1], min, max, now_ms)?;
+    pairs.reverse();
+    if let (Some(offset), Some(count)) = (limit_offset, limit_count) {
+        pairs = pairs.into_iter().skip(offset).take(count).collect();
+    }
+    zrange_emit(pairs, withscores)
 }
 
 fn zrangebylex(
@@ -4322,10 +5060,15 @@ fn zrangebylex(
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
-    if argv.len() != 4 {
+    // ZRANGEBYLEX key min max [LIMIT offset count]
+    if argv.len() < 4 {
         return Err(CommandError::WrongArity("ZRANGEBYLEX"));
     }
-    let members = store.zrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
+    let (_, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
+    let mut members = store.zrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
+    if let (Some(offset), Some(count)) = (limit_offset, limit_count) {
+        members = members.into_iter().skip(offset).take(count).collect();
+    }
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
@@ -4338,11 +5081,15 @@ fn zrevrangebylex(
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
-    if argv.len() != 4 {
+    // ZREVRANGEBYLEX key max min [LIMIT offset count]
+    if argv.len() < 4 {
         return Err(CommandError::WrongArity("ZREVRANGEBYLEX"));
     }
-    // ZREVRANGEBYLEX key max min (note: max before min, reversed from ZRANGEBYLEX)
-    let members = store.zrevrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
+    let (_, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
+    let mut members = store.zrevrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
+    if let (Some(offset), Some(count)) = (limit_offset, limit_count) {
+        members = members.into_iter().skip(offset).take(count).collect();
+    }
     let frames = members
         .into_iter()
         .map(|m| RespFrame::BulkString(Some(m)))
@@ -5098,64 +5845,537 @@ fn select(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
 }
 
 fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() > 2 {
-        // Redis allows INFO [section] but we accept 0 or 1 extra args
-    }
     let keyspace_size = store.dbsize(now_ms);
     let section = if argv.len() >= 2 {
         std::str::from_utf8(&argv[1]).unwrap_or("all")
     } else {
         "all"
     };
+    let is_all = section.eq_ignore_ascii_case("all")
+        || section.eq_ignore_ascii_case("everything")
+        || section.eq_ignore_ascii_case("default");
 
     let mut info = String::new();
+
     // Server section
-    if section == "all" || section.eq_ignore_ascii_case("server") {
+    if is_all || section.eq_ignore_ascii_case("server") {
         info.push_str("# Server\r\n");
-        info.push_str("redis_version:7.0.0-frankenredis\r\n");
+        info.push_str("redis_version:7.2.0-frankenredis\r\n");
+        info.push_str("redis_git_sha1:00000000\r\n");
+        info.push_str("redis_git_dirty:0\r\n");
+        info.push_str("redis_build_id:0\r\n");
         info.push_str("redis_mode:standalone\r\n");
+        info.push_str("os:Linux\r\n");
         info.push_str("arch_bits:64\r\n");
+        info.push_str("monotonic_clock:POSIX clock_gettime\r\n");
+        info.push_str("multiplexing_api:epoll\r\n");
+        info.push_str("gcc_version:0.0.0\r\n");
+        info.push_str("process_id:1\r\n");
+        info.push_str("run_id:00000000000000000000000000000000\r\n");
         info.push_str("tcp_port:6379\r\n");
+        let uptime_s = now_ms / 1000;
+        info.push_str(&format!("uptime_in_seconds:{uptime_s}\r\n"));
+        info.push_str(&format!("uptime_in_days:{}\r\n", uptime_s / 86400));
+        info.push_str("hz:10\r\n");
+        info.push_str("configured_hz:10\r\n");
+        info.push_str("lru_clock:0\r\n");
+        info.push_str("executable:/usr/local/bin/frankenredis\r\n");
+        info.push_str("config_file:\r\n");
         info.push_str("\r\n");
     }
-    // Keyspace section
-    if section == "all" || section.eq_ignore_ascii_case("keyspace") {
-        info.push_str("# Keyspace\r\n");
-        info.push_str(&format!("db0:keys={keyspace_size},expires=0,avg_ttl=0\r\n"));
+
+    // Clients section
+    if is_all || section.eq_ignore_ascii_case("clients") {
+        info.push_str("# Clients\r\n");
+        info.push_str("connected_clients:1\r\n");
+        info.push_str("cluster_connections:0\r\n");
+        info.push_str("maxclients:10000\r\n");
+        info.push_str("client_recent_max_input_buffer:0\r\n");
+        info.push_str("client_recent_max_output_buffer:0\r\n");
+        info.push_str("total_clients_connected_including_replicas:1\r\n");
+        info.push_str("blocked_clients:0\r\n");
+        info.push_str("tracking_clients:0\r\n");
+        info.push_str("clients_in_timeout_table:0\r\n");
+        info.push_str("total_blocking_clients:0\r\n");
+        info.push_str("total_blocking_clients_on_nokey:0\r\n");
         info.push_str("\r\n");
     }
+
     // Memory section
-    if section == "all" || section.eq_ignore_ascii_case("memory") {
+    if is_all || section.eq_ignore_ascii_case("memory") {
         info.push_str("# Memory\r\n");
         info.push_str("used_memory:0\r\n");
         info.push_str("used_memory_human:0B\r\n");
+        info.push_str("used_memory_rss:0\r\n");
+        info.push_str("used_memory_rss_human:0B\r\n");
+        info.push_str("used_memory_peak:0\r\n");
+        info.push_str("used_memory_peak_human:0B\r\n");
+        info.push_str("used_memory_peak_perc:0.00%\r\n");
+        info.push_str("used_memory_overhead:0\r\n");
+        info.push_str("used_memory_startup:0\r\n");
+        info.push_str("used_memory_dataset:0\r\n");
+        info.push_str("used_memory_dataset_perc:0.00%\r\n");
+        info.push_str("maxmemory:0\r\n");
+        info.push_str("maxmemory_human:0B\r\n");
+        info.push_str("maxmemory_policy:noeviction\r\n");
+        info.push_str("mem_fragmentation_ratio:1.00\r\n");
+        info.push_str("mem_allocator:rust-alloc\r\n");
+        info.push_str("active_defrag_running:0\r\n");
+        info.push_str("lazyfree_pending_objects:0\r\n");
+        info.push_str("lazyfreed_objects:0\r\n");
         info.push_str("\r\n");
     }
+
+    // Persistence section
+    if is_all || section.eq_ignore_ascii_case("persistence") {
+        info.push_str("# Persistence\r\n");
+        info.push_str("loading:0\r\n");
+        info.push_str("async_loading:0\r\n");
+        info.push_str("current_cow_peak:0\r\n");
+        info.push_str("current_cow_size:0\r\n");
+        info.push_str("current_cow_size_age:0\r\n");
+        info.push_str("current_fork_perc:0.00\r\n");
+        info.push_str("current_save_keys_processed:0\r\n");
+        info.push_str("current_save_keys_total:0\r\n");
+        info.push_str("rdb_changes_since_last_save:0\r\n");
+        info.push_str("rdb_bgsave_in_progress:0\r\n");
+        info.push_str("rdb_last_save_time:0\r\n");
+        info.push_str("rdb_last_bgsave_status:ok\r\n");
+        info.push_str("rdb_last_bgsave_time_sec:-1\r\n");
+        info.push_str("rdb_current_bgsave_time_sec:-1\r\n");
+        info.push_str("rdb_saves:0\r\n");
+        info.push_str("rdb_last_cow_size:0\r\n");
+        info.push_str("aof_enabled:0\r\n");
+        info.push_str("aof_rewrite_in_progress:0\r\n");
+        info.push_str("aof_rewrite_scheduled:0\r\n");
+        info.push_str("aof_last_rewrite_time_sec:-1\r\n");
+        info.push_str("aof_current_rewrite_time_sec:-1\r\n");
+        info.push_str("aof_last_bgrewrite_status:ok\r\n");
+        info.push_str("aof_last_write_status:ok\r\n");
+        info.push_str("aof_last_cow_size:0\r\n");
+        info.push_str("\r\n");
+    }
+
+    // Stats section
+    if is_all || section.eq_ignore_ascii_case("stats") {
+        info.push_str("# Stats\r\n");
+        info.push_str("total_connections_received:1\r\n");
+        info.push_str("total_commands_processed:0\r\n");
+        info.push_str("instantaneous_ops_per_sec:0\r\n");
+        info.push_str("total_net_input_bytes:0\r\n");
+        info.push_str("total_net_output_bytes:0\r\n");
+        info.push_str("total_net_repl_input_bytes:0\r\n");
+        info.push_str("total_net_repl_output_bytes:0\r\n");
+        info.push_str("instantaneous_input_kbps:0.00\r\n");
+        info.push_str("instantaneous_output_kbps:0.00\r\n");
+        info.push_str("instantaneous_input_repl_kbps:0.00\r\n");
+        info.push_str("instantaneous_output_repl_kbps:0.00\r\n");
+        info.push_str("rejected_connections:0\r\n");
+        info.push_str("sync_full:0\r\n");
+        info.push_str("sync_partial_ok:0\r\n");
+        info.push_str("sync_partial_err:0\r\n");
+        info.push_str("expired_keys:0\r\n");
+        info.push_str("expired_stale_perc:0.00\r\n");
+        info.push_str("expired_time_cap_reached_count:0\r\n");
+        info.push_str("expire_cycle_cpu_milliseconds:0\r\n");
+        info.push_str("evicted_keys:0\r\n");
+        info.push_str("evicted_clients:0\r\n");
+        info.push_str("total_keys_expired:0\r\n");
+        info.push_str("total_keys_evicted:0\r\n");
+        info.push_str("keyspace_hits:0\r\n");
+        info.push_str("keyspace_misses:0\r\n");
+        info.push_str("pubsub_channels:0\r\n");
+        info.push_str("pubsub_patterns:0\r\n");
+        info.push_str("pubsub_shardchannels:0\r\n");
+        info.push_str("latest_fork_usec:0\r\n");
+        info.push_str("total_forks:0\r\n");
+        info.push_str("migrate_cached_sockets:0\r\n");
+        info.push_str("slave_expires_tracked_keys:0\r\n");
+        info.push_str("active_defrag_hits:0\r\n");
+        info.push_str("active_defrag_misses:0\r\n");
+        info.push_str("active_defrag_key_hits:0\r\n");
+        info.push_str("active_defrag_key_misses:0\r\n");
+        info.push_str("tracking_total_keys:0\r\n");
+        info.push_str("tracking_total_items:0\r\n");
+        info.push_str("tracking_total_prefixes:0\r\n");
+        info.push_str("unexpected_error_replies:0\r\n");
+        info.push_str("total_error_replies:0\r\n");
+        info.push_str("dump_payload_sanitizations:0\r\n");
+        info.push_str("total_reads_processed:0\r\n");
+        info.push_str("total_writes_processed:0\r\n");
+        info.push_str("io_threaded_reads_processed:0\r\n");
+        info.push_str("io_threaded_writes_processed:0\r\n");
+        info.push_str("reply_buffer_shrinks:0\r\n");
+        info.push_str("reply_buffer_expands:0\r\n");
+        info.push_str("current_eviction_exceeded_time:0\r\n");
+        info.push_str("current_active_defrag_time:0\r\n");
+        info.push_str("\r\n");
+    }
+
     // Replication section
-    if section == "all" || section.eq_ignore_ascii_case("replication") {
+    if is_all || section.eq_ignore_ascii_case("replication") {
         info.push_str("# Replication\r\n");
         info.push_str("role:master\r\n");
         info.push_str("connected_slaves:0\r\n");
+        info.push_str("master_failover_state:no-failover\r\n");
+        info.push_str("master_replid:0000000000000000000000000000000000000000\r\n");
+        info.push_str("master_replid2:0000000000000000000000000000000000000000\r\n");
+        info.push_str("master_repl_offset:0\r\n");
+        info.push_str("second_repl_offset:-1\r\n");
+        info.push_str("repl_backlog_active:0\r\n");
+        info.push_str("repl_backlog_size:1048576\r\n");
+        info.push_str("repl_backlog_first_byte_offset:0\r\n");
+        info.push_str("repl_backlog_histlen:0\r\n");
+        info.push_str("\r\n");
+    }
+
+    // CPU section
+    if is_all || section.eq_ignore_ascii_case("cpu") {
+        info.push_str("# CPU\r\n");
+        info.push_str("used_cpu_sys:0.000000\r\n");
+        info.push_str("used_cpu_user:0.000000\r\n");
+        info.push_str("used_cpu_sys_children:0.000000\r\n");
+        info.push_str("used_cpu_user_children:0.000000\r\n");
+        info.push_str("used_cpu_sys_main_thread:0.000000\r\n");
+        info.push_str("used_cpu_user_main_thread:0.000000\r\n");
+        info.push_str("\r\n");
+    }
+
+    // Modules section
+    if is_all || section.eq_ignore_ascii_case("modules") {
+        info.push_str("# Modules\r\n");
+        info.push_str("\r\n");
+    }
+
+    // Errorstats section
+    if is_all || section.eq_ignore_ascii_case("errorstats") {
+        info.push_str("# Errorstats\r\n");
+        info.push_str("\r\n");
+    }
+
+    // Cluster section
+    if is_all || section.eq_ignore_ascii_case("cluster") {
+        info.push_str("# Cluster\r\n");
+        info.push_str("cluster_enabled:0\r\n");
+        info.push_str("\r\n");
+    }
+
+    // Keyspace section
+    if is_all || section.eq_ignore_ascii_case("keyspace") {
+        info.push_str("# Keyspace\r\n");
+        if keyspace_size > 0 {
+            info.push_str(&format!("db0:keys={keyspace_size},expires=0,avg_ttl=0\r\n"));
+        }
         info.push_str("\r\n");
     }
 
     Ok(RespFrame::BulkString(Some(info.into_bytes())))
 }
 
+/// Static command metadata table: (name, arity, flags, first_key, last_key, step)
+/// Arity: positive = exact arg count incl. command, negative = minimum args
+const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
+    ("ping", 1, "fast", 0, 0, 0),
+    ("echo", 2, "fast", 0, 0, 0),
+    ("set", -3, "write denyoom", 1, 1, 1),
+    ("get", 2, "readonly fast", 1, 1, 1),
+    ("del", -2, "write", 1, -1, 1),
+    ("incr", 2, "write denyoom fast", 1, 1, 1),
+    ("decr", 2, "write denyoom fast", 1, 1, 1),
+    ("incrby", 3, "write denyoom fast", 1, 1, 1),
+    ("decrby", 3, "write denyoom fast", 1, 1, 1),
+    ("incrbyfloat", 3, "write denyoom fast", 1, 1, 1),
+    ("mget", -2, "readonly fast", 1, -1, 1),
+    ("mset", -3, "write denyoom", 1, -1, 2),
+    ("msetnx", -3, "write denyoom", 1, -1, 2),
+    ("append", 3, "write denyoom fast", 1, 1, 1),
+    ("strlen", 2, "readonly fast", 1, 1, 1),
+    ("getrange", 4, "readonly", 1, 1, 1),
+    ("setrange", 4, "write denyoom", 1, 1, 1),
+    ("setnx", 3, "write denyoom fast", 1, 1, 1),
+    ("setex", 4, "write denyoom", 1, 1, 1),
+    ("psetex", 4, "write denyoom", 1, 1, 1),
+    ("getset", 3, "write denyoom fast", 1, 1, 1),
+    ("getdel", 2, "write fast", 1, 1, 1),
+    ("getex", -2, "write fast", 1, 1, 1),
+    ("substr", 4, "readonly", 1, 1, 1),
+    ("lcs", -3, "readonly", 1, 2, 1),
+    ("expire", 3, "write fast", 1, 1, 1),
+    ("pexpire", 3, "write fast", 1, 1, 1),
+    ("expireat", 3, "write fast", 1, 1, 1),
+    ("pexpireat", 3, "write fast", 1, 1, 1),
+    ("persist", 2, "write fast", 1, 1, 1),
+    ("ttl", 2, "readonly fast", 1, 1, 1),
+    ("pttl", 2, "readonly fast", 1, 1, 1),
+    ("expiretime", 2, "readonly fast", 1, 1, 1),
+    ("pexpiretime", 2, "readonly fast", 1, 1, 1),
+    ("exists", -2, "readonly fast", 1, -1, 1),
+    ("type", 2, "readonly fast", 1, 1, 1),
+    ("rename", 3, "write", 1, 2, 1),
+    ("renamenx", 3, "write fast", 1, 2, 1),
+    ("keys", 2, "readonly sort_for_script", 0, 0, 0),
+    ("randomkey", 1, "readonly", 0, 0, 0),
+    ("scan", -2, "readonly", 0, 0, 0),
+    ("dbsize", 1, "readonly fast", 0, 0, 0),
+    ("flushdb", -1, "write", 0, 0, 0),
+    ("select", 2, "fast", 0, 0, 0),
+    ("move", 3, "write fast", 1, 1, 1),
+    ("copy", -3, "write", 1, 2, 1),
+    ("sort", -2, "write denyoom", 1, 1, 1),
+    ("dump", 2, "readonly", 1, 1, 1),
+    ("restore", -4, "write denyoom", 1, 1, 1),
+    ("unlink", -2, "write fast", 1, -1, 1),
+    ("touch", -2, "readonly fast", 1, -1, 1),
+    ("hset", -4, "write denyoom fast", 1, 1, 1),
+    ("hget", 3, "readonly fast", 1, 1, 1),
+    ("hdel", -3, "write fast", 1, 1, 1),
+    ("hexists", 3, "readonly fast", 1, 1, 1),
+    ("hlen", 2, "readonly fast", 1, 1, 1),
+    ("hgetall", 2, "readonly", 1, 1, 1),
+    ("hkeys", 2, "readonly sort_for_script", 1, 1, 1),
+    ("hvals", 2, "readonly sort_for_script", 1, 1, 1),
+    ("hmget", -3, "readonly fast", 1, 1, 1),
+    ("hmset", -4, "write denyoom fast", 1, 1, 1),
+    ("hincrby", 4, "write denyoom fast", 1, 1, 1),
+    ("hincrbyfloat", 4, "write denyoom fast", 1, 1, 1),
+    ("hsetnx", 4, "write denyoom fast", 1, 1, 1),
+    ("hstrlen", 3, "readonly fast", 1, 1, 1),
+    ("hrandfield", -2, "readonly", 1, 1, 1),
+    ("hscan", -3, "readonly", 1, 1, 1),
+    ("lpush", -3, "write denyoom fast", 1, 1, 1),
+    ("rpush", -3, "write denyoom fast", 1, 1, 1),
+    ("lpushx", -3, "write denyoom fast", 1, 1, 1),
+    ("rpushx", -3, "write denyoom fast", 1, 1, 1),
+    ("lpop", -2, "write fast", 1, 1, 1),
+    ("rpop", -2, "write fast", 1, 1, 1),
+    ("llen", 2, "readonly fast", 1, 1, 1),
+    ("lrange", 4, "readonly", 1, 1, 1),
+    ("lindex", 3, "readonly", 1, 1, 1),
+    ("lset", 4, "write denyoom", 1, 1, 1),
+    ("linsert", 5, "write denyoom", 1, 1, 1),
+    ("lrem", 4, "write", 1, 1, 1),
+    ("ltrim", 4, "write", 1, 1, 1),
+    ("lpos", -3, "readonly", 1, 1, 1),
+    ("lmove", 5, "write denyoom", 1, 2, 1),
+    ("lmpop", -4, "write fast", 0, 0, 0),
+    ("rpoplpush", 3, "write denyoom", 1, 2, 1),
+    ("blpop", -3, "write denyoom", 1, -2, 1),
+    ("brpop", -3, "write denyoom", 1, -2, 1),
+    ("blmove", 6, "write denyoom", 1, 2, 1),
+    ("blmpop", -5, "write denyoom", 0, 0, 0),
+    ("brpoplpush", 4, "write denyoom", 1, 2, 1),
+    ("sadd", -3, "write denyoom fast", 1, 1, 1),
+    ("srem", -3, "write fast", 1, 1, 1),
+    ("smembers", 2, "readonly sort_for_script", 1, 1, 1),
+    ("scard", 2, "readonly fast", 1, 1, 1),
+    ("sismember", 3, "readonly fast", 1, 1, 1),
+    ("smismember", -3, "readonly fast", 1, 1, 1),
+    ("sinter", -2, "readonly sort_for_script", 1, -1, 1),
+    ("sinterstore", -3, "write denyoom", 1, -1, 1),
+    ("sintercard", -3, "readonly", 0, 0, 0),
+    ("sunion", -2, "readonly sort_for_script", 1, -1, 1),
+    ("sunionstore", -3, "write denyoom", 1, -1, 1),
+    ("sdiff", -2, "readonly sort_for_script", 1, -1, 1),
+    ("sdiffstore", -3, "write denyoom", 1, -1, 1),
+    ("spop", -2, "write fast", 1, 1, 1),
+    ("srandmember", -2, "readonly", 1, 1, 1),
+    ("smove", 4, "write fast", 1, 2, 1),
+    ("sscan", -3, "readonly", 1, 1, 1),
+    ("zadd", -4, "write denyoom fast", 1, 1, 1),
+    ("zrem", -3, "write fast", 1, 1, 1),
+    ("zscore", 3, "readonly fast", 1, 1, 1),
+    ("zmscore", -3, "readonly fast", 1, 1, 1),
+    ("zcard", 2, "readonly fast", 1, 1, 1),
+    ("zrank", 3, "readonly fast", 1, 1, 1),
+    ("zrevrank", 3, "readonly fast", 1, 1, 1),
+    ("zrange", -4, "readonly", 1, 1, 1),
+    ("zrevrange", 4, "readonly", 1, 1, 1),
+    ("zrangebyscore", -4, "readonly", 1, 1, 1),
+    ("zrevrangebyscore", -4, "readonly", 1, 1, 1),
+    ("zrangebylex", -4, "readonly", 1, 1, 1),
+    ("zrevrangebylex", -4, "readonly", 1, 1, 1),
+    ("zcount", 4, "readonly fast", 1, 1, 1),
+    ("zlexcount", 4, "readonly fast", 1, 1, 1),
+    ("zincrby", 4, "write denyoom fast", 1, 1, 1),
+    ("zpopmin", -2, "write fast", 1, 1, 1),
+    ("zpopmax", -2, "write fast", 1, 1, 1),
+    ("zrandmember", -2, "readonly", 1, 1, 1),
+    ("zunionstore", -4, "write denyoom", 1, 1, 1),
+    ("zinterstore", -4, "write denyoom", 1, 1, 1),
+    ("zdiff", -3, "readonly sort_for_script", 0, 0, 0),
+    ("zdiffstore", -4, "write denyoom", 1, 1, 1),
+    ("zinter", -3, "readonly sort_for_script", 0, 0, 0),
+    ("zunion", -3, "readonly sort_for_script", 0, 0, 0),
+    ("zintercard", -3, "readonly", 0, 0, 0),
+    ("zmpop", -4, "write fast", 0, 0, 0),
+    ("zremrangebyrank", 4, "write", 1, 1, 1),
+    ("zremrangebyscore", 4, "write", 1, 1, 1),
+    ("zremrangebylex", 4, "write", 1, 1, 1),
+    ("zscan", -3, "readonly", 1, 1, 1),
+    ("pfadd", -2, "write denyoom fast", 1, 1, 1),
+    ("pfcount", -2, "readonly", 1, -1, 1),
+    ("pfmerge", -2, "write denyoom", 1, -1, 1),
+    ("setbit", 4, "write denyoom", 1, 1, 1),
+    ("getbit", 3, "readonly fast", 1, 1, 1),
+    ("bitcount", -2, "readonly", 1, 1, 1),
+    ("bitpos", -3, "readonly", 1, 1, 1),
+    ("bitop", -4, "write denyoom", 2, -1, 1),
+    ("bitfield", -2, "write denyoom", 1, 1, 1),
+    ("geoadd", -5, "write denyoom", 1, 1, 1),
+    ("geopos", -2, "readonly", 1, 1, 1),
+    ("geodist", -4, "readonly", 1, 1, 1),
+    ("geohash", -2, "readonly", 1, 1, 1),
+    ("georadius", -6, "write", 1, 1, 1),
+    ("georadiusbymember", -5, "write", 1, 1, 1),
+    ("geosearch", -7, "readonly", 1, 1, 1),
+    ("geosearchstore", -8, "write denyoom", 1, 2, 1),
+    ("xadd", -5, "write denyoom fast", 1, 1, 1),
+    ("xlen", 2, "readonly fast", 1, 1, 1),
+    ("xdel", -3, "write fast", 1, 1, 1),
+    ("xtrim", -4, "write", 1, 1, 1),
+    ("xread", -4, "readonly", 0, 0, 0),
+    ("xreadgroup", -7, "write", 0, 0, 0),
+    ("xclaim", -6, "write fast", 1, 1, 1),
+    ("xautoclaim", -7, "write fast", 1, 1, 1),
+    ("xpending", -3, "readonly", 1, 1, 1),
+    ("xack", -4, "write fast", 1, 1, 1),
+    ("xsetid", -3, "write", 1, 1, 1),
+    ("xinfo", -2, "readonly", 2, 2, 1),
+    ("xgroup", -2, "write", 2, 2, 1),
+    ("xrange", -4, "readonly", 1, 1, 1),
+    ("xrevrange", -4, "readonly", 1, 1, 1),
+    ("subscribe", -2, "pubsub", 0, 0, 0),
+    ("unsubscribe", -1, "pubsub", 0, 0, 0),
+    ("psubscribe", -2, "pubsub", 0, 0, 0),
+    ("punsubscribe", -1, "pubsub", 0, 0, 0),
+    ("publish", 3, "pubsub fast", 0, 0, 0),
+    ("pubsub", -2, "pubsub", 0, 0, 0),
+    ("eval", -3, "scripting", 0, 0, 0),
+    ("evalsha", -3, "scripting", 0, 0, 0),
+    ("script", -2, "scripting", 0, 0, 0),
+    ("multi", 1, "fast", 0, 0, 0),
+    ("exec", 1, "slow", 0, 0, 0),
+    ("discard", 1, "fast", 0, 0, 0),
+    ("watch", -2, "fast", 1, -1, 1),
+    ("unwatch", 1, "fast", 0, 0, 0),
+    ("auth", -2, "fast", 0, 0, 0),
+    ("hello", -1, "fast", 0, 0, 0),
+    ("quit", 1, "fast", 0, 0, 0),
+    ("reset", 1, "fast", 0, 0, 0),
+    ("info", -1, "fast", 0, 0, 0),
+    ("config", -2, "admin", 0, 0, 0),
+    ("acl", -2, "admin", 0, 0, 0),
+    ("command", -1, "fast", 0, 0, 0),
+    ("client", -2, "admin", 0, 0, 0),
+    ("time", 1, "fast", 0, 0, 0),
+    ("save", 1, "admin", 0, 0, 0),
+    ("bgsave", -1, "admin", 0, 0, 0),
+    ("bgrewriteaof", 1, "admin", 0, 0, 0),
+    ("lastsave", 1, "fast", 0, 0, 0),
+    ("swapdb", 3, "write fast", 0, 0, 0),
+    ("object", -2, "readonly", 2, 2, 1),
+    ("memory", -2, "readonly", 0, 0, 0),
+    ("slowlog", -2, "admin", 0, 0, 0),
+    ("debug", -2, "admin", 0, 0, 0),
+    ("role", 1, "fast", 0, 0, 0),
+    ("shutdown", -1, "admin", 0, 0, 0),
+    ("latency", -2, "admin", 0, 0, 0),
+    ("wait", 3, "slow", 0, 0, 0),
+    ("waitaof", 4, "slow", 0, 0, 0),
+    ("lolwut", -1, "fast", 0, 0, 0),
+    ("cluster", -2, "admin", 0, 0, 0),
+    ("asking", 1, "fast", 0, 0, 0),
+    ("readonly", 1, "fast", 0, 0, 0),
+    ("readwrite", 1, "fast", 0, 0, 0),
+    ("replicaof", 3, "admin", 0, 0, 0),
+    ("slaveof", 3, "admin", 0, 0, 0),
+    ("function", -2, "scripting", 0, 0, 0),
+    ("ssubscribe", -2, "pubsub", 0, 0, 0),
+    ("sunsubscribe", -1, "pubsub", 0, 0, 0),
+    ("spublish", 3, "pubsub fast", 0, 0, 0),
+    ("sort_ro", -2, "readonly fast", 1, 1, 1),
+    ("readonly", 1, "fast", 0, 0, 0),
+    ("readwrite", 1, "fast", 0, 0, 0),
+    ("zrangestore", -5, "write denyoom", 1, 2, 1),
+];
+
 fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
-    // COMMAND, COMMAND COUNT, COMMAND DOCS, etc.
     if argv.len() == 1 {
-        // COMMAND with no sub-command: return empty array (stub)
-        return Ok(RespFrame::Array(Some(Vec::new())));
+        // COMMAND with no sub-command: return full command info for all commands
+        let entries: Vec<RespFrame> = COMMAND_TABLE
+            .iter()
+            .map(|&(name, arity, flags, first_key, last_key, step)| {
+                command_info_entry(name, arity, flags, first_key, last_key, step)
+            })
+            .collect();
+        return Ok(RespFrame::Array(Some(entries)));
     }
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if sub.eq_ignore_ascii_case("COUNT") {
-        // Return approximate command count
-        Ok(RespFrame::Integer(100))
-    } else {
-        // DOCS, INFO, and other subcommands return empty array
+        Ok(RespFrame::Integer(COMMAND_TABLE.len() as i64))
+    } else if sub.eq_ignore_ascii_case("LIST") {
+        let names: Vec<RespFrame> = COMMAND_TABLE
+            .iter()
+            .map(|&(name, ..)| RespFrame::BulkString(Some(name.as_bytes().to_vec())))
+            .collect();
+        Ok(RespFrame::Array(Some(names)))
+    } else if sub.eq_ignore_ascii_case("INFO") {
+        if argv.len() < 3 {
+            let entries: Vec<RespFrame> = COMMAND_TABLE
+                .iter()
+                .map(|&(name, arity, flags, first_key, last_key, step)| {
+                    command_info_entry(name, arity, flags, first_key, last_key, step)
+                })
+                .collect();
+            return Ok(RespFrame::Array(Some(entries)));
+        }
+        let mut entries = Vec::new();
+        for arg in &argv[2..] {
+            let cmd_name =
+                std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            let found = COMMAND_TABLE
+                .iter()
+                .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name));
+            match found {
+                Some(&(name, arity, flags, first_key, last_key, step)) => {
+                    entries.push(command_info_entry(
+                        name, arity, flags, first_key, last_key, step,
+                    ));
+                }
+                None => entries.push(RespFrame::BulkString(None)),
+            }
+        }
+        Ok(RespFrame::Array(Some(entries)))
+    } else if sub.eq_ignore_ascii_case("DOCS") || sub.eq_ignore_ascii_case("GETKEYS") {
         Ok(RespFrame::Array(Some(Vec::new())))
+    } else {
+        Ok(RespFrame::Error(format!(
+            "ERR unknown subcommand or wrong number of arguments for 'command|{sub}'"
+        )))
     }
+}
+
+/// Build a Redis COMMAND INFO entry: [name, arity, flags, first_key, last_key, step]
+fn command_info_entry(
+    name: &str,
+    arity: i64,
+    flags: &str,
+    first_key: i64,
+    last_key: i64,
+    step: i64,
+) -> RespFrame {
+    let flag_list: Vec<RespFrame> = flags
+        .split_whitespace()
+        .map(|f| RespFrame::SimpleString(f.to_string()))
+        .collect();
+    RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(name.as_bytes().to_vec())),
+        RespFrame::Integer(arity),
+        RespFrame::Array(Some(flag_list)),
+        RespFrame::Integer(first_key),
+        RespFrame::Integer(last_key),
+        RespFrame::Integer(step),
+    ]))
 }
 
 fn config_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
@@ -5200,6 +6420,30 @@ fn client_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         || sub.eq_ignore_ascii_case("NO-TOUCH")
         || sub.eq_ignore_ascii_case("REPLY")
     {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("KILL") {
+        // CLIENT KILL [ip:port | ID client-id | ...]
+        // In standalone single-connection mode, always return 0 (no clients killed)
+        Ok(RespFrame::Integer(0))
+    } else if sub.eq_ignore_ascii_case("PAUSE") {
+        // CLIENT PAUSE timeout [WRITE|ALL]
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("CLIENT"));
+        }
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("UNPAUSE") {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("TRACKING") {
+        // CLIENT TRACKING ON|OFF [REDIRECT id] [PREFIX prefix ...] [BCAST] [OPTIN] [OPTOUT] [NOLOOP]
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("CLIENT"));
+        }
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("CACHING") {
+        // CLIENT CACHING YES|NO
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("CLIENT"));
+        }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else {
         Ok(RespFrame::Error(format!(
@@ -6112,35 +7356,120 @@ fn bitfield_cmd(
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
-    // BITFIELD key [GET encoding offset] [SET encoding offset value] [INCRBY encoding offset increment] [OVERFLOW WRAP|SAT|FAIL]
+    // BITFIELD key [GET encoding offset] [SET encoding offset value]
+    //              [INCRBY encoding offset increment] [OVERFLOW WRAP|SAT|FAIL]
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("BITFIELD"));
     }
-    // Simplified stub: process GET/SET/INCRBY subcommands
     let key = &argv[1];
     let mut results: Vec<RespFrame> = Vec::new();
+    let mut overflow_mode = BitfieldOverflow::Wrap;
     let mut i = 2;
-    let _ = store.get(key, now_ms); // touch key for expiry check
+
     while i < argv.len() {
         let sub = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if sub.eq_ignore_ascii_case("GET") {
             if i + 2 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
-            results.push(RespFrame::Integer(0));
+            let (signed, bits) = match bitfield_parse_encoding(&argv[i + 1]) {
+                Some(v) => v,
+                None => {
+                    return Ok(RespFrame::Error(
+                        "ERR Invalid bitfield type. Use something like i8 u8 i16 u16 i32 u32 i64 u63"
+                            .to_string(),
+                    ));
+                }
+            };
+            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits) {
+                Some(v) => v,
+                None => {
+                    return Ok(RespFrame::Error(
+                        "ERR bit offset is not an integer or out of range".to_string(),
+                    ));
+                }
+            };
+            let val = store
+                .bitfield_get(key, bit_offset, bits, signed, now_ms)
+                .map_err(CommandError::Store)?;
+            results.push(RespFrame::Integer(val));
             i += 3;
         } else if sub.eq_ignore_ascii_case("SET") {
             if i + 3 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
-            results.push(RespFrame::Integer(0));
+            let (signed, bits) = match bitfield_parse_encoding(&argv[i + 1]) {
+                Some(v) => v,
+                None => {
+                    return Ok(RespFrame::Error(
+                        "ERR Invalid bitfield type. Use something like i8 u8 i16 u16 i32 u32 i64 u63"
+                            .to_string(),
+                    ));
+                }
+            };
+            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits) {
+                Some(v) => v,
+                None => {
+                    return Ok(RespFrame::Error(
+                        "ERR bit offset is not an integer or out of range".to_string(),
+                    ));
+                }
+            };
+            let value = parse_i64_arg(&argv[i + 3])?;
+            let clamped = bitfield_clamp(value, bits, signed, overflow_mode);
+            // For SET, overflow FAIL still writes (SET always succeeds per Redis behavior),
+            // but we truncate/wrap as needed
+            let old = store
+                .bitfield_set(key, bit_offset, bits, clamped, now_ms)
+                .map_err(CommandError::Store)?;
+            // Return old value, sign-extended if signed
+            let old_result = if signed {
+                bitfield_sign_extend(old, bits)
+            } else {
+                old
+            };
+            results.push(RespFrame::Integer(old_result));
             i += 4;
         } else if sub.eq_ignore_ascii_case("INCRBY") {
             if i + 3 >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
+            let (signed, bits) = match bitfield_parse_encoding(&argv[i + 1]) {
+                Some(v) => v,
+                None => {
+                    return Ok(RespFrame::Error(
+                        "ERR Invalid bitfield type. Use something like i8 u8 i16 u16 i32 u32 i64 u63"
+                            .to_string(),
+                    ));
+                }
+            };
+            let bit_offset = match bitfield_parse_offset(&argv[i + 2], bits) {
+                Some(v) => v,
+                None => {
+                    return Ok(RespFrame::Error(
+                        "ERR bit offset is not an integer or out of range".to_string(),
+                    ));
+                }
+            };
             let increment = parse_i64_arg(&argv[i + 3])?;
-            results.push(RespFrame::Integer(increment));
+
+            // Read current value
+            let current = store
+                .bitfield_get(key, bit_offset, bits, signed, now_ms)
+                .map_err(CommandError::Store)?;
+
+            let new_val = current.wrapping_add(increment);
+            let (clamped, overflowed) =
+                bitfield_clamp_with_overflow(new_val, bits, signed, overflow_mode);
+
+            if overflowed && overflow_mode == BitfieldOverflow::Fail {
+                results.push(RespFrame::BulkString(None));
+            } else {
+                store
+                    .bitfield_set(key, bit_offset, bits, clamped, now_ms)
+                    .map_err(CommandError::Store)?;
+                results.push(RespFrame::Integer(clamped));
+            }
             i += 4;
         } else if sub.eq_ignore_ascii_case("OVERFLOW") {
             if i + 1 >= argv.len() {
@@ -6148,11 +7477,16 @@ fn bitfield_cmd(
             }
             let mode =
                 std::str::from_utf8(&argv[i + 1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-            if !mode.eq_ignore_ascii_case("WRAP")
-                && !mode.eq_ignore_ascii_case("SAT")
-                && !mode.eq_ignore_ascii_case("FAIL")
-            {
-                return Ok(RespFrame::Error("ERR Invalid OVERFLOW type".to_string()));
+            if mode.eq_ignore_ascii_case("WRAP") {
+                overflow_mode = BitfieldOverflow::Wrap;
+            } else if mode.eq_ignore_ascii_case("SAT") {
+                overflow_mode = BitfieldOverflow::Sat;
+            } else if mode.eq_ignore_ascii_case("FAIL") {
+                overflow_mode = BitfieldOverflow::Fail;
+            } else {
+                return Ok(RespFrame::Error(
+                    "ERR Invalid OVERFLOW type (should be one of WRAP, SAT, FAIL)".to_string(),
+                ));
             }
             i += 2;
         } else {
@@ -6160,6 +7494,139 @@ fn bitfield_cmd(
         }
     }
     Ok(RespFrame::Array(Some(results)))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BitfieldOverflow {
+    Wrap,
+    Sat,
+    Fail,
+}
+
+/// Parse a BITFIELD type encoding like "i8", "u16", "i64", "u63".
+/// Returns (signed, bits). Max 64 for signed, 63 for unsigned.
+fn bitfield_parse_encoding(arg: &[u8]) -> Option<(bool, u8)> {
+    let s = std::str::from_utf8(arg).ok()?;
+    if s.is_empty() {
+        return None;
+    }
+    let (signed, rest) = if s.starts_with('i') || s.starts_with('I') {
+        (true, &s[1..])
+    } else if s.starts_with('u') || s.starts_with('U') {
+        (false, &s[1..])
+    } else {
+        return None;
+    };
+    let bits: u8 = rest.parse().ok()?;
+    if bits == 0 {
+        return None;
+    }
+    if signed && bits > 64 {
+        return None;
+    }
+    if !signed && bits > 63 {
+        return None;
+    }
+    Some((signed, bits))
+}
+
+/// Parse a BITFIELD offset like "100" (plain bit offset) or "#5" (type-aligned offset).
+fn bitfield_parse_offset(arg: &[u8], bits: u8) -> Option<u64> {
+    let s = std::str::from_utf8(arg).ok()?;
+    if let Some(rest) = s.strip_prefix('#') {
+        let n: u64 = rest.parse().ok()?;
+        Some(n.checked_mul(u64::from(bits))?)
+    } else {
+        s.parse::<u64>().ok()
+    }
+}
+
+/// Sign-extend a value from `bits` width to i64.
+fn bitfield_sign_extend(value: i64, bits: u8) -> i64 {
+    if bits >= 64 {
+        return value;
+    }
+    let mask = 1i64 << (bits - 1);
+    if value & mask != 0 {
+        value | (i64::MAX << bits << 1) // sign extend
+    } else {
+        value & ((1i64 << bits) - 1) // mask to width
+    }
+}
+
+/// Clamp a value to the range of the specified type encoding.
+fn bitfield_clamp(value: i64, bits: u8, signed: bool, overflow: BitfieldOverflow) -> i64 {
+    bitfield_clamp_with_overflow(value, bits, signed, overflow).0
+}
+
+/// Clamp a value and report whether overflow occurred.
+fn bitfield_clamp_with_overflow(
+    value: i64,
+    bits: u8,
+    signed: bool,
+    overflow: BitfieldOverflow,
+) -> (i64, bool) {
+    if signed {
+        let min = if bits >= 64 {
+            i64::MIN
+        } else {
+            -(1i64 << (bits - 1))
+        };
+        let max = if bits >= 64 {
+            i64::MAX
+        } else {
+            (1i64 << (bits - 1)) - 1
+        };
+        if value >= min && value <= max {
+            return (value, false);
+        }
+        match overflow {
+            BitfieldOverflow::Wrap => {
+                if bits >= 64 {
+                    (value, true)
+                } else {
+                    let range = 1i64 << bits;
+                    let mut wrapped = value % range;
+                    if wrapped > max {
+                        wrapped -= range;
+                    } else if wrapped < min {
+                        wrapped += range;
+                    }
+                    (wrapped, true)
+                }
+            }
+            BitfieldOverflow::Sat => {
+                let clamped = value.clamp(min, max);
+                (clamped, true)
+            }
+            BitfieldOverflow::Fail => (value, true),
+        }
+    } else {
+        let max = if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        };
+        let uval = value as u64;
+        // Check if value fits in the unsigned range
+        if value >= 0 && uval <= max {
+            return (value, false);
+        }
+        match overflow {
+            BitfieldOverflow::Wrap => {
+                let wrapped = uval & max;
+                (wrapped as i64, true)
+            }
+            BitfieldOverflow::Sat => {
+                if value < 0 {
+                    (0, true)
+                } else {
+                    (max as i64, true)
+                }
+            }
+            BitfieldOverflow::Fail => (value, true),
+        }
+    }
 }
 
 fn aggregate_scores_for_cmd(a: f64, b: f64, aggregate: &[u8]) -> f64 {
@@ -6354,12 +7821,282 @@ fn restore_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     ))
 }
 
-fn sort_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn sort_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SORT"));
     }
-    // Stub: basic SORT returning empty array
-    Ok(RespFrame::Array(Some(Vec::new())))
+    let key = &argv[1];
+
+    // ── Parse options ────────────────────────────────────────────────
+    let mut by_pattern: Option<Vec<u8>> = None;
+    let mut get_patterns: Vec<Vec<u8>> = Vec::new();
+    let mut desc = false;
+    let mut alpha = false;
+    let mut limit_offset: i64 = 0;
+    let mut limit_count: i64 = -1;
+    let mut store_dest: Option<Vec<u8>> = None;
+
+    let mut i = 2;
+    while i < argv.len() {
+        let arg = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if arg.eq_ignore_ascii_case("BY") {
+            if i + 1 >= argv.len() {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+            i += 1;
+            by_pattern = Some(argv[i].clone());
+        } else if arg.eq_ignore_ascii_case("GET") {
+            if i + 1 >= argv.len() {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+            i += 1;
+            get_patterns.push(argv[i].clone());
+        } else if arg.eq_ignore_ascii_case("LIMIT") {
+            if i + 2 >= argv.len() {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+            i += 1;
+            limit_offset = parse_i64_arg(&argv[i])?;
+            i += 1;
+            limit_count = parse_i64_arg(&argv[i])?;
+        } else if arg.eq_ignore_ascii_case("ASC") {
+            desc = false;
+        } else if arg.eq_ignore_ascii_case("DESC") {
+            desc = true;
+        } else if arg.eq_ignore_ascii_case("ALPHA") {
+            alpha = true;
+        } else if arg.eq_ignore_ascii_case("STORE") {
+            if i + 1 >= argv.len() {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+            i += 1;
+            store_dest = Some(argv[i].clone());
+        } else {
+            return Ok(RespFrame::Error("ERR syntax error".to_string()));
+        }
+        i += 1;
+    }
+
+    // ── Get elements from the source key ─────────────────────────────
+    let mut elements = store
+        .sort_elements(key, now_ms)
+        .map_err(CommandError::Store)?;
+
+    if elements.is_empty() {
+        if let Some(dest) = store_dest {
+            store.del(&[dest], now_ms);
+            return Ok(RespFrame::Integer(0));
+        }
+        return Ok(RespFrame::Array(Some(Vec::new())));
+    }
+
+    // ── Determine if sorting should be skipped (BY with constant pattern) ──
+    let dontsort = by_pattern.as_ref().is_some_and(|p| !p.contains(&b'*'));
+
+    // ── Sort the elements ────────────────────────────────────────────
+    if dontsort {
+        // BY nosort: preserve natural order (or force alpha-sort for sets with STORE)
+        let is_set = store
+            .value_type(key, now_ms)
+            .is_some_and(|vt| vt == ValueType::Set);
+        if is_set && store_dest.is_some() {
+            // Force deterministic ordering for sets with STORE
+            elements.sort();
+        }
+        if desc {
+            elements.reverse();
+        }
+    } else {
+        // Build sort keys for each element
+        let sort_keys: Vec<Option<Vec<u8>>> = elements
+            .iter()
+            .map(|el| sort_lookup_by_pattern(store, &by_pattern, el, now_ms))
+            .collect();
+
+        if !alpha {
+            // Numeric sort: parse sort keys as f64
+            let mut scored: Vec<(f64, usize)> = Vec::with_capacity(elements.len());
+            for (idx, sk) in sort_keys.iter().enumerate() {
+                let val = sk.as_deref().unwrap_or(b"0");
+                let s = std::str::from_utf8(val).unwrap_or("0");
+                let Ok(score) = s.parse::<f64>() else {
+                    return Ok(RespFrame::Error(
+                        "ERR One or more scores can't be converted into double".to_string(),
+                    ));
+                };
+                scored.push((score, idx));
+            }
+            scored.sort_by(|a, b| {
+                let cmp = a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal);
+                if cmp == std::cmp::Ordering::Equal {
+                    // Lexicographic tiebreaker for stability
+                    elements[a.1].cmp(&elements[b.1])
+                } else if desc {
+                    cmp.reverse()
+                } else {
+                    cmp
+                }
+            });
+            let reordered: Vec<Vec<u8>> = scored
+                .iter()
+                .map(|(_, idx)| elements[*idx].clone())
+                .collect();
+            elements = reordered;
+        } else {
+            // Alpha (lexicographic) sort
+            let mut indexed: Vec<(usize, &[u8])> = sort_keys
+                .iter()
+                .enumerate()
+                .map(|(idx, sk)| {
+                    let val: &[u8] = sk.as_deref().unwrap_or(b"");
+                    (idx, val)
+                })
+                .collect();
+            indexed.sort_by(|a, b| {
+                // NULL (empty) sorts before non-empty
+                let cmp = a.1.cmp(b.1);
+                if desc { cmp.reverse() } else { cmp }
+            });
+            let reordered: Vec<Vec<u8>> = indexed
+                .iter()
+                .map(|(idx, _)| elements[*idx].clone())
+                .collect();
+            elements = reordered;
+        }
+    }
+
+    // ── Apply LIMIT ──────────────────────────────────────────────────
+    let total = elements.len();
+    let start = (limit_offset.max(0) as usize).min(total);
+    let count = if limit_count < 0 {
+        total.saturating_sub(start)
+    } else {
+        (limit_count as usize).min(total.saturating_sub(start))
+    };
+    let sliced: Vec<Vec<u8>> = elements.into_iter().skip(start).take(count).collect();
+
+    // ── Build output with GET patterns ───────────────────────────────
+    let use_store = store_dest.is_some();
+    let output: Vec<RespFrame> = if get_patterns.is_empty() {
+        sliced
+            .iter()
+            .map(|el| RespFrame::BulkString(Some(el.clone())))
+            .collect()
+    } else {
+        let mut out = Vec::with_capacity(sliced.len() * get_patterns.len());
+        for el in &sliced {
+            for pat in &get_patterns {
+                let val = sort_lookup_get_pattern(store, pat, el, now_ms);
+                match val {
+                    Some(v) => out.push(RespFrame::BulkString(Some(v))),
+                    None => {
+                        if use_store {
+                            out.push(RespFrame::BulkString(Some(Vec::new())));
+                        } else {
+                            out.push(RespFrame::BulkString(None));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    };
+
+    // ── STORE or return ──────────────────────────────────────────────
+    if let Some(dest) = store_dest {
+        let result_count = output.len() as i64;
+        if output.is_empty() {
+            store.del(&[dest], now_ms);
+        } else {
+            let list_elements: Vec<Vec<u8>> = output
+                .into_iter()
+                .map(|f| match f {
+                    RespFrame::BulkString(Some(v)) => v,
+                    _ => Vec::new(),
+                })
+                .collect();
+            store.store_as_list(dest, list_elements);
+        }
+        Ok(RespFrame::Integer(result_count))
+    } else {
+        Ok(RespFrame::Array(Some(output)))
+    }
+}
+
+/// Look up a sort key using a BY pattern for the SORT command.
+/// Substitutes `*` with the element value. Supports `->` for hash field dereference.
+/// Returns None if the key doesn't exist or is the wrong type.
+fn sort_lookup_by_pattern(
+    store: &mut Store,
+    by_pattern: &Option<Vec<u8>>,
+    element: &[u8],
+    now_ms: u64,
+) -> Option<Vec<u8>> {
+    let pattern = match by_pattern {
+        Some(p) => p,
+        None => return Some(element.to_vec()),
+    };
+
+    // Substitute * with element value
+    let star_pos = pattern.iter().position(|&b| b == b'*');
+    let lookup_key = match star_pos {
+        Some(pos) => {
+            let mut k = Vec::with_capacity(pattern.len() + element.len());
+            k.extend_from_slice(&pattern[..pos]);
+            k.extend_from_slice(element);
+            k.extend_from_slice(&pattern[pos + 1..]);
+            k
+        }
+        None => return Some(element.to_vec()),
+    };
+
+    // Check for hash field dereference (->)
+    sort_resolve_key_or_hash(store, &lookup_key, now_ms)
+}
+
+/// Look up a value using a GET pattern for the SORT command.
+/// `GET #` returns the element itself.
+fn sort_lookup_get_pattern(
+    store: &mut Store,
+    pattern: &[u8],
+    element: &[u8],
+    now_ms: u64,
+) -> Option<Vec<u8>> {
+    // GET # returns the element itself
+    if pattern == b"#" {
+        return Some(element.to_vec());
+    }
+
+    // Substitute * with element value
+    let star_pos = pattern.iter().position(|&b| b == b'*');
+    let lookup_key = match star_pos {
+        Some(pos) => {
+            let mut k = Vec::with_capacity(pattern.len() + element.len());
+            k.extend_from_slice(&pattern[..pos]);
+            k.extend_from_slice(element);
+            k.extend_from_slice(&pattern[pos + 1..]);
+            k
+        }
+        None => return None, // GET without * always returns nil
+    };
+
+    sort_resolve_key_or_hash(store, &lookup_key, now_ms)
+}
+
+/// Resolve a key that may contain `->` for hash field dereference.
+/// Without `->`, looks up as a string key.
+/// With `->`, looks up hash key and field.
+fn sort_resolve_key_or_hash(store: &mut Store, key: &[u8], now_ms: u64) -> Option<Vec<u8>> {
+    // Check for hash field dereference: key->field
+    if let Some(arrow_pos) = key.windows(2).position(|w| w == b"->") {
+        let hash_key = &key[..arrow_pos];
+        let field = &key[arrow_pos + 2..];
+        // Attempt hash lookup; silently return None on wrong type or missing
+        store.hget(hash_key, field, now_ms).ok().flatten()
+    } else {
+        // String key lookup; silently return None on wrong type or missing
+        store.get(key, now_ms).ok().flatten()
+    }
 }
 
 fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -6394,7 +8131,7 @@ mod tests {
     use std::time::Instant;
 
     use fr_protocol::RespFrame;
-    use fr_store::Store;
+    use fr_store::{Store, StoreError};
 
     use super::{
         CommandError, CommandId, classify_command, dispatch_argv, eq_ascii_command, frame_to_argv,
@@ -6784,6 +8521,51 @@ mod tests {
         }
         if eq_ascii_command(cmd, b"XREVRANGE") {
             return Some(CommandId::Xrevrange);
+        }
+        if eq_ascii_command(cmd, b"XACK") {
+            return Some(CommandId::Xack);
+        }
+        if eq_ascii_command(cmd, b"XSETID") {
+            return Some(CommandId::Xsetid);
+        }
+        if eq_ascii_command(cmd, b"LOLWUT") {
+            return Some(CommandId::Lolwut);
+        }
+        if eq_ascii_command(cmd, b"WAITAOF") {
+            return Some(CommandId::Waitaof);
+        }
+        if eq_ascii_command(cmd, b"CLUSTER") {
+            return Some(CommandId::Cluster);
+        }
+        if eq_ascii_command(cmd, b"REPLICAOF") {
+            return Some(CommandId::Replicaof);
+        }
+        if eq_ascii_command(cmd, b"SLAVEOF") {
+            return Some(CommandId::Replicaof);
+        }
+        if eq_ascii_command(cmd, b"FUNCTION") {
+            return Some(CommandId::Function);
+        }
+        if eq_ascii_command(cmd, b"SSUBSCRIBE") {
+            return Some(CommandId::Ssubscribe);
+        }
+        if eq_ascii_command(cmd, b"SUNSUBSCRIBE") {
+            return Some(CommandId::Sunsubscribe);
+        }
+        if eq_ascii_command(cmd, b"SPUBLISH") {
+            return Some(CommandId::Spublish);
+        }
+        if eq_ascii_command(cmd, b"SORT_RO") {
+            return Some(CommandId::SortRo);
+        }
+        if eq_ascii_command(cmd, b"READONLY") {
+            return Some(CommandId::Readonly);
+        }
+        if eq_ascii_command(cmd, b"READWRITE") {
+            return Some(CommandId::Readwrite);
+        }
+        if eq_ascii_command(cmd, b"ZRANGESTORE") {
+            return Some(CommandId::Zrangestore);
         }
         None
     }
@@ -15667,5 +17449,2089 @@ mod tests {
         )
         .expect("georadius empty");
         assert_eq!(out, RespFrame::Array(Some(Vec::new())));
+    }
+
+    // ── SORT command tests ──────────────────────────────────────────
+
+    #[test]
+    fn sort_nonexistent_key_returns_empty() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"SORT".to_vec(), b"nokey".to_vec()], &mut store, 0)
+            .expect("sort nonexistent");
+        assert_eq!(out, RespFrame::Array(Some(Vec::new())));
+    }
+
+    #[test]
+    fn sort_numeric_list_asc() {
+        let mut store = Store::new();
+        for val in [b"3", b"1", b"2"] {
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"mylist".to_vec(), val.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        let out = dispatch_argv(&[b"SORT".to_vec(), b"mylist".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"1".to_vec())),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+                RespFrame::BulkString(Some(b"3".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_numeric_list_desc() {
+        let mut store = Store::new();
+        for val in [b"3", b"1", b"2"] {
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"mylist".to_vec(), val.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        let out = dispatch_argv(
+            &[b"SORT".to_vec(), b"mylist".to_vec(), b"DESC".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"3".to_vec())),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+                RespFrame::BulkString(Some(b"1".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_alpha_list() {
+        let mut store = Store::new();
+        for val in [b"charlie" as &[u8], b"alpha", b"bravo"] {
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"mylist".to_vec(), val.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        let out = dispatch_argv(
+            &[b"SORT".to_vec(), b"mylist".to_vec(), b"ALPHA".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"alpha".to_vec())),
+                RespFrame::BulkString(Some(b"bravo".to_vec())),
+                RespFrame::BulkString(Some(b"charlie".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_with_limit() {
+        let mut store = Store::new();
+        for val in [b"5", b"3", b"1", b"4", b"2"] {
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"mylist".to_vec(), val.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        let out = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"mylist".to_vec(),
+                b"LIMIT".to_vec(),
+                b"1".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"2".to_vec())),
+                RespFrame::BulkString(Some(b"3".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_store() {
+        let mut store = Store::new();
+        for val in [b"3", b"1", b"2"] {
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"mylist".to_vec(), val.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        let out = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"mylist".to_vec(),
+                b"STORE".to_vec(),
+                b"sorted".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(3));
+
+        // Verify the stored list
+        let range = dispatch_argv(
+            &[
+                b"LRANGE".to_vec(),
+                b"sorted".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            range,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"1".to_vec())),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+                RespFrame::BulkString(Some(b"3".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_by_external_key() {
+        let mut store = Store::new();
+        for val in [b"a", b"b", b"c"] {
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"mylist".to_vec(), val.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        // Set external sort keys
+        store.set(b"weight_a".to_vec(), b"3".to_vec(), None, 0);
+        store.set(b"weight_b".to_vec(), b"1".to_vec(), None, 0);
+        store.set(b"weight_c".to_vec(), b"2".to_vec(), None, 0);
+
+        let out = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"mylist".to_vec(),
+                b"BY".to_vec(),
+                b"weight_*".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"c".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_get_external_value() {
+        let mut store = Store::new();
+        for val in [b"2", b"1", b"3"] {
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"mylist".to_vec(), val.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        store.set(b"name_1".to_vec(), b"Alice".to_vec(), None, 0);
+        store.set(b"name_2".to_vec(), b"Bob".to_vec(), None, 0);
+        store.set(b"name_3".to_vec(), b"Charlie".to_vec(), None, 0);
+
+        let out = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"mylist".to_vec(),
+                b"GET".to_vec(),
+                b"name_*".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"Alice".to_vec())),
+                RespFrame::BulkString(Some(b"Bob".to_vec())),
+                RespFrame::BulkString(Some(b"Charlie".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_get_hash_pattern() {
+        let mut store = Store::new();
+        for val in [b"2", b"1"] {
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"mylist".to_vec(), val.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"user_1".to_vec(),
+                b"name".to_vec(),
+                b"Alice".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"user_2".to_vec(),
+                b"name".to_vec(),
+                b"Bob".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        let out = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"mylist".to_vec(),
+                b"GET".to_vec(),
+                b"user_*->name".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"Alice".to_vec())),
+                RespFrame::BulkString(Some(b"Bob".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_get_hash_self() {
+        let mut store = Store::new();
+        for val in [b"3", b"1", b"2"] {
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"mylist".to_vec(), val.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        let out = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"mylist".to_vec(),
+                b"GET".to_vec(),
+                b"#".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"1".to_vec())),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+                RespFrame::BulkString(Some(b"3".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_set() {
+        let mut store = Store::new();
+        for val in [b"3", b"1", b"2"] {
+            dispatch_argv(
+                &[b"SADD".to_vec(), b"myset".to_vec(), val.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        let out = dispatch_argv(&[b"SORT".to_vec(), b"myset".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"1".to_vec())),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+                RespFrame::BulkString(Some(b"3".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_by_nosort_preserves_order() {
+        let mut store = Store::new();
+        for val in [b"c", b"a", b"b"] {
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"mylist".to_vec(), val.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        let out = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"mylist".to_vec(),
+                b"BY".to_vec(),
+                b"nosort".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // BY nosort preserves insertion order for lists
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"c".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sort_numeric_error_non_numeric() {
+        let mut store = Store::new();
+        for val in [b"foo" as &[u8], b"bar"] {
+            dispatch_argv(
+                &[b"RPUSH".to_vec(), b"mylist".to_vec(), val.to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+        }
+        let out = dispatch_argv(&[b"SORT".to_vec(), b"mylist".to_vec()], &mut store, 0).unwrap();
+        match out {
+            RespFrame::Error(msg) => {
+                assert!(msg.contains("scores can't be converted into double"));
+            }
+            _ => panic!("expected error for non-numeric sort"),
+        }
+    }
+
+    #[test]
+    fn sort_store_empty_deletes_dest() {
+        let mut store = Store::new();
+        // Set up a destination key first
+        store.set(b"dest".to_vec(), b"existing".to_vec(), None, 0);
+        let out = dispatch_argv(
+            &[
+                b"SORT".to_vec(),
+                b"nokey".to_vec(),
+                b"STORE".to_vec(),
+                b"dest".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+        // Destination should be deleted
+        let get = dispatch_argv(&[b"GET".to_vec(), b"dest".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(get, RespFrame::BulkString(None));
+    }
+
+    #[test]
+    fn sort_wrongtype_error() {
+        let mut store = Store::new();
+        store.set(b"mystr".to_vec(), b"hello".to_vec(), None, 0);
+        let out = dispatch_argv(&[b"SORT".to_vec(), b"mystr".to_vec()], &mut store, 0);
+        match out {
+            Err(CommandError::Store(StoreError::WrongType)) => {}
+            _ => panic!("expected WrongType error, got {out:?}"),
+        }
+    }
+
+    // ── BITFIELD command tests ──────────────────────────────────────
+
+    #[test]
+    fn bitfield_get_empty_key() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"GET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+    }
+
+    #[test]
+    fn bitfield_set_and_get_u8() {
+        let mut store = Store::new();
+        // SET u8 at offset 0 to 200, should return old value (0)
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"SET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"200".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+
+        // GET u8 at offset 0, should return 200
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"GET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(200)])));
+    }
+
+    #[test]
+    fn bitfield_set_and_get_i8() {
+        let mut store = Store::new();
+        // SET i8 at offset 0 to -100, returns old value (0)
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"SET".to_vec(),
+                b"i8".to_vec(),
+                b"0".to_vec(),
+                b"-100".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+
+        // GET i8, should return -100
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"GET".to_vec(),
+                b"i8".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(-100)])));
+    }
+
+    #[test]
+    fn bitfield_incrby() {
+        let mut store = Store::new();
+        // INCRBY u8 offset 0 by 10
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"INCRBY".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"10".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(10)])));
+
+        // INCRBY again by 20
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"INCRBY".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"20".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(30)])));
+    }
+
+    #[test]
+    fn bitfield_overflow_wrap() {
+        let mut store = Store::new();
+        // Set u8 to 250, then INCRBY 10 with WRAP (default) = wraps to 4
+        dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"SET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"250".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"INCRBY".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"10".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(4)])));
+    }
+
+    #[test]
+    fn bitfield_overflow_sat() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"SET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"250".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"OVERFLOW".to_vec(),
+                b"SAT".to_vec(),
+                b"INCRBY".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"10".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(255)])));
+    }
+
+    #[test]
+    fn bitfield_overflow_fail() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"SET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"250".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"OVERFLOW".to_vec(),
+                b"FAIL".to_vec(),
+                b"INCRBY".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"10".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // FAIL returns nil and doesn't modify
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(None)]))
+        );
+
+        // Verify value unchanged
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"GET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(250)])));
+    }
+
+    #[test]
+    fn bitfield_hash_offset() {
+        let mut store = Store::new();
+        // SET u8 at #1 (= bit offset 8) to 42
+        dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"SET".to_vec(),
+                b"u8".to_vec(),
+                b"#1".to_vec(),
+                b"42".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"GET".to_vec(),
+                b"u8".to_vec(),
+                b"#1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(42)])));
+        // #0 should still be 0
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"GET".to_vec(),
+                b"u8".to_vec(),
+                b"#0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+    }
+
+    #[test]
+    fn bitfield_multiple_ops() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"SET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"100".to_vec(),
+                b"SET".to_vec(),
+                b"u8".to_vec(),
+                b"8".to_vec(),
+                b"200".to_vec(),
+                b"GET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"GET".to_vec(),
+                b"u8".to_vec(),
+                b"8".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(0),   // old value of first SET
+                RespFrame::Integer(0),   // old value of second SET
+                RespFrame::Integer(100), // GET first byte
+                RespFrame::Integer(200), // GET second byte
+            ]))
+        );
+    }
+
+    #[test]
+    fn bitfield_u16() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"SET".to_vec(),
+                b"u16".to_vec(),
+                b"0".to_vec(),
+                b"1000".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"GET".to_vec(),
+                b"u16".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(1000)])));
+    }
+
+    // ── XACK tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn xack_basic() {
+        let mut store = Store::new();
+        // Create stream and consumer group
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"mystream".to_vec(),
+                b"1-0".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"mystream".to_vec(),
+                b"grp".to_vec(),
+                b"0-0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // Read to create pending entry
+        dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"grp".to_vec(),
+                b"consumer1".to_vec(),
+                b"COUNT".to_vec(),
+                b"10".to_vec(),
+                b"STREAMS".to_vec(),
+                b"mystream".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            1,
+        )
+        .unwrap();
+        // ACK the message
+        let out = dispatch_argv(
+            &[
+                b"XACK".to_vec(),
+                b"mystream".to_vec(),
+                b"grp".to_vec(),
+                b"1-0".to_vec(),
+            ],
+            &mut store,
+            2,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn xack_nonexistent_id() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1-0".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"0-0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"XACK".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"99-99".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn xack_no_stream() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"XACK".to_vec(),
+                b"missing".to_vec(),
+                b"g".to_vec(),
+                b"1-0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    // ── XSETID tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn xsetid_on_stream() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1-0".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[b"XSETID".to_vec(), b"s".to_vec(), b"5-0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn xsetid_missing_key() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"XSETID".to_vec(), b"missing".to_vec(), b"1-0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // Returns error when key doesn't exist
+        match out {
+            RespFrame::Error(_) => {}
+            other => panic!("expected error, got {other:?}"),
+        }
+    }
+
+    // ── LOLWUT test ─────────────────────────────────────────────────
+
+    #[test]
+    fn lolwut_returns_version() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"LOLWUT".to_vec()], &mut store, 0).unwrap();
+        match out {
+            RespFrame::BulkString(Some(data)) => {
+                let text = String::from_utf8_lossy(&data);
+                assert!(text.contains("FrankenRedis"));
+            }
+            other => panic!("expected bulk string, got {other:?}"),
+        }
+    }
+
+    // ── WAITAOF test ────────────────────────────────────────────────
+
+    #[test]
+    fn waitaof_standalone() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"WAITAOF".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0),]))
+        );
+    }
+
+    // ── CLUSTER tests ───────────────────────────────────────────────
+
+    #[test]
+    fn cluster_info_standalone() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"CLUSTER".to_vec(), b"INFO".to_vec()], &mut store, 0).unwrap();
+        match out {
+            RespFrame::BulkString(Some(data)) => {
+                let text = String::from_utf8_lossy(&data);
+                assert!(text.contains("cluster_enabled:0"));
+            }
+            other => panic!("expected bulk string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cluster_myid() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"CLUSTER".to_vec(), b"MYID".to_vec()], &mut store, 0).unwrap();
+        match out {
+            RespFrame::BulkString(Some(_)) => {}
+            other => panic!("expected bulk string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cluster_slots_empty() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"CLUSTER".to_vec(), b"SLOTS".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(out, RespFrame::Array(Some(Vec::new())));
+    }
+
+    #[test]
+    fn cluster_keyslot() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"CLUSTER".to_vec(), b"KEYSLOT".to_vec(), b"foo".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // "foo" -> CRC16 slot 12182
+        assert_eq!(out, RespFrame::Integer(12182));
+    }
+
+    #[test]
+    fn cluster_keyslot_hashtag() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"CLUSTER".to_vec(),
+                b"KEYSLOT".to_vec(),
+                b"{user}.info".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // {user} -> hash "user" -> slot 5474
+        assert_eq!(out, RespFrame::Integer(5474));
+    }
+
+    // ── CLIENT KILL/PAUSE/UNPAUSE tests ─────────────────────────────
+
+    #[test]
+    fn client_kill_returns_zero() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"127.0.0.1:1234".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn client_pause_unpause() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"PAUSE".to_vec(), b"1000".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        let out = dispatch_argv(&[b"CLIENT".to_vec(), b"UNPAUSE".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    // ── REPLICAOF / SLAVEOF tests ───────────────────────────────────
+
+    #[test]
+    fn replicaof_no_one() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"REPLICAOF".to_vec(), b"NO".to_vec(), b"ONE".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::SimpleString(s) => assert!(s.contains("OK")),
+            other => panic!("expected simple string, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slaveof_no_one() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"SLAVEOF".to_vec(), b"NO".to_vec(), b"ONE".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::SimpleString(s) => assert!(s.contains("OK")),
+            other => panic!("expected simple string, got {other:?}"),
+        }
+    }
+
+    // ── FUNCTION tests ──────────────────────────────────────────────
+
+    #[test]
+    fn function_list_empty() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"FUNCTION".to_vec(), b"LIST".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(out, RespFrame::Array(Some(Vec::new())));
+    }
+
+    #[test]
+    fn function_flush() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"FUNCTION".to_vec(), b"FLUSH".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    // ── SHARD PUB/SUB tests ─────────────────────────────────────────
+
+    #[test]
+    fn spublish_no_subscribers() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"SPUBLISH".to_vec(), b"ch".to_vec(), b"msg".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn ssubscribe_returns_confirmation() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"SSUBSCRIBE".to_vec(), b"mychannel".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 3);
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_pxat_absolute_expiry() {
+        let mut store = Store::new();
+        let now = 1000;
+        // SET key value PXAT 5000 — absolute expiry at 5000ms
+        let out = dispatch_argv(
+            &[
+                b"SET".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+                b"PXAT".to_vec(),
+                b"5000".to_vec(),
+            ],
+            &mut store,
+            now,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        // Key should exist at now=4999
+        assert_eq!(store.get(b"k", 4999).unwrap(), Some(b"v".to_vec()));
+        // Key should be expired at now=5000
+        assert_eq!(store.get(b"k", 5000).unwrap(), None);
+    }
+
+    #[test]
+    fn set_exat_absolute_expiry() {
+        let mut store = Store::new();
+        let now = 1000;
+        // SET key value EXAT 10 — absolute expiry at 10s = 10000ms
+        let out = dispatch_argv(
+            &[
+                b"SET".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+                b"EXAT".to_vec(),
+                b"10".to_vec(),
+            ],
+            &mut store,
+            now,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        // Key should exist at now=9999
+        assert_eq!(store.get(b"k", 9999).unwrap(), Some(b"v".to_vec()));
+        // Key should be expired at now=10000
+        assert_eq!(store.get(b"k", 10000).unwrap(), None);
+    }
+
+    #[test]
+    fn set_keepttl_preserves_existing_expiry() {
+        let mut store = Store::new();
+        let now = 1000;
+        // SET key value PX 4000 — expires at now+4000 = 5000
+        dispatch_argv(
+            &[
+                b"SET".to_vec(),
+                b"k".to_vec(),
+                b"v1".to_vec(),
+                b"PX".to_vec(),
+                b"4000".to_vec(),
+            ],
+            &mut store,
+            now,
+        )
+        .unwrap();
+        // SET key newvalue KEEPTTL — should keep expiry at 5000
+        let out = dispatch_argv(
+            &[
+                b"SET".to_vec(),
+                b"k".to_vec(),
+                b"v2".to_vec(),
+                b"KEEPTTL".to_vec(),
+            ],
+            &mut store,
+            now,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        // Value should be updated
+        assert_eq!(store.get(b"k", now).unwrap(), Some(b"v2".to_vec()));
+        // Original TTL should be preserved — still alive at 4999
+        assert_eq!(store.get(b"k", 4999).unwrap(), Some(b"v2".to_vec()));
+        // Expired at 5000
+        assert_eq!(store.get(b"k", 5000).unwrap(), None);
+    }
+
+    #[test]
+    fn set_keepttl_no_prior_ttl() {
+        let mut store = Store::new();
+        // SET key value (no TTL)
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v1".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // SET key newvalue KEEPTTL — no prior TTL, so no expiry
+        dispatch_argv(
+            &[
+                b"SET".to_vec(),
+                b"k".to_vec(),
+                b"v2".to_vec(),
+                b"KEEPTTL".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // Should still exist far in the future
+        assert_eq!(store.get(b"k", 999_999_999).unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn set_conflicting_expiry_modes_rejected() {
+        let mut store = Store::new();
+        // EX + PX → syntax error
+        let result = dispatch_argv(
+            &[
+                b"SET".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+                b"EX".to_vec(),
+                b"10".to_vec(),
+                b"PX".to_vec(),
+                b"10000".to_vec(),
+            ],
+            &mut store,
+            0,
+        );
+        assert!(result.is_err());
+        // KEEPTTL + EXAT → syntax error
+        let result = dispatch_argv(
+            &[
+                b"SET".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+                b"KEEPTTL".to_vec(),
+                b"EXAT".to_vec(),
+                b"10".to_vec(),
+            ],
+            &mut store,
+            0,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn set_pxat_with_get() {
+        let mut store = Store::new();
+        // Set initial value
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"old".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // SET k new PXAT 5000 GET — should return old value
+        let out = dispatch_argv(
+            &[
+                b"SET".to_vec(),
+                b"k".to_vec(),
+                b"new".to_vec(),
+                b"PXAT".to_vec(),
+                b"5000".to_vec(),
+                b"GET".to_vec(),
+            ],
+            &mut store,
+            1000,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(b"old".to_vec())));
+        // New value should be accessible
+        assert_eq!(store.get(b"k", 1000).unwrap(), Some(b"new".to_vec()));
+    }
+
+    #[test]
+    fn sort_ro_returns_sorted_list() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"mylist".to_vec(),
+                b"3".to_vec(),
+                b"1".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(&[b"SORT_RO".to_vec(), b"mylist".to_vec()], &mut store, 0).unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"1".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"2".to_vec())));
+                assert_eq!(arr[2], RespFrame::BulkString(Some(b"3".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn readonly_returns_ok() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"READONLY".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn readwrite_returns_ok() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"READWRITE".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn client_tracking_returns_ok() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"TRACKING".to_vec(), b"ON".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn client_caching_returns_ok() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"CACHING".to_vec(), b"YES".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn srandmember_with_positive_count() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"SADD".to_vec(),
+                b"myset".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[b"SRANDMEMBER".to_vec(), b"myset".to_vec(), b"2".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn srandmember_with_negative_count() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SADD".to_vec(), b"myset".to_vec(), b"x".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // Negative count: return 5 elements (repeats allowed)
+        let out = dispatch_argv(
+            &[b"SRANDMEMBER".to_vec(), b"myset".to_vec(), b"-5".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 5);
+                for elem in &arr {
+                    assert_eq!(*elem, RespFrame::BulkString(Some(b"x".to_vec())));
+                }
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn srandmember_count_empty_set() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"SRANDMEMBER".to_vec(), b"nonexist".to_vec(), b"3".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![])));
+    }
+
+    #[test]
+    fn zrangestore_by_rank() {
+        let mut store = Store::new();
+        // ZADD src: a=1, b=2, c=3
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"src".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANGESTORE dst src 0 1 — copy first 2 elements
+        let out = dispatch_argv(
+            &[
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"src".to_vec(),
+                b"0".to_vec(),
+                b"1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(2));
+        // Verify dst has 2 members
+        let card = dispatch_argv(&[b"ZCARD".to_vec(), b"dst".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(card, RespFrame::Integer(2));
+    }
+
+    #[test]
+    fn zrangestore_byscore() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"src".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+                b"4".to_vec(),
+                b"d".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANGESTORE dst src 2 3 BYSCORE
+        let out = dispatch_argv(
+            &[
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"src".to_vec(),
+                b"2".to_vec(),
+                b"3".to_vec(),
+                b"BYSCORE".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(2));
+        // Verify: should contain b and c
+        let members = dispatch_argv(
+            &[
+                b"ZRANGE".to_vec(),
+                b"dst".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match members {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zrange_byscore() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+                b"4".to_vec(),
+                b"d".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"ZRANGE".to_vec(),
+                b"zs".to_vec(),
+                b"2".to_vec(),
+                b"3".to_vec(),
+                b"BYSCORE".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"b".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"c".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zrange_byscore_rev() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANGE zs 3 1 BYSCORE REV — reversed score range
+        let out = dispatch_argv(
+            &[
+                b"ZRANGE".to_vec(),
+                b"zs".to_vec(),
+                b"3".to_vec(),
+                b"1".to_vec(),
+                b"BYSCORE".to_vec(),
+                b"REV".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"c".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"b".to_vec())));
+                assert_eq!(arr[2], RespFrame::BulkString(Some(b"a".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zrange_byscore_limit() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+                b"4".to_vec(),
+                b"d".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANGE zs 1 4 BYSCORE LIMIT 1 2 — skip 1, take 2
+        let out = dispatch_argv(
+            &[
+                b"ZRANGE".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"4".to_vec(),
+                b"BYSCORE".to_vec(),
+                b"LIMIT".to_vec(),
+                b"1".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"b".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"c".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zrange_byscore_withscores() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"1.5".to_vec(),
+                b"a".to_vec(),
+                b"2.5".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"ZRANGE".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"3".to_vec(),
+                b"BYSCORE".to_vec(),
+                b"WITHSCORES".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 4); // 2 members * 2 (member + score)
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"a".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"1.5".to_vec())));
+                assert_eq!(arr[2], RespFrame::BulkString(Some(b"b".to_vec())));
+                assert_eq!(arr[3], RespFrame::BulkString(Some(b"2.5".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zrange_rev_by_rank() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANGE zs 0 -1 REV — all elements reversed
+        let out = dispatch_argv(
+            &[
+                b"ZRANGE".to_vec(),
+                b"zs".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"REV".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 3);
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"c".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"b".to_vec())));
+                assert_eq!(arr[2], RespFrame::BulkString(Some(b"a".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zrangebyscore_withscores_and_limit() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+                b"4".to_vec(),
+                b"d".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANGEBYSCORE zs 1 4 WITHSCORES LIMIT 1 2
+        let out = dispatch_argv(
+            &[
+                b"ZRANGEBYSCORE".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"4".to_vec(),
+                b"WITHSCORES".to_vec(),
+                b"LIMIT".to_vec(),
+                b"1".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                // 2 members * 2 (member+score) = 4
+                assert_eq!(arr.len(), 4);
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"b".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"2".to_vec())));
+                assert_eq!(arr[2], RespFrame::BulkString(Some(b"c".to_vec())));
+                assert_eq!(arr[3], RespFrame::BulkString(Some(b"3".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zrevrangebyscore_withscores() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZREVRANGEBYSCORE zs 3 1 WITHSCORES
+        let out = dispatch_argv(
+            &[
+                b"ZREVRANGEBYSCORE".to_vec(),
+                b"zs".to_vec(),
+                b"3".to_vec(),
+                b"1".to_vec(),
+                b"WITHSCORES".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 6); // 3 members * 2
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"c".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"3".to_vec())));
+                assert_eq!(arr[4], RespFrame::BulkString(Some(b"a".to_vec())));
+                assert_eq!(arr[5], RespFrame::BulkString(Some(b"1".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zrangebylex_with_limit() {
+        let mut store = Store::new();
+        // All same score for lex ordering
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"0".to_vec(),
+                b"a".to_vec(),
+                b"0".to_vec(),
+                b"b".to_vec(),
+                b"0".to_vec(),
+                b"c".to_vec(),
+                b"0".to_vec(),
+                b"d".to_vec(),
+                b"0".to_vec(),
+                b"e".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANGEBYLEX zs [a [e LIMIT 1 2
+        let out = dispatch_argv(
+            &[
+                b"ZRANGEBYLEX".to_vec(),
+                b"zs".to_vec(),
+                b"[a".to_vec(),
+                b"[e".to_vec(),
+                b"LIMIT".to_vec(),
+                b"1".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"b".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"c".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lpop_with_count() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"mylist".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[b"LPOP".to_vec(), b"mylist".to_vec(), b"2".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"a".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"b".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rpop_with_count() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"mylist".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[b"RPOP".to_vec(), b"mylist".to_vec(), b"2".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"c".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"b".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spop_with_count() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"SADD".to_vec(),
+                b"s".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[b"SPOP".to_vec(), b"s".to_vec(), b"2".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+        // Only 1 member left
+        let card = dispatch_argv(&[b"SCARD".to_vec(), b"s".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(card, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn zpopmin_with_count() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[b"ZPOPMIN".to_vec(), b"zs".to_vec(), b"2".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 4); // 2 pairs
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"a".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"1".to_vec())));
+                assert_eq!(arr[2], RespFrame::BulkString(Some(b"b".to_vec())));
+                assert_eq!(arr[3], RespFrame::BulkString(Some(b"2".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zpopmax_with_count() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[b"ZPOPMAX".to_vec(), b"zs".to_vec(), b"2".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 4); // 2 pairs
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"c".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"3".to_vec())));
+                assert_eq!(arr[2], RespFrame::BulkString(Some(b"b".to_vec())));
+                assert_eq!(arr[3], RespFrame::BulkString(Some(b"2".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
     }
 }
