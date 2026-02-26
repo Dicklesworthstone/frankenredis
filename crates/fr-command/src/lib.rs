@@ -2,8 +2,9 @@
 
 use fr_protocol::RespFrame;
 use fr_store::{
-    PttlValue, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
-    StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamId, ValueType,
+    PttlValue, ScoreBound, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
+    StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamId,
+    ValueType,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1461,14 +1462,12 @@ fn expiretime(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() != 2 {
         return Err(CommandError::WrongArity("EXPIRETIME"));
     }
-    let value = match store.pttl(&argv[1], now_ms) {
-        PttlValue::KeyMissing => -2,
-        PttlValue::NoExpiry => -1,
-        PttlValue::Remaining(ms) => {
-            let absolute_ms = i128::from(now_ms).saturating_add(i128::from(ms));
-            let absolute_ms = clamp_i128_to_i64(absolute_ms);
-            absolute_ms.saturating_add(500) / 1000
-        }
+    if !store.exists(&argv[1], now_ms) {
+        return Ok(RespFrame::Integer(-2));
+    }
+    let value = match store.get_expires_at_ms(&argv[1], now_ms) {
+        Some(abs_ms) => (abs_ms / 1000) as i64,
+        None => -1,
     };
     Ok(RespFrame::Integer(value))
 }
@@ -1481,13 +1480,12 @@ fn pexpiretime(
     if argv.len() != 2 {
         return Err(CommandError::WrongArity("PEXPIRETIME"));
     }
-    let value = match store.pttl(&argv[1], now_ms) {
-        PttlValue::KeyMissing => -2,
-        PttlValue::NoExpiry => -1,
-        PttlValue::Remaining(ms) => {
-            let absolute_ms = i128::from(now_ms).saturating_add(i128::from(ms));
-            clamp_i128_to_i64(absolute_ms)
-        }
+    if !store.exists(&argv[1], now_ms) {
+        return Ok(RespFrame::Integer(-2));
+    }
+    let value = match store.get_expires_at_ms(&argv[1], now_ms) {
+        Some(abs_ms) => abs_ms as i64,
+        None => -1,
     };
     Ok(RespFrame::Integer(value))
 }
@@ -4561,15 +4559,22 @@ const CRC16_TAB: [u16; 256] = [
     0x6e17, 0x7e36, 0x4e55, 0x5e74, 0x2e93, 0x3eb2, 0x0ed1, 0x1ef0,
 ];
 
-fn parse_score_bound(arg: &[u8]) -> Result<f64, CommandError> {
+fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
     let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if text == "-inf" {
-        Ok(f64::NEG_INFINITY)
+        Ok(ScoreBound::Inclusive(f64::NEG_INFINITY))
     } else if text == "+inf" || text == "inf" {
-        Ok(f64::INFINITY)
+        Ok(ScoreBound::Inclusive(f64::INFINITY))
+    } else if let Some(rest) = text.strip_prefix('(') {
+        let val = rest
+            .parse::<f64>()
+            .map_err(|_| CommandError::InvalidInteger)?;
+        Ok(ScoreBound::Exclusive(val))
     } else {
-        text.parse::<f64>()
-            .map_err(|_| CommandError::InvalidInteger)
+        let val = text
+            .parse::<f64>()
+            .map_err(|_| CommandError::InvalidInteger)?;
+        Ok(ScoreBound::Inclusive(val))
     }
 }
 
@@ -4879,12 +4884,38 @@ fn zrandmember(
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
-    if argv.len() != 2 {
+    // ZRANDMEMBER key [count [WITHSCORES]]
+    if argv.len() < 2 || argv.len() > 4 {
         return Err(CommandError::WrongArity("ZRANDMEMBER"));
     }
-    match store.zrandmember(&argv[1], now_ms)? {
-        Some(m) => Ok(RespFrame::BulkString(Some(m))),
-        None => Ok(RespFrame::BulkString(None)),
+    if argv.len() == 2 {
+        // No count: return single element or nil
+        return match store.zrandmember(&argv[1], now_ms)? {
+            Some(m) => Ok(RespFrame::BulkString(Some(m))),
+            None => Ok(RespFrame::BulkString(None)),
+        };
+    }
+    let count = parse_i64_arg(&argv[2])?;
+    let withscores = argv.len() == 4
+        && std::str::from_utf8(&argv[3])
+            .is_ok_and(|s| s.eq_ignore_ascii_case("WITHSCORES"));
+    if argv.len() == 4 && !withscores {
+        return Err(CommandError::SyntaxError);
+    }
+    let pairs = store.zrandmember_count(&argv[1], count, now_ms)?;
+    if withscores {
+        let mut frames = Vec::with_capacity(pairs.len() * 2);
+        for (member, score) in pairs {
+            frames.push(RespFrame::BulkString(Some(member)));
+            frames.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+        }
+        Ok(RespFrame::Array(Some(frames)))
+    } else {
+        let frames = pairs
+            .into_iter()
+            .map(|(m, _)| RespFrame::BulkString(Some(m)))
+            .collect();
+        Ok(RespFrame::Array(Some(frames)))
     }
 }
 
@@ -5034,12 +5065,38 @@ fn hincrbyfloat(
 }
 
 fn hrandfield(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 2 {
+    // HRANDFIELD key [count [WITHVALUES]]
+    if argv.len() < 2 || argv.len() > 4 {
         return Err(CommandError::WrongArity("HRANDFIELD"));
     }
-    match store.hrandfield(&argv[1], now_ms)? {
-        Some(field) => Ok(RespFrame::BulkString(Some(field))),
-        None => Ok(RespFrame::BulkString(None)),
+    if argv.len() == 2 {
+        // No count: return single field or nil
+        return match store.hrandfield(&argv[1], now_ms)? {
+            Some(field) => Ok(RespFrame::BulkString(Some(field))),
+            None => Ok(RespFrame::BulkString(None)),
+        };
+    }
+    let count = parse_i64_arg(&argv[2])?;
+    let withvalues = argv.len() == 4
+        && std::str::from_utf8(&argv[3])
+            .is_ok_and(|s| s.eq_ignore_ascii_case("WITHVALUES"));
+    if argv.len() == 4 && !withvalues {
+        return Err(CommandError::SyntaxError);
+    }
+    let pairs = store.hrandfield_count(&argv[1], count, now_ms)?;
+    if withvalues {
+        let mut frames = Vec::with_capacity(pairs.len() * 2);
+        for (field, value) in pairs {
+            frames.push(RespFrame::BulkString(Some(field)));
+            frames.push(RespFrame::BulkString(Some(value)));
+        }
+        Ok(RespFrame::Array(Some(frames)))
+    } else {
+        let frames = pairs
+            .into_iter()
+            .map(|(f, _)| RespFrame::BulkString(Some(f)))
+            .collect();
+        Ok(RespFrame::Array(Some(frames)))
     }
 }
 
@@ -6484,12 +6541,14 @@ fn randomkey(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 
 // ── SCAN family ──────────────────────────────────────────────────────
 
+#[allow(clippy::type_complexity)]
 fn parse_scan_args(
     argv: &[Vec<u8>],
     start_idx: usize,
-) -> Result<(Option<Vec<u8>>, usize), CommandError> {
+) -> Result<(Option<Vec<u8>>, usize, Option<Vec<u8>>), CommandError> {
     let mut pattern: Option<Vec<u8>> = None;
     let mut count: usize = 10;
+    let mut type_filter: Option<Vec<u8>> = None;
     let mut i = start_idx;
     while i < argv.len() {
         let kw = std::str::from_utf8(&argv[i]).unwrap_or("");
@@ -6512,11 +6571,17 @@ fn parse_scan_args(
             }
             count = c as usize;
             i += 2;
+        } else if kw.eq_ignore_ascii_case("TYPE") {
+            if i + 1 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            type_filter = Some(argv[i + 1].clone());
+            i += 2;
         } else {
             return Err(CommandError::SyntaxError);
         }
     }
-    Ok((pattern, count))
+    Ok((pattern, count, type_filter))
 }
 
 fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -6528,8 +6593,22 @@ fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         .parse::<u64>()
         .map_err(|_| CommandError::InvalidInteger)?;
 
-    let (pattern, count) = parse_scan_args(argv, 2)?;
+    let (pattern, count, type_filter) = parse_scan_args(argv, 2)?;
     let (next_cursor, keys) = store.scan(cursor, pattern.as_deref(), count, now_ms);
+
+    // Apply TYPE filter if specified
+    let keys: Vec<Vec<u8>> = if let Some(ref tf) = type_filter {
+        let tf_str = std::str::from_utf8(tf).unwrap_or("");
+        keys.into_iter()
+            .filter(|k| {
+                store
+                    .key_type(k, now_ms)
+                    .is_some_and(|t| t.eq_ignore_ascii_case(tf_str))
+            })
+            .collect()
+    } else {
+        keys
+    };
 
     let key_frames: Vec<RespFrame> = keys
         .into_iter()
@@ -6551,7 +6630,7 @@ fn hscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         .parse::<u64>()
         .map_err(|_| CommandError::InvalidInteger)?;
 
-    let (pattern, count) = parse_scan_args(argv, 3)?;
+    let (pattern, count, _type_filter) = parse_scan_args(argv, 3)?;
     let (next_cursor, pairs) = store
         .hscan(key, cursor, pattern.as_deref(), count, now_ms)
         .map_err(CommandError::Store)?;
@@ -6577,7 +6656,7 @@ fn sscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         .parse::<u64>()
         .map_err(|_| CommandError::InvalidInteger)?;
 
-    let (pattern, count) = parse_scan_args(argv, 3)?;
+    let (pattern, count, _type_filter) = parse_scan_args(argv, 3)?;
     let (next_cursor, members) = store
         .sscan(key, cursor, pattern.as_deref(), count, now_ms)
         .map_err(CommandError::Store)?;
@@ -6602,7 +6681,7 @@ fn zscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         .parse::<u64>()
         .map_err(|_| CommandError::InvalidInteger)?;
 
-    let (pattern, count) = parse_scan_args(argv, 3)?;
+    let (pattern, count, _type_filter) = parse_scan_args(argv, 3)?;
     let (next_cursor, pairs) = store
         .zscan(key, cursor, pattern.as_deref(), count, now_ms)
         .map_err(CommandError::Store)?;
@@ -6630,7 +6709,7 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         let encoding = store.object_encoding(&argv[2], now_ms);
         match encoding {
             Some(enc) => Ok(RespFrame::BulkString(Some(enc.as_bytes().to_vec()))),
-            None => Ok(RespFrame::BulkString(None)),
+            None => Ok(RespFrame::Error("ERR no such key".to_string())),
         }
     } else if sub.eq_ignore_ascii_case("REFCOUNT") {
         if argv.len() < 3 {
@@ -6639,7 +6718,7 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         if store.exists(&argv[2], now_ms) {
             Ok(RespFrame::Integer(1))
         } else {
-            Ok(RespFrame::BulkString(None))
+            Ok(RespFrame::Error("ERR no such key".to_string()))
         }
     } else if sub.eq_ignore_ascii_case("IDLETIME") || sub.eq_ignore_ascii_case("FREQ") {
         if argv.len() < 3 {
@@ -6648,7 +6727,7 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         if store.exists(&argv[2], now_ms) {
             Ok(RespFrame::Integer(0))
         } else {
-            Ok(RespFrame::BulkString(None))
+            Ok(RespFrame::Error("ERR no such key".to_string()))
         }
     } else if sub.eq_ignore_ascii_case("HELP") {
         Ok(RespFrame::Array(Some(vec![
@@ -6950,9 +7029,9 @@ fn msetnx(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 3 || argv.len().is_multiple_of(2) {
         return Err(CommandError::WrongArity("MSETNX"));
     }
-    // Check if any key already exists
+    // Check if any key already exists (any type, not just string)
     for i in (1..argv.len()).step_by(2) {
-        if store.get(&argv[i], now_ms).ok().flatten().is_some() {
+        if store.exists(&argv[i], now_ms) {
             return Ok(RespFrame::Integer(0));
         }
     }
@@ -8121,9 +8200,11 @@ fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
         let arg = std::str::from_utf8(&argv[i]).unwrap_or("");
         if arg.eq_ignore_ascii_case("REPLACE") {
             replace = true;
-        } else if arg.eq_ignore_ascii_case("DESTINATION") {
-            // COPY source destination DESTINATION db - ignore DB (single-db mode)
+        } else if arg.eq_ignore_ascii_case("DB") {
+            // COPY source destination [DB destination-db] — ignore DB (single-db mode)
             i += 1;
+        } else {
+            return Err(CommandError::SyntaxError);
         }
         i += 1;
     }
@@ -9910,9 +9991,10 @@ mod tests {
         )
         .expect("pexpire key");
 
+        // expires_at_ms = 1000 + 2500 = 3500; EXPIRETIME truncates to seconds: 3500/1000 = 3
         let expiretime = dispatch_argv(&[b"EXPIRETIME".to_vec(), b"k".to_vec()], &mut store, 1_000)
             .expect("expiretime");
-        assert_eq!(expiretime, RespFrame::Integer(4));
+        assert_eq!(expiretime, RespFrame::Integer(3));
 
         let pexpiretime =
             dispatch_argv(&[b"PEXPIRETIME".to_vec(), b"k".to_vec()], &mut store, 1_000)
@@ -19541,5 +19623,486 @@ mod tests {
             }
             other => panic!("expected array, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn zrangebyscore_exclusive_bounds() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+                b"4".to_vec(),
+                b"d".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANGEBYSCORE z (1 (4 — exclusive on both ends: only b(2) and c(3)
+        let out = dispatch_argv(
+            &[
+                b"ZRANGEBYSCORE".to_vec(),
+                b"z".to_vec(),
+                b"(1".to_vec(),
+                b"(4".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"b".to_vec())));
+                assert_eq!(arr[1], RespFrame::BulkString(Some(b"c".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zcount_exclusive_bounds() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZCOUNT z (1 3 — exclusive min: b(2) and c(3) = 2
+        let out = dispatch_argv(
+            &[
+                b"ZCOUNT".to_vec(),
+                b"z".to_vec(),
+                b"(1".to_vec(),
+                b"3".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(2));
+        // ZCOUNT z 1 (3 — exclusive max: a(1) and b(2) = 2
+        let out2 = dispatch_argv(
+            &[
+                b"ZCOUNT".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"(3".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out2, RespFrame::Integer(2));
+    }
+
+    #[test]
+    fn zrange_byscore_exclusive() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANGE z (1 (3 BYSCORE — only b(2)
+        let out = dispatch_argv(
+            &[
+                b"ZRANGE".to_vec(),
+                b"z".to_vec(),
+                b"(1".to_vec(),
+                b"(3".to_vec(),
+                b"BYSCORE".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 1);
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"b".to_vec())));
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zremrangebyscore_exclusive() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZREMRANGEBYSCORE z (1 (3 — removes only b(2)
+        let out = dispatch_argv(
+            &[
+                b"ZREMRANGEBYSCORE".to_vec(),
+                b"z".to_vec(),
+                b"(1".to_vec(),
+                b"(3".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+        // Remaining: a(1) and c(3)
+        let card = dispatch_argv(&[b"ZCARD".to_vec(), b"z".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(card, RespFrame::Integer(2));
+    }
+
+    #[test]
+    fn lpop_count_nonexistent_returns_nil() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"LPOP".to_vec(), b"nokey".to_vec(), b"5".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(None));
+    }
+
+    #[test]
+    fn rpop_count_nonexistent_returns_nil() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"RPOP".to_vec(), b"nokey".to_vec(), b"5".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(None));
+    }
+
+    #[test]
+    fn scan_type_filter() {
+        let mut store = Store::new();
+        // Create keys of different types
+        dispatch_argv(
+            &[b"SET".to_vec(), b"str1".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[b"SADD".to_vec(), b"set1".to_vec(), b"m".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[b"RPUSH".to_vec(), b"list1".to_vec(), b"x".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // SCAN 0 TYPE string — should only return str1
+        let out = dispatch_argv(
+            &[
+                b"SCAN".to_vec(),
+                b"0".to_vec(),
+                b"TYPE".to_vec(),
+                b"string".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                if let RespFrame::Array(Some(keys)) = &arr[1] {
+                    assert_eq!(keys.len(), 1);
+                    assert_eq!(keys[0], RespFrame::BulkString(Some(b"str1".to_vec())));
+                } else {
+                    panic!("expected keys array");
+                }
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zrandmember_with_positive_count() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANDMEMBER z 2 — return 2 distinct members
+        let out = dispatch_argv(
+            &[b"ZRANDMEMBER".to_vec(), b"z".to_vec(), b"2".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => assert_eq!(arr.len(), 2),
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zrandmember_with_negative_count() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANDMEMBER z -5 — return 5 members with repeats
+        let out = dispatch_argv(
+            &[b"ZRANDMEMBER".to_vec(), b"z".to_vec(), b"-5".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => assert_eq!(arr.len(), 5),
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zrandmember_with_count_withscores() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANDMEMBER z 2 WITHSCORES — return pairs: member, score, member, score
+        let out = dispatch_argv(
+            &[
+                b"ZRANDMEMBER".to_vec(),
+                b"z".to_vec(),
+                b"2".to_vec(),
+                b"WITHSCORES".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                // 2 members * 2 (member + score) = 4 elements
+                assert_eq!(arr.len(), 4);
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zrandmember_count_empty_set() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"ZRANDMEMBER".to_vec(), b"nokey".to_vec(), b"3".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![])));
+    }
+
+    #[test]
+    fn zrandmember_count_exceeds_cardinality() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // ZRANDMEMBER z 10 — only 1 member, return just that one
+        let out = dispatch_argv(
+            &[b"ZRANDMEMBER".to_vec(), b"z".to_vec(), b"10".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => assert_eq!(arr.len(), 1),
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hrandfield_with_positive_count() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"h".to_vec(),
+                b"f1".to_vec(),
+                b"v1".to_vec(),
+                b"f2".to_vec(),
+                b"v2".to_vec(),
+                b"f3".to_vec(),
+                b"v3".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // HRANDFIELD h 2 — return 2 distinct fields
+        let out = dispatch_argv(
+            &[b"HRANDFIELD".to_vec(), b"h".to_vec(), b"2".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => assert_eq!(arr.len(), 2),
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hrandfield_with_negative_count() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"h".to_vec(),
+                b"f1".to_vec(),
+                b"v1".to_vec(),
+                b"f2".to_vec(),
+                b"v2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // HRANDFIELD h -5 — return 5 fields with repeats
+        let out = dispatch_argv(
+            &[b"HRANDFIELD".to_vec(), b"h".to_vec(), b"-5".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => assert_eq!(arr.len(), 5),
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hrandfield_with_count_withvalues() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"h".to_vec(),
+                b"f1".to_vec(),
+                b"v1".to_vec(),
+                b"f2".to_vec(),
+                b"v2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // HRANDFIELD h 2 WITHVALUES — return pairs: field, value, field, value
+        let out = dispatch_argv(
+            &[
+                b"HRANDFIELD".to_vec(),
+                b"h".to_vec(),
+                b"2".to_vec(),
+                b"WITHVALUES".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                // 2 fields * 2 (field + value) = 4 elements
+                assert_eq!(arr.len(), 4);
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hrandfield_count_empty_hash() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"HRANDFIELD".to_vec(), b"nokey".to_vec(), b"3".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(vec![])));
     }
 }

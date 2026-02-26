@@ -135,6 +135,66 @@
       "expect": { "kind": "integer", "value": 0 }
     },
     {
+      "name": "hgetall_result",
+      "now_ms": 0,
+      "argv": ["HSET", "hga", "f1", "v1", "f2", "v2"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "hgetall_missing_key",
+      "now_ms": 0,
+      "argv": ["HGETALL", "nokey"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "hkeys_result",
+      "now_ms": 0,
+      "argv": ["HSET", "hk", "a", "1", "b", "2", "c", "3"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "hkeys_missing_key",
+      "now_ms": 0,
+      "argv": ["HKEYS", "nokey"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "hvals_missing_key",
+      "now_ms": 0,
+      "argv": ["HVALS", "nokey"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "hincrbyfloat_new_field",
+      "now_ms": 0,
+      "argv": ["HINCRBYFLOAT", "hf", "price", "10.5"],
+      "expect": { "kind": "bulk", "value": "10.5" }
+    },
+    {
+      "name": "hincrbyfloat_existing",
+      "now_ms": 0,
+      "argv": ["HINCRBYFLOAT", "hf", "price", "0.3"],
+      "expect": { "kind": "bulk", "value": "10.8" }
+    },
+    {
+      "name": "hincrbyfloat_negative",
+      "now_ms": 0,
+      "argv": ["HINCRBYFLOAT", "hf", "price", "-0.8"],
+      "expect": { "kind": "bulk", "value": "10" }
+    },
+    {
+      "name": "hset_float_value",
+      "now_ms": 0,
+      "argv": ["HSET", "hf", "fval", "3.14"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "hincrby_on_non_integer",
+      "now_ms": 0,
+      "argv": ["HINCRBY", "hf", "fval", "1"],
+      "expect": { "kind": "error", "value": "ERR hash value is not an integer" }
+    },
+    {
       "name": "hset_wrongtype_on_string",
       "now_ms": 0,
       "argv": ["SET", "strkey", "val"],

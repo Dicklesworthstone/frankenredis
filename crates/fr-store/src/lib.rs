@@ -21,6 +21,37 @@ pub type StreamPendingSummary = (
 pub type StreamPendingRecord = (StreamId, Vec<u8>, u64, u64);
 pub type StreamAutoClaimDeleted = Vec<StreamId>;
 
+/// Score bound for sorted set range queries (ZRANGEBYSCORE, ZCOUNT, etc.).
+/// Supports inclusive (default), exclusive (`(` prefix), and infinity (`-inf`/`+inf`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ScoreBound {
+    Inclusive(f64),
+    Exclusive(f64),
+}
+
+impl ScoreBound {
+    /// Check if `score` satisfies this bound as a minimum (lower bound).
+    pub fn check_min(self, score: f64) -> bool {
+        match self {
+            ScoreBound::Inclusive(v) => score >= v,
+            ScoreBound::Exclusive(v) => score > v,
+        }
+    }
+
+    /// Check if `score` satisfies this bound as a maximum (upper bound).
+    pub fn check_max(self, score: f64) -> bool {
+        match self {
+            ScoreBound::Inclusive(v) => score <= v,
+            ScoreBound::Exclusive(v) => score < v,
+        }
+    }
+}
+
+/// Check if a score falls within the given min/max bounds.
+pub fn score_in_range(score: f64, min: ScoreBound, max: ScoreBound) -> bool {
+    min.check_min(score) && max.check_max(score)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamPendingEntry {
     pub consumer: Vec<u8>,
@@ -92,6 +123,7 @@ pub type StreamGroupInfo = (Vec<u8>, usize, usize, StreamId);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
     ValueNotInteger,
+    HashValueNotInteger,
     ValueNotFloat,
     IntegerOverflow,
     KeyNotFound,
@@ -1348,7 +1380,8 @@ impl Store {
             Some(entry) => match &mut entry.value {
                 Value::Hash(m) => {
                     let current = match m.get(field) {
-                        Some(v) => parse_i64(v)?,
+                        Some(v) => parse_i64(v)
+                            .map_err(|_| StoreError::HashValueNotInteger)?,
                         None => 0,
                     };
                     let next = current
@@ -1471,6 +1504,46 @@ impl Store {
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(None),
+        }
+    }
+
+    /// Return `count` random fields from a hash.
+    /// Positive count: up to `count` distinct fields.
+    /// Negative count: `|count|` fields with possible repeats.
+    #[allow(clippy::type_complexity)]
+    pub fn hrandfield_count(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::Hash(m) => {
+                    if m.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    let fields: Vec<(&Vec<u8>, &Vec<u8>)> = m.iter().collect();
+                    if count >= 0 {
+                        let n = (count as usize).min(fields.len());
+                        Ok(fields[..n]
+                            .iter()
+                            .map(|(k, v)| ((*k).clone(), (*v).clone()))
+                            .collect())
+                    } else {
+                        let abs_count = count.unsigned_abs() as usize;
+                        let mut result = Vec::with_capacity(abs_count);
+                        for i in 0..abs_count {
+                            let (k, v) = &fields[i % fields.len()];
+                            result.push(((*k).clone(), (*v).clone()));
+                        }
+                        Ok(result)
+                    }
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(Vec::new()),
         }
     }
 
@@ -2669,8 +2742,8 @@ impl Store {
     pub fn zrangebyscore(
         &mut self,
         key: &[u8],
-        min: f64,
-        max: f64,
+        min: ScoreBound,
+        max: ScoreBound,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         self.drop_if_expired(key, now_ms);
@@ -2680,7 +2753,7 @@ impl Store {
                     let sorted = sorted_members_asc(zs);
                     Ok(sorted
                         .into_iter()
-                        .filter(|(s, _)| *s >= min && *s <= max)
+                        .filter(|(s, _)| score_in_range(*s, min, max))
                         .map(|(_, m)| m)
                         .collect())
                 }
@@ -2690,12 +2763,12 @@ impl Store {
         }
     }
 
-    /// Return members with scores within [min, max] range, as (member, score) pairs.
+    /// Return members with scores within the given bounds, as (member, score) pairs.
     pub fn zrangebyscore_withscores(
         &mut self,
         key: &[u8],
-        min: f64,
-        max: f64,
+        min: ScoreBound,
+        max: ScoreBound,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         self.drop_if_expired(key, now_ms);
@@ -2705,7 +2778,7 @@ impl Store {
                     let sorted = sorted_members_asc(zs);
                     Ok(sorted
                         .into_iter()
-                        .filter(|(s, _)| *s >= min && *s <= max)
+                        .filter(|(s, _)| score_in_range(*s, min, max))
                         .map(|(s, m)| (m, s))
                         .collect())
                 }
@@ -2732,20 +2805,21 @@ impl Store {
         );
     }
 
-    /// Count members with scores within [min, max] range.
+    /// Count members with scores within the given bounds.
     pub fn zcount(
         &mut self,
         key: &[u8],
-        min: f64,
-        max: f64,
+        min: ScoreBound,
+        max: ScoreBound,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    Ok(zs.values().filter(|s| **s >= min && **s <= max).count())
-                }
+                Value::SortedSet(zs) => Ok(zs
+                    .values()
+                    .filter(|s| score_in_range(**s, min, max))
+                    .count()),
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(0),
@@ -3014,8 +3088,8 @@ impl Store {
     pub fn zremrangebyscore(
         &mut self,
         key: &[u8],
-        min: f64,
-        max: f64,
+        min: ScoreBound,
+        max: ScoreBound,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
@@ -3024,7 +3098,7 @@ impl Store {
                 Value::SortedSet(zs) => {
                     let to_remove: Vec<Vec<u8>> = zs
                         .iter()
-                        .filter(|(_, score)| **score >= min && **score <= max)
+                        .filter(|(_, score)| score_in_range(**score, min, max))
                         .map(|(m, _)| m.clone())
                         .collect();
                     let count = to_remove.len();
@@ -3084,6 +3158,45 @@ impl Store {
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(None),
+        }
+    }
+
+    /// Return `count` random members from a sorted set.
+    /// Positive count: up to `count` distinct members.
+    /// Negative count: `|count|` members with possible repeats.
+    pub fn zrandmember_count(
+        &mut self,
+        key: &[u8],
+        count: i64,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => {
+                    if zs.is_empty() {
+                        return Ok(Vec::new());
+                    }
+                    let members: Vec<(&Vec<u8>, &f64)> = zs.iter().collect();
+                    if count >= 0 {
+                        let n = (count as usize).min(members.len());
+                        Ok(members[..n]
+                            .iter()
+                            .map(|(m, s)| ((*m).clone(), **s))
+                            .collect())
+                    } else {
+                        let abs_count = count.unsigned_abs() as usize;
+                        let mut result = Vec::with_capacity(abs_count);
+                        for i in 0..abs_count {
+                            let (m, s) = &members[i % members.len()];
+                            result.push(((*m).clone(), **s));
+                        }
+                        Ok(result)
+                    }
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(Vec::new()),
         }
     }
 
@@ -5208,7 +5321,7 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 mod tests {
     use super::{
         EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPressureLevel,
-        PttlValue, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
+        PttlValue, ScoreBound, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
         StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
         StreamPendingEntry, ValueType,
     };
@@ -6175,9 +6288,23 @@ mod tests {
                 0,
             )
             .unwrap();
-        let range = store.zrangebyscore(b"z", 2.0, 3.0, 0).unwrap();
+        let range = store
+            .zrangebyscore(
+                b"z",
+                ScoreBound::Inclusive(2.0),
+                ScoreBound::Inclusive(3.0),
+                0,
+            )
+            .unwrap();
         assert_eq!(range, vec![b"b".to_vec(), b"c".to_vec()]);
-        let count = store.zcount(b"z", 2.0, 3.0, 0).unwrap();
+        let count = store
+            .zcount(
+                b"z",
+                ScoreBound::Inclusive(2.0),
+                ScoreBound::Inclusive(3.0),
+                0,
+            )
+            .unwrap();
         assert_eq!(count, 2);
     }
 

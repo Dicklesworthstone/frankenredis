@@ -134,6 +134,111 @@
       "now_ms": 0,
       "argv": ["ZADD", "strkey4", "1.0", "a"],
       "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+
+    {
+      "name": "zadd_exclusive_setup",
+      "now_ms": 0,
+      "argv": ["ZADD", "zex", "1", "a", "2", "b", "3", "c", "4", "d"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "zrangebyscore_exclusive_both",
+      "now_ms": 0,
+      "argv": ["ZRANGEBYSCORE", "zex", "(1", "(4"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "b" },
+          { "kind": "bulk", "value": "c" }
+        ]
+      }
+    },
+    {
+      "name": "zrangebyscore_exclusive_min",
+      "now_ms": 0,
+      "argv": ["ZRANGEBYSCORE", "zex", "(1", "3"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "b" },
+          { "kind": "bulk", "value": "c" }
+        ]
+      }
+    },
+    {
+      "name": "zrangebyscore_exclusive_max",
+      "now_ms": 0,
+      "argv": ["ZRANGEBYSCORE", "zex", "1", "(3"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "a" },
+          { "kind": "bulk", "value": "b" }
+        ]
+      }
+    },
+    {
+      "name": "zcount_exclusive_both",
+      "now_ms": 0,
+      "argv": ["ZCOUNT", "zex", "(1", "(4"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "zcount_inclusive_all",
+      "now_ms": 0,
+      "argv": ["ZCOUNT", "zex", "-inf", "+inf"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "zrangebyscore_inf_bounds",
+      "now_ms": 0,
+      "argv": ["ZRANGEBYSCORE", "zex", "-inf", "+inf"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "a" },
+          { "kind": "bulk", "value": "b" },
+          { "kind": "bulk", "value": "c" },
+          { "kind": "bulk", "value": "d" }
+        ]
+      }
+    },
+    {
+      "name": "zrevrangebyscore_exclusive",
+      "now_ms": 0,
+      "argv": ["ZREVRANGEBYSCORE", "zex", "(4", "(1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "c" },
+          { "kind": "bulk", "value": "b" }
+        ]
+      }
+    },
+    {
+      "name": "zremrangebyscore_exclusive",
+      "now_ms": 0,
+      "argv": ["ZREMRANGEBYSCORE", "zex", "(1", "(4"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "zcard_after_remrangebyscore",
+      "now_ms": 0,
+      "argv": ["ZCARD", "zex"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "zrange_after_remrangebyscore",
+      "now_ms": 0,
+      "argv": ["ZRANGE", "zex", "0", "-1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "a" },
+          { "kind": "bulk", "value": "d" }
+        ]
+      }
     }
   ]
 }

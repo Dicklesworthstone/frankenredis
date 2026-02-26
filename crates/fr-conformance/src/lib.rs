@@ -3649,7 +3649,8 @@ mod tests {
         assert_eq!(expire_variant, pexpire_variant);
         assert_eq!(expire_variant.0, RespFrame::Integer(5));
         assert_eq!(expire_variant.1, RespFrame::Integer(5000));
-        assert_eq!(expire_variant.2, RespFrame::Integer(6));
+        // expires_at_ms = 840 + 5000 = 5840; EXPIRETIME truncates: 5840/1000 = 5
+        assert_eq!(expire_variant.2, RespFrame::Integer(5));
         assert_eq!(expire_variant.3, RespFrame::Integer(5840));
 
         let event = EvidenceEvent {

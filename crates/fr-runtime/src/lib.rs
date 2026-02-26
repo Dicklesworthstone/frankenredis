@@ -1564,8 +1564,19 @@ impl Runtime {
                 self.acllog_max_len.to_string().into_bytes(),
             )));
         }
+        // Dynamic maxmemory — override the static default
+        if Self::config_pattern_matches(&pattern, "maxmemory") {
+            entries.push(RespFrame::BulkString(Some(b"maxmemory".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.maxmemory_bytes.to_string().into_bytes(),
+            )));
+        }
         // Static configuration parameters that clients commonly probe
         for &(name, value) in CONFIG_STATIC_PARAMS {
+            // Skip maxmemory from statics — we already emitted the dynamic value above
+            if name == "maxmemory" {
+                continue;
+            }
             if Self::config_pattern_matches(&pattern, name) {
                 entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
                 entries.push(RespFrame::BulkString(Some(value.as_bytes().to_vec())));
@@ -1581,6 +1592,7 @@ impl Runtime {
 
         let mut next_requirepass: Option<Option<Vec<u8>>> = None;
         let mut next_acllog_max_len = self.acllog_max_len;
+        let mut next_maxmemory: Option<usize> = None;
 
         for pair in argv[2..].chunks_exact(2) {
             let parameter = match std::str::from_utf8(&pair[0]) {
@@ -1609,6 +1621,40 @@ impl Runtime {
                 next_acllog_max_len = parsed;
                 continue;
             }
+            if parameter.eq_ignore_ascii_case("maxmemory") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as usize,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument '?' for CONFIG SET 'maxmemory'".to_string(),
+                        );
+                    }
+                    Err(err) => return command_error_to_resp(err),
+                };
+                next_maxmemory = Some(parsed);
+                continue;
+            }
+            // Accept commonly-probed parameters as no-ops to avoid breaking clients
+            if parameter.eq_ignore_ascii_case("maxmemory-policy")
+                || parameter.eq_ignore_ascii_case("hz")
+                || parameter.eq_ignore_ascii_case("timeout")
+                || parameter.eq_ignore_ascii_case("tcp-keepalive")
+                || parameter.eq_ignore_ascii_case("loglevel")
+                || parameter.eq_ignore_ascii_case("save")
+                || parameter.eq_ignore_ascii_case("appendonly")
+                || parameter.eq_ignore_ascii_case("slowlog-log-slower-than")
+                || parameter.eq_ignore_ascii_case("slowlog-max-len")
+                || parameter.eq_ignore_ascii_case("latency-tracking")
+                || parameter.eq_ignore_ascii_case("notify-keyspace-events")
+                || parameter.eq_ignore_ascii_case("lazyfree-lazy-eviction")
+                || parameter.eq_ignore_ascii_case("lazyfree-lazy-expire")
+                || parameter.eq_ignore_ascii_case("lazyfree-lazy-server-del")
+                || parameter.eq_ignore_ascii_case("lazyfree-lazy-user-del")
+                || parameter.eq_ignore_ascii_case("activedefrag")
+                || parameter.eq_ignore_ascii_case("protected-mode")
+            {
+                continue;
+            }
             return RespFrame::Error(format!("ERR Unsupported CONFIG parameter '{parameter}'"));
         }
 
@@ -1618,6 +1664,9 @@ impl Runtime {
                 .set_requirepass_with_session_policy(requirepass, true);
         }
         self.acllog_max_len = next_acllog_max_len;
+        if let Some(maxmemory) = next_maxmemory {
+            self.maxmemory_bytes = maxmemory;
+        }
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -2077,6 +2126,9 @@ fn command_error_to_resp(error: CommandError) -> RespFrame {
         CommandError::Store(store_error) => match store_error {
             fr_store::StoreError::ValueNotInteger => {
                 RespFrame::Error("ERR value is not an integer or out of range".to_string())
+            }
+            fr_store::StoreError::HashValueNotInteger => {
+                RespFrame::Error("ERR hash value is not an integer".to_string())
             }
             fr_store::StoreError::ValueNotFloat => {
                 RespFrame::Error("ERR value is not a valid float".to_string())
@@ -3560,5 +3612,55 @@ mod tests {
         rt.execute_frame(command(&[b"SET", b"k", b"new"]), 4);
         let result = rt.execute_frame(command(&[b"EXEC"]), 5);
         assert_eq!(result, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn config_set_maxmemory_updates_and_get_returns_dynamic_value() {
+        let mut rt = Runtime::default_strict();
+        // Default is 0
+        let get = rt.execute_frame(command(&[b"CONFIG", b"GET", b"maxmemory"]), 0);
+        assert_eq!(
+            get,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"maxmemory".to_vec())),
+                RespFrame::BulkString(Some(b"0".to_vec())),
+            ]))
+        );
+        // Set to 1GB
+        let set = rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"maxmemory", b"1073741824"]),
+            1,
+        );
+        assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
+        // Verify the dynamic value
+        let get2 = rt.execute_frame(command(&[b"CONFIG", b"GET", b"maxmemory"]), 2);
+        assert_eq!(
+            get2,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"maxmemory".to_vec())),
+                RespFrame::BulkString(Some(b"1073741824".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn config_set_common_params_accepted() {
+        let mut rt = Runtime::default_strict();
+        // Commonly-probed parameters should be accepted without error
+        let set = rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"hz", b"100"]),
+            0,
+        );
+        assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
+        let set = rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"timeout", b"300"]),
+            1,
+        );
+        assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
+        let set = rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"loglevel", b"warning"]),
+            2,
+        );
+        assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
     }
 }

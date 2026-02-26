@@ -111,6 +111,175 @@
       "expect": { "kind": "bulk", "value": null }
     },
     {
+      "name": "linsert_setup",
+      "now_ms": 0,
+      "argv": ["RPUSH", "li", "a", "b", "d"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "linsert_before",
+      "now_ms": 0,
+      "argv": ["LINSERT", "li", "BEFORE", "d", "c"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "linsert_after",
+      "now_ms": 0,
+      "argv": ["LINSERT", "li", "AFTER", "a", "a2"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "linsert_missing_pivot",
+      "now_ms": 0,
+      "argv": ["LINSERT", "li", "BEFORE", "z", "x"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "linsert_missing_key",
+      "now_ms": 0,
+      "argv": ["LINSERT", "nokey", "BEFORE", "a", "b"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "lrem_setup",
+      "now_ms": 0,
+      "argv": ["RPUSH", "lr", "a", "b", "a", "c", "a"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "lrem_positive_count",
+      "now_ms": 0,
+      "argv": ["LREM", "lr", "2", "a"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "lrange_after_lrem",
+      "now_ms": 0,
+      "argv": ["LRANGE", "lr", "0", "-1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "b" },
+          { "kind": "bulk", "value": "c" },
+          { "kind": "bulk", "value": "a" }
+        ]
+      }
+    },
+    {
+      "name": "ltrim_setup",
+      "now_ms": 0,
+      "argv": ["RPUSH", "lt", "a", "b", "c", "d", "e"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "ltrim_middle",
+      "now_ms": 0,
+      "argv": ["LTRIM", "lt", "1", "3"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "lrange_after_ltrim",
+      "now_ms": 0,
+      "argv": ["LRANGE", "lt", "0", "-1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "b" },
+          { "kind": "bulk", "value": "c" },
+          { "kind": "bulk", "value": "d" }
+        ]
+      }
+    },
+    {
+      "name": "lpushx_existing",
+      "now_ms": 0,
+      "argv": ["LPUSHX", "lt", "x"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "lpushx_missing",
+      "now_ms": 0,
+      "argv": ["LPUSHX", "nokey", "x"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "rpushx_existing",
+      "now_ms": 0,
+      "argv": ["RPUSHX", "lt", "z"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "rpushx_missing",
+      "now_ms": 0,
+      "argv": ["RPUSHX", "nokey", "z"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "lmove_setup",
+      "now_ms": 0,
+      "argv": ["RPUSH", "lmsrc", "a", "b", "c"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "lmove_left_right",
+      "now_ms": 0,
+      "argv": ["LMOVE", "lmsrc", "lmdst", "LEFT", "RIGHT"],
+      "expect": { "kind": "bulk", "value": "a" }
+    },
+    {
+      "name": "lmove_verify_src",
+      "now_ms": 0,
+      "argv": ["LRANGE", "lmsrc", "0", "-1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "b" },
+          { "kind": "bulk", "value": "c" }
+        ]
+      }
+    },
+    {
+      "name": "lmove_verify_dst",
+      "now_ms": 0,
+      "argv": ["LRANGE", "lmdst", "0", "-1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "a" }
+        ]
+      }
+    },
+    {
+      "name": "lpop_with_count",
+      "now_ms": 0,
+      "argv": ["RPUSH", "lpc", "a", "b", "c", "d"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "lpop_count_2",
+      "now_ms": 0,
+      "argv": ["LPOP", "lpc", "2"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "a" },
+          { "kind": "bulk", "value": "b" }
+        ]
+      }
+    },
+    {
+      "name": "rpop_count_2",
+      "now_ms": 0,
+      "argv": ["RPOP", "lpc", "2"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "d" },
+          { "kind": "bulk", "value": "c" }
+        ]
+      }
+    },
+    {
       "name": "lpush_wrongtype_on_string",
       "now_ms": 0,
       "argv": ["SET", "strkey2", "v"],

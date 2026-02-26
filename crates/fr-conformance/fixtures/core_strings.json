@@ -173,7 +173,7 @@
       "name": "expiretime_abskey",
       "now_ms": 3300,
       "argv": ["EXPIRETIME", "abskey"],
-      "expect": { "kind": "integer", "value": 4 }
+      "expect": { "kind": "integer", "value": 3 }
     },
     {
       "name": "abskey_expired",
