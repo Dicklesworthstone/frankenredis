@@ -1720,6 +1720,10 @@ fn lpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     }
     if argv.len() == 3 {
         let count = parse_u64_arg(&argv[2])? as usize;
+        // Redis returns nil (not empty array) when key doesn't exist with COUNT
+        if !store.exists(&argv[1], now_ms) {
+            return Ok(RespFrame::BulkString(None));
+        }
         let mut result = Vec::new();
         for _ in 0..count {
             match store.lpop(&argv[1], now_ms)? {
@@ -1739,6 +1743,10 @@ fn rpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     }
     if argv.len() == 3 {
         let count = parse_u64_arg(&argv[2])? as usize;
+        // Redis returns nil (not empty array) when key doesn't exist with COUNT
+        if !store.exists(&argv[1], now_ms) {
+            return Ok(RespFrame::BulkString(None));
+        }
         let mut result = Vec::new();
         for _ in 0..count {
             match store.rpop(&argv[1], now_ms)? {
