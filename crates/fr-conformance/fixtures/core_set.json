@@ -104,6 +104,85 @@
       }
     },
     {
+      "name": "smismember_check",
+      "now_ms": 0,
+      "argv": ["SMISMEMBER", "s1", "a", "z", "b"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 1 },
+          { "kind": "integer", "value": 0 },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "smove_existing",
+      "now_ms": 0,
+      "argv": ["SMOVE", "s2", "s1", "d"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "sismember_after_smove",
+      "now_ms": 0,
+      "argv": ["SISMEMBER", "s1", "d"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "sismember_removed_by_smove",
+      "now_ms": 0,
+      "argv": ["SISMEMBER", "s2", "d"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "smove_missing_member",
+      "now_ms": 0,
+      "argv": ["SMOVE", "s2", "s1", "z"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "sinterstore_dest",
+      "now_ms": 0,
+      "argv": ["SADD", "si1", "a", "b", "c"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "sinterstore_src2",
+      "now_ms": 0,
+      "argv": ["SADD", "si2", "b", "c", "d"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "sinterstore_result",
+      "now_ms": 0,
+      "argv": ["SINTERSTORE", "sidst", "si1", "si2"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "sunionstore_result",
+      "now_ms": 0,
+      "argv": ["SUNIONSTORE", "sudst", "si1", "si2"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "sdiffstore_result",
+      "now_ms": 0,
+      "argv": ["SDIFFSTORE", "sddst", "si1", "si2"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "sintercard_basic",
+      "now_ms": 0,
+      "argv": ["SINTERCARD", "2", "si1", "si2"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "sintercard_with_limit",
+      "now_ms": 0,
+      "argv": ["SINTERCARD", "2", "si1", "si2", "LIMIT", "1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
       "name": "sadd_wrongtype_on_string",
       "now_ms": 0,
       "argv": ["SET", "strkey3", "v"],
