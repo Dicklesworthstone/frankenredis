@@ -1,0 +1,312 @@
+{
+  "suite": "core_pubsub",
+  "cases": [
+    {
+      "name": "subscribe_single_channel",
+      "now_ms": 0,
+      "argv": ["SUBSCRIBE", "mychannel"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "subscribe" },
+          { "kind": "bulk", "value": "mychannel" },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "unsubscribe_mychannel",
+      "now_ms": 0,
+      "argv": ["UNSUBSCRIBE", "mychannel"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "unsubscribe" },
+          { "kind": "bulk", "value": "mychannel" },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "unsubscribe_no_channels",
+      "now_ms": 0,
+      "argv": ["UNSUBSCRIBE"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "unsubscribe" },
+          { "kind": "bulk", "value": null },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "psubscribe_pattern",
+      "now_ms": 0,
+      "argv": ["PSUBSCRIBE", "news.*"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "psubscribe" },
+          { "kind": "bulk", "value": "news.*" },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "punsubscribe_pattern",
+      "now_ms": 0,
+      "argv": ["PUNSUBSCRIBE", "news.*"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "punsubscribe" },
+          { "kind": "bulk", "value": "news.*" },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "punsubscribe_no_patterns",
+      "now_ms": 0,
+      "argv": ["PUNSUBSCRIBE"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "punsubscribe" },
+          { "kind": "bulk", "value": null },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "publish_no_subscribers",
+      "now_ms": 0,
+      "argv": ["PUBLISH", "mychannel", "hello"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "subscribe_for_publish_test",
+      "now_ms": 0,
+      "argv": ["SUBSCRIBE", "testch"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "subscribe" },
+          { "kind": "bulk", "value": "testch" },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "publish_to_subscribed_channel",
+      "now_ms": 0,
+      "argv": ["PUBLISH", "testch", "world"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "unsubscribe_testch",
+      "now_ms": 0,
+      "argv": ["UNSUBSCRIBE", "testch"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "unsubscribe" },
+          { "kind": "bulk", "value": "testch" },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "pubsub_channels_empty",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "CHANNELS"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "pubsub_numpat_zero",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "NUMPAT"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "subscribe_for_pubsub_test",
+      "now_ms": 0,
+      "argv": ["SUBSCRIBE", "ch1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "subscribe" },
+          { "kind": "bulk", "value": "ch1" },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "pubsub_numsub_subscribed",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "NUMSUB", "ch1", "ch2"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "ch1" },
+          { "kind": "integer", "value": 1 },
+          { "kind": "bulk", "value": "ch2" },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "pubsub_numpat_with_pattern",
+      "now_ms": 0,
+      "argv": ["PSUBSCRIBE", "alert.*"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "psubscribe" },
+          { "kind": "bulk", "value": "alert.*" },
+          { "kind": "integer", "value": 2 }
+        ]
+      }
+    },
+    {
+      "name": "pubsub_numpat_one",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "NUMPAT"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "publish_pattern_match",
+      "now_ms": 0,
+      "argv": ["PUBLISH", "alert.fire", "evacuate"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pubsub_shardchannels_empty",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "SHARDCHANNELS"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "pubsub_shardnumsub",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "SHARDNUMSUB", "ch1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "ch1" },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "publish_wrong_arity",
+      "now_ms": 0,
+      "argv": ["PUBLISH", "ch"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PUBLISH' command"
+      }
+    },
+    {
+      "name": "subscribe_wrong_arity",
+      "now_ms": 0,
+      "argv": ["SUBSCRIBE"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SUBSCRIBE' command"
+      }
+    },
+    {
+      "name": "psubscribe_wrong_arity",
+      "now_ms": 0,
+      "argv": ["PSUBSCRIBE"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PSUBSCRIBE' command"
+      }
+    },
+    {
+      "name": "pubsub_wrong_arity",
+      "now_ms": 0,
+      "argv": ["PUBSUB"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PUBSUB' command"
+      }
+    },
+    {
+      "name": "pubsub_unknown_subcommand",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "NOSUCHSUB"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown subcommand or wrong number of arguments for 'pubsub|NOSUCHSUB'"
+      }
+    },
+    {
+      "name": "spublish_no_subscribers",
+      "now_ms": 0,
+      "argv": ["SPUBLISH", "ch", "msg"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "ssubscribe_channel",
+      "now_ms": 0,
+      "argv": ["SSUBSCRIBE", "shardch"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "ssubscribe" },
+          { "kind": "bulk", "value": "shardch" },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "sunsubscribe_channel",
+      "now_ms": 0,
+      "argv": ["SUNSUBSCRIBE", "shardch"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "sunsubscribe" },
+          { "kind": "bulk", "value": null },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "cleanup_unsubscribe_all",
+      "now_ms": 0,
+      "argv": ["UNSUBSCRIBE", "ch1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "unsubscribe" },
+          { "kind": "bulk", "value": "ch1" },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "cleanup_punsubscribe_all",
+      "now_ms": 0,
+      "argv": ["PUNSUBSCRIBE", "alert.*"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "punsubscribe" },
+          { "kind": "bulk", "value": "alert.*" },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    }
+  ]
+}

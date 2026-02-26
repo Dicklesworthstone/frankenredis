@@ -4,9 +4,9 @@ mod lua_eval;
 
 use fr_protocol::RespFrame;
 use fr_store::{
-    PttlValue, ScoreBound, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
-    StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamId,
-    ValueType,
+    PttlValue, PubSubMessage, ScoreBound, Store, StoreError, StreamAutoClaimOptions,
+    StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
+    StreamGroupReadOptions, StreamId, ValueType, glob_match,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -217,6 +217,9 @@ pub fn dispatch_argv(
         Some(CommandId::Pubsub) => return pubsub_cmd(argv, store),
         Some(CommandId::Msetnx) => return msetnx(argv, store, now_ms),
         Some(CommandId::Brpoplpush) => return brpoplpush(argv, store, now_ms),
+        Some(CommandId::Bzpopmin) => return bzpopmin(argv, store, now_ms),
+        Some(CommandId::Bzpopmax) => return bzpopmax(argv, store, now_ms),
+        Some(CommandId::Bzmpop) => return bzmpop(argv, store, now_ms),
         Some(CommandId::Zdiff) => return zdiff(argv, store, now_ms),
         Some(CommandId::Zdiffstore) => return zdiffstore(argv, store, now_ms),
         Some(CommandId::Zinter) => return zinter(argv, store, now_ms),
@@ -586,6 +589,9 @@ enum CommandId {
     Readonly,
     Readwrite,
     Zrangestore,
+    Bzpopmin,
+    Bzpopmax,
+    Bzmpop,
 }
 
 #[inline]
@@ -857,6 +863,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Xsetid)
             } else if eq_ascii_command(cmd, b"LOLWUT") {
                 Some(CommandId::Lolwut)
+            } else if eq_ascii_command(cmd, b"BZMPOP") {
+                Some(CommandId::Bzmpop)
             } else {
                 None
             }
@@ -953,6 +961,10 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Readonly)
             } else if eq_ascii_command(cmd, b"FCALL_RO") {
                 Some(CommandId::FcallRo)
+            } else if eq_ascii_command(cmd, b"BZPOPMIN") {
+                Some(CommandId::Bzpopmin)
+            } else if eq_ascii_command(cmd, b"BZPOPMAX") {
+                Some(CommandId::Bzpopmax)
             } else {
                 None
             }
@@ -4705,9 +4717,7 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_')
     {
-        return Ok(RespFrame::Error(
-            "ERR Function not found".to_string(),
-        ));
+        return Ok(RespFrame::Error("ERR Function not found".to_string()));
     }
 
     // Look up the function by name
@@ -6562,6 +6572,9 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("blmove", 6, "write denyoom", 1, 2, 1),
     ("blmpop", -5, "write denyoom", 0, 0, 0),
     ("brpoplpush", 4, "write denyoom", 1, 2, 1),
+    ("bzpopmin", -3, "write denyoom", 1, -2, 1),
+    ("bzpopmax", -3, "write denyoom", 1, -2, 1),
+    ("bzmpop", -5, "write denyoom", 0, 0, 0),
     ("sadd", -3, "write denyoom fast", 1, 1, 1),
     ("srem", -3, "write fast", 1, 1, 1),
     ("smembers", 2, "readonly sort_for_script", 1, 1, 1),
@@ -6732,7 +6745,16 @@ fn command_matches_acl_category(name: &str, flags: &str, category: &str) -> bool
         "dangerous" => flag_list.contains(&"admin") || flag_list.contains(&"dangerous"),
         "blocking" => matches!(
             name,
-            "blpop" | "brpop" | "blmove" | "blmpop" | "brpoplpush" | "wait" | "waitaof"
+            "blpop"
+                | "brpop"
+                | "blmove"
+                | "blmpop"
+                | "brpoplpush"
+                | "bzpopmin"
+                | "bzpopmax"
+                | "bzmpop"
+                | "wait"
+                | "waitaof"
         ),
         "connection" => matches!(
             name,
@@ -6920,6 +6942,9 @@ fn command_matches_acl_category(name: &str, flags: &str, category: &str) -> bool
                 | "zremrangebylex"
                 | "zscan"
                 | "zrangestore"
+                | "bzpopmin"
+                | "bzpopmax"
+                | "bzmpop"
         ),
         "bitmap" => matches!(
             name,
@@ -7506,86 +7531,181 @@ fn lastsave_cmd(argv: &[Vec<u8>], now_ms: u64) -> Result<RespFrame, CommandError
     Ok(RespFrame::Integer((now_ms / 1000) as i64))
 }
 
+/// Convert a `PubSubMessage` to the corresponding RESP push frame.
+/// Direct subscriptions: `["message", channel, data]`
+/// Pattern subscriptions: `["pmessage", pattern, channel, data]`
+pub fn pubsub_message_to_frame(msg: PubSubMessage) -> RespFrame {
+    match msg {
+        PubSubMessage::Message { channel, data } => RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"message".to_vec())),
+            RespFrame::BulkString(Some(channel)),
+            RespFrame::BulkString(Some(data)),
+        ])),
+        PubSubMessage::PMessage {
+            pattern,
+            channel,
+            data,
+        } => RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"pmessage".to_vec())),
+            RespFrame::BulkString(Some(pattern)),
+            RespFrame::BulkString(Some(channel)),
+            RespFrame::BulkString(Some(data)),
+        ])),
+    }
+}
+
+/// Drain all pending Pub/Sub messages from the store and convert to RESP frames.
+pub fn drain_pubsub_messages(store: &mut Store) -> Vec<RespFrame> {
+    store
+        .drain_pending_pubsub()
+        .into_iter()
+        .map(pubsub_message_to_frame)
+        .collect()
+}
+
 fn subscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     // SUBSCRIBE channel [channel ...]
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SUBSCRIBE"));
     }
-    // Subscribe to each channel and return confirmation for the last
-    let mut count = 0i64;
-    for channel in &argv[1..] {
-        count = store.subscribe(channel.clone()) as i64;
+    // In Redis, SUBSCRIBE with N channels produces N separate push messages.
+    // We pack them into a single Array-of-Arrays for the single-response dispatch model.
+    if argv.len() == 2 {
+        // Single channel — return the standard 3-element subscribe reply
+        let count = store.subscribe(argv[1].clone()) as i64;
+        return Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"subscribe".to_vec())),
+            RespFrame::BulkString(Some(argv[1].clone())),
+            RespFrame::Integer(count),
+        ])));
     }
-    let last_channel = &argv[argv.len() - 1];
-    Ok(RespFrame::Array(Some(vec![
-        RespFrame::BulkString(Some(b"subscribe".to_vec())),
-        RespFrame::BulkString(Some(last_channel.clone())),
-        RespFrame::Integer(count),
-    ])))
+    // Multiple channels — produce one subscribe reply per channel
+    let mut replies = Vec::with_capacity(argv.len() - 1);
+    for channel in &argv[1..] {
+        let count = store.subscribe(channel.clone()) as i64;
+        replies.push(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"subscribe".to_vec())),
+            RespFrame::BulkString(Some(channel.clone())),
+            RespFrame::Integer(count),
+        ])));
+    }
+    Ok(RespFrame::Array(Some(replies)))
 }
 
 fn unsubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     // UNSUBSCRIBE [channel [channel ...]]
     if argv.len() < 2 {
-        // Unsubscribe from all channels
+        // Unsubscribe from all channels — produce one reply per channel
         let channels: Vec<Vec<u8>> = store.subscribed_channels.iter().cloned().collect();
+        if channels.is_empty() {
+            return Ok(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::Integer(0),
+            ])));
+        }
+        let mut replies = Vec::with_capacity(channels.len());
         for ch in &channels {
             store.unsubscribe(ch);
+            let remaining = store.subscribed_channels.len() + store.subscribed_patterns.len();
+            replies.push(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
+                RespFrame::BulkString(Some(ch.clone())),
+                RespFrame::Integer(remaining as i64),
+            ])));
         }
+        if replies.len() == 1 {
+            return Ok(replies.into_iter().next().unwrap());
+        }
+        return Ok(RespFrame::Array(Some(replies)));
+    }
+    if argv.len() == 2 {
+        let count = store.unsubscribe(&argv[1]) as i64;
         return Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
-            RespFrame::BulkString(None),
-            RespFrame::Integer(0),
+            RespFrame::BulkString(Some(argv[1].clone())),
+            RespFrame::Integer(count),
         ])));
     }
-    let mut count = 0i64;
+    let mut replies = Vec::with_capacity(argv.len() - 1);
     for channel in &argv[1..] {
-        count = store.unsubscribe(channel) as i64;
+        let count = store.unsubscribe(channel) as i64;
+        replies.push(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
+            RespFrame::BulkString(Some(channel.clone())),
+            RespFrame::Integer(count),
+        ])));
     }
-    Ok(RespFrame::Array(Some(vec![
-        RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
-        RespFrame::BulkString(Some(argv[argv.len() - 1].clone())),
-        RespFrame::Integer(count),
-    ])))
+    Ok(RespFrame::Array(Some(replies)))
 }
 
 fn psubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("PSUBSCRIBE"));
     }
-    let mut count = 0i64;
-    for pattern in &argv[1..] {
-        count = store.psubscribe(pattern.clone()) as i64;
+    if argv.len() == 2 {
+        let count = store.psubscribe(argv[1].clone()) as i64;
+        return Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"psubscribe".to_vec())),
+            RespFrame::BulkString(Some(argv[1].clone())),
+            RespFrame::Integer(count),
+        ])));
     }
-    let last_pattern = &argv[argv.len() - 1];
-    Ok(RespFrame::Array(Some(vec![
-        RespFrame::BulkString(Some(b"psubscribe".to_vec())),
-        RespFrame::BulkString(Some(last_pattern.clone())),
-        RespFrame::Integer(count),
-    ])))
+    let mut replies = Vec::with_capacity(argv.len() - 1);
+    for pattern in &argv[1..] {
+        let count = store.psubscribe(pattern.clone()) as i64;
+        replies.push(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"psubscribe".to_vec())),
+            RespFrame::BulkString(Some(pattern.clone())),
+            RespFrame::Integer(count),
+        ])));
+    }
+    Ok(RespFrame::Array(Some(replies)))
 }
 
 fn punsubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         let patterns: Vec<Vec<u8>> = store.subscribed_patterns.iter().cloned().collect();
+        if patterns.is_empty() {
+            return Ok(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::Integer(0),
+            ])));
+        }
+        let mut replies = Vec::with_capacity(patterns.len());
         for p in &patterns {
             store.punsubscribe(p);
+            let remaining = store.subscribed_channels.len() + store.subscribed_patterns.len();
+            replies.push(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
+                RespFrame::BulkString(Some(p.clone())),
+                RespFrame::Integer(remaining as i64),
+            ])));
         }
+        if replies.len() == 1 {
+            return Ok(replies.into_iter().next().unwrap());
+        }
+        return Ok(RespFrame::Array(Some(replies)));
+    }
+    if argv.len() == 2 {
+        let count = store.punsubscribe(&argv[1]) as i64;
         return Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
-            RespFrame::BulkString(None),
-            RespFrame::Integer(0),
+            RespFrame::BulkString(Some(argv[1].clone())),
+            RespFrame::Integer(count),
         ])));
     }
-    let mut count = 0i64;
+    let mut replies = Vec::with_capacity(argv.len() - 1);
     for pattern in &argv[1..] {
-        count = store.punsubscribe(pattern) as i64;
+        let count = store.punsubscribe(pattern) as i64;
+        replies.push(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
+            RespFrame::BulkString(Some(pattern.clone())),
+            RespFrame::Integer(count),
+        ])));
     }
-    Ok(RespFrame::Array(Some(vec![
-        RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
-        RespFrame::BulkString(Some(argv[argv.len() - 1].clone())),
-        RespFrame::Integer(count),
-    ])))
+    Ok(RespFrame::Array(Some(replies)))
 }
 
 fn publish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
@@ -7604,18 +7724,12 @@ fn pubsub_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if sub.eq_ignore_ascii_case("CHANNELS") {
         let channels = store.pubsub_channels();
-        // Optionally filter by pattern
+        // Optionally filter by glob pattern
         let filtered: Vec<RespFrame> = if argv.len() >= 3 {
             let pattern = &argv[2];
             channels
                 .into_iter()
-                .filter(|ch| {
-                    // Simple glob match on channel name
-                    pattern == b"*"
-                        || ch == pattern
-                        || String::from_utf8_lossy(pattern)
-                            .contains(String::from_utf8_lossy(ch).as_ref())
-                })
+                .filter(|ch| glob_match(pattern, ch))
                 .map(|ch| RespFrame::BulkString(Some(ch)))
                 .collect()
         } else {
@@ -8569,6 +8683,129 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     Ok(RespFrame::Array(None))
 }
 
+/// Parse and validate a blocking command timeout. Returns an error for negative values.
+fn parse_blocking_timeout(arg: &[u8]) -> Result<f64, CommandError> {
+    let timeout = parse_f64_arg(arg)?;
+    if timeout < 0.0 {
+        return Err(CommandError::SyntaxError);
+    }
+    Ok(timeout)
+}
+
+fn bzpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // BZPOPMIN key [key ...] timeout
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("BZPOPMIN"));
+    }
+    let _timeout = parse_blocking_timeout(&argv[argv.len() - 1])?;
+    for key in &argv[1..argv.len() - 1] {
+        match store.zpopmin(key, now_ms) {
+            Ok(Some((member, score))) => {
+                return Ok(RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(key.clone())),
+                    RespFrame::BulkString(Some(member)),
+                    RespFrame::BulkString(Some(score.to_string().into_bytes())),
+                ])));
+            }
+            Ok(None) => continue,
+            Err(e) => return Err(CommandError::Store(e)),
+        }
+    }
+    Ok(RespFrame::Array(None))
+}
+
+fn bzpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // BZPOPMAX key [key ...] timeout
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("BZPOPMAX"));
+    }
+    let _timeout = parse_blocking_timeout(&argv[argv.len() - 1])?;
+    for key in &argv[1..argv.len() - 1] {
+        match store.zpopmax(key, now_ms) {
+            Ok(Some((member, score))) => {
+                return Ok(RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(key.clone())),
+                    RespFrame::BulkString(Some(member)),
+                    RespFrame::BulkString(Some(score.to_string().into_bytes())),
+                ])));
+            }
+            Ok(None) => continue,
+            Err(e) => return Err(CommandError::Store(e)),
+        }
+    }
+    Ok(RespFrame::Array(None))
+}
+
+fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // BZMPOP timeout numkeys key [key ...] MIN|MAX [COUNT count]
+    if argv.len() < 4 {
+        return Err(CommandError::WrongArity("BZMPOP"));
+    }
+    let _timeout = parse_blocking_timeout(&argv[1])?;
+    let numkeys = parse_i64_arg(&argv[2])? as usize;
+    if numkeys == 0 || argv.len() < 3 + numkeys + 1 {
+        return Ok(RespFrame::Error("ERR syntax error".to_string()));
+    }
+    let direction_idx = 3 + numkeys;
+    let direction =
+        std::str::from_utf8(&argv[direction_idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let use_min = if direction.eq_ignore_ascii_case("MIN") {
+        true
+    } else if direction.eq_ignore_ascii_case("MAX") {
+        false
+    } else {
+        return Ok(RespFrame::Error("ERR syntax error".to_string()));
+    };
+    let mut count: usize = 1;
+    let mut idx = direction_idx + 1;
+    while idx < argv.len() {
+        let opt = std::str::from_utf8(&argv[idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if opt.eq_ignore_ascii_case("COUNT") {
+            idx += 1;
+            if idx >= argv.len() {
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
+            }
+            count = parse_i64_arg(&argv[idx])? as usize;
+            if count == 0 {
+                return Ok(RespFrame::Error(
+                    "ERR COUNT value of 0 is not allowed".to_string(),
+                ));
+            }
+        } else {
+            return Ok(RespFrame::Error("ERR syntax error".to_string()));
+        }
+        idx += 1;
+    }
+    for ki in 0..numkeys {
+        let key = &argv[3 + ki];
+        let popped = if use_min {
+            store.zpopmin_count(key, count, now_ms)
+        } else {
+            store.zpopmax_count(key, count, now_ms)
+        };
+        match popped {
+            Ok(pairs) if !pairs.is_empty() => {
+                let elements: Vec<RespFrame> = pairs
+                    .into_iter()
+                    .flat_map(|(member, score)| {
+                        vec![
+                            RespFrame::BulkString(Some(member)),
+                            RespFrame::BulkString(Some(score.to_string().into_bytes())),
+                        ]
+                    })
+                    .collect();
+                return Ok(RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(key.clone())),
+                    RespFrame::Array(Some(elements)),
+                ])));
+            }
+            Ok(_) => continue,
+            Err(e) => return Err(CommandError::Store(e)),
+        }
+    }
+    Ok(RespFrame::Array(None))
+}
+
 fn reset_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     if argv.len() != 1 {
         return Err(CommandError::WrongArity("RESET"));
@@ -8937,7 +9174,8 @@ mod tests {
     use fr_store::{Store, StoreError};
 
     use super::{
-        CommandError, CommandId, classify_command, dispatch_argv, eq_ascii_command, frame_to_argv,
+        CommandError, CommandId, classify_command, dispatch_argv, drain_pubsub_messages,
+        eq_ascii_command, frame_to_argv, pubsub_message_to_frame,
     };
 
     fn classify_command_linear(cmd: &[u8]) -> Option<CommandId> {
@@ -17668,6 +17906,286 @@ mod tests {
                 RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
                 RespFrame::BulkString(None),
                 RespFrame::Integer(0),
+            ]))
+        );
+    }
+
+    #[test]
+    fn subscribe_multiple_channels() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"SUBSCRIBE".to_vec(),
+                b"ch1".to_vec(),
+                b"ch2".to_vec(),
+                b"ch3".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("subscribe multi");
+        // Multiple channels returns array-of-arrays
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 3);
+                // Each sub-array is [subscribe, channel, count]
+                for (i, item) in arr.iter().enumerate() {
+                    match item {
+                        RespFrame::Array(Some(sub)) => {
+                            assert_eq!(sub.len(), 3);
+                            assert_eq!(sub[2], RespFrame::Integer((i + 1) as i64));
+                        }
+                        other => panic!("expected array, got {other:?}"),
+                    }
+                }
+            }
+            other => panic!("expected array of arrays, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn publish_to_direct_subscriber() {
+        let mut store = Store::new();
+        store.subscribe(b"news".to_vec());
+        let out = dispatch_argv(
+            &[b"PUBLISH".to_vec(), b"news".to_vec(), b"hello".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("publish");
+        assert_eq!(out, RespFrame::Integer(1));
+        // Check pending messages
+        let pending = store.drain_pending_pubsub();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0],
+            fr_store::PubSubMessage::Message {
+                channel: b"news".to_vec(),
+                data: b"hello".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn publish_to_pattern_subscriber() {
+        let mut store = Store::new();
+        store.psubscribe(b"news.*".to_vec());
+        let out = dispatch_argv(
+            &[
+                b"PUBLISH".to_vec(),
+                b"news.sports".to_vec(),
+                b"goal!".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("publish");
+        assert_eq!(out, RespFrame::Integer(1));
+        let pending = store.drain_pending_pubsub();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0],
+            fr_store::PubSubMessage::PMessage {
+                pattern: b"news.*".to_vec(),
+                channel: b"news.sports".to_vec(),
+                data: b"goal!".to_vec(),
+            }
+        );
+    }
+
+    #[test]
+    fn publish_to_both_direct_and_pattern() {
+        let mut store = Store::new();
+        store.subscribe(b"news.sports".to_vec());
+        store.psubscribe(b"news.*".to_vec());
+        let out = dispatch_argv(
+            &[
+                b"PUBLISH".to_vec(),
+                b"news.sports".to_vec(),
+                b"goal!".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("publish");
+        // Both direct and pattern match — 2 receivers
+        assert_eq!(out, RespFrame::Integer(2));
+        let pending = store.drain_pending_pubsub();
+        assert_eq!(pending.len(), 2);
+    }
+
+    #[test]
+    fn publish_multiple_matching_patterns() {
+        let mut store = Store::new();
+        store.psubscribe(b"news.*".to_vec());
+        store.psubscribe(b"n*".to_vec());
+        let out = dispatch_argv(
+            &[
+                b"PUBLISH".to_vec(),
+                b"news.sports".to_vec(),
+                b"goal!".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("publish");
+        // Both patterns match — 2 receivers
+        assert_eq!(out, RespFrame::Integer(2));
+        let pending = store.drain_pending_pubsub();
+        assert_eq!(pending.len(), 2);
+    }
+
+    #[test]
+    fn pubsub_message_to_frame_direct() {
+        let frame = pubsub_message_to_frame(fr_store::PubSubMessage::Message {
+            channel: b"ch1".to_vec(),
+            data: b"hello".to_vec(),
+        });
+        assert_eq!(
+            frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"message".to_vec())),
+                RespFrame::BulkString(Some(b"ch1".to_vec())),
+                RespFrame::BulkString(Some(b"hello".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn pubsub_message_to_frame_pattern() {
+        let frame = pubsub_message_to_frame(fr_store::PubSubMessage::PMessage {
+            pattern: b"ch*".to_vec(),
+            channel: b"ch1".to_vec(),
+            data: b"hello".to_vec(),
+        });
+        assert_eq!(
+            frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"pmessage".to_vec())),
+                RespFrame::BulkString(Some(b"ch*".to_vec())),
+                RespFrame::BulkString(Some(b"ch1".to_vec())),
+                RespFrame::BulkString(Some(b"hello".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn drain_pubsub_messages_converts_pending() {
+        let mut store = Store::new();
+        store.subscribe(b"ch1".to_vec());
+        store.psubscribe(b"ch*".to_vec());
+        store.publish(b"ch1", b"hello");
+        let frames = drain_pubsub_messages(&mut store);
+        assert_eq!(frames.len(), 2);
+        // First is direct message
+        assert_eq!(
+            frames[0],
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"message".to_vec())),
+                RespFrame::BulkString(Some(b"ch1".to_vec())),
+                RespFrame::BulkString(Some(b"hello".to_vec())),
+            ]))
+        );
+        // Second is pattern message
+        assert_eq!(
+            frames[1],
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"pmessage".to_vec())),
+                RespFrame::BulkString(Some(b"ch*".to_vec())),
+                RespFrame::BulkString(Some(b"ch1".to_vec())),
+                RespFrame::BulkString(Some(b"hello".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn pubsub_channels_glob_filter() {
+        let mut store = Store::new();
+        store.subscribe(b"news.sports".to_vec());
+        store.subscribe(b"news.weather".to_vec());
+        store.subscribe(b"alerts".to_vec());
+        let out = dispatch_argv(
+            &[
+                b"PUBSUB".to_vec(),
+                b"CHANNELS".to_vec(),
+                b"news.*".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pubsub channels");
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pubsub_numsub_with_channels() {
+        let mut store = Store::new();
+        store.subscribe(b"ch1".to_vec());
+        let out = dispatch_argv(
+            &[
+                b"PUBSUB".to_vec(),
+                b"NUMSUB".to_vec(),
+                b"ch1".to_vec(),
+                b"ch2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("pubsub numsub");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"ch1".to_vec())),
+                RespFrame::Integer(1),
+                RespFrame::BulkString(Some(b"ch2".to_vec())),
+                RespFrame::Integer(0),
+            ]))
+        );
+    }
+
+    #[test]
+    fn psubscribe_multiple_patterns() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"PSUBSCRIBE".to_vec(),
+                b"news.*".to_vec(),
+                b"alerts.*".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("psubscribe multi");
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+            }
+            other => panic!("expected array of arrays, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsubscribe_specific_channel() {
+        let mut store = Store::new();
+        store.subscribe(b"ch1".to_vec());
+        store.subscribe(b"ch2".to_vec());
+        let out = dispatch_argv(
+            &[b"UNSUBSCRIBE".to_vec(), b"ch1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("unsubscribe");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
+                RespFrame::BulkString(Some(b"ch1".to_vec())),
+                RespFrame::Integer(1),
             ]))
         );
     }

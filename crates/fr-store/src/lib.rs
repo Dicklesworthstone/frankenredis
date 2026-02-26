@@ -21,6 +21,22 @@ pub type StreamPendingSummary = (
 pub type StreamPendingRecord = (StreamId, Vec<u8>, u64, u64);
 pub type StreamAutoClaimDeleted = Vec<StreamId>;
 
+/// A Pub/Sub message queued for delivery to a subscriber.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PubSubMessage {
+    /// Direct channel subscription match: `["message", channel, data]`.
+    Message {
+        channel: Vec<u8>,
+        data: Vec<u8>,
+    },
+    /// Pattern subscription match: `["pmessage", pattern, channel, data]`.
+    PMessage {
+        pattern: Vec<u8>,
+        channel: Vec<u8>,
+        data: Vec<u8>,
+    },
+}
+
 /// Score bound for sorted set range queries (ZRANGEBYSCORE, ZCOUNT, etc.).
 /// Supports inclusive (default), exclusive (`(` prefix), and infinity (`-inf`/`+inf`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -287,8 +303,8 @@ pub struct Store {
     pub subscribed_channels: HashSet<Vec<u8>>,
     /// Pub/Sub: patterns this client is subscribed to.
     pub subscribed_patterns: HashSet<Vec<u8>>,
-    /// Pub/Sub: pending messages for delivery (channel, message).
-    pub pubsub_pending: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Pub/Sub: pending messages for delivery.
+    pub pubsub_pending: Vec<PubSubMessage>,
     /// Function libraries: library_name → FunctionLibrary.
     function_libraries: HashMap<String, FunctionLibrary>,
 }
@@ -5342,24 +5358,39 @@ impl Store {
     }
 
     /// Publish a message to a channel. Returns number of subscribers that received it.
+    /// In Redis, each matching direct subscription gets a `message` push,
+    /// and each matching pattern subscription gets a separate `pmessage` push.
     pub fn publish(&mut self, channel: &[u8], message: &[u8]) -> usize {
         let mut receivers = 0;
         // Check direct channel subscriptions
         if self.subscribed_channels.contains(channel) {
-            self.pubsub_pending
-                .push((channel.to_vec(), message.to_vec()));
+            self.pubsub_pending.push(PubSubMessage::Message {
+                channel: channel.to_vec(),
+                data: message.to_vec(),
+            });
             receivers += 1;
         }
-        // Check pattern subscriptions
-        for pattern in &self.subscribed_patterns {
-            if glob_match(pattern, channel) {
-                self.pubsub_pending
-                    .push((channel.to_vec(), message.to_vec()));
-                receivers += 1;
-                break; // Each pattern match counts once
-            }
+        // Check pattern subscriptions — each matching pattern produces a separate pmessage
+        let matching_patterns: Vec<Vec<u8>> = self
+            .subscribed_patterns
+            .iter()
+            .filter(|pattern| glob_match(pattern, channel))
+            .cloned()
+            .collect();
+        for pattern in matching_patterns {
+            self.pubsub_pending.push(PubSubMessage::PMessage {
+                pattern,
+                channel: channel.to_vec(),
+                data: message.to_vec(),
+            });
+            receivers += 1;
         }
         receivers
+    }
+
+    /// Drain all pending Pub/Sub messages.
+    pub fn drain_pending_pubsub(&mut self) -> Vec<PubSubMessage> {
+        self.pubsub_pending.drain(..).collect()
     }
 
     /// Return the number of subscribed channels.
@@ -5970,7 +6001,7 @@ fn extract_quoted_string(s: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
+pub fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
     glob_match_inner(pattern, string, 0, 0)
 }
 
