@@ -1,0 +1,338 @@
+{
+  "suite": "core_expiry",
+  "cases": [
+    {
+      "name": "pttl_missing_key_returns_minus2",
+      "now_ms": 0,
+      "argv": ["PTTL", "nosuchkey"],
+      "expect": { "kind": "integer", "value": -2 }
+    },
+    {
+      "name": "ttl_missing_key_returns_minus2",
+      "now_ms": 1,
+      "argv": ["TTL", "nosuchkey"],
+      "expect": { "kind": "integer", "value": -2 }
+    },
+    {
+      "name": "set_key_for_expiry_tests",
+      "now_ms": 1000,
+      "argv": ["SET", "mykey", "hello"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pttl_no_expiry_returns_minus1",
+      "now_ms": 1001,
+      "argv": ["PTTL", "mykey"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "ttl_no_expiry_returns_minus1",
+      "now_ms": 1002,
+      "argv": ["TTL", "mykey"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "expire_sets_ttl_returns_1",
+      "now_ms": 1000,
+      "argv": ["EXPIRE", "mykey", "10"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pttl_after_expire_returns_remaining",
+      "now_ms": 1000,
+      "argv": ["PTTL", "mykey"],
+      "expect": { "kind": "integer", "value": 10000 }
+    },
+    {
+      "name": "ttl_after_expire_returns_seconds",
+      "now_ms": 1000,
+      "argv": ["TTL", "mykey"],
+      "expect": { "kind": "integer", "value": 10 }
+    },
+    {
+      "name": "pttl_with_time_elapsed",
+      "now_ms": 3000,
+      "argv": ["PTTL", "mykey"],
+      "expect": { "kind": "integer", "value": 8000 }
+    },
+    {
+      "name": "ttl_with_time_elapsed",
+      "now_ms": 3000,
+      "argv": ["TTL", "mykey"],
+      "expect": { "kind": "integer", "value": 8 }
+    },
+    {
+      "name": "persist_removes_expiry_returns_1",
+      "now_ms": 3000,
+      "argv": ["PERSIST", "mykey"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pttl_after_persist_returns_minus1",
+      "now_ms": 3001,
+      "argv": ["PTTL", "mykey"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "persist_no_expiry_returns_0",
+      "now_ms": 3002,
+      "argv": ["PERSIST", "mykey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "persist_missing_key_returns_0",
+      "now_ms": 3003,
+      "argv": ["PERSIST", "nosuchkey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_missing_key_returns_0",
+      "now_ms": 4000,
+      "argv": ["EXPIRE", "nosuchkey", "10"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pexpire_sets_millisecond_ttl",
+      "now_ms": 5000,
+      "argv": ["PEXPIRE", "mykey", "5000"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pttl_after_pexpire",
+      "now_ms": 5000,
+      "argv": ["PTTL", "mykey"],
+      "expect": { "kind": "integer", "value": 5000 }
+    },
+    {
+      "name": "pexpireat_sets_absolute_ms_deadline",
+      "now_ms": 6000,
+      "argv": ["PEXPIREAT", "mykey", "20000"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pttl_after_pexpireat",
+      "now_ms": 6000,
+      "argv": ["PTTL", "mykey"],
+      "expect": { "kind": "integer", "value": 14000 }
+    },
+    {
+      "name": "pexpiretime_returns_absolute_ms",
+      "now_ms": 6001,
+      "argv": ["PEXPIRETIME", "mykey"],
+      "expect": { "kind": "integer", "value": 20000 }
+    },
+    {
+      "name": "expireat_sets_absolute_seconds",
+      "now_ms": 7000,
+      "argv": ["EXPIREAT", "mykey", "30"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expiretime_returns_absolute_secs",
+      "now_ms": 7001,
+      "argv": ["EXPIRETIME", "mykey"],
+      "expect": { "kind": "integer", "value": 30 }
+    },
+    {
+      "name": "pexpiretime_after_expireat",
+      "now_ms": 7002,
+      "argv": ["PEXPIRETIME", "mykey"],
+      "expect": { "kind": "integer", "value": 30000 }
+    },
+    {
+      "name": "key_expired_get_returns_nil",
+      "now_ms": 31000,
+      "argv": ["GET", "mykey"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "pttl_expired_key_returns_minus2",
+      "now_ms": 31001,
+      "argv": ["PTTL", "mykey"],
+      "expect": { "kind": "integer", "value": -2 }
+    },
+    {
+      "name": "expiretime_missing_key_returns_minus2",
+      "now_ms": 31002,
+      "argv": ["EXPIRETIME", "nosuchkey"],
+      "expect": { "kind": "integer", "value": -2 }
+    },
+    {
+      "name": "pexpiretime_missing_key_returns_minus2",
+      "now_ms": 31003,
+      "argv": ["PEXPIRETIME", "nosuchkey"],
+      "expect": { "kind": "integer", "value": -2 }
+    },
+    {
+      "name": "set_key_no_expiry_for_expiretime",
+      "now_ms": 32000,
+      "argv": ["SET", "noexp", "val"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "expiretime_no_expiry_returns_minus1",
+      "now_ms": 32001,
+      "argv": ["EXPIRETIME", "noexp"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "pexpiretime_no_expiry_returns_minus1",
+      "now_ms": 32002,
+      "argv": ["PEXPIRETIME", "noexp"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "type_string_returns_string",
+      "now_ms": 33000,
+      "argv": ["TYPE", "noexp"],
+      "expect": { "kind": "simple", "value": "string" }
+    },
+    {
+      "name": "type_missing_returns_none",
+      "now_ms": 33001,
+      "argv": ["TYPE", "nosuchkey"],
+      "expect": { "kind": "simple", "value": "none" }
+    },
+    {
+      "name": "setup_list_for_type",
+      "now_ms": 33002,
+      "argv": ["LPUSH", "mylist", "a"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "type_list",
+      "now_ms": 33003,
+      "argv": ["TYPE", "mylist"],
+      "expect": { "kind": "simple", "value": "list" }
+    },
+    {
+      "name": "setup_set_for_type",
+      "now_ms": 33004,
+      "argv": ["SADD", "myset", "a"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "type_set",
+      "now_ms": 33005,
+      "argv": ["TYPE", "myset"],
+      "expect": { "kind": "simple", "value": "set" }
+    },
+    {
+      "name": "setup_hash_for_type",
+      "now_ms": 33006,
+      "argv": ["HSET", "myhash", "f", "v"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "type_hash",
+      "now_ms": 33007,
+      "argv": ["TYPE", "myhash"],
+      "expect": { "kind": "simple", "value": "hash" }
+    },
+    {
+      "name": "setup_zset_for_type",
+      "now_ms": 33008,
+      "argv": ["ZADD", "myzset", "1", "a"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "type_zset",
+      "now_ms": 33009,
+      "argv": ["TYPE", "myzset"],
+      "expect": { "kind": "simple", "value": "zset" }
+    },
+    {
+      "name": "expire_wrong_arity",
+      "now_ms": 40000,
+      "argv": ["EXPIRE", "k"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'EXPIRE' command"
+      }
+    },
+    {
+      "name": "pttl_wrong_arity",
+      "now_ms": 40001,
+      "argv": ["PTTL"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PTTL' command"
+      }
+    },
+    {
+      "name": "ttl_wrong_arity",
+      "now_ms": 40002,
+      "argv": ["TTL"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'TTL' command"
+      }
+    },
+    {
+      "name": "persist_wrong_arity",
+      "now_ms": 40003,
+      "argv": ["PERSIST"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PERSIST' command"
+      }
+    },
+    {
+      "name": "type_wrong_arity",
+      "now_ms": 40004,
+      "argv": ["TYPE"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'TYPE' command"
+      }
+    },
+    {
+      "name": "expire_nx_option_only_set_when_no_expiry",
+      "now_ms": 50000,
+      "argv": ["SET", "nxkey", "val"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "expire_nx_on_no_expiry_succeeds",
+      "now_ms": 50001,
+      "argv": ["EXPIRE", "nxkey", "10", "NX"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_nx_on_existing_expiry_fails",
+      "now_ms": 50002,
+      "argv": ["EXPIRE", "nxkey", "20", "NX"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_xx_on_existing_expiry_succeeds",
+      "now_ms": 50003,
+      "argv": ["EXPIRE", "nxkey", "30", "XX"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_gt_sets_longer_ttl",
+      "now_ms": 50004,
+      "argv": ["EXPIRE", "nxkey", "60", "GT"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_gt_rejects_shorter_ttl",
+      "now_ms": 50005,
+      "argv": ["EXPIRE", "nxkey", "5", "GT"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_lt_sets_shorter_ttl",
+      "now_ms": 50006,
+      "argv": ["EXPIRE", "nxkey", "10", "LT"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_lt_rejects_longer_ttl",
+      "now_ms": 50007,
+      "argv": ["EXPIRE", "nxkey", "100", "LT"],
+      "expect": { "kind": "integer", "value": 0 }
+    }
+  ]
+}

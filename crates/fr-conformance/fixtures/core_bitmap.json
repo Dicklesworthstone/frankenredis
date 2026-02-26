@@ -1,0 +1,248 @@
+{
+  "suite": "core_bitmap",
+  "cases": [
+    {
+      "name": "setbit_creates_key_returns_0",
+      "now_ms": 0,
+      "argv": ["SETBIT", "bm1", "7", "1"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "getbit_returns_set_bit",
+      "now_ms": 1,
+      "argv": ["GETBIT", "bm1", "7"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "getbit_returns_0_for_unset_bit",
+      "now_ms": 2,
+      "argv": ["GETBIT", "bm1", "0"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "setbit_returns_old_value",
+      "now_ms": 3,
+      "argv": ["SETBIT", "bm1", "7", "0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "getbit_after_clear_returns_0",
+      "now_ms": 4,
+      "argv": ["GETBIT", "bm1", "7"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "getbit_missing_key_returns_0",
+      "now_ms": 5,
+      "argv": ["GETBIT", "nosuchkey", "100"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "setbit_high_offset",
+      "now_ms": 6,
+      "argv": ["SETBIT", "bm2", "100", "1"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "getbit_high_offset",
+      "now_ms": 7,
+      "argv": ["GETBIT", "bm2", "100"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "setup_bitcount_key",
+      "now_ms": 10,
+      "argv": ["SET", "bckey", "foobar"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "bitcount_whole_string",
+      "now_ms": 11,
+      "argv": ["BITCOUNT", "bckey"],
+      "expect": { "kind": "integer", "value": 26 }
+    },
+    {
+      "name": "bitcount_byte_range_0_0",
+      "now_ms": 12,
+      "argv": ["BITCOUNT", "bckey", "0", "0"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "bitcount_byte_range_1_1",
+      "now_ms": 13,
+      "argv": ["BITCOUNT", "bckey", "1", "1"],
+      "expect": { "kind": "integer", "value": 6 }
+    },
+    {
+      "name": "bitcount_missing_key",
+      "now_ms": 14,
+      "argv": ["BITCOUNT", "nosuchkey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "bitcount_negative_range",
+      "now_ms": 15,
+      "argv": ["BITCOUNT", "bckey", "-2", "-1"],
+      "expect": { "kind": "integer", "value": 7 }
+    },
+    {
+      "name": "bitpos_find_first_set_bit",
+      "now_ms": 20,
+      "argv": ["BITPOS", "bckey", "1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "bitpos_find_first_clear_bit",
+      "now_ms": 21,
+      "argv": ["BITPOS", "bckey", "0"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "bitpos_missing_key_bit_0",
+      "now_ms": 22,
+      "argv": ["BITPOS", "nosuchkey", "0"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "bitpos_missing_key_bit_1",
+      "now_ms": 23,
+      "argv": ["BITPOS", "nosuchkey", "1"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "bitop_and_setup_key1",
+      "now_ms": 30,
+      "argv": ["SET", "bo1", "abc"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "bitop_and_setup_key2",
+      "now_ms": 31,
+      "argv": ["SET", "bo2", "abc"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "bitop_and_same_keys",
+      "now_ms": 32,
+      "argv": ["BITOP", "AND", "bo_dest", "bo1", "bo2"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "bitop_and_result_check",
+      "now_ms": 33,
+      "argv": ["GET", "bo_dest"],
+      "expect": { "kind": "bulk", "value": "abc" }
+    },
+    {
+      "name": "bitop_not",
+      "now_ms": 34,
+      "argv": ["BITOP", "NOT", "bo_not", "bo1"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "bitop_not_multiple_sources_error",
+      "now_ms": 35,
+      "argv": ["BITOP", "NOT", "bo_not2", "bo1", "bo2"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR BITOP NOT must be called with a single source key."
+      }
+    },
+    {
+      "name": "bitop_or",
+      "now_ms": 36,
+      "argv": ["BITOP", "OR", "bo_or", "bo1", "bo2"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "bitop_xor",
+      "now_ms": 37,
+      "argv": ["BITOP", "XOR", "bo_xor", "bo1", "bo2"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "bitop_xor_same_key_zeroes",
+      "now_ms": 38,
+      "argv": ["BITCOUNT", "bo_xor"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "setbit_wrong_arity_no_args",
+      "now_ms": 40,
+      "argv": ["SETBIT"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SETBIT' command"
+      }
+    },
+    {
+      "name": "getbit_wrong_arity",
+      "now_ms": 41,
+      "argv": ["GETBIT"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'GETBIT' command"
+      }
+    },
+    {
+      "name": "bitcount_wrong_arity_too_many",
+      "now_ms": 42,
+      "argv": ["BITCOUNT", "k", "0", "1", "BYTE", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'BITCOUNT' command"
+      }
+    },
+    {
+      "name": "bitop_wrong_arity",
+      "now_ms": 43,
+      "argv": ["BITOP"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'BITOP' command"
+      }
+    },
+    {
+      "name": "setbit_invalid_bit_value",
+      "now_ms": 44,
+      "argv": ["SETBIT", "bm_err", "0", "2"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "setbit_wrongtype_on_list",
+      "now_ms": 50,
+      "argv": ["LPUSH", "listkey2", "val"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "setbit_on_list_wrongtype",
+      "now_ms": 51,
+      "argv": ["SETBIT", "listkey2", "0", "1"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "getbit_on_list_wrongtype",
+      "now_ms": 52,
+      "argv": ["GETBIT", "listkey2", "0"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "bitcount_on_list_wrongtype",
+      "now_ms": 53,
+      "argv": ["BITCOUNT", "listkey2"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    }
+  ]
+}

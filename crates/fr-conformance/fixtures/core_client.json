@@ -1,0 +1,170 @@
+{
+  "suite": "core_client",
+  "cases": [
+    {
+      "name": "client_getname_initially_nil",
+      "now_ms": 1,
+      "argv": ["CLIENT", "GETNAME"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "client_setname_ok",
+      "now_ms": 2,
+      "argv": ["CLIENT", "SETNAME", "myconn"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_getname_after_setname",
+      "now_ms": 3,
+      "argv": ["CLIENT", "GETNAME"],
+      "expect": { "kind": "bulk", "value": "myconn" }
+    },
+    {
+      "name": "client_setname_overwrite",
+      "now_ms": 4,
+      "argv": ["CLIENT", "SETNAME", "newname"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_getname_after_overwrite",
+      "now_ms": 5,
+      "argv": ["CLIENT", "GETNAME"],
+      "expect": { "kind": "bulk", "value": "newname" }
+    },
+    {
+      "name": "client_setname_clear_with_empty",
+      "now_ms": 6,
+      "argv": ["CLIENT", "SETNAME", ""],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_getname_after_clear",
+      "now_ms": 7,
+      "argv": ["CLIENT", "GETNAME"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "client_setname_spaces_rejected",
+      "now_ms": 8,
+      "argv": ["CLIENT", "SETNAME", "my conn"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Client names cannot contain spaces, newlines or special characters."
+      }
+    },
+    {
+      "name": "client_setname_wrong_arity",
+      "now_ms": 9,
+      "argv": ["CLIENT", "SETNAME"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLIENT' command"
+      }
+    },
+    {
+      "name": "client_no_evict_on",
+      "now_ms": 10,
+      "argv": ["CLIENT", "NO-EVICT", "ON"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_no_evict_off",
+      "now_ms": 11,
+      "argv": ["CLIENT", "NO-EVICT", "OFF"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_no_evict_invalid_arg",
+      "now_ms": 12,
+      "argv": ["CLIENT", "NO-EVICT", "MAYBE"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR argument must be 'on' or 'off'"
+      }
+    },
+    {
+      "name": "client_no_touch_on",
+      "now_ms": 13,
+      "argv": ["CLIENT", "NO-TOUCH", "ON"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_no_touch_off",
+      "now_ms": 14,
+      "argv": ["CLIENT", "NO-TOUCH", "OFF"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_reply_on",
+      "now_ms": 15,
+      "argv": ["CLIENT", "REPLY", "ON"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_kill_returns_zero",
+      "now_ms": 16,
+      "argv": ["CLIENT", "KILL", "ID", "99999"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "client_pause_ok",
+      "now_ms": 17,
+      "argv": ["CLIENT", "PAUSE", "1000"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_unpause_ok",
+      "now_ms": 18,
+      "argv": ["CLIENT", "UNPAUSE"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_tracking_on",
+      "now_ms": 19,
+      "argv": ["CLIENT", "TRACKING", "ON"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_caching_yes",
+      "now_ms": 20,
+      "argv": ["CLIENT", "CACHING", "YES"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_unknown_subcommand",
+      "now_ms": 21,
+      "argv": ["CLIENT", "BOGUS"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for CLIENT BOGUS"
+      }
+    },
+    {
+      "name": "client_wrong_arity_no_args",
+      "now_ms": 22,
+      "argv": ["CLIENT"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLIENT' command"
+      }
+    },
+    {
+      "name": "client_pause_wrong_arity",
+      "now_ms": 23,
+      "argv": ["CLIENT", "PAUSE"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLIENT' command"
+      }
+    },
+    {
+      "name": "client_tracking_wrong_arity",
+      "now_ms": 24,
+      "argv": ["CLIENT", "TRACKING"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLIENT' command"
+      }
+    }
+  ]
+}

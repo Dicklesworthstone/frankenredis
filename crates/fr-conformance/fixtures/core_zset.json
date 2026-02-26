@@ -124,6 +124,181 @@
       "expect": { "kind": "integer", "value": 0 }
     },
     {
+      "name": "zadd_nx_new_member",
+      "now_ms": 0,
+      "argv": ["ZADD", "z1", "NX", "5.0", "d"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "zadd_nx_existing_member",
+      "now_ms": 0,
+      "argv": ["ZADD", "z1", "NX", "99.0", "b"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "zscore_b_unchanged_by_nx",
+      "now_ms": 0,
+      "argv": ["ZSCORE", "z1", "b"],
+      "expect": { "kind": "bulk", "value": "2" }
+    },
+    {
+      "name": "zadd_xx_existing_member",
+      "now_ms": 0,
+      "argv": ["ZADD", "z1", "XX", "7.0", "d"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "zscore_d_updated_by_xx",
+      "now_ms": 0,
+      "argv": ["ZSCORE", "z1", "d"],
+      "expect": { "kind": "bulk", "value": "7" }
+    },
+    {
+      "name": "zadd_xx_new_member_ignored",
+      "now_ms": 0,
+      "argv": ["ZADD", "z1", "XX", "1.0", "e"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "zscore_e_not_added_by_xx",
+      "now_ms": 0,
+      "argv": ["ZSCORE", "z1", "e"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "zadd_gt_higher_score",
+      "now_ms": 0,
+      "argv": ["ZADD", "z1", "GT", "10.0", "d"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "zscore_d_updated_by_gt",
+      "now_ms": 0,
+      "argv": ["ZSCORE", "z1", "d"],
+      "expect": { "kind": "bulk", "value": "10" }
+    },
+    {
+      "name": "zadd_gt_lower_score_rejected",
+      "now_ms": 0,
+      "argv": ["ZADD", "z1", "GT", "3.0", "d"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "zscore_d_unchanged_by_gt",
+      "now_ms": 0,
+      "argv": ["ZSCORE", "z1", "d"],
+      "expect": { "kind": "bulk", "value": "10" }
+    },
+    {
+      "name": "zadd_lt_lower_score",
+      "now_ms": 0,
+      "argv": ["ZADD", "z1", "LT", "1.0", "d"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "zscore_d_updated_by_lt",
+      "now_ms": 0,
+      "argv": ["ZSCORE", "z1", "d"],
+      "expect": { "kind": "bulk", "value": "1" }
+    },
+    {
+      "name": "zadd_lt_higher_score_rejected",
+      "now_ms": 0,
+      "argv": ["ZADD", "z1", "LT", "50.0", "d"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "zadd_ch_returns_changed_count",
+      "now_ms": 0,
+      "argv": ["ZADD", "z1", "CH", "99.0", "d", "1.0", "newmem"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "zpopmin_single",
+      "now_ms": 0,
+      "argv": ["ZADD", "zpop", "1", "a", "2", "b", "3", "c"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "zpopmin_result",
+      "now_ms": 0,
+      "argv": ["ZPOPMIN", "zpop"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "a" },
+          { "kind": "bulk", "value": "1" }
+        ]
+      }
+    },
+    {
+      "name": "zpopmax_result",
+      "now_ms": 0,
+      "argv": ["ZPOPMAX", "zpop"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "c" },
+          { "kind": "bulk", "value": "3" }
+        ]
+      }
+    },
+    {
+      "name": "zpopmin_empty",
+      "now_ms": 0,
+      "argv": ["ZPOPMIN", "nokey"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "zmscore_setup",
+      "now_ms": 0,
+      "argv": ["ZADD", "zms", "1", "a", "2", "b", "3", "c"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "zmscore_result",
+      "now_ms": 0,
+      "argv": ["ZMSCORE", "zms", "a", "z", "c"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "1" },
+          { "kind": "bulk", "value": null },
+          { "kind": "bulk", "value": "3" }
+        ]
+      }
+    },
+    {
+      "name": "zunionstore_setup1",
+      "now_ms": 0,
+      "argv": ["ZADD", "zu1", "1", "a", "2", "b"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "zunionstore_setup2",
+      "now_ms": 0,
+      "argv": ["ZADD", "zu2", "3", "b", "4", "c"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "zunionstore_result",
+      "now_ms": 0,
+      "argv": ["ZUNIONSTORE", "zudst", "2", "zu1", "zu2"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "zinterstore_result",
+      "now_ms": 0,
+      "argv": ["ZINTERSTORE", "zidst", "2", "zu1", "zu2"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "zinterstore_verify_score",
+      "now_ms": 0,
+      "argv": ["ZSCORE", "zidst", "b"],
+      "expect": { "kind": "bulk", "value": "5" }
+    },
+    {
       "name": "zadd_wrongtype_on_string",
       "now_ms": 0,
       "argv": ["SET", "strkey4", "v"],

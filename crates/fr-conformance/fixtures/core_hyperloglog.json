@@ -1,0 +1,173 @@
+{
+  "suite": "core_hyperloglog",
+  "cases": [
+    {
+      "name": "pfadd_creates_key_returns_1",
+      "now_ms": 0,
+      "argv": ["PFADD", "hll1", "a", "b", "c"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfadd_duplicate_elements_returns_0",
+      "now_ms": 1,
+      "argv": ["PFADD", "hll1", "a", "b"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pfadd_new_element_returns_1",
+      "now_ms": 2,
+      "argv": ["PFADD", "hll1", "d"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfadd_no_elements_creates_key",
+      "now_ms": 3,
+      "argv": ["PFADD", "hll_empty"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfadd_no_elements_existing_returns_0",
+      "now_ms": 4,
+      "argv": ["PFADD", "hll_empty"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pfcount_missing_key_returns_0",
+      "now_ms": 10,
+      "argv": ["PFCOUNT", "nonexistent"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pfcount_empty_hll_returns_0",
+      "now_ms": 11,
+      "argv": ["PFCOUNT", "hll_empty"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pfadd_second_set",
+      "now_ms": 20,
+      "argv": ["PFADD", "hll2", "x", "y", "z"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfcount_multiple_keys_union",
+      "now_ms": 21,
+      "argv": ["PFCOUNT", "hll_empty", "nonexistent"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pfmerge_basic",
+      "now_ms": 30,
+      "argv": ["PFMERGE", "merged", "hll1", "hll2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pfmerge_dest_only",
+      "now_ms": 31,
+      "argv": ["PFMERGE", "dest_only"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pfcount_dest_only_returns_0",
+      "now_ms": 32,
+      "argv": ["PFCOUNT", "dest_only"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pfmerge_nonexistent_sources",
+      "now_ms": 33,
+      "argv": ["PFMERGE", "merged_none", "nosuch1", "nosuch2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pfcount_merged_none_returns_0",
+      "now_ms": 34,
+      "argv": ["PFCOUNT", "merged_none"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pfadd_wrong_type_error",
+      "now_ms": 40,
+      "argv": ["SET", "strkey", "value"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pfadd_on_string_key_invalid_hll",
+      "now_ms": 41,
+      "argv": ["PFADD", "strkey", "elem"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Key is not a valid HyperLogLog string value."
+      }
+    },
+    {
+      "name": "pfcount_on_string_key_invalid_hll",
+      "now_ms": 42,
+      "argv": ["PFCOUNT", "strkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Key is not a valid HyperLogLog string value."
+      }
+    },
+    {
+      "name": "pfmerge_src_invalid_hll",
+      "now_ms": 43,
+      "argv": ["PFMERGE", "dest_wt", "strkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Key is not a valid HyperLogLog string value."
+      }
+    },
+    {
+      "name": "setup_list_key_for_wrongtype",
+      "now_ms": 44,
+      "argv": ["LPUSH", "listkey", "val"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfadd_on_list_key_wrongtype",
+      "now_ms": 45,
+      "argv": ["PFADD", "listkey", "elem"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfcount_on_list_key_wrongtype",
+      "now_ms": 46,
+      "argv": ["PFCOUNT", "listkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfadd_wrong_arity_no_key",
+      "now_ms": 50,
+      "argv": ["PFADD"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PFADD' command"
+      }
+    },
+    {
+      "name": "pfcount_wrong_arity",
+      "now_ms": 51,
+      "argv": ["PFCOUNT"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PFCOUNT' command"
+      }
+    },
+    {
+      "name": "pfmerge_wrong_arity",
+      "now_ms": 52,
+      "argv": ["PFMERGE"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PFMERGE' command"
+      }
+    }
+  ]
+}

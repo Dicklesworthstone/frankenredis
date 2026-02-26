@@ -28,6 +28,7 @@ use fr_store::{
 };
 
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
+static CLIENT_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_AUTH_USER: &[u8] = b"default";
 const NOAUTH_ERROR: &str = "NOAUTH Authentication required.";
 const WRONGPASS_ERROR: &str = "WRONGPASS invalid username-password pair or user is disabled.";
@@ -292,6 +293,7 @@ enum ClusterClientMode {
 enum RuntimeSpecialCommand {
     Acl,
     Config,
+    Client,
     Auth,
     Hello,
     Asking,
@@ -306,6 +308,13 @@ enum RuntimeSpecialCommand {
     Watch,
     Unwatch,
     Quit,
+    Reset,
+    Slowlog,
+    Save,
+    Bgsave,
+    Lastsave,
+    Bgrewriteaof,
+    Shutdown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,6 +342,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
                 Some(RuntimeSpecialCommand::Exec)
             } else if eq_ascii_token(cmd, b"QUIT") {
                 Some(RuntimeSpecialCommand::Quit)
+            } else if eq_ascii_token(cmd, b"SAVE") {
+                Some(RuntimeSpecialCommand::Save)
             } else {
                 None
             }
@@ -344,6 +355,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
                 Some(RuntimeSpecialCommand::Multi)
             } else if eq_ascii_token(cmd, b"WATCH") {
                 Some(RuntimeSpecialCommand::Watch)
+            } else if eq_ascii_token(cmd, b"RESET") {
+                Some(RuntimeSpecialCommand::Reset)
             } else {
                 None
             }
@@ -353,6 +366,10 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
                 Some(RuntimeSpecialCommand::Asking)
             } else if eq_ascii_token(cmd, b"CONFIG") {
                 Some(RuntimeSpecialCommand::Config)
+            } else if eq_ascii_token(cmd, b"CLIENT") {
+                Some(RuntimeSpecialCommand::Client)
+            } else if eq_ascii_token(cmd, b"BGSAVE") {
+                Some(RuntimeSpecialCommand::Bgsave)
             } else {
                 None
             }
@@ -366,6 +383,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
                 Some(RuntimeSpecialCommand::Discard)
             } else if eq_ascii_token(cmd, b"UNWATCH") {
                 Some(RuntimeSpecialCommand::Unwatch)
+            } else if eq_ascii_token(cmd, b"SLOWLOG") {
+                Some(RuntimeSpecialCommand::Slowlog)
             } else {
                 None
             }
@@ -373,6 +392,10 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
         8 => {
             if eq_ascii_token(cmd, b"READONLY") {
                 Some(RuntimeSpecialCommand::Readonly)
+            } else if eq_ascii_token(cmd, b"LASTSAVE") {
+                Some(RuntimeSpecialCommand::Lastsave)
+            } else if eq_ascii_token(cmd, b"SHUTDOWN") {
+                Some(RuntimeSpecialCommand::Shutdown)
             } else {
                 None
             }
@@ -380,6 +403,13 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
         9 => {
             if eq_ascii_token(cmd, b"READWRITE") {
                 Some(RuntimeSpecialCommand::Readwrite)
+            } else {
+                None
+            }
+        }
+        12 => {
+            if eq_ascii_token(cmd, b"BGREWRITEAOF") {
+                Some(RuntimeSpecialCommand::Bgrewriteaof)
             } else {
                 None
             }
@@ -423,6 +453,22 @@ fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialC
         Some(RuntimeSpecialCommand::Unwatch)
     } else if command.eq_ignore_ascii_case("QUIT") {
         Some(RuntimeSpecialCommand::Quit)
+    } else if command.eq_ignore_ascii_case("CLIENT") {
+        Some(RuntimeSpecialCommand::Client)
+    } else if command.eq_ignore_ascii_case("RESET") {
+        Some(RuntimeSpecialCommand::Reset)
+    } else if command.eq_ignore_ascii_case("SLOWLOG") {
+        Some(RuntimeSpecialCommand::Slowlog)
+    } else if command.eq_ignore_ascii_case("SAVE") {
+        Some(RuntimeSpecialCommand::Save)
+    } else if command.eq_ignore_ascii_case("BGSAVE") {
+        Some(RuntimeSpecialCommand::Bgsave)
+    } else if command.eq_ignore_ascii_case("LASTSAVE") {
+        Some(RuntimeSpecialCommand::Lastsave)
+    } else if command.eq_ignore_ascii_case("BGREWRITEAOF") {
+        Some(RuntimeSpecialCommand::Bgrewriteaof)
+    } else if command.eq_ignore_ascii_case("SHUTDOWN") {
+        Some(RuntimeSpecialCommand::Shutdown)
     } else {
         None
     }
@@ -485,6 +531,15 @@ struct TransactionState {
     watch_dirty: bool,
 }
 
+/// A single slow log entry recording a command that exceeded the threshold.
+#[derive(Debug, Clone)]
+struct SlowlogEntry {
+    id: u64,
+    timestamp_sec: u64,
+    duration_us: u64,
+    argv: Vec<Vec<u8>>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvidenceEvent {
     pub ts_utc: String,
@@ -545,6 +600,24 @@ pub struct Runtime {
     active_expire_key_cursor: usize,
     active_expire_budget: ActiveExpireCycleBudget,
     last_active_expire_cycle: Option<ActiveExpireCycleStats>,
+    /// Per-client connection ID (monotonically increasing).
+    client_id: u64,
+    /// Per-client name set via CLIENT SETNAME.
+    client_name: Option<Vec<u8>>,
+    /// Flags: client no-evict mode.
+    client_no_evict: bool,
+    /// Flags: client no-touch mode.
+    client_no_touch: bool,
+    /// Slow log: ring buffer of slow queries.
+    slowlog: Vec<SlowlogEntry>,
+    /// Slow log entry ID counter.
+    slowlog_next_id: u64,
+    /// Slow log threshold in microseconds (slowlog-log-slower-than config).
+    slowlog_log_slower_than_us: i64,
+    /// Slow log maximum length.
+    slowlog_max_len: usize,
+    /// Last successful save timestamp (seconds since epoch).
+    last_save_time_sec: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -592,6 +665,15 @@ impl Runtime {
             active_expire_key_cursor: 0,
             active_expire_budget: ActiveExpireCycleBudget::default(),
             last_active_expire_cycle: None,
+            client_id: CLIENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
+            client_name: None,
+            client_no_evict: false,
+            client_no_touch: false,
+            slowlog: Vec::new(),
+            slowlog_next_id: 0,
+            slowlog_log_slower_than_us: 10_000, // default: 10ms
+            slowlog_max_len: 128,
+            last_save_time_sec: 0,
         }
     }
 
@@ -978,6 +1060,7 @@ impl Runtime {
         match special_command {
             Some(RuntimeSpecialCommand::Acl) => return self.handle_acl_command(&argv),
             Some(RuntimeSpecialCommand::Config) => return self.handle_config_command(&argv),
+            Some(RuntimeSpecialCommand::Client) => return self.handle_client_command(&argv),
             Some(RuntimeSpecialCommand::Asking) => return self.handle_asking_command(&argv),
             Some(RuntimeSpecialCommand::Readonly) => return self.handle_readonly_command(&argv),
             Some(RuntimeSpecialCommand::Readwrite) => return self.handle_readwrite_command(&argv),
@@ -992,6 +1075,25 @@ impl Runtime {
             Some(RuntimeSpecialCommand::Watch) => return self.handle_watch_command(&argv, now_ms),
             Some(RuntimeSpecialCommand::Unwatch) => return self.handle_unwatch_command(&argv),
             Some(RuntimeSpecialCommand::Quit) => return RespFrame::SimpleString("OK".to_string()),
+            Some(RuntimeSpecialCommand::Reset) => return self.handle_reset_command(&argv),
+            Some(RuntimeSpecialCommand::Slowlog) => {
+                return self.handle_slowlog_command(&argv);
+            }
+            Some(RuntimeSpecialCommand::Save) => {
+                return self.handle_save_command(&argv, now_ms);
+            }
+            Some(RuntimeSpecialCommand::Bgsave) => {
+                return self.handle_bgsave_command(&argv, now_ms);
+            }
+            Some(RuntimeSpecialCommand::Lastsave) => {
+                return self.handle_lastsave_command(&argv);
+            }
+            Some(RuntimeSpecialCommand::Bgrewriteaof) => {
+                return self.handle_bgrewriteaof_command(&argv);
+            }
+            Some(RuntimeSpecialCommand::Shutdown) => {
+                return self.handle_shutdown_command(&argv);
+            }
             _ => {}
         }
 
@@ -1705,6 +1807,288 @@ impl Runtime {
         }
         self.cluster_state.mode = ClusterClientMode::ReadWrite;
         self.cluster_state.asking = false;
+        RespFrame::SimpleString("OK".to_string())
+    }
+
+    fn handle_client_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+        }
+        let sub = match std::str::from_utf8(&argv[1]) {
+            Ok(s) => s,
+            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+        };
+        if sub.eq_ignore_ascii_case("SETNAME") {
+            if argv.len() != 3 {
+                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+            }
+            // Redis validates: name must not contain spaces
+            if argv[2].contains(&b' ') {
+                return RespFrame::Error(
+                    "ERR Client names cannot contain spaces, newlines or special characters."
+                        .to_string(),
+                );
+            }
+            if argv[2].is_empty() {
+                self.client_name = None;
+            } else {
+                self.client_name = Some(argv[2].clone());
+            }
+            RespFrame::SimpleString("OK".to_string())
+        } else if sub.eq_ignore_ascii_case("GETNAME") {
+            if argv.len() != 2 {
+                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+            }
+            match &self.client_name {
+                Some(name) => RespFrame::BulkString(Some(name.clone())),
+                None => RespFrame::BulkString(None),
+            }
+        } else if sub.eq_ignore_ascii_case("ID") {
+            if argv.len() != 2 {
+                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+            }
+            RespFrame::Integer(self.client_id as i64)
+        } else if sub.eq_ignore_ascii_case("LIST") || sub.eq_ignore_ascii_case("INFO") {
+            // Build real client info line from tracked state
+            let name_str = self
+                .client_name
+                .as_ref()
+                .map(|n| String::from_utf8_lossy(n).to_string())
+                .unwrap_or_default();
+            let flags = if self.transaction_state.in_transaction {
+                "x"
+            } else {
+                "N"
+            };
+            let multi_count = if self.transaction_state.in_transaction {
+                self.transaction_state.command_queue.len() as i64
+            } else {
+                -1
+            };
+            let info_line = format!(
+                "id={} addr=127.0.0.1:0 laddr=127.0.0.1:6379 fd=0 name={} db=0 sub=0 psub=0 ssub=0 multi={} watch={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user=default lib-name= lib-ver= resp=2 flags={}\r\n",
+                self.client_id,
+                name_str,
+                multi_count,
+                self.transaction_state.watched_keys.len(),
+                sub.to_ascii_lowercase(),
+                flags,
+            );
+            RespFrame::BulkString(Some(info_line.into_bytes()))
+        } else if sub.eq_ignore_ascii_case("NO-EVICT") {
+            if argv.len() != 3 {
+                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+            }
+            let mode = match std::str::from_utf8(&argv[2]) {
+                Ok(m) => m,
+                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+            };
+            if mode.eq_ignore_ascii_case("ON") {
+                self.client_no_evict = true;
+            } else if mode.eq_ignore_ascii_case("OFF") {
+                self.client_no_evict = false;
+            } else {
+                return RespFrame::Error(
+                    "ERR argument must be 'on' or 'off'".to_string(),
+                );
+            }
+            RespFrame::SimpleString("OK".to_string())
+        } else if sub.eq_ignore_ascii_case("NO-TOUCH") {
+            if argv.len() != 3 {
+                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+            }
+            let mode = match std::str::from_utf8(&argv[2]) {
+                Ok(m) => m,
+                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+            };
+            if mode.eq_ignore_ascii_case("ON") {
+                self.client_no_touch = true;
+            } else if mode.eq_ignore_ascii_case("OFF") {
+                self.client_no_touch = false;
+            } else {
+                return RespFrame::Error(
+                    "ERR argument must be 'on' or 'off'".to_string(),
+                );
+            }
+            RespFrame::SimpleString("OK".to_string())
+        } else if sub.eq_ignore_ascii_case("REPLY") {
+            // CLIENT REPLY ON|OFF|SKIP
+            if argv.len() != 3 {
+                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+            }
+            RespFrame::SimpleString("OK".to_string())
+        } else if sub.eq_ignore_ascii_case("KILL") {
+            // CLIENT KILL [ip:port | ID client-id | ...]
+            // Single-connection runtime: always return 0 (no other clients to kill)
+            Ok::<i64, ()>(0).ok();
+            RespFrame::Integer(0)
+        } else if sub.eq_ignore_ascii_case("PAUSE") {
+            // CLIENT PAUSE timeout [WRITE|ALL]
+            if argv.len() < 3 {
+                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+            }
+            if parse_i64_arg(&argv[2]).is_err() {
+                return command_error_to_resp(CommandError::InvalidInteger);
+            }
+            RespFrame::SimpleString("OK".to_string())
+        } else if sub.eq_ignore_ascii_case("UNPAUSE") {
+            if argv.len() != 2 {
+                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+            }
+            RespFrame::SimpleString("OK".to_string())
+        } else if sub.eq_ignore_ascii_case("TRACKING") {
+            // CLIENT TRACKING ON|OFF [REDIRECT id] [PREFIX prefix ...] [BCAST] [OPTIN] [OPTOUT] [NOLOOP]
+            if argv.len() < 3 {
+                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+            }
+            RespFrame::SimpleString("OK".to_string())
+        } else if sub.eq_ignore_ascii_case("CACHING") {
+            // CLIENT CACHING YES|NO
+            if argv.len() < 3 {
+                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+            }
+            RespFrame::SimpleString("OK".to_string())
+        } else {
+            RespFrame::Error(format!(
+                "ERR Unknown subcommand or wrong number of arguments for CLIENT {sub}",
+            ))
+        }
+    }
+
+    fn handle_reset_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            return command_error_to_resp(CommandError::WrongArity("RESET"));
+        }
+        // Reset all per-client state to initial values
+        self.client_name = None;
+        self.client_no_evict = false;
+        self.client_no_touch = false;
+        self.transaction_state = TransactionState::default();
+        // Re-authenticate as default user (deauth + implicit re-auth for no-password default)
+        self.auth_state.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
+        // Redis returns +RESET\r\n (a simple string "RESET")
+        RespFrame::SimpleString("RESET".to_string())
+    }
+
+    fn handle_slowlog_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() < 2 {
+            return command_error_to_resp(CommandError::WrongArity("SLOWLOG"));
+        }
+        let sub = match std::str::from_utf8(&argv[1]) {
+            Ok(s) => s,
+            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+        };
+        if sub.eq_ignore_ascii_case("GET") {
+            let count = if argv.len() >= 3 {
+                match parse_i64_arg(&argv[2]) {
+                    Ok(c) if c >= 0 => c as usize,
+                    _ => return command_error_to_resp(CommandError::InvalidInteger),
+                }
+            } else {
+                self.slowlog_max_len
+            };
+            let entries: Vec<RespFrame> = self
+                .slowlog
+                .iter()
+                .rev()
+                .take(count)
+                .map(|entry| {
+                    let argv_frames: Vec<RespFrame> = entry
+                        .argv
+                        .iter()
+                        .map(|a| RespFrame::BulkString(Some(a.clone())))
+                        .collect();
+                    RespFrame::Array(Some(vec![
+                        RespFrame::Integer(entry.id as i64),
+                        RespFrame::Integer(entry.timestamp_sec as i64),
+                        RespFrame::Integer(entry.duration_us as i64),
+                        RespFrame::Array(Some(argv_frames)),
+                        RespFrame::BulkString(Some(b"".to_vec())), // client addr
+                        RespFrame::BulkString(Some(b"".to_vec())), // client name
+                    ]))
+                })
+                .collect();
+            RespFrame::Array(Some(entries))
+        } else if sub.eq_ignore_ascii_case("LEN") {
+            RespFrame::Integer(self.slowlog.len() as i64)
+        } else if sub.eq_ignore_ascii_case("RESET") {
+            self.slowlog.clear();
+            self.slowlog_next_id = 0;
+            RespFrame::SimpleString("OK".to_string())
+        } else if sub.eq_ignore_ascii_case("HELP") {
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(
+                    b"SLOWLOG <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec(),
+                )),
+                RespFrame::BulkString(Some(
+                    b"GET [<count>] - Return the slow log entries.".to_vec(),
+                )),
+                RespFrame::BulkString(Some(
+                    b"LEN - Return the number of entries in the slow log.".to_vec(),
+                )),
+                RespFrame::BulkString(Some(b"RESET - Reset the slow log.".to_vec())),
+                RespFrame::BulkString(Some(b"HELP - Return subcommand help summary.".to_vec())),
+            ]))
+        } else {
+            RespFrame::Error(format!(
+                "ERR unknown subcommand or wrong number of arguments for 'slowlog|{sub}'"
+            ))
+        }
+    }
+
+    fn handle_save_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
+        if argv.len() != 1 {
+            return command_error_to_resp(CommandError::WrongArity("SAVE"));
+        }
+        // Record save time — in a full implementation this would persist data to disk
+        self.last_save_time_sec = now_ms / 1000;
+        RespFrame::SimpleString("OK".to_string())
+    }
+
+    fn handle_bgsave_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
+        if argv.len() > 2 {
+            return command_error_to_resp(CommandError::WrongArity("BGSAVE"));
+        }
+        // BGSAVE [SCHEDULE] — record save time
+        self.last_save_time_sec = now_ms / 1000;
+        RespFrame::SimpleString("Background saving started".to_string())
+    }
+
+    fn handle_lastsave_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            return command_error_to_resp(CommandError::WrongArity("LASTSAVE"));
+        }
+        RespFrame::Integer(self.last_save_time_sec as i64)
+    }
+
+    fn handle_bgrewriteaof_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            return command_error_to_resp(CommandError::WrongArity("BGREWRITEAOF"));
+        }
+        RespFrame::SimpleString("Background append only file rewriting started".to_string())
+    }
+
+    fn handle_shutdown_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() > 3 {
+            return command_error_to_resp(CommandError::WrongArity("SHUTDOWN"));
+        }
+        // Validate flags: NOSAVE, SAVE, NOW, FORCE
+        for arg in &argv[1..] {
+            let s = match std::str::from_utf8(arg) {
+                Ok(s) => s,
+                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+            };
+            if !s.eq_ignore_ascii_case("NOSAVE")
+                && !s.eq_ignore_ascii_case("SAVE")
+                && !s.eq_ignore_ascii_case("NOW")
+                && !s.eq_ignore_ascii_case("FORCE")
+            {
+                return RespFrame::Error(format!(
+                    "ERR unrecognized option or bad number of args for SHUTDOWN: '{s}'"
+                ));
+            }
+        }
+        // In standalone mode, acknowledge but don't actually shut down
         RespFrame::SimpleString("OK".to_string())
     }
 

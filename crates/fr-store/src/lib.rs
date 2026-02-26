@@ -120,6 +120,15 @@ pub struct StreamGroup {
 pub type StreamGroupState = BTreeMap<Vec<u8>, StreamGroup>;
 pub type StreamGroupInfo = (Vec<u8>, usize, usize, StreamId);
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ZaddOptions {
+    pub nx: bool,
+    pub xx: bool,
+    pub gt: bool,
+    pub lt: bool,
+    pub ch: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
     ValueNotInteger,
@@ -149,6 +158,22 @@ pub enum Value {
 struct Entry {
     value: Value,
     expires_at_ms: Option<u64>,
+    /// Last access timestamp in milliseconds (for OBJECT IDLETIME / LRU).
+    last_access_ms: u64,
+}
+
+impl Entry {
+    fn new(value: Value, expires_at_ms: Option<u64>, now_ms: u64) -> Self {
+        Self {
+            value,
+            expires_at_ms,
+            last_access_ms: now_ms,
+        }
+    }
+
+    fn touch(&mut self, now_ms: u64) {
+        self.last_access_ms = now_ms;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -253,6 +278,14 @@ impl ValueType {
 pub struct Store {
     entries: HashMap<Vec<u8>, Entry>,
     stream_groups: HashMap<Vec<u8>, StreamGroupState>,
+    /// Script cache: SHA1 hex string → script body.
+    script_cache: HashMap<String, Vec<u8>>,
+    /// Pub/Sub: channels this client is subscribed to.
+    pub subscribed_channels: HashSet<Vec<u8>>,
+    /// Pub/Sub: patterns this client is subscribed to.
+    pub subscribed_patterns: HashSet<Vec<u8>>,
+    /// Pub/Sub: pending messages for delivery (channel, message).
+    pub pubsub_pending: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Store {
@@ -289,10 +322,7 @@ impl Store {
         self.stream_groups.remove(key.as_slice());
         self.entries.insert(
             key,
-            Entry {
-                value: Value::String(value),
-                expires_at_ms,
-            },
+            Entry::new(Value::String(value), expires_at_ms, now_ms),
         );
     }
 
@@ -306,10 +336,7 @@ impl Store {
         self.stream_groups.remove(key.as_slice());
         self.entries.insert(
             key,
-            Entry {
-                value: Value::String(value),
-                expires_at_ms,
-            },
+            Entry::new(Value::String(value), expires_at_ms, 0),
         );
     }
 
@@ -348,10 +375,7 @@ impl Store {
         let next = current.checked_add(1).ok_or(StoreError::IntegerOverflow)?;
         self.entries.insert(
             key.to_vec(),
-            Entry {
-                value: Value::String(next.to_string().into_bytes()),
-                expires_at_ms,
-            },
+            Entry::new(Value::String(next.to_string().into_bytes()), expires_at_ms, now_ms),
         );
         Ok(next)
     }
@@ -438,10 +462,7 @@ impl Store {
             let len = value.len();
             self.entries.insert(
                 key.to_vec(),
-                Entry {
-                    value: Value::String(value.to_vec()),
-                    expires_at_ms: None,
-                },
+                Entry::new(Value::String(value.to_vec()), None, now_ms),
             );
             Ok(len)
         }
@@ -479,10 +500,7 @@ impl Store {
         }
         self.entries.insert(
             key,
-            Entry {
-                value: Value::String(value),
-                expires_at_ms: None,
-            },
+            Entry::new(Value::String(value), None, now_ms),
         );
         true
     }
@@ -503,10 +521,7 @@ impl Store {
         };
         self.entries.insert(
             key,
-            Entry {
-                value: Value::String(value),
-                expires_at_ms,
-            },
+            Entry::new(Value::String(value), expires_at_ms, now_ms),
         );
         Ok(old)
     }
@@ -525,10 +540,7 @@ impl Store {
             .ok_or(StoreError::IntegerOverflow)?;
         self.entries.insert(
             key.to_vec(),
-            Entry {
-                value: Value::String(next.to_string().into_bytes()),
-                expires_at_ms,
-            },
+            Entry::new(Value::String(next.to_string().into_bytes()), expires_at_ms, now_ms),
         );
         Ok(next)
     }
@@ -548,10 +560,7 @@ impl Store {
         }
         self.entries.insert(
             key.to_vec(),
-            Entry {
-                value: Value::String(next.to_string().into_bytes()),
-                expires_at_ms,
-            },
+            Entry::new(Value::String(next.to_string().into_bytes()), expires_at_ms, now_ms),
         );
         Ok(next)
     }
@@ -633,10 +642,7 @@ impl Store {
         let new_len = current.len();
         self.entries.insert(
             key.to_vec(),
-            Entry {
-                value: Value::String(current),
-                expires_at_ms,
-            },
+            Entry::new(Value::String(current), expires_at_ms, now_ms),
         );
         Ok(new_len)
     }
@@ -671,10 +677,7 @@ impl Store {
         }
         self.entries.insert(
             key.to_vec(),
-            Entry {
-                value: Value::String(bytes),
-                expires_at_ms,
-            },
+            Entry::new(Value::String(bytes), expires_at_ms, now_ms),
         );
         Ok(old_bit)
     }
@@ -758,10 +761,7 @@ impl Store {
 
         self.entries.insert(
             key.to_vec(),
-            Entry {
-                value: Value::String(bytes),
-                expires_at_ms,
-            },
+            Entry::new(Value::String(bytes), expires_at_ms, now_ms),
         );
         Ok(old_value)
     }
@@ -920,7 +920,7 @@ impl Store {
                 }
             }
             Value::Set(s) => {
-                if s.len() <= 128 {
+                if s.len() <= 128 && s.iter().all(|m| m.len() <= 64) {
                     "listpack"
                 } else {
                     "hashtable"
@@ -935,6 +935,26 @@ impl Store {
             }
             Value::Stream(_) => "stream",
         })
+    }
+
+    /// Return idle time in seconds for a key (time since last access).
+    pub fn object_idletime(&mut self, key: &[u8], now_ms: u64) -> Option<u64> {
+        self.drop_if_expired(key, now_ms);
+        self.entries.get(key).map(|entry| {
+            let idle_ms = now_ms.saturating_sub(entry.last_access_ms);
+            idle_ms / 1000
+        })
+    }
+
+    /// Touch a key (update its last access time) without modifying the value.
+    pub fn touch_key(&mut self, key: &[u8], now_ms: u64) -> bool {
+        self.drop_if_expired(key, now_ms);
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.touch(now_ms);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn rename(&mut self, key: &[u8], newkey: &[u8], now_ms: u64) -> Result<(), StoreError> {
@@ -1230,10 +1250,7 @@ impl Store {
                 m.insert(field, value);
                 self.entries.insert(
                     key.to_vec(),
-                    Entry {
-                        value: Value::Hash(m),
-                        expires_at_ms: None,
-                    },
+                    Entry::new(Value::Hash(m), None, now_ms),
                 );
                 Ok(true)
             }
@@ -1397,10 +1414,7 @@ impl Store {
                 m.insert(field.to_vec(), delta.to_string().into_bytes());
                 self.entries.insert(
                     key.to_vec(),
-                    Entry {
-                        value: Value::Hash(m),
-                        expires_at_ms: None,
-                    },
+                    Entry::new(Value::Hash(m), None, now_ms),
                 );
                 Ok(delta)
             }
@@ -1433,10 +1447,7 @@ impl Store {
                 m.insert(field, value);
                 self.entries.insert(
                     key.to_vec(),
-                    Entry {
-                        value: Value::Hash(m),
-                        expires_at_ms: None,
-                    },
+                    Entry::new(Value::Hash(m), None, now_ms),
                 );
                 Ok(true)
             }
@@ -1486,10 +1497,7 @@ impl Store {
                 m.insert(field.to_vec(), delta.to_string().into_bytes());
                 self.entries.insert(
                     key.to_vec(),
-                    Entry {
-                        value: Value::Hash(m),
-                        expires_at_ms: None,
-                    },
+                    Entry::new(Value::Hash(m), None, now_ms),
                 );
                 Ok(delta)
             }
@@ -1574,10 +1582,7 @@ impl Store {
                 let len = l.len();
                 self.entries.insert(
                     key.to_vec(),
-                    Entry {
-                        value: Value::List(l),
-                        expires_at_ms: None,
-                    },
+                    Entry::new(Value::List(l), None, now_ms),
                 );
                 Ok(len)
             }
@@ -1609,10 +1614,7 @@ impl Store {
                 let len = l.len();
                 self.entries.insert(
                     key.to_vec(),
-                    Entry {
-                        value: Value::List(l),
-                        expires_at_ms: None,
-                    },
+                    Entry::new(Value::List(l), None, now_ms),
                 );
                 Ok(len)
             }
@@ -1753,6 +1755,70 @@ impl Store {
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(None),
+        }
+    }
+
+    /// LPOS with RANK, COUNT, and MAXLEN support.
+    /// rank: 1-based rank of match (positive=head-to-tail, negative=tail-to-head). 0 is invalid.
+    /// count: if Some(0) return all matches; if Some(n) return up to n; if None return first match only.
+    /// maxlen: limit scan to first/last maxlen entries.
+    pub fn lpos_full(
+        &mut self,
+        key: &[u8],
+        element: &[u8],
+        rank: i64,
+        count: Option<u64>,
+        maxlen: usize,
+        now_ms: u64,
+    ) -> Result<Vec<usize>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get(key) {
+            Some(entry) => match &entry.value {
+                Value::List(l) => {
+                    let len = l.len();
+                    let limit = if maxlen == 0 { len } else { maxlen.min(len) };
+                    let max_results = match count {
+                        Some(0) => usize::MAX,
+                        Some(n) => n as usize,
+                        None => 1,
+                    };
+                    let mut results = Vec::new();
+                    let abs_rank = rank.unsigned_abs() as usize;
+                    let skip = if abs_rank > 0 { abs_rank - 1 } else { 0 };
+                    let mut matched = 0_usize;
+
+                    if rank >= 0 {
+                        // Forward scan
+                        for (i, item) in l.iter().enumerate().take(limit) {
+                            if item.as_slice() == element {
+                                matched += 1;
+                                if matched > skip {
+                                    results.push(i);
+                                    if results.len() >= max_results {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Reverse scan
+                        for (i, item) in l.iter().enumerate().take(len).skip(len.saturating_sub(limit)).rev() {
+                            if item.as_slice() == element {
+                                matched += 1;
+                                if matched > skip {
+                                    results.push(i);
+                                    if results.len() >= max_results {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(results)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(Vec::new()),
         }
     }
 
@@ -1917,10 +1983,7 @@ impl Store {
                 l.push_front(val.clone());
                 self.entries.insert(
                     destination.to_vec(),
-                    Entry {
-                        value: Value::List(l),
-                        expires_at_ms: source_ttl,
-                    },
+                    Entry::new(Value::List(l), source_ttl, now_ms),
                 );
             }
         }
@@ -2083,10 +2146,7 @@ impl Store {
                 }
                 self.entries.insert(
                     destination.to_vec(),
-                    Entry {
-                        value: Value::List(l),
-                        expires_at_ms: source_ttl,
-                    },
+                    Entry::new(Value::List(l), source_ttl, now_ms),
                 );
             }
         }
@@ -2125,10 +2185,7 @@ impl Store {
                 }
                 self.entries.insert(
                     key.to_vec(),
-                    Entry {
-                        value: Value::Set(s),
-                        expires_at_ms: None,
-                    },
+                    Entry::new(Value::Set(s), None, now_ms),
                 );
                 Ok(added)
             }
@@ -2497,10 +2554,7 @@ impl Store {
             let set: HashSet<Vec<u8>> = result.into_iter().collect();
             self.entries.insert(
                 destination.to_vec(),
-                Entry {
-                    value: Value::Set(set),
-                    expires_at_ms: None,
-                },
+                Entry::new(Value::Set(set), None, now_ms),
             );
         }
         Ok(count)
@@ -2520,10 +2574,7 @@ impl Store {
             let set: HashSet<Vec<u8>> = result.into_iter().collect();
             self.entries.insert(
                 destination.to_vec(),
-                Entry {
-                    value: Value::Set(set),
-                    expires_at_ms: None,
-                },
+                Entry::new(Value::Set(set), None, now_ms),
             );
         }
         Ok(count)
@@ -2543,10 +2594,7 @@ impl Store {
             let set: HashSet<Vec<u8>> = result.into_iter().collect();
             self.entries.insert(
                 destination.to_vec(),
-                Entry {
-                    value: Value::Set(set),
-                    expires_at_ms: None,
-                },
+                Entry::new(Value::Set(set), None, now_ms),
             );
         }
         Ok(count)
@@ -2561,21 +2609,67 @@ impl Store {
         members: &[(f64, Vec<u8>)],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
+        self.zadd_with_options(key, members, ZaddOptions::default(), now_ms)
+            .map(|(added, _changed)| added)
+    }
+
+    /// ZADD with NX/XX/GT/LT/CH options.
+    /// Returns (count, changed) where:
+    /// - Without CH: count = number of new elements added
+    /// - With CH: count = number of new elements added + updated elements
+    /// - changed = number of existing elements whose score was updated
+    pub fn zadd_with_options(
+        &mut self,
+        key: &[u8],
+        members: &[(f64, Vec<u8>)],
+        opts: ZaddOptions,
+        now_ms: u64,
+    ) -> Result<(usize, usize), StoreError> {
         self.drop_if_expired(key, now_ms);
-        let entry = self.entries.entry(key.to_vec()).or_insert_with(|| Entry {
-            value: Value::SortedSet(HashMap::new()),
-            expires_at_ms: None,
+        let entry = self.entries.entry(key.to_vec()).or_insert_with(|| {
+            Entry::new(Value::SortedSet(HashMap::new()), None, now_ms)
         });
         let Value::SortedSet(zs) = &mut entry.value else {
             return Err(StoreError::WrongType);
         };
-        let mut added = 0;
+        let mut added = 0_usize;
+        let mut changed = 0_usize;
         for (score, member) in members {
-            if zs.insert(member.clone(), *score).is_none() {
-                added += 1;
+            match zs.get(member) {
+                Some(&old_score) => {
+                    // Existing member
+                    if opts.nx {
+                        continue; // NX: don't update existing
+                    }
+                    let should_update = if opts.gt && opts.lt {
+                        *score != old_score // GT+LT: update if different
+                    } else if opts.gt {
+                        *score > old_score
+                    } else if opts.lt {
+                        *score < old_score
+                    } else {
+                        true
+                    };
+                    if should_update && *score != old_score {
+                        zs.insert(member.clone(), *score);
+                        changed += 1;
+                    }
+                }
+                None => {
+                    // New member
+                    if opts.xx {
+                        continue; // XX: don't add new
+                    }
+                    zs.insert(member.clone(), *score);
+                    added += 1;
+                }
             }
         }
-        Ok(added)
+        if opts.ch {
+            Ok((added + changed, changed))
+        } else {
+            Ok((added, changed))
+        }
     }
 
     /// Remove members. Returns count of members actually removed.
@@ -2790,7 +2884,6 @@ impl Store {
 
     /// Create or overwrite a sorted set from member-score pairs.
     pub fn zstore_from_pairs(&mut self, key: Vec<u8>, pairs: Vec<(Vec<u8>, f64)>, now_ms: u64) {
-        let _ = now_ms;
         let mut zs = HashMap::new();
         for (member, score) in pairs {
             zs.insert(member, score);
@@ -2798,10 +2891,7 @@ impl Store {
         self.stream_groups.remove(key.as_slice());
         self.entries.insert(
             key,
-            Entry {
-                value: Value::SortedSet(zs),
-                expires_at_ms: None,
-            },
+            Entry::new(Value::SortedSet(zs), None, now_ms),
         );
     }
 
@@ -2835,9 +2925,8 @@ impl Store {
         now_ms: u64,
     ) -> Result<f64, StoreError> {
         self.drop_if_expired(key, now_ms);
-        let entry = self.entries.entry(key.to_vec()).or_insert_with(|| Entry {
-            value: Value::SortedSet(HashMap::new()),
-            expires_at_ms: None,
+        let entry = self.entries.entry(key.to_vec()).or_insert_with(|| {
+            Entry::new(Value::SortedSet(HashMap::new()), None, now_ms)
         });
         let Value::SortedSet(zs) = &mut entry.value else {
             return Err(StoreError::WrongType);
@@ -3249,10 +3338,7 @@ impl Store {
                 self.stream_groups.remove(key);
                 self.entries.insert(
                     key.to_vec(),
-                    Entry {
-                        value: Value::Stream(entries),
-                        expires_at_ms: None,
-                    },
+                    Entry::new(Value::Stream(entries), None, now_ms),
                 );
                 Ok(())
             }
@@ -3881,10 +3967,7 @@ impl Store {
             self.stream_groups.remove(key);
             self.entries.insert(
                 key.to_vec(),
-                Entry {
-                    value: Value::Stream(BTreeMap::new()),
-                    expires_at_ms: None,
-                },
+                Entry::new(Value::Stream(BTreeMap::new()), None, now_ms),
             );
         }
 
@@ -4177,10 +4260,7 @@ impl Store {
             let data = hll_encode(&registers);
             self.entries.insert(
                 key.to_vec(),
-                Entry {
-                    value: Value::String(data),
-                    expires_at_ms: expires_at,
-                },
+                Entry::new(Value::String(data), expires_at, now_ms),
             );
         }
         Ok(created || modified)
@@ -4262,10 +4342,7 @@ impl Store {
         let data = hll_encode(&merged);
         self.entries.insert(
             dest.to_vec(),
-            Entry {
-                value: Value::String(data),
-                expires_at_ms: None,
-            },
+            Entry::new(Value::String(data), None, now_ms),
         );
         Ok(())
     }
@@ -4361,10 +4438,7 @@ impl Store {
         self.stream_groups.remove(dest);
         self.entries.insert(
             dest.to_vec(),
-            Entry {
-                value: Value::String(result),
-                expires_at_ms: None,
-            },
+            Entry::new(Value::String(result), None, now_ms),
         );
         Ok(len)
     }
@@ -4412,10 +4486,7 @@ impl Store {
         self.stream_groups.remove(dest);
         self.entries.insert(
             dest.to_vec(),
-            Entry {
-                value: Value::SortedSet(combined),
-                expires_at_ms: None,
-            },
+            Entry::new(Value::SortedSet(combined), None, now_ms),
         );
         Ok(count)
     }
@@ -4433,10 +4504,7 @@ impl Store {
             self.stream_groups.remove(dest);
             self.entries.insert(
                 dest.to_vec(),
-                Entry {
-                    value: Value::SortedSet(std::collections::HashMap::new()),
-                    expires_at_ms: None,
-                },
+                Entry::new(Value::SortedSet(std::collections::HashMap::new()), None, now_ms),
             );
             return Ok(0);
         }
@@ -4482,10 +4550,7 @@ impl Store {
         self.stream_groups.remove(dest);
         self.entries.insert(
             dest.to_vec(),
-            Entry {
-                value: Value::SortedSet(result),
-                expires_at_ms: None,
-            },
+            Entry::new(Value::SortedSet(result), None, now_ms),
         );
         Ok(count)
     }
@@ -4765,10 +4830,7 @@ impl Store {
         self.stream_groups.remove(key.as_slice());
         self.entries.insert(
             key,
-            Entry {
-                value: Value::List(elements.into_iter().collect()),
-                expires_at_ms: None,
-            },
+            Entry::new(Value::List(elements.into_iter().collect()), None, 0),
         );
     }
 
@@ -4912,10 +4974,7 @@ impl Store {
         self.stream_groups.remove(dest);
         self.entries.insert(
             dest.to_vec(),
-            Entry {
-                value: Value::SortedSet(members),
-                expires_at_ms: None,
-            },
+            Entry::new(Value::SortedSet(members), None, 0),
         );
     }
 
@@ -4944,6 +5003,155 @@ impl Store {
         }
         None
     }
+
+    /// Load a script into the cache, returning its SHA1 hex digest.
+    pub fn script_load(&mut self, script: &[u8]) -> String {
+        let sha1_hex = sha1_hex(script);
+        self.script_cache
+            .insert(sha1_hex.clone(), script.to_vec());
+        sha1_hex
+    }
+
+    /// Check if scripts exist in the cache by SHA1.
+    pub fn script_exists(&self, sha1s: &[&[u8]]) -> Vec<bool> {
+        sha1s
+            .iter()
+            .map(|sha1| {
+                let hex = String::from_utf8_lossy(sha1).to_ascii_lowercase();
+                self.script_cache.contains_key(&hex)
+            })
+            .collect()
+    }
+
+    /// Flush the script cache.
+    pub fn script_flush(&mut self) {
+        self.script_cache.clear();
+    }
+
+    /// Look up a script body by SHA1 hex.
+    pub fn script_get(&self, sha1: &[u8]) -> Option<&[u8]> {
+        let hex = String::from_utf8_lossy(sha1).to_ascii_lowercase();
+        self.script_cache.get(&hex).map(Vec::as_slice)
+    }
+
+    /// Subscribe to a channel. Returns the total subscription count.
+    pub fn subscribe(&mut self, channel: Vec<u8>) -> usize {
+        self.subscribed_channels.insert(channel);
+        self.subscribed_channels.len() + self.subscribed_patterns.len()
+    }
+
+    /// Unsubscribe from a channel. Returns the total subscription count.
+    pub fn unsubscribe(&mut self, channel: &[u8]) -> usize {
+        self.subscribed_channels.remove(channel);
+        self.subscribed_channels.len() + self.subscribed_patterns.len()
+    }
+
+    /// Subscribe to a pattern. Returns the total subscription count.
+    pub fn psubscribe(&mut self, pattern: Vec<u8>) -> usize {
+        self.subscribed_patterns.insert(pattern);
+        self.subscribed_channels.len() + self.subscribed_patterns.len()
+    }
+
+    /// Unsubscribe from a pattern. Returns the total subscription count.
+    pub fn punsubscribe(&mut self, pattern: &[u8]) -> usize {
+        self.subscribed_patterns.remove(pattern);
+        self.subscribed_channels.len() + self.subscribed_patterns.len()
+    }
+
+    /// Publish a message to a channel. Returns number of subscribers that received it.
+    pub fn publish(&mut self, channel: &[u8], message: &[u8]) -> usize {
+        let mut receivers = 0;
+        // Check direct channel subscriptions
+        if self.subscribed_channels.contains(channel) {
+            self.pubsub_pending
+                .push((channel.to_vec(), message.to_vec()));
+            receivers += 1;
+        }
+        // Check pattern subscriptions
+        for pattern in &self.subscribed_patterns {
+            if glob_match(pattern, channel) {
+                self.pubsub_pending
+                    .push((channel.to_vec(), message.to_vec()));
+                receivers += 1;
+                break; // Each pattern match counts once
+            }
+        }
+        receivers
+    }
+
+    /// Return the number of subscribed channels.
+    pub fn pubsub_numsub_count(&self, channel: &[u8]) -> usize {
+        usize::from(self.subscribed_channels.contains(channel))
+    }
+
+    /// Return the number of pattern subscriptions.
+    pub fn pubsub_numpat(&self) -> usize {
+        self.subscribed_patterns.len()
+    }
+
+    /// Return all subscribed channel names.
+    pub fn pubsub_channels(&self) -> Vec<Vec<u8>> {
+        self.subscribed_channels.iter().cloned().collect()
+    }
+}
+
+/// Minimal SHA-1 implementation (pure Rust, no unsafe).
+fn sha1_hex(data: &[u8]) -> String {
+    let mut h0: u32 = 0x6745_2301;
+    let mut h1: u32 = 0xEFCD_AB89;
+    let mut h2: u32 = 0x98BA_DCFE;
+    let mut h3: u32 = 0x1032_5476;
+    let mut h4: u32 = 0xC3D2_E1F0;
+
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while msg.len() % 64 != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+
+    for chunk in msg.chunks_exact(64) {
+        let mut w = [0u32; 80];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..80 {
+            w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+        }
+
+        let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
+        for i in 0..80 {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
+                20..=39 => (b ^ c ^ d, 0x6ED9_EBA1u32),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDCu32),
+                _ => (b ^ c ^ d, 0xCA62_C1D6u32),
+            };
+            let temp = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(w[i]);
+            e = d;
+            d = c;
+            c = b.rotate_left(30);
+            b = a;
+            a = temp;
+        }
+        h0 = h0.wrapping_add(a);
+        h1 = h1.wrapping_add(b);
+        h2 = h2.wrapping_add(c);
+        h3 = h3.wrapping_add(d);
+        h4 = h4.wrapping_add(e);
+    }
+    format!("{h0:08x}{h1:08x}{h2:08x}{h3:08x}{h4:08x}")
 }
 
 const ENTRY_BASE_OVERHEAD_BYTES: usize = 32;

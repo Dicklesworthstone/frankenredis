@@ -1,0 +1,653 @@
+{
+  "suite": "core_generic",
+  "cases": [
+    {
+      "name": "set_key_for_type",
+      "now_ms": 0,
+      "argv": ["SET", "str1", "hello"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "type_string",
+      "now_ms": 0,
+      "argv": ["TYPE", "str1"],
+      "expect": { "kind": "simple", "value": "string" }
+    },
+    {
+      "name": "type_missing_key",
+      "now_ms": 0,
+      "argv": ["TYPE", "nokey"],
+      "expect": { "kind": "simple", "value": "none" }
+    },
+    {
+      "name": "setup_list_for_type",
+      "now_ms": 0,
+      "argv": ["RPUSH", "list1", "a"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "type_list",
+      "now_ms": 0,
+      "argv": ["TYPE", "list1"],
+      "expect": { "kind": "simple", "value": "list" }
+    },
+    {
+      "name": "setup_set_for_type",
+      "now_ms": 0,
+      "argv": ["SADD", "set1", "a"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "type_set",
+      "now_ms": 0,
+      "argv": ["TYPE", "set1"],
+      "expect": { "kind": "simple", "value": "set" }
+    },
+    {
+      "name": "setup_hash_for_type",
+      "now_ms": 0,
+      "argv": ["HSET", "hash1", "f", "v"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "type_hash",
+      "now_ms": 0,
+      "argv": ["TYPE", "hash1"],
+      "expect": { "kind": "simple", "value": "hash" }
+    },
+    {
+      "name": "setup_zset_for_type",
+      "now_ms": 0,
+      "argv": ["ZADD", "zset1", "1", "a"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "type_zset",
+      "now_ms": 0,
+      "argv": ["TYPE", "zset1"],
+      "expect": { "kind": "simple", "value": "zset" }
+    },
+    {
+      "name": "exists_present",
+      "now_ms": 0,
+      "argv": ["EXISTS", "str1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "exists_missing",
+      "now_ms": 0,
+      "argv": ["EXISTS", "nokey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "exists_multiple",
+      "now_ms": 0,
+      "argv": ["EXISTS", "str1", "list1", "nokey", "set1"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "exists_duplicate_keys",
+      "now_ms": 0,
+      "argv": ["EXISTS", "str1", "str1"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "del_single",
+      "now_ms": 0,
+      "argv": ["SET", "delme", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "del_single_result",
+      "now_ms": 0,
+      "argv": ["DEL", "delme"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "del_missing",
+      "now_ms": 0,
+      "argv": ["DEL", "delme"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "unlink_setup",
+      "now_ms": 0,
+      "argv": ["SET", "unlinkme", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "unlink_result",
+      "now_ms": 0,
+      "argv": ["UNLINK", "unlinkme"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "unlink_missing",
+      "now_ms": 0,
+      "argv": ["UNLINK", "unlinkme"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "del_multiple",
+      "now_ms": 0,
+      "argv": ["DEL", "str1", "list1", "nokey"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "rename_setup",
+      "now_ms": 0,
+      "argv": ["SET", "rkey", "rval"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "rename_ok",
+      "now_ms": 0,
+      "argv": ["RENAME", "rkey", "rkey2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "rename_verify_new",
+      "now_ms": 0,
+      "argv": ["GET", "rkey2"],
+      "expect": { "kind": "bulk", "value": "rval" }
+    },
+    {
+      "name": "rename_verify_old_gone",
+      "now_ms": 0,
+      "argv": ["GET", "rkey"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "rename_missing_key",
+      "now_ms": 0,
+      "argv": ["RENAME", "nokey", "dst"],
+      "expect": { "kind": "error", "value": "ERR no such key" }
+    },
+    {
+      "name": "renamenx_setup",
+      "now_ms": 0,
+      "argv": ["SET", "rnx1", "v1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "renamenx_no_conflict",
+      "now_ms": 0,
+      "argv": ["RENAMENX", "rnx1", "rnx2"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "renamenx_with_conflict",
+      "now_ms": 0,
+      "argv": ["SET", "rnx3", "v3"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "renamenx_conflict_result",
+      "now_ms": 0,
+      "argv": ["RENAMENX", "rnx2", "rnx3"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "copy_setup",
+      "now_ms": 0,
+      "argv": ["SET", "csrc", "cval"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "copy_success",
+      "now_ms": 0,
+      "argv": ["COPY", "csrc", "cdst"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "copy_verify_src",
+      "now_ms": 0,
+      "argv": ["GET", "csrc"],
+      "expect": { "kind": "bulk", "value": "cval" }
+    },
+    {
+      "name": "copy_verify_dst",
+      "now_ms": 0,
+      "argv": ["GET", "cdst"],
+      "expect": { "kind": "bulk", "value": "cval" }
+    },
+    {
+      "name": "copy_no_replace",
+      "now_ms": 0,
+      "argv": ["COPY", "csrc", "cdst"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "copy_with_replace",
+      "now_ms": 0,
+      "argv": ["SET", "csrc", "newval"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "copy_replace_result",
+      "now_ms": 0,
+      "argv": ["COPY", "csrc", "cdst", "REPLACE"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "copy_replace_verify",
+      "now_ms": 0,
+      "argv": ["GET", "cdst"],
+      "expect": { "kind": "bulk", "value": "newval" }
+    },
+    {
+      "name": "copy_missing_src",
+      "now_ms": 0,
+      "argv": ["COPY", "nokey", "dst"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_setup",
+      "now_ms": 1000,
+      "argv": ["SET", "exkey", "exval"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "expire_set",
+      "now_ms": 1000,
+      "argv": ["EXPIRE", "exkey", "10"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "ttl_with_expiry",
+      "now_ms": 1000,
+      "argv": ["TTL", "exkey"],
+      "expect": { "kind": "integer", "value": 10 }
+    },
+    {
+      "name": "pttl_with_expiry",
+      "now_ms": 1000,
+      "argv": ["PTTL", "exkey"],
+      "expect": { "kind": "integer", "value": 10000 }
+    },
+    {
+      "name": "ttl_after_time_passes",
+      "now_ms": 3000,
+      "argv": ["TTL", "exkey"],
+      "expect": { "kind": "integer", "value": 8 }
+    },
+    {
+      "name": "persist_removes_expiry",
+      "now_ms": 3000,
+      "argv": ["PERSIST", "exkey"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "ttl_no_expiry",
+      "now_ms": 3000,
+      "argv": ["TTL", "exkey"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "ttl_missing_key",
+      "now_ms": 0,
+      "argv": ["TTL", "nokey"],
+      "expect": { "kind": "integer", "value": -2 }
+    },
+    {
+      "name": "pttl_missing_key",
+      "now_ms": 0,
+      "argv": ["PTTL", "nokey"],
+      "expect": { "kind": "integer", "value": -2 }
+    },
+    {
+      "name": "persist_missing_key",
+      "now_ms": 0,
+      "argv": ["PERSIST", "nokey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "persist_no_expiry",
+      "now_ms": 0,
+      "argv": ["PERSIST", "exkey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_missing_key",
+      "now_ms": 0,
+      "argv": ["EXPIRE", "nokey", "10"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pexpire_set",
+      "now_ms": 1000,
+      "argv": ["PEXPIRE", "exkey", "5000"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pttl_after_pexpire",
+      "now_ms": 1000,
+      "argv": ["PTTL", "exkey"],
+      "expect": { "kind": "integer", "value": 5000 }
+    },
+    {
+      "name": "key_expired_check",
+      "now_ms": 20000,
+      "argv": ["EXISTS", "exkey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expiretime_setup",
+      "now_ms": 0,
+      "argv": ["SET", "etkey", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "expiretime_no_expiry",
+      "now_ms": 0,
+      "argv": ["EXPIRETIME", "etkey"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "expiretime_missing",
+      "now_ms": 0,
+      "argv": ["EXPIRETIME", "nokey"],
+      "expect": { "kind": "integer", "value": -2 }
+    },
+    {
+      "name": "pexpiretime_no_expiry",
+      "now_ms": 0,
+      "argv": ["PEXPIRETIME", "etkey"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "pexpiretime_missing",
+      "now_ms": 0,
+      "argv": ["PEXPIRETIME", "nokey"],
+      "expect": { "kind": "integer", "value": -2 }
+    },
+    {
+      "name": "pexpireat_set",
+      "now_ms": 0,
+      "argv": ["PEXPIREAT", "etkey", "30000"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expiretime_with_expiry",
+      "now_ms": 0,
+      "argv": ["EXPIRETIME", "etkey"],
+      "expect": { "kind": "integer", "value": 30 }
+    },
+    {
+      "name": "pexpiretime_with_expiry",
+      "now_ms": 0,
+      "argv": ["PEXPIRETIME", "etkey"],
+      "expect": { "kind": "integer", "value": 30000 }
+    },
+    {
+      "name": "append_new_key",
+      "now_ms": 0,
+      "argv": ["APPEND", "appkey", "hello"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "append_existing",
+      "now_ms": 0,
+      "argv": ["APPEND", "appkey", " world"],
+      "expect": { "kind": "integer", "value": 11 }
+    },
+    {
+      "name": "append_verify",
+      "now_ms": 0,
+      "argv": ["GET", "appkey"],
+      "expect": { "kind": "bulk", "value": "hello world" }
+    },
+    {
+      "name": "getdel_setup",
+      "now_ms": 0,
+      "argv": ["SET", "gdkey", "gdval"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "getdel_returns_value",
+      "now_ms": 0,
+      "argv": ["GETDEL", "gdkey"],
+      "expect": { "kind": "bulk", "value": "gdval" }
+    },
+    {
+      "name": "getdel_key_gone",
+      "now_ms": 0,
+      "argv": ["EXISTS", "gdkey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "getdel_missing",
+      "now_ms": 0,
+      "argv": ["GETDEL", "nokey"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "getex_setup",
+      "now_ms": 0,
+      "argv": ["SET", "gekey", "geval"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "getex_no_options",
+      "now_ms": 0,
+      "argv": ["GETEX", "gekey"],
+      "expect": { "kind": "bulk", "value": "geval" }
+    },
+    {
+      "name": "getex_with_ex",
+      "now_ms": 1000,
+      "argv": ["GETEX", "gekey", "EX", "10"],
+      "expect": { "kind": "bulk", "value": "geval" }
+    },
+    {
+      "name": "getex_verify_ttl",
+      "now_ms": 1000,
+      "argv": ["TTL", "gekey"],
+      "expect": { "kind": "integer", "value": 10 }
+    },
+    {
+      "name": "getex_persist",
+      "now_ms": 1000,
+      "argv": ["GETEX", "gekey", "PERSIST"],
+      "expect": { "kind": "bulk", "value": "geval" }
+    },
+    {
+      "name": "getex_verify_no_ttl",
+      "now_ms": 1000,
+      "argv": ["TTL", "gekey"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "getex_missing",
+      "now_ms": 0,
+      "argv": ["GETEX", "nokey"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "object_encoding_string_embstr",
+      "now_ms": 0,
+      "argv": ["SET", "objstr", "hello"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "object_encoding_embstr",
+      "now_ms": 0,
+      "argv": ["OBJECT", "ENCODING", "objstr"],
+      "expect": { "kind": "bulk", "value": "embstr" }
+    },
+    {
+      "name": "object_encoding_int",
+      "now_ms": 0,
+      "argv": ["SET", "objint", "12345"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "object_encoding_int_result",
+      "now_ms": 0,
+      "argv": ["OBJECT", "ENCODING", "objint"],
+      "expect": { "kind": "bulk", "value": "int" }
+    },
+    {
+      "name": "object_refcount",
+      "now_ms": 0,
+      "argv": ["OBJECT", "REFCOUNT", "objstr"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "object_idletime",
+      "now_ms": 0,
+      "argv": ["OBJECT", "IDLETIME", "objstr"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "object_encoding_hash",
+      "now_ms": 0,
+      "argv": ["OBJECT", "ENCODING", "hash1"],
+      "expect": { "kind": "bulk", "value": "listpack" }
+    },
+    {
+      "name": "object_encoding_list",
+      "now_ms": 0,
+      "argv": ["RPUSH", "objlist", "a"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "object_encoding_list_result",
+      "now_ms": 0,
+      "argv": ["OBJECT", "ENCODING", "objlist"],
+      "expect": { "kind": "bulk", "value": "listpack" }
+    },
+    {
+      "name": "object_encoding_set",
+      "now_ms": 0,
+      "argv": ["OBJECT", "ENCODING", "set1"],
+      "expect": { "kind": "bulk", "value": "listpack" }
+    },
+    {
+      "name": "object_encoding_zset",
+      "now_ms": 0,
+      "argv": ["OBJECT", "ENCODING", "zset1"],
+      "expect": { "kind": "bulk", "value": "listpack" }
+    },
+    {
+      "name": "expire_nx_setup",
+      "now_ms": 1000,
+      "argv": ["SET", "enxkey", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "expire_nx_no_existing_ttl",
+      "now_ms": 1000,
+      "argv": ["EXPIRE", "enxkey", "10", "NX"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_nx_has_existing_ttl",
+      "now_ms": 1000,
+      "argv": ["EXPIRE", "enxkey", "20", "NX"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_xx_setup",
+      "now_ms": 1000,
+      "argv": ["SET", "exxkey", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "expire_xx_no_existing_ttl",
+      "now_ms": 1000,
+      "argv": ["EXPIRE", "exxkey", "10", "XX"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_xx_setup_ttl",
+      "now_ms": 1000,
+      "argv": ["EXPIRE", "exxkey", "10"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_xx_with_existing_ttl",
+      "now_ms": 1000,
+      "argv": ["EXPIRE", "exxkey", "20", "XX"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_xx_verify",
+      "now_ms": 1000,
+      "argv": ["TTL", "exxkey"],
+      "expect": { "kind": "integer", "value": 20 }
+    },
+    {
+      "name": "expire_gt_longer",
+      "now_ms": 1000,
+      "argv": ["EXPIRE", "enxkey", "30", "GT"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_gt_shorter",
+      "now_ms": 1000,
+      "argv": ["EXPIRE", "enxkey", "5", "GT"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_gt_verify",
+      "now_ms": 1000,
+      "argv": ["TTL", "enxkey"],
+      "expect": { "kind": "integer", "value": 30 }
+    },
+    {
+      "name": "expire_lt_shorter",
+      "now_ms": 1000,
+      "argv": ["EXPIRE", "enxkey", "5", "LT"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "expire_lt_longer",
+      "now_ms": 1000,
+      "argv": ["EXPIRE", "enxkey", "50", "LT"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "expire_lt_verify",
+      "now_ms": 1000,
+      "argv": ["TTL", "enxkey"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "object_encoding_missing_key",
+      "now_ms": 0,
+      "argv": ["OBJECT", "ENCODING", "nokey"],
+      "expect": { "kind": "error", "value": "ERR no such key" }
+    },
+    {
+      "name": "object_refcount_missing_key",
+      "now_ms": 0,
+      "argv": ["OBJECT", "REFCOUNT", "nokey"],
+      "expect": { "kind": "error", "value": "ERR no such key" }
+    },
+    {
+      "name": "object_encoding_raw_setup",
+      "now_ms": 0,
+      "argv": ["SET", "longstr", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "object_encoding_raw",
+      "now_ms": 0,
+      "argv": ["OBJECT", "ENCODING", "longstr"],
+      "expect": { "kind": "bulk", "value": "raw" }
+    },
+    {
+      "name": "touch_existing",
+      "now_ms": 0,
+      "argv": ["TOUCH", "objstr", "objint", "nokey"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "dbsize_count",
+      "now_ms": 0,
+      "argv": ["DBSIZE"],
+      "expect": { "kind": "integer", "value": 17 }
+    }
+  ]
+}

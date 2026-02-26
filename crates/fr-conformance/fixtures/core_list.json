@@ -280,6 +280,103 @@
       }
     },
     {
+      "name": "lpos_setup",
+      "now_ms": 0,
+      "argv": ["RPUSH", "lp", "a", "b", "a", "c", "a"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "lpos_basic",
+      "now_ms": 0,
+      "argv": ["LPOS", "lp", "a"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "lpos_missing_element",
+      "now_ms": 0,
+      "argv": ["LPOS", "lp", "z"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "lpos_rank_2",
+      "now_ms": 0,
+      "argv": ["LPOS", "lp", "a", "RANK", "2"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "lpos_rank_3",
+      "now_ms": 0,
+      "argv": ["LPOS", "lp", "a", "RANK", "3"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "lpos_rank_negative",
+      "now_ms": 0,
+      "argv": ["LPOS", "lp", "a", "RANK", "-1"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "lpos_rank_negative_2",
+      "now_ms": 0,
+      "argv": ["LPOS", "lp", "a", "RANK", "-2"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "lpos_count_0",
+      "now_ms": 0,
+      "argv": ["LPOS", "lp", "a", "COUNT", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 0 },
+          { "kind": "integer", "value": 2 },
+          { "kind": "integer", "value": 4 }
+        ]
+      }
+    },
+    {
+      "name": "lpos_count_2",
+      "now_ms": 0,
+      "argv": ["LPOS", "lp", "a", "COUNT", "2"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 0 },
+          { "kind": "integer", "value": 2 }
+        ]
+      }
+    },
+    {
+      "name": "lpos_count_with_rank",
+      "now_ms": 0,
+      "argv": ["LPOS", "lp", "a", "RANK", "2", "COUNT", "2"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 2 },
+          { "kind": "integer", "value": 4 }
+        ]
+      }
+    },
+    {
+      "name": "lpos_maxlen",
+      "now_ms": 0,
+      "argv": ["LPOS", "lp", "a", "MAXLEN", "3"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "lpos_count_missing_element",
+      "now_ms": 0,
+      "argv": ["LPOS", "lp", "z", "COUNT", "0"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "lpos_missing_key",
+      "now_ms": 0,
+      "argv": ["LPOS", "nokey", "a"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
       "name": "lpush_wrongtype_on_string",
       "now_ms": 0,
       "argv": ["SET", "strkey2", "v"],

@@ -161,3 +161,75 @@ fn core_stream_conformance() {
     assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
     assert!(diff.failed.is_empty());
 }
+
+#[test]
+fn core_generic_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_generic.json").expect("generic fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_acl_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_acl.json").expect("acl fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_hyperloglog_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_hyperloglog.json").expect("hyperloglog fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_bitmap_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_bitmap.json").expect("bitmap fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_transaction_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_transaction.json").expect("transaction fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_connection_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_connection.json").expect("connection fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_expiry_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_expiry.json").expect("expiry fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_client_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_client.json").expect("client fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_server_conformance() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_fixture(&cfg, "core_server.json").expect("server fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}

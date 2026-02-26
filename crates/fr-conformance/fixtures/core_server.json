@@ -1,0 +1,104 @@
+{
+  "suite": "core_server",
+  "cases": [
+    {
+      "name": "slowlog_len_initially_zero",
+      "now_ms": 1000,
+      "argv": ["SLOWLOG", "LEN"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "slowlog_get_initially_empty",
+      "now_ms": 1001,
+      "argv": ["SLOWLOG", "GET"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "slowlog_get_with_count",
+      "now_ms": 1002,
+      "argv": ["SLOWLOG", "GET", "10"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "slowlog_reset_ok",
+      "now_ms": 1003,
+      "argv": ["SLOWLOG", "RESET"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slowlog_wrong_arity",
+      "now_ms": 1004,
+      "argv": ["SLOWLOG"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SLOWLOG' command"
+      }
+    },
+    {
+      "name": "lastsave_initially_zero",
+      "now_ms": 2000,
+      "argv": ["LASTSAVE"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "save_returns_ok",
+      "now_ms": 5000000,
+      "argv": ["SAVE"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "lastsave_after_save",
+      "now_ms": 5001000,
+      "argv": ["LASTSAVE"],
+      "expect": { "kind": "integer", "value": 5000 }
+    },
+    {
+      "name": "bgsave_returns_message",
+      "now_ms": 6000000,
+      "argv": ["BGSAVE"],
+      "expect": { "kind": "simple", "value": "Background saving started" }
+    },
+    {
+      "name": "lastsave_after_bgsave",
+      "now_ms": 6001000,
+      "argv": ["LASTSAVE"],
+      "expect": { "kind": "integer", "value": 6000 }
+    },
+    {
+      "name": "bgsave_schedule",
+      "now_ms": 7000000,
+      "argv": ["BGSAVE", "SCHEDULE"],
+      "expect": { "kind": "simple", "value": "Background saving started" }
+    },
+    {
+      "name": "bgrewriteaof_returns_message",
+      "now_ms": 8000,
+      "argv": ["BGREWRITEAOF"],
+      "expect": {
+        "kind": "simple",
+        "value": "Background append only file rewriting started"
+      }
+    },
+    {
+      "name": "shutdown_ok",
+      "now_ms": 9000,
+      "argv": ["SHUTDOWN", "NOSAVE"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "shutdown_invalid_flag",
+      "now_ms": 9001,
+      "argv": ["SHUTDOWN", "BADARG"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unrecognized option or bad number of args for SHUTDOWN: 'BADARG'"
+      }
+    },
+    {
+      "name": "reset_returns_reset_string",
+      "now_ms": 10000,
+      "argv": ["RESET"],
+      "expect": { "kind": "simple", "value": "RESET" }
+    }
+  ]
+}

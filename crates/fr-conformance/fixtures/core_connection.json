@@ -1,0 +1,224 @@
+{
+  "suite": "core_connection",
+  "cases": [
+    {
+      "name": "ping_no_args_returns_pong",
+      "now_ms": 0,
+      "argv": ["PING"],
+      "expect": { "kind": "simple", "value": "PONG" }
+    },
+    {
+      "name": "ping_with_message",
+      "now_ms": 1,
+      "argv": ["PING", "hello"],
+      "expect": { "kind": "bulk", "value": "hello" }
+    },
+    {
+      "name": "ping_wrong_arity",
+      "now_ms": 2,
+      "argv": ["PING", "a", "b"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PING' command"
+      }
+    },
+    {
+      "name": "echo_returns_argument",
+      "now_ms": 3,
+      "argv": ["ECHO", "test message"],
+      "expect": { "kind": "bulk", "value": "test message" }
+    },
+    {
+      "name": "echo_wrong_arity_no_args",
+      "now_ms": 4,
+      "argv": ["ECHO"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'ECHO' command"
+      }
+    },
+    {
+      "name": "echo_wrong_arity_too_many",
+      "now_ms": 5,
+      "argv": ["ECHO", "a", "b"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'ECHO' command"
+      }
+    },
+    {
+      "name": "select_db0_ok",
+      "now_ms": 10,
+      "argv": ["SELECT", "0"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "select_db1_error",
+      "now_ms": 11,
+      "argv": ["SELECT", "1"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR DB index is out of range"
+      }
+    },
+    {
+      "name": "select_wrong_arity",
+      "now_ms": 12,
+      "argv": ["SELECT"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SELECT' command"
+      }
+    },
+    {
+      "name": "select_invalid_db",
+      "now_ms": 13,
+      "argv": ["SELECT", "notanumber"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "dbsize_empty_returns_0",
+      "now_ms": 20,
+      "argv": ["DBSIZE"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "set_for_dbsize_test",
+      "now_ms": 21,
+      "argv": ["SET", "key1", "val1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "set_for_dbsize_test_2",
+      "now_ms": 22,
+      "argv": ["SET", "key2", "val2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "dbsize_returns_2",
+      "now_ms": 23,
+      "argv": ["DBSIZE"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "dbsize_wrong_arity",
+      "now_ms": 24,
+      "argv": ["DBSIZE", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'DBSIZE' command"
+      }
+    },
+    {
+      "name": "flushdb_returns_ok",
+      "now_ms": 30,
+      "argv": ["FLUSHDB"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "dbsize_after_flush_returns_0",
+      "now_ms": 31,
+      "argv": ["DBSIZE"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "get_after_flush_returns_nil",
+      "now_ms": 32,
+      "argv": ["GET", "key1"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "time_returns_array",
+      "now_ms": 5000,
+      "argv": ["TIME"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "5" },
+          { "kind": "bulk", "value": "0" }
+        ]
+      }
+    },
+    {
+      "name": "time_with_millis",
+      "now_ms": 12345,
+      "argv": ["TIME"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "12" },
+          { "kind": "bulk", "value": "345000" }
+        ]
+      }
+    },
+    {
+      "name": "time_wrong_arity",
+      "now_ms": 50,
+      "argv": ["TIME", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'TIME' command"
+      }
+    },
+    {
+      "name": "unknown_command_error",
+      "now_ms": 60,
+      "argv": ["NOTAREALCOMMAND"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown command 'NOTAREALCOMMAND'"
+      }
+    },
+    {
+      "name": "unknown_command_with_args",
+      "now_ms": 61,
+      "argv": ["FAKECMD", "arg1", "arg2"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown command 'FAKECMD', with args beginning with: 'arg1' 'arg2' "
+      }
+    },
+    {
+      "name": "set_after_flush_for_randomkey",
+      "now_ms": 70,
+      "argv": ["SET", "onlykey", "val"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "randomkey_returns_existing_key",
+      "now_ms": 71,
+      "argv": ["RANDOMKEY"],
+      "expect": { "kind": "bulk", "value": "onlykey" }
+    },
+    {
+      "name": "del_only_key",
+      "now_ms": 72,
+      "argv": ["DEL", "onlykey"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "randomkey_empty_returns_nil",
+      "now_ms": 73,
+      "argv": ["RANDOMKEY"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "flushdb_with_async_arg",
+      "now_ms": 80,
+      "argv": ["FLUSHDB", "ASYNC"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "flushdb_wrong_arity",
+      "now_ms": 81,
+      "argv": ["FLUSHDB", "ASYNC", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'FLUSHDB' command"
+      }
+    }
+  ]
+}

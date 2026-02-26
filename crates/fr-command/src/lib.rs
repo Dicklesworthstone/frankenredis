@@ -207,12 +207,12 @@ pub fn dispatch_argv(
         Some(CommandId::Brpop) => return brpop(argv, store, now_ms),
         Some(CommandId::Blmove) => return blmove(argv, store, now_ms),
         Some(CommandId::Blmpop) => return blmpop(argv, store, now_ms),
-        Some(CommandId::Subscribe) => return subscribe_cmd(argv),
-        Some(CommandId::Unsubscribe) => return unsubscribe_cmd(argv),
-        Some(CommandId::Psubscribe) => return psubscribe_cmd(argv),
-        Some(CommandId::Punsubscribe) => return punsubscribe_cmd(argv),
-        Some(CommandId::Publish) => return publish_cmd(argv),
-        Some(CommandId::Pubsub) => return pubsub_cmd(argv),
+        Some(CommandId::Subscribe) => return subscribe_cmd(argv, store),
+        Some(CommandId::Unsubscribe) => return unsubscribe_cmd(argv, store),
+        Some(CommandId::Psubscribe) => return psubscribe_cmd(argv, store),
+        Some(CommandId::Punsubscribe) => return punsubscribe_cmd(argv, store),
+        Some(CommandId::Publish) => return publish_cmd(argv, store),
+        Some(CommandId::Pubsub) => return pubsub_cmd(argv, store),
         Some(CommandId::Msetnx) => return msetnx(argv, store, now_ms),
         Some(CommandId::Brpoplpush) => return brpoplpush(argv, store, now_ms),
         Some(CommandId::Zdiff) => return zdiff(argv, store, now_ms),
@@ -221,8 +221,8 @@ pub fn dispatch_argv(
         Some(CommandId::Zunion) => return zunion_cmd(argv, store, now_ms),
         Some(CommandId::Zintercard) => return zintercard(argv, store, now_ms),
         Some(CommandId::Eval) => return eval_cmd(argv),
-        Some(CommandId::Evalsha) => return evalsha_cmd(argv),
-        Some(CommandId::Script) => return script_cmd(argv),
+        Some(CommandId::Evalsha) => return evalsha_cmd(argv, store),
+        Some(CommandId::Script) => return script_cmd(argv, store),
         Some(CommandId::Debug) => return debug_cmd(argv),
         Some(CommandId::Role) => return role_cmd(argv),
         Some(CommandId::Shutdown) => return shutdown_cmd(argv),
@@ -2074,19 +2074,67 @@ fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
 }
 
 fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    // ZADD key score member [score member ...]
-    if argv.len() < 4 || !(argv.len() - 2).is_multiple_of(2) {
+    // ZADD key [NX|XX] [GT|LT] [CH] score member [score member ...]
+    if argv.len() < 4 {
         return Err(CommandError::WrongArity("ZADD"));
     }
-    let mut pairs = Vec::with_capacity((argv.len() - 2) / 2);
+
+    let mut nx = false;
+    let mut xx = false;
+    let mut gt = false;
+    let mut lt = false;
+    let mut ch = false;
     let mut i = 2;
+
+    // Parse option flags
+    while i < argv.len() {
+        let opt = std::str::from_utf8(&argv[i]).unwrap_or("");
+        if opt.eq_ignore_ascii_case("NX") {
+            nx = true;
+        } else if opt.eq_ignore_ascii_case("XX") {
+            xx = true;
+        } else if opt.eq_ignore_ascii_case("GT") {
+            gt = true;
+        } else if opt.eq_ignore_ascii_case("LT") {
+            lt = true;
+        } else if opt.eq_ignore_ascii_case("CH") {
+            ch = true;
+        } else {
+            break; // Start of score-member pairs
+        }
+        i += 1;
+    }
+
+    // NX and XX are mutually exclusive
+    if nx && xx {
+        return Ok(RespFrame::Error(
+            "ERR XX and NX options at the same time are not compatible".to_string(),
+        ));
+    }
+    // NX and GT/LT are mutually exclusive
+    if nx && (gt || lt) {
+        return Ok(RespFrame::Error(
+            "ERR GT, LT, and NX options at the same time are not compatible".to_string(),
+        ));
+    }
+
+    let remaining = argv.len() - i;
+    if remaining < 2 || !remaining.is_multiple_of(2) {
+        return Err(CommandError::WrongArity("ZADD"));
+    }
+
+    let mut pairs = Vec::with_capacity(remaining / 2);
     while i + 1 < argv.len() {
         let score = parse_f64_arg(&argv[i])?;
         pairs.push((score, argv[i + 1].clone()));
         i += 2;
     }
-    let added = store.zadd(&argv[1], &pairs, now_ms)?;
-    Ok(RespFrame::Integer(i64::try_from(added).unwrap_or(i64::MAX)))
+
+    let opts = fr_store::ZaddOptions { nx, xx, gt, lt, ch };
+    let (count, _changed) = store.zadd_with_options(&argv[1], &pairs, opts, now_ms)?;
+    Ok(RespFrame::Integer(
+        i64::try_from(count).unwrap_or(i64::MAX),
+    ))
 }
 
 fn zrem(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -4196,10 +4244,51 @@ fn xsetid_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
 
 fn lolwut_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     // LOLWUT [VERSION version]
-    let _ = argv;
-    Ok(RespFrame::BulkString(Some(
-        b"FrankenRedis ver. 0.1.0\n".to_vec(),
-    )))
+    let version = if argv.len() >= 3 {
+        let ver_kw = std::str::from_utf8(&argv[1]).unwrap_or("");
+        if ver_kw.eq_ignore_ascii_case("VERSION") {
+            parse_i64_arg(&argv[2]).unwrap_or(1) as u32
+        } else {
+            1
+        }
+    } else {
+        1
+    };
+    let art = generate_lolwut_art(version);
+    Ok(RespFrame::BulkString(Some(art.into_bytes())))
+}
+
+fn generate_lolwut_art(version: u32) -> String {
+    // Generate deterministic ASCII art based on version number
+    let width = 40;
+    let height = 12;
+    let mut lines = Vec::with_capacity(height + 2);
+    lines.push(String::new());
+    let seed = version.wrapping_mul(2654435761);
+    for row in 0..height {
+        let mut line = String::with_capacity(width);
+        for col in 0..width {
+            let v = seed
+                .wrapping_add((row as u32).wrapping_mul(31))
+                .wrapping_add((col as u32).wrapping_mul(17));
+            let ch = match (v >> 4) % 8 {
+                0 => ' ',
+                1 => '.',
+                2 => 'o',
+                3 => 'O',
+                4 => '#',
+                5 => '*',
+                6 => '+',
+                _ => '-',
+            };
+            line.push(ch);
+        }
+        lines.push(line);
+    }
+    lines.push(String::new());
+    lines.push(format!("FrankenRedis ver. 0.1.0 -- LOLWUT v{version}"));
+    lines.push(String::new());
+    lines.join("\n")
 }
 
 // ── WAITAOF ─────────────────────────────────────────────────────────
@@ -5002,12 +5091,73 @@ fn bitpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 }
 
 fn lpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 3 {
+    // LPOS key element [RANK rank] [COUNT count] [MAXLEN maxlen]
+    if argv.len() < 3 {
         return Err(CommandError::WrongArity("LPOS"));
     }
-    match store.lpos(&argv[1], &argv[2], now_ms)? {
-        Some(pos) => Ok(RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX))),
-        None => Ok(RespFrame::BulkString(None)),
+    let mut rank: i64 = 1;
+    let mut count: Option<u64> = None;
+    let mut maxlen: usize = 0;
+    let mut i = 3;
+    while i < argv.len() {
+        let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if opt.eq_ignore_ascii_case("RANK") {
+            i += 1;
+            if i >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            rank = parse_i64_arg(&argv[i])?;
+            if rank == 0 {
+                return Ok(RespFrame::Error(
+                    "ERR RANK can't be zero: use 1 to start from the first match, 2 from the second ... or use negative to start from the end of the list"
+                        .to_string(),
+                ));
+            }
+        } else if opt.eq_ignore_ascii_case("COUNT") {
+            i += 1;
+            if i >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let c = parse_i64_arg(&argv[i])?;
+            if c < 0 {
+                return Ok(RespFrame::Error(
+                    "ERR COUNT can't be negative".to_string(),
+                ));
+            }
+            count = Some(c as u64);
+        } else if opt.eq_ignore_ascii_case("MAXLEN") {
+            i += 1;
+            if i >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let m = parse_i64_arg(&argv[i])?;
+            if m < 0 {
+                return Ok(RespFrame::Error(
+                    "ERR MAXLEN can't be negative".to_string(),
+                ));
+            }
+            maxlen = m as usize;
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+        i += 1;
+    }
+
+    let positions = store.lpos_full(&argv[1], &argv[2], rank, count, maxlen, now_ms)?;
+
+    if count.is_some() {
+        // COUNT mode: always return array
+        let arr: Vec<RespFrame> = positions
+            .into_iter()
+            .map(|p| RespFrame::Integer(i64::try_from(p).unwrap_or(i64::MAX)))
+            .collect();
+        Ok(RespFrame::Array(Some(arr)))
+    } else {
+        // No COUNT: return single integer or nil
+        match positions.first() {
+            Some(&pos) => Ok(RespFrame::Integer(i64::try_from(pos).unwrap_or(i64::MAX))),
+            None => Ok(RespFrame::BulkString(None)),
+        }
     }
 }
 
@@ -6720,7 +6870,16 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         } else {
             Ok(RespFrame::Error("ERR no such key".to_string()))
         }
-    } else if sub.eq_ignore_ascii_case("IDLETIME") || sub.eq_ignore_ascii_case("FREQ") {
+    } else if sub.eq_ignore_ascii_case("IDLETIME") {
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("OBJECT"));
+        }
+        match store.object_idletime(&argv[2], now_ms) {
+            Some(idle_secs) => Ok(RespFrame::Integer(idle_secs as i64)),
+            None => Ok(RespFrame::Error("ERR no such key".to_string())),
+        }
+    } else if sub.eq_ignore_ascii_case("FREQ") {
+        // LFU frequency counter - returns 0 since we don't track frequency
         if argv.len() < 3 {
             return Err(CommandError::WrongArity("OBJECT"));
         }
@@ -6902,96 +7061,136 @@ fn lastsave_cmd(argv: &[Vec<u8>], now_ms: u64) -> Result<RespFrame, CommandError
     Ok(RespFrame::Integer((now_ms / 1000) as i64))
 }
 
-fn subscribe_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn subscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     // SUBSCRIBE channel [channel ...]
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SUBSCRIBE"));
     }
-    // Return subscription confirmations for each channel
-    // In real Redis, these are sent as separate push messages.
-    // We return the last one as the command response (count = total channels).
-    let total = (argv.len() - 1) as i64;
+    // Subscribe to each channel and return confirmation for the last
+    let mut count = 0i64;
+    for channel in &argv[1..] {
+        count = store.subscribe(channel.clone()) as i64;
+    }
     let last_channel = &argv[argv.len() - 1];
     Ok(RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(b"subscribe".to_vec())),
         RespFrame::BulkString(Some(last_channel.clone())),
-        RespFrame::Integer(total),
+        RespFrame::Integer(count),
     ])))
 }
 
-fn unsubscribe_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn unsubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     // UNSUBSCRIBE [channel [channel ...]]
     if argv.len() < 2 {
-        // Unsubscribe from all — return 0 subscriptions
+        // Unsubscribe from all channels
+        let channels: Vec<Vec<u8>> = store.subscribed_channels.iter().cloned().collect();
+        for ch in &channels {
+            store.unsubscribe(ch);
+        }
         return Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
             RespFrame::BulkString(None),
             RespFrame::Integer(0),
         ])));
     }
+    let mut count = 0i64;
+    for channel in &argv[1..] {
+        count = store.unsubscribe(channel) as i64;
+    }
     Ok(RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
         RespFrame::BulkString(Some(argv[argv.len() - 1].clone())),
-        RespFrame::Integer(0),
+        RespFrame::Integer(count),
     ])))
 }
 
-fn psubscribe_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn psubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("PSUBSCRIBE"));
     }
-    let total = (argv.len() - 1) as i64;
+    let mut count = 0i64;
+    for pattern in &argv[1..] {
+        count = store.psubscribe(pattern.clone()) as i64;
+    }
     let last_pattern = &argv[argv.len() - 1];
     Ok(RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(b"psubscribe".to_vec())),
         RespFrame::BulkString(Some(last_pattern.clone())),
-        RespFrame::Integer(total),
+        RespFrame::Integer(count),
     ])))
 }
 
-fn punsubscribe_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn punsubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
+        let patterns: Vec<Vec<u8>> = store.subscribed_patterns.iter().cloned().collect();
+        for p in &patterns {
+            store.punsubscribe(p);
+        }
         return Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
             RespFrame::BulkString(None),
             RespFrame::Integer(0),
         ])));
     }
+    let mut count = 0i64;
+    for pattern in &argv[1..] {
+        count = store.punsubscribe(pattern) as i64;
+    }
     Ok(RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
         RespFrame::BulkString(Some(argv[argv.len() - 1].clone())),
-        RespFrame::Integer(0),
+        RespFrame::Integer(count),
     ])))
 }
 
-fn publish_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn publish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     // PUBLISH channel message
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("PUBLISH"));
     }
-    // No subscribers — 0 clients received the message
-    Ok(RespFrame::Integer(0))
+    let receivers = store.publish(&argv[1], &argv[2]);
+    Ok(RespFrame::Integer(receivers as i64))
 }
 
-fn pubsub_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn pubsub_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("PUBSUB"));
     }
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if sub.eq_ignore_ascii_case("CHANNELS") {
-        // No active channels
-        Ok(RespFrame::Array(Some(Vec::new())))
+        let channels = store.pubsub_channels();
+        // Optionally filter by pattern
+        let filtered: Vec<RespFrame> = if argv.len() >= 3 {
+            let pattern = &argv[2];
+            channels
+                .into_iter()
+                .filter(|ch| {
+                    // Simple glob match on channel name
+                    pattern == b"*"
+                        || ch == pattern
+                        || String::from_utf8_lossy(pattern)
+                            .contains(&String::from_utf8_lossy(ch).as_ref())
+                })
+                .map(|ch| RespFrame::BulkString(Some(ch)))
+                .collect()
+        } else {
+            channels
+                .into_iter()
+                .map(|ch| RespFrame::BulkString(Some(ch)))
+                .collect()
+        };
+        Ok(RespFrame::Array(Some(filtered)))
     } else if sub.eq_ignore_ascii_case("NUMSUB") {
-        // Return channel/count pairs — all zeros
         let mut result = Vec::new();
         for ch in &argv[2..] {
             result.push(RespFrame::BulkString(Some(ch.clone())));
-            result.push(RespFrame::Integer(0));
+            result.push(RespFrame::Integer(store.pubsub_numsub_count(ch) as i64));
         }
         Ok(RespFrame::Array(Some(result)))
     } else if sub.eq_ignore_ascii_case("NUMPAT") {
-        Ok(RespFrame::Integer(0))
+        Ok(RespFrame::Integer(store.pubsub_numpat() as i64))
     } else if sub.eq_ignore_ascii_case("SHARDCHANNELS") {
+        // Shard channels not tracked in standalone mode
         Ok(RespFrame::Array(Some(Vec::new())))
     } else if sub.eq_ignore_ascii_case("SHARDNUMSUB") {
         let mut result = Vec::new();
@@ -7290,17 +7489,25 @@ fn eval_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     ))
 }
 
-fn evalsha_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn evalsha_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     // EVALSHA sha1 numkeys [key ...] [arg ...]
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("EVALSHA"));
     }
-    Ok(RespFrame::Error(
-        "NOSCRIPT No matching script. Please use EVAL.".to_string(),
-    ))
+    // Check if the script exists in the cache
+    if store.script_get(&argv[1]).is_some() {
+        // Script found, but Lua execution is not yet implemented
+        Ok(RespFrame::Error(
+            "ERR Lua scripting execution is not yet implemented".to_string(),
+        ))
+    } else {
+        Ok(RespFrame::Error(
+            "NOSCRIPT No matching script. Please use EVAL.".to_string(),
+        ))
+    }
 }
 
-fn script_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SCRIPT"));
     }
@@ -7309,16 +7516,21 @@ fn script_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         if argv.len() != 3 {
             return Err(CommandError::WrongArity("SCRIPT|LOAD"));
         }
-        // Return a fake SHA1 hash (Lua not actually executed)
-        Ok(RespFrame::Error(
-            "ERR Lua scripting is not supported".to_string(),
-        ))
+        let sha1 = store.script_load(&argv[2]);
+        Ok(RespFrame::BulkString(Some(sha1.into_bytes())))
     } else if sub.eq_ignore_ascii_case("EXISTS") {
-        // Return 0 for each script — none exist
-        let count = argv.len() - 2;
-        let results: Vec<RespFrame> = (0..count).map(|_| RespFrame::Integer(0)).collect();
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("SCRIPT|EXISTS"));
+        }
+        let sha1s: Vec<&[u8]> = argv[2..].iter().map(Vec::as_slice).collect();
+        let results: Vec<RespFrame> = store
+            .script_exists(&sha1s)
+            .into_iter()
+            .map(|exists| RespFrame::Integer(i64::from(exists)))
+            .collect();
         Ok(RespFrame::Array(Some(results)))
     } else if sub.eq_ignore_ascii_case("FLUSH") {
+        store.script_flush();
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("KILL") {
         Ok(RespFrame::Error(
