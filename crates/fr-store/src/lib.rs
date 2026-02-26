@@ -141,6 +141,7 @@ pub enum StoreError {
     IndexOutOfRange,
     InvalidDumpPayload,
     BusyKey,
+    GenericError(String),
 }
 
 /// The inner value held by a key in the store.
@@ -288,6 +289,34 @@ pub struct Store {
     pub subscribed_patterns: HashSet<Vec<u8>>,
     /// Pub/Sub: pending messages for delivery (channel, message).
     pub pubsub_pending: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Function libraries: library_name → FunctionLibrary.
+    function_libraries: HashMap<String, FunctionLibrary>,
+}
+
+/// A registered function library (Redis 7.0+ FUNCTION framework).
+#[derive(Clone, Debug)]
+pub struct FunctionLibrary {
+    /// Library name (unique identifier).
+    pub name: String,
+    /// Engine name (e.g. "LUA").
+    pub engine: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Raw library code.
+    pub code: Vec<u8>,
+    /// Functions registered by this library: function_name → FunctionEntry.
+    pub functions: Vec<FunctionEntry>,
+}
+
+/// A single function within a library.
+#[derive(Clone, Debug)]
+pub struct FunctionEntry {
+    /// Function name.
+    pub name: String,
+    /// Optional description.
+    pub description: Option<String>,
+    /// Flags (e.g. "no-writes", "allow-stale").
+    pub flags: Vec<String>,
 }
 
 impl Store {
@@ -322,10 +351,8 @@ impl Store {
     pub fn set(&mut self, key: Vec<u8>, value: Vec<u8>, px_ttl_ms: Option<u64>, now_ms: u64) {
         let expires_at_ms = px_ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
         self.stream_groups.remove(key.as_slice());
-        self.entries.insert(
-            key,
-            Entry::new(Value::String(value), expires_at_ms, now_ms),
-        );
+        self.entries
+            .insert(key, Entry::new(Value::String(value), expires_at_ms, now_ms));
     }
 
     /// SET variant that takes an absolute expiry timestamp (for EXAT/PXAT/KEEPTTL).
@@ -336,10 +363,8 @@ impl Store {
         expires_at_ms: Option<u64>,
     ) {
         self.stream_groups.remove(key.as_slice());
-        self.entries.insert(
-            key,
-            Entry::new(Value::String(value), expires_at_ms, 0),
-        );
+        self.entries
+            .insert(key, Entry::new(Value::String(value), expires_at_ms, 0));
     }
 
     /// Returns the current absolute expiry timestamp for a key, if any.
@@ -377,7 +402,11 @@ impl Store {
         let next = current.checked_add(1).ok_or(StoreError::IntegerOverflow)?;
         self.entries.insert(
             key.to_vec(),
-            Entry::new(Value::String(next.to_string().into_bytes()), expires_at_ms, now_ms),
+            Entry::new(
+                Value::String(next.to_string().into_bytes()),
+                expires_at_ms,
+                now_ms,
+            ),
         );
         Ok(next)
     }
@@ -500,10 +529,8 @@ impl Store {
         if self.entries.contains_key(&key) {
             return false;
         }
-        self.entries.insert(
-            key,
-            Entry::new(Value::String(value), None, now_ms),
-        );
+        self.entries
+            .insert(key, Entry::new(Value::String(value), None, now_ms));
         true
     }
 
@@ -521,10 +548,8 @@ impl Store {
             },
             None => (None, None),
         };
-        self.entries.insert(
-            key,
-            Entry::new(Value::String(value), expires_at_ms, now_ms),
-        );
+        self.entries
+            .insert(key, Entry::new(Value::String(value), expires_at_ms, now_ms));
         Ok(old)
     }
 
@@ -542,7 +567,11 @@ impl Store {
             .ok_or(StoreError::IntegerOverflow)?;
         self.entries.insert(
             key.to_vec(),
-            Entry::new(Value::String(next.to_string().into_bytes()), expires_at_ms, now_ms),
+            Entry::new(
+                Value::String(next.to_string().into_bytes()),
+                expires_at_ms,
+                now_ms,
+            ),
         );
         Ok(next)
     }
@@ -562,7 +591,11 @@ impl Store {
         }
         self.entries.insert(
             key.to_vec(),
-            Entry::new(Value::String(next.to_string().into_bytes()), expires_at_ms, now_ms),
+            Entry::new(
+                Value::String(next.to_string().into_bytes()),
+                expires_at_ms,
+                now_ms,
+            ),
         );
         Ok(next)
     }
@@ -1250,10 +1283,8 @@ impl Store {
             None => {
                 let mut m = HashMap::new();
                 m.insert(field, value);
-                self.entries.insert(
-                    key.to_vec(),
-                    Entry::new(Value::Hash(m), None, now_ms),
-                );
+                self.entries
+                    .insert(key.to_vec(), Entry::new(Value::Hash(m), None, now_ms));
                 Ok(true)
             }
         }
@@ -1399,8 +1430,7 @@ impl Store {
             Some(entry) => match &mut entry.value {
                 Value::Hash(m) => {
                     let current = match m.get(field) {
-                        Some(v) => parse_i64(v)
-                            .map_err(|_| StoreError::HashValueNotInteger)?,
+                        Some(v) => parse_i64(v).map_err(|_| StoreError::HashValueNotInteger)?,
                         None => 0,
                     };
                     let next = current
@@ -1414,10 +1444,8 @@ impl Store {
             None => {
                 let mut m = HashMap::new();
                 m.insert(field.to_vec(), delta.to_string().into_bytes());
-                self.entries.insert(
-                    key.to_vec(),
-                    Entry::new(Value::Hash(m), None, now_ms),
-                );
+                self.entries
+                    .insert(key.to_vec(), Entry::new(Value::Hash(m), None, now_ms));
                 Ok(delta)
             }
         }
@@ -1447,10 +1475,8 @@ impl Store {
             None => {
                 let mut m = HashMap::new();
                 m.insert(field, value);
-                self.entries.insert(
-                    key.to_vec(),
-                    Entry::new(Value::Hash(m), None, now_ms),
-                );
+                self.entries
+                    .insert(key.to_vec(), Entry::new(Value::Hash(m), None, now_ms));
                 Ok(true)
             }
         }
@@ -1497,10 +1523,8 @@ impl Store {
                 }
                 let mut m = HashMap::new();
                 m.insert(field.to_vec(), delta.to_string().into_bytes());
-                self.entries.insert(
-                    key.to_vec(),
-                    Entry::new(Value::Hash(m), None, now_ms),
-                );
+                self.entries
+                    .insert(key.to_vec(), Entry::new(Value::Hash(m), None, now_ms));
                 Ok(delta)
             }
         }
@@ -1582,10 +1606,8 @@ impl Store {
                     l.push_front(v.clone());
                 }
                 let len = l.len();
-                self.entries.insert(
-                    key.to_vec(),
-                    Entry::new(Value::List(l), None, now_ms),
-                );
+                self.entries
+                    .insert(key.to_vec(), Entry::new(Value::List(l), None, now_ms));
                 Ok(len)
             }
         }
@@ -1614,10 +1636,8 @@ impl Store {
                     l.push_back(v.clone());
                 }
                 let len = l.len();
-                self.entries.insert(
-                    key.to_vec(),
-                    Entry::new(Value::List(l), None, now_ms),
-                );
+                self.entries
+                    .insert(key.to_vec(), Entry::new(Value::List(l), None, now_ms));
                 Ok(len)
             }
         }
@@ -1804,7 +1824,13 @@ impl Store {
                         }
                     } else {
                         // Reverse scan
-                        for (i, item) in l.iter().enumerate().take(len).skip(len.saturating_sub(limit)).rev() {
+                        for (i, item) in l
+                            .iter()
+                            .enumerate()
+                            .take(len)
+                            .skip(len.saturating_sub(limit))
+                            .rev()
+                        {
                             if item.as_slice() == element {
                                 matched += 1;
                                 if matched > skip {
@@ -2185,10 +2211,8 @@ impl Store {
                         added += 1;
                     }
                 }
-                self.entries.insert(
-                    key.to_vec(),
-                    Entry::new(Value::Set(s), None, now_ms),
-                );
+                self.entries
+                    .insert(key.to_vec(), Entry::new(Value::Set(s), None, now_ms));
                 Ok(added)
             }
         }
@@ -2628,9 +2652,10 @@ impl Store {
         now_ms: u64,
     ) -> Result<(usize, usize), StoreError> {
         self.drop_if_expired(key, now_ms);
-        let entry = self.entries.entry(key.to_vec()).or_insert_with(|| {
-            Entry::new(Value::SortedSet(HashMap::new()), None, now_ms)
-        });
+        let entry = self
+            .entries
+            .entry(key.to_vec())
+            .or_insert_with(|| Entry::new(Value::SortedSet(HashMap::new()), None, now_ms));
         let Value::SortedSet(zs) = &mut entry.value else {
             return Err(StoreError::WrongType);
         };
@@ -2891,10 +2916,8 @@ impl Store {
             zs.insert(member, score);
         }
         self.stream_groups.remove(key.as_slice());
-        self.entries.insert(
-            key,
-            Entry::new(Value::SortedSet(zs), None, now_ms),
-        );
+        self.entries
+            .insert(key, Entry::new(Value::SortedSet(zs), None, now_ms));
     }
 
     /// Count members with scores within the given bounds.
@@ -2927,9 +2950,10 @@ impl Store {
         now_ms: u64,
     ) -> Result<f64, StoreError> {
         self.drop_if_expired(key, now_ms);
-        let entry = self.entries.entry(key.to_vec()).or_insert_with(|| {
-            Entry::new(Value::SortedSet(HashMap::new()), None, now_ms)
-        });
+        let entry = self
+            .entries
+            .entry(key.to_vec())
+            .or_insert_with(|| Entry::new(Value::SortedSet(HashMap::new()), None, now_ms));
         let Value::SortedSet(zs) = &mut entry.value else {
             return Err(StoreError::WrongType);
         };
@@ -4342,10 +4366,8 @@ impl Store {
         }
 
         let data = hll_encode(&merged);
-        self.entries.insert(
-            dest.to_vec(),
-            Entry::new(Value::String(data), None, now_ms),
-        );
+        self.entries
+            .insert(dest.to_vec(), Entry::new(Value::String(data), None, now_ms));
         Ok(())
     }
 
@@ -4506,7 +4528,11 @@ impl Store {
             self.stream_groups.remove(dest);
             self.entries.insert(
                 dest.to_vec(),
-                Entry::new(Value::SortedSet(std::collections::HashMap::new()), None, now_ms),
+                Entry::new(
+                    Value::SortedSet(std::collections::HashMap::new()),
+                    None,
+                    now_ms,
+                ),
             );
             return Ok(0);
         }
@@ -5009,8 +5035,7 @@ impl Store {
     /// Load a script into the cache, returning its SHA1 hex digest.
     pub fn script_load(&mut self, script: &[u8]) -> String {
         let sha1_hex = sha1_hex(script);
-        self.script_cache
-            .insert(sha1_hex.clone(), script.to_vec());
+        self.script_cache.insert(sha1_hex.clone(), script.to_vec());
         sha1_hex
     }
 
@@ -5034,6 +5059,258 @@ impl Store {
     pub fn script_get(&self, sha1: &[u8]) -> Option<&[u8]> {
         let hex = String::from_utf8_lossy(sha1).to_ascii_lowercase();
         self.script_cache.get(&hex).map(Vec::as_slice)
+    }
+
+    // ── Function library management ─────────────────────────────────
+
+    /// Load a function library. Parses the library code to extract metadata.
+    /// Returns the library name on success.
+    pub fn function_load(&mut self, code: &[u8], replace: bool) -> Result<String, StoreError> {
+        // Parse the library header: #!<engine> name=<name>
+        let code_str = std::str::from_utf8(code).map_err(|_| StoreError::WrongType)?;
+
+        let first_line = code_str.lines().next().unwrap_or("");
+        if !first_line.starts_with("#!") {
+            return Err(StoreError::GenericError(
+                "ERR Missing library metadata".to_string(),
+            ));
+        }
+
+        let header = &first_line[2..].trim();
+        let mut engine = String::new();
+        let mut lib_name = String::new();
+
+        for (i, part) in header.split_whitespace().enumerate() {
+            if i == 0 {
+                engine = part.to_string();
+            } else if let Some(name) = part.strip_prefix("name=") {
+                lib_name = name.to_string();
+            }
+        }
+
+        if engine.is_empty() || lib_name.is_empty() {
+            return Err(StoreError::GenericError(
+                "ERR Missing library metadata".to_string(),
+            ));
+        }
+
+        if !replace && self.function_libraries.contains_key(&lib_name) {
+            return Err(StoreError::GenericError(format!(
+                "ERR Library '{lib_name}' already exists"
+            )));
+        }
+
+        // Parse function registrations from the code
+        let mut functions = Vec::new();
+        for line in code_str.lines() {
+            let trimmed = line.trim();
+            // Look for redis.register_function('name', callback)
+            // or redis.register_function{function_name='name', callback=func, ...}
+            if trimmed.contains("register_function")
+                && let Some(name) = extract_function_name(trimmed)
+            {
+                functions.push(FunctionEntry {
+                    name,
+                    description: None,
+                    flags: Vec::new(),
+                });
+            }
+        }
+
+        let library = FunctionLibrary {
+            name: lib_name.clone(),
+            engine,
+            description: None,
+            code: code.to_vec(),
+            functions,
+        };
+
+        self.function_libraries.insert(lib_name.clone(), library);
+        Ok(lib_name)
+    }
+
+    /// Delete a function library by name.
+    pub fn function_delete(&mut self, name: &str) -> Result<(), StoreError> {
+        if self.function_libraries.remove(name).is_none() {
+            return Err(StoreError::GenericError(
+                "ERR Library not found".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// List function libraries, optionally filtered by pattern.
+    pub fn function_list(&self, pattern: Option<&str>) -> Vec<&FunctionLibrary> {
+        let mut libs: Vec<&FunctionLibrary> = self
+            .function_libraries
+            .values()
+            .filter(|lib| {
+                if let Some(pat) = pattern {
+                    glob_match_str(pat, &lib.name)
+                } else {
+                    true
+                }
+            })
+            .collect();
+        libs.sort_by(|a, b| a.name.cmp(&b.name));
+        libs
+    }
+
+    /// Flush all function libraries.
+    pub fn function_flush(&mut self) {
+        self.function_libraries.clear();
+    }
+
+    /// Dump all function libraries as a serialized blob.
+    pub fn function_dump(&self) -> Vec<u8> {
+        // Simple binary format: [count:4LE] [for each: name_len:4LE name code_len:4LE code]
+        let mut buf = Vec::new();
+        let count = self.function_libraries.len() as u32;
+        buf.extend_from_slice(&count.to_le_bytes());
+        for lib in self.function_libraries.values() {
+            let name_bytes = lib.name.as_bytes();
+            buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(name_bytes);
+            buf.extend_from_slice(&(lib.code.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&lib.code);
+            let engine_bytes = lib.engine.as_bytes();
+            buf.extend_from_slice(&(engine_bytes.len() as u32).to_le_bytes());
+            buf.extend_from_slice(engine_bytes);
+        }
+        buf
+    }
+
+    /// Restore function libraries from a serialized blob.
+    pub fn function_restore(&mut self, data: &[u8], policy: &str) -> Result<(), StoreError> {
+        let flush = policy.eq_ignore_ascii_case("FLUSH");
+        let replace = policy.eq_ignore_ascii_case("REPLACE") || flush;
+        let append = policy.eq_ignore_ascii_case("APPEND") || policy.is_empty();
+
+        if flush {
+            self.function_libraries.clear();
+        }
+
+        let mut pos = 0;
+        if data.len() < 4 {
+            return Err(StoreError::GenericError(
+                "ERR Invalid dump data".to_string(),
+            ));
+        }
+        let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
+        pos += 4;
+
+        for _ in 0..count {
+            if pos + 4 > data.len() {
+                return Err(StoreError::GenericError(
+                    "ERR Invalid dump data".to_string(),
+                ));
+            }
+            let name_len =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
+            pos += 4;
+            if pos + name_len > data.len() {
+                return Err(StoreError::GenericError(
+                    "ERR Invalid dump data".to_string(),
+                ));
+            }
+            let name = String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
+            pos += name_len;
+
+            if pos + 4 > data.len() {
+                return Err(StoreError::GenericError(
+                    "ERR Invalid dump data".to_string(),
+                ));
+            }
+            let code_len =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
+            pos += 4;
+            if pos + code_len > data.len() {
+                return Err(StoreError::GenericError(
+                    "ERR Invalid dump data".to_string(),
+                ));
+            }
+            let code = data[pos..pos + code_len].to_vec();
+            pos += code_len;
+
+            if pos + 4 > data.len() {
+                return Err(StoreError::GenericError(
+                    "ERR Invalid dump data".to_string(),
+                ));
+            }
+            let engine_len =
+                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
+            pos += 4;
+            if pos + engine_len > data.len() {
+                return Err(StoreError::GenericError(
+                    "ERR Invalid dump data".to_string(),
+                ));
+            }
+            let engine = String::from_utf8_lossy(&data[pos..pos + engine_len]).to_string();
+            pos += engine_len;
+
+            if !replace && !append {
+                continue;
+            }
+            if append && self.function_libraries.contains_key(&name) {
+                return Err(StoreError::GenericError(format!(
+                    "ERR Library '{name}' already exists"
+                )));
+            }
+
+            // Re-parse functions from code
+            let mut functions = Vec::new();
+            let code_str = String::from_utf8_lossy(&code);
+            for line in code_str.lines() {
+                let trimmed = line.trim();
+                if trimmed.contains("register_function")
+                    && let Some(fn_name) = extract_function_name(trimmed)
+                {
+                    functions.push(FunctionEntry {
+                        name: fn_name,
+                        description: None,
+                        flags: Vec::new(),
+                    });
+                }
+            }
+
+            self.function_libraries.insert(
+                name.clone(),
+                FunctionLibrary {
+                    name,
+                    engine,
+                    description: None,
+                    code,
+                    functions,
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Look up a function by name across all libraries. Returns (library, function_entry).
+    pub fn function_get(&self, func_name: &str) -> Option<(&FunctionLibrary, &FunctionEntry)> {
+        for lib in self.function_libraries.values() {
+            for func in &lib.functions {
+                if func.name.eq_ignore_ascii_case(func_name) {
+                    return Some((lib, func));
+                }
+            }
+        }
+        None
+    }
+
+    /// Get FUNCTION STATS data.
+    pub fn function_stats(&self) -> (usize, usize) {
+        let lib_count = self.function_libraries.len();
+        let func_count: usize = self
+            .function_libraries
+            .values()
+            .map(|lib| lib.functions.len())
+            .sum();
+        (lib_count, func_count)
     }
 
     /// Subscribe to a channel. Returns the total subscription count.
@@ -5318,6 +5595,12 @@ fn decode_length(data: &[u8], offset: usize) -> Result<(usize, usize), StoreErro
 }
 
 /// Minimal SHA-1 implementation (pure Rust, no unsafe).
+/// Public alias for use by fr-command's Lua evaluator (redis.sha1hex).
+pub fn sha1_hex_public(data: &[u8]) -> String {
+    sha1_hex(data)
+}
+
+/// Minimal SHA-1 implementation (pure Rust, no unsafe).
 fn sha1_hex(data: &[u8]) -> String {
     let mut h0: u32 = 0x6745_2301;
     let mut h1: u32 = 0xEFCD_AB89;
@@ -5348,6 +5631,7 @@ fn sha1_hex(data: &[u8]) -> String {
         }
 
         let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
+        #[allow(clippy::needless_range_loop)]
         for i in 0..80 {
             let (f, k) = match i {
                 0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
@@ -5634,6 +5918,54 @@ fn hll_estimate(registers: &[u8]) -> u64 {
 /// Supports `*` (match any sequence), `?` (match one byte),
 /// `[abc]` (character class), `[^abc]` (negated class),
 /// and `\x` (escape).
+/// String-based glob match wrapper for function library filtering.
+fn glob_match_str(pattern: &str, string: &str) -> bool {
+    glob_match(pattern.as_bytes(), string.as_bytes())
+}
+
+/// Extract a function name from a redis.register_function call.
+/// Handles patterns like:
+///   redis.register_function('myFunc', function(keys, args) ...)
+///   redis.register_function{function_name='myFunc', ...}
+fn extract_function_name(line: &str) -> Option<String> {
+    // Pattern 1: redis.register_function('name', ...)
+    if let Some(start) = line.find("register_function") {
+        let rest = &line[start..];
+        // Look for quoted string after (
+        if let Some(paren) = rest.find('(') {
+            let after = &rest[paren + 1..].trim_start();
+            if let Some(name) = extract_quoted_string(after) {
+                return Some(name);
+            }
+        }
+        // Pattern 2: register_function{function_name='name', ...}
+        if let Some(brace) = rest.find('{') {
+            let after = &rest[brace + 1..];
+            if let Some(fn_idx) = after.find("function_name") {
+                let rest2 = &after[fn_idx..];
+                if let Some(eq) = rest2.find('=') {
+                    let after_eq = rest2[eq + 1..].trim_start();
+                    if let Some(name) = extract_quoted_string(after_eq) {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_quoted_string(s: &str) -> Option<String> {
+    let s = s.trim();
+    let quote = s.as_bytes().first().copied()?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    let rest = &s[1..];
+    let end = rest.find(quote as char)?;
+    Some(rest[..end].to_string())
+}
+
 fn glob_match(pattern: &[u8], string: &[u8]) -> bool {
     glob_match_inner(pattern, string, 0, 0)
 }

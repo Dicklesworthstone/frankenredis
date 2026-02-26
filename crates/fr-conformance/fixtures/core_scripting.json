@@ -1,0 +1,374 @@
+{
+  "suite": "core_scripting",
+  "cases": [
+    {
+      "name": "eval_return_integer",
+      "now_ms": 0,
+      "argv": ["EVAL", "return 1", "0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "eval_return_string",
+      "now_ms": 0,
+      "argv": ["EVAL", "return 'hello'", "0"],
+      "expect": { "kind": "bulk", "value": "hello" }
+    },
+    {
+      "name": "eval_return_nil",
+      "now_ms": 0,
+      "argv": ["EVAL", "return nil", "0"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "eval_return_true_as_integer_1",
+      "now_ms": 0,
+      "argv": ["EVAL", "return true", "0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "eval_return_false_as_nil",
+      "now_ms": 0,
+      "argv": ["EVAL", "return false", "0"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "eval_return_table_as_array",
+      "now_ms": 0,
+      "argv": ["EVAL", "return {1, 2, 3}", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 1 },
+          { "kind": "integer", "value": 2 },
+          { "kind": "integer", "value": 3 }
+        ]
+      }
+    },
+    {
+      "name": "eval_arithmetic",
+      "now_ms": 0,
+      "argv": ["EVAL", "return 2 + 3 * 4", "0"],
+      "expect": { "kind": "integer", "value": 14 }
+    },
+    {
+      "name": "eval_string_concat",
+      "now_ms": 0,
+      "argv": ["EVAL", "return 'hello' .. ' ' .. 'world'", "0"],
+      "expect": { "kind": "bulk", "value": "hello world" }
+    },
+    {
+      "name": "eval_local_variable",
+      "now_ms": 0,
+      "argv": ["EVAL", "local x = 42 return x", "0"],
+      "expect": { "kind": "integer", "value": 42 }
+    },
+    {
+      "name": "eval_if_true_branch",
+      "now_ms": 0,
+      "argv": ["EVAL", "if true then return 'yes' else return 'no' end", "0"],
+      "expect": { "kind": "bulk", "value": "yes" }
+    },
+    {
+      "name": "eval_if_false_branch",
+      "now_ms": 0,
+      "argv": ["EVAL", "if false then return 'yes' else return 'no' end", "0"],
+      "expect": { "kind": "bulk", "value": "no" }
+    },
+    {
+      "name": "eval_numeric_for_loop",
+      "now_ms": 0,
+      "argv": ["EVAL", "local sum = 0 for i = 1, 5 do sum = sum + i end return sum", "0"],
+      "expect": { "kind": "integer", "value": 15 }
+    },
+    {
+      "name": "eval_keys_and_argv",
+      "now_ms": 0,
+      "argv": ["EVAL", "return KEYS[1]", "1", "mykey"],
+      "expect": { "kind": "bulk", "value": "mykey" }
+    },
+    {
+      "name": "eval_argv_access",
+      "now_ms": 0,
+      "argv": ["EVAL", "return ARGV[1]", "0", "myarg"],
+      "expect": { "kind": "bulk", "value": "myarg" }
+    },
+    {
+      "name": "eval_redis_call_set",
+      "now_ms": 0,
+      "argv": ["EVAL", "return redis.call('SET', KEYS[1], ARGV[1])", "1", "skey", "sval"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "eval_redis_call_get",
+      "now_ms": 0,
+      "argv": ["EVAL", "return redis.call('GET', KEYS[1])", "1", "skey"],
+      "expect": { "kind": "bulk", "value": "sval" }
+    },
+    {
+      "name": "eval_redis_call_incr",
+      "now_ms": 0,
+      "argv": ["EVAL", "redis.call('SET', KEYS[1], '10') return redis.call('INCR', KEYS[1])", "1", "counter"],
+      "expect": { "kind": "integer", "value": 11 }
+    },
+    {
+      "name": "eval_tonumber",
+      "now_ms": 0,
+      "argv": ["EVAL", "return tonumber('42')", "0"],
+      "expect": { "kind": "integer", "value": 42 }
+    },
+    {
+      "name": "eval_tostring",
+      "now_ms": 0,
+      "argv": ["EVAL", "return tostring(42)", "0"],
+      "expect": { "kind": "bulk", "value": "42" }
+    },
+    {
+      "name": "eval_type_function",
+      "now_ms": 0,
+      "argv": ["EVAL", "return type(42)", "0"],
+      "expect": { "kind": "bulk", "value": "number" }
+    },
+    {
+      "name": "eval_string_len_operator",
+      "now_ms": 0,
+      "argv": ["EVAL", "return #'hello'", "0"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "eval_table_len_operator",
+      "now_ms": 0,
+      "argv": ["EVAL", "local t = {10, 20, 30} return #t", "0"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "eval_math_floor",
+      "now_ms": 0,
+      "argv": ["EVAL", "return math.floor(3.7)", "0"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "eval_string_sub",
+      "now_ms": 0,
+      "argv": ["EVAL", "return string.sub('hello', 1, 3)", "0"],
+      "expect": { "kind": "bulk", "value": "hel" }
+    },
+    {
+      "name": "eval_string_upper",
+      "now_ms": 0,
+      "argv": ["EVAL", "return string.upper('hello')", "0"],
+      "expect": { "kind": "bulk", "value": "HELLO" }
+    },
+    {
+      "name": "eval_pcall_success",
+      "now_ms": 0,
+      "argv": ["EVAL", "local ok, val = pcall(function() return 42 end) if ok then return val else return 0 end", "0"],
+      "expect": { "kind": "integer", "value": 42 }
+    },
+    {
+      "name": "eval_wrong_arity",
+      "now_ms": 0,
+      "argv": ["EVAL", "return 1"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'EVAL' command" }
+    },
+    {
+      "name": "eval_invalid_numkeys",
+      "now_ms": 0,
+      "argv": ["EVAL", "return 1", "abc"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "script_load_and_exists",
+      "now_ms": 0,
+      "argv": ["SCRIPT", "LOAD", "return 1"],
+      "expect": { "kind": "bulk", "value": "e0e1f9fabfc9d4800c877a703b823ac0578ff8db" }
+    },
+    {
+      "name": "script_exists_loaded",
+      "now_ms": 0,
+      "argv": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "script_exists_not_loaded",
+      "now_ms": 0,
+      "argv": ["SCRIPT", "EXISTS", "0000000000000000000000000000000000000000"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "evalsha_run_cached",
+      "now_ms": 0,
+      "argv": ["EVALSHA", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "evalsha_noscript",
+      "now_ms": 0,
+      "argv": ["EVALSHA", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0"],
+      "expect": { "kind": "error", "value": "NOSCRIPT No matching script. Please use EVAL." }
+    },
+    {
+      "name": "script_flush_clears_cache",
+      "now_ms": 0,
+      "argv": ["SCRIPT", "FLUSH"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "script_exists_after_flush",
+      "now_ms": 0,
+      "argv": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "eval_while_loop",
+      "now_ms": 0,
+      "argv": ["EVAL", "local i = 0 while i < 5 do i = i + 1 end return i", "0"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "eval_repeat_until",
+      "now_ms": 0,
+      "argv": ["EVAL", "local i = 0 repeat i = i + 1 until i >= 3 return i", "0"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "eval_table_insert_and_return",
+      "now_ms": 0,
+      "argv": ["EVAL", "local t = {} for i = 1, 3 do t[i] = i * 10 end return t", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 10 },
+          { "kind": "integer", "value": 20 },
+          { "kind": "integer", "value": 30 }
+        ]
+      }
+    },
+    {
+      "name": "eval_status_reply",
+      "now_ms": 0,
+      "argv": ["EVAL", "return redis.status_reply('PONG')", "0"],
+      "expect": { "kind": "simple", "value": "PONG" }
+    },
+    {
+      "name": "eval_error_reply",
+      "now_ms": 0,
+      "argv": ["EVAL", "return redis.error_reply('custom error')", "0"],
+      "expect": { "kind": "error", "value": "custom error" }
+    },
+    {
+      "name": "function_flush_initial",
+      "now_ms": 0,
+      "argv": ["FUNCTION", "FLUSH"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "function_list_empty",
+      "now_ms": 0,
+      "argv": ["FUNCTION", "LIST"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "function_load_library",
+      "now_ms": 0,
+      "argv": ["FUNCTION", "LOAD", "#!lua name=mylib\nredis.register_function('myfunc', function(keys, args) return 'hello' end)"],
+      "expect": { "kind": "bulk", "value": "mylib" }
+    },
+    {
+      "name": "function_list_after_load",
+      "now_ms": 0,
+      "argv": ["FUNCTION", "LIST"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "library_name" },
+              { "kind": "bulk", "value": "mylib" },
+              { "kind": "bulk", "value": "engine" },
+              { "kind": "bulk", "value": "lua" },
+              { "kind": "bulk", "value": "functions" },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      { "kind": "bulk", "value": "name" },
+                      { "kind": "bulk", "value": "myfunc" },
+                      { "kind": "bulk", "value": "description" },
+                      { "kind": "bulk", "value": null },
+                      { "kind": "bulk", "value": "flags" },
+                      { "kind": "array", "value": [] }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "function_stats_after_load",
+      "now_ms": 0,
+      "argv": ["FUNCTION", "STATS"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "running_script" },
+          { "kind": "integer", "value": 0 },
+          { "kind": "bulk", "value": "engines" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "LUA" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "libraries_count" },
+                  { "kind": "integer", "value": 1 },
+                  { "kind": "bulk", "value": "functions_count" },
+                  { "kind": "integer", "value": 1 }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "function_delete_library",
+      "now_ms": 0,
+      "argv": ["FUNCTION", "DELETE", "mylib"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "function_list_after_delete",
+      "now_ms": 0,
+      "argv": ["FUNCTION", "LIST"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "function_delete_nonexistent",
+      "now_ms": 0,
+      "argv": ["FUNCTION", "DELETE", "nolib"],
+      "expect": { "kind": "error", "value": "ERR Library not found" }
+    }
+  ]
+}

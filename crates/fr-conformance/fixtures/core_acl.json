@@ -259,6 +259,59 @@
         "kind": "error",
         "value": "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
       }
+    },
+    {
+      "name": "acl_cat_hyperloglog_returns_commands",
+      "now_ms": 25,
+      "argv": ["ACL", "CAT", "hyperloglog"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "pfadd" },
+          { "kind": "bulk", "value": "pfcount" },
+          { "kind": "bulk", "value": "pfmerge" }
+        ]
+      }
+    },
+    {
+      "name": "acl_cat_transaction_returns_commands",
+      "now_ms": 26,
+      "argv": ["ACL", "CAT", "transaction"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "multi" },
+          { "kind": "bulk", "value": "exec" },
+          { "kind": "bulk", "value": "discard" },
+          { "kind": "bulk", "value": "watch" },
+          { "kind": "bulk", "value": "unwatch" }
+        ]
+      }
+    },
+    {
+      "name": "acl_cat_bitmap_returns_commands",
+      "now_ms": 27,
+      "argv": ["ACL", "CAT", "bitmap"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "setbit" },
+          { "kind": "bulk", "value": "getbit" },
+          { "kind": "bulk", "value": "bitcount" },
+          { "kind": "bulk", "value": "bitpos" },
+          { "kind": "bulk", "value": "bitop" },
+          { "kind": "bulk", "value": "bitfield" }
+        ]
+      }
+    },
+    {
+      "name": "acl_log_with_count_returns_empty",
+      "now_ms": 28,
+      "argv": ["ACL", "LOG", "10"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
     }
   ]
 }

@@ -5,7 +5,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use fr_command::{CommandError, dispatch_argv, frame_to_argv};
+use fr_command::{CommandError, commands_in_acl_category, dispatch_argv, frame_to_argv};
 use fr_config::{
     DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
     TlsCfgError, TlsConfig, TlsListenerTransition, TlsRuntimeState,
@@ -42,60 +42,137 @@ const DEFAULT_ACLLOG_MAX_LEN: i64 = 128;
 /// Static configuration parameters returned by CONFIG GET.
 /// These represent sensible defaults for a standalone FrankenRedis instance.
 const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
+    // Network
     ("bind", "127.0.0.1"),
+    ("bind-source-addr", ""),
     ("port", "6379"),
-    ("databases", "16"),
-    ("maxmemory", "0"),
-    ("maxmemory-policy", "noeviction"),
-    ("hz", "10"),
+    ("tcp-backlog", "511"),
+    ("unixsocket", ""),
+    ("unixsocketperm", "0"),
     ("timeout", "0"),
     ("tcp-keepalive", "300"),
-    ("tcp-backlog", "511"),
-    ("loglevel", "notice"),
-    ("logfile", ""),
-    ("maxclients", "10000"),
-    ("save", ""),
-    ("appendonly", "no"),
-    ("dir", "."),
-    ("dbfilename", "dump.rdb"),
-    ("appendfilename", "appendonly.aof"),
     ("protected-mode", "yes"),
+    // General
     ("daemonize", "no"),
     ("pidfile", ""),
-    ("lfu-log-factor", "10"),
-    ("lfu-decay-time", "1"),
-    ("activedefrag", "no"),
-    ("lazyfree-lazy-eviction", "no"),
-    ("lazyfree-lazy-expire", "no"),
-    ("lazyfree-lazy-server-del", "no"),
-    ("lazyfree-lazy-user-del", "no"),
-    ("latency-tracking", "yes"),
-    ("latency-tracking-info-percentiles", "50 99 99.9"),
-    ("proto-max-bulk-len", "512000000"),
-    ("lua-time-limit", "5000"),
-    ("slowlog-log-slower-than", "10000"),
-    ("slowlog-max-len", "128"),
-    ("list-max-listpack-size", "-2"),
-    ("set-max-listpack-entries", "128"),
-    ("hash-max-listpack-entries", "128"),
-    ("hash-max-listpack-value", "64"),
-    ("zset-max-listpack-entries", "128"),
-    ("zset-max-listpack-value", "64"),
-    ("stream-node-max-bytes", "4096"),
-    ("stream-node-max-entries", "100"),
-    ("cluster-enabled", "no"),
-    ("cluster-config-file", ""),
-    ("cluster-node-timeout", "15000"),
+    ("loglevel", "notice"),
+    ("logfile", ""),
+    ("databases", "16"),
+    ("always-show-logo", "yes"),
+    ("set-proc-title", "yes"),
+    ("proc-title-template", "{title} {laddr} {server-mode}"),
+    // Memory
+    ("maxmemory", "0"),
+    ("maxmemory-policy", "noeviction"),
+    ("maxmemory-samples", "5"),
+    ("maxmemory-eviction-tenacity", "10"),
+    ("maxclients", "10000"),
+    // Persistence - RDB
+    ("save", ""),
+    ("stop-writes-on-bgsave-error", "yes"),
+    ("rdbcompression", "yes"),
+    ("rdbchecksum", "yes"),
+    ("dbfilename", "dump.rdb"),
+    ("rdb-del-sync-files", "no"),
+    ("dir", "."),
+    // Persistence - AOF
+    ("appendonly", "no"),
+    ("appendfilename", "appendonly.aof"),
+    ("appenddirname", "appendonlydir"),
+    ("appendfsync", "everysec"),
+    ("no-appendfsync-on-rewrite", "no"),
+    ("auto-aof-rewrite-percentage", "100"),
+    ("auto-aof-rewrite-min-size", "67108864"),
+    ("aof-load-truncated", "yes"),
+    ("aof-use-rdb-preamble", "yes"),
+    ("aof-timestamp-enabled", "no"),
+    // Replication
+    ("replicaof", ""),
+    ("masterauth", ""),
+    ("masteruser", ""),
+    ("replica-serve-stale-data", "yes"),
+    ("replica-read-only", "yes"),
+    ("replica-lazy-flush", "no"),
+    ("repl-diskless-sync", "yes"),
+    ("repl-diskless-sync-delay", "5"),
+    ("repl-diskless-sync-period", "0"),
+    ("repl-diskless-load", "disabled"),
+    ("repl-ping-replica-period", "10"),
+    ("repl-timeout", "60"),
     ("repl-backlog-size", "1048576"),
     ("repl-backlog-ttl", "3600"),
     ("min-replicas-to-write", "0"),
     ("min-replicas-max-lag", "10"),
+    // Lua scripting
+    ("lua-time-limit", "5000"),
+    ("busy-reply-threshold", "5000"),
+    // Cluster
+    ("cluster-enabled", "no"),
+    ("cluster-config-file", "nodes.conf"),
+    ("cluster-node-timeout", "15000"),
+    ("cluster-migration-barrier", "1"),
+    ("cluster-allow-reads-when-down", "no"),
+    ("cluster-allow-pubsubshard-when-down", "yes"),
+    ("cluster-link-sendbuf-limit", "0"),
+    ("cluster-announce-hostname", ""),
+    ("cluster-announce-human-nodename", ""),
+    ("cluster-preferred-endpoint-type", "ip"),
+    // Slow log
+    ("slowlog-log-slower-than", "10000"),
+    ("slowlog-max-len", "128"),
+    // Latency monitor
+    ("latency-tracking", "yes"),
+    ("latency-tracking-info-percentiles", "50 99 99.9"),
+    ("latency-monitor-threshold", "0"),
+    // Keyspace notifications
     ("notify-keyspace-events", ""),
-    ("always-show-logo", "yes"),
-    ("rename-command", ""),
+    // Advanced
+    ("hz", "10"),
+    ("dynamic-hz", "yes"),
+    ("activedefrag", "no"),
+    ("active-defrag-enabled", "no"),
+    ("active-defrag-threshold-lower", "10"),
+    ("active-defrag-threshold-upper", "100"),
+    ("active-defrag-cycle-min", "1"),
+    ("active-defrag-cycle-max", "25"),
+    ("active-expire-enabled", "yes"),
+    ("active-expire-effort", "1"),
+    ("lfu-log-factor", "10"),
+    ("lfu-decay-time", "1"),
+    // Lazy free
+    ("lazyfree-lazy-eviction", "no"),
+    ("lazyfree-lazy-expire", "no"),
+    ("lazyfree-lazy-server-del", "no"),
+    ("lazyfree-lazy-user-del", "no"),
+    ("lazyfree-lazy-user-flush", "no"),
+    // Encoding thresholds
+    ("list-max-listpack-size", "-2"),
+    ("list-max-ziplist-size", "-2"),
+    ("list-compress-depth", "0"),
+    ("set-max-intset-entries", "512"),
+    ("set-max-listpack-entries", "128"),
+    ("hash-max-listpack-entries", "128"),
+    ("hash-max-listpack-value", "64"),
+    ("hash-max-ziplist-entries", "128"),
+    ("hash-max-ziplist-value", "64"),
+    ("zset-max-listpack-entries", "128"),
+    ("zset-max-listpack-value", "64"),
+    ("zset-max-ziplist-entries", "128"),
+    ("zset-max-ziplist-value", "64"),
+    ("stream-node-max-bytes", "4096"),
+    ("stream-node-max-entries", "100"),
+    // Protocol
+    ("proto-max-bulk-len", "512000000"),
+    ("close-on-oom", "no"),
+    // I/O threads
     ("io-threads", "1"),
     ("io-threads-do-reads", "no"),
+    // Memory allocator
     ("jemalloc-bg-thread", "yes"),
+    // Misc
+    ("rename-command", ""),
+    ("enable-debug-command", "no"),
+    ("hide-user-data-from-log", "no"),
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -613,6 +690,7 @@ pub struct Runtime {
     /// Slow log entry ID counter.
     slowlog_next_id: u64,
     /// Slow log threshold in microseconds (slowlog-log-slower-than config).
+    #[allow(dead_code)]
     slowlog_log_slower_than_us: i64,
     /// Slow log maximum length.
     slowlog_max_len: usize,
@@ -1524,7 +1602,12 @@ impl Runtime {
                 Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
             };
             if CATEGORIES.iter().any(|c| c.eq_ignore_ascii_case(cat)) {
-                RespFrame::Array(Some(Vec::new()))
+                let cmds = commands_in_acl_category(cat);
+                RespFrame::Array(Some(
+                    cmds.iter()
+                        .map(|c| RespFrame::BulkString(Some(c.as_bytes().to_vec())))
+                        .collect(),
+                ))
             } else {
                 RespFrame::Error(format!("ERR Unknown ACL cat category '{cat}'"))
             }
@@ -1553,12 +1636,22 @@ impl Runtime {
         let hex_chars = bits.div_ceil(4);
         let bytes_needed = hex_chars.div_ceil(2);
         let mut buf = vec![0u8; bytes_needed];
-        // Simple deterministic pseudo-random for now (seeded from packet counter)
-        let seed = PACKET_COUNTER.load(Ordering::Relaxed);
-        let mut state = seed.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
-        for byte in &mut buf {
-            state = state.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
-            *byte = (state >> 33) as u8;
+        // Read from /dev/urandom for cryptographic-quality randomness.
+        // Fall back to PRNG seeded from packet counter + timestamp if unavailable.
+        if std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
+            .is_err()
+        {
+            let seed = PACKET_COUNTER.load(Ordering::Relaxed).wrapping_add(
+                std::time::SystemTime::UNIX_EPOCH
+                    .elapsed()
+                    .map_or(0, |d| d.as_nanos() as u64),
+            );
+            let mut state = seed.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
+            for byte in &mut buf {
+                state = state.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
+                *byte = (state >> 33) as u8;
+            }
         }
         let hex: String = buf.iter().map(|b| format!("{b:02x}")).collect();
         let truncated = &hex[..hex_chars];
@@ -1736,25 +1829,12 @@ impl Runtime {
                 next_maxmemory = Some(parsed);
                 continue;
             }
-            // Accept commonly-probed parameters as no-ops to avoid breaking clients
-            if parameter.eq_ignore_ascii_case("maxmemory-policy")
-                || parameter.eq_ignore_ascii_case("hz")
-                || parameter.eq_ignore_ascii_case("timeout")
-                || parameter.eq_ignore_ascii_case("tcp-keepalive")
-                || parameter.eq_ignore_ascii_case("loglevel")
-                || parameter.eq_ignore_ascii_case("save")
-                || parameter.eq_ignore_ascii_case("appendonly")
-                || parameter.eq_ignore_ascii_case("slowlog-log-slower-than")
-                || parameter.eq_ignore_ascii_case("slowlog-max-len")
-                || parameter.eq_ignore_ascii_case("latency-tracking")
-                || parameter.eq_ignore_ascii_case("notify-keyspace-events")
-                || parameter.eq_ignore_ascii_case("lazyfree-lazy-eviction")
-                || parameter.eq_ignore_ascii_case("lazyfree-lazy-expire")
-                || parameter.eq_ignore_ascii_case("lazyfree-lazy-server-del")
-                || parameter.eq_ignore_ascii_case("lazyfree-lazy-user-del")
-                || parameter.eq_ignore_ascii_case("activedefrag")
-                || parameter.eq_ignore_ascii_case("protected-mode")
-            {
+            // Accept known CONFIG parameters as no-ops to avoid breaking clients.
+            // These are recognized but their values are not yet stored dynamically.
+            let is_known_param = CONFIG_STATIC_PARAMS
+                .iter()
+                .any(|&(name, _)| name.eq_ignore_ascii_case(parameter));
+            if is_known_param {
                 continue;
             }
             return RespFrame::Error(format!("ERR Unsupported CONFIG parameter '{parameter}'"));
@@ -1888,9 +1968,7 @@ impl Runtime {
             } else if mode.eq_ignore_ascii_case("OFF") {
                 self.client_no_evict = false;
             } else {
-                return RespFrame::Error(
-                    "ERR argument must be 'on' or 'off'".to_string(),
-                );
+                return RespFrame::Error("ERR argument must be 'on' or 'off'".to_string());
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("NO-TOUCH") {
@@ -1906,9 +1984,7 @@ impl Runtime {
             } else if mode.eq_ignore_ascii_case("OFF") {
                 self.client_no_touch = false;
             } else {
-                return RespFrame::Error(
-                    "ERR argument must be 'on' or 'off'".to_string(),
-                );
+                return RespFrame::Error("ERR argument must be 'on' or 'off'".to_string());
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("REPLY") {
@@ -2536,6 +2612,7 @@ fn command_error_to_resp(error: CommandError) -> RespFrame {
             fr_store::StoreError::BusyKey => {
                 RespFrame::Error("BUSYKEY Target key name already exists.".to_string())
             }
+            fr_store::StoreError::GenericError(msg) => RespFrame::Error(msg),
         },
     }
 }
@@ -4037,20 +4114,11 @@ mod tests {
     fn config_set_common_params_accepted() {
         let mut rt = Runtime::default_strict();
         // Commonly-probed parameters should be accepted without error
-        let set = rt.execute_frame(
-            command(&[b"CONFIG", b"SET", b"hz", b"100"]),
-            0,
-        );
+        let set = rt.execute_frame(command(&[b"CONFIG", b"SET", b"hz", b"100"]), 0);
         assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
-        let set = rt.execute_frame(
-            command(&[b"CONFIG", b"SET", b"timeout", b"300"]),
-            1,
-        );
+        let set = rt.execute_frame(command(&[b"CONFIG", b"SET", b"timeout", b"300"]), 1);
         assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
-        let set = rt.execute_frame(
-            command(&[b"CONFIG", b"SET", b"loglevel", b"warning"]),
-            2,
-        );
+        let set = rt.execute_frame(command(&[b"CONFIG", b"SET", b"loglevel", b"warning"]), 2);
         assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
     }
 }

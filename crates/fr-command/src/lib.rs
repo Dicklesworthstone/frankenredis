@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+mod lua_eval;
+
 use fr_protocol::RespFrame;
 use fr_store::{
     PttlValue, ScoreBound, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
@@ -220,8 +222,10 @@ pub fn dispatch_argv(
         Some(CommandId::Zinter) => return zinter(argv, store, now_ms),
         Some(CommandId::Zunion) => return zunion_cmd(argv, store, now_ms),
         Some(CommandId::Zintercard) => return zintercard(argv, store, now_ms),
-        Some(CommandId::Eval) => return eval_cmd(argv),
-        Some(CommandId::Evalsha) => return evalsha_cmd(argv, store),
+        Some(CommandId::Eval) => return eval_cmd(argv, store, now_ms),
+        Some(CommandId::Evalsha) => return evalsha_cmd(argv, store, now_ms),
+        Some(CommandId::EvalRo) => return eval_cmd(argv, store, now_ms),
+        Some(CommandId::EvalshaRo) => return evalsha_cmd(argv, store, now_ms),
         Some(CommandId::Script) => return script_cmd(argv, store),
         Some(CommandId::Debug) => return debug_cmd(argv),
         Some(CommandId::Role) => return role_cmd(argv),
@@ -259,7 +263,9 @@ pub fn dispatch_argv(
         Some(CommandId::Waitaof) => return waitaof_cmd(argv),
         Some(CommandId::Cluster) => return cluster_cmd(argv),
         Some(CommandId::Replicaof) => return replicaof_cmd(argv),
-        Some(CommandId::Function) => return function_cmd(argv),
+        Some(CommandId::Function) => return function_cmd(argv, store, now_ms),
+        Some(CommandId::Fcall) => return fcall_cmd(argv, store, now_ms),
+        Some(CommandId::FcallRo) => return fcall_cmd(argv, store, now_ms),
         Some(CommandId::Ssubscribe) => return ssubscribe_cmd(argv),
         Some(CommandId::Sunsubscribe) => return sunsubscribe_cmd(argv),
         Some(CommandId::Spublish) => return spublish_cmd(argv),
@@ -530,6 +536,10 @@ enum CommandId {
     Zintercard,
     Eval,
     Evalsha,
+    EvalRo,
+    EvalshaRo,
+    Fcall,
+    FcallRo,
     Script,
     Debug,
     Role,
@@ -746,6 +756,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Brpop)
             } else if eq_ascii_command(cmd, b"DEBUG") {
                 Some(CommandId::Debug)
+            } else if eq_ascii_command(cmd, b"FCALL") {
+                Some(CommandId::Fcall)
             } else {
                 None
             }
@@ -890,6 +902,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Slowlog)
             } else if eq_ascii_command(cmd, b"EVALSHA") {
                 Some(CommandId::Evalsha)
+            } else if eq_ascii_command(cmd, b"EVAL_RO") {
+                Some(CommandId::EvalRo)
             } else if eq_ascii_command(cmd, b"LATENCY") {
                 Some(CommandId::Latency)
             } else if eq_ascii_command(cmd, b"PUBLISH") {
@@ -937,6 +951,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Spublish)
             } else if eq_ascii_command(cmd, b"READONLY") {
                 Some(CommandId::Readonly)
+            } else if eq_ascii_command(cmd, b"FCALL_RO") {
+                Some(CommandId::FcallRo)
             } else {
                 None
             }
@@ -989,6 +1005,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Psubscribe)
             } else if eq_ascii_command(cmd, b"BRPOPLPUSH") {
                 Some(CommandId::Brpoplpush)
+            } else if eq_ascii_command(cmd, b"EVALSHA_RO") {
+                Some(CommandId::EvalshaRo)
             } else if eq_ascii_command(cmd, b"ZDIFFSTORE") {
                 Some(CommandId::Zdiffstore)
             } else if eq_ascii_command(cmd, b"ZINTERCARD") {
@@ -2132,9 +2150,7 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
 
     let opts = fr_store::ZaddOptions { nx, xx, gt, lt, ch };
     let (count, _changed) = store.zadd_with_options(&argv[1], &pairs, opts, now_ms)?;
-    Ok(RespFrame::Integer(
-        i64::try_from(count).unwrap_or(i64::MAX),
-    ))
+    Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
 
 fn zrem(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -4509,48 +4525,210 @@ fn zrangestore_cmd(
 
 // ── FUNCTION ────────────────────────────────────────────────────────
 
-fn function_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn function_cmd(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    _now_ms: u64,
+) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("FUNCTION"));
     }
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    if sub.eq_ignore_ascii_case("LIST") {
-        Ok(RespFrame::Array(Some(Vec::new())))
+    if sub.eq_ignore_ascii_case("LOAD") {
+        // FUNCTION LOAD [REPLACE] function-code
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("FUNCTION"));
+        }
+        let mut replace = false;
+        let code_idx;
+        if argv.len() >= 4 {
+            let flag = std::str::from_utf8(&argv[2]).unwrap_or("");
+            if flag.eq_ignore_ascii_case("REPLACE") {
+                replace = true;
+                code_idx = 3;
+            } else {
+                code_idx = 2;
+            }
+        } else {
+            code_idx = 2;
+        }
+        if code_idx >= argv.len() {
+            return Err(CommandError::WrongArity("FUNCTION"));
+        }
+        match store.function_load(&argv[code_idx], replace) {
+            Ok(name) => Ok(RespFrame::BulkString(Some(name.into_bytes()))),
+            Err(e) => Err(CommandError::Store(e)),
+        }
+    } else if sub.eq_ignore_ascii_case("LIST") {
+        // FUNCTION LIST [LIBRARYNAME pattern] [WITHCODE]
+        let mut pattern = None;
+        let mut with_code = false;
+        let mut i = 2;
+        while i < argv.len() {
+            let arg = std::str::from_utf8(&argv[i]).unwrap_or("");
+            if arg.eq_ignore_ascii_case("LIBRARYNAME") {
+                i += 1;
+                if i < argv.len() {
+                    pattern = Some(std::str::from_utf8(&argv[i]).unwrap_or("*").to_string());
+                }
+            } else if arg.eq_ignore_ascii_case("WITHCODE") {
+                with_code = true;
+            }
+            i += 1;
+        }
+        let libs = store.function_list(pattern.as_deref());
+        let mut result = Vec::new();
+        for lib in libs {
+            let mut entries = vec![
+                RespFrame::BulkString(Some(b"library_name".to_vec())),
+                RespFrame::BulkString(Some(lib.name.as_bytes().to_vec())),
+                RespFrame::BulkString(Some(b"engine".to_vec())),
+                RespFrame::BulkString(Some(lib.engine.as_bytes().to_vec())),
+                RespFrame::BulkString(Some(b"functions".to_vec())),
+            ];
+            let funcs: Vec<RespFrame> = lib
+                .functions
+                .iter()
+                .map(|f| {
+                    let func_entries = vec![
+                        RespFrame::BulkString(Some(b"name".to_vec())),
+                        RespFrame::BulkString(Some(f.name.as_bytes().to_vec())),
+                        RespFrame::BulkString(Some(b"description".to_vec())),
+                        match &f.description {
+                            Some(d) => RespFrame::BulkString(Some(d.as_bytes().to_vec())),
+                            None => RespFrame::BulkString(None),
+                        },
+                        RespFrame::BulkString(Some(b"flags".to_vec())),
+                        RespFrame::Array(Some(
+                            f.flags
+                                .iter()
+                                .map(|fl| RespFrame::BulkString(Some(fl.as_bytes().to_vec())))
+                                .collect(),
+                        )),
+                    ];
+                    let _ = &func_entries;
+                    RespFrame::Array(Some(func_entries))
+                })
+                .collect();
+            entries.push(RespFrame::Array(Some(funcs)));
+            if with_code {
+                entries.push(RespFrame::BulkString(Some(b"library_code".to_vec())));
+                entries.push(RespFrame::BulkString(Some(lib.code.clone())));
+            }
+            result.push(RespFrame::Array(Some(entries)));
+        }
+        Ok(RespFrame::Array(Some(result)))
     } else if sub.eq_ignore_ascii_case("STATS") {
+        let (lib_count, func_count) = store.function_stats();
         Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"running_script".to_vec())),
             RespFrame::Integer(0),
             RespFrame::BulkString(Some(b"engines".to_vec())),
-            RespFrame::Array(Some(Vec::new())),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"LUA".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"libraries_count".to_vec())),
+                    RespFrame::Integer(lib_count as i64),
+                    RespFrame::BulkString(Some(b"functions_count".to_vec())),
+                    RespFrame::Integer(func_count as i64),
+                ])),
+            ])),
         ])))
     } else if sub.eq_ignore_ascii_case("DUMP") {
-        Ok(RespFrame::BulkString(Some(Vec::new())))
+        let data = store.function_dump();
+        Ok(RespFrame::BulkString(Some(data)))
+    } else if sub.eq_ignore_ascii_case("RESTORE") {
+        // FUNCTION RESTORE serialized-value [FLUSH|APPEND|REPLACE]
+        if argv.len() < 3 {
+            return Err(CommandError::WrongArity("FUNCTION"));
+        }
+        let policy = if argv.len() >= 4 {
+            std::str::from_utf8(&argv[3]).unwrap_or("")
+        } else {
+            ""
+        };
+        match store.function_restore(&argv[2], policy) {
+            Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
+            Err(e) => Err(CommandError::Store(e)),
+        }
     } else if sub.eq_ignore_ascii_case("FLUSH") {
+        store.function_flush();
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("DELETE") {
         if argv.len() < 3 {
             return Err(CommandError::WrongArity("FUNCTION"));
         }
-        Ok(RespFrame::SimpleString("OK".to_string()))
-    } else if sub.eq_ignore_ascii_case("LOAD") || sub.eq_ignore_ascii_case("RESTORE") {
-        Ok(RespFrame::Error(
-            "ERR Function library loading is not supported".to_string(),
-        ))
+        let name = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        match store.function_delete(name) {
+            Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
+            Err(e) => Err(CommandError::Store(e)),
+        }
     } else if sub.eq_ignore_ascii_case("HELP") {
         Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(
-                b"FUNCTION LIST [LIBRARYNAME pattern] [WITHCODE]".to_vec(),
+                b"FUNCTION LOAD [REPLACE] function-code - Load a library.".to_vec(),
             )),
-            RespFrame::BulkString(Some(b"FUNCTION STATS".to_vec())),
-            RespFrame::BulkString(Some(b"FUNCTION DUMP".to_vec())),
-            RespFrame::BulkString(Some(b"FUNCTION FLUSH [ASYNC|SYNC]".to_vec())),
-            RespFrame::BulkString(Some(b"FUNCTION DELETE <library-name>".to_vec())),
-            RespFrame::BulkString(Some(b"FUNCTION HELP".to_vec())),
+            RespFrame::BulkString(Some(
+                b"FUNCTION LIST [LIBRARYNAME pattern] [WITHCODE] - List libraries.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"FUNCTION STATS - Return engine stats.".to_vec())),
+            RespFrame::BulkString(Some(b"FUNCTION DUMP - Serialize all libraries.".to_vec())),
+            RespFrame::BulkString(Some(
+                b"FUNCTION RESTORE data [FLUSH|APPEND|REPLACE] - Restore libraries.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"FUNCTION FLUSH [ASYNC|SYNC] - Delete all libraries.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"FUNCTION DELETE library-name - Delete a library.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"FUNCTION HELP - Return this help.".to_vec())),
         ])))
     } else {
         Ok(RespFrame::Error(format!(
             "ERR Unknown subcommand or wrong number of arguments for FUNCTION {sub}"
         )))
+    }
+}
+
+fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    // FCALL function numkeys [key ...] [arg ...]
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity("FCALL"));
+    }
+    let func_name = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let (_numkeys, keys, args) = parse_eval_args(argv)?;
+
+    // Look up the function by name
+    let script = match store.function_get(func_name) {
+        Some((lib, _func)) => lib.code.clone(),
+        None => {
+            return Ok(RespFrame::Error("ERR Function not found".to_string()));
+        }
+    };
+
+    // Execute the library code, which should define the function, then call it
+    // For Redis 7.0+, the library registers functions via redis.register_function
+    // The FCALL mechanism calls the registered function directly
+    // Since we have the Lua evaluator, we execute the full library code
+    // and then call the target function
+    let wrapper_script = format!(
+        "{}\nreturn {}(KEYS, ARGV)",
+        String::from_utf8_lossy(&script),
+        func_name
+    );
+
+    let keys_vec: Vec<Vec<u8>> = keys.to_vec();
+    let args_vec: Vec<Vec<u8>> = args.to_vec();
+    match lua_eval::eval_script(
+        wrapper_script.as_bytes(),
+        &keys_vec,
+        &args_vec,
+        store,
+        now_ms,
+    ) {
+        Ok(frame) => Ok(frame),
+        Err(e) => Ok(RespFrame::Error(format!("ERR Error running function: {e}"))),
     }
 }
 
@@ -4986,8 +5164,7 @@ fn zrandmember(
     }
     let count = parse_i64_arg(&argv[2])?;
     let withscores = argv.len() == 4
-        && std::str::from_utf8(&argv[3])
-            .is_ok_and(|s| s.eq_ignore_ascii_case("WITHSCORES"));
+        && std::str::from_utf8(&argv[3]).is_ok_and(|s| s.eq_ignore_ascii_case("WITHSCORES"));
     if argv.len() == 4 && !withscores {
         return Err(CommandError::SyntaxError);
     }
@@ -5120,9 +5297,7 @@ fn lpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             }
             let c = parse_i64_arg(&argv[i])?;
             if c < 0 {
-                return Ok(RespFrame::Error(
-                    "ERR COUNT can't be negative".to_string(),
-                ));
+                return Ok(RespFrame::Error("ERR COUNT can't be negative".to_string()));
             }
             count = Some(c as u64);
         } else if opt.eq_ignore_ascii_case("MAXLEN") {
@@ -5132,9 +5307,7 @@ fn lpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             }
             let m = parse_i64_arg(&argv[i])?;
             if m < 0 {
-                return Ok(RespFrame::Error(
-                    "ERR MAXLEN can't be negative".to_string(),
-                ));
+                return Ok(RespFrame::Error("ERR MAXLEN can't be negative".to_string()));
             }
             maxlen = m as usize;
         } else {
@@ -5228,8 +5401,7 @@ fn hrandfield(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     }
     let count = parse_i64_arg(&argv[2])?;
     let withvalues = argv.len() == 4
-        && std::str::from_utf8(&argv[3])
-            .is_ok_and(|s| s.eq_ignore_ascii_case("WITHVALUES"));
+        && std::str::from_utf8(&argv[3]).is_ok_and(|s| s.eq_ignore_ascii_case("WITHVALUES"));
     if argv.len() == 4 && !withvalues {
         return Err(CommandError::SyntaxError);
     }
@@ -6467,6 +6639,10 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("pubsub", -2, "pubsub", 0, 0, 0),
     ("eval", -3, "scripting", 0, 0, 0),
     ("evalsha", -3, "scripting", 0, 0, 0),
+    ("eval_ro", -3, "scripting readonly", 0, 0, 0),
+    ("evalsha_ro", -3, "scripting readonly", 0, 0, 0),
+    ("fcall", -3, "scripting", 0, 0, 0),
+    ("fcall_ro", -3, "scripting readonly", 0, 0, 0),
     ("script", -2, "scripting", 0, 0, 0),
     ("multi", 1, "fast", 0, 0, 0),
     ("exec", 1, "slow", 0, 0, 0),
@@ -6513,6 +6689,266 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("readwrite", 1, "fast", 0, 0, 0),
     ("zrangestore", -5, "write denyoom", 1, 2, 1),
 ];
+
+/// Return commands that belong to the given ACL category.
+/// Redis maps commands to categories based on data type (string, hash, list, set,
+/// sortedset, geo, stream, bitmap, hyperloglog), access type (read, write),
+/// and command group (admin, fast, slow, pubsub, scripting, transaction, connection,
+/// keyspace, generic, blocking, dangerous, server).
+pub fn commands_in_acl_category(category: &str) -> Vec<&'static str> {
+    // Build the category → command mapping from COMMAND_TABLE flags and command names.
+    let cat_lower = category.to_ascii_lowercase();
+    COMMAND_TABLE
+        .iter()
+        .filter(|&&(name, _arity, flags, _first, _last, _step)| {
+            command_matches_acl_category(name, flags, &cat_lower)
+        })
+        .map(|&(name, ..)| name)
+        .collect()
+}
+
+fn command_matches_acl_category(name: &str, flags: &str, category: &str) -> bool {
+    // Direct flag match (e.g., "write", "fast", "admin", "scripting", "pubsub")
+    let flag_list: Vec<&str> = flags.split_whitespace().collect();
+
+    match category {
+        // Access-type categories from flags
+        "read" => flag_list.contains(&"readonly"),
+        "write" => flag_list.contains(&"write"),
+        "fast" => flag_list.contains(&"fast"),
+        "slow" => flag_list.contains(&"slow"),
+        "admin" => flag_list.contains(&"admin"),
+        "pubsub" => flag_list.contains(&"pubsub"),
+        "scripting" => flag_list.contains(&"scripting"),
+        "dangerous" => flag_list.contains(&"admin") || flag_list.contains(&"dangerous"),
+        "blocking" => matches!(
+            name,
+            "blpop" | "brpop" | "blmove" | "blmpop" | "brpoplpush" | "wait" | "waitaof"
+        ),
+        "connection" => matches!(
+            name,
+            "auth" | "hello" | "ping" | "echo" | "quit" | "reset" | "select" | "client"
+        ),
+        "transaction" => matches!(name, "multi" | "exec" | "discard" | "watch" | "unwatch"),
+        "server" => matches!(
+            name,
+            "info"
+                | "config"
+                | "acl"
+                | "command"
+                | "time"
+                | "dbsize"
+                | "flushdb"
+                | "save"
+                | "bgsave"
+                | "bgrewriteaof"
+                | "lastsave"
+                | "slowlog"
+                | "debug"
+                | "role"
+                | "shutdown"
+                | "latency"
+                | "lolwut"
+                | "memory"
+                | "replicaof"
+                | "slaveof"
+                | "cluster"
+                | "swapdb"
+                | "object"
+        ),
+        "generic" | "keyspace" => matches!(
+            name,
+            "del"
+                | "exists"
+                | "type"
+                | "keys"
+                | "randomkey"
+                | "scan"
+                | "rename"
+                | "renamenx"
+                | "expire"
+                | "pexpire"
+                | "expireat"
+                | "pexpireat"
+                | "persist"
+                | "ttl"
+                | "pttl"
+                | "expiretime"
+                | "pexpiretime"
+                | "dump"
+                | "restore"
+                | "unlink"
+                | "touch"
+                | "sort"
+                | "sort_ro"
+                | "copy"
+                | "move"
+                | "object"
+                | "wait"
+                | "waitaof"
+        ),
+        // Data-type categories
+        "string" => matches!(
+            name,
+            "set"
+                | "get"
+                | "append"
+                | "strlen"
+                | "getrange"
+                | "setrange"
+                | "incr"
+                | "decr"
+                | "incrby"
+                | "decrby"
+                | "incrbyfloat"
+                | "mget"
+                | "mset"
+                | "msetnx"
+                | "setnx"
+                | "setex"
+                | "psetex"
+                | "getset"
+                | "getdel"
+                | "getex"
+                | "substr"
+                | "lcs"
+        ),
+        "hash" => matches!(
+            name,
+            "hset"
+                | "hget"
+                | "hdel"
+                | "hexists"
+                | "hlen"
+                | "hgetall"
+                | "hkeys"
+                | "hvals"
+                | "hmget"
+                | "hmset"
+                | "hincrby"
+                | "hincrbyfloat"
+                | "hsetnx"
+                | "hstrlen"
+                | "hrandfield"
+                | "hscan"
+        ),
+        "list" => matches!(
+            name,
+            "lpush"
+                | "rpush"
+                | "lpushx"
+                | "rpushx"
+                | "lpop"
+                | "rpop"
+                | "llen"
+                | "lrange"
+                | "lindex"
+                | "lset"
+                | "linsert"
+                | "lrem"
+                | "ltrim"
+                | "lpos"
+                | "lmove"
+                | "lmpop"
+                | "rpoplpush"
+                | "blpop"
+                | "brpop"
+                | "blmove"
+                | "blmpop"
+                | "brpoplpush"
+        ),
+        "set" => matches!(
+            name,
+            "sadd"
+                | "srem"
+                | "smembers"
+                | "scard"
+                | "sismember"
+                | "smismember"
+                | "sinter"
+                | "sinterstore"
+                | "sintercard"
+                | "sunion"
+                | "sunionstore"
+                | "sdiff"
+                | "sdiffstore"
+                | "spop"
+                | "srandmember"
+                | "smove"
+                | "sscan"
+        ),
+        "sortedset" => matches!(
+            name,
+            "zadd"
+                | "zrem"
+                | "zscore"
+                | "zmscore"
+                | "zcard"
+                | "zrank"
+                | "zrevrank"
+                | "zrange"
+                | "zrevrange"
+                | "zrangebyscore"
+                | "zrevrangebyscore"
+                | "zrangebylex"
+                | "zrevrangebylex"
+                | "zcount"
+                | "zlexcount"
+                | "zincrby"
+                | "zpopmin"
+                | "zpopmax"
+                | "zrandmember"
+                | "zunionstore"
+                | "zinterstore"
+                | "zdiff"
+                | "zdiffstore"
+                | "zinter"
+                | "zunion"
+                | "zintercard"
+                | "zmpop"
+                | "zremrangebyrank"
+                | "zremrangebyscore"
+                | "zremrangebylex"
+                | "zscan"
+                | "zrangestore"
+        ),
+        "bitmap" => matches!(
+            name,
+            "setbit" | "getbit" | "bitcount" | "bitpos" | "bitop" | "bitfield"
+        ),
+        "hyperloglog" => matches!(name, "pfadd" | "pfcount" | "pfmerge"),
+        "geo" => matches!(
+            name,
+            "geoadd"
+                | "geopos"
+                | "geodist"
+                | "geohash"
+                | "georadius"
+                | "georadiusbymember"
+                | "geosearch"
+                | "geosearchstore"
+        ),
+        "stream" => matches!(
+            name,
+            "xadd"
+                | "xlen"
+                | "xdel"
+                | "xtrim"
+                | "xread"
+                | "xreadgroup"
+                | "xclaim"
+                | "xautoclaim"
+                | "xpending"
+                | "xack"
+                | "xsetid"
+                | "xinfo"
+                | "xgroup"
+                | "xrange"
+                | "xrevrange"
+        ),
+        _ => false,
+    }
+}
 
 fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     if argv.len() == 1 {
@@ -7169,7 +7605,7 @@ fn pubsub_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                     pattern == b"*"
                         || ch == pattern
                         || String::from_utf8_lossy(pattern)
-                            .contains(&String::from_utf8_lossy(ch).as_ref())
+                            .contains(String::from_utf8_lossy(ch).as_ref())
                 })
                 .map(|ch| RespFrame::BulkString(Some(ch)))
                 .collect()
@@ -7478,32 +7914,70 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     Ok(RespFrame::Integer(count as i64))
 }
 
-fn eval_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+#[allow(clippy::type_complexity)]
+fn parse_eval_args(argv: &[Vec<u8>]) -> Result<(usize, &[Vec<u8>], &[Vec<u8>]), CommandError> {
+    // Parse numkeys
+    let numkeys_str =
+        std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let numkeys: usize = numkeys_str
+        .parse()
+        .map_err(|_| CommandError::InvalidInteger)?;
+    let total_after = argv.len() - 3;
+    if numkeys > total_after {
+        return Err(CommandError::InvalidInteger);
+    }
+    let keys = &argv[3..3 + numkeys];
+    let args = &argv[3 + numkeys..];
+    Ok((numkeys, keys, args))
+}
+
+fn eval_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // EVAL script numkeys [key ...] [arg ...]
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("EVAL"));
     }
-    // Lua scripting is not implemented — return NOSCRIPT-style error
-    Ok(RespFrame::Error(
-        "NOSCRIPT No matching script. Please use EVAL.".to_string(),
-    ))
+    let script = &argv[1];
+    let (_numkeys, keys, args) = parse_eval_args(argv)?;
+
+    // Cache the script (Redis caches on EVAL too)
+    store.script_load(script);
+
+    // Execute
+    let keys_vec: Vec<Vec<u8>> = keys.to_vec();
+    let args_vec: Vec<Vec<u8>> = args.to_vec();
+    match lua_eval::eval_script(script, &keys_vec, &args_vec, store, now_ms) {
+        Ok(frame) => Ok(frame),
+        Err(e) => Ok(RespFrame::Error(format!("ERR Error running script: {e}"))),
+    }
 }
 
-fn evalsha_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
+fn evalsha_cmd(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
     // EVALSHA sha1 numkeys [key ...] [arg ...]
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("EVALSHA"));
     }
-    // Check if the script exists in the cache
-    if store.script_get(&argv[1]).is_some() {
-        // Script found, but Lua execution is not yet implemented
-        Ok(RespFrame::Error(
-            "ERR Lua scripting execution is not yet implemented".to_string(),
-        ))
-    } else {
-        Ok(RespFrame::Error(
-            "NOSCRIPT No matching script. Please use EVAL.".to_string(),
-        ))
+    let sha1 = &argv[1];
+    let (_numkeys, keys, args) = parse_eval_args(argv)?;
+
+    // Look up script by SHA1
+    let script = match store.script_get(sha1) {
+        Some(s) => s.to_vec(),
+        None => {
+            return Ok(RespFrame::Error(
+                "NOSCRIPT No matching script. Please use EVAL.".to_string(),
+            ));
+        }
+    };
+
+    let keys_vec: Vec<Vec<u8>> = keys.to_vec();
+    let args_vec: Vec<Vec<u8>> = args.to_vec();
+    match lua_eval::eval_script(&script, &keys_vec, &args_vec, store, now_ms) {
+        Ok(frame) => Ok(frame),
+        Err(e) => Ok(RespFrame::Error(format!("ERR Error running script: {e}"))),
     }
 }
 
@@ -8102,11 +8576,7 @@ fn touch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     Ok(RespFrame::Integer(count))
 }
 
-fn dump_cmd(
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, CommandError> {
+fn dump_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() != 2 {
         return Err(CommandError::WrongArity("DUMP"));
     }
@@ -8130,7 +8600,7 @@ fn restore_cmd(
     // Check for REPLACE flag
     let replace = argv[4..]
         .iter()
-        .any(|a| std::str::from_utf8(a).map_or(false, |s| s.eq_ignore_ascii_case("REPLACE")));
+        .any(|a| std::str::from_utf8(a).is_ok_and(|s| s.eq_ignore_ascii_case("REPLACE")));
     match store.restore_key(key, ttl_ms, payload, replace, now_ms) {
         Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
         Err(StoreError::BusyKey) => Ok(RespFrame::Error(
@@ -17428,7 +17898,7 @@ mod tests {
     }
 
     #[test]
-    fn eval_returns_noscript() {
+    fn eval_executes_lua() {
         let mut store = Store::new();
         let out = dispatch_argv(
             &[b"EVAL".to_vec(), b"return 1".to_vec(), b"0".to_vec()],
@@ -17436,7 +17906,7 @@ mod tests {
             0,
         )
         .expect("eval");
-        assert!(matches!(out, RespFrame::Error(_)));
+        assert_eq!(out, RespFrame::Integer(1));
     }
 
     #[test]
