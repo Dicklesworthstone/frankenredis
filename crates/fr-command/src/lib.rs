@@ -4606,7 +4606,6 @@ fn function_cmd(
                                 .collect(),
                         )),
                     ];
-                    let _ = &func_entries;
                     RespFrame::Array(Some(func_entries))
                 })
                 .collect();
@@ -4698,6 +4697,18 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     }
     let func_name = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     let (_numkeys, keys, args) = parse_eval_args(argv)?;
+
+    // Validate function name contains only safe identifier characters to prevent
+    // Lua code injection when constructing the wrapper script.
+    if func_name.is_empty()
+        || !func_name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    {
+        return Ok(RespFrame::Error(
+            "ERR Function not found".to_string(),
+        ));
+    }
 
     // Look up the function by name
     let script = match store.function_get(func_name) {
@@ -6685,8 +6696,6 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("sunsubscribe", -1, "pubsub", 0, 0, 0),
     ("spublish", 3, "pubsub fast", 0, 0, 0),
     ("sort_ro", -2, "readonly fast", 1, 1, 1),
-    ("readonly", 1, "fast", 0, 0, 0),
-    ("readwrite", 1, "fast", 0, 0, 0),
     ("zrangestore", -5, "write denyoom", 1, 2, 1),
 ];
 

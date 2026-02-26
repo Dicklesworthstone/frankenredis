@@ -5186,6 +5186,13 @@ impl Store {
         let replace = policy.eq_ignore_ascii_case("REPLACE") || flush;
         let append = policy.eq_ignore_ascii_case("APPEND") || policy.is_empty();
 
+        // Reject unknown policies
+        if !flush && !replace && !append {
+            return Err(StoreError::GenericError(
+                "ERR Invalid restore policy".to_string(),
+            ));
+        }
+
         if flush {
             self.function_libraries.clear();
         }
@@ -5251,9 +5258,6 @@ impl Store {
             let engine = String::from_utf8_lossy(&data[pos..pos + engine_len]).to_string();
             pos += engine_len;
 
-            if !replace && !append {
-                continue;
-            }
             if append && self.function_libraries.contains_key(&name) {
                 return Err(StoreError::GenericError(format!(
                     "ERR Library '{name}' already exists"
