@@ -139,6 +139,8 @@ pub enum StoreError {
     WrongType,
     InvalidHllValue,
     IndexOutOfRange,
+    InvalidDumpPayload,
+    BusyKey,
 }
 
 /// The inner value held by a key in the store.
@@ -5092,6 +5094,226 @@ impl Store {
     /// Return all subscribed channel names.
     pub fn pubsub_channels(&self) -> Vec<Vec<u8>> {
         self.subscribed_channels.iter().cloned().collect()
+    }
+
+    /// Serialize a key's value for DUMP. Returns None if key doesn't exist.
+    /// Format: [type_byte][payload][8-byte TTL-ms or 0][2-byte CRC placeholder]
+    pub fn dump_key(&mut self, key: &[u8], now_ms: u64) -> Option<Vec<u8>> {
+        self.drop_if_expired(key, now_ms);
+        let entry = self.entries.get(key)?;
+        let mut buf = Vec::new();
+        // Type byte
+        let ttl_ms = entry
+            .expires_at_ms
+            .map(|exp| exp.saturating_sub(now_ms))
+            .unwrap_or(0);
+        match &entry.value {
+            Value::String(v) => {
+                buf.push(0); // type 0 = string
+                encode_length(&mut buf, v.len());
+                buf.extend_from_slice(v);
+            }
+            Value::List(l) => {
+                buf.push(1); // type 1 = list
+                encode_length(&mut buf, l.len());
+                for item in l {
+                    encode_length(&mut buf, item.len());
+                    buf.extend_from_slice(item);
+                }
+            }
+            Value::Set(s) => {
+                buf.push(2); // type 2 = set
+                let members: Vec<&Vec<u8>> = s.iter().collect();
+                encode_length(&mut buf, members.len());
+                for member in members {
+                    encode_length(&mut buf, member.len());
+                    buf.extend_from_slice(member);
+                }
+            }
+            Value::Hash(h) => {
+                buf.push(4); // type 4 = hash
+                encode_length(&mut buf, h.len());
+                for (field, value) in h {
+                    encode_length(&mut buf, field.len());
+                    buf.extend_from_slice(field);
+                    encode_length(&mut buf, value.len());
+                    buf.extend_from_slice(value);
+                }
+            }
+            Value::SortedSet(zs) => {
+                buf.push(5); // type 5 = sorted set
+                encode_length(&mut buf, zs.len());
+                for (member, score) in zs {
+                    encode_length(&mut buf, member.len());
+                    buf.extend_from_slice(member);
+                    buf.extend_from_slice(&score.to_le_bytes());
+                }
+            }
+            Value::Stream(_) => {
+                buf.push(15); // type 15 = stream (minimal)
+                encode_length(&mut buf, 0);
+            }
+        }
+        // Append TTL (8 bytes LE)
+        buf.extend_from_slice(&ttl_ms.to_le_bytes());
+        // Append version byte + CRC16 placeholder (for format compat)
+        buf.push(10); // RDB version
+        buf.push(0); // CRC placeholder byte 1
+        buf.push(0); // CRC placeholder byte 2
+        Some(buf)
+    }
+
+    /// Restore a key from a DUMP payload. Returns Ok(()) on success.
+    pub fn restore_key(
+        &mut self,
+        key: &[u8],
+        ttl_ms: u64,
+        payload: &[u8],
+        replace: bool,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        if payload.len() < 11 {
+            // Minimum: type(1) + length(1) + ttl(8) + version(1)
+            return Err(StoreError::InvalidDumpPayload);
+        }
+        // Check if key exists and replace flag
+        self.drop_if_expired(key, now_ms);
+        if !replace && self.entries.contains_key(key) {
+            return Err(StoreError::BusyKey);
+        }
+        let type_byte = payload[0];
+        let mut cursor = 1;
+        let value = match type_byte {
+            0 => {
+                // String
+                let (len, consumed) = decode_length(payload, cursor)?;
+                cursor += consumed;
+                if cursor + len > payload.len().saturating_sub(11) {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                let v = payload[cursor..cursor + len].to_vec();
+                Value::String(v)
+            }
+            1 => {
+                // List
+                let (count, consumed) = decode_length(payload, cursor)?;
+                cursor += consumed;
+                let mut list = VecDeque::with_capacity(count);
+                for _ in 0..count {
+                    let (len, consumed) = decode_length(payload, cursor)?;
+                    cursor += consumed;
+                    if cursor + len > payload.len() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
+                    list.push_back(payload[cursor..cursor + len].to_vec());
+                    cursor += len;
+                }
+                Value::List(list)
+            }
+            2 => {
+                // Set
+                let (count, consumed) = decode_length(payload, cursor)?;
+                cursor += consumed;
+                let mut set = HashSet::with_capacity(count);
+                for _ in 0..count {
+                    let (len, consumed) = decode_length(payload, cursor)?;
+                    cursor += consumed;
+                    if cursor + len > payload.len() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
+                    set.insert(payload[cursor..cursor + len].to_vec());
+                    cursor += len;
+                }
+                Value::Set(set)
+            }
+            4 => {
+                // Hash
+                let (count, consumed) = decode_length(payload, cursor)?;
+                cursor += consumed;
+                let mut hash = HashMap::with_capacity(count);
+                for _ in 0..count {
+                    let (flen, fc) = decode_length(payload, cursor)?;
+                    cursor += fc;
+                    if cursor + flen > payload.len() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
+                    let field = payload[cursor..cursor + flen].to_vec();
+                    cursor += flen;
+                    let (vlen, vc) = decode_length(payload, cursor)?;
+                    cursor += vc;
+                    if cursor + vlen > payload.len() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
+                    let value = payload[cursor..cursor + vlen].to_vec();
+                    cursor += vlen;
+                    hash.insert(field, value);
+                }
+                Value::Hash(hash)
+            }
+            5 => {
+                // Sorted set
+                let (count, consumed) = decode_length(payload, cursor)?;
+                cursor += consumed;
+                let mut zs = HashMap::with_capacity(count);
+                for _ in 0..count {
+                    let (mlen, mc) = decode_length(payload, cursor)?;
+                    cursor += mc;
+                    if cursor + mlen + 8 > payload.len() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
+                    let member = payload[cursor..cursor + mlen].to_vec();
+                    cursor += mlen;
+                    let score = f64::from_le_bytes(
+                        payload[cursor..cursor + 8]
+                            .try_into()
+                            .map_err(|_| StoreError::InvalidDumpPayload)?,
+                    );
+                    cursor += 8;
+                    zs.insert(member, score);
+                }
+                Value::SortedSet(zs)
+            }
+            _ => return Err(StoreError::InvalidDumpPayload),
+        };
+        let expires_at_ms = if ttl_ms > 0 {
+            Some(now_ms.saturating_add(ttl_ms))
+        } else {
+            None
+        };
+        self.entries
+            .insert(key.to_vec(), Entry::new(value, expires_at_ms, now_ms));
+        Ok(())
+    }
+}
+
+/// Encode a length as a variable-length integer (1–5 bytes).
+fn encode_length(buf: &mut Vec<u8>, len: usize) {
+    if len < 0x80 {
+        buf.push(len as u8);
+    } else {
+        buf.extend_from_slice(&(len as u32).to_le_bytes());
+        // Mark the first byte with high bit to indicate 4-byte encoding
+        let pos = buf.len() - 4;
+        buf[pos] |= 0x80;
+    }
+}
+
+/// Decode a length from a variable-length integer.
+fn decode_length(data: &[u8], offset: usize) -> Result<(usize, usize), StoreError> {
+    if offset >= data.len() {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    let first = data[offset];
+    if first & 0x80 == 0 {
+        Ok((first as usize, 1))
+    } else {
+        if offset + 4 > data.len() {
+            return Err(StoreError::InvalidDumpPayload);
+        }
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(&data[offset..offset + 4]);
+        bytes[0] &= 0x7F; // Clear the marker bit
+        Ok((u32::from_le_bytes(bytes) as usize, 4))
     }
 }
 

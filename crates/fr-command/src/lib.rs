@@ -251,8 +251,8 @@ pub fn dispatch_argv(
         Some(CommandId::Reset) => return reset_cmd(argv),
         Some(CommandId::Unlink) => return del(argv, store, now_ms),
         Some(CommandId::Touch) => return touch(argv, store, now_ms),
-        Some(CommandId::Dump) => return dump_cmd(argv),
-        Some(CommandId::Restore) => return restore_cmd(argv),
+        Some(CommandId::Dump) => return dump_cmd(argv, store, now_ms),
+        Some(CommandId::Restore) => return restore_cmd(argv, store, now_ms),
         Some(CommandId::Sort) => return sort_cmd(argv, store, now_ms),
         Some(CommandId::Copy) => return copy_cmd(argv, store, now_ms),
         Some(CommandId::Lolwut) => return lolwut_cmd(argv),
@@ -8102,22 +8102,45 @@ fn touch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     Ok(RespFrame::Integer(count))
 }
 
-fn dump_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn dump_cmd(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
     if argv.len() != 2 {
         return Err(CommandError::WrongArity("DUMP"));
     }
-    // Stub: DUMP is not fully supported
-    Ok(RespFrame::BulkString(None))
+    match store.dump_key(&argv[1], now_ms) {
+        Some(payload) => Ok(RespFrame::BulkString(Some(payload))),
+        None => Ok(RespFrame::BulkString(None)),
+    }
 }
 
-fn restore_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn restore_cmd(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("RESTORE"));
     }
-    // Stub: RESTORE is not fully supported
-    Ok(RespFrame::Error(
-        "ERR DUMP/RESTORE serialization not supported".to_string(),
-    ))
+    let key = &argv[1];
+    let ttl_ms: u64 = parse_i64_arg(&argv[2]).map(|v| v.max(0) as u64)?;
+    let payload = &argv[3];
+    // Check for REPLACE flag
+    let replace = argv[4..]
+        .iter()
+        .any(|a| std::str::from_utf8(a).map_or(false, |s| s.eq_ignore_ascii_case("REPLACE")));
+    match store.restore_key(key, ttl_ms, payload, replace, now_ms) {
+        Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
+        Err(StoreError::BusyKey) => Ok(RespFrame::Error(
+            "BUSYKEY Target key name already exists.".to_string(),
+        )),
+        Err(StoreError::InvalidDumpPayload) => Ok(RespFrame::Error(
+            "ERR DUMP payload version or checksum are wrong".to_string(),
+        )),
+        Err(e) => Err(CommandError::Store(e)),
+    }
 }
 
 fn sort_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {

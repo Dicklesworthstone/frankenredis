@@ -2530,6 +2530,12 @@ fn command_error_to_resp(error: CommandError) -> RespFrame {
             fr_store::StoreError::IndexOutOfRange => {
                 RespFrame::Error("ERR index out of range".to_string())
             }
+            fr_store::StoreError::InvalidDumpPayload => {
+                RespFrame::Error("ERR DUMP payload version or checksum are wrong".to_string())
+            }
+            fr_store::StoreError::BusyKey => {
+                RespFrame::Error("BUSYKEY Target key name already exists.".to_string())
+            }
         },
     }
 }
