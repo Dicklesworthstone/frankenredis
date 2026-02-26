@@ -103,6 +103,121 @@
         { "key": "sx:key", "expect": "long", "at_ms": 8500 },
         { "key": "psx:key", "expect": "mini", "at_ms": 9000 }
       ]
+    },
+    {
+      "name": "setnx_idempotent_replay",
+      "now_ms": 9000,
+      "records": [
+        ["SET", "nx:key", "first"],
+        ["SETNX", "nx:key", "second"],
+        ["SETNX", "nx:new", "created"]
+      ],
+      "assertions": [
+        { "key": "nx:key", "expect": "first" },
+        { "key": "nx:new", "expect": "created" }
+      ]
+    },
+    {
+      "name": "decrby_and_incrbyfloat_replay",
+      "now_ms": 10000,
+      "records": [
+        ["SET", "counter", "100"],
+        ["DECRBY", "counter", "30"],
+        ["DECRBY", "counter", "20"],
+        ["INCR", "counter"]
+      ],
+      "assertions": [
+        { "key": "counter", "expect": "51" }
+      ]
+    },
+    {
+      "name": "setrange_replay",
+      "now_ms": 11000,
+      "records": [
+        ["SET", "buf", "Hello World"],
+        ["SETRANGE", "buf", "6", "Redis"]
+      ],
+      "assertions": [
+        { "key": "buf", "expect": "Hello Redis" }
+      ]
+    },
+    {
+      "name": "getdel_replay",
+      "now_ms": 12000,
+      "records": [
+        ["SET", "gd:key", "ephemeral"],
+        ["GETDEL", "gd:key"],
+        ["SET", "gd:survivor", "alive"]
+      ],
+      "assertions": [
+        { "key": "gd:key", "expect": null },
+        { "key": "gd:survivor", "expect": "alive" }
+      ]
+    },
+    {
+      "name": "multi_key_overwrite_chain",
+      "now_ms": 13000,
+      "records": [
+        ["MSET", "mk:a", "1", "mk:b", "2", "mk:c", "3"],
+        ["SET", "mk:a", "10"],
+        ["APPEND", "mk:b", "0"],
+        ["DEL", "mk:c"],
+        ["SET", "mk:c", "30"]
+      ],
+      "assertions": [
+        { "key": "mk:a", "expect": "10" },
+        { "key": "mk:b", "expect": "20" },
+        { "key": "mk:c", "expect": "30" }
+      ]
+    },
+    {
+      "name": "set_ex_seconds_ttl_replay",
+      "now_ms": 14000,
+      "records": [
+        ["SET", "ex:key", "val", "EX", "1"]
+      ],
+      "assertions": [
+        { "key": "ex:key", "expect": "val", "at_ms": 14500 },
+        { "key": "ex:key", "expect": null, "at_ms": 15001 }
+      ]
+    },
+    {
+      "name": "set_nx_xx_flags_replay",
+      "now_ms": 15000,
+      "records": [
+        ["SET", "flag:key", "original"],
+        ["SET", "flag:key", "overwrite", "NX"],
+        ["SET", "flag:key", "updated", "XX"],
+        ["SET", "flag:new", "attempt", "XX"]
+      ],
+      "assertions": [
+        { "key": "flag:key", "expect": "updated" },
+        { "key": "flag:new", "expect": null }
+      ]
+    },
+    {
+      "name": "msetnx_atomicity_replay",
+      "now_ms": 16000,
+      "records": [
+        ["SET", "mnx:exist", "old"],
+        ["MSETNX", "mnx:exist", "new", "mnx:fresh", "val"]
+      ],
+      "assertions": [
+        { "key": "mnx:exist", "expect": "old" },
+        { "key": "mnx:fresh", "expect": null }
+      ]
+    },
+    {
+      "name": "getex_with_persist_replay",
+      "now_ms": 17000,
+      "records": [
+        ["SET", "gx:key", "data", "PX", "10"],
+        ["GETEX", "gx:key", "PERSIST"]
+      ],
+      "assertions": [
+        { "key": "gx:key", "expect": "data", "at_ms": 17005 },
+        { "key": "gx:key", "expect": "data", "at_ms": 18000 }
+      ]
     }
   ]
 }

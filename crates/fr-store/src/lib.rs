@@ -5461,17 +5461,29 @@ impl Store {
                     buf.extend_from_slice(&score.to_le_bytes());
                 }
             }
-            Value::Stream(_) => {
-                buf.push(15); // type 15 = stream (minimal)
-                encode_length(&mut buf, 0);
+            Value::Stream(entries) => {
+                buf.push(15); // type 15 = stream
+                encode_length(&mut buf, entries.len());
+                for ((ms, seq), fields) in entries {
+                    buf.extend_from_slice(&ms.to_le_bytes());
+                    buf.extend_from_slice(&seq.to_le_bytes());
+                    encode_length(&mut buf, fields.len());
+                    for (fname, fval) in fields {
+                        encode_length(&mut buf, fname.len());
+                        buf.extend_from_slice(fname);
+                        encode_length(&mut buf, fval.len());
+                        buf.extend_from_slice(fval);
+                    }
+                }
             }
         }
         // Append TTL (8 bytes LE)
         buf.extend_from_slice(&ttl_ms.to_le_bytes());
-        // Append version byte + CRC16 placeholder (for format compat)
+        // Append version byte
         buf.push(10); // RDB version
-        buf.push(0); // CRC placeholder byte 1
-        buf.push(0); // CRC placeholder byte 2
+        // Compute and append CRC16 over all preceding bytes
+        let crc = crc16(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
         Some(buf)
     }
 
@@ -5484,8 +5496,16 @@ impl Store {
         replace: bool,
         now_ms: u64,
     ) -> Result<(), StoreError> {
-        if payload.len() < 11 {
-            // Minimum: type(1) + length(1) + ttl(8) + version(1)
+        if payload.len() < 13 {
+            // Minimum: type(1) + length(1) + ttl(8) + version(1) + crc(2)
+            return Err(StoreError::InvalidDumpPayload);
+        }
+        // Validate CRC16: last 2 bytes are CRC over everything before them
+        let crc_offset = payload.len() - 2;
+        let stored_crc =
+            u16::from_le_bytes([payload[crc_offset], payload[crc_offset + 1]]);
+        let computed_crc = crc16(&payload[..crc_offset]);
+        if stored_crc != computed_crc {
             return Err(StoreError::InvalidDumpPayload);
         }
         // Check if key exists and replace flag
@@ -5585,6 +5605,51 @@ impl Store {
                 }
                 Value::SortedSet(zs)
             }
+            15 => {
+                // Stream
+                let (entry_count, consumed) = decode_length(payload, cursor)?;
+                cursor += consumed;
+                let mut entries = BTreeMap::new();
+                for _ in 0..entry_count {
+                    if cursor + 16 > payload.len() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
+                    let ms = u64::from_le_bytes(
+                        payload[cursor..cursor + 8]
+                            .try_into()
+                            .map_err(|_| StoreError::InvalidDumpPayload)?,
+                    );
+                    cursor += 8;
+                    let seq = u64::from_le_bytes(
+                        payload[cursor..cursor + 8]
+                            .try_into()
+                            .map_err(|_| StoreError::InvalidDumpPayload)?,
+                    );
+                    cursor += 8;
+                    let (field_count, fc) = decode_length(payload, cursor)?;
+                    cursor += fc;
+                    let mut fields = Vec::with_capacity(field_count);
+                    for _ in 0..field_count {
+                        let (fname_len, fnc) = decode_length(payload, cursor)?;
+                        cursor += fnc;
+                        if cursor + fname_len > payload.len() {
+                            return Err(StoreError::InvalidDumpPayload);
+                        }
+                        let fname = payload[cursor..cursor + fname_len].to_vec();
+                        cursor += fname_len;
+                        let (fval_len, fvc) = decode_length(payload, cursor)?;
+                        cursor += fvc;
+                        if cursor + fval_len > payload.len() {
+                            return Err(StoreError::InvalidDumpPayload);
+                        }
+                        let fval = payload[cursor..cursor + fval_len].to_vec();
+                        cursor += fval_len;
+                        fields.push((fname, fval));
+                    }
+                    entries.insert((ms, seq), fields);
+                }
+                Value::Stream(entries)
+            }
             _ => return Err(StoreError::InvalidDumpPayload),
         };
         let expires_at_ms = if ttl_ms > 0 {
@@ -5596,6 +5661,22 @@ impl Store {
             .insert(key.to_vec(), Entry::new(value, expires_at_ms, now_ms));
         Ok(())
     }
+}
+
+/// CRC16-CCITT (poly 0x1021) for DUMP payload integrity.
+fn crc16(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0;
+    for &byte in data {
+        crc ^= (byte as u16) << 8;
+        for _ in 0..8 {
+            if crc & 0x8000 != 0 {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
 }
 
 /// Encode a length as a variable-length integer (1–5 bytes).
@@ -8589,5 +8670,145 @@ mod tests {
         // After popping all members, the key should be removed
         assert!(!store.exists(b"s", 0));
         assert_eq!(store.spop(b"s", 0).unwrap(), None);
+    }
+
+    #[test]
+    fn dump_restore_string_round_trip() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"hello".to_vec(), None, 100);
+        let payload = store.dump_key(b"k", 100).unwrap();
+        let mut store2 = Store::new();
+        store2.restore_key(b"k", 0, &payload, false, 100).unwrap();
+        assert_eq!(store2.get(b"k", 100).unwrap(), Some(b"hello".to_vec()));
+    }
+
+    #[test]
+    fn dump_restore_list_round_trip() {
+        let mut store = Store::new();
+        store
+            .rpush(b"l", &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()], 100)
+            .unwrap();
+        let payload = store.dump_key(b"l", 100).unwrap();
+        let mut store2 = Store::new();
+        store2.restore_key(b"l", 0, &payload, false, 100).unwrap();
+        assert_eq!(
+            store2.lrange(b"l", 0, -1, 100).unwrap(),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+    }
+
+    #[test]
+    fn dump_restore_set_round_trip() {
+        let mut store = Store::new();
+        store
+            .sadd(b"s", &[b"x".to_vec(), b"y".to_vec()], 100)
+            .unwrap();
+        let payload = store.dump_key(b"s", 100).unwrap();
+        let mut store2 = Store::new();
+        store2.restore_key(b"s", 0, &payload, false, 100).unwrap();
+        assert!(store2.sismember(b"s", b"x", 100).unwrap());
+        assert!(store2.sismember(b"s", b"y", 100).unwrap());
+        assert_eq!(store2.scard(b"s", 100).unwrap(), 2);
+    }
+
+    #[test]
+    fn dump_restore_hash_round_trip() {
+        let mut store = Store::new();
+        store.hset(b"h", b"f1".to_vec(), b"v1".to_vec(), 100).unwrap();
+        store.hset(b"h", b"f2".to_vec(), b"v2".to_vec(), 100).unwrap();
+        let payload = store.dump_key(b"h", 100).unwrap();
+        let mut store2 = Store::new();
+        store2.restore_key(b"h", 0, &payload, false, 100).unwrap();
+        assert_eq!(store2.hget(b"h", b"f1", 100).unwrap(), Some(b"v1".to_vec()));
+        assert_eq!(store2.hget(b"h", b"f2", 100).unwrap(), Some(b"v2".to_vec()));
+    }
+
+    #[test]
+    fn dump_restore_sorted_set_round_trip() {
+        let mut store = Store::new();
+        store
+            .zadd(b"z", &[(1.5, b"a".to_vec()), (2.5, b"b".to_vec())], 100)
+            .unwrap();
+        let payload = store.dump_key(b"z", 100).unwrap();
+        let mut store2 = Store::new();
+        store2.restore_key(b"z", 0, &payload, false, 100).unwrap();
+        assert_eq!(store2.zscore(b"z", b"a", 100).unwrap(), Some(1.5));
+        assert_eq!(store2.zscore(b"z", b"b", 100).unwrap(), Some(2.5));
+    }
+
+    #[test]
+    fn dump_restore_stream_round_trip() {
+        let mut store = Store::new();
+        store
+            .xadd(
+                b"s",
+                (1, 0),
+                &[(b"name".to_vec(), b"alice".to_vec())],
+                100,
+            )
+            .unwrap();
+        store
+            .xadd(
+                b"s",
+                (2, 0),
+                &[
+                    (b"name".to_vec(), b"bob".to_vec()),
+                    (b"age".to_vec(), b"30".to_vec()),
+                ],
+                100,
+            )
+            .unwrap();
+        let payload = store.dump_key(b"s", 100).unwrap();
+        let mut store2 = Store::new();
+        store2.restore_key(b"s", 0, &payload, false, 100).unwrap();
+        let entries = store2.xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 100).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, (1, 0));
+        assert_eq!(entries[0].1, vec![(b"name".to_vec(), b"alice".to_vec())]);
+        assert_eq!(entries[1].0, (2, 0));
+    }
+
+    #[test]
+    fn dump_restore_with_ttl() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"val".to_vec(), Some(200), 100);
+        let payload = store.dump_key(b"k", 100).unwrap();
+        let mut store2 = Store::new();
+        // Restore with explicit TTL of 50ms
+        store2.restore_key(b"k", 50, &payload, false, 100).unwrap();
+        assert_eq!(store2.get(b"k", 100).unwrap(), Some(b"val".to_vec()));
+        // After 50ms the key should be expired
+        assert_eq!(store2.get(b"k", 151).unwrap(), None);
+    }
+
+    #[test]
+    fn dump_restore_busy_key() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"old".to_vec(), None, 100);
+        store.set(b"k2".to_vec(), b"val".to_vec(), None, 100);
+        let payload = store.dump_key(b"k2", 100).unwrap();
+        // Without REPLACE, should fail with BusyKey
+        assert_eq!(store.restore_key(b"k", 0, &payload, false, 100), Err(StoreError::BusyKey));
+        // With REPLACE, should succeed
+        store.restore_key(b"k", 0, &payload, true, 100).unwrap();
+        assert_eq!(store.get(b"k", 100).unwrap(), Some(b"val".to_vec()));
+    }
+
+    #[test]
+    fn dump_restore_invalid_crc_rejected() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 100);
+        let mut payload = store.dump_key(b"k", 100).unwrap();
+        // Corrupt the CRC bytes
+        let last = payload.len() - 1;
+        payload[last] ^= 0xFF;
+        let mut store2 = Store::new();
+        assert_eq!(store2.restore_key(b"k", 0, &payload, false, 100), Err(StoreError::InvalidDumpPayload));
+    }
+
+    #[test]
+    fn dump_nonexistent_key_returns_none() {
+        let mut store = Store::new();
+        assert!(store.dump_key(b"nope", 100).is_none());
     }
 }

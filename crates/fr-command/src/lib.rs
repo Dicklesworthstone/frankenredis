@@ -7805,7 +7805,7 @@ fn brpoplpush(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() != 4 {
         return Err(CommandError::WrongArity("BRPOPLPUSH"));
     }
-    let _timeout = parse_f64_arg(&argv[3])?;
+    let _timeout = parse_blocking_timeout(&argv[3])?;
     match store.rpoplpush(&argv[1], &argv[2], now_ms) {
         Ok(Some(val)) => Ok(RespFrame::BulkString(Some(val))),
         Ok(None) => Ok(RespFrame::BulkString(None)),
@@ -8553,8 +8553,8 @@ fn blpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("BLPOP"));
     }
-    // Last arg is timeout (ignored — we try once immediately)
-    let _timeout = parse_f64_arg(&argv[argv.len() - 1])?;
+    // Last arg is timeout — validated but not used (we try once immediately)
+    let _timeout = parse_blocking_timeout(&argv[argv.len() - 1])?;
     for key in &argv[1..argv.len() - 1] {
         match store.lpop(key, now_ms) {
             Ok(Some(val)) => {
@@ -8576,7 +8576,7 @@ fn brpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("BRPOP"));
     }
-    let _timeout = parse_f64_arg(&argv[argv.len() - 1])?;
+    let _timeout = parse_blocking_timeout(&argv[argv.len() - 1])?;
     for key in &argv[1..argv.len() - 1] {
         match store.rpop(key, now_ms) {
             Ok(Some(val)) => {
@@ -8597,7 +8597,7 @@ fn blmove(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 6 {
         return Err(CommandError::WrongArity("BLMOVE"));
     }
-    let _timeout = parse_f64_arg(&argv[5])?;
+    let _timeout = parse_blocking_timeout(&argv[5])?;
     if !argv[3].eq_ignore_ascii_case(b"LEFT") && !argv[3].eq_ignore_ascii_case(b"RIGHT") {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
@@ -8616,7 +8616,7 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("BLMPOP"));
     }
-    let _timeout = parse_f64_arg(&argv[1])?;
+    let _timeout = parse_blocking_timeout(&argv[1])?;
     let numkeys = parse_i64_arg(&argv[2])? as usize;
     if numkeys == 0 || argv.len() < 3 + numkeys + 1 {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
@@ -17818,6 +17818,222 @@ mod tests {
         )
         .expect("blmpop empty");
         assert_eq!(out, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn bzpopmin_with_data() {
+        let mut store = Store::new();
+        store
+            .zadd(
+                b"myzset",
+                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())],
+                0,
+            )
+            .unwrap();
+        let out = dispatch_argv(
+            &[b"BZPOPMIN".to_vec(), b"myzset".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("bzpopmin");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"myzset".to_vec())),
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"1".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn bzpopmin_empty() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"BZPOPMIN".to_vec(), b"nokey".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("bzpopmin empty");
+        assert_eq!(out, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn bzpopmax_with_data() {
+        let mut store = Store::new();
+        store
+            .zadd(
+                b"myzset",
+                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())],
+                0,
+            )
+            .unwrap();
+        let out = dispatch_argv(
+            &[b"BZPOPMAX".to_vec(), b"myzset".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("bzpopmax");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"myzset".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"2".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn bzpopmax_empty() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"BZPOPMAX".to_vec(), b"nokey".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("bzpopmax empty");
+        assert_eq!(out, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn bzmpop_with_data() {
+        let mut store = Store::new();
+        store
+            .zadd(
+                b"myzset",
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
+                0,
+            )
+            .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"BZMPOP".to_vec(),
+                b"0".to_vec(),
+                b"1".to_vec(),
+                b"myzset".to_vec(),
+                b"MIN".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("bzmpop");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"myzset".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"a".to_vec())),
+                    RespFrame::BulkString(Some(b"1".to_vec())),
+                ])),
+            ]))
+        );
+    }
+
+    #[test]
+    fn bzmpop_empty() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"BZMPOP".to_vec(),
+                b"0".to_vec(),
+                b"1".to_vec(),
+                b"nokey".to_vec(),
+                b"MIN".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("bzmpop empty");
+        assert_eq!(out, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn bzmpop_with_count() {
+        let mut store = Store::new();
+        store
+            .zadd(
+                b"myzset",
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
+                0,
+            )
+            .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"BZMPOP".to_vec(),
+                b"0".to_vec(),
+                b"1".to_vec(),
+                b"myzset".to_vec(),
+                b"MAX".to_vec(),
+                b"COUNT".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("bzmpop count");
+        match out {
+            RespFrame::Array(Some(arr)) => {
+                assert_eq!(arr.len(), 2);
+                // First element is key
+                assert_eq!(arr[0], RespFrame::BulkString(Some(b"myzset".to_vec())));
+                // Second element is array of [member, score, member, score]
+                match &arr[1] {
+                    RespFrame::Array(Some(elements)) => {
+                        assert_eq!(elements.len(), 4); // 2 members * 2 (member + score)
+                    }
+                    other => panic!("expected array, got {other:?}"),
+                }
+            }
+            other => panic!("expected array, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bzpopmin_multiple_keys() {
+        let mut store = Store::new();
+        // First key is empty, second has data
+        store
+            .zadd(b"z2", &[(5.0, b"x".to_vec())], 0)
+            .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"BZPOPMIN".to_vec(),
+                b"z1".to_vec(),
+                b"z2".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("bzpopmin multi-key");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"z2".to_vec())),
+                RespFrame::BulkString(Some(b"x".to_vec())),
+                RespFrame::BulkString(Some(b"5".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn blpop_negative_timeout_rejected() {
+        let mut store = Store::new();
+        let result = dispatch_argv(
+            &[b"BLPOP".to_vec(), b"key".to_vec(), b"-1".to_vec()],
+            &mut store,
+            0,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
