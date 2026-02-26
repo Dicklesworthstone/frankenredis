@@ -265,6 +265,8 @@ pub fn dispatch_argv(
         Some(CommandId::Lolwut) => return lolwut_cmd(argv),
         Some(CommandId::Waitaof) => return waitaof_cmd(argv),
         Some(CommandId::Cluster) => return cluster_cmd(argv),
+        Some(CommandId::Replconf) => return replconf_cmd(argv),
+        Some(CommandId::Psync) => return psync_cmd(argv),
         Some(CommandId::Replicaof) => return replicaof_cmd(argv),
         Some(CommandId::Function) => return function_cmd(argv, store, now_ms),
         Some(CommandId::Fcall) => return fcall_cmd(argv, store, now_ms),
@@ -580,6 +582,8 @@ enum CommandId {
     Lolwut,
     Waitaof,
     Cluster,
+    Replconf,
+    Psync,
     Replicaof,
     Function,
     Ssubscribe,
@@ -764,6 +768,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Debug)
             } else if eq_ascii_command(cmd, b"FCALL") {
                 Some(CommandId::Fcall)
+            } else if eq_ascii_command(cmd, b"PSYNC") {
+                Some(CommandId::Psync)
             } else {
                 None
             }
@@ -965,6 +971,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Bzpopmin)
             } else if eq_ascii_command(cmd, b"BZPOPMAX") {
                 Some(CommandId::Bzpopmax)
+            } else if eq_ascii_command(cmd, b"REPLCONF") {
+                Some(CommandId::Replconf)
             } else {
                 None
             }
@@ -4396,6 +4404,54 @@ fn cluster_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     }
 }
 
+// ── REPLCONF ────────────────────────────────────────────────────────
+
+fn replconf_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // REPLCONF subcommand [args...]
+    if argv.len() < 2 {
+        return Err(CommandError::WrongArity("REPLCONF"));
+    }
+    let sub = std::str::from_utf8(&argv[1]).unwrap_or("");
+    if sub.eq_ignore_ascii_case("ACK") {
+        // REPLCONF ACK <offset> — replica acknowledges replication offset
+        // In standalone mode, accept but no-op (no active replication)
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("GETACK") {
+        // REPLCONF GETACK * — master requests ACK from replica
+        // Return REPLCONF ACK 0 (we report offset 0 as standalone)
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"REPLCONF".to_vec())),
+            RespFrame::BulkString(Some(b"ACK".to_vec())),
+            RespFrame::BulkString(Some(b"0".to_vec())),
+        ])))
+    } else if sub.eq_ignore_ascii_case("listening-port")
+        || sub.eq_ignore_ascii_case("ip-address")
+        || sub.eq_ignore_ascii_case("capa")
+    {
+        // Handshake configuration — accept silently
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else {
+        // Unknown subcommand — still accept per Redis behavior
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    }
+}
+
+// ── PSYNC ───────────────────────────────────────────────────────────
+
+fn psync_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+    // PSYNC replid offset
+    if argv.len() != 3 {
+        return Err(CommandError::WrongArity("PSYNC"));
+    }
+    // In standalone mode, always respond with FULLRESYNC
+    // Generate a deterministic replid for conformance testing
+    let replid = "0000000000000000000000000000000000000000";
+    let offset = 0;
+    Ok(RespFrame::SimpleString(format!(
+        "FULLRESYNC {replid} {offset}"
+    )))
+}
+
 // ── REPLICAOF / SLAVEOF ─────────────────────────────────────────────
 
 fn replicaof_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
@@ -6702,6 +6758,8 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("asking", 1, "fast", 0, 0, 0),
     ("readonly", 1, "fast", 0, 0, 0),
     ("readwrite", 1, "fast", 0, 0, 0),
+    ("replconf", -1, "admin", 0, 0, 0),
+    ("psync", 3, "admin", 0, 0, 0),
     ("replicaof", 3, "admin", 0, 0, 0),
     ("slaveof", 3, "admin", 0, 0, 0),
     ("function", -2, "scripting", 0, 0, 0),
@@ -6781,6 +6839,8 @@ fn command_matches_acl_category(name: &str, flags: &str, category: &str) -> bool
                 | "latency"
                 | "lolwut"
                 | "memory"
+                | "replconf"
+                | "psync"
                 | "replicaof"
                 | "slaveof"
                 | "cluster"
@@ -9577,6 +9637,12 @@ mod tests {
         }
         if eq_ascii_command(cmd, b"CLUSTER") {
             return Some(CommandId::Cluster);
+        }
+        if eq_ascii_command(cmd, b"REPLCONF") {
+            return Some(CommandId::Replconf);
+        }
+        if eq_ascii_command(cmd, b"PSYNC") {
+            return Some(CommandId::Psync);
         }
         if eq_ascii_command(cmd, b"REPLICAOF") {
             return Some(CommandId::Replicaof);
@@ -21552,5 +21618,146 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::Array(Some(vec![])));
+    }
+
+    // ── Replication command tests ───────────────────────────────────
+
+    #[test]
+    fn replconf_ack_returns_ok() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"REPLCONF".to_vec(), b"ACK".to_vec(), b"100".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn replconf_listening_port_returns_ok() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"REPLCONF".to_vec(),
+                b"listening-port".to_vec(),
+                b"6380".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn replconf_capa_returns_ok() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"REPLCONF".to_vec(), b"capa".to_vec(), b"eof".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn replconf_getack_returns_ack_array() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"REPLCONF".to_vec(), b"GETACK".to_vec(), b"*".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"REPLCONF".to_vec())),
+                RespFrame::BulkString(Some(b"ACK".to_vec())),
+                RespFrame::BulkString(Some(b"0".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn replconf_wrong_arity() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"REPLCONF".to_vec()], &mut store, 0);
+        assert!(out.is_err());
+    }
+
+    #[test]
+    fn psync_returns_fullresync() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"PSYNC".to_vec(), b"?".to_vec(), b"-1".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match out {
+            RespFrame::SimpleString(s) => {
+                assert!(s.starts_with("FULLRESYNC "));
+                let parts: Vec<&str> = s.split(' ').collect();
+                assert_eq!(parts.len(), 3);
+                assert_eq!(parts[0], "FULLRESYNC");
+                assert_eq!(parts[1].len(), 40); // replid is 40 chars
+                assert_eq!(parts[2], "0");
+            }
+            other => panic!("expected SimpleString, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn psync_wrong_arity() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"PSYNC".to_vec(), b"?".to_vec()], &mut store, 0);
+        assert!(out.is_err());
+    }
+
+    #[test]
+    fn replicaof_no_one() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"REPLICAOF".to_vec(), b"NO".to_vec(), b"ONE".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::SimpleString("OK Already a master".to_string())
+        );
+    }
+
+    #[test]
+    fn slaveof_no_one() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"SLAVEOF".to_vec(), b"NO".to_vec(), b"ONE".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::SimpleString("OK Already a master".to_string())
+        );
+    }
+
+    #[test]
+    fn role_returns_master() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"ROLE".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"master".to_vec())),
+                RespFrame::Integer(0),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
+        );
     }
 }
