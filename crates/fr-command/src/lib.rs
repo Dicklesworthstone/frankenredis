@@ -8677,8 +8677,12 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("BLMPOP"));
     }
     let _timeout = parse_blocking_timeout(&argv[1])?;
-    let numkeys = parse_i64_arg(&argv[2])? as usize;
-    if numkeys == 0 || argv.len() < 3 + numkeys + 1 {
+    let numkeys_val = parse_i64_arg(&argv[2])?;
+    if numkeys_val <= 0 {
+        return Err(CommandError::SyntaxError);
+    }
+    let numkeys = numkeys_val as usize;
+    if argv.len() < 3 + numkeys + 1 {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
     let direction_idx = 3 + numkeys;
@@ -8802,8 +8806,12 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("BZMPOP"));
     }
     let _timeout = parse_blocking_timeout(&argv[1])?;
-    let numkeys = parse_i64_arg(&argv[2])? as usize;
-    if numkeys == 0 || argv.len() < 3 + numkeys + 1 {
+    let numkeys_val = parse_i64_arg(&argv[2])?;
+    if numkeys_val <= 0 {
+        return Err(CommandError::SyntaxError);
+    }
+    let numkeys = numkeys_val as usize;
+    if argv.len() < 3 + numkeys + 1 {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
     let direction_idx = 3 + numkeys;
@@ -21717,47 +21725,4 @@ mod tests {
         assert!(out.is_err());
     }
 
-    #[test]
-    fn replicaof_no_one() {
-        let mut store = Store::new();
-        let out = dispatch_argv(
-            &[b"REPLICAOF".to_vec(), b"NO".to_vec(), b"ONE".to_vec()],
-            &mut store,
-            0,
-        )
-        .unwrap();
-        assert_eq!(
-            out,
-            RespFrame::SimpleString("OK Already a master".to_string())
-        );
-    }
-
-    #[test]
-    fn slaveof_no_one() {
-        let mut store = Store::new();
-        let out = dispatch_argv(
-            &[b"SLAVEOF".to_vec(), b"NO".to_vec(), b"ONE".to_vec()],
-            &mut store,
-            0,
-        )
-        .unwrap();
-        assert_eq!(
-            out,
-            RespFrame::SimpleString("OK Already a master".to_string())
-        );
-    }
-
-    #[test]
-    fn role_returns_master() {
-        let mut store = Store::new();
-        let out = dispatch_argv(&[b"ROLE".to_vec()], &mut store, 0).unwrap();
-        assert_eq!(
-            out,
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"master".to_vec())),
-                RespFrame::Integer(0),
-                RespFrame::Array(Some(Vec::new())),
-            ]))
-        );
-    }
 }

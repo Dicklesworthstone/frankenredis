@@ -1,0 +1,127 @@
+{
+  "suite": "core_replication",
+  "cases": [
+    {
+      "name": "replconf_ack_ok",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "ACK", "100"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replconf_listening_port_ok",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "listening-port", "6380"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replconf_capa_eof_ok",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "capa", "eof"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replconf_capa_psync2_ok",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "capa", "psync2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replconf_ip_address_ok",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "ip-address", "192.168.1.1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replconf_getack_returns_ack_array",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "GETACK", "*"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "REPLCONF" },
+          { "kind": "bulk", "value": "ACK" },
+          { "kind": "bulk", "value": "0" }
+        ]
+      }
+    },
+    {
+      "name": "replconf_wrong_arity",
+      "now_ms": 0,
+      "argv": ["REPLCONF"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'REPLCONF' command"
+      }
+    },
+    {
+      "name": "psync_returns_fullresync",
+      "now_ms": 0,
+      "argv": ["PSYNC", "?", "-1"],
+      "expect": { "kind": "simple", "value": "FULLRESYNC 0000000000000000000000000000000000000000 0" }
+    },
+    {
+      "name": "psync_with_replid_returns_fullresync",
+      "now_ms": 0,
+      "argv": ["PSYNC", "abc123", "100"],
+      "expect": { "kind": "simple", "value": "FULLRESYNC 0000000000000000000000000000000000000000 0" }
+    },
+    {
+      "name": "psync_wrong_arity",
+      "now_ms": 0,
+      "argv": ["PSYNC", "?"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PSYNC' command"
+      }
+    },
+    {
+      "name": "replicaof_no_one",
+      "now_ms": 0,
+      "argv": ["REPLICAOF", "NO", "ONE"],
+      "expect": { "kind": "simple", "value": "OK Already a master" }
+    },
+    {
+      "name": "replicaof_host_port",
+      "now_ms": 0,
+      "argv": ["REPLICAOF", "127.0.0.1", "6379"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slaveof_no_one",
+      "now_ms": 0,
+      "argv": ["SLAVEOF", "NO", "ONE"],
+      "expect": { "kind": "simple", "value": "OK Already a master" }
+    },
+    {
+      "name": "replicaof_wrong_arity",
+      "now_ms": 0,
+      "argv": ["REPLICAOF", "127.0.0.1"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'REPLICAOF' command"
+      }
+    },
+    {
+      "name": "role_returns_master",
+      "now_ms": 0,
+      "argv": ["ROLE"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "master" },
+          { "kind": "integer", "value": 0 },
+          { "kind": "array", "value": [] }
+        ]
+      }
+    },
+    {
+      "name": "role_wrong_arity",
+      "now_ms": 0,
+      "argv": ["ROLE", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'ROLE' command"
+      }
+    }
+  ]
+}
