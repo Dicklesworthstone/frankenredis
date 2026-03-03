@@ -76,6 +76,14 @@ pub fn run_smoke(config: &HarnessConfig) -> HarnessReport {
     }
 }
 
+fn runtime_for_harness_config(config: &HarnessConfig) -> Runtime {
+    if config.strict_mode {
+        Runtime::default_strict()
+    } else {
+        Runtime::default_hardened()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ConformanceFixture {
     pub suite: String,
@@ -173,7 +181,7 @@ pub fn run_fixture(
         .as_ref()
         .map(|root| live_log_output_path(root, &fixture.suite, fixture_name));
 
-    let mut runtime = Runtime::default_strict();
+    let mut runtime = runtime_for_harness_config(config);
     let mut failed = Vec::new();
     let total = fixture.cases.len();
     for case in fixture.cases {
@@ -228,7 +236,7 @@ pub fn run_live_redis_diff(
     oracle: &LiveOracleConfig,
 ) -> Result<DifferentialReport, String> {
     let fixture = load_conformance_fixture(config, fixture_name)?;
-    let mut runtime = Runtime::default_strict();
+    let mut runtime = runtime_for_harness_config(config);
     let mut stream = connect_live_redis(oracle)?;
     flushall(&mut stream)?;
     let suite = format!("live_redis_diff::{}", fixture.suite);
@@ -371,7 +379,7 @@ pub fn run_protocol_fixture(
         .as_ref()
         .map(|root| live_log_output_path(root, &fixture.suite, fixture_name));
 
-    let mut runtime = Runtime::default_strict();
+    let mut runtime = runtime_for_harness_config(config);
     let mut failed = Vec::new();
     let total = fixture.cases.len();
     for case in fixture.cases {
@@ -428,7 +436,7 @@ pub fn run_live_redis_protocol_diff(
     oracle: &LiveOracleConfig,
 ) -> Result<DifferentialReport, String> {
     let fixture = load_protocol_fixture(config, fixture_name)?;
-    let mut runtime = Runtime::default_strict();
+    let mut runtime = runtime_for_harness_config(config);
     let suite = format!("live_redis_protocol_diff::{}", fixture.suite);
     let live_log_path = config
         .live_log_root
@@ -646,7 +654,7 @@ pub fn run_replay_fixture(
     let mut failed = Vec::new();
     let mut total = 0_usize;
     for case in fixture.cases {
-        let mut runtime = Runtime::default_strict();
+        let mut runtime = runtime_for_harness_config(config);
         let source_records = case
             .records
             .into_iter()
@@ -1307,10 +1315,10 @@ mod tests {
         StructuredLogEmissionContext, build_differential_report, expected_to_frame, run_fixture,
         run_live_redis_diff, run_live_redis_protocol_diff, run_protocol_fixture,
         run_replay_fixture, run_replication_handshake_fixture, run_smoke,
-        validate_structured_log_emission, validate_threat_expectation,
+        runtime_for_harness_config, validate_structured_log_emission, validate_threat_expectation,
     };
     use crate::log_contract::{
-        LogOutcome, StructuredLogEvent, VerificationPath, live_log_output_path,
+        LogMode, LogOutcome, StructuredLogEvent, VerificationPath, live_log_output_path,
     };
 
     fn unique_temp_log_root(prefix: &str) -> std::path::PathBuf {
@@ -1744,6 +1752,19 @@ mod tests {
     }
 
     #[test]
+    fn conformance_errors_fixture_passes_in_hardened_mode() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.strict_mode = false;
+        let report = run_fixture(&cfg, "core_errors.json").expect("errors fixture run");
+        assert_eq!(
+            report.total, report.passed,
+            "mismatch details: {:?}",
+            report.failed
+        );
+        assert!(report.failed.is_empty());
+    }
+
+    #[test]
     fn run_fixture_accepts_structured_log_persistence_toggle() {
         let log_root = unique_temp_log_root("fr_conformance_fixture_logs");
         let mut cfg = HarnessConfig::default_paths();
@@ -1940,6 +1961,110 @@ mod tests {
     }
 
     #[test]
+    fn conformance_protocol_fixture_exposes_expected_hardened_threat_drift() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.strict_mode = false;
+        let report =
+            run_protocol_fixture(&cfg, "protocol_negative.json").expect("protocol fixture run");
+        assert!(report.passed < report.total);
+        assert!(!report.failed.is_empty());
+        assert!(
+            report.failed.iter().all(|case| case
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("severity mismatch"))),
+            "expected hardened mismatches to capture threat severity drift: {:?}",
+            report.failed
+        );
+        assert_eq!(
+            report.reason_code_counts.get("protocol_parse_failure"),
+            Some(&report.failed.len())
+        );
+    }
+
+    #[test]
+    fn run_protocol_fixture_persists_mode_selected_by_harness_config() {
+        let strict_log_root = unique_temp_log_root("fr_conformance_protocol_mode_strict");
+        let mut strict_cfg = HarnessConfig::default_paths();
+        strict_cfg.strict_mode = true;
+        strict_cfg.live_log_root = Some(strict_log_root.clone());
+        let strict_report =
+            run_protocol_fixture(&strict_cfg, "protocol_negative.json").expect("strict run");
+        assert_eq!(
+            strict_report.total, strict_report.passed,
+            "strict mismatches: {:?}",
+            strict_report.failed
+        );
+        let strict_log_path = live_log_output_path(
+            &strict_log_root,
+            "protocol_negative",
+            "protocol_negative.json",
+        );
+        let strict_raw = fs::read_to_string(&strict_log_path).expect("read strict log output");
+        let strict_events = strict_raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str::<StructuredLogEvent>(line).expect("parse strict log line")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !strict_events.is_empty(),
+            "expected strict protocol run to emit structured log events",
+        );
+        assert!(
+            strict_events
+                .iter()
+                .all(|event| event.mode == LogMode::Strict),
+            "strict protocol run emitted non-strict mode event",
+        );
+
+        let hardened_log_root = unique_temp_log_root("fr_conformance_protocol_mode_hardened");
+        let mut hardened_cfg = HarnessConfig::default_paths();
+        hardened_cfg.strict_mode = false;
+        hardened_cfg.live_log_root = Some(hardened_log_root.clone());
+        let hardened_report =
+            run_protocol_fixture(&hardened_cfg, "protocol_negative.json").expect("hardened run");
+        assert!(hardened_report.passed < hardened_report.total);
+        assert!(!hardened_report.failed.is_empty());
+        assert!(
+            hardened_report.failed.iter().all(|case| case
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("severity mismatch"))),
+            "expected hardened protocol mismatches to capture severity drift: {:?}",
+            hardened_report.failed
+        );
+        let hardened_log_path = live_log_output_path(
+            &hardened_log_root,
+            "protocol_negative",
+            "protocol_negative.json",
+        );
+        let hardened_raw =
+            fs::read_to_string(&hardened_log_path).expect("read hardened log output");
+        let hardened_events = hardened_raw
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                serde_json::from_str::<StructuredLogEvent>(line).expect("parse hardened log line")
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !hardened_events.is_empty(),
+            "expected hardened protocol run to emit structured log events",
+        );
+        assert!(
+            hardened_events
+                .iter()
+                .all(|event| event.mode == LogMode::Hardened),
+            "hardened protocol run emitted non-hardened mode event",
+        );
+
+        let _ = fs::remove_dir_all(strict_log_root);
+        let _ = fs::remove_dir_all(hardened_log_root);
+    }
+
+    #[test]
     fn run_protocol_fixture_persists_structured_logs_when_enabled() {
         let log_root = unique_temp_log_root("fr_conformance_protocol_logs");
         let mut cfg = HarnessConfig::default_paths();
@@ -1977,6 +2102,15 @@ mod tests {
     #[test]
     fn conformance_replay_fixture_passes() {
         let cfg = HarnessConfig::default_paths();
+        let report = run_replay_fixture(&cfg, "persist_replay.json").expect("replay fixture run");
+        assert_eq!(report.total, report.passed);
+        assert!(report.failed.is_empty());
+    }
+
+    #[test]
+    fn conformance_replay_fixture_passes_in_hardened_mode() {
+        let mut cfg = HarnessConfig::default_paths();
+        cfg.strict_mode = false;
         let report = run_replay_fixture(&cfg, "persist_replay.json").expect("replay fixture run");
         assert_eq!(report.total, report.passed);
         assert!(report.failed.is_empty());
@@ -5347,5 +5481,40 @@ mod tests {
             "mismatches: {:?}",
             report.failed
         );
+    }
+
+    #[test]
+    fn runtime_for_harness_config_selects_mode() {
+        let mut strict_cfg = HarnessConfig::default_paths();
+        strict_cfg.strict_mode = true;
+        let mut strict_runtime = runtime_for_harness_config(&strict_cfg);
+        strict_runtime.set_requirepass(Some(b"secret".to_vec()));
+        let strict_noauth = strict_runtime.execute_frame(command_frame(&["GET", "k"]), 1);
+        assert_eq!(
+            strict_noauth,
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
+        let strict_event = strict_runtime
+            .evidence()
+            .events()
+            .last()
+            .expect("strict noauth event");
+        assert_eq!(strict_event.mode, Mode::Strict);
+
+        let mut hardened_cfg = HarnessConfig::default_paths();
+        hardened_cfg.strict_mode = false;
+        let mut hardened_runtime = runtime_for_harness_config(&hardened_cfg);
+        hardened_runtime.set_requirepass(Some(b"secret".to_vec()));
+        let hardened_noauth = hardened_runtime.execute_frame(command_frame(&["GET", "k"]), 2);
+        assert_eq!(
+            hardened_noauth,
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
+        let hardened_event = hardened_runtime
+            .evidence()
+            .events()
+            .last()
+            .expect("hardened noauth event");
+        assert_eq!(hardened_event.mode, Mode::Hardened);
     }
 }
