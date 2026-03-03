@@ -304,6 +304,7 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
             | CommandId::Pexpireat
             | CommandId::Append
             | CommandId::Mset
+            | CommandId::Msetnx
             | CommandId::Setnx
             | CommandId::Getset
             | CommandId::Incrby
@@ -347,6 +348,7 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
             | CommandId::Linsert
             | CommandId::Lrem
             | CommandId::Rpoplpush
+            | CommandId::Brpoplpush
             | CommandId::Hincrbyfloat
             | CommandId::Ltrim
             | CommandId::Lpushx
@@ -365,6 +367,10 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
             | CommandId::Bitop
             | CommandId::Zunionstore
             | CommandId::Zinterstore
+            | CommandId::Bzpopmin
+            | CommandId::Bzpopmax
+            | CommandId::Bzmpop
+            | CommandId::Zdiffstore
             | CommandId::Restore
             | CommandId::Sort
             | CommandId::Copy
@@ -9243,7 +9249,7 @@ mod tests {
 
     use super::{
         CommandError, CommandId, classify_command, dispatch_argv, drain_pubsub_messages,
-        eq_ascii_command, frame_to_argv, pubsub_message_to_frame,
+        eq_ascii_command, frame_to_argv, is_write_command, pubsub_message_to_frame,
     };
 
     fn classify_command_linear(cmd: &[u8]) -> Option<CommandId> {
@@ -9789,6 +9795,31 @@ mod tests {
         ]));
         let err = frame_to_argv(&invalid_items).expect_err("must fail");
         assert!(matches!(err, CommandError::InvalidCommandFrame));
+    }
+
+    #[test]
+    fn is_write_command_covers_mutating_blocking_and_store_variants() {
+        let write_commands: &[&[u8]] = &[
+            b"MSETNX",
+            b"BRPOPLPUSH",
+            b"BZPOPMIN",
+            b"BZPOPMAX",
+            b"BZMPOP",
+            b"ZDIFFSTORE",
+        ];
+
+        for cmd in write_commands {
+            assert!(
+                is_write_command(cmd),
+                "{cmd:?} should be classified as write"
+            );
+
+            let lowercase = cmd.to_ascii_lowercase();
+            assert!(
+                is_write_command(&lowercase),
+                "{cmd:?} lowercase should be classified as write"
+            );
+        }
     }
 
     #[test]
@@ -17898,11 +17929,7 @@ mod tests {
     fn bzpopmin_with_data() {
         let mut store = Store::new();
         store
-            .zadd(
-                b"myzset",
-                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())],
-                0,
-            )
+            .zadd(b"myzset", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 0)
             .unwrap();
         let out = dispatch_argv(
             &[b"BZPOPMIN".to_vec(), b"myzset".to_vec(), b"0".to_vec()],
@@ -17936,11 +17963,7 @@ mod tests {
     fn bzpopmax_with_data() {
         let mut store = Store::new();
         store
-            .zadd(
-                b"myzset",
-                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())],
-                0,
-            )
+            .zadd(b"myzset", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 0)
             .unwrap();
         let out = dispatch_argv(
             &[b"BZPOPMAX".to_vec(), b"myzset".to_vec(), b"0".to_vec()],
@@ -18075,9 +18098,7 @@ mod tests {
     fn bzpopmin_multiple_keys() {
         let mut store = Store::new();
         // First key is empty, second has data
-        store
-            .zadd(b"z2", &[(5.0, b"x".to_vec())], 0)
-            .unwrap();
+        store.zadd(b"z2", &[(5.0, b"x".to_vec())], 0).unwrap();
         let out = dispatch_argv(
             &[
                 b"BZPOPMIN".to_vec(),
@@ -18395,11 +18416,7 @@ mod tests {
         store.subscribe(b"news.weather".to_vec());
         store.subscribe(b"alerts".to_vec());
         let out = dispatch_argv(
-            &[
-                b"PUBSUB".to_vec(),
-                b"CHANNELS".to_vec(),
-                b"news.*".to_vec(),
-            ],
+            &[b"PUBSUB".to_vec(), b"CHANNELS".to_vec(), b"news.*".to_vec()],
             &mut store,
             0,
         )
@@ -18464,12 +18481,8 @@ mod tests {
         let mut store = Store::new();
         store.subscribe(b"ch1".to_vec());
         store.subscribe(b"ch2".to_vec());
-        let out = dispatch_argv(
-            &[b"UNSUBSCRIBE".to_vec(), b"ch1".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("unsubscribe");
+        let out = dispatch_argv(&[b"UNSUBSCRIBE".to_vec(), b"ch1".to_vec()], &mut store, 0)
+            .expect("unsubscribe");
         assert_eq!(
             out,
             RespFrame::Array(Some(vec![
@@ -21724,5 +21737,4 @@ mod tests {
         let out = dispatch_argv(&[b"PSYNC".to_vec(), b"?".to_vec()], &mut store, 0);
         assert!(out.is_err());
     }
-
 }

@@ -25,10 +25,7 @@ pub type StreamAutoClaimDeleted = Vec<StreamId>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PubSubMessage {
     /// Direct channel subscription match: `["message", channel, data]`.
-    Message {
-        channel: Vec<u8>,
-        data: Vec<u8>,
-    },
+    Message { channel: Vec<u8>, data: Vec<u8> },
     /// Pattern subscription match: `["pmessage", pattern, channel, data]`.
     PMessage {
         pattern: Vec<u8>,
@@ -5502,8 +5499,7 @@ impl Store {
         }
         // Validate CRC16: last 2 bytes are CRC over everything before them
         let crc_offset = payload.len() - 2;
-        let stored_crc =
-            u16::from_le_bytes([payload[crc_offset], payload[crc_offset + 1]]);
+        let stored_crc = u16::from_le_bytes([payload[crc_offset], payload[crc_offset + 1]]);
         let computed_crc = crc16(&payload[..crc_offset]);
         if stored_crc != computed_crc {
             return Err(StoreError::InvalidDumpPayload);
@@ -8714,8 +8710,12 @@ mod tests {
     #[test]
     fn dump_restore_hash_round_trip() {
         let mut store = Store::new();
-        store.hset(b"h", b"f1".to_vec(), b"v1".to_vec(), 100).unwrap();
-        store.hset(b"h", b"f2".to_vec(), b"v2".to_vec(), 100).unwrap();
+        store
+            .hset(b"h", b"f1".to_vec(), b"v1".to_vec(), 100)
+            .unwrap();
+        store
+            .hset(b"h", b"f2".to_vec(), b"v2".to_vec(), 100)
+            .unwrap();
         let payload = store.dump_key(b"h", 100).unwrap();
         let mut store2 = Store::new();
         store2.restore_key(b"h", 0, &payload, false, 100).unwrap();
@@ -8740,12 +8740,7 @@ mod tests {
     fn dump_restore_stream_round_trip() {
         let mut store = Store::new();
         store
-            .xadd(
-                b"s",
-                (1, 0),
-                &[(b"name".to_vec(), b"alice".to_vec())],
-                100,
-            )
+            .xadd(b"s", (1, 0), &[(b"name".to_vec(), b"alice".to_vec())], 100)
             .unwrap();
         store
             .xadd(
@@ -8761,7 +8756,9 @@ mod tests {
         let payload = store.dump_key(b"s", 100).unwrap();
         let mut store2 = Store::new();
         store2.restore_key(b"s", 0, &payload, false, 100).unwrap();
-        let entries = store2.xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 100).unwrap();
+        let entries = store2
+            .xrange(b"s", (0, 0), (u64::MAX, u64::MAX), None, 100)
+            .unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].0, (1, 0));
         assert_eq!(entries[0].1, vec![(b"name".to_vec(), b"alice".to_vec())]);
@@ -8788,7 +8785,10 @@ mod tests {
         store.set(b"k2".to_vec(), b"val".to_vec(), None, 100);
         let payload = store.dump_key(b"k2", 100).unwrap();
         // Without REPLACE, should fail with BusyKey
-        assert_eq!(store.restore_key(b"k", 0, &payload, false, 100), Err(StoreError::BusyKey));
+        assert_eq!(
+            store.restore_key(b"k", 0, &payload, false, 100),
+            Err(StoreError::BusyKey)
+        );
         // With REPLACE, should succeed
         store.restore_key(b"k", 0, &payload, true, 100).unwrap();
         assert_eq!(store.get(b"k", 100).unwrap(), Some(b"val".to_vec()));
@@ -8803,7 +8803,10 @@ mod tests {
         let last = payload.len() - 1;
         payload[last] ^= 0xFF;
         let mut store2 = Store::new();
-        assert_eq!(store2.restore_key(b"k", 0, &payload, false, 100), Err(StoreError::InvalidDumpPayload));
+        assert_eq!(
+            store2.restore_key(b"k", 0, &payload, false, 100),
+            Err(StoreError::InvalidDumpPayload)
+        );
     }
 
     #[test]
