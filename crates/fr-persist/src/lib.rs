@@ -34,6 +34,9 @@ impl AofRecord {
         let RespFrame::Array(Some(items)) = frame else {
             return Err(PersistError::InvalidFrame);
         };
+        if items.is_empty() {
+            return Err(PersistError::InvalidFrame);
+        }
         let mut argv = Vec::with_capacity(items.len());
         for item in items {
             match item {
@@ -91,6 +94,13 @@ mod tests {
     }
 
     #[test]
+    fn empty_array_record_rejected() {
+        let frame = RespFrame::Array(Some(Vec::new()));
+        let err = AofRecord::from_resp_frame(&frame).expect_err("must fail");
+        assert_eq!(err, PersistError::InvalidFrame);
+    }
+
+    #[test]
     fn round_trip_multi_record_stream() {
         let records = vec![
             AofRecord {
@@ -108,6 +118,12 @@ mod tests {
     #[test]
     fn decode_rejects_invalid_stream_frame() {
         let err = decode_aof_stream(b"$3\r\nbad\r\n").expect_err("must fail");
+        assert_eq!(err, PersistError::InvalidFrame);
+    }
+
+    #[test]
+    fn decode_rejects_empty_command_array_record() {
+        let err = decode_aof_stream(b"*0\r\n").expect_err("must fail");
         assert_eq!(err, PersistError::InvalidFrame);
     }
 
