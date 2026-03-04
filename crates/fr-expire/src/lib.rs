@@ -45,4 +45,25 @@ mod tests {
         assert_eq!(decision.remaining_ms, -2);
         assert!(decision.should_evict);
     }
+
+    #[test]
+    fn deadline_equal_to_now_is_evicted() {
+        let decision = evaluate_expiry(100, Some(100));
+        assert_eq!(decision.remaining_ms, -2);
+        assert!(decision.should_evict);
+    }
+
+    #[test]
+    fn future_deadline_reports_positive_remaining_ms() {
+        let decision = evaluate_expiry(100, Some(250));
+        assert_eq!(decision.remaining_ms, 150);
+        assert!(!decision.should_evict);
+    }
+
+    #[test]
+    fn far_future_deadline_clamps_to_i64_max() {
+        let decision = evaluate_expiry(0, Some(u64::MAX));
+        assert_eq!(decision.remaining_ms, i64::MAX);
+        assert!(!decision.should_evict);
+    }
 }
