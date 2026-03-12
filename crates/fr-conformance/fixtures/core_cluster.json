@@ -192,6 +192,133 @@
         "kind": "bulk",
         "value": "cluster_enabled:0\r\ncluster_state:ok\r\ncluster_slots_assigned:0\r\ncluster_slots_ok:0\r\ncluster_slots_pfail:0\r\ncluster_slots_fail:0\r\ncluster_known_nodes:0\r\ncluster_size:0\r\ncluster_current_epoch:0\r\ncluster_my_epoch:0\r\ncluster_stats_messages_sent:0\r\ncluster_stats_messages_received:0\r\ntotal_cluster_links_buffer_limit_exceeded:0\r\n"
       }
+    },
+
+    {
+      "name": "cluster_reset_hard",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "RESET", "HARD"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "cluster_reset_soft",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "RESET", "SOFT"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "cluster_keyslot_empty_string",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "KEYSLOT", ""],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "cluster_keyslot_hash_tag_same_slot",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "KEYSLOT", "{user}.followers"],
+      "expect": { "kind": "integer", "value": 5474 }
+    },
+    {
+      "name": "cluster_countkeysinslot_non_integer",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "abc"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "cluster_countkeysinslot_out_of_range_clamped",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "99999"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "cluster_getkeysinslot_non_integer_slot",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "xyz", "10"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "cluster_getkeysinslot_non_integer_count",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "0", "xyz"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "cluster_getkeysinslot_negative_count",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "12182", "-5"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "setup_multiple_same_slot",
+      "now_ms": 0,
+      "argv": ["SET", "{user}.name", "alice"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "setup_multiple_same_slot_2",
+      "now_ms": 0,
+      "argv": ["SET", "{user}.email", "alice@example.com"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "cluster_countkeysinslot_multiple_keys",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "5474"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "cluster_getkeysinslot_out_of_range_clamped",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "99999", "10"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "cluster_myid_case_insensitive",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "myid"],
+      "expect": {
+        "kind": "bulk",
+        "value": "0000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "cluster_slots_case_insensitive",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "slots"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "cluster_shards_case_insensitive",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "shards"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "cluster_nodes_case_insensitive",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "nodes"],
+      "expect": {
+        "kind": "bulk",
+        "value": ""
+      }
+    },
+    {
+      "name": "cluster_countkeysinslot_negative_clamped_to_0",
+      "now_ms": 0,
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "-1"],
+      "expect": { "kind": "integer", "value": 0 }
     }
   ]
 }

@@ -210,6 +210,154 @@
         "kind": "error",
         "value": "ERR wrong number of arguments for 'PFMERGE' command"
       }
+    },
+
+    {
+      "name": "pfadd_empty_string_element",
+      "now_ms": 60,
+      "argv": ["PFADD", "hll_empty_elem", ""],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfcount_empty_string_element",
+      "now_ms": 61,
+      "argv": ["PFCOUNT", "hll_empty_elem"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfadd_single_element",
+      "now_ms": 62,
+      "argv": ["PFADD", "hll_single", "only"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfcount_single_element",
+      "now_ms": 63,
+      "argv": ["PFCOUNT", "hll_single"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfcount_mix_existing_nonexisting",
+      "now_ms": 64,
+      "argv": ["PFCOUNT", "hll1", "nonexistent", "hll2"],
+      "expect": { "kind": "integer", "value": 7 }
+    },
+    {
+      "name": "pfmerge_dest_is_also_source",
+      "now_ms": 70,
+      "argv": ["PFADD", "hll_self", "p", "q", "r"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfmerge_self_merge",
+      "now_ms": 71,
+      "argv": ["PFMERGE", "hll_self", "hll_self"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pfcount_after_self_merge",
+      "now_ms": 72,
+      "argv": ["PFCOUNT", "hll_self"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "pfadd_many_elements",
+      "now_ms": 80,
+      "argv": ["PFADD", "hll_many", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfcount_many_elements",
+      "now_ms": 81,
+      "argv": ["PFCOUNT", "hll_many"],
+      "expect": { "kind": "integer", "value": 10 }
+    },
+    {
+      "name": "pfadd_all_duplicates_returns_0",
+      "now_ms": 82,
+      "argv": ["PFADD", "hll_many", "a", "b", "c"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pfmerge_overlapping_sets",
+      "now_ms": 90,
+      "argv": ["PFADD", "hll_overlap1", "a", "b", "c"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfmerge_overlapping_sets_2",
+      "now_ms": 91,
+      "argv": ["PFADD", "hll_overlap2", "b", "c", "d"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfmerge_overlapping",
+      "now_ms": 92,
+      "argv": ["PFMERGE", "hll_overlap_merged", "hll_overlap1", "hll_overlap2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pfcount_overlapping_merged",
+      "now_ms": 93,
+      "argv": ["PFCOUNT", "hll_overlap_merged"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "del_hll_then_pfcount",
+      "now_ms": 100,
+      "argv": ["DEL", "hll_single"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfcount_after_del",
+      "now_ms": 101,
+      "argv": ["PFCOUNT", "hll_single"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pfmerge_single_source",
+      "now_ms": 110,
+      "argv": ["PFMERGE", "hll_copy", "hll1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pfcount_copied",
+      "now_ms": 111,
+      "argv": ["PFCOUNT", "hll_copy"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "pfmerge_on_hash_key_wrongtype",
+      "now_ms": 120,
+      "argv": ["HSET", "hashkey", "f", "v"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfadd_on_hash_key_wrongtype",
+      "now_ms": 121,
+      "argv": ["PFADD", "hashkey", "elem"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfcount_on_hash_key_wrongtype",
+      "now_ms": 122,
+      "argv": ["PFCOUNT", "hashkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfmerge_dest_hash_wrongtype",
+      "now_ms": 123,
+      "argv": ["PFMERGE", "hashkey", "hll1"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     }
   ]
 }

@@ -369,6 +369,214 @@
       "now_ms": 0,
       "argv": ["FUNCTION", "DELETE", "nolib"],
       "expect": { "kind": "error", "value": "ERR Library not found" }
+    },
+
+    {
+      "name": "eval_ro_basic",
+      "now_ms": 0,
+      "argv": ["EVAL_RO", "return 42", "0"],
+      "expect": { "kind": "integer", "value": 42 }
+    },
+    {
+      "name": "eval_ro_string",
+      "now_ms": 0,
+      "argv": ["EVAL_RO", "return 'readonly'", "0"],
+      "expect": { "kind": "bulk", "value": "readonly" }
+    },
+    {
+      "name": "evalsha_load_for_ro",
+      "now_ms": 0,
+      "argv": ["SCRIPT", "LOAD", "return 99"],
+      "expect": { "kind": "bulk", "value": "a2eba4a6e7d6643bc4b14aa4f9e0eedd55dbae3d" }
+    },
+    {
+      "name": "evalsha_ro_cached",
+      "now_ms": 0,
+      "argv": ["EVALSHA_RO", "a2eba4a6e7d6643bc4b14aa4f9e0eedd55dbae3d", "0"],
+      "expect": { "kind": "integer", "value": 99 }
+    },
+
+    {
+      "name": "eval_negative_numkeys",
+      "now_ms": 0,
+      "argv": ["EVAL", "return 1", "-1"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "eval_numkeys_exceeds_args",
+      "now_ms": 0,
+      "argv": ["EVAL", "return 1", "5"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+
+    {
+      "name": "eval_comparison_less_than",
+      "now_ms": 0,
+      "argv": ["EVAL", "if 3 < 5 then return 1 else return 0 end", "0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "eval_comparison_greater_equal",
+      "now_ms": 0,
+      "argv": ["EVAL", "if 5 >= 5 then return 1 else return 0 end", "0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "eval_elseif",
+      "now_ms": 0,
+      "argv": ["EVAL", "local x = 2 if x == 1 then return 'one' elseif x == 2 then return 'two' else return 'other' end", "0"],
+      "expect": { "kind": "bulk", "value": "two" }
+    },
+    {
+      "name": "eval_function_definition",
+      "now_ms": 0,
+      "argv": ["EVAL", "local function double(n) return n * 2 end return double(21)", "0"],
+      "expect": { "kind": "integer", "value": 42 }
+    },
+    {
+      "name": "eval_nested_table",
+      "now_ms": 0,
+      "argv": ["EVAL", "return {1, {2, 3}}", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 1 },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "integer", "value": 2 },
+              { "kind": "integer", "value": 3 }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "eval_string_lower",
+      "now_ms": 0,
+      "argv": ["EVAL", "return string.lower('HELLO')", "0"],
+      "expect": { "kind": "bulk", "value": "hello" }
+    },
+    {
+      "name": "eval_string_rep",
+      "now_ms": 0,
+      "argv": ["EVAL", "return string.rep('ab', 3)", "0"],
+      "expect": { "kind": "bulk", "value": "ababab" }
+    },
+    {
+      "name": "eval_string_reverse",
+      "now_ms": 0,
+      "argv": ["EVAL", "return string.reverse('hello')", "0"],
+      "expect": { "kind": "bulk", "value": "olleh" }
+    },
+    {
+      "name": "eval_string_len",
+      "now_ms": 0,
+      "argv": ["EVAL", "return string.len('hello')", "0"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "eval_math_abs",
+      "now_ms": 0,
+      "argv": ["EVAL", "return math.abs(-42)", "0"],
+      "expect": { "kind": "integer", "value": 42 }
+    },
+    {
+      "name": "eval_math_ceil",
+      "now_ms": 0,
+      "argv": ["EVAL", "return math.ceil(3.2)", "0"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "eval_math_max",
+      "now_ms": 0,
+      "argv": ["EVAL", "return math.max(1, 5, 3)", "0"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "eval_math_min",
+      "now_ms": 0,
+      "argv": ["EVAL", "return math.min(1, 5, 3)", "0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "eval_redis_pcall_success",
+      "now_ms": 0,
+      "argv": ["EVAL", "local ok, val = pcall(redis.call, 'SET', KEYS[1], 'pval') if ok then return 'ok' else return val end", "1", "pkey"],
+      "expect": { "kind": "bulk", "value": "ok" }
+    },
+    {
+      "name": "eval_redis_status_reply",
+      "now_ms": 0,
+      "argv": ["EVAL", "return redis.status_reply('CUSTOM')", "0"],
+      "expect": { "kind": "simple", "value": "CUSTOM" }
+    },
+    {
+      "name": "eval_redis_error_reply",
+      "now_ms": 0,
+      "argv": ["EVAL", "return redis.error_reply('my error')", "0"],
+      "expect": { "kind": "error", "value": "my error" }
+    },
+    {
+      "name": "eval_string_format_integer",
+      "now_ms": 0,
+      "argv": ["EVAL", "return string.format('%d items', 42)", "0"],
+      "expect": { "kind": "bulk", "value": "42 items" }
+    },
+    {
+      "name": "eval_modulo",
+      "now_ms": 0,
+      "argv": ["EVAL", "return 17 % 5", "0"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "eval_not_operator",
+      "now_ms": 0,
+      "argv": ["EVAL", "if not false then return 1 else return 0 end", "0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "eval_and_operator",
+      "now_ms": 0,
+      "argv": ["EVAL", "return (true and 'yes') or 'no'", "0"],
+      "expect": { "kind": "bulk", "value": "yes" }
+    },
+    {
+      "name": "eval_or_operator",
+      "now_ms": 0,
+      "argv": ["EVAL", "return (false or 'fallback')", "0"],
+      "expect": { "kind": "bulk", "value": "fallback" }
+    },
+    {
+      "name": "eval_multiple_keys_and_args",
+      "now_ms": 0,
+      "argv": ["EVAL", "return KEYS[1] .. ':' .. KEYS[2] .. ':' .. ARGV[1]", "2", "k1", "k2", "v1"],
+      "expect": { "kind": "bulk", "value": "k1:k2:v1" }
+    },
+    {
+      "name": "eval_empty_script",
+      "now_ms": 0,
+      "argv": ["EVAL", "", "0"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+
+    {
+      "name": "eval_ro_wrong_arity",
+      "now_ms": 0,
+      "argv": ["EVAL_RO", "return 1"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'EVAL' command" }
+    },
+    {
+      "name": "evalsha_wrong_arity",
+      "now_ms": 0,
+      "argv": ["EVALSHA"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'EVALSHA' command" }
+    },
+    {
+      "name": "evalsha_ro_wrong_arity",
+      "now_ms": 0,
+      "argv": ["EVALSHA_RO"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'EVALSHA' command" }
     }
   ]
 }
