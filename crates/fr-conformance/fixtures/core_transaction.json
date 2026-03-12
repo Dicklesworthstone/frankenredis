@@ -304,6 +304,420 @@
       "now_ms": 106,
       "argv": ["GET", "counter"],
       "expect": { "kind": "bulk", "value": "3" }
+    },
+
+    {
+      "name": "watch_modified_key_setup",
+      "now_ms": 110,
+      "argv": ["SET", "wk1", "original"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_modified_key_watch",
+      "now_ms": 111,
+      "argv": ["WATCH", "wk1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_modified_key_external_set",
+      "now_ms": 112,
+      "argv": ["SET", "wk1", "changed"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_modified_key_multi",
+      "now_ms": 113,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_modified_key_get_queued",
+      "now_ms": 114,
+      "argv": ["GET", "wk1"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "watch_modified_key_exec_aborts",
+      "now_ms": 115,
+      "argv": ["EXEC"],
+      "expect": { "kind": "null_array" }
+    },
+    {
+      "name": "watch_modified_key_value_unchanged",
+      "now_ms": 116,
+      "argv": ["GET", "wk1"],
+      "expect": { "kind": "bulk", "value": "changed" }
+    },
+
+    {
+      "name": "watch_nonexistent_key_watch",
+      "now_ms": 120,
+      "argv": ["WATCH", "nokey"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_nonexistent_key_create",
+      "now_ms": 121,
+      "argv": ["SET", "nokey", "hello"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_nonexistent_key_multi",
+      "now_ms": 122,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_nonexistent_key_get_queued",
+      "now_ms": 123,
+      "argv": ["GET", "nokey"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "watch_nonexistent_key_exec_aborts",
+      "now_ms": 124,
+      "argv": ["EXEC"],
+      "expect": { "kind": "null_array" }
+    },
+
+    {
+      "name": "watch_multi_keys_setup_mk1",
+      "now_ms": 130,
+      "argv": ["SET", "mk1", "a"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_multi_keys_setup_mk2",
+      "now_ms": 131,
+      "argv": ["SET", "mk2", "b"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_multi_keys_watch_both",
+      "now_ms": 132,
+      "argv": ["WATCH", "mk1", "mk2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_multi_keys_modify_one",
+      "now_ms": 133,
+      "argv": ["SET", "mk2", "c"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_multi_keys_multi",
+      "now_ms": 134,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_multi_keys_get_queued",
+      "now_ms": 135,
+      "argv": ["GET", "mk1"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "watch_multi_keys_exec_aborts",
+      "now_ms": 136,
+      "argv": ["EXEC"],
+      "expect": { "kind": "null_array" }
+    },
+
+    {
+      "name": "unwatch_clears_watch_setup",
+      "now_ms": 140,
+      "argv": ["SET", "uwk", "val"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "unwatch_clears_watch_watch",
+      "now_ms": 141,
+      "argv": ["WATCH", "uwk"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "unwatch_clears_watch_unwatch",
+      "now_ms": 142,
+      "argv": ["UNWATCH"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "unwatch_clears_watch_modify",
+      "now_ms": 143,
+      "argv": ["SET", "uwk", "changed"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "unwatch_clears_watch_multi",
+      "now_ms": 144,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "unwatch_clears_watch_get_queued",
+      "now_ms": 145,
+      "argv": ["GET", "uwk"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "unwatch_clears_watch_exec_succeeds",
+      "now_ms": 146,
+      "argv": ["EXEC"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "changed" }
+        ]
+      }
+    },
+
+    {
+      "name": "discard_clears_watches_setup",
+      "now_ms": 150,
+      "argv": ["SET", "dk", "val"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "discard_clears_watches_watch",
+      "now_ms": 151,
+      "argv": ["WATCH", "dk"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "discard_clears_watches_multi",
+      "now_ms": 152,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "discard_clears_watches_discard",
+      "now_ms": 153,
+      "argv": ["DISCARD"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "discard_clears_watches_modify",
+      "now_ms": 154,
+      "argv": ["SET", "dk", "changed"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "discard_clears_watches_rewatch",
+      "now_ms": 155,
+      "argv": ["WATCH", "dk"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "discard_clears_watches_multi2",
+      "now_ms": 156,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "discard_clears_watches_get_queued",
+      "now_ms": 157,
+      "argv": ["GET", "dk"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "discard_clears_watches_exec_succeeds",
+      "now_ms": 158,
+      "argv": ["EXEC"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "changed" }
+        ]
+      }
+    },
+
+    {
+      "name": "watch_del_key_setup",
+      "now_ms": 160,
+      "argv": ["SET", "delk", "val"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_del_key_watch",
+      "now_ms": 161,
+      "argv": ["WATCH", "delk"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_del_key_delete",
+      "now_ms": 162,
+      "argv": ["DEL", "delk"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "watch_del_key_multi",
+      "now_ms": 163,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_del_key_set_queued",
+      "now_ms": 164,
+      "argv": ["SET", "delk", "new"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "watch_del_key_exec_aborts",
+      "now_ms": 165,
+      "argv": ["EXEC"],
+      "expect": { "kind": "null_array" }
+    },
+
+    {
+      "name": "wrongtype_in_tx_setup",
+      "now_ms": 170,
+      "argv": ["SET", "skey", "hello"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "wrongtype_in_tx_multi",
+      "now_ms": 171,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "wrongtype_in_tx_lpush_queued",
+      "now_ms": 172,
+      "argv": ["LPUSH", "skey", "elem"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "wrongtype_in_tx_get_queued",
+      "now_ms": 173,
+      "argv": ["GET", "skey"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "wrongtype_in_tx_exec",
+      "now_ms": 174,
+      "argv": ["EXEC"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" },
+          { "kind": "bulk", "value": "hello" }
+        ]
+      }
+    },
+
+    {
+      "name": "multiple_watch_calls_setup1",
+      "now_ms": 180,
+      "argv": ["SET", "acc1", "a"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "multiple_watch_calls_setup2",
+      "now_ms": 181,
+      "argv": ["SET", "acc2", "b"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "multiple_watch_calls_watch1",
+      "now_ms": 182,
+      "argv": ["WATCH", "acc1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "multiple_watch_calls_watch2",
+      "now_ms": 183,
+      "argv": ["WATCH", "acc2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "multiple_watch_calls_modify_second",
+      "now_ms": 184,
+      "argv": ["SET", "acc2", "c"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "multiple_watch_calls_multi",
+      "now_ms": 185,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "multiple_watch_calls_get_queued",
+      "now_ms": 186,
+      "argv": ["GET", "acc1"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "multiple_watch_calls_exec_aborts",
+      "now_ms": 187,
+      "argv": ["EXEC"],
+      "expect": { "kind": "null_array" }
+    },
+
+    {
+      "name": "exec_abort_clears_watch_state_setup",
+      "now_ms": 190,
+      "argv": ["SET", "eck", "v1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "exec_abort_clears_watch_state_watch",
+      "now_ms": 191,
+      "argv": ["WATCH", "eck"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "exec_abort_clears_watch_state_modify",
+      "now_ms": 192,
+      "argv": ["SET", "eck", "v2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "exec_abort_clears_watch_state_multi",
+      "now_ms": 193,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "exec_abort_clears_watch_state_exec_aborts",
+      "now_ms": 194,
+      "argv": ["EXEC"],
+      "expect": { "kind": "null_array" }
+    },
+    {
+      "name": "exec_abort_clears_watch_state_rewatch",
+      "now_ms": 195,
+      "argv": ["WATCH", "eck"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "exec_abort_clears_watch_state_multi2",
+      "now_ms": 196,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "exec_abort_clears_watch_state_set_queued",
+      "now_ms": 197,
+      "argv": ["SET", "eck", "v3"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "exec_abort_clears_watch_state_exec_succeeds",
+      "now_ms": 198,
+      "argv": ["EXEC"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "simple", "value": "OK" }
+        ]
+      }
+    },
+    {
+      "name": "exec_abort_clears_watch_state_verify",
+      "now_ms": 199,
+      "argv": ["GET", "eck"],
+      "expect": { "kind": "bulk", "value": "v3" }
     }
   ]
 }

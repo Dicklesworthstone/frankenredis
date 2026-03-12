@@ -512,6 +512,446 @@
       "now_ms": 5001,
       "argv": ["GET"],
       "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GET' command" }
+    },
+
+    {
+      "name": "append_new_key",
+      "now_ms": 5100,
+      "argv": ["APPEND", "appkey", "hello"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "append_existing_key",
+      "now_ms": 5101,
+      "argv": ["APPEND", "appkey", " world"],
+      "expect": { "kind": "integer", "value": 11 }
+    },
+    {
+      "name": "append_verify",
+      "now_ms": 5102,
+      "argv": ["GET", "appkey"],
+      "expect": { "kind": "bulk", "value": "hello world" }
+    },
+
+    {
+      "name": "decr_new_key",
+      "now_ms": 5200,
+      "argv": ["DECR", "dcrkey"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "decr_existing",
+      "now_ms": 5201,
+      "argv": ["DECR", "dcrkey"],
+      "expect": { "kind": "integer", "value": -2 }
+    },
+    {
+      "name": "incrby_new_key",
+      "now_ms": 5300,
+      "argv": ["INCRBY", "ibykey", "10"],
+      "expect": { "kind": "integer", "value": 10 }
+    },
+    {
+      "name": "incrby_existing",
+      "now_ms": 5301,
+      "argv": ["INCRBY", "ibykey", "5"],
+      "expect": { "kind": "integer", "value": 15 }
+    },
+    {
+      "name": "incrby_negative",
+      "now_ms": 5302,
+      "argv": ["INCRBY", "ibykey", "-20"],
+      "expect": { "kind": "integer", "value": -5 }
+    },
+
+    {
+      "name": "psetex_ok",
+      "now_ms": 5400,
+      "argv": ["PSETEX", "pskey", "500", "val"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "psetex_verify_value",
+      "now_ms": 5400,
+      "argv": ["GET", "pskey"],
+      "expect": { "kind": "bulk", "value": "val" }
+    },
+    {
+      "name": "psetex_verify_pttl",
+      "now_ms": 5400,
+      "argv": ["PTTL", "pskey"],
+      "expect": { "kind": "integer", "value": 500 }
+    },
+    {
+      "name": "psetex_expired",
+      "now_ms": 5901,
+      "argv": ["GET", "pskey"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "psetex_zero_ms_error",
+      "now_ms": 5400,
+      "argv": ["PSETEX", "pskey2", "0", "val"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "psetex_negative_ms_error",
+      "now_ms": 5400,
+      "argv": ["PSETEX", "pskey3", "-1", "val"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+
+    {
+      "name": "getdel_setup",
+      "now_ms": 5500,
+      "argv": ["SET", "gdkey", "todelete"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "getdel_returns_value",
+      "now_ms": 5501,
+      "argv": ["GETDEL", "gdkey"],
+      "expect": { "kind": "bulk", "value": "todelete" }
+    },
+    {
+      "name": "getdel_key_gone",
+      "now_ms": 5502,
+      "argv": ["EXISTS", "gdkey"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "getdel_missing_key",
+      "now_ms": 5503,
+      "argv": ["GETDEL", "gdmissing"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+
+    {
+      "name": "getex_setup",
+      "now_ms": 5600,
+      "argv": ["SET", "gxkey", "hello"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "getex_no_options",
+      "now_ms": 5601,
+      "argv": ["GETEX", "gxkey"],
+      "expect": { "kind": "bulk", "value": "hello" }
+    },
+    {
+      "name": "getex_with_ex",
+      "now_ms": 5602,
+      "argv": ["GETEX", "gxkey", "EX", "10"],
+      "expect": { "kind": "bulk", "value": "hello" }
+    },
+    {
+      "name": "getex_verify_ttl_after_ex",
+      "now_ms": 5602,
+      "argv": ["TTL", "gxkey"],
+      "expect": { "kind": "integer", "value": 10 }
+    },
+    {
+      "name": "getex_with_px",
+      "now_ms": 5700,
+      "argv": ["GETEX", "gxkey", "PX", "2000"],
+      "expect": { "kind": "bulk", "value": "hello" }
+    },
+    {
+      "name": "getex_verify_pttl_after_px",
+      "now_ms": 5700,
+      "argv": ["PTTL", "gxkey"],
+      "expect": { "kind": "integer", "value": 2000 }
+    },
+    {
+      "name": "getex_with_exat",
+      "now_ms": 5800,
+      "argv": ["GETEX", "gxkey", "EXAT", "10"],
+      "expect": { "kind": "bulk", "value": "hello" }
+    },
+    {
+      "name": "getex_verify_ttl_after_exat",
+      "now_ms": 5800,
+      "argv": ["TTL", "gxkey"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "getex_with_pxat",
+      "now_ms": 5900,
+      "argv": ["GETEX", "gxkey", "PXAT", "8000"],
+      "expect": { "kind": "bulk", "value": "hello" }
+    },
+    {
+      "name": "getex_verify_pttl_after_pxat",
+      "now_ms": 5900,
+      "argv": ["PTTL", "gxkey"],
+      "expect": { "kind": "integer", "value": 2100 }
+    },
+    {
+      "name": "getex_with_persist",
+      "now_ms": 6000,
+      "argv": ["GETEX", "gxkey", "PERSIST"],
+      "expect": { "kind": "bulk", "value": "hello" }
+    },
+    {
+      "name": "getex_verify_ttl_after_persist",
+      "now_ms": 6000,
+      "argv": ["TTL", "gxkey"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "getex_missing_key",
+      "now_ms": 6100,
+      "argv": ["GETEX", "gxmissing"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+
+    {
+      "name": "substr_alias_for_getrange",
+      "now_ms": 6200,
+      "argv": ["SET", "subkey", "Hello World"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "substr_basic",
+      "now_ms": 6201,
+      "argv": ["SUBSTR", "subkey", "0", "4"],
+      "expect": { "kind": "bulk", "value": "Hello" }
+    },
+    {
+      "name": "substr_negative_end",
+      "now_ms": 6202,
+      "argv": ["SUBSTR", "subkey", "6", "-1"],
+      "expect": { "kind": "bulk", "value": "World" }
+    },
+
+    {
+      "name": "getrange_negative_indices",
+      "now_ms": 6300,
+      "argv": ["GETRANGE", "subkey", "-5", "-1"],
+      "expect": { "kind": "bulk", "value": "World" }
+    },
+    {
+      "name": "getrange_beyond_length",
+      "now_ms": 6301,
+      "argv": ["GETRANGE", "subkey", "0", "100"],
+      "expect": { "kind": "bulk", "value": "Hello World" }
+    },
+    {
+      "name": "getrange_missing_key",
+      "now_ms": 6302,
+      "argv": ["GETRANGE", "nokey", "0", "5"],
+      "expect": { "kind": "bulk", "value": "" }
+    },
+    {
+      "name": "getrange_reversed_indices",
+      "now_ms": 6303,
+      "argv": ["GETRANGE", "subkey", "5", "0"],
+      "expect": { "kind": "bulk", "value": "" }
+    },
+
+    {
+      "name": "set_with_exat",
+      "now_ms": 6400,
+      "argv": ["SET", "exatkey", "v", "EXAT", "10"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "set_exat_verify_ttl",
+      "now_ms": 6400,
+      "argv": ["TTL", "exatkey"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "set_with_pxat",
+      "now_ms": 6500,
+      "argv": ["SET", "pxatkey", "v", "PXAT", "8000"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "set_pxat_verify_pttl",
+      "now_ms": 6500,
+      "argv": ["PTTL", "pxatkey"],
+      "expect": { "kind": "integer", "value": 1500 }
+    },
+
+    {
+      "name": "set_ex_negative_error",
+      "now_ms": 6601,
+      "argv": ["SET", "k", "v", "EX", "-1"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "setex_zero_error",
+      "now_ms": 6602,
+      "argv": ["SETEX", "k", "0", "v"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+
+    {
+      "name": "lcs_setup_a",
+      "now_ms": 6700,
+      "argv": ["SET", "lcsa", "ohmytext"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "lcs_setup_b",
+      "now_ms": 6701,
+      "argv": ["SET", "lcsb", "mynewtext"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "lcs_basic",
+      "now_ms": 6702,
+      "argv": ["LCS", "lcsa", "lcsb"],
+      "expect": { "kind": "bulk", "value": "mytext" }
+    },
+    {
+      "name": "lcs_len",
+      "now_ms": 6703,
+      "argv": ["LCS", "lcsa", "lcsb", "LEN"],
+      "expect": { "kind": "integer", "value": 6 }
+    },
+    {
+      "name": "lcs_missing_key",
+      "now_ms": 6704,
+      "argv": ["LCS", "lcsa", "nokey"],
+      "expect": { "kind": "bulk", "value": "" }
+    },
+    {
+      "name": "lcs_missing_key_len",
+      "now_ms": 6705,
+      "argv": ["LCS", "lcsa", "nokey", "LEN"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+
+    {
+      "name": "object_encoding_int",
+      "now_ms": 6800,
+      "argv": ["SET", "intkey", "12345"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "object_encoding_int_verify",
+      "now_ms": 6801,
+      "argv": ["OBJECT", "ENCODING", "intkey"],
+      "expect": { "kind": "bulk", "value": "int" }
+    },
+    {
+      "name": "object_encoding_embstr",
+      "now_ms": 6802,
+      "argv": ["SET", "embkey", "hello"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "object_encoding_embstr_verify",
+      "now_ms": 6803,
+      "argv": ["OBJECT", "ENCODING", "embkey"],
+      "expect": { "kind": "bulk", "value": "embstr" }
+    },
+    {
+      "name": "object_encoding_raw",
+      "now_ms": 6804,
+      "argv": ["SET", "rawkey", "this is a string that is long enough to exceed the embstr limit of forty four bytes"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "object_encoding_raw_verify",
+      "now_ms": 6805,
+      "argv": ["OBJECT", "ENCODING", "rawkey"],
+      "expect": { "kind": "bulk", "value": "raw" }
+    },
+
+    {
+      "name": "set_overwrite_clears_ttl",
+      "now_ms": 6900,
+      "argv": ["SET", "ttlclr", "v", "EX", "100"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "set_overwrite_clears_ttl_verify",
+      "now_ms": 6900,
+      "argv": ["TTL", "ttlclr"],
+      "expect": { "kind": "integer", "value": 100 }
+    },
+    {
+      "name": "set_overwrite_clears_ttl_overwrite",
+      "now_ms": 6901,
+      "argv": ["SET", "ttlclr", "newval"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "set_overwrite_clears_ttl_check",
+      "now_ms": 6901,
+      "argv": ["TTL", "ttlclr"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+
+    {
+      "name": "append_wrong_arity",
+      "now_ms": 7000,
+      "argv": ["APPEND"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'APPEND' command" }
+    },
+    {
+      "name": "getdel_wrong_arity",
+      "now_ms": 7001,
+      "argv": ["GETDEL"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GETDEL' command" }
+    },
+    {
+      "name": "getex_wrong_arity",
+      "now_ms": 7002,
+      "argv": ["GETEX"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GETEX' command" }
+    },
+    {
+      "name": "psetex_wrong_arity",
+      "now_ms": 7003,
+      "argv": ["PSETEX", "k", "100"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'PSETEX' command" }
+    },
+    {
+      "name": "setex_wrong_arity",
+      "now_ms": 7004,
+      "argv": ["SETEX", "k"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SETEX' command" }
+    },
+    {
+      "name": "lcs_wrong_arity",
+      "now_ms": 7005,
+      "argv": ["LCS", "k"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'LCS' command" }
+    },
+    {
+      "name": "substr_wrong_arity",
+      "now_ms": 7006,
+      "argv": ["SUBSTR", "k"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GETRANGE' command" }
+    },
+
+    {
+      "name": "getdel_wrongtype",
+      "now_ms": 7100,
+      "argv": ["LPUSH", "gdlist", "a"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "getdel_wrongtype_error",
+      "now_ms": 7101,
+      "argv": ["GETDEL", "gdlist"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "append_wrongtype",
+      "now_ms": 7102,
+      "argv": ["APPEND", "gdlist", "val"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "getex_wrongtype",
+      "now_ms": 7103,
+      "argv": ["GETEX", "gdlist"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
     }
   ]
 }
