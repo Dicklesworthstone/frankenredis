@@ -4804,16 +4804,29 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         }
     };
 
-    // Execute the library code, which should define the function, then call it
-    // For Redis 7.0+, the library registers functions via redis.register_function
-    // The FCALL mechanism calls the registered function directly
-    // Since we have the Lua evaluator, we execute the full library code
-    // and then call the target function
-    let wrapper_script = format!(
-        "{}\nreturn {}(KEYS, ARGV)",
-        String::from_utf8_lossy(&script),
-        func_name
-    );
+    // Transform the library code for execution:
+    // 1. Strip the #!lua name=... header line (not valid Lua)
+    // 2. Convert redis.register_function('name', func) calls into
+    //    named function definitions so they can be called directly
+    let code_str = String::from_utf8_lossy(&script);
+    let mut lua_lines = Vec::new();
+    for line in code_str.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("#!") {
+            continue;
+        }
+        if trimmed.contains("register_function") {
+            // Transform: redis.register_function('name', function(k,a) ... end)
+            // Into: function name(k,a) ... end
+            if let Some(transformed) = transform_register_function(trimmed) {
+                lua_lines.push(transformed);
+            }
+            continue;
+        }
+        lua_lines.push(line.to_string());
+    }
+    lua_lines.push(format!("return {func_name}(KEYS, ARGV)"));
+    let wrapper_script = lua_lines.join("\n");
 
     let keys_vec: Vec<Vec<u8>> = keys.to_vec();
     let args_vec: Vec<Vec<u8>> = args.to_vec();
@@ -4827,6 +4840,37 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         Ok(frame) => Ok(frame),
         Err(e) => Ok(RespFrame::Error(format!("ERR Error running function: {e}"))),
     }
+}
+
+/// Transform `redis.register_function('name', function(k,a) body end)` into
+/// `function name(k,a) body end` so it can be called by name in our Lua evaluator.
+fn transform_register_function(line: &str) -> Option<String> {
+    // Match: redis.register_function('name', function(...)
+    // or:    redis.register_function("name", function(...)
+    let after = line
+        .find("register_function")
+        .map(|i| &line[i + "register_function".len()..])?;
+    let after = after.trim_start().strip_prefix('(')?;
+    let after = after.trim_start();
+    // Extract function name from 'name' or "name"
+    let (name, rest) = if after.starts_with('\'') {
+        let end = after[1..].find('\'')?;
+        (&after[1..1 + end], &after[2 + end..])
+    } else if after.starts_with('"') {
+        let end = after[1..].find('"')?;
+        (&after[1..1 + end], &after[2 + end..])
+    } else {
+        return None;
+    };
+    // Skip comma and whitespace to find 'function'
+    let rest = rest.trim_start().strip_prefix(',')?;
+    let rest = rest.trim_start();
+    // Rest should be: function(params) body end)
+    // Strip trailing ')' from the register_function call
+    let rest = rest.strip_prefix("function")?;
+    let rest = rest.trim_end();
+    let rest = rest.strip_suffix(')')?;
+    Some(format!("function {name}{rest}"))
 }
 
 // ── SSUBSCRIBE / SUNSUBSCRIBE / SPUBLISH (shard Pub/Sub) ───────────
