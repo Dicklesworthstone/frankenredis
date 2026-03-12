@@ -968,7 +968,18 @@ impl Store {
                 }
             }
             Value::Set(s) => {
-                if s.len() <= 128 && s.iter().all(|m| m.len() <= 64) {
+                // Redis uses intset when all members are parseable as integers
+                // and set size <= set-max-intset-entries (default 512).
+                if s.len() <= 512
+                    && s.iter().all(|m| {
+                        std::str::from_utf8(m)
+                            .ok()
+                            .and_then(|s| s.parse::<i64>().ok())
+                            .is_some()
+                    })
+                {
+                    "intset"
+                } else if s.len() <= 128 && s.iter().all(|m| m.len() <= 64) {
                     "listpack"
                 } else {
                     "hashtable"
@@ -5688,6 +5699,115 @@ impl Store {
             .insert(key.to_vec(), Entry::new(value, expires_at_ms, now_ms));
         Ok(())
     }
+
+    /// Generate AOF-compatible command sequences that reconstruct the entire store.
+    ///
+    /// Returns a list of command argv vectors. Non-expired entries are serialized
+    /// as the appropriate write command (SET, HSET, RPUSH, SADD, ZADD, XADD),
+    /// followed by PEXPIREAT if the key has an expiry. Expired entries are skipped.
+    ///
+    /// This is the core of AOF rewrite: the output can be wrapped in `AofRecord`
+    /// and encoded/replayed to reconstruct the database from scratch.
+    #[must_use]
+    pub fn to_aof_commands(&mut self, now_ms: u64) -> Vec<Vec<Vec<u8>>> {
+        // Expire stale keys first so they aren't serialized.
+        let all_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
+        for key in &all_keys {
+            self.drop_if_expired(key, now_ms);
+        }
+
+        let mut commands = Vec::new();
+
+        // Snapshot the remaining keys (sorted for deterministic output).
+        let mut keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
+        keys.sort();
+
+        for key in keys {
+            let Some(entry) = self.entries.get(&key) else {
+                continue;
+            };
+
+            match &entry.value {
+                Value::String(v) => {
+                    commands.push(vec![b"SET".to_vec(), key.clone(), v.clone()]);
+                }
+                Value::Hash(h) => {
+                    if !h.is_empty() {
+                        let mut argv = vec![b"HSET".to_vec(), key.clone()];
+                        // Sort fields for deterministic output.
+                        let mut fields: Vec<(&Vec<u8>, &Vec<u8>)> = h.iter().collect();
+                        fields.sort_by(|a, b| a.0.cmp(b.0));
+                        for (field, value) in fields {
+                            argv.push(field.clone());
+                            argv.push(value.clone());
+                        }
+                        commands.push(argv);
+                    }
+                }
+                Value::List(l) => {
+                    if !l.is_empty() {
+                        let mut argv = vec![b"RPUSH".to_vec(), key.clone()];
+                        for item in l {
+                            argv.push(item.clone());
+                        }
+                        commands.push(argv);
+                    }
+                }
+                Value::Set(s) => {
+                    if !s.is_empty() {
+                        let mut argv = vec![b"SADD".to_vec(), key.clone()];
+                        // Sort members for deterministic output.
+                        let mut members: Vec<&Vec<u8>> = s.iter().collect();
+                        members.sort();
+                        for member in members {
+                            argv.push(member.clone());
+                        }
+                        commands.push(argv);
+                    }
+                }
+                Value::SortedSet(zs) => {
+                    if !zs.is_empty() {
+                        let mut argv = vec![b"ZADD".to_vec(), key.clone()];
+                        // Sort by score then member for deterministic output.
+                        let mut pairs: Vec<(&Vec<u8>, &f64)> = zs.iter().collect();
+                        pairs.sort_by(|a, b| {
+                            a.1.partial_cmp(b.1)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                                .then_with(|| a.0.cmp(b.0))
+                        });
+                        for (member, score) in pairs {
+                            argv.push(score.to_string().into_bytes());
+                            argv.push(member.clone());
+                        }
+                        commands.push(argv);
+                    }
+                }
+                Value::Stream(entries) => {
+                    // Each stream entry becomes a separate XADD command.
+                    for ((ms, seq), fields) in entries {
+                        let id = format!("{ms}-{seq}");
+                        let mut argv = vec![b"XADD".to_vec(), key.clone(), id.into_bytes()];
+                        for (fname, fval) in fields {
+                            argv.push(fname.clone());
+                            argv.push(fval.clone());
+                        }
+                        commands.push(argv);
+                    }
+                }
+            }
+
+            // Emit PEXPIREAT if the key has an expiry timestamp.
+            if let Some(exp_ms) = entry.expires_at_ms {
+                commands.push(vec![
+                    b"PEXPIREAT".to_vec(),
+                    key.clone(),
+                    exp_ms.to_string().into_bytes(),
+                ]);
+            }
+        }
+
+        commands
+    }
 }
 
 /// CRC16-CCITT (poly 0x1021) for DUMP payload integrity.
@@ -8844,5 +8964,165 @@ mod tests {
     fn dump_nonexistent_key_returns_none() {
         let mut store = Store::new();
         assert!(store.dump_key(b"nope", 100).is_none());
+    }
+
+    // ── AOF rewrite serialization tests ─────────────────────────────────
+
+    #[test]
+    fn aof_commands_empty_store() {
+        let mut store = Store::new();
+        let cmds = store.to_aof_commands(100);
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn aof_commands_string_key() {
+        let mut store = Store::new();
+        store.set(b"hello".to_vec(), b"world".to_vec(), None, 100);
+        let cmds = store.to_aof_commands(100);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0][0], b"SET");
+        assert_eq!(cmds[0][1], b"hello");
+        assert_eq!(cmds[0][2], b"world");
+    }
+
+    #[test]
+    fn aof_commands_string_with_expiry() {
+        let mut store = Store::new();
+        // set with px_ttl_ms=5000 at now_ms=100 → expires_at_ms=5100
+        store.set(b"k".to_vec(), b"v".to_vec(), Some(5000), 100);
+        let cmds = store.to_aof_commands(100);
+        assert_eq!(cmds.len(), 2);
+        assert_eq!(cmds[0][0], b"SET");
+        assert_eq!(cmds[1][0], b"PEXPIREAT");
+        assert_eq!(cmds[1][1], b"k");
+        assert_eq!(cmds[1][2], b"5100");
+    }
+
+    #[test]
+    fn aof_commands_expired_key_skipped() {
+        let mut store = Store::new();
+        // set with px_ttl_ms=50 at now_ms=100 → expires_at_ms=150
+        store.set(b"k".to_vec(), b"v".to_vec(), Some(50), 100);
+        // At now_ms=200, key has expired (200 > 150)
+        let cmds = store.to_aof_commands(200);
+        assert!(cmds.is_empty());
+    }
+
+    #[test]
+    fn aof_commands_hash_key() {
+        let mut store = Store::new();
+        store
+            .hset(b"myhash", b"field1".to_vec(), b"val1".to_vec(), 100)
+            .unwrap();
+        store
+            .hset(b"myhash", b"field2".to_vec(), b"val2".to_vec(), 100)
+            .unwrap();
+        let cmds = store.to_aof_commands(100);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0][0], b"HSET");
+        assert_eq!(cmds[0][1], b"myhash");
+        // Fields are sorted deterministically
+        assert_eq!(cmds[0].len(), 6); // HSET key f1 v1 f2 v2
+    }
+
+    #[test]
+    fn aof_commands_list_key() {
+        let mut store = Store::new();
+        let _ = store.rpush(
+            b"mylist",
+            &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
+            100,
+        );
+        let cmds = store.to_aof_commands(100);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0][0], b"RPUSH");
+        assert_eq!(cmds[0][1], b"mylist");
+        assert_eq!(cmds[0][2], b"a");
+        assert_eq!(cmds[0][3], b"b");
+        assert_eq!(cmds[0][4], b"c");
+    }
+
+    #[test]
+    fn aof_commands_set_key() {
+        let mut store = Store::new();
+        let _ = store.sadd(b"myset", &[b"x".to_vec(), b"y".to_vec()], 100);
+        let cmds = store.to_aof_commands(100);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0][0], b"SADD");
+        assert_eq!(cmds[0][1], b"myset");
+        // Members are sorted deterministically
+        assert_eq!(cmds[0].len(), 4); // SADD key x y
+    }
+
+    #[test]
+    fn aof_commands_sorted_set_key() {
+        let mut store = Store::new();
+        store
+            .zadd(
+                b"myzset",
+                &[(1.5, b"alice".to_vec()), (2.0, b"bob".to_vec())],
+                100,
+            )
+            .unwrap();
+        let cmds = store.to_aof_commands(100);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0][0], b"ZADD");
+        assert_eq!(cmds[0][1], b"myzset");
+        // Score-member pairs sorted by score then member
+        assert_eq!(cmds[0].len(), 6); // ZADD key score1 member1 score2 member2
+    }
+
+    #[test]
+    fn aof_commands_stream_key() {
+        let mut store = Store::new();
+        store
+            .xadd(
+                b"mystream",
+                (1000, 0),
+                &[(b"name".to_vec(), b"val".to_vec())],
+                100,
+            )
+            .unwrap();
+        let cmds = store.to_aof_commands(100);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0][0], b"XADD");
+        assert_eq!(cmds[0][1], b"mystream");
+        assert_eq!(cmds[0][2], b"1000-0");
+        assert_eq!(cmds[0][3], b"name");
+        assert_eq!(cmds[0][4], b"val");
+    }
+
+    #[test]
+    fn aof_commands_deterministic_key_order() {
+        let mut store = Store::new();
+        store.set(b"z_key".to_vec(), b"1".to_vec(), None, 100);
+        store.set(b"a_key".to_vec(), b"2".to_vec(), None, 100);
+        store.set(b"m_key".to_vec(), b"3".to_vec(), None, 100);
+        let cmds = store.to_aof_commands(100);
+        assert_eq!(cmds.len(), 3);
+        // Keys should be sorted alphabetically
+        assert_eq!(cmds[0][1], b"a_key");
+        assert_eq!(cmds[1][1], b"m_key");
+        assert_eq!(cmds[2][1], b"z_key");
+    }
+
+    #[test]
+    fn aof_commands_mixed_types() {
+        let mut store = Store::new();
+        store.set(b"str".to_vec(), b"val".to_vec(), None, 100);
+        store
+            .hset(b"hash", b"f".to_vec(), b"v".to_vec(), 100)
+            .unwrap();
+        let _ = store.rpush(b"list", &[b"item".to_vec()], 100);
+        let _ = store.sadd(b"set", &[b"member".to_vec()], 100);
+        let cmds = store.to_aof_commands(100);
+        assert_eq!(cmds.len(), 4);
+        let commands: Vec<&[u8]> = cmds.iter().map(|c| c[0].as_slice()).collect();
+        // All data types represented
+        assert!(commands.contains(&b"SET".as_slice()));
+        assert!(commands.contains(&b"HSET".as_slice()));
+        assert!(commands.contains(&b"RPUSH".as_slice()));
+        assert!(commands.contains(&b"SADD".as_slice()));
     }
 }

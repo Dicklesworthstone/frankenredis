@@ -274,7 +274,7 @@ pub fn dispatch_argv(
         Some(CommandId::Ssubscribe) => return ssubscribe_cmd(argv),
         Some(CommandId::Sunsubscribe) => return sunsubscribe_cmd(argv),
         Some(CommandId::Spublish) => return spublish_cmd(argv),
-        Some(CommandId::SortRo) => return sort_cmd(argv, store, now_ms),
+        Some(CommandId::SortRo) => return sort_ro_cmd(argv, store, now_ms),
         Some(CommandId::Readonly) => return readonly_cmd(argv),
         Some(CommandId::Readwrite) => return readwrite_cmd(argv),
         Some(CommandId::Zrangestore) => return zrangestore_cmd(argv, store, now_ms),
@@ -9155,6 +9155,22 @@ fn sort_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     } else {
         Ok(RespFrame::Array(Some(output)))
     }
+}
+
+fn sort_ro_cmd(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    // SORT_RO rejects the STORE option
+    for arg in &argv[2..] {
+        if let Ok(s) = std::str::from_utf8(arg)
+            && s.eq_ignore_ascii_case("STORE")
+        {
+            return Ok(RespFrame::Error("ERR syntax error".to_string()));
+        }
+    }
+    sort_cmd(argv, store, now_ms)
 }
 
 /// Look up a sort key using a BY pattern for the SORT command.

@@ -1357,6 +1357,7 @@ mod tests {
                 "persist.replay.frame_length_violation"
             }
             fr_persist::PersistError::Parse(_) => "persist.replay.frame_parse_invalid",
+            fr_persist::PersistError::Io(_) => "persist.replay.io_error",
         }
     }
 

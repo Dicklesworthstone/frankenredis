@@ -20,7 +20,10 @@ use fr_eventloop::{
     validate_accept_path, validate_ae_barrier_order, validate_bootstrap,
     validate_fd_registration_bounds, validate_pending_write_delivery, validate_read_path,
 };
-use fr_persist::{AofRecord, PersistError, decode_aof_stream, encode_aof_stream};
+use fr_persist::{
+    AofRecord, PersistError, argv_to_aof_records, decode_aof_stream, encode_aof_stream,
+    write_aof_file,
+};
 use fr_protocol::{RespFrame, RespParseError, parse_frame};
 use fr_repl::{ReplOffset, WaitAofThreshold, WaitThreshold, evaluate_wait, evaluate_waitaof};
 use fr_store::{
@@ -720,6 +723,8 @@ pub struct Runtime {
     slowlog_max_len: usize,
     /// Last successful save timestamp (seconds since epoch).
     last_save_time_sec: u64,
+    /// Path for AOF persistence file (used by SAVE/BGSAVE).
+    aof_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -776,7 +781,31 @@ impl Runtime {
             slowlog_log_slower_than_us: 10_000, // default: 10ms
             slowlog_max_len: 128,
             last_save_time_sec: 0,
+            aof_path: None,
         }
+    }
+
+    /// Set the AOF persistence file path. When set, SAVE/BGSAVE will write
+    /// a full AOF rewrite to this path.
+    pub fn set_aof_path(&mut self, path: std::path::PathBuf) {
+        self.aof_path = Some(path);
+    }
+
+    /// Load and replay AOF records from the configured path, restoring store state.
+    ///
+    /// Each AOF record is dispatched through the command router as if it were
+    /// a client command. Returns the number of records replayed, or an error.
+    pub fn load_aof(&mut self, now_ms: u64) -> Result<usize, PersistError> {
+        let path = match &self.aof_path {
+            Some(p) => p.clone(),
+            None => return Ok(0),
+        };
+        let records = fr_persist::read_aof_file(&path)?;
+        let count = records.len();
+        for record in &records {
+            let _ = dispatch_argv(&record.argv, &mut self.store, now_ms);
+        }
+        Ok(count)
     }
 
     #[must_use]
@@ -1193,7 +1222,7 @@ impl Runtime {
                 return self.handle_lastsave_command(&argv);
             }
             Some(RuntimeSpecialCommand::Bgrewriteaof) => {
-                return self.handle_bgrewriteaof_command(&argv);
+                return self.handle_bgrewriteaof_command(&argv, now_ms);
             }
             Some(RuntimeSpecialCommand::Shutdown) => {
                 return self.handle_shutdown_command(&argv);
@@ -2142,7 +2171,14 @@ impl Runtime {
         if argv.len() != 1 {
             return command_error_to_resp(CommandError::WrongArity("SAVE"));
         }
-        // Record save time — in a full implementation this would persist data to disk
+        // Persist store state to AOF file if a path is configured.
+        if let Some(path) = &self.aof_path {
+            let commands = self.store.to_aof_commands(now_ms);
+            let records = argv_to_aof_records(commands);
+            if let Err(_e) = write_aof_file(path, &records) {
+                return RespFrame::Error("ERR error saving dataset to disk".to_string());
+            }
+        }
         self.last_save_time_sec = now_ms / 1000;
         RespFrame::SimpleString("OK".to_string())
     }
@@ -2151,7 +2187,15 @@ impl Runtime {
         if argv.len() > 2 {
             return command_error_to_resp(CommandError::WrongArity("BGSAVE"));
         }
-        // BGSAVE [SCHEDULE] — record save time
+        // In a single-threaded context, BGSAVE behaves like SAVE.
+        // Persist store state to AOF file if a path is configured.
+        if let Some(path) = &self.aof_path {
+            let commands = self.store.to_aof_commands(now_ms);
+            let records = argv_to_aof_records(commands);
+            if let Err(_e) = write_aof_file(path, &records) {
+                return RespFrame::Error("ERR error saving dataset to disk".to_string());
+            }
+        }
         self.last_save_time_sec = now_ms / 1000;
         RespFrame::SimpleString("Background saving started".to_string())
     }
@@ -2163,9 +2207,17 @@ impl Runtime {
         RespFrame::Integer(self.last_save_time_sec as i64)
     }
 
-    fn handle_bgrewriteaof_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_bgrewriteaof_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         if argv.len() != 1 {
             return command_error_to_resp(CommandError::WrongArity("BGREWRITEAOF"));
+        }
+        // Rewrite the AOF file with a snapshot of the current store state.
+        if let Some(path) = &self.aof_path {
+            let commands = self.store.to_aof_commands(now_ms);
+            let records = argv_to_aof_records(commands);
+            if let Err(_e) = write_aof_file(path, &records) {
+                return RespFrame::Error("ERR error rewriting AOF file".to_string());
+            }
         }
         RespFrame::SimpleString("Background append only file rewriting started".to_string())
     }
@@ -4224,5 +4276,79 @@ mod tests {
         assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
         let set = rt.execute_frame(command(&[b"CONFIG", b"SET", b"loglevel", b"warning"]), 2);
         assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    // ── AOF persistence round-trip tests ────────────────────────────────
+
+    #[test]
+    fn save_and_load_aof_round_trip() {
+        let dir = std::env::temp_dir().join("fr_runtime_aof_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let aof_path = dir.join("test_save.aof");
+
+        // Populate a runtime with various data types
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(aof_path.clone());
+
+        rt.execute_frame(command(&[b"SET", b"str_key", b"hello"]), 100);
+        rt.execute_frame(
+            command(&[b"HSET", b"hash_key", b"f1", b"v1", b"f2", b"v2"]),
+            100,
+        );
+        rt.execute_frame(command(&[b"RPUSH", b"list_key", b"a", b"b", b"c"]), 100);
+        rt.execute_frame(command(&[b"SADD", b"set_key", b"x", b"y", b"z"]), 100);
+        rt.execute_frame(
+            command(&[b"ZADD", b"zset_key", b"1.5", b"alice", b"2.5", b"bob"]),
+            100,
+        );
+
+        // SAVE to persist
+        let save_result = rt.execute_frame(command(&[b"SAVE"]), 100);
+        assert_eq!(save_result, RespFrame::SimpleString("OK".to_string()));
+
+        // Verify the file exists
+        assert!(aof_path.exists());
+
+        // Load into a fresh runtime
+        let mut rt2 = Runtime::default_strict();
+        rt2.set_aof_path(aof_path.clone());
+        let loaded = rt2.load_aof(100).expect("load should succeed");
+        assert!(loaded > 0, "should have loaded some records");
+
+        // Verify data was restored
+        let get = rt2.execute_frame(command(&[b"GET", b"str_key"]), 100);
+        assert_eq!(get, RespFrame::BulkString(Some(b"hello".to_vec())));
+
+        let hgetall = rt2.execute_frame(command(&[b"HGET", b"hash_key", b"f1"]), 100);
+        assert_eq!(hgetall, RespFrame::BulkString(Some(b"v1".to_vec())));
+
+        let lrange = rt2.execute_frame(command(&[b"LLEN", b"list_key"]), 100);
+        assert_eq!(lrange, RespFrame::Integer(3));
+
+        let scard = rt2.execute_frame(command(&[b"SCARD", b"set_key"]), 100);
+        assert_eq!(scard, RespFrame::Integer(3));
+
+        let zscore = rt2.execute_frame(command(&[b"ZSCORE", b"zset_key", b"alice"]), 100);
+        assert_eq!(zscore, RespFrame::BulkString(Some(b"1.5".to_vec())));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&aof_path);
+    }
+
+    #[test]
+    fn load_aof_no_path_returns_zero() {
+        let mut rt = Runtime::default_strict();
+        let count = rt.load_aof(100).expect("should succeed");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn load_aof_missing_file_returns_empty() {
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(std::path::PathBuf::from(
+            "/tmp/fr_nonexistent_aof_test_file.aof",
+        ));
+        let count = rt.load_aof(100).expect("should succeed for missing file");
+        assert_eq!(count, 0);
     }
 }
