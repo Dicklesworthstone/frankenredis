@@ -2849,6 +2849,11 @@ fn command_error_to_resp(error: CommandError) -> RespFrame {
             fr_store::StoreError::ValueNotFloat => {
                 RespFrame::Error("ERR value is not a valid float".to_string())
             }
+            fr_store::StoreError::IncrFloatNaN => {
+                RespFrame::Error(
+                    "ERR increment would produce NaN or Infinity".to_string(),
+                )
+            }
             fr_store::StoreError::IntegerOverflow => {
                 RespFrame::Error("ERR increment or decrement would overflow".to_string())
             }

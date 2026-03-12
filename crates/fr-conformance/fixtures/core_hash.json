@@ -1094,7 +1094,7 @@
       }
     },
     {
-      "name": "hincrbyfloat_inf_error",
+      "name": "hincrbyfloat_inf_accepted",
       "now_ms": 804,
       "argv": [
         "HINCRBYFLOAT",
@@ -1103,8 +1103,8 @@
         "inf"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not a valid float"
+        "kind": "bulk",
+        "value": "inf"
       }
     },
     {
@@ -1623,7 +1623,7 @@
       }
     },
     {
-      "name": "hincrbyfloat_inf_error",
+      "name": "hincrbyfloat_inf_accepted",
       "now_ms": 100,
       "argv": [
         "HINCRBYFLOAT",
@@ -1632,8 +1632,8 @@
         "inf"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not a valid float"
+        "kind": "bulk",
+        "value": "inf"
       }
     },
     {
@@ -1825,41 +1825,84 @@
         "value": "3.5"
       }
     },
-
     {
       "name": "hmset_basic",
       "now_ms": 200,
-      "argv": ["HMSET", "hms", "f1", "v1", "f2", "v2", "f3", "v3"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "HMSET",
+        "hms",
+        "f1",
+        "v1",
+        "f2",
+        "v2",
+        "f3",
+        "v3"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "hmset_verify_f1",
       "now_ms": 200,
-      "argv": ["HGET", "hms", "f1"],
-      "expect": { "kind": "bulk", "value": "v1" }
+      "argv": [
+        "HGET",
+        "hms",
+        "f1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "v1"
+      }
     },
     {
       "name": "hmset_verify_f3",
       "now_ms": 200,
-      "argv": ["HGET", "hms", "f3"],
-      "expect": { "kind": "bulk", "value": "v3" }
+      "argv": [
+        "HGET",
+        "hms",
+        "f3"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "v3"
+      }
     },
     {
       "name": "hmset_overwrite",
       "now_ms": 200,
-      "argv": ["HMSET", "hms", "f1", "updated"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "HMSET",
+        "hms",
+        "f1",
+        "updated"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "hmset_verify_overwrite",
       "now_ms": 200,
-      "argv": ["HGET", "hms", "f1"],
-      "expect": { "kind": "bulk", "value": "updated" }
+      "argv": [
+        "HGET",
+        "hms",
+        "f1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "updated"
+      }
     },
     {
       "name": "hmset_wrong_arity",
       "now_ms": 200,
-      "argv": ["HMSET", "k"],
+      "argv": [
+        "HMSET",
+        "k"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'HMSET' command"
@@ -1868,7 +1911,13 @@
     {
       "name": "hmset_odd_fields",
       "now_ms": 200,
-      "argv": ["HMSET", "k", "f1", "v1", "f2"],
+      "argv": [
+        "HMSET",
+        "k",
+        "f1",
+        "v1",
+        "f2"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'HMSET' command"
@@ -1877,29 +1926,126 @@
     {
       "name": "hkeys_basic",
       "now_ms": 200,
-      "argv": ["HKEYS", "hms"],
+      "argv": [
+        "HKEYS",
+        "hms"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "f1" },
-          { "kind": "bulk", "value": "f2" },
-          { "kind": "bulk", "value": "f3" }
+          {
+            "kind": "bulk",
+            "value": "f1"
+          },
+          {
+            "kind": "bulk",
+            "value": "f2"
+          },
+          {
+            "kind": "bulk",
+            "value": "f3"
+          }
         ]
       }
     },
     {
       "name": "hkeys_nonexistent",
       "now_ms": 200,
-      "argv": ["HKEYS", "nosuchhash"],
-      "expect": { "kind": "array", "value": [] }
+      "argv": [
+        "HKEYS",
+        "nosuchhash"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
     },
     {
       "name": "hkeys_wrong_arity",
       "now_ms": 200,
-      "argv": ["HKEYS"],
+      "argv": [
+        "HKEYS"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'HKEYS' command"
+      }
+    },
+    {
+      "name": "hincrbyfloat_inf_setup",
+      "now_ms": 1000,
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "hincrbyfloat_inf_on_new_field",
+      "now_ms": 1000,
+      "argv": [
+        "HINCRBYFLOAT",
+        "hfinf",
+        "f1",
+        "inf"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "inf"
+      }
+    },
+    {
+      "name": "hincrbyfloat_inf_get_value",
+      "now_ms": 1000,
+      "argv": [
+        "HGET",
+        "hfinf",
+        "f1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "inf"
+      }
+    },
+    {
+      "name": "hincrbyfloat_neg_inf",
+      "now_ms": 1000,
+      "argv": [
+        "HINCRBYFLOAT",
+        "hfinf",
+        "f2",
+        "-inf"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "-inf"
+      }
+    },
+    {
+      "name": "hincrbyfloat_inf_minus_inf_error",
+      "now_ms": 1000,
+      "argv": [
+        "HINCRBYFLOAT",
+        "hfinf",
+        "f1",
+        "-inf"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR increment would produce NaN or Infinity"
+      }
+    },
+    {
+      "name": "hincrbyfloat_inf_cleanup",
+      "now_ms": 1000,
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
       }
     }
   ]

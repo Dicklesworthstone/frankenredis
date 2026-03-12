@@ -2956,6 +2956,120 @@
         "kind": "simple",
         "value": "OK"
       }
+    },
+    {
+      "name": "incrbyfloat_inf_setup",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "floatinf",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "incrbyfloat_inf_returns_inf",
+      "now_ms": 1000,
+      "argv": [
+        "INCRBYFLOAT",
+        "floatinf",
+        "inf"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "inf"
+      }
+    },
+    {
+      "name": "incrbyfloat_get_inf",
+      "now_ms": 1000,
+      "argv": [
+        "GET",
+        "floatinf"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "inf"
+      }
+    },
+    {
+      "name": "incrbyfloat_neg_inf_setup",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "floatneginf",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "incrbyfloat_neg_inf_returns_neg_inf",
+      "now_ms": 1000,
+      "argv": [
+        "INCRBYFLOAT",
+        "floatneginf",
+        "-inf"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "-inf"
+      }
+    },
+    {
+      "name": "incrbyfloat_inf_minus_inf_error",
+      "now_ms": 1000,
+      "argv": [
+        "INCRBYFLOAT",
+        "floatinf",
+        "-inf"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR increment would produce NaN or Infinity"
+      }
+    },
+    {
+      "name": "incrbyfloat_nan_error",
+      "now_ms": 1000,
+      "argv": [
+        "INCRBYFLOAT",
+        "floatinf",
+        "nan"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not a valid float"
+      }
+    },
+    {
+      "name": "incrbyfloat_inf_plus_zero_stays_inf",
+      "now_ms": 1000,
+      "argv": [
+        "INCRBYFLOAT",
+        "floatinf",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "inf"
+      }
+    },
+    {
+      "name": "incrbyfloat_inf_cleanup",
+      "now_ms": 1000,
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     }
   ]
 }

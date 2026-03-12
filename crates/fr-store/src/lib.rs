@@ -147,6 +147,7 @@ pub enum StoreError {
     ValueNotInteger,
     HashValueNotInteger,
     ValueNotFloat,
+    IncrFloatNaN,
     IntegerOverflow,
     KeyNotFound,
     WrongType,
@@ -607,8 +608,8 @@ impl Store {
             None => (0.0_f64, None),
         };
         let next = current + delta;
-        if next.is_infinite() || next.is_nan() {
-            return Err(StoreError::ValueNotFloat);
+        if next.is_nan() {
+            return Err(StoreError::IncrFloatNaN);
         }
         self.entries.insert(
             key.to_vec(),
@@ -1555,8 +1556,8 @@ impl Store {
                         None => 0.0,
                     };
                     let next = current + delta;
-                    if next.is_infinite() || next.is_nan() {
-                        return Err(StoreError::ValueNotFloat);
+                    if next.is_nan() {
+                        return Err(StoreError::IncrFloatNaN);
                     }
                     m.insert(field.to_vec(), next.to_string().into_bytes());
                     Ok(next)
@@ -1564,8 +1565,8 @@ impl Store {
                 _ => Err(StoreError::WrongType),
             },
             None => {
-                if delta.is_infinite() || delta.is_nan() {
-                    return Err(StoreError::ValueNotFloat);
+                if delta.is_nan() {
+                    return Err(StoreError::IncrFloatNaN);
                 }
                 let mut m = HashMap::new();
                 m.insert(field.to_vec(), delta.to_string().into_bytes());
