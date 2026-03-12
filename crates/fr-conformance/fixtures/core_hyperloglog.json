@@ -4,139 +4,294 @@
     {
       "name": "pfadd_creates_key_returns_1",
       "now_ms": 0,
-      "argv": ["PFADD", "hll1", "a", "b", "c"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFADD",
+        "hll1",
+        "a",
+        "b",
+        "c"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfadd_duplicate_elements_returns_0",
       "now_ms": 1,
-      "argv": ["PFADD", "hll1", "a", "b"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "PFADD",
+        "hll1",
+        "a",
+        "b"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "pfadd_new_element_returns_1",
       "now_ms": 2,
-      "argv": ["PFADD", "hll1", "d"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFADD",
+        "hll1",
+        "d"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfadd_no_elements_creates_key",
       "now_ms": 3,
-      "argv": ["PFADD", "hll_empty"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFADD",
+        "hll_empty"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfadd_no_elements_existing_returns_0",
       "now_ms": 4,
-      "argv": ["PFADD", "hll_empty"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "PFADD",
+        "hll_empty"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "pfcount_missing_key_returns_0",
       "now_ms": 10,
-      "argv": ["PFCOUNT", "nonexistent"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "PFCOUNT",
+        "nonexistent"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "pfcount_empty_hll_returns_0",
       "now_ms": 11,
-      "argv": ["PFCOUNT", "hll_empty"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "PFCOUNT",
+        "hll_empty"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "pfcount_hll1_has_four",
       "now_ms": 10,
-      "argv": ["PFCOUNT", "hll1"],
-      "expect": { "kind": "integer", "value": 4 }
+      "argv": [
+        "PFCOUNT",
+        "hll1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 4
+      }
     },
     {
       "name": "pfadd_second_set",
       "now_ms": 20,
-      "argv": ["PFADD", "hll2", "x", "y", "z"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFADD",
+        "hll2",
+        "x",
+        "y",
+        "z"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfcount_hll2_has_three",
       "now_ms": 21,
-      "argv": ["PFCOUNT", "hll2"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "PFCOUNT",
+        "hll2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "pfcount_multiple_keys_union_count",
       "now_ms": 22,
-      "argv": ["PFCOUNT", "hll1", "hll2"],
-      "expect": { "kind": "integer", "value": 7 }
+      "argv": [
+        "PFCOUNT",
+        "hll1",
+        "hll2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 7
+      }
     },
     {
       "name": "pfcount_multiple_keys_empty_union",
       "now_ms": 23,
-      "argv": ["PFCOUNT", "hll_empty", "nonexistent"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "PFCOUNT",
+        "hll_empty",
+        "nonexistent"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "pfmerge_basic",
       "now_ms": 30,
-      "argv": ["PFMERGE", "merged", "hll1", "hll2"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "PFMERGE",
+        "merged",
+        "hll1",
+        "hll2"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "pfmerge_dest_only",
       "now_ms": 31,
-      "argv": ["PFMERGE", "dest_only"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "PFMERGE",
+        "dest_only"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "pfcount_dest_only_returns_0",
       "now_ms": 32,
-      "argv": ["PFCOUNT", "dest_only"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "PFCOUNT",
+        "dest_only"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "pfcount_merged_has_seven",
       "now_ms": 31,
-      "argv": ["PFCOUNT", "merged"],
-      "expect": { "kind": "integer", "value": 7 }
+      "argv": [
+        "PFCOUNT",
+        "merged"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 7
+      }
     },
     {
       "name": "pfmerge_nonexistent_sources",
       "now_ms": 33,
-      "argv": ["PFMERGE", "merged_none", "nosuch1", "nosuch2"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "PFMERGE",
+        "merged_none",
+        "nosuch1",
+        "nosuch2"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "pfcount_merged_none_returns_0",
       "now_ms": 34,
-      "argv": ["PFCOUNT", "merged_none"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "PFCOUNT",
+        "merged_none"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "pfmerge_into_existing",
       "now_ms": 35,
-      "argv": ["PFADD", "hll3", "m", "n"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFADD",
+        "hll3",
+        "m",
+        "n"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfmerge_overwrites_dest",
       "now_ms": 36,
-      "argv": ["PFMERGE", "hll3", "hll1"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "PFMERGE",
+        "hll3",
+        "hll1"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "pfcount_merged_into_existing",
       "now_ms": 37,
-      "argv": ["PFCOUNT", "hll3"],
-      "expect": { "kind": "integer", "value": 6 }
+      "argv": [
+        "PFCOUNT",
+        "hll3"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 6
+      }
     },
     {
       "name": "pfadd_wrong_type_error",
       "now_ms": 40,
-      "argv": ["SET", "strkey", "value"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "strkey",
+        "value"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "pfadd_on_string_key_invalid_hll",
       "now_ms": 41,
-      "argv": ["PFADD", "strkey", "elem"],
+      "argv": [
+        "PFADD",
+        "strkey",
+        "elem"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Key is not a valid HyperLogLog string value."
@@ -145,7 +300,10 @@
     {
       "name": "pfcount_on_string_key_invalid_hll",
       "now_ms": 42,
-      "argv": ["PFCOUNT", "strkey"],
+      "argv": [
+        "PFCOUNT",
+        "strkey"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Key is not a valid HyperLogLog string value."
@@ -154,7 +312,11 @@
     {
       "name": "pfmerge_src_invalid_hll",
       "now_ms": 43,
-      "argv": ["PFMERGE", "dest_wt", "strkey"],
+      "argv": [
+        "PFMERGE",
+        "dest_wt",
+        "strkey"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Key is not a valid HyperLogLog string value."
@@ -163,13 +325,24 @@
     {
       "name": "setup_list_key_for_wrongtype",
       "now_ms": 44,
-      "argv": ["LPUSH", "listkey", "val"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "LPUSH",
+        "listkey",
+        "val"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfadd_on_list_key_wrongtype",
       "now_ms": 45,
-      "argv": ["PFADD", "listkey", "elem"],
+      "argv": [
+        "PFADD",
+        "listkey",
+        "elem"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -178,7 +351,10 @@
     {
       "name": "pfcount_on_list_key_wrongtype",
       "now_ms": 46,
-      "argv": ["PFCOUNT", "listkey"],
+      "argv": [
+        "PFCOUNT",
+        "listkey"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -187,7 +363,9 @@
     {
       "name": "pfadd_wrong_arity_no_key",
       "now_ms": 50,
-      "argv": ["PFADD"],
+      "argv": [
+        "PFADD"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'PFADD' command"
@@ -196,7 +374,9 @@
     {
       "name": "pfcount_wrong_arity",
       "now_ms": 51,
-      "argv": ["PFCOUNT"],
+      "argv": [
+        "PFCOUNT"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'PFCOUNT' command"
@@ -205,137 +385,294 @@
     {
       "name": "pfmerge_wrong_arity",
       "now_ms": 52,
-      "argv": ["PFMERGE"],
+      "argv": [
+        "PFMERGE"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'PFMERGE' command"
       }
     },
-
     {
       "name": "pfadd_empty_string_element",
       "now_ms": 60,
-      "argv": ["PFADD", "hll_empty_elem", ""],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFADD",
+        "hll_empty_elem",
+        ""
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfcount_empty_string_element",
       "now_ms": 61,
-      "argv": ["PFCOUNT", "hll_empty_elem"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFCOUNT",
+        "hll_empty_elem"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfadd_single_element",
       "now_ms": 62,
-      "argv": ["PFADD", "hll_single", "only"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFADD",
+        "hll_single",
+        "only"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfcount_single_element",
       "now_ms": 63,
-      "argv": ["PFCOUNT", "hll_single"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFCOUNT",
+        "hll_single"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfcount_mix_existing_nonexisting",
       "now_ms": 64,
-      "argv": ["PFCOUNT", "hll1", "nonexistent", "hll2"],
-      "expect": { "kind": "integer", "value": 7 }
+      "argv": [
+        "PFCOUNT",
+        "hll1",
+        "nonexistent",
+        "hll2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 7
+      }
     },
     {
       "name": "pfmerge_dest_is_also_source",
       "now_ms": 70,
-      "argv": ["PFADD", "hll_self", "p", "q", "r"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFADD",
+        "hll_self",
+        "p",
+        "q",
+        "r"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfmerge_self_merge",
       "now_ms": 71,
-      "argv": ["PFMERGE", "hll_self", "hll_self"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "PFMERGE",
+        "hll_self",
+        "hll_self"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "pfcount_after_self_merge",
       "now_ms": 72,
-      "argv": ["PFCOUNT", "hll_self"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "PFCOUNT",
+        "hll_self"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "pfadd_many_elements",
       "now_ms": 80,
-      "argv": ["PFADD", "hll_many", "a", "b", "c", "d", "e", "f", "g", "h", "i", "j"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFADD",
+        "hll_many",
+        "a",
+        "b",
+        "c",
+        "d",
+        "e",
+        "f",
+        "g",
+        "h",
+        "i",
+        "j"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfcount_many_elements",
       "now_ms": 81,
-      "argv": ["PFCOUNT", "hll_many"],
-      "expect": { "kind": "integer", "value": 10 }
+      "argv": [
+        "PFCOUNT",
+        "hll_many"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 10
+      }
     },
     {
       "name": "pfadd_all_duplicates_returns_0",
       "now_ms": 82,
-      "argv": ["PFADD", "hll_many", "a", "b", "c"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "PFADD",
+        "hll_many",
+        "a",
+        "b",
+        "c"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "pfmerge_overlapping_sets",
       "now_ms": 90,
-      "argv": ["PFADD", "hll_overlap1", "a", "b", "c"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFADD",
+        "hll_overlap1",
+        "a",
+        "b",
+        "c"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfmerge_overlapping_sets_2",
       "now_ms": 91,
-      "argv": ["PFADD", "hll_overlap2", "b", "c", "d"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "PFADD",
+        "hll_overlap2",
+        "b",
+        "c",
+        "d"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfmerge_overlapping",
       "now_ms": 92,
-      "argv": ["PFMERGE", "hll_overlap_merged", "hll_overlap1", "hll_overlap2"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "PFMERGE",
+        "hll_overlap_merged",
+        "hll_overlap1",
+        "hll_overlap2"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "pfcount_overlapping_merged",
       "now_ms": 93,
-      "argv": ["PFCOUNT", "hll_overlap_merged"],
-      "expect": { "kind": "integer", "value": 4 }
+      "argv": [
+        "PFCOUNT",
+        "hll_overlap_merged"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 4
+      }
     },
     {
       "name": "del_hll_then_pfcount",
       "now_ms": 100,
-      "argv": ["DEL", "hll_single"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "DEL",
+        "hll_single"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfcount_after_del",
       "now_ms": 101,
-      "argv": ["PFCOUNT", "hll_single"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "PFCOUNT",
+        "hll_single"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "pfmerge_single_source",
       "now_ms": 110,
-      "argv": ["PFMERGE", "hll_copy", "hll1"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "PFMERGE",
+        "hll_copy",
+        "hll1"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "pfcount_copied",
       "now_ms": 111,
-      "argv": ["PFCOUNT", "hll_copy"],
-      "expect": { "kind": "integer", "value": 4 }
+      "argv": [
+        "PFCOUNT",
+        "hll_copy"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 4
+      }
     },
     {
       "name": "pfmerge_on_hash_key_wrongtype",
       "now_ms": 120,
-      "argv": ["HSET", "hashkey", "f", "v"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "HSET",
+        "hashkey",
+        "f",
+        "v"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "pfadd_on_hash_key_wrongtype",
       "now_ms": 121,
-      "argv": ["PFADD", "hashkey", "elem"],
+      "argv": [
+        "PFADD",
+        "hashkey",
+        "elem"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -344,7 +681,10 @@
     {
       "name": "pfcount_on_hash_key_wrongtype",
       "now_ms": 122,
-      "argv": ["PFCOUNT", "hashkey"],
+      "argv": [
+        "PFCOUNT",
+        "hashkey"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -353,10 +693,228 @@
     {
       "name": "pfmerge_dest_hash_wrongtype",
       "now_ms": 123,
-      "argv": ["PFMERGE", "hashkey", "hll1"],
+      "argv": [
+        "PFMERGE",
+        "hashkey",
+        "hll1"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfadd_hll3",
+      "now_ms": 100,
+      "argv": [
+        "PFADD",
+        "hll3",
+        "p",
+        "q",
+        "r"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pfcount_three_key_union",
+      "now_ms": 100,
+      "argv": [
+        "PFCOUNT",
+        "hll1",
+        "hll2",
+        "hll3"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 12
+      }
+    },
+    {
+      "name": "pfmerge_three_sources",
+      "now_ms": 100,
+      "argv": [
+        "PFMERGE",
+        "merged3",
+        "hll1",
+        "hll2",
+        "hll3"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "pfcount_merged_three",
+      "now_ms": 100,
+      "argv": [
+        "PFCOUNT",
+        "merged3"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 12
+      }
+    },
+    {
+      "name": "setup_hll_for_del",
+      "now_ms": 100,
+      "argv": [
+        "PFADD",
+        "hll_del",
+        "a",
+        "b"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "del_hll_for_recreate",
+      "now_ms": 100,
+      "argv": [
+        "DEL",
+        "hll_del"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pfadd_after_del_recreate",
+      "now_ms": 100,
+      "argv": [
+        "PFADD",
+        "hll_del",
+        "c",
+        "d"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pfcount_after_recreate",
+      "now_ms": 100,
+      "argv": [
+        "PFCOUNT",
+        "hll_del"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "pfadd_nonempty_for_merge",
+      "now_ms": 100,
+      "argv": [
+        "PFADD",
+        "hll_nonempty",
+        "aa",
+        "bb"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pfmerge_with_empty_source",
+      "now_ms": 100,
+      "argv": [
+        "PFMERGE",
+        "merged_with_empty",
+        "hll_nonempty",
+        "hll_nonexist123"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "pfcount_merged_with_empty",
+      "now_ms": 100,
+      "argv": [
+        "PFCOUNT",
+        "merged_with_empty"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "setup_zset_for_hll_wrongtype",
+      "now_ms": 100,
+      "argv": [
+        "ZADD",
+        "zset_for_hll",
+        "1",
+        "m"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pfadd_on_zset_wrongtype",
+      "now_ms": 100,
+      "argv": [
+        "PFADD",
+        "zset_for_hll",
+        "x"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfcount_on_zset_wrongtype",
+      "now_ms": 100,
+      "argv": [
+        "PFCOUNT",
+        "zset_for_hll"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfmerge_src_zset_wrongtype",
+      "now_ms": 100,
+      "argv": [
+        "PFMERGE",
+        "merged_zset",
+        "zset_for_hll"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfadd_repeat_same_elements",
+      "now_ms": 100,
+      "argv": [
+        "PFADD",
+        "hll_nonempty",
+        "aa",
+        "bb"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
       }
     }
   ]

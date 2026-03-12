@@ -4,7 +4,10 @@
     {
       "name": "cluster_info",
       "now_ms": 0,
-      "argv": ["CLUSTER", "INFO"],
+      "argv": [
+        "CLUSTER",
+        "INFO"
+      ],
       "expect": {
         "kind": "bulk",
         "value": "cluster_enabled:0\r\ncluster_state:ok\r\ncluster_slots_assigned:0\r\ncluster_slots_ok:0\r\ncluster_slots_pfail:0\r\ncluster_slots_fail:0\r\ncluster_known_nodes:0\r\ncluster_size:0\r\ncluster_current_epoch:0\r\ncluster_my_epoch:0\r\ncluster_stats_messages_sent:0\r\ncluster_stats_messages_received:0\r\ntotal_cluster_links_buffer_limit_exceeded:0\r\n"
@@ -13,7 +16,10 @@
     {
       "name": "cluster_myid",
       "now_ms": 0,
-      "argv": ["CLUSTER", "MYID"],
+      "argv": [
+        "CLUSTER",
+        "MYID"
+      ],
       "expect": {
         "kind": "bulk",
         "value": "0000000000000000000000000000000000000000"
@@ -22,7 +28,10 @@
     {
       "name": "cluster_slots_empty",
       "now_ms": 0,
-      "argv": ["CLUSTER", "SLOTS"],
+      "argv": [
+        "CLUSTER",
+        "SLOTS"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -31,7 +40,10 @@
     {
       "name": "cluster_shards_empty",
       "now_ms": 0,
-      "argv": ["CLUSTER", "SHARDS"],
+      "argv": [
+        "CLUSTER",
+        "SHARDS"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -40,7 +52,10 @@
     {
       "name": "cluster_nodes_empty",
       "now_ms": 0,
-      "argv": ["CLUSTER", "NODES"],
+      "argv": [
+        "CLUSTER",
+        "NODES"
+      ],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -49,84 +64,173 @@
     {
       "name": "cluster_reset",
       "now_ms": 0,
-      "argv": ["CLUSTER", "RESET"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "CLUSTER",
+        "RESET"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "cluster_keyslot_foo",
       "now_ms": 0,
-      "argv": ["CLUSTER", "KEYSLOT", "foo"],
-      "expect": { "kind": "integer", "value": 12182 }
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        "foo"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 12182
+      }
     },
     {
       "name": "cluster_keyslot_bar",
       "now_ms": 0,
-      "argv": ["CLUSTER", "KEYSLOT", "bar"],
-      "expect": { "kind": "integer", "value": 5061 }
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        "bar"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 5061
+      }
     },
     {
       "name": "cluster_keyslot_hello",
       "now_ms": 0,
-      "argv": ["CLUSTER", "KEYSLOT", "hello"],
-      "expect": { "kind": "integer", "value": 866 }
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        "hello"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 866
+      }
     },
     {
       "name": "cluster_keyslot_hash_tag",
       "now_ms": 0,
-      "argv": ["CLUSTER", "KEYSLOT", "{user}.following"],
-      "expect": { "kind": "integer", "value": 5474 }
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        "{user}.following"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 5474
+      }
     },
     {
       "name": "cluster_keyslot_hash_tag_same_as_inner",
       "now_ms": 0,
-      "argv": ["CLUSTER", "KEYSLOT", "user"],
-      "expect": { "kind": "integer", "value": 5474 }
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        "user"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 5474
+      }
     },
     {
       "name": "cluster_keyslot_empty_hash_tag_uses_full_key",
       "now_ms": 0,
-      "argv": ["CLUSTER", "KEYSLOT", "{}.foo"],
-      "expect": { "kind": "integer", "value": 64 }
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        "{}.foo"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 64
+      }
     },
     {
       "name": "setup_cluster_keys",
       "now_ms": 0,
-      "argv": ["SET", "foo", "val1"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "foo",
+        "val1"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "setup_cluster_keys_2",
       "now_ms": 0,
-      "argv": ["SET", "bar", "val2"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "bar",
+        "val2"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "cluster_countkeysinslot_with_key",
       "now_ms": 0,
-      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "12182"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT",
+        "12182"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "cluster_countkeysinslot_empty",
       "now_ms": 0,
-      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "0"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "cluster_getkeysinslot_with_key",
       "now_ms": 0,
-      "argv": ["CLUSTER", "GETKEYSINSLOT", "12182", "10"],
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "12182",
+        "10"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "foo" }
+          {
+            "kind": "bulk",
+            "value": "foo"
+          }
         ]
       }
     },
     {
       "name": "cluster_getkeysinslot_empty",
       "now_ms": 0,
-      "argv": ["CLUSTER", "GETKEYSINSLOT", "0", "10"],
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "0",
+        "10"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -135,7 +239,12 @@
     {
       "name": "cluster_getkeysinslot_count_zero",
       "now_ms": 0,
-      "argv": ["CLUSTER", "GETKEYSINSLOT", "12182", "0"],
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "12182",
+        "0"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -144,108 +253,215 @@
     {
       "name": "cluster_help",
       "now_ms": 0,
-      "argv": ["CLUSTER", "HELP"],
+      "argv": [
+        "CLUSTER",
+        "HELP"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "CLUSTER HELP" },
-          { "kind": "bulk", "value": "CLUSTER subcommand dispatch scaffold (FR-P2C-007 D1)." },
-          { "kind": "bulk", "value": "Supported subcommands in this stage: HELP, INFO, MYID, SLOTS, SHARDS, NODES, KEYSLOT, GETKEYSINSLOT, COUNTKEYSINSLOT, RESET." }
+          {
+            "kind": "bulk",
+            "value": "CLUSTER HELP"
+          },
+          {
+            "kind": "bulk",
+            "value": "CLUSTER subcommand dispatch scaffold (FR-P2C-007 D1)."
+          },
+          {
+            "kind": "bulk",
+            "value": "Supported subcommands in this stage: HELP, INFO, MYID, SLOTS, SHARDS, NODES, KEYSLOT, GETKEYSINSLOT, COUNTKEYSINSLOT, RESET."
+          }
         ]
       }
     },
     {
       "name": "cluster_wrong_arity",
       "now_ms": 0,
-      "argv": ["CLUSTER"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'CLUSTER' command" }
+      "argv": [
+        "CLUSTER"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLUSTER' command"
+      }
     },
     {
       "name": "cluster_unknown_subcommand",
       "now_ms": 0,
-      "argv": ["CLUSTER", "NOSUCH"],
-      "expect": { "kind": "error", "value": "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP." }
+      "argv": [
+        "CLUSTER",
+        "NOSUCH"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP."
+      }
     },
     {
       "name": "cluster_keyslot_wrong_arity",
       "now_ms": 0,
-      "argv": ["CLUSTER", "KEYSLOT"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'CLUSTER' command" }
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLUSTER' command"
+      }
     },
     {
       "name": "cluster_countkeysinslot_wrong_arity",
       "now_ms": 0,
-      "argv": ["CLUSTER", "COUNTKEYSINSLOT"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'CLUSTER' command" }
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLUSTER' command"
+      }
     },
     {
       "name": "cluster_getkeysinslot_wrong_arity",
       "now_ms": 0,
-      "argv": ["CLUSTER", "GETKEYSINSLOT", "0"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'CLUSTER' command" }
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLUSTER' command"
+      }
     },
     {
       "name": "cluster_case_insensitive",
       "now_ms": 0,
-      "argv": ["CLUSTER", "info"],
+      "argv": [
+        "CLUSTER",
+        "info"
+      ],
       "expect": {
         "kind": "bulk",
         "value": "cluster_enabled:0\r\ncluster_state:ok\r\ncluster_slots_assigned:0\r\ncluster_slots_ok:0\r\ncluster_slots_pfail:0\r\ncluster_slots_fail:0\r\ncluster_known_nodes:0\r\ncluster_size:0\r\ncluster_current_epoch:0\r\ncluster_my_epoch:0\r\ncluster_stats_messages_sent:0\r\ncluster_stats_messages_received:0\r\ntotal_cluster_links_buffer_limit_exceeded:0\r\n"
       }
     },
-
     {
       "name": "cluster_reset_hard",
       "now_ms": 0,
-      "argv": ["CLUSTER", "RESET", "HARD"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "CLUSTER",
+        "RESET",
+        "HARD"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "cluster_reset_soft",
       "now_ms": 0,
-      "argv": ["CLUSTER", "RESET", "SOFT"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "CLUSTER",
+        "RESET",
+        "SOFT"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "cluster_keyslot_empty_string",
       "now_ms": 0,
-      "argv": ["CLUSTER", "KEYSLOT", ""],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        ""
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "cluster_keyslot_hash_tag_same_slot",
       "now_ms": 0,
-      "argv": ["CLUSTER", "KEYSLOT", "{user}.followers"],
-      "expect": { "kind": "integer", "value": 5474 }
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        "{user}.followers"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 5474
+      }
     },
     {
       "name": "cluster_countkeysinslot_non_integer",
       "now_ms": 0,
-      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "cluster_countkeysinslot_out_of_range_clamped",
       "now_ms": 0,
-      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "99999"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT",
+        "99999"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "cluster_getkeysinslot_non_integer_slot",
       "now_ms": 0,
-      "argv": ["CLUSTER", "GETKEYSINSLOT", "xyz", "10"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "xyz",
+        "10"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "cluster_getkeysinslot_non_integer_count",
       "now_ms": 0,
-      "argv": ["CLUSTER", "GETKEYSINSLOT", "0", "xyz"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "0",
+        "xyz"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "cluster_getkeysinslot_negative_count",
       "now_ms": 0,
-      "argv": ["CLUSTER", "GETKEYSINSLOT", "12182", "-5"],
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "12182",
+        "-5"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -254,25 +470,51 @@
     {
       "name": "setup_multiple_same_slot",
       "now_ms": 0,
-      "argv": ["SET", "{user}.name", "alice"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "{user}.name",
+        "alice"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "setup_multiple_same_slot_2",
       "now_ms": 0,
-      "argv": ["SET", "{user}.email", "alice@example.com"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "{user}.email",
+        "alice@example.com"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "cluster_countkeysinslot_multiple_keys",
       "now_ms": 0,
-      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "5474"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT",
+        "5474"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
     {
       "name": "cluster_getkeysinslot_out_of_range_clamped",
       "now_ms": 0,
-      "argv": ["CLUSTER", "GETKEYSINSLOT", "99999", "10"],
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "99999",
+        "10"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -281,7 +523,10 @@
     {
       "name": "cluster_myid_case_insensitive",
       "now_ms": 0,
-      "argv": ["CLUSTER", "myid"],
+      "argv": [
+        "CLUSTER",
+        "myid"
+      ],
       "expect": {
         "kind": "bulk",
         "value": "0000000000000000000000000000000000000000"
@@ -290,7 +535,10 @@
     {
       "name": "cluster_slots_case_insensitive",
       "now_ms": 0,
-      "argv": ["CLUSTER", "slots"],
+      "argv": [
+        "CLUSTER",
+        "slots"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -299,7 +547,10 @@
     {
       "name": "cluster_shards_case_insensitive",
       "now_ms": 0,
-      "argv": ["CLUSTER", "shards"],
+      "argv": [
+        "CLUSTER",
+        "shards"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -308,7 +559,10 @@
     {
       "name": "cluster_nodes_case_insensitive",
       "now_ms": 0,
-      "argv": ["CLUSTER", "nodes"],
+      "argv": [
+        "CLUSTER",
+        "nodes"
+      ],
       "expect": {
         "kind": "bulk",
         "value": ""
@@ -317,8 +571,67 @@
     {
       "name": "cluster_countkeysinslot_negative_clamped_to_0",
       "now_ms": 0,
-      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "-1"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT",
+        "-1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "cluster_keyslot_nested_hash_tag",
+      "now_ms": 100,
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        "{foo}bar{baz}"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 12182
+      }
+    },
+    {
+      "name": "cluster_keyslot_only_closing_brace",
+      "now_ms": 100,
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        "}foo"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 5221
+      }
+    },
+    {
+      "name": "cluster_keyslot_unclosed_hash_tag",
+      "now_ms": 100,
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        "{foo"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 13308
+      }
+    },
+    {
+      "name": "cluster_keyslot_space_in_key",
+      "now_ms": 100,
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        "hello world"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 15332
+      }
     }
   ]
 }

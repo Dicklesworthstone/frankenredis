@@ -4,7 +4,10 @@
     {
       "name": "function_list_empty",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LIST"],
+      "argv": [
+        "FUNCTION",
+        "LIST"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -13,24 +16,51 @@
     {
       "name": "function_stats_empty",
       "now_ms": 0,
-      "argv": ["FUNCTION", "STATS"],
+      "argv": [
+        "FUNCTION",
+        "STATS"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "running_script" },
-          { "kind": "integer", "value": 0 },
-          { "kind": "bulk", "value": "engines" },
+          {
+            "kind": "bulk",
+            "value": "running_script"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "bulk",
+            "value": "engines"
+          },
           {
             "kind": "array",
             "value": [
-              { "kind": "bulk", "value": "LUA" },
+              {
+                "kind": "bulk",
+                "value": "LUA"
+              },
               {
                 "kind": "array",
                 "value": [
-                  { "kind": "bulk", "value": "libraries_count" },
-                  { "kind": "integer", "value": 0 },
-                  { "kind": "bulk", "value": "functions_count" },
-                  { "kind": "integer", "value": 0 }
+                  {
+                    "kind": "bulk",
+                    "value": "libraries_count"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 0
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "functions_count"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 0
+                  }
                 ]
               }
             ]
@@ -41,36 +71,79 @@
     {
       "name": "function_load_simple",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LOAD", "#!lua name=mylib\nredis.register_function('myfunc', function(keys, args) return args[1] end)"],
-      "expect": { "kind": "bulk", "value": "mylib" }
+      "argv": [
+        "FUNCTION",
+        "LOAD",
+        "#!lua name=mylib\nredis.register_function('myfunc', function(keys, args) return args[1] end)"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "mylib"
+      }
     },
     {
       "name": "function_list_after_load",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LIST"],
+      "argv": [
+        "FUNCTION",
+        "LIST"
+      ],
       "expect": {
         "kind": "array",
         "value": [
           {
             "kind": "array",
             "value": [
-              { "kind": "bulk", "value": "library_name" },
-              { "kind": "bulk", "value": "mylib" },
-              { "kind": "bulk", "value": "engine" },
-              { "kind": "bulk", "value": "lua" },
-              { "kind": "bulk", "value": "functions" },
+              {
+                "kind": "bulk",
+                "value": "library_name"
+              },
+              {
+                "kind": "bulk",
+                "value": "mylib"
+              },
+              {
+                "kind": "bulk",
+                "value": "engine"
+              },
+              {
+                "kind": "bulk",
+                "value": "lua"
+              },
+              {
+                "kind": "bulk",
+                "value": "functions"
+              },
               {
                 "kind": "array",
                 "value": [
                   {
                     "kind": "array",
                     "value": [
-                      { "kind": "bulk", "value": "name" },
-                      { "kind": "bulk", "value": "myfunc" },
-                      { "kind": "bulk", "value": "description" },
-                      { "kind": "bulk", "value": null },
-                      { "kind": "bulk", "value": "flags" },
-                      { "kind": "array", "value": [] }
+                      {
+                        "kind": "bulk",
+                        "value": "name"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "myfunc"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "description"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": null
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "flags"
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      }
                     ]
                   }
                 ]
@@ -83,24 +156,51 @@
     {
       "name": "function_stats_after_load",
       "now_ms": 0,
-      "argv": ["FUNCTION", "STATS"],
+      "argv": [
+        "FUNCTION",
+        "STATS"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "running_script" },
-          { "kind": "integer", "value": 0 },
-          { "kind": "bulk", "value": "engines" },
+          {
+            "kind": "bulk",
+            "value": "running_script"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "bulk",
+            "value": "engines"
+          },
           {
             "kind": "array",
             "value": [
-              { "kind": "bulk", "value": "LUA" },
+              {
+                "kind": "bulk",
+                "value": "LUA"
+              },
               {
                 "kind": "array",
                 "value": [
-                  { "kind": "bulk", "value": "libraries_count" },
-                  { "kind": "integer", "value": 1 },
-                  { "kind": "bulk", "value": "functions_count" },
-                  { "kind": "integer", "value": 1 }
+                  {
+                    "kind": "bulk",
+                    "value": "libraries_count"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 1
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "functions_count"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 1
+                  }
                 ]
               }
             ]
@@ -111,91 +211,195 @@
     {
       "name": "fcall_not_found",
       "now_ms": 0,
-      "argv": ["FCALL", "nosuchfunc", "0"],
-      "expect": { "kind": "error", "value": "ERR Function not found" }
+      "argv": [
+        "FCALL",
+        "nosuchfunc",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Function not found"
+      }
     },
     {
       "name": "fcall_myfunc_returns_arg",
       "now_ms": 0,
-      "argv": ["FCALL", "myfunc", "0", "hello"],
-      "expect": { "kind": "bulk", "value": "hello" }
+      "argv": [
+        "FCALL",
+        "myfunc",
+        "0",
+        "hello"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "hello"
+      }
     },
     {
       "name": "fcall_myfunc_no_args_returns_nil",
       "now_ms": 0,
-      "argv": ["FCALL", "myfunc", "0"],
-      "expect": { "kind": "bulk", "value": null }
+      "argv": [
+        "FCALL",
+        "myfunc",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
     },
     {
       "name": "function_load_numeric_lib",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LOAD", "#!lua name=numlib\nredis.register_function('add42', function(keys, args) return 42 end)"],
-      "expect": { "kind": "bulk", "value": "numlib" }
+      "argv": [
+        "FUNCTION",
+        "LOAD",
+        "#!lua name=numlib\nredis.register_function('add42', function(keys, args) return 42 end)"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "numlib"
+      }
     },
     {
       "name": "fcall_add42_returns_integer",
       "now_ms": 0,
-      "argv": ["FCALL", "add42", "0"],
-      "expect": { "kind": "integer", "value": 42 }
+      "argv": [
+        "FCALL",
+        "add42",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 42
+      }
     },
     {
       "name": "function_delete_numlib",
       "now_ms": 0,
-      "argv": ["FUNCTION", "DELETE", "numlib"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FUNCTION",
+        "DELETE",
+        "numlib"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "function_load_redis_call_lib",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LOAD", "#!lua name=setlib\nredis.register_function('myset', function(keys, args) return redis.call('SET', keys[1], args[1]) end)"],
-      "expect": { "kind": "bulk", "value": "setlib" }
+      "argv": [
+        "FUNCTION",
+        "LOAD",
+        "#!lua name=setlib\nredis.register_function('myset', function(keys, args) return redis.call('SET', keys[1], args[1]) end)"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "setlib"
+      }
     },
     {
       "name": "fcall_myset_sets_key",
       "now_ms": 0,
-      "argv": ["FCALL", "myset", "1", "fcall_key", "fcall_value"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FCALL",
+        "myset",
+        "1",
+        "fcall_key",
+        "fcall_value"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "fcall_verify_key_was_set",
       "now_ms": 0,
-      "argv": ["GET", "fcall_key"],
-      "expect": { "kind": "bulk", "value": "fcall_value" }
+      "argv": [
+        "GET",
+        "fcall_key"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "fcall_value"
+      }
     },
     {
       "name": "function_delete_setlib",
       "now_ms": 0,
-      "argv": ["FUNCTION", "DELETE", "setlib"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FUNCTION",
+        "DELETE",
+        "setlib"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "function_load_duplicate_error",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LOAD", "#!lua name=mylib\nredis.register_function('myfunc2', function(keys, args) return 1 end)"],
-      "expect": { "kind": "error", "value": "ERR Library 'mylib' already exists" }
+      "argv": [
+        "FUNCTION",
+        "LOAD",
+        "#!lua name=mylib\nredis.register_function('myfunc2', function(keys, args) return 1 end)"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Library 'mylib' already exists"
+      }
     },
     {
       "name": "function_load_replace",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LOAD", "REPLACE", "#!lua name=mylib\nredis.register_function('myfunc', function(keys, args) return args[1] end)"],
-      "expect": { "kind": "bulk", "value": "mylib" }
+      "argv": [
+        "FUNCTION",
+        "LOAD",
+        "REPLACE",
+        "#!lua name=mylib\nredis.register_function('myfunc', function(keys, args) return args[1] end)"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "mylib"
+      }
     },
     {
       "name": "function_delete",
       "now_ms": 0,
-      "argv": ["FUNCTION", "DELETE", "mylib"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FUNCTION",
+        "DELETE",
+        "mylib"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "function_delete_not_found",
       "now_ms": 0,
-      "argv": ["FUNCTION", "DELETE", "nosuchlib"],
-      "expect": { "kind": "error", "value": "ERR Library not found" }
+      "argv": [
+        "FUNCTION",
+        "DELETE",
+        "nosuchlib"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Library not found"
+      }
     },
     {
       "name": "function_list_after_delete",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LIST"],
+      "argv": [
+        "FUNCTION",
+        "LIST"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -204,19 +408,35 @@
     {
       "name": "function_load_for_flush",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LOAD", "#!lua name=lib1\nredis.register_function('func1', function(keys, args) return 1 end)"],
-      "expect": { "kind": "bulk", "value": "lib1" }
+      "argv": [
+        "FUNCTION",
+        "LOAD",
+        "#!lua name=lib1\nredis.register_function('func1', function(keys, args) return 1 end)"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "lib1"
+      }
     },
     {
       "name": "function_flush",
       "now_ms": 0,
-      "argv": ["FUNCTION", "FLUSH"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FUNCTION",
+        "FLUSH"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "function_list_after_flush",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LIST"],
+      "argv": [
+        "FUNCTION",
+        "LIST"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -225,161 +445,322 @@
     {
       "name": "function_flush_async",
       "now_ms": 0,
-      "argv": ["FUNCTION", "FLUSH", "ASYNC"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FUNCTION",
+        "FLUSH",
+        "ASYNC"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "function_load_bad_header",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LOAD", "no header here"],
-      "expect": { "kind": "error", "value": "ERR Missing library metadata" }
+      "argv": [
+        "FUNCTION",
+        "LOAD",
+        "no header here"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Missing library metadata"
+      }
     },
     {
       "name": "function_wrong_arity",
       "now_ms": 0,
-      "argv": ["FUNCTION"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'FUNCTION' command" }
+      "argv": [
+        "FUNCTION"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'FUNCTION' command"
+      }
     },
     {
       "name": "fcall_wrong_arity",
       "now_ms": 0,
-      "argv": ["FCALL"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'FCALL' command" }
+      "argv": [
+        "FCALL"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'FCALL' command"
+      }
     },
     {
       "name": "fcall_wrong_arity_no_numkeys",
       "now_ms": 0,
-      "argv": ["FCALL", "func"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'FCALL' command" }
+      "argv": [
+        "FCALL",
+        "func"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'FCALL' command"
+      }
     },
     {
       "name": "script_load",
       "now_ms": 0,
-      "argv": ["SCRIPT", "LOAD", "return 1"],
-      "expect": { "kind": "bulk", "value": "e0e1f9fabfc9d4800c877a703b823ac0578ff8db" }
+      "argv": [
+        "SCRIPT",
+        "LOAD",
+        "return 1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"
+      }
     },
     {
       "name": "script_exists_yes",
       "now_ms": 0,
-      "argv": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"],
+      "argv": [
+        "SCRIPT",
+        "EXISTS",
+        "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "integer", "value": 1 }
+          {
+            "kind": "integer",
+            "value": 1
+          }
         ]
       }
     },
     {
       "name": "script_exists_no",
       "now_ms": 0,
-      "argv": ["SCRIPT", "EXISTS", "0000000000000000000000000000000000000000"],
+      "argv": [
+        "SCRIPT",
+        "EXISTS",
+        "0000000000000000000000000000000000000000"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "integer", "value": 0 }
+          {
+            "kind": "integer",
+            "value": 0
+          }
         ]
       }
     },
     {
       "name": "script_exists_mixed",
       "now_ms": 0,
-      "argv": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "0000000000000000000000000000000000000000"],
+      "argv": [
+        "SCRIPT",
+        "EXISTS",
+        "e0e1f9fabfc9d4800c877a703b823ac0578ff8db",
+        "0000000000000000000000000000000000000000"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "integer", "value": 1 },
-          { "kind": "integer", "value": 0 }
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          }
         ]
       }
     },
     {
       "name": "evalsha_loaded_script",
       "now_ms": 0,
-      "argv": ["EVALSHA", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db", "0"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "EVALSHA",
+        "e0e1f9fabfc9d4800c877a703b823ac0578ff8db",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "script_flush",
       "now_ms": 0,
-      "argv": ["SCRIPT", "FLUSH"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SCRIPT",
+        "FLUSH"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "script_exists_after_flush",
       "now_ms": 0,
-      "argv": ["SCRIPT", "EXISTS", "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"],
+      "argv": [
+        "SCRIPT",
+        "EXISTS",
+        "e0e1f9fabfc9d4800c877a703b823ac0578ff8db"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "integer", "value": 0 }
+          {
+            "kind": "integer",
+            "value": 0
+          }
         ]
       }
     },
-
     {
       "name": "function_help",
       "now_ms": 0,
-      "argv": ["FUNCTION", "HELP"],
+      "argv": [
+        "FUNCTION",
+        "HELP"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "FUNCTION LOAD [REPLACE] function-code - Load a library." },
-          { "kind": "bulk", "value": "FUNCTION LIST [LIBRARYNAME pattern] [WITHCODE] - List libraries." },
-          { "kind": "bulk", "value": "FUNCTION STATS - Return engine stats." },
-          { "kind": "bulk", "value": "FUNCTION DUMP - Serialize all libraries." },
-          { "kind": "bulk", "value": "FUNCTION RESTORE data [FLUSH|APPEND|REPLACE] - Restore libraries." },
-          { "kind": "bulk", "value": "FUNCTION FLUSH [ASYNC|SYNC] - Delete all libraries." },
-          { "kind": "bulk", "value": "FUNCTION DELETE library-name - Delete a library." },
-          { "kind": "bulk", "value": "FUNCTION HELP - Return this help." }
+          {
+            "kind": "bulk",
+            "value": "FUNCTION LOAD [REPLACE] function-code - Load a library."
+          },
+          {
+            "kind": "bulk",
+            "value": "FUNCTION LIST [LIBRARYNAME pattern] [WITHCODE] - List libraries."
+          },
+          {
+            "kind": "bulk",
+            "value": "FUNCTION STATS - Return engine stats."
+          },
+          {
+            "kind": "bulk",
+            "value": "FUNCTION DUMP - Serialize all libraries."
+          },
+          {
+            "kind": "bulk",
+            "value": "FUNCTION RESTORE data [FLUSH|APPEND|REPLACE] - Restore libraries."
+          },
+          {
+            "kind": "bulk",
+            "value": "FUNCTION FLUSH [ASYNC|SYNC] - Delete all libraries."
+          },
+          {
+            "kind": "bulk",
+            "value": "FUNCTION DELETE library-name - Delete a library."
+          },
+          {
+            "kind": "bulk",
+            "value": "FUNCTION HELP - Return this help."
+          }
         ]
       }
     },
     {
       "name": "function_unknown_subcommand",
       "now_ms": 0,
-      "argv": ["FUNCTION", "NOSUCH"],
-      "expect": { "kind": "error", "value": "ERR Unknown subcommand or wrong number of arguments for FUNCTION NOSUCH" }
+      "argv": [
+        "FUNCTION",
+        "NOSUCH"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for FUNCTION NOSUCH"
+      }
     },
-
     {
       "name": "function_load_multi_func",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LOAD", "#!lua name=multilib\nredis.register_function('func_a', function(keys, args) return 'A' end)\nredis.register_function('func_b', function(keys, args) return 'B' end)"],
-      "expect": { "kind": "bulk", "value": "multilib" }
+      "argv": [
+        "FUNCTION",
+        "LOAD",
+        "#!lua name=multilib\nredis.register_function('func_a', function(keys, args) return 'A' end)\nredis.register_function('func_b', function(keys, args) return 'B' end)"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "multilib"
+      }
     },
     {
       "name": "fcall_multi_func_a",
       "now_ms": 0,
-      "argv": ["FCALL", "func_a", "0"],
-      "expect": { "kind": "bulk", "value": "A" }
+      "argv": [
+        "FCALL",
+        "func_a",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "A"
+      }
     },
     {
       "name": "fcall_multi_func_b",
       "now_ms": 0,
-      "argv": ["FCALL", "func_b", "0"],
-      "expect": { "kind": "bulk", "value": "B" }
+      "argv": [
+        "FCALL",
+        "func_b",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "B"
+      }
     },
     {
       "name": "function_stats_multi_func",
       "now_ms": 0,
-      "argv": ["FUNCTION", "STATS"],
+      "argv": [
+        "FUNCTION",
+        "STATS"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "running_script" },
-          { "kind": "integer", "value": 0 },
-          { "kind": "bulk", "value": "engines" },
+          {
+            "kind": "bulk",
+            "value": "running_script"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "bulk",
+            "value": "engines"
+          },
           {
             "kind": "array",
             "value": [
-              { "kind": "bulk", "value": "LUA" },
+              {
+                "kind": "bulk",
+                "value": "LUA"
+              },
               {
                 "kind": "array",
                 "value": [
-                  { "kind": "bulk", "value": "libraries_count" },
-                  { "kind": "integer", "value": 1 },
-                  { "kind": "bulk", "value": "functions_count" },
-                  { "kind": "integer", "value": 2 }
+                  {
+                    "kind": "bulk",
+                    "value": "libraries_count"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 1
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "functions_count"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 2
+                  }
                 ]
               }
             ]
@@ -390,41 +771,97 @@
     {
       "name": "function_list_libraryname_filter_match",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LIST", "LIBRARYNAME", "multilib"],
+      "argv": [
+        "FUNCTION",
+        "LIST",
+        "LIBRARYNAME",
+        "multilib"
+      ],
       "expect": {
         "kind": "array",
         "value": [
           {
             "kind": "array",
             "value": [
-              { "kind": "bulk", "value": "library_name" },
-              { "kind": "bulk", "value": "multilib" },
-              { "kind": "bulk", "value": "engine" },
-              { "kind": "bulk", "value": "lua" },
-              { "kind": "bulk", "value": "functions" },
+              {
+                "kind": "bulk",
+                "value": "library_name"
+              },
+              {
+                "kind": "bulk",
+                "value": "multilib"
+              },
+              {
+                "kind": "bulk",
+                "value": "engine"
+              },
+              {
+                "kind": "bulk",
+                "value": "lua"
+              },
+              {
+                "kind": "bulk",
+                "value": "functions"
+              },
               {
                 "kind": "array",
                 "value": [
                   {
                     "kind": "array",
                     "value": [
-                      { "kind": "bulk", "value": "name" },
-                      { "kind": "bulk", "value": "func_a" },
-                      { "kind": "bulk", "value": "description" },
-                      { "kind": "bulk", "value": null },
-                      { "kind": "bulk", "value": "flags" },
-                      { "kind": "array", "value": [] }
+                      {
+                        "kind": "bulk",
+                        "value": "name"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "func_a"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "description"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": null
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "flags"
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      }
                     ]
                   },
                   {
                     "kind": "array",
                     "value": [
-                      { "kind": "bulk", "value": "name" },
-                      { "kind": "bulk", "value": "func_b" },
-                      { "kind": "bulk", "value": "description" },
-                      { "kind": "bulk", "value": null },
-                      { "kind": "bulk", "value": "flags" },
-                      { "kind": "array", "value": [] }
+                      {
+                        "kind": "bulk",
+                        "value": "name"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "func_b"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "description"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": null
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "flags"
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      }
                     ]
                   }
                 ]
@@ -437,7 +874,12 @@
     {
       "name": "function_list_libraryname_filter_no_match",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LIST", "LIBRARYNAME", "nosuchlib"],
+      "argv": [
+        "FUNCTION",
+        "LIST",
+        "LIBRARYNAME",
+        "nosuchlib"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -446,120 +888,381 @@
     {
       "name": "function_delete_multilib",
       "now_ms": 0,
-      "argv": ["FUNCTION", "DELETE", "multilib"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FUNCTION",
+        "DELETE",
+        "multilib"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
-
     {
       "name": "function_load_with_keys",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LOAD", "#!lua name=keylib\nredis.register_function('setkey', function(keys, args) return redis.call('SET', keys[1], args[1]) end)"],
-      "expect": { "kind": "bulk", "value": "keylib" }
+      "argv": [
+        "FUNCTION",
+        "LOAD",
+        "#!lua name=keylib\nredis.register_function('setkey', function(keys, args) return redis.call('SET', keys[1], args[1]) end)"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "keylib"
+      }
     },
     {
       "name": "fcall_with_keys",
       "now_ms": 0,
-      "argv": ["FCALL", "setkey", "1", "fkey1", "fval1"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FCALL",
+        "setkey",
+        "1",
+        "fkey1",
+        "fval1"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "fcall_verify_key_set",
       "now_ms": 0,
-      "argv": ["GET", "fkey1"],
-      "expect": { "kind": "bulk", "value": "fval1" }
+      "argv": [
+        "GET",
+        "fkey1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "fval1"
+      }
     },
     {
       "name": "function_delete_keylib",
       "now_ms": 0,
-      "argv": ["FUNCTION", "DELETE", "keylib"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FUNCTION",
+        "DELETE",
+        "keylib"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
-
     {
       "name": "fcall_ro_basic",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LOAD", "#!lua name=rolib\nredis.register_function('echo_ro', function(keys, args) return args[1] end)"],
-      "expect": { "kind": "bulk", "value": "rolib" }
+      "argv": [
+        "FUNCTION",
+        "LOAD",
+        "#!lua name=rolib\nredis.register_function('echo_ro', function(keys, args) return args[1] end)"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "rolib"
+      }
     },
     {
       "name": "fcall_ro_returns_arg",
       "now_ms": 0,
-      "argv": ["FCALL_RO", "echo_ro", "0", "readonly_val"],
-      "expect": { "kind": "bulk", "value": "readonly_val" }
+      "argv": [
+        "FCALL_RO",
+        "echo_ro",
+        "0",
+        "readonly_val"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "readonly_val"
+      }
     },
     {
       "name": "function_delete_rolib",
       "now_ms": 0,
-      "argv": ["FUNCTION", "DELETE", "rolib"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FUNCTION",
+        "DELETE",
+        "rolib"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
-
     {
       "name": "function_flush_sync",
       "now_ms": 0,
-      "argv": ["FUNCTION", "FLUSH", "SYNC"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FUNCTION",
+        "FLUSH",
+        "SYNC"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "function_list_after_sync_flush",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LIST"],
+      "argv": [
+        "FUNCTION",
+        "LIST"
+      ],
       "expect": {
         "kind": "array",
         "value": []
       }
     },
-
     {
       "name": "function_load_missing_name",
       "now_ms": 0,
-      "argv": ["FUNCTION", "LOAD", "#!lua\nredis.register_function('f', function(keys, args) return 1 end)"],
-      "expect": { "kind": "error", "value": "ERR Missing library metadata" }
+      "argv": [
+        "FUNCTION",
+        "LOAD",
+        "#!lua\nredis.register_function('f', function(keys, args) return 1 end)"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Missing library metadata"
+      }
     },
-
     {
       "name": "fcall_not_found_after_flush",
       "now_ms": 0,
-      "argv": ["FCALL", "nosuchfunc", "0"],
-      "expect": { "kind": "error", "value": "ERR Function not found" }
+      "argv": [
+        "FCALL",
+        "nosuchfunc",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Function not found"
+      }
     },
-
     {
       "name": "fcall_ro_wrong_arity",
       "now_ms": 0,
-      "argv": ["FCALL_RO"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'FCALL' command" }
+      "argv": [
+        "FCALL_RO"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'FCALL' command"
+      }
     },
     {
       "name": "fcall_ro_wrong_arity_no_numkeys",
       "now_ms": 0,
-      "argv": ["FCALL_RO", "func"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'FCALL' command" }
+      "argv": [
+        "FCALL_RO",
+        "func"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'FCALL' command"
+      }
     },
-
     {
       "name": "script_wrong_arity",
       "now_ms": 0,
-      "argv": ["SCRIPT"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SCRIPT' command" }
+      "argv": [
+        "SCRIPT"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SCRIPT' command"
+      }
     },
     {
       "name": "script_unknown_subcommand",
       "now_ms": 0,
-      "argv": ["SCRIPT", "NOSUCH"],
-      "expect": { "kind": "error", "value": "ERR unknown subcommand or wrong number of arguments for 'script|NOSUCH'" }
+      "argv": [
+        "SCRIPT",
+        "NOSUCH"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown subcommand or wrong number of arguments for 'script|NOSUCH'"
+      }
     },
     {
       "name": "script_flush_sync",
       "now_ms": 0,
-      "argv": ["SCRIPT", "FLUSH", "SYNC"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SCRIPT",
+        "FLUSH",
+        "SYNC"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "script_flush_async",
       "now_ms": 0,
-      "argv": ["SCRIPT", "FLUSH", "ASYNC"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SCRIPT",
+        "FLUSH",
+        "ASYNC"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "fcall_invalid_numkeys",
+      "now_ms": 100,
+      "argv": [
+        "FCALL",
+        "myfunc",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "fcall_negative_numkeys",
+      "now_ms": 100,
+      "argv": [
+        "FCALL",
+        "myfunc",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "fcall_ro_invalid_numkeys",
+      "now_ms": 100,
+      "argv": [
+        "FCALL_RO",
+        "myfunc",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "fcall_ro_negative_numkeys",
+      "now_ms": 100,
+      "argv": [
+        "FCALL_RO",
+        "myfunc",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "function_delete_wrong_arity",
+      "now_ms": 100,
+      "argv": [
+        "FUNCTION",
+        "DELETE"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'FUNCTION' command"
+      }
+    },
+    {
+      "name": "function_load_wrong_arity",
+      "now_ms": 100,
+      "argv": [
+        "FUNCTION",
+        "LOAD"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'FUNCTION' command"
+      }
+    },
+    {
+      "name": "function_dump_empty",
+      "now_ms": 100,
+      "argv": [
+        "FUNCTION",
+        "DUMP"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "\u0000\u0000\u0000\u0000"
+      }
+    },
+    {
+      "name": "function_restore_wrong_arity",
+      "now_ms": 100,
+      "argv": [
+        "FUNCTION",
+        "RESTORE"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'FUNCTION' command"
+      }
+    },
+    {
+      "name": "script_exists_wrong_arity",
+      "now_ms": 100,
+      "argv": [
+        "SCRIPT",
+        "EXISTS"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SCRIPT|EXISTS' command"
+      }
+    },
+    {
+      "name": "script_load_wrong_arity",
+      "now_ms": 100,
+      "argv": [
+        "SCRIPT",
+        "LOAD"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SCRIPT|LOAD' command"
+      }
+    },
+    {
+      "name": "fcall_numkeys_exceeds_args",
+      "now_ms": 100,
+      "argv": [
+        "FCALL",
+        "myfunc",
+        "5"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "fcall_ro_numkeys_exceeds_args",
+      "now_ms": 100,
+      "argv": [
+        "FCALL_RO",
+        "myfunc",
+        "5"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     }
   ]
 }
