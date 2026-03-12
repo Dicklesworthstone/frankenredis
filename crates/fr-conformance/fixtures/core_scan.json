@@ -1,0 +1,363 @@
+{
+  "suite": "core_scan",
+  "cases": [
+    {
+      "name": "scan_empty_store",
+      "now_ms": 0,
+      "argv": ["SCAN", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          { "kind": "array", "value": [] }
+        ]
+      }
+    },
+    {
+      "name": "setup_scan_keys",
+      "now_ms": 0,
+      "argv": ["SET", "key:1", "val1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "setup_scan_keys_2",
+      "now_ms": 0,
+      "argv": ["SET", "key:2", "val2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "setup_scan_keys_3",
+      "now_ms": 0,
+      "argv": ["SET", "key:3", "val3"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "setup_scan_list",
+      "now_ms": 0,
+      "argv": ["RPUSH", "mylist", "a", "b"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "setup_scan_hash",
+      "now_ms": 0,
+      "argv": ["HSET", "myhash", "f1", "v1", "f2", "v2"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "setup_scan_set",
+      "now_ms": 0,
+      "argv": ["SADD", "myset", "x", "y", "z"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "setup_scan_zset",
+      "now_ms": 0,
+      "argv": ["ZADD", "myzset", "1", "a", "2", "b"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "scan_all_keys_full",
+      "now_ms": 0,
+      "argv": ["SCAN", "0", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "key:1" },
+              { "kind": "bulk", "value": "key:2" },
+              { "kind": "bulk", "value": "key:3" },
+              { "kind": "bulk", "value": "myhash" },
+              { "kind": "bulk", "value": "mylist" },
+              { "kind": "bulk", "value": "myset" },
+              { "kind": "bulk", "value": "myzset" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "scan_with_match_pattern",
+      "now_ms": 0,
+      "argv": ["SCAN", "0", "MATCH", "key:*", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "key:1" },
+              { "kind": "bulk", "value": "key:2" },
+              { "kind": "bulk", "value": "key:3" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "scan_with_match_no_results",
+      "now_ms": 0,
+      "argv": ["SCAN", "0", "MATCH", "nomatch*", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          { "kind": "array", "value": [] }
+        ]
+      }
+    },
+    {
+      "name": "scan_type_filter_string",
+      "now_ms": 0,
+      "argv": ["SCAN", "0", "TYPE", "string", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "key:1" },
+              { "kind": "bulk", "value": "key:2" },
+              { "kind": "bulk", "value": "key:3" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "scan_type_filter_list",
+      "now_ms": 0,
+      "argv": ["SCAN", "0", "TYPE", "list", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "mylist" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "scan_type_filter_hash",
+      "now_ms": 0,
+      "argv": ["SCAN", "0", "TYPE", "hash", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "myhash" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "scan_type_filter_set",
+      "now_ms": 0,
+      "argv": ["SCAN", "0", "TYPE", "set", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "myset" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "scan_type_filter_zset",
+      "now_ms": 0,
+      "argv": ["SCAN", "0", "TYPE", "zset", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "myzset" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "scan_type_filter_none_match",
+      "now_ms": 0,
+      "argv": ["SCAN", "0", "TYPE", "stream", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          { "kind": "array", "value": [] }
+        ]
+      }
+    },
+    {
+      "name": "scan_wrong_arity",
+      "now_ms": 0,
+      "argv": ["SCAN"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SCAN' command" }
+    },
+    {
+      "name": "scan_invalid_cursor",
+      "now_ms": 0,
+      "argv": ["SCAN", "abc"],
+      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+    },
+    {
+      "name": "hscan_setup",
+      "now_ms": 0,
+      "argv": ["HSET", "hs", "field1", "val1", "field2", "val2", "field3", "val3"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "hscan_all",
+      "now_ms": 0,
+      "argv": ["HSCAN", "hs", "0", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "field1" },
+              { "kind": "bulk", "value": "val1" },
+              { "kind": "bulk", "value": "field2" },
+              { "kind": "bulk", "value": "val2" },
+              { "kind": "bulk", "value": "field3" },
+              { "kind": "bulk", "value": "val3" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "hscan_match",
+      "now_ms": 0,
+      "argv": ["HSCAN", "hs", "0", "MATCH", "field1", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "field1" },
+              { "kind": "bulk", "value": "val1" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "hscan_missing_key",
+      "now_ms": 0,
+      "argv": ["HSCAN", "nokey", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          { "kind": "array", "value": [] }
+        ]
+      }
+    },
+    {
+      "name": "sscan_all",
+      "now_ms": 0,
+      "argv": ["SSCAN", "myset", "0", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "x" },
+              { "kind": "bulk", "value": "y" },
+              { "kind": "bulk", "value": "z" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "sscan_missing_key",
+      "now_ms": 0,
+      "argv": ["SSCAN", "nokey", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          { "kind": "array", "value": [] }
+        ]
+      }
+    },
+    {
+      "name": "zscan_all",
+      "now_ms": 0,
+      "argv": ["ZSCAN", "myzset", "0", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "a" },
+              { "kind": "bulk", "value": "1" },
+              { "kind": "bulk", "value": "b" },
+              { "kind": "bulk", "value": "2" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "zscan_missing_key",
+      "now_ms": 0,
+      "argv": ["ZSCAN", "nokey", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "0" },
+          { "kind": "array", "value": [] }
+        ]
+      }
+    },
+    {
+      "name": "hscan_wrongtype",
+      "now_ms": 0,
+      "argv": ["HSCAN", "key:1", "0"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "sscan_wrongtype",
+      "now_ms": 0,
+      "argv": ["SSCAN", "key:1", "0"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "zscan_wrongtype",
+      "now_ms": 0,
+      "argv": ["ZSCAN", "key:1", "0"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    }
+  ]
+}
