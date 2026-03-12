@@ -5394,9 +5394,13 @@ fn getbit(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("GETBIT"));
     }
-    let offset = parse_i64_arg(&argv[2])?;
+    let offset = parse_i64_arg(&argv[2]).map_err(|_| {
+        CommandError::Custom("ERR bit offset is not an integer or out of range".to_string())
+    })?;
     if offset < 0 {
-        return Err(CommandError::InvalidInteger);
+        return Err(CommandError::Custom(
+            "ERR bit offset is not an integer or out of range".to_string(),
+        ));
     }
     let bit = store.getbit(&argv[1], offset as usize, now_ms)?;
     Ok(RespFrame::Integer(if bit { 1 } else { 0 }))
@@ -5424,7 +5428,9 @@ fn bitpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     }
     let bit_val = parse_i64_arg(&argv[2])?;
     if bit_val != 0 && bit_val != 1 {
-        return Err(CommandError::InvalidInteger);
+        return Err(CommandError::Custom(
+            "ERR The bit argument must be 1 or 0.".to_string(),
+        ));
     }
     let start = if argv.len() >= 4 {
         Some(parse_i64_arg(&argv[3])?)

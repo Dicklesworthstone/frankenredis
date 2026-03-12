@@ -1168,7 +1168,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR bit offset is not an integer or out of range"
       }
     },
     {
