@@ -1633,9 +1633,10 @@ impl<'a> LuaState<'a> {
                 let mut control = iter_vals.get(2).cloned().unwrap_or(LuaValue::Nil);
 
                 loop {
+                    let mut iter_args = vec![state.clone(), control.clone()];
                     let results = self.call_function(
                         &iter_fn,
-                        &[state.clone(), control.clone()],
+                        &mut iter_args,
                         env,
                         varargs,
                     )?;
@@ -1863,8 +1864,18 @@ impl<'a> LuaState<'a> {
             }
             Expr::Call(func_expr, args) => {
                 let func = self.eval_expr(func_expr, env, varargs)?;
-                let arg_vals = self.eval_call_args(args, env, varargs)?;
-                let results = self.call_function(&func, &arg_vals, env, varargs)?;
+                let mut arg_vals = self.eval_call_args(args, env, varargs)?;
+                let results = self.call_function(&func, &mut arg_vals, env, varargs)?;
+                // Write back table mutations (table.sort/insert/remove mutate args[0] in-place)
+                if let LuaValue::RustFunction(ref name) = func {
+                    if matches!(name.as_str(), "table.sort" | "table.insert" | "table.remove") {
+                        if let Some(Expr::Name(var_name)) = args.first() {
+                            if !env.set_existing_local(var_name, arg_vals[0].clone()) {
+                                self.globals.insert(var_name.clone(), arg_vals[0].clone());
+                            }
+                        }
+                    }
+                }
                 Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
             }
             Expr::MethodCall(obj_expr, method, args) => {
@@ -1880,7 +1891,7 @@ impl<'a> LuaState<'a> {
                 };
                 let mut arg_vals = vec![obj.clone()];
                 arg_vals.extend(self.eval_call_args(args, env, varargs)?);
-                let results = self.call_function(&func, &arg_vals, env, varargs)?;
+                let results = self.call_function(&func, &mut arg_vals, env, varargs)?;
                 Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
             }
             Expr::TableConstructor(fields) => {
@@ -1934,8 +1945,8 @@ impl<'a> LuaState<'a> {
                     }
                     Expr::Call(func_expr, call_args) => {
                         let func = self.eval_expr(func_expr, env, varargs)?;
-                        let arg_vals = self.eval_call_args(call_args, env, varargs)?;
-                        let results = self.call_function(&func, &arg_vals, env, varargs)?;
+                        let mut arg_vals = self.eval_call_args(call_args, env, varargs)?;
+                        let results = self.call_function(&func, &mut arg_vals, env, varargs)?;
                         vals.extend(results);
                     }
                     Expr::MethodCall(obj_expr, method, call_args) => {
@@ -1946,7 +1957,7 @@ impl<'a> LuaState<'a> {
                         };
                         let mut arg_vals = vec![obj];
                         arg_vals.extend(self.eval_call_args(call_args, env, varargs)?);
-                        let results = self.call_function(&func, &arg_vals, env, varargs)?;
+                        let results = self.call_function(&func, &mut arg_vals, env, varargs)?;
                         vals.extend(results);
                     }
                     _ => {
@@ -2025,7 +2036,7 @@ impl<'a> LuaState<'a> {
     fn call_function(
         &mut self,
         func: &LuaValue,
-        args: &[LuaValue],
+        args: &mut [LuaValue],
         env: &mut Env,
         _varargs: &mut Vec<LuaValue>,
     ) -> Result<Vec<LuaValue>, String> {
@@ -2062,7 +2073,7 @@ impl<'a> LuaState<'a> {
     fn call_builtin(
         &mut self,
         name: &str,
-        args: &[LuaValue],
+        args: &mut [LuaValue],
         env: &mut Env,
     ) -> Result<Vec<LuaValue>, String> {
         match name {
@@ -2158,8 +2169,8 @@ impl<'a> LuaState<'a> {
             }
             "pcall" => {
                 let func = args.first().cloned().unwrap_or(LuaValue::Nil);
-                let call_args = args.get(1..).unwrap_or(&[]);
-                match self.call_function(&func, call_args, env, &mut Vec::new()) {
+                let mut call_args_vec = args.get(1..).unwrap_or(&[]).to_vec();
+                match self.call_function(&func, &mut call_args_vec, env, &mut Vec::new()) {
                     Ok(mut vals) => {
                         vals.insert(0, LuaValue::Bool(true));
                         Ok(vals)
@@ -2527,45 +2538,40 @@ impl<'a> LuaState<'a> {
             "table.insert" => {
                 if args.len() == 2 {
                     // table.insert(t, value) — append
-                    let mut table = args[0].clone();
-                    if let LuaValue::Table(ref mut t) = table {
-                        t.array.push(args[1].clone());
-                        // Write back
-                        self.write_back_table_arg(args, 0, table, env);
+                    let val = args[1].clone();
+                    if let LuaValue::Table(ref mut t) = args[0] {
+                        t.array.push(val);
                     }
                 } else if args.len() >= 3 {
                     // table.insert(t, pos, value)
-                    let mut table = args[0].clone();
                     let pos = args[1].to_number().unwrap_or(1.0) as usize;
-                    if let LuaValue::Table(ref mut t) = table {
+                    let val = args[2].clone();
+                    if let LuaValue::Table(ref mut t) = args[0] {
                         let idx = pos.saturating_sub(1);
                         if idx <= t.array.len() {
-                            t.array.insert(idx, args[2].clone());
+                            t.array.insert(idx, val);
                         } else {
-                            t.array.push(args[2].clone());
+                            t.array.push(val);
                         }
-                        self.write_back_table_arg(args, 0, table, env);
                     }
                 }
                 Ok(vec![LuaValue::Nil])
             }
             "table.remove" => {
-                let mut table = args.first().cloned().unwrap_or(LuaValue::Nil);
-                if let LuaValue::Table(ref mut t) = table {
-                    let pos = args
-                        .get(1)
-                        .and_then(|v| v.to_number())
-                        .unwrap_or(t.array.len() as f64) as usize;
-                    let removed = if pos >= 1 && pos <= t.array.len() {
-                        t.array.remove(pos - 1)
-                    } else {
-                        LuaValue::Nil
-                    };
-                    self.write_back_table_arg(args, 0, table, env);
-                    Ok(vec![removed])
-                } else {
-                    Ok(vec![LuaValue::Nil])
+                if !args.is_empty() {
+                    // Read pos arg before mutably borrowing args[0]
+                    let pos_arg = args.get(1).and_then(|v| v.to_number());
+                    if let LuaValue::Table(ref mut t) = args[0] {
+                        let pos = pos_arg.unwrap_or(t.array.len() as f64) as usize;
+                        let removed = if pos >= 1 && pos <= t.array.len() {
+                            t.array.remove(pos - 1)
+                        } else {
+                            LuaValue::Nil
+                        };
+                        return Ok(vec![removed]);
+                    }
                 }
+                Ok(vec![LuaValue::Nil])
             }
             "table.concat" => {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
@@ -2598,19 +2604,17 @@ impl<'a> LuaState<'a> {
                 }
             }
             "table.sort" => {
-                // Note: sort mutates the table in place
-                // We need to sort and write back
-                let mut table = args.first().cloned().unwrap_or(LuaValue::Nil);
-                if let LuaValue::Table(ref mut t) = table {
-                    // Default sort: compare as strings or numbers
-                    t.array.sort_by(|a, b| match (a, b) {
-                        (LuaValue::Number(x), LuaValue::Number(y)) => {
-                            x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
-                        }
-                        (LuaValue::Str(x), LuaValue::Str(y)) => x.cmp(y),
-                        _ => std::cmp::Ordering::Equal,
-                    });
-                    self.write_back_table_arg(args, 0, table, env);
+                if !args.is_empty() {
+                    if let LuaValue::Table(ref mut t) = args[0] {
+                        // Default sort: compare as strings or numbers
+                        t.array.sort_by(|a, b| match (a, b) {
+                            (LuaValue::Number(x), LuaValue::Number(y)) => {
+                                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                            }
+                            (LuaValue::Str(x), LuaValue::Str(y)) => x.cmp(y),
+                            _ => std::cmp::Ordering::Equal,
+                        });
+                    }
                 }
                 Ok(vec![LuaValue::Nil])
             }
@@ -2639,25 +2643,6 @@ impl<'a> LuaState<'a> {
             }
             _ => Err(format!("attempt to call unknown built-in '{name}'")),
         }
-    }
-
-    fn write_back_table_arg(
-        &mut self,
-        _args: &[LuaValue],
-        _idx: usize,
-        _table: LuaValue,
-        _env: &mut Env,
-    ) {
-        // Table mutation write-back is a known limitation.
-        // In the current design, tables are cloned values. For redis scripting,
-        // table.insert/remove/sort work on local variables which get reassigned.
-        // The caller handles the assignment pattern:
-        //   local t = {}; table.insert(t, val)
-        // via direct mutation of the LuaValue in the environment.
-        //
-        // For now, this is a no-op. The table.* functions work correctly
-        // when the table is passed directly from a local variable, because
-        // the Lua patterns used in Redis scripts don't rely on aliased mutation.
     }
 
     fn redis_call(&mut self, args: &[LuaValue], is_pcall: bool) -> Result<Vec<LuaValue>, String> {

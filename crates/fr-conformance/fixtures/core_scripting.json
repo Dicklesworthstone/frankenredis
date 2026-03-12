@@ -1457,6 +1457,150 @@
         "kind": "error",
         "value": "ERR wrong number of arguments for 'SCRIPT' command"
       }
+    },
+    {
+      "name": "eval_table_sort_numbers",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {3, 1, 2}\ntable.sort(t)\nreturn t[1]",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "eval_table_sort_returns_ordered",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {5, 3, 1, 4, 2}\ntable.sort(t)\nreturn t[1] * 10000 + t[2] * 1000 + t[3] * 100 + t[4] * 10 + t[5]",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 12345
+      }
+    },
+    {
+      "name": "eval_table_insert_append",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {10, 20}\ntable.insert(t, 30)\nreturn t[3]",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 30
+      }
+    },
+    {
+      "name": "eval_table_insert_at_position",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {1, 3}\ntable.insert(t, 2, 2)\nreturn t[1] * 100 + t[2] * 10 + t[3]",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 123
+      }
+    },
+    {
+      "name": "eval_table_remove_last",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {10, 20, 30}\nlocal v = table.remove(t)\nreturn v",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 30
+      }
+    },
+    {
+      "name": "eval_table_remove_shrinks_table",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {10, 20, 30}\ntable.remove(t)\nreturn #t",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "eval_table_remove_at_position",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {1, 2, 3}\ntable.remove(t, 1)\nreturn t[1] * 10 + t[2]",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 23
+      }
+    },
+    {
+      "name": "eval_table_insert_then_sort",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {3, 1}\ntable.insert(t, 2)\ntable.sort(t)\nreturn t[1] * 100 + t[2] * 10 + t[3]",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 123
+      }
+    },
+    {
+      "name": "eval_table_sort_strings",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {'c', 'a', 'b'}\ntable.sort(t)\nreturn t[1] .. t[2] .. t[3]",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "abc"
+      }
+    },
+    {
+      "name": "eval_table_insert_multiple",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {}\ntable.insert(t, 'a')\ntable.insert(t, 'b')\ntable.insert(t, 'c')\nreturn #t",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
+    },
+    {
+      "name": "eval_table_sort_with_redis_data",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "redis.call('RPUSH', KEYS[1], '3', '1', '2')\nlocal vals = redis.call('LRANGE', KEYS[1], 0, -1)\nlocal nums = {}\nfor i, v in ipairs(vals) do nums[i] = tonumber(v) end\ntable.sort(nums)\nreturn nums[1]",
+        "1",
+        "sortkey"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     }
   ]
 }
