@@ -4,85 +4,178 @@
     {
       "name": "acl_whoami_returns_default",
       "now_ms": 0,
-      "argv": ["ACL", "WHOAMI"],
-      "expect": { "kind": "bulk", "value": "default" }
+      "argv": [
+        "ACL",
+        "WHOAMI"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "default"
+      }
     },
     {
       "name": "acl_users_returns_default",
       "now_ms": 1,
-      "argv": ["ACL", "USERS"],
+      "argv": [
+        "ACL",
+        "USERS"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "default" }
+          {
+            "kind": "bulk",
+            "value": "default"
+          }
         ]
       }
     },
     {
       "name": "acl_list_returns_default_user_rule",
       "now_ms": 2,
-      "argv": ["ACL", "LIST"],
+      "argv": [
+        "ACL",
+        "LIST"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "user default on nopass ~* &* +@all" }
+          {
+            "kind": "bulk",
+            "value": "user default on nopass ~* &* +@all"
+          }
         ]
       }
     },
     {
       "name": "acl_setuser_creates_new_user",
       "now_ms": 3,
-      "argv": ["ACL", "SETUSER", "alice", "on", ">password123"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "alice",
+        "on",
+        ">password123"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_users_includes_alice",
       "now_ms": 4,
-      "argv": ["ACL", "USERS"],
+      "argv": [
+        "ACL",
+        "USERS"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "alice" },
-          { "kind": "bulk", "value": "default" }
+          {
+            "kind": "bulk",
+            "value": "alice"
+          },
+          {
+            "kind": "bulk",
+            "value": "default"
+          }
         ]
       }
     },
     {
       "name": "acl_getuser_alice_returns_details",
       "now_ms": 5,
-      "argv": ["ACL", "GETUSER", "alice"],
+      "argv": [
+        "ACL",
+        "GETUSER",
+        "alice"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "flags" },
-          { "kind": "array", "value": [{ "kind": "bulk", "value": "on" }] },
-          { "kind": "bulk", "value": "passwords" },
-          { "kind": "array", "value": [] },
-          { "kind": "bulk", "value": "commands" },
-          { "kind": "bulk", "value": "+@all" },
-          { "kind": "bulk", "value": "keys" },
-          { "kind": "bulk", "value": "~*" },
-          { "kind": "bulk", "value": "channels" },
-          { "kind": "bulk", "value": "&*" }
+          {
+            "kind": "bulk",
+            "value": "flags"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "on"
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "passwords"
+          },
+          {
+            "kind": "array",
+            "value": []
+          },
+          {
+            "kind": "bulk",
+            "value": "commands"
+          },
+          {
+            "kind": "bulk",
+            "value": "+@all"
+          },
+          {
+            "kind": "bulk",
+            "value": "keys"
+          },
+          {
+            "kind": "bulk",
+            "value": "~*"
+          },
+          {
+            "kind": "bulk",
+            "value": "channels"
+          },
+          {
+            "kind": "bulk",
+            "value": "&*"
+          }
         ]
       }
     },
     {
       "name": "acl_getuser_nonexistent_returns_nil",
       "now_ms": 6,
-      "argv": ["ACL", "GETUSER", "bob"],
-      "expect": { "kind": "bulk", "value": null }
+      "argv": [
+        "ACL",
+        "GETUSER",
+        "bob"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
     },
     {
       "name": "acl_deluser_alice_returns_count",
       "now_ms": 7,
-      "argv": ["ACL", "DELUSER", "alice"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "alice"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "acl_deluser_default_is_rejected",
       "now_ms": 8,
-      "argv": ["ACL", "DELUSER", "default"],
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "default"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR The 'default' user cannot be removed"
@@ -91,46 +184,129 @@
     {
       "name": "acl_deluser_nonexistent_returns_zero",
       "now_ms": 9,
-      "argv": ["ACL", "DELUSER", "nonexistent"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "nonexistent"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "acl_cat_returns_categories",
       "now_ms": 10,
-      "argv": ["ACL", "CAT"],
+      "argv": [
+        "ACL",
+        "CAT"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "keyspace" },
-          { "kind": "bulk", "value": "read" },
-          { "kind": "bulk", "value": "write" },
-          { "kind": "bulk", "value": "set" },
-          { "kind": "bulk", "value": "sortedset" },
-          { "kind": "bulk", "value": "list" },
-          { "kind": "bulk", "value": "hash" },
-          { "kind": "bulk", "value": "string" },
-          { "kind": "bulk", "value": "bitmap" },
-          { "kind": "bulk", "value": "hyperloglog" },
-          { "kind": "bulk", "value": "geo" },
-          { "kind": "bulk", "value": "stream" },
-          { "kind": "bulk", "value": "pubsub" },
-          { "kind": "bulk", "value": "admin" },
-          { "kind": "bulk", "value": "fast" },
-          { "kind": "bulk", "value": "slow" },
-          { "kind": "bulk", "value": "blocking" },
-          { "kind": "bulk", "value": "dangerous" },
-          { "kind": "bulk", "value": "connection" },
-          { "kind": "bulk", "value": "transaction" },
-          { "kind": "bulk", "value": "scripting" },
-          { "kind": "bulk", "value": "server" },
-          { "kind": "bulk", "value": "generic" }
+          {
+            "kind": "bulk",
+            "value": "keyspace"
+          },
+          {
+            "kind": "bulk",
+            "value": "read"
+          },
+          {
+            "kind": "bulk",
+            "value": "write"
+          },
+          {
+            "kind": "bulk",
+            "value": "set"
+          },
+          {
+            "kind": "bulk",
+            "value": "sortedset"
+          },
+          {
+            "kind": "bulk",
+            "value": "list"
+          },
+          {
+            "kind": "bulk",
+            "value": "hash"
+          },
+          {
+            "kind": "bulk",
+            "value": "string"
+          },
+          {
+            "kind": "bulk",
+            "value": "bitmap"
+          },
+          {
+            "kind": "bulk",
+            "value": "hyperloglog"
+          },
+          {
+            "kind": "bulk",
+            "value": "geo"
+          },
+          {
+            "kind": "bulk",
+            "value": "stream"
+          },
+          {
+            "kind": "bulk",
+            "value": "pubsub"
+          },
+          {
+            "kind": "bulk",
+            "value": "admin"
+          },
+          {
+            "kind": "bulk",
+            "value": "fast"
+          },
+          {
+            "kind": "bulk",
+            "value": "slow"
+          },
+          {
+            "kind": "bulk",
+            "value": "blocking"
+          },
+          {
+            "kind": "bulk",
+            "value": "dangerous"
+          },
+          {
+            "kind": "bulk",
+            "value": "connection"
+          },
+          {
+            "kind": "bulk",
+            "value": "transaction"
+          },
+          {
+            "kind": "bulk",
+            "value": "scripting"
+          },
+          {
+            "kind": "bulk",
+            "value": "server"
+          },
+          {
+            "kind": "bulk",
+            "value": "generic"
+          }
         ]
       }
     },
     {
       "name": "acl_cat_unknown_category_is_rejected",
       "now_ms": 11,
-      "argv": ["ACL", "CAT", "foobar"],
+      "argv": [
+        "ACL",
+        "CAT",
+        "foobar"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR Unknown ACL cat category 'foobar'"
@@ -139,7 +315,10 @@
     {
       "name": "acl_log_returns_empty_array",
       "now_ms": 12,
-      "argv": ["ACL", "LOG"],
+      "argv": [
+        "ACL",
+        "LOG"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -148,25 +327,47 @@
     {
       "name": "acl_log_reset_returns_ok",
       "now_ms": 13,
-      "argv": ["ACL", "LOG", "RESET"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "LOG",
+        "RESET"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_save_returns_ok",
       "now_ms": 14,
-      "argv": ["ACL", "SAVE"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "SAVE"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_load_returns_ok",
       "now_ms": 15,
-      "argv": ["ACL", "LOAD"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "LOAD"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_unknown_subcommand_is_rejected",
       "now_ms": 16,
-      "argv": ["ACL", "BADCMD"],
+      "argv": [
+        "ACL",
+        "BADCMD"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
@@ -175,7 +376,9 @@
     {
       "name": "acl_no_subcommand_is_rejected",
       "now_ms": 17,
-      "argv": ["ACL"],
+      "argv": [
+        "ACL"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
@@ -184,7 +387,12 @@
     {
       "name": "acl_setuser_invalid_rule_is_rejected",
       "now_ms": 18,
-      "argv": ["ACL", "SETUSER", "bob", "invalidrule"],
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "bob",
+        "invalidrule"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR Error in ACL SETUSER modifier 'invalidrule': Syntax error"
@@ -193,59 +401,162 @@
     {
       "name": "acl_setuser_disable_user",
       "now_ms": 19,
-      "argv": ["ACL", "SETUSER", "carol", "off"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "carol",
+        "off"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_getuser_carol_is_disabled",
       "now_ms": 20,
-      "argv": ["ACL", "GETUSER", "carol"],
+      "argv": [
+        "ACL",
+        "GETUSER",
+        "carol"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "flags" },
-          { "kind": "array", "value": [{ "kind": "bulk", "value": "off" }] },
-          { "kind": "bulk", "value": "passwords" },
-          { "kind": "array", "value": [] },
-          { "kind": "bulk", "value": "commands" },
-          { "kind": "bulk", "value": "+@all" },
-          { "kind": "bulk", "value": "keys" },
-          { "kind": "bulk", "value": "~*" },
-          { "kind": "bulk", "value": "channels" },
-          { "kind": "bulk", "value": "&*" }
+          {
+            "kind": "bulk",
+            "value": "flags"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "off"
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "passwords"
+          },
+          {
+            "kind": "array",
+            "value": []
+          },
+          {
+            "kind": "bulk",
+            "value": "commands"
+          },
+          {
+            "kind": "bulk",
+            "value": "+@all"
+          },
+          {
+            "kind": "bulk",
+            "value": "keys"
+          },
+          {
+            "kind": "bulk",
+            "value": "~*"
+          },
+          {
+            "kind": "bulk",
+            "value": "channels"
+          },
+          {
+            "kind": "bulk",
+            "value": "&*"
+          }
         ]
       }
     },
     {
       "name": "acl_setuser_nopass",
       "now_ms": 21,
-      "argv": ["ACL", "SETUSER", "dave", "on", "nopass"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "dave",
+        "on",
+        "nopass"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_getuser_dave_nopass",
       "now_ms": 22,
-      "argv": ["ACL", "GETUSER", "dave"],
+      "argv": [
+        "ACL",
+        "GETUSER",
+        "dave"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "flags" },
-          { "kind": "array", "value": [{ "kind": "bulk", "value": "on" }, { "kind": "bulk", "value": "nopass" }] },
-          { "kind": "bulk", "value": "passwords" },
-          { "kind": "array", "value": [] },
-          { "kind": "bulk", "value": "commands" },
-          { "kind": "bulk", "value": "+@all" },
-          { "kind": "bulk", "value": "keys" },
-          { "kind": "bulk", "value": "~*" },
-          { "kind": "bulk", "value": "channels" },
-          { "kind": "bulk", "value": "&*" }
+          {
+            "kind": "bulk",
+            "value": "flags"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "on"
+              },
+              {
+                "kind": "bulk",
+                "value": "nopass"
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "passwords"
+          },
+          {
+            "kind": "array",
+            "value": []
+          },
+          {
+            "kind": "bulk",
+            "value": "commands"
+          },
+          {
+            "kind": "bulk",
+            "value": "+@all"
+          },
+          {
+            "kind": "bulk",
+            "value": "keys"
+          },
+          {
+            "kind": "bulk",
+            "value": "~*"
+          },
+          {
+            "kind": "bulk",
+            "value": "channels"
+          },
+          {
+            "kind": "bulk",
+            "value": "&*"
+          }
         ]
       }
     },
     {
       "name": "acl_whoami_extra_args_rejected",
       "now_ms": 23,
-      "argv": ["ACL", "WHOAMI", "extra"],
+      "argv": [
+        "ACL",
+        "WHOAMI",
+        "extra"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
@@ -254,7 +565,11 @@
     {
       "name": "acl_genpass_error_on_invalid_bits",
       "now_ms": 24,
-      "argv": ["ACL", "GENPASS", "0"],
+      "argv": [
+        "ACL",
+        "GENPASS",
+        "0"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
@@ -263,61 +578,121 @@
     {
       "name": "acl_cat_hyperloglog_returns_commands",
       "now_ms": 25,
-      "argv": ["ACL", "CAT", "hyperloglog"],
+      "argv": [
+        "ACL",
+        "CAT",
+        "hyperloglog"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "pfadd" },
-          { "kind": "bulk", "value": "pfcount" },
-          { "kind": "bulk", "value": "pfmerge" }
+          {
+            "kind": "bulk",
+            "value": "pfadd"
+          },
+          {
+            "kind": "bulk",
+            "value": "pfcount"
+          },
+          {
+            "kind": "bulk",
+            "value": "pfmerge"
+          }
         ]
       }
     },
     {
       "name": "acl_cat_transaction_returns_commands",
       "now_ms": 26,
-      "argv": ["ACL", "CAT", "transaction"],
+      "argv": [
+        "ACL",
+        "CAT",
+        "transaction"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "multi" },
-          { "kind": "bulk", "value": "exec" },
-          { "kind": "bulk", "value": "discard" },
-          { "kind": "bulk", "value": "watch" },
-          { "kind": "bulk", "value": "unwatch" }
+          {
+            "kind": "bulk",
+            "value": "multi"
+          },
+          {
+            "kind": "bulk",
+            "value": "exec"
+          },
+          {
+            "kind": "bulk",
+            "value": "discard"
+          },
+          {
+            "kind": "bulk",
+            "value": "watch"
+          },
+          {
+            "kind": "bulk",
+            "value": "unwatch"
+          }
         ]
       }
     },
     {
       "name": "acl_cat_bitmap_returns_commands",
       "now_ms": 27,
-      "argv": ["ACL", "CAT", "bitmap"],
+      "argv": [
+        "ACL",
+        "CAT",
+        "bitmap"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "setbit" },
-          { "kind": "bulk", "value": "getbit" },
-          { "kind": "bulk", "value": "bitcount" },
-          { "kind": "bulk", "value": "bitpos" },
-          { "kind": "bulk", "value": "bitop" },
-          { "kind": "bulk", "value": "bitfield" }
+          {
+            "kind": "bulk",
+            "value": "setbit"
+          },
+          {
+            "kind": "bulk",
+            "value": "getbit"
+          },
+          {
+            "kind": "bulk",
+            "value": "bitcount"
+          },
+          {
+            "kind": "bulk",
+            "value": "bitpos"
+          },
+          {
+            "kind": "bulk",
+            "value": "bitop"
+          },
+          {
+            "kind": "bulk",
+            "value": "bitfield"
+          }
         ]
       }
     },
     {
       "name": "acl_log_with_count_returns_empty",
       "now_ms": 28,
-      "argv": ["ACL", "LOG", "10"],
+      "argv": [
+        "ACL",
+        "LOG",
+        "10"
+      ],
       "expect": {
         "kind": "array",
         "value": []
       }
     },
-
     {
       "name": "auth_without_password_configured",
       "now_ms": 30,
-      "argv": ["AUTH", "somepass"],
+      "argv": [
+        "AUTH",
+        "somepass"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?"
@@ -326,7 +701,9 @@
     {
       "name": "auth_wrong_arity_no_args",
       "now_ms": 31,
-      "argv": ["AUTH"],
+      "argv": [
+        "AUTH"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'AUTH' command"
@@ -335,35 +712,65 @@
     {
       "name": "auth_wrong_arity_too_many",
       "now_ms": 32,
-      "argv": ["AUTH", "user", "pass", "extra"],
+      "argv": [
+        "AUTH",
+        "user",
+        "pass",
+        "extra"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'AUTH' command"
       }
     },
-
     {
       "name": "acl_setuser_with_password_for_auth",
       "now_ms": 40,
-      "argv": ["ACL", "SETUSER", "testuser", "on", ">secret123"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "testuser",
+        "on",
+        ">secret123"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "auth_correct_user_pass",
       "now_ms": 41,
-      "argv": ["AUTH", "testuser", "secret123"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "AUTH",
+        "testuser",
+        "secret123"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_whoami_after_auth",
       "now_ms": 42,
-      "argv": ["ACL", "WHOAMI"],
-      "expect": { "kind": "bulk", "value": "testuser" }
+      "argv": [
+        "ACL",
+        "WHOAMI"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "testuser"
+      }
     },
     {
       "name": "auth_wrong_password",
       "now_ms": 43,
-      "argv": ["AUTH", "testuser", "wrongpass"],
+      "argv": [
+        "AUTH",
+        "testuser",
+        "wrongpass"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGPASS invalid username-password pair or user is disabled."
@@ -372,110 +779,236 @@
     {
       "name": "auth_nonexistent_user",
       "now_ms": 44,
-      "argv": ["AUTH", "nobody", "pass"],
+      "argv": [
+        "AUTH",
+        "nobody",
+        "pass"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGPASS invalid username-password pair or user is disabled."
       }
     },
-
     {
       "name": "acl_setuser_disabled_user",
       "now_ms": 50,
-      "argv": ["ACL", "SETUSER", "disabled_user", "off", ">pass456"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "disabled_user",
+        "off",
+        ">pass456"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "auth_disabled_user_rejected",
       "now_ms": 51,
-      "argv": ["AUTH", "disabled_user", "pass456"],
+      "argv": [
+        "AUTH",
+        "disabled_user",
+        "pass456"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGPASS invalid username-password pair or user is disabled."
       }
     },
-
     {
       "name": "acl_deluser_multiple_setup_user2",
       "now_ms": 60,
-      "argv": ["ACL", "SETUSER", "user2", "on"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "user2",
+        "on"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_deluser_multiple_setup_user3",
       "now_ms": 61,
-      "argv": ["ACL", "SETUSER", "user3", "on"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "user3",
+        "on"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_deluser_multiple_at_once",
       "now_ms": 62,
-      "argv": ["ACL", "DELUSER", "user2", "user3"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "user2",
+        "user3"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
     {
       "name": "acl_getuser_user2_gone",
       "now_ms": 63,
-      "argv": ["ACL", "GETUSER", "user2"],
-      "expect": { "kind": "bulk", "value": null }
+      "argv": [
+        "ACL",
+        "GETUSER",
+        "user2"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
     },
     {
       "name": "acl_getuser_user3_gone",
       "now_ms": 64,
-      "argv": ["ACL", "GETUSER", "user3"],
-      "expect": { "kind": "bulk", "value": null }
+      "argv": [
+        "ACL",
+        "GETUSER",
+        "user3"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
     },
-
     {
       "name": "acl_deluser_mix_existing_nonexistent",
       "now_ms": 65,
-      "argv": ["ACL", "SETUSER", "user4", "on"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "user4",
+        "on"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_deluser_mix_count",
       "now_ms": 66,
-      "argv": ["ACL", "DELUSER", "user4", "nonexist"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "user4",
+        "nonexist"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
-
     {
       "name": "acl_setuser_resetpass",
       "now_ms": 70,
-      "argv": ["ACL", "SETUSER", "rpuser", "on", ">mypass"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "rpuser",
+        "on",
+        ">mypass"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_setuser_resetpass_apply",
       "now_ms": 71,
-      "argv": ["ACL", "SETUSER", "rpuser", "resetpass"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "rpuser",
+        "resetpass"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_getuser_after_resetpass",
       "now_ms": 72,
-      "argv": ["ACL", "GETUSER", "rpuser"],
+      "argv": [
+        "ACL",
+        "GETUSER",
+        "rpuser"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "flags" },
-          { "kind": "array", "value": [{ "kind": "bulk", "value": "off" }] },
-          { "kind": "bulk", "value": "passwords" },
-          { "kind": "array", "value": [] },
-          { "kind": "bulk", "value": "commands" },
-          { "kind": "bulk", "value": "+@all" },
-          { "kind": "bulk", "value": "keys" },
-          { "kind": "bulk", "value": "~*" },
-          { "kind": "bulk", "value": "channels" },
-          { "kind": "bulk", "value": "&*" }
+          {
+            "kind": "bulk",
+            "value": "flags"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "off"
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "passwords"
+          },
+          {
+            "kind": "array",
+            "value": []
+          },
+          {
+            "kind": "bulk",
+            "value": "commands"
+          },
+          {
+            "kind": "bulk",
+            "value": "+@all"
+          },
+          {
+            "kind": "bulk",
+            "value": "keys"
+          },
+          {
+            "kind": "bulk",
+            "value": "~*"
+          },
+          {
+            "kind": "bulk",
+            "value": "channels"
+          },
+          {
+            "kind": "bulk",
+            "value": "&*"
+          }
         ]
       }
     },
-
     {
       "name": "acl_genpass_negative_error",
       "now_ms": 80,
-      "argv": ["ACL", "GENPASS", "-1"],
+      "argv": [
+        "ACL",
+        "GENPASS",
+        "-1"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
@@ -484,7 +1017,11 @@
     {
       "name": "acl_genpass_too_large_error",
       "now_ms": 81,
-      "argv": ["ACL", "GENPASS", "4097"],
+      "argv": [
+        "ACL",
+        "GENPASS",
+        "4097"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
@@ -493,17 +1030,24 @@
     {
       "name": "acl_genpass_extra_args_error",
       "now_ms": 82,
-      "argv": ["ACL", "GENPASS", "128", "extra"],
+      "argv": [
+        "ACL",
+        "GENPASS",
+        "128",
+        "extra"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
       }
     },
-
     {
       "name": "acl_deluser_wrong_arity",
       "now_ms": 83,
-      "argv": ["ACL", "DELUSER"],
+      "argv": [
+        "ACL",
+        "DELUSER"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
@@ -512,7 +1056,10 @@
     {
       "name": "acl_getuser_wrong_arity",
       "now_ms": 84,
-      "argv": ["ACL", "GETUSER"],
+      "argv": [
+        "ACL",
+        "GETUSER"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
@@ -521,17 +1068,23 @@
     {
       "name": "acl_setuser_wrong_arity",
       "now_ms": 85,
-      "argv": ["ACL", "SETUSER"],
+      "argv": [
+        "ACL",
+        "SETUSER"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
       }
     },
-
     {
       "name": "acl_save_wrong_arity",
       "now_ms": 86,
-      "argv": ["ACL", "SAVE", "extra"],
+      "argv": [
+        "ACL",
+        "SAVE",
+        "extra"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
@@ -540,134 +1093,494 @@
     {
       "name": "acl_load_wrong_arity",
       "now_ms": 87,
-      "argv": ["ACL", "LOAD", "extra"],
+      "argv": [
+        "ACL",
+        "LOAD",
+        "extra"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
       }
     },
-
     {
       "name": "acl_log_invalid_subcommand",
       "now_ms": 88,
-      "argv": ["ACL", "LOG", "BADCMD"],
+      "argv": [
+        "ACL",
+        "LOG",
+        "BADCMD"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP."
       }
     },
-
     {
       "name": "acl_cat_string_returns_commands",
       "now_ms": 90,
-      "argv": ["ACL", "CAT", "string"],
+      "argv": [
+        "ACL",
+        "CAT",
+        "string"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "set" },
-          { "kind": "bulk", "value": "get" },
-          { "kind": "bulk", "value": "incr" },
-          { "kind": "bulk", "value": "decr" },
-          { "kind": "bulk", "value": "incrby" },
-          { "kind": "bulk", "value": "decrby" },
-          { "kind": "bulk", "value": "incrbyfloat" },
-          { "kind": "bulk", "value": "mget" },
-          { "kind": "bulk", "value": "mset" },
-          { "kind": "bulk", "value": "msetnx" },
-          { "kind": "bulk", "value": "append" },
-          { "kind": "bulk", "value": "strlen" },
-          { "kind": "bulk", "value": "getrange" },
-          { "kind": "bulk", "value": "setrange" },
-          { "kind": "bulk", "value": "setnx" },
-          { "kind": "bulk", "value": "setex" },
-          { "kind": "bulk", "value": "psetex" },
-          { "kind": "bulk", "value": "getset" },
-          { "kind": "bulk", "value": "getdel" },
-          { "kind": "bulk", "value": "getex" },
-          { "kind": "bulk", "value": "substr" },
-          { "kind": "bulk", "value": "lcs" }
+          {
+            "kind": "bulk",
+            "value": "set"
+          },
+          {
+            "kind": "bulk",
+            "value": "get"
+          },
+          {
+            "kind": "bulk",
+            "value": "incr"
+          },
+          {
+            "kind": "bulk",
+            "value": "decr"
+          },
+          {
+            "kind": "bulk",
+            "value": "incrby"
+          },
+          {
+            "kind": "bulk",
+            "value": "decrby"
+          },
+          {
+            "kind": "bulk",
+            "value": "incrbyfloat"
+          },
+          {
+            "kind": "bulk",
+            "value": "mget"
+          },
+          {
+            "kind": "bulk",
+            "value": "mset"
+          },
+          {
+            "kind": "bulk",
+            "value": "msetnx"
+          },
+          {
+            "kind": "bulk",
+            "value": "append"
+          },
+          {
+            "kind": "bulk",
+            "value": "strlen"
+          },
+          {
+            "kind": "bulk",
+            "value": "getrange"
+          },
+          {
+            "kind": "bulk",
+            "value": "setrange"
+          },
+          {
+            "kind": "bulk",
+            "value": "setnx"
+          },
+          {
+            "kind": "bulk",
+            "value": "setex"
+          },
+          {
+            "kind": "bulk",
+            "value": "psetex"
+          },
+          {
+            "kind": "bulk",
+            "value": "getset"
+          },
+          {
+            "kind": "bulk",
+            "value": "getdel"
+          },
+          {
+            "kind": "bulk",
+            "value": "getex"
+          },
+          {
+            "kind": "bulk",
+            "value": "substr"
+          },
+          {
+            "kind": "bulk",
+            "value": "lcs"
+          }
         ]
       }
     },
-
     {
       "name": "acl_setuser_allcommands_allkeys",
       "now_ms": 100,
-      "argv": ["ACL", "SETUSER", "fulluser", "on", "nopass", "allcommands", "allkeys"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "fulluser",
+        "on",
+        "nopass",
+        "allcommands",
+        "allkeys"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "acl_getuser_fulluser",
       "now_ms": 101,
-      "argv": ["ACL", "GETUSER", "fulluser"],
+      "argv": [
+        "ACL",
+        "GETUSER",
+        "fulluser"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "flags" },
-          { "kind": "array", "value": [{ "kind": "bulk", "value": "on" }, { "kind": "bulk", "value": "nopass" }] },
-          { "kind": "bulk", "value": "passwords" },
-          { "kind": "array", "value": [] },
-          { "kind": "bulk", "value": "commands" },
-          { "kind": "bulk", "value": "+@all" },
-          { "kind": "bulk", "value": "keys" },
-          { "kind": "bulk", "value": "~*" },
-          { "kind": "bulk", "value": "channels" },
-          { "kind": "bulk", "value": "&*" }
+          {
+            "kind": "bulk",
+            "value": "flags"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "on"
+              },
+              {
+                "kind": "bulk",
+                "value": "nopass"
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "passwords"
+          },
+          {
+            "kind": "array",
+            "value": []
+          },
+          {
+            "kind": "bulk",
+            "value": "commands"
+          },
+          {
+            "kind": "bulk",
+            "value": "+@all"
+          },
+          {
+            "kind": "bulk",
+            "value": "keys"
+          },
+          {
+            "kind": "bulk",
+            "value": "~*"
+          },
+          {
+            "kind": "bulk",
+            "value": "channels"
+          },
+          {
+            "kind": "bulk",
+            "value": "&*"
+          }
         ]
       }
     },
-
     {
       "name": "acl_deluser_cleanup_testuser",
       "now_ms": 110,
-      "argv": ["ACL", "DELUSER", "testuser"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "testuser"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "acl_deluser_cleanup_disabled_user",
       "now_ms": 111,
-      "argv": ["ACL", "DELUSER", "disabled_user"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "disabled_user"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "acl_deluser_cleanup_rpuser",
       "now_ms": 112,
-      "argv": ["ACL", "DELUSER", "rpuser"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "rpuser"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "acl_deluser_cleanup_fulluser",
       "now_ms": 113,
-      "argv": ["ACL", "DELUSER", "fulluser"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "fulluser"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "acl_deluser_cleanup_carol",
       "now_ms": 114,
-      "argv": ["ACL", "DELUSER", "carol"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "carol"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "acl_deluser_cleanup_dave",
       "now_ms": 115,
-      "argv": ["ACL", "DELUSER", "dave"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "dave"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "acl_deluser_cleanup_bob",
       "now_ms": 116,
-      "argv": ["ACL", "DELUSER", "bob"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "bob"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "acl_users_only_default_after_cleanup",
       "now_ms": 117,
-      "argv": ["ACL", "USERS"],
+      "argv": [
+        "ACL",
+        "USERS"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "default" }
+          {
+            "kind": "bulk",
+            "value": "default"
+          }
         ]
+      }
+    },
+    {
+      "name": "acl_log_empty",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "LOG"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "acl_whoami_lowercase",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "whoami"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "testuser"
+      }
+    },
+    {
+      "name": "acl_users_lowercase",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "users"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "default"
+          }
+        ]
+      }
+    },
+    {
+      "name": "acl_setuser_bob_on",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "bob",
+        "on",
+        ">bobpass"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "acl_setuser_bob_off",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "bob",
+        "off"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "acl_deluser_bob",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "bob"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "acl_genpass_negative_bits",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "GENPASS",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
+      }
+    },
+    {
+      "name": "acl_genpass_too_large",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "GENPASS",
+        "5000"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
+      }
+    },
+    {
+      "name": "acl_cat_unknown_returns_error",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "CAT",
+        "nosuchcategory"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown ACL cat category 'nosuchcategory'"
+      }
+    },
+    {
+      "name": "acl_deluser_setup_multi",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "user1",
+        "on"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "acl_deluser_setup_multi2",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "SETUSER",
+        "user2",
+        "on"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "acl_deluser_multiple",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "DELUSER",
+        "user1",
+        "user2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "acl_getuser_missing",
+      "now_ms": 100,
+      "argv": [
+        "ACL",
+        "GETUSER",
+        "nosuchuser"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
       }
     }
   ]
