@@ -4,666 +4,1728 @@
     {
       "name": "unknown_no_args",
       "now_ms": 0,
-      "argv": ["NOPE"],
-      "expect": { "kind": "error", "value": "ERR unknown command 'NOPE'" }
+      "argv": [
+        "NOPE"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown command 'NOPE'"
+      }
     },
     {
       "name": "unknown_with_args_preview",
       "now_ms": 0,
-      "argv": ["NOPE", "x", "y"],
-      "expect": { "kind": "error", "value": "ERR unknown command 'NOPE', with args beginning with: 'x' 'y' " }
+      "argv": [
+        "NOPE",
+        "x",
+        "y"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown command 'NOPE', with args beginning with: 'x' 'y' "
+      }
     },
     {
       "name": "wrong_arity_get",
       "now_ms": 0,
-      "argv": ["GET"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GET' command" }
+      "argv": [
+        "GET"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'GET' command"
+      }
     },
     {
       "name": "set_syntax_error",
       "now_ms": 0,
-      "argv": ["SET", "k", "v", "NX", "10"],
-      "expect": { "kind": "error", "value": "ERR syntax error" }
+      "argv": [
+        "SET",
+        "k",
+        "v",
+        "NX",
+        "10"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
     },
     {
       "name": "expire_invalid_integer",
       "now_ms": 0,
-      "argv": ["EXPIRE", "k", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "EXPIRE",
+        "k",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "pexpire_invalid_integer",
       "now_ms": 0,
-      "argv": ["PEXPIRE", "k", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "PEXPIRE",
+        "k",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "expiretime_wrong_arity",
       "now_ms": 0,
-      "argv": ["EXPIRETIME"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'EXPIRETIME' command" }
+      "argv": [
+        "EXPIRETIME"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'EXPIRETIME' command"
+      }
     },
     {
       "name": "wait_wrong_arity",
       "now_ms": 0,
-      "argv": ["WAIT", "1"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'WAIT' command" }
+      "argv": [
+        "WAIT",
+        "1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'WAIT' command"
+      }
     },
     {
       "name": "wait_invalid_integer",
       "now_ms": 0,
-      "argv": ["WAIT", "nope", "0"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "WAIT",
+        "nope",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "wait_invalid_timeout",
       "now_ms": 0,
-      "argv": ["WAIT", "1", "-1"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "WAIT",
+        "1",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "waitaof_wrong_arity",
       "now_ms": 0,
-      "argv": ["WAITAOF", "1", "0"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'WAITAOF' command" }
+      "argv": [
+        "WAITAOF",
+        "1",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'WAITAOF' command"
+      }
     },
     {
       "name": "waitaof_invalid_local_integer",
       "now_ms": 0,
-      "argv": ["WAITAOF", "nope", "1", "0"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "WAITAOF",
+        "nope",
+        "1",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "waitaof_invalid_integer",
       "now_ms": 0,
-      "argv": ["WAITAOF", "1", "nope", "0"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "WAITAOF",
+        "1",
+        "nope",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "waitaof_invalid_timeout",
       "now_ms": 0,
-      "argv": ["WAITAOF", "1", "0", "-1"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "WAITAOF",
+        "1",
+        "0",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "set_expire_options_key",
       "now_ms": 0,
-      "argv": ["SET", "expire_opts_key", "value"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "expire_opts_key",
+        "value"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "expire_incompatible_nx_xx",
       "now_ms": 0,
-      "argv": ["EXPIRE", "expire_opts_key", "5", "NX", "XX"],
-      "expect": { "kind": "error", "value": "ERR syntax error" }
+      "argv": [
+        "EXPIRE",
+        "expire_opts_key",
+        "5",
+        "NX",
+        "XX"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
     },
     {
       "name": "expire_incompatible_nx_gt",
       "now_ms": 0,
-      "argv": ["EXPIRE", "expire_opts_key", "5", "NX", "GT"],
-      "expect": { "kind": "error", "value": "ERR syntax error" }
+      "argv": [
+        "EXPIRE",
+        "expire_opts_key",
+        "5",
+        "NX",
+        "GT"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
     },
     {
       "name": "expire_incompatible_gt_lt",
       "now_ms": 0,
-      "argv": ["EXPIRE", "expire_opts_key", "5", "GT", "LT"],
-      "expect": { "kind": "error", "value": "ERR syntax error" }
+      "argv": [
+        "EXPIRE",
+        "expire_opts_key",
+        "5",
+        "GT",
+        "LT"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
     },
     {
       "name": "expire_unknown_option",
       "now_ms": 0,
-      "argv": ["EXPIRE", "expire_opts_key", "5", "ZZ"],
-      "expect": { "kind": "error", "value": "ERR syntax error" }
+      "argv": [
+        "EXPIRE",
+        "expire_opts_key",
+        "5",
+        "ZZ"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
     },
     {
       "name": "pexpire_incompatible_gt_lt",
       "now_ms": 0,
-      "argv": ["PEXPIRE", "expire_opts_key", "5", "GT", "LT"],
-      "expect": { "kind": "error", "value": "ERR syntax error" }
+      "argv": [
+        "PEXPIRE",
+        "expire_opts_key",
+        "5",
+        "GT",
+        "LT"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
     },
     {
       "name": "pexpire_unknown_option",
       "now_ms": 0,
-      "argv": ["PEXPIRE", "expire_opts_key", "5", "ZZ"],
-      "expect": { "kind": "error", "value": "ERR syntax error" }
+      "argv": [
+        "PEXPIRE",
+        "expire_opts_key",
+        "5",
+        "ZZ"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
     },
     {
       "name": "set_text_value",
       "now_ms": 1,
-      "argv": ["SET", "counter", "hello"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "counter",
+        "hello"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "incr_non_integer",
       "now_ms": 1,
-      "argv": ["INCR", "counter"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "INCR",
+        "counter"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "set_max_i64",
       "now_ms": 2,
-      "argv": ["SET", "maxint", "9223372036854775807"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "maxint",
+        "9223372036854775807"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "incr_overflow",
       "now_ms": 2,
-      "argv": ["INCR", "maxint"],
-      "expect": { "kind": "error", "value": "ERR increment or decrement would overflow" }
+      "argv": [
+        "INCR",
+        "maxint"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR increment or decrement would overflow"
+      }
     },
-
     {
       "name": "del_wrong_arity",
       "now_ms": 0,
-      "argv": ["DEL"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'DEL' command" }
+      "argv": [
+        "DEL"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'DEL' command"
+      }
     },
     {
       "name": "mget_wrong_arity",
       "now_ms": 0,
-      "argv": ["MGET"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'MGET' command" }
+      "argv": [
+        "MGET"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'MGET' command"
+      }
     },
     {
       "name": "append_wrong_arity",
       "now_ms": 0,
-      "argv": ["APPEND"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'APPEND' command" }
+      "argv": [
+        "APPEND"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'APPEND' command"
+      }
     },
     {
       "name": "strlen_wrong_arity",
       "now_ms": 0,
-      "argv": ["STRLEN"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'STRLEN' command" }
+      "argv": [
+        "STRLEN"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'STRLEN' command"
+      }
     },
     {
       "name": "getrange_wrong_arity",
       "now_ms": 0,
-      "argv": ["GETRANGE", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GETRANGE' command" }
+      "argv": [
+        "GETRANGE",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'GETRANGE' command"
+      }
     },
     {
       "name": "setrange_wrong_arity",
       "now_ms": 0,
-      "argv": ["SETRANGE", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SETRANGE' command" }
+      "argv": [
+        "SETRANGE",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SETRANGE' command"
+      }
     },
     {
       "name": "lpush_wrong_arity",
       "now_ms": 0,
-      "argv": ["LPUSH", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'LPUSH' command" }
+      "argv": [
+        "LPUSH",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'LPUSH' command"
+      }
     },
     {
       "name": "rpush_wrong_arity",
       "now_ms": 0,
-      "argv": ["RPUSH", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'RPUSH' command" }
+      "argv": [
+        "RPUSH",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'RPUSH' command"
+      }
     },
     {
       "name": "sadd_wrong_arity",
       "now_ms": 0,
-      "argv": ["SADD", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SADD' command" }
+      "argv": [
+        "SADD",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SADD' command"
+      }
     },
     {
       "name": "zadd_wrong_arity",
       "now_ms": 0,
-      "argv": ["ZADD", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'ZADD' command" }
+      "argv": [
+        "ZADD",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'ZADD' command"
+      }
     },
     {
       "name": "hset_wrong_arity",
       "now_ms": 0,
-      "argv": ["HSET", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'HSET' command" }
+      "argv": [
+        "HSET",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'HSET' command"
+      }
     },
     {
       "name": "type_wrong_arity",
       "now_ms": 0,
-      "argv": ["TYPE"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'TYPE' command" }
+      "argv": [
+        "TYPE"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'TYPE' command"
+      }
     },
     {
       "name": "keys_wrong_arity",
       "now_ms": 0,
-      "argv": ["KEYS"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'KEYS' command" }
+      "argv": [
+        "KEYS"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'KEYS' command"
+      }
     },
     {
       "name": "rename_wrong_arity",
       "now_ms": 0,
-      "argv": ["RENAME", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'RENAME' command" }
+      "argv": [
+        "RENAME",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'RENAME' command"
+      }
     },
     {
       "name": "renamenx_wrong_arity",
       "now_ms": 0,
-      "argv": ["RENAMENX", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'RENAMENX' command" }
+      "argv": [
+        "RENAMENX",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'RENAMENX' command"
+      }
     },
     {
       "name": "select_wrong_arity",
       "now_ms": 0,
-      "argv": ["SELECT"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SELECT' command" }
+      "argv": [
+        "SELECT"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SELECT' command"
+      }
     },
     {
       "name": "llen_wrong_arity",
       "now_ms": 0,
-      "argv": ["LLEN"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'LLEN' command" }
+      "argv": [
+        "LLEN"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'LLEN' command"
+      }
     },
     {
       "name": "scard_wrong_arity",
       "now_ms": 0,
-      "argv": ["SCARD"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SCARD' command" }
+      "argv": [
+        "SCARD"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SCARD' command"
+      }
     },
     {
       "name": "zcard_wrong_arity",
       "now_ms": 0,
-      "argv": ["ZCARD"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'ZCARD' command" }
+      "argv": [
+        "ZCARD"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'ZCARD' command"
+      }
     },
     {
       "name": "hlen_wrong_arity",
       "now_ms": 0,
-      "argv": ["HLEN"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'HLEN' command" }
+      "argv": [
+        "HLEN"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'HLEN' command"
+      }
     },
-
     {
       "name": "wrongtype_setup_string",
       "now_ms": 5,
-      "argv": ["SET", "strkey", "hello"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "strkey",
+        "hello"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "wrongtype_lpush_on_string",
       "now_ms": 5,
-      "argv": ["LPUSH", "strkey", "x"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "LPUSH",
+        "strkey",
+        "x"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
     {
       "name": "wrongtype_sadd_on_string",
       "now_ms": 5,
-      "argv": ["SADD", "strkey", "x"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "SADD",
+        "strkey",
+        "x"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
     {
       "name": "wrongtype_zadd_on_string",
       "now_ms": 5,
-      "argv": ["ZADD", "strkey", "1", "x"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "ZADD",
+        "strkey",
+        "1",
+        "x"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
     {
       "name": "wrongtype_hset_on_string",
       "now_ms": 5,
-      "argv": ["HSET", "strkey", "f", "v"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "HSET",
+        "strkey",
+        "f",
+        "v"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
     {
       "name": "wrongtype_llen_on_string",
       "now_ms": 5,
-      "argv": ["LLEN", "strkey"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "LLEN",
+        "strkey"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
     {
       "name": "wrongtype_scard_on_string",
       "now_ms": 5,
-      "argv": ["SCARD", "strkey"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "SCARD",
+        "strkey"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
     {
       "name": "wrongtype_zcard_on_string",
       "now_ms": 5,
-      "argv": ["ZCARD", "strkey"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "ZCARD",
+        "strkey"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
     {
       "name": "wrongtype_hlen_on_string",
       "now_ms": 5,
-      "argv": ["HLEN", "strkey"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "HLEN",
+        "strkey"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
     {
       "name": "wrongtype_setup_list",
       "now_ms": 6,
-      "argv": ["LPUSH", "listkey", "a"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "LPUSH",
+        "listkey",
+        "a"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "wrongtype_get_on_list",
       "now_ms": 6,
-      "argv": ["GET", "listkey"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "GET",
+        "listkey"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
     {
       "name": "wrongtype_sadd_on_list",
       "now_ms": 6,
-      "argv": ["SADD", "listkey", "x"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "SADD",
+        "listkey",
+        "x"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
     {
       "name": "wrongtype_incr_on_list",
       "now_ms": 6,
-      "argv": ["INCR", "listkey"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "INCR",
+        "listkey"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
-
     {
       "name": "incrbyfloat_not_a_float",
       "now_ms": 7,
-      "argv": ["SET", "fltkey", "10"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "fltkey",
+        "10"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "incrbyfloat_invalid_value",
       "now_ms": 7,
-      "argv": ["INCRBYFLOAT", "fltkey", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not a valid float" }
+      "argv": [
+        "INCRBYFLOAT",
+        "fltkey",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not a valid float"
+      }
     },
     {
       "name": "incrbyfloat_wrong_arity",
       "now_ms": 7,
-      "argv": ["INCRBYFLOAT", "fltkey"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'INCRBYFLOAT' command" }
+      "argv": [
+        "INCRBYFLOAT",
+        "fltkey"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'INCRBYFLOAT' command"
+      }
     },
     {
       "name": "incrby_not_integer",
       "now_ms": 7,
-      "argv": ["INCRBY", "fltkey", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "INCRBY",
+        "fltkey",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "decrby_not_integer",
       "now_ms": 7,
-      "argv": ["DECRBY", "fltkey", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "DECRBY",
+        "fltkey",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "decr_non_integer_value",
       "now_ms": 7,
-      "argv": ["SET", "notint", "abc"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "notint",
+        "abc"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "decr_on_non_integer",
       "now_ms": 7,
-      "argv": ["DECR", "notint"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "DECR",
+        "notint"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
-
     {
       "name": "set_conflicting_nx_xx",
       "now_ms": 8,
-      "argv": ["SET", "k", "v", "NX", "XX"],
-      "expect": { "kind": "error", "value": "ERR syntax error" }
+      "argv": [
+        "SET",
+        "k",
+        "v",
+        "NX",
+        "XX"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
     },
     {
       "name": "set_conflicting_ex_px",
       "now_ms": 8,
-      "argv": ["SET", "k", "v", "EX", "10", "PX", "10000"],
-      "expect": { "kind": "error", "value": "ERR syntax error" }
+      "argv": [
+        "SET",
+        "k",
+        "v",
+        "EX",
+        "10",
+        "PX",
+        "10000"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
     },
     {
       "name": "set_ex_not_integer",
       "now_ms": 8,
-      "argv": ["SET", "k", "v", "EX", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "SET",
+        "k",
+        "v",
+        "EX",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "set_px_not_integer",
       "now_ms": 8,
-      "argv": ["SET", "k", "v", "PX", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "SET",
+        "k",
+        "v",
+        "PX",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
-
     {
       "name": "select_db0_ok",
       "now_ms": 9,
-      "argv": ["SELECT", "0"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SELECT",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "select_db1_out_of_range",
       "now_ms": 9,
-      "argv": ["SELECT", "1"],
-      "expect": { "kind": "error", "value": "ERR DB index is out of range" }
+      "argv": [
+        "SELECT",
+        "1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR DB index is out of range"
+      }
     },
     {
       "name": "select_not_integer",
       "now_ms": 9,
-      "argv": ["SELECT", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "SELECT",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "select_negative",
       "now_ms": 9,
-      "argv": ["SELECT", "-1"],
-      "expect": { "kind": "error", "value": "ERR DB index is out of range" }
+      "argv": [
+        "SELECT",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR DB index is out of range"
+      }
     },
-
     {
       "name": "rename_no_such_key",
       "now_ms": 10,
-      "argv": ["RENAME", "nonexist", "other"],
-      "expect": { "kind": "error", "value": "ERR no such key" }
+      "argv": [
+        "RENAME",
+        "nonexist",
+        "other"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
     },
     {
       "name": "renamenx_no_such_key",
       "now_ms": 10,
-      "argv": ["RENAMENX", "nonexist", "other"],
-      "expect": { "kind": "error", "value": "ERR no such key" }
+      "argv": [
+        "RENAMENX",
+        "nonexist",
+        "other"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
     },
-
     {
       "name": "setrange_offset_not_integer",
       "now_ms": 11,
-      "argv": ["SETRANGE", "k", "abc", "val"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "SETRANGE",
+        "k",
+        "abc",
+        "val"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "getrange_start_not_integer",
       "now_ms": 11,
-      "argv": ["GETRANGE", "k", "abc", "5"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "GETRANGE",
+        "k",
+        "abc",
+        "5"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "getrange_end_not_integer",
       "now_ms": 11,
-      "argv": ["GETRANGE", "k", "0", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "GETRANGE",
+        "k",
+        "0",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
-
     {
       "name": "lindex_wrong_arity",
       "now_ms": 12,
-      "argv": ["LINDEX", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'LINDEX' command" }
+      "argv": [
+        "LINDEX",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'LINDEX' command"
+      }
     },
     {
       "name": "lset_wrong_arity",
       "now_ms": 12,
-      "argv": ["LSET", "k", "0"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'LSET' command" }
+      "argv": [
+        "LSET",
+        "k",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'LSET' command"
+      }
     },
     {
       "name": "lindex_not_integer",
       "now_ms": 12,
-      "argv": ["LINDEX", "k", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "LINDEX",
+        "k",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
-
     {
       "name": "unknown_with_long_args_preview",
       "now_ms": 0,
-      "argv": ["BADCMD", "arg1", "arg2", "arg3"],
-      "expect": { "kind": "error", "value": "ERR unknown command 'BADCMD', with args beginning with: 'arg1' 'arg2' 'arg3' " }
+      "argv": [
+        "BADCMD",
+        "arg1",
+        "arg2",
+        "arg3"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown command 'BADCMD', with args beginning with: 'arg1' 'arg2' 'arg3' "
+      }
     },
     {
       "name": "unknown_empty_command",
       "now_ms": 0,
-      "argv": [""],
-      "expect": { "kind": "error", "value": "ERR unknown command ''" }
+      "argv": [
+        ""
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown command ''"
+      }
     },
     {
       "name": "unknown_case_preserved",
       "now_ms": 0,
-      "argv": ["FoObAr"],
-      "expect": { "kind": "error", "value": "ERR unknown command 'FoObAr'" }
+      "argv": [
+        "FoObAr"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown command 'FoObAr'"
+      }
     },
-
     {
       "name": "object_unknown_subcommand",
       "now_ms": 13,
-      "argv": ["OBJECT", "BADSUBCMD", "k"],
-      "expect": { "kind": "error", "value": "ERR Unknown subcommand or wrong number of arguments for OBJECT BADSUBCMD" }
+      "argv": [
+        "OBJECT",
+        "BADSUBCMD",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for OBJECT BADSUBCMD"
+      }
     },
-
     {
       "name": "setrange_negative_offset",
       "now_ms": 14,
-      "argv": ["SETRANGE", "k", "-1", "val"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "SETRANGE",
+        "k",
+        "-1",
+        "val"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
-
     {
       "name": "bitcount_wrong_arity",
       "now_ms": 15,
-      "argv": ["BITCOUNT"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'BITCOUNT' command" }
+      "argv": [
+        "BITCOUNT"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'BITCOUNT' command"
+      }
     },
     {
       "name": "getbit_wrong_arity",
       "now_ms": 15,
-      "argv": ["GETBIT", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GETBIT' command" }
+      "argv": [
+        "GETBIT",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'GETBIT' command"
+      }
     },
     {
       "name": "setbit_wrong_arity",
       "now_ms": 15,
-      "argv": ["SETBIT", "k", "0"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SETBIT' command" }
+      "argv": [
+        "SETBIT",
+        "k",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SETBIT' command"
+      }
     },
     {
       "name": "setbit_not_integer_offset",
       "now_ms": 15,
-      "argv": ["SETBIT", "k", "abc", "1"],
-      "expect": { "kind": "error", "value": "ERR bit offset is not an integer or out of range" }
+      "argv": [
+        "SETBIT",
+        "k",
+        "abc",
+        "1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR bit offset is not an integer or out of range"
+      }
     },
     {
       "name": "setbit_invalid_value",
       "now_ms": 15,
-      "argv": ["SETBIT", "k", "0", "2"],
-      "expect": { "kind": "error", "value": "ERR bit is not an integer or out of range" }
+      "argv": [
+        "SETBIT",
+        "k",
+        "0",
+        "2"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR bit is not an integer or out of range"
+      }
     },
     {
       "name": "getbit_not_integer_offset",
       "now_ms": 15,
-      "argv": ["GETBIT", "k", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "GETBIT",
+        "k",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
-
     {
       "name": "decr_wrong_arity",
       "now_ms": 16,
-      "argv": ["DECR"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'DECR' command" }
+      "argv": [
+        "DECR"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'DECR' command"
+      }
     },
     {
       "name": "incr_wrong_arity",
       "now_ms": 16,
-      "argv": ["INCR"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'INCR' command" }
+      "argv": [
+        "INCR"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'INCR' command"
+      }
     },
     {
       "name": "incrby_wrong_arity",
       "now_ms": 16,
-      "argv": ["INCRBY", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'INCRBY' command" }
+      "argv": [
+        "INCRBY",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'INCRBY' command"
+      }
     },
     {
       "name": "decrby_wrong_arity",
       "now_ms": 16,
-      "argv": ["DECRBY", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'DECRBY' command" }
+      "argv": [
+        "DECRBY",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'DECRBY' command"
+      }
     },
     {
       "name": "mset_odd_args",
       "now_ms": 16,
-      "argv": ["MSET", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'MSET' command" }
+      "argv": [
+        "MSET",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'MSET' command"
+      }
     },
     {
       "name": "msetnx_odd_args",
       "now_ms": 16,
-      "argv": ["MSETNX", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'MSETNX' command" }
+      "argv": [
+        "MSETNX",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'MSETNX' command"
+      }
     },
-
     {
       "name": "set_min_i64_decr_overflow",
       "now_ms": 17,
-      "argv": ["SET", "minint", "-9223372036854775808"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "minint",
+        "-9223372036854775808"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "decr_underflow",
       "now_ms": 17,
-      "argv": ["DECR", "minint"],
-      "expect": { "kind": "error", "value": "ERR increment or decrement would overflow" }
+      "argv": [
+        "DECR",
+        "minint"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR increment or decrement would overflow"
+      }
     },
-
     {
       "name": "persist_wrong_arity",
       "now_ms": 18,
-      "argv": ["PERSIST"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'PERSIST' command" }
+      "argv": [
+        "PERSIST"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PERSIST' command"
+      }
     },
     {
       "name": "ttl_wrong_arity",
       "now_ms": 18,
-      "argv": ["TTL"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'TTL' command" }
+      "argv": [
+        "TTL"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'TTL' command"
+      }
     },
     {
       "name": "pttl_wrong_arity",
       "now_ms": 18,
-      "argv": ["PTTL"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'PTTL' command" }
+      "argv": [
+        "PTTL"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PTTL' command"
+      }
     },
     {
       "name": "exists_wrong_arity",
       "now_ms": 18,
-      "argv": ["EXISTS"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'EXISTS' command" }
+      "argv": [
+        "EXISTS"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'EXISTS' command"
+      }
     },
     {
       "name": "dbsize_wrong_arity",
       "now_ms": 18,
-      "argv": ["DBSIZE", "extra"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'DBSIZE' command" }
+      "argv": [
+        "DBSIZE",
+        "extra"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'DBSIZE' command"
+      }
     },
-
     {
       "name": "sintercard_wrong_arity",
       "now_ms": 19,
-      "argv": ["SINTERCARD"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SINTERCARD' command" }
+      "argv": [
+        "SINTERCARD"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SINTERCARD' command"
+      }
     },
     {
       "name": "zrangebyscore_wrong_arity",
       "now_ms": 19,
-      "argv": ["ZRANGEBYSCORE", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'ZRANGEBYSCORE' command" }
+      "argv": [
+        "ZRANGEBYSCORE",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'ZRANGEBYSCORE' command"
+      }
     },
     {
       "name": "zscore_wrong_arity",
       "now_ms": 19,
-      "argv": ["ZSCORE", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'ZSCORE' command" }
+      "argv": [
+        "ZSCORE",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'ZSCORE' command"
+      }
+    },
+    {
+      "name": "wt_setup_string",
+      "now_ms": 119,
+      "argv": [
+        "SET",
+        "wts",
+        "hello"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "wt_setup_list",
+      "now_ms": 119,
+      "argv": [
+        "RPUSH",
+        "wtl",
+        "a",
+        "b"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "wt_setup_set",
+      "now_ms": 119,
+      "argv": [
+        "SADD",
+        "wtset",
+        "x",
+        "y"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "wt_setup_zset",
+      "now_ms": 119,
+      "argv": [
+        "ZADD",
+        "wtz",
+        "1",
+        "a",
+        "2",
+        "b"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "wt_setup_hash",
+      "now_ms": 119,
+      "argv": [
+        "HSET",
+        "wth",
+        "f1",
+        "v1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "wt_rpush_on_string",
+      "now_ms": 119,
+      "argv": [
+        "RPUSH",
+        "wts",
+        "val"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_lpush_on_string",
+      "now_ms": 119,
+      "argv": [
+        "LPUSH",
+        "wts",
+        "val"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_lrange_on_string",
+      "now_ms": 119,
+      "argv": [
+        "LRANGE",
+        "wts",
+        "0",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_llen_on_string",
+      "now_ms": 119,
+      "argv": [
+        "LLEN",
+        "wts"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_sadd_on_string",
+      "now_ms": 119,
+      "argv": [
+        "SADD",
+        "wts",
+        "m"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_smembers_on_string",
+      "now_ms": 119,
+      "argv": [
+        "SMEMBERS",
+        "wts"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_scard_on_string",
+      "now_ms": 119,
+      "argv": [
+        "SCARD",
+        "wts"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_zadd_on_string",
+      "now_ms": 119,
+      "argv": [
+        "ZADD",
+        "wts",
+        "1",
+        "m"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_zrange_on_string",
+      "now_ms": 119,
+      "argv": [
+        "ZRANGE",
+        "wts",
+        "0",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_zcard_on_string",
+      "now_ms": 119,
+      "argv": [
+        "ZCARD",
+        "wts"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_hset_on_string",
+      "now_ms": 119,
+      "argv": [
+        "HSET",
+        "wts",
+        "f",
+        "v"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_hget_on_string",
+      "now_ms": 119,
+      "argv": [
+        "HGET",
+        "wts",
+        "f"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_hgetall_on_string",
+      "now_ms": 119,
+      "argv": [
+        "HGETALL",
+        "wts"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_get_on_list",
+      "now_ms": 119,
+      "argv": [
+        "GET",
+        "wtl"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_append_on_list",
+      "now_ms": 119,
+      "argv": [
+        "APPEND",
+        "wtl",
+        "x"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_incr_on_list",
+      "now_ms": 119,
+      "argv": [
+        "INCR",
+        "wtl"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_hset_on_list",
+      "now_ms": 119,
+      "argv": [
+        "HSET",
+        "wtl",
+        "f",
+        "v"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_get_on_hash",
+      "now_ms": 119,
+      "argv": [
+        "GET",
+        "wth"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_rpush_on_hash",
+      "now_ms": 119,
+      "argv": [
+        "RPUSH",
+        "wth",
+        "val"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_zadd_on_set",
+      "now_ms": 119,
+      "argv": [
+        "ZADD",
+        "wtset",
+        "1",
+        "m"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_sadd_on_zset",
+      "now_ms": 119,
+      "argv": [
+        "SADD",
+        "wtz",
+        "m"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_hset_on_set",
+      "now_ms": 119,
+      "argv": [
+        "HSET",
+        "wtset",
+        "f",
+        "v"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "wt_lrange_on_zset",
+      "now_ms": 119,
+      "argv": [
+        "LRANGE",
+        "wtz",
+        "0",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     }
   ]
 }
