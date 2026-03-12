@@ -4,151 +4,275 @@
     {
       "name": "config_get_exact_maxmemory",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "maxmemory"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "maxmemory"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "maxmemory" },
-          { "kind": "bulk", "value": "0" }
+          {
+            "kind": "bulk",
+            "value": "maxmemory"
+          },
+          {
+            "kind": "bulk",
+            "value": "0"
+          }
         ]
       }
     },
     {
       "name": "config_get_exact_bind",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "bind"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "bind"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "bind" },
-          { "kind": "bulk", "value": "127.0.0.1" }
+          {
+            "kind": "bulk",
+            "value": "bind"
+          },
+          {
+            "kind": "bulk",
+            "value": "127.0.0.1"
+          }
         ]
       }
     },
     {
       "name": "config_get_exact_port",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "port"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "port"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "port" },
-          { "kind": "bulk", "value": "6379" }
+          {
+            "kind": "bulk",
+            "value": "port"
+          },
+          {
+            "kind": "bulk",
+            "value": "6379"
+          }
         ]
       }
     },
     {
       "name": "config_get_exact_databases",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "databases"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "databases"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "databases" },
-          { "kind": "bulk", "value": "16" }
+          {
+            "kind": "bulk",
+            "value": "databases"
+          },
+          {
+            "kind": "bulk",
+            "value": "16"
+          }
         ]
       }
     },
     {
       "name": "config_get_exact_hz",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "hz"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "hz"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "hz" },
-          { "kind": "bulk", "value": "10" }
+          {
+            "kind": "bulk",
+            "value": "hz"
+          },
+          {
+            "kind": "bulk",
+            "value": "10"
+          }
         ]
       }
     },
     {
       "name": "config_get_exact_requirepass_default",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "requirepass"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "requirepass"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "requirepass" },
-          { "kind": "bulk", "value": "" }
+          {
+            "kind": "bulk",
+            "value": "requirepass"
+          },
+          {
+            "kind": "bulk",
+            "value": ""
+          }
         ]
       }
     },
     {
       "name": "config_get_exact_acllog_max_len_default",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "acllog-max-len"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "acllog-max-len"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "acllog-max-len" },
-          { "kind": "bulk", "value": "128" }
+          {
+            "kind": "bulk",
+            "value": "acllog-max-len"
+          },
+          {
+            "kind": "bulk",
+            "value": "128"
+          }
         ]
       }
     },
     {
       "name": "config_get_exact_appendonly",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "appendonly"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "appendonly"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "appendonly" },
-          { "kind": "bulk", "value": "no" }
+          {
+            "kind": "bulk",
+            "value": "appendonly"
+          },
+          {
+            "kind": "bulk",
+            "value": "no"
+          }
         ]
       }
     },
     {
       "name": "config_get_exact_appendfsync",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "appendfsync"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "appendfsync"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "appendfsync" },
-          { "kind": "bulk", "value": "everysec" }
+          {
+            "kind": "bulk",
+            "value": "appendfsync"
+          },
+          {
+            "kind": "bulk",
+            "value": "everysec"
+          }
         ]
       }
     },
     {
       "name": "config_get_exact_maxmemory_policy",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "maxmemory-policy"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "maxmemory-policy"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "maxmemory-policy" },
-          { "kind": "bulk", "value": "noeviction" }
+          {
+            "kind": "bulk",
+            "value": "maxmemory-policy"
+          },
+          {
+            "kind": "bulk",
+            "value": "noeviction"
+          }
         ]
       }
     },
     {
       "name": "config_get_exact_loglevel",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "loglevel"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "loglevel"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "loglevel" },
-          { "kind": "bulk", "value": "notice" }
+          {
+            "kind": "bulk",
+            "value": "loglevel"
+          },
+          {
+            "kind": "bulk",
+            "value": "notice"
+          }
         ]
       }
     },
     {
       "name": "config_get_exact_slowlog_log_slower_than",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "slowlog-log-slower-than"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "slowlog-log-slower-than"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "slowlog-log-slower-than" },
-          { "kind": "bulk", "value": "10000" }
+          {
+            "kind": "bulk",
+            "value": "slowlog-log-slower-than"
+          },
+          {
+            "kind": "bulk",
+            "value": "10000"
+          }
         ]
       }
     },
     {
       "name": "config_get_no_match",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "nonexistent-parameter"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "nonexistent-parameter"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -157,381 +281,801 @@
     {
       "name": "config_get_prefix_pattern_maxmemory",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "maxmemory*"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "maxmemory*"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "maxmemory" },
-          { "kind": "bulk", "value": "0" },
-          { "kind": "bulk", "value": "maxmemory-policy" },
-          { "kind": "bulk", "value": "noeviction" },
-          { "kind": "bulk", "value": "maxmemory-samples" },
-          { "kind": "bulk", "value": "5" },
-          { "kind": "bulk", "value": "maxmemory-eviction-tenacity" },
-          { "kind": "bulk", "value": "10" }
+          {
+            "kind": "bulk",
+            "value": "maxmemory"
+          },
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
+          {
+            "kind": "bulk",
+            "value": "maxmemory-policy"
+          },
+          {
+            "kind": "bulk",
+            "value": "noeviction"
+          },
+          {
+            "kind": "bulk",
+            "value": "maxmemory-samples"
+          },
+          {
+            "kind": "bulk",
+            "value": "5"
+          },
+          {
+            "kind": "bulk",
+            "value": "maxmemory-eviction-tenacity"
+          },
+          {
+            "kind": "bulk",
+            "value": "10"
+          }
         ]
       }
     },
     {
       "name": "config_get_prefix_pattern_cluster",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "cluster-enabled*"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "cluster-enabled*"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "cluster-enabled" },
-          { "kind": "bulk", "value": "no" }
+          {
+            "kind": "bulk",
+            "value": "cluster-enabled"
+          },
+          {
+            "kind": "bulk",
+            "value": "no"
+          }
         ]
       }
     },
     {
       "name": "config_get_prefix_pattern_lazyfree",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "lazyfree*"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "lazyfree*"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "lazyfree-lazy-eviction" },
-          { "kind": "bulk", "value": "no" },
-          { "kind": "bulk", "value": "lazyfree-lazy-expire" },
-          { "kind": "bulk", "value": "no" },
-          { "kind": "bulk", "value": "lazyfree-lazy-server-del" },
-          { "kind": "bulk", "value": "no" },
-          { "kind": "bulk", "value": "lazyfree-lazy-user-del" },
-          { "kind": "bulk", "value": "no" },
-          { "kind": "bulk", "value": "lazyfree-lazy-user-flush" },
-          { "kind": "bulk", "value": "no" }
+          {
+            "kind": "bulk",
+            "value": "lazyfree-lazy-eviction"
+          },
+          {
+            "kind": "bulk",
+            "value": "no"
+          },
+          {
+            "kind": "bulk",
+            "value": "lazyfree-lazy-expire"
+          },
+          {
+            "kind": "bulk",
+            "value": "no"
+          },
+          {
+            "kind": "bulk",
+            "value": "lazyfree-lazy-server-del"
+          },
+          {
+            "kind": "bulk",
+            "value": "no"
+          },
+          {
+            "kind": "bulk",
+            "value": "lazyfree-lazy-user-del"
+          },
+          {
+            "kind": "bulk",
+            "value": "no"
+          },
+          {
+            "kind": "bulk",
+            "value": "lazyfree-lazy-user-flush"
+          },
+          {
+            "kind": "bulk",
+            "value": "no"
+          }
         ]
       }
     },
     {
       "name": "config_set_maxmemory",
       "now_ms": 0,
-      "argv": ["CONFIG", "SET", "maxmemory", "1048576"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "CONFIG",
+        "SET",
+        "maxmemory",
+        "1048576"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "config_get_maxmemory_after_set",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "maxmemory"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "maxmemory"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "maxmemory" },
-          { "kind": "bulk", "value": "1048576" }
+          {
+            "kind": "bulk",
+            "value": "maxmemory"
+          },
+          {
+            "kind": "bulk",
+            "value": "1048576"
+          }
         ]
       }
     },
     {
       "name": "config_set_maxmemory_zero",
       "now_ms": 0,
-      "argv": ["CONFIG", "SET", "maxmemory", "0"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "CONFIG",
+        "SET",
+        "maxmemory",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "config_get_maxmemory_after_reset",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "maxmemory"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "maxmemory"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "maxmemory" },
-          { "kind": "bulk", "value": "0" }
+          {
+            "kind": "bulk",
+            "value": "maxmemory"
+          },
+          {
+            "kind": "bulk",
+            "value": "0"
+          }
         ]
       }
     },
     {
       "name": "config_set_acllog_max_len",
       "now_ms": 0,
-      "argv": ["CONFIG", "SET", "acllog-max-len", "256"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "CONFIG",
+        "SET",
+        "acllog-max-len",
+        "256"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "config_get_acllog_max_len_after_set",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "acllog-max-len"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "acllog-max-len"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "acllog-max-len" },
-          { "kind": "bulk", "value": "256" }
+          {
+            "kind": "bulk",
+            "value": "acllog-max-len"
+          },
+          {
+            "kind": "bulk",
+            "value": "256"
+          }
         ]
       }
     },
     {
       "name": "config_set_requirepass",
       "now_ms": 0,
-      "argv": ["CONFIG", "SET", "requirepass", "secret123"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "CONFIG",
+        "SET",
+        "requirepass",
+        "secret123"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "config_get_requirepass_after_set",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "requirepass"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "requirepass"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "requirepass" },
-          { "kind": "bulk", "value": "secret123" }
+          {
+            "kind": "bulk",
+            "value": "requirepass"
+          },
+          {
+            "kind": "bulk",
+            "value": "secret123"
+          }
         ]
       }
     },
     {
       "name": "config_set_requirepass_empty_clears",
       "now_ms": 0,
-      "argv": ["CONFIG", "SET", "requirepass", ""],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "CONFIG",
+        "SET",
+        "requirepass",
+        ""
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "config_get_requirepass_after_clear",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "requirepass"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "requirepass"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "requirepass" },
-          { "kind": "bulk", "value": "" }
+          {
+            "kind": "bulk",
+            "value": "requirepass"
+          },
+          {
+            "kind": "bulk",
+            "value": ""
+          }
         ]
       }
     },
     {
       "name": "config_set_multiple_params",
       "now_ms": 0,
-      "argv": ["CONFIG", "SET", "maxmemory", "2097152", "acllog-max-len", "64"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "CONFIG",
+        "SET",
+        "maxmemory",
+        "2097152",
+        "acllog-max-len",
+        "64"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "config_get_maxmemory_after_multi_set",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "maxmemory"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "maxmemory"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "maxmemory" },
-          { "kind": "bulk", "value": "2097152" }
+          {
+            "kind": "bulk",
+            "value": "maxmemory"
+          },
+          {
+            "kind": "bulk",
+            "value": "2097152"
+          }
         ]
       }
     },
     {
       "name": "config_get_acllog_after_multi_set",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "acllog-max-len"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "acllog-max-len"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "acllog-max-len" },
-          { "kind": "bulk", "value": "64" }
+          {
+            "kind": "bulk",
+            "value": "acllog-max-len"
+          },
+          {
+            "kind": "bulk",
+            "value": "64"
+          }
         ]
       }
     },
     {
       "name": "config_set_known_static_noop",
       "now_ms": 0,
-      "argv": ["CONFIG", "SET", "hz", "20"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "CONFIG",
+        "SET",
+        "hz",
+        "20"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "config_set_unknown_param_error",
       "now_ms": 0,
-      "argv": ["CONFIG", "SET", "totally-fake-param", "value"],
-      "expect": { "kind": "error", "value": "ERR Unsupported CONFIG parameter 'totally-fake-param'" }
+      "argv": [
+        "CONFIG",
+        "SET",
+        "totally-fake-param",
+        "value"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unsupported CONFIG parameter 'totally-fake-param'"
+      }
     },
     {
       "name": "config_set_maxmemory_negative_error",
       "now_ms": 0,
-      "argv": ["CONFIG", "SET", "maxmemory", "-1"],
-      "expect": { "kind": "error", "value": "ERR Invalid argument '?' for CONFIG SET 'maxmemory'" }
+      "argv": [
+        "CONFIG",
+        "SET",
+        "maxmemory",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Invalid argument '?' for CONFIG SET 'maxmemory'"
+      }
     },
     {
       "name": "config_set_acllog_negative_error",
       "now_ms": 0,
-      "argv": ["CONFIG", "SET", "acllog-max-len", "-5"],
-      "expect": { "kind": "error", "value": "ERR CONFIG SET acllog-max-len must be a non-negative integer" }
+      "argv": [
+        "CONFIG",
+        "SET",
+        "acllog-max-len",
+        "-5"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CONFIG SET acllog-max-len must be a non-negative integer"
+      }
     },
     {
       "name": "config_set_maxmemory_non_integer_error",
       "now_ms": 0,
-      "argv": ["CONFIG", "SET", "maxmemory", "abc"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "argv": [
+        "CONFIG",
+        "SET",
+        "maxmemory",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     },
     {
       "name": "config_resetstat",
       "now_ms": 0,
-      "argv": ["CONFIG", "RESETSTAT"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "CONFIG",
+        "RESETSTAT"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "config_rewrite",
       "now_ms": 0,
-      "argv": ["CONFIG", "REWRITE"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "CONFIG",
+        "REWRITE"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "config_wrong_arity_no_subcommand",
       "now_ms": 0,
-      "argv": ["CONFIG"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'CONFIG' command" }
+      "argv": [
+        "CONFIG"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CONFIG' command"
+      }
     },
     {
       "name": "config_get_wrong_arity",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'CONFIG' command" }
+      "argv": [
+        "CONFIG",
+        "GET"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CONFIG' command"
+      }
     },
     {
       "name": "config_set_wrong_arity_odd",
       "now_ms": 0,
-      "argv": ["CONFIG", "SET", "maxmemory"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'CONFIG' command" }
+      "argv": [
+        "CONFIG",
+        "SET",
+        "maxmemory"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CONFIG' command"
+      }
     },
     {
       "name": "config_resetstat_wrong_arity",
       "now_ms": 0,
-      "argv": ["CONFIG", "RESETSTAT", "extra"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'CONFIG' command" }
+      "argv": [
+        "CONFIG",
+        "RESETSTAT",
+        "extra"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CONFIG' command"
+      }
     },
     {
       "name": "config_unknown_subcommand",
       "now_ms": 0,
-      "argv": ["CONFIG", "NOSUCH"],
-      "expect": { "kind": "error", "value": "ERR Unknown subcommand or wrong number of arguments for CONFIG NOSUCH" }
+      "argv": [
+        "CONFIG",
+        "NOSUCH"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for CONFIG NOSUCH"
+      }
     },
     {
       "name": "config_get_case_insensitive",
       "now_ms": 0,
-      "argv": ["CONFIG", "get", "MAXMEMORY"],
+      "argv": [
+        "CONFIG",
+        "get",
+        "MAXMEMORY"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "maxmemory" },
-          { "kind": "bulk", "value": "2097152" }
+          {
+            "kind": "bulk",
+            "value": "maxmemory"
+          },
+          {
+            "kind": "bulk",
+            "value": "2097152"
+          }
         ]
       }
     },
     {
       "name": "config_get_encoding_thresholds",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "set-max-intset-entries"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "set-max-intset-entries"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "set-max-intset-entries" },
-          { "kind": "bulk", "value": "512" }
+          {
+            "kind": "bulk",
+            "value": "set-max-intset-entries"
+          },
+          {
+            "kind": "bulk",
+            "value": "512"
+          }
         ]
       }
     },
     {
       "name": "config_get_list_max_listpack_size",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "list-max-listpack-size"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "list-max-listpack-size"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "list-max-listpack-size" },
-          { "kind": "bulk", "value": "-2" }
+          {
+            "kind": "bulk",
+            "value": "list-max-listpack-size"
+          },
+          {
+            "kind": "bulk",
+            "value": "-2"
+          }
         ]
       }
     },
     {
       "name": "config_get_hash_max_listpack_entries",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "hash-max-listpack-entries"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "hash-max-listpack-entries"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "hash-max-listpack-entries" },
-          { "kind": "bulk", "value": "128" }
+          {
+            "kind": "bulk",
+            "value": "hash-max-listpack-entries"
+          },
+          {
+            "kind": "bulk",
+            "value": "128"
+          }
         ]
       }
     },
     {
       "name": "config_get_proto_max_bulk_len",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "proto-max-bulk-len"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "proto-max-bulk-len"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "proto-max-bulk-len" },
-          { "kind": "bulk", "value": "512000000" }
+          {
+            "kind": "bulk",
+            "value": "proto-max-bulk-len"
+          },
+          {
+            "kind": "bulk",
+            "value": "512000000"
+          }
         ]
       }
     },
     {
       "name": "config_get_io_threads",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "io-threads"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "io-threads"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "io-threads" },
-          { "kind": "bulk", "value": "1" }
+          {
+            "kind": "bulk",
+            "value": "io-threads"
+          },
+          {
+            "kind": "bulk",
+            "value": "1"
+          }
         ]
       }
     },
     {
       "name": "config_get_repl_prefix",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "repl-backlog*"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "repl-backlog*"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "repl-backlog-size" },
-          { "kind": "bulk", "value": "1048576" },
-          { "kind": "bulk", "value": "repl-backlog-ttl" },
-          { "kind": "bulk", "value": "3600" }
+          {
+            "kind": "bulk",
+            "value": "repl-backlog-size"
+          },
+          {
+            "kind": "bulk",
+            "value": "1048576"
+          },
+          {
+            "kind": "bulk",
+            "value": "repl-backlog-ttl"
+          },
+          {
+            "kind": "bulk",
+            "value": "3600"
+          }
         ]
       }
     },
     {
       "name": "config_get_multi_pattern_two_exact",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "maxmemory", "hz"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "maxmemory",
+        "hz"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "maxmemory" },
-          { "kind": "bulk", "value": "2097152" },
-          { "kind": "bulk", "value": "hz" },
-          { "kind": "bulk", "value": "10" }
+          {
+            "kind": "bulk",
+            "value": "maxmemory"
+          },
+          {
+            "kind": "bulk",
+            "value": "2097152"
+          },
+          {
+            "kind": "bulk",
+            "value": "hz"
+          },
+          {
+            "kind": "bulk",
+            "value": "10"
+          }
         ]
       }
     },
     {
       "name": "config_get_multi_pattern_mixed",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "bind", "databases", "port"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "bind",
+        "databases",
+        "port"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "bind" },
-          { "kind": "bulk", "value": "127.0.0.1" },
-          { "kind": "bulk", "value": "databases" },
-          { "kind": "bulk", "value": "16" },
-          { "kind": "bulk", "value": "port" },
-          { "kind": "bulk", "value": "6379" }
+          {
+            "kind": "bulk",
+            "value": "bind"
+          },
+          {
+            "kind": "bulk",
+            "value": "127.0.0.1"
+          },
+          {
+            "kind": "bulk",
+            "value": "databases"
+          },
+          {
+            "kind": "bulk",
+            "value": "16"
+          },
+          {
+            "kind": "bulk",
+            "value": "port"
+          },
+          {
+            "kind": "bulk",
+            "value": "6379"
+          }
         ]
       }
     },
     {
       "name": "config_get_multi_pattern_with_glob",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "bind", "repl-backlog*"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "bind",
+        "repl-backlog*"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "bind" },
-          { "kind": "bulk", "value": "127.0.0.1" },
-          { "kind": "bulk", "value": "repl-backlog-size" },
-          { "kind": "bulk", "value": "1048576" },
-          { "kind": "bulk", "value": "repl-backlog-ttl" },
-          { "kind": "bulk", "value": "3600" }
+          {
+            "kind": "bulk",
+            "value": "bind"
+          },
+          {
+            "kind": "bulk",
+            "value": "127.0.0.1"
+          },
+          {
+            "kind": "bulk",
+            "value": "repl-backlog-size"
+          },
+          {
+            "kind": "bulk",
+            "value": "1048576"
+          },
+          {
+            "kind": "bulk",
+            "value": "repl-backlog-ttl"
+          },
+          {
+            "kind": "bulk",
+            "value": "3600"
+          }
         ]
       }
     },
     {
       "name": "config_get_multi_pattern_no_match",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "nosuchparam1", "nosuchparam2"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "nosuchparam1",
+        "nosuchparam2"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -540,31 +1084,55 @@
     {
       "name": "config_get_glob_question_mark_hz",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "h?"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "h?"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "hz" },
-          { "kind": "bulk", "value": "10" }
+          {
+            "kind": "bulk",
+            "value": "hz"
+          },
+          {
+            "kind": "bulk",
+            "value": "10"
+          }
         ]
       }
     },
     {
       "name": "config_get_glob_question_mark_port",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "por?"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "por?"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "port" },
-          { "kind": "bulk", "value": "6379" }
+          {
+            "kind": "bulk",
+            "value": "port"
+          },
+          {
+            "kind": "bulk",
+            "value": "6379"
+          }
         ]
       }
     },
     {
       "name": "config_get_glob_question_mark_no_match",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "hz?"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "hz?"
+      ],
       "expect": {
         "kind": "array",
         "value": []
@@ -573,24 +1141,352 @@
     {
       "name": "config_get_glob_char_class_dir",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "di[r]"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "di[r]"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "dir" },
-          { "kind": "bulk", "value": "." }
+          {
+            "kind": "bulk",
+            "value": "dir"
+          },
+          {
+            "kind": "bulk",
+            "value": "."
+          }
         ]
       }
     },
     {
       "name": "config_get_glob_middle_star",
       "now_ms": 0,
-      "argv": ["CONFIG", "GET", "repl-*-sync"],
+      "argv": [
+        "CONFIG",
+        "GET",
+        "repl-*-sync"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "repl-diskless-sync" },
-          { "kind": "bulk", "value": "yes" }
+          {
+            "kind": "bulk",
+            "value": "repl-diskless-sync"
+          },
+          {
+            "kind": "bulk",
+            "value": "yes"
+          }
+        ]
+      }
+    },
+    {
+      "name": "config_set_slowlog_log_slower_than",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "slowlog-log-slower-than",
+        "5000"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "config_get_slowlog_log_slower_than_after_set",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "GET",
+        "slowlog-log-slower-than"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "slowlog-log-slower-than"
+          },
+          {
+            "kind": "bulk",
+            "value": "5000"
+          }
+        ]
+      }
+    },
+    {
+      "name": "config_set_slowlog_max_len",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "slowlog-max-len",
+        "256"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "config_get_slowlog_max_len_after_set",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "GET",
+        "slowlog-max-len"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "slowlog-max-len"
+          },
+          {
+            "kind": "bulk",
+            "value": "256"
+          }
+        ]
+      }
+    },
+    {
+      "name": "config_set_slowlog_max_len_negative_error",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "slowlog-max-len",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Invalid argument '?' for CONFIG SET 'slowlog-max-len'"
+      }
+    },
+    {
+      "name": "config_set_maxmemory_large",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "maxmemory",
+        "1073741824"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "config_get_maxmemory_large_verify",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "GET",
+        "maxmemory"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "maxmemory"
+          },
+          {
+            "kind": "bulk",
+            "value": "1073741824"
+          }
+        ]
+      }
+    },
+    {
+      "name": "config_rewrite_wrong_arity",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "REWRITE",
+        "extra"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CONFIG' command"
+      }
+    },
+    {
+      "name": "config_set_maxmemory_float_error",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "maxmemory",
+        "1.5"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "config_set_acllog_non_integer_error",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "acllog-max-len",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "config_subcommand_case_insensitive_get",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "get",
+        "maxmemory"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "maxmemory"
+          },
+          {
+            "kind": "bulk",
+            "value": "1073741824"
+          }
+        ]
+      }
+    },
+    {
+      "name": "config_subcommand_case_insensitive_set",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "set",
+        "maxmemory",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "config_subcommand_case_insensitive_resetstat",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "resetstat"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "config_subcommand_case_insensitive_rewrite",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "rewrite"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "config_unknown_subcommand_foobar",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "FOOBAR"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for CONFIG FOOBAR"
+      }
+    },
+    {
+      "name": "config_unknown_subcommand_empty_like",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "NOSUCH"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for CONFIG NOSUCH"
+      }
+    },
+    {
+      "name": "config_set_wrong_arity_three_values",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "maxmemory",
+        "100",
+        "hz"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CONFIG' command"
+      }
+    },
+    {
+      "name": "config_get_star_returns_array",
+      "now_ms": 100,
+      "argv": [
+        "CONFIG",
+        "GET",
+        "*memory*"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "maxmemory"
+          },
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
+          {
+            "kind": "bulk",
+            "value": "maxmemory-policy"
+          },
+          {
+            "kind": "bulk",
+            "value": "noeviction"
+          },
+          {
+            "kind": "bulk",
+            "value": "maxmemory-samples"
+          },
+          {
+            "kind": "bulk",
+            "value": "5"
+          },
+          {
+            "kind": "bulk",
+            "value": "maxmemory-eviction-tenacity"
+          },
+          {
+            "kind": "bulk",
+            "value": "10"
+          }
         ]
       }
     }

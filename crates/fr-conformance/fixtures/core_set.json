@@ -4,403 +4,832 @@
     {
       "name": "sadd_new_members",
       "now_ms": 0,
-      "argv": ["SADD", "s1", "a", "b", "c"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "SADD",
+        "s1",
+        "a",
+        "b",
+        "c"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "sadd_duplicate_member",
       "now_ms": 0,
-      "argv": ["SADD", "s1", "a"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "SADD",
+        "s1",
+        "a"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "scard",
       "now_ms": 0,
-      "argv": ["SCARD", "s1"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "SCARD",
+        "s1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "scard_missing_key",
       "now_ms": 0,
-      "argv": ["SCARD", "nokey"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "SCARD",
+        "nokey"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "sismember_present",
       "now_ms": 0,
-      "argv": ["SISMEMBER", "s1", "a"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "SISMEMBER",
+        "s1",
+        "a"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "sismember_absent",
       "now_ms": 0,
-      "argv": ["SISMEMBER", "s1", "z"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "SISMEMBER",
+        "s1",
+        "z"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "srem_existing",
       "now_ms": 0,
-      "argv": ["SREM", "s1", "c"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "SREM",
+        "s1",
+        "c"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "srem_absent",
       "now_ms": 0,
-      "argv": ["SREM", "s1", "z"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "SREM",
+        "s1",
+        "z"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "smembers_result",
       "now_ms": 0,
-      "argv": ["SMEMBERS", "s1"],
+      "argv": [
+        "SMEMBERS",
+        "s1"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "a" },
-          { "kind": "bulk", "value": "b" }
+          {
+            "kind": "bulk",
+            "value": "a"
+          },
+          {
+            "kind": "bulk",
+            "value": "b"
+          }
         ]
       }
     },
     {
       "name": "sadd_set2",
       "now_ms": 0,
-      "argv": ["SADD", "s2", "b", "c", "d"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "SADD",
+        "s2",
+        "b",
+        "c",
+        "d"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "sinter_sets",
       "now_ms": 0,
-      "argv": ["SINTER", "s1", "s2"],
+      "argv": [
+        "SINTER",
+        "s1",
+        "s2"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "b" }
+          {
+            "kind": "bulk",
+            "value": "b"
+          }
         ]
       }
     },
     {
       "name": "sunion_sets",
       "now_ms": 0,
-      "argv": ["SUNION", "s1", "s2"],
+      "argv": [
+        "SUNION",
+        "s1",
+        "s2"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "a" },
-          { "kind": "bulk", "value": "b" },
-          { "kind": "bulk", "value": "c" },
-          { "kind": "bulk", "value": "d" }
+          {
+            "kind": "bulk",
+            "value": "a"
+          },
+          {
+            "kind": "bulk",
+            "value": "b"
+          },
+          {
+            "kind": "bulk",
+            "value": "c"
+          },
+          {
+            "kind": "bulk",
+            "value": "d"
+          }
         ]
       }
     },
     {
       "name": "sdiff_sets",
       "now_ms": 0,
-      "argv": ["SDIFF", "s1", "s2"],
+      "argv": [
+        "SDIFF",
+        "s1",
+        "s2"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "a" }
+          {
+            "kind": "bulk",
+            "value": "a"
+          }
         ]
       }
     },
     {
       "name": "smismember_check",
       "now_ms": 0,
-      "argv": ["SMISMEMBER", "s1", "a", "z", "b"],
+      "argv": [
+        "SMISMEMBER",
+        "s1",
+        "a",
+        "z",
+        "b"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "integer", "value": 1 },
-          { "kind": "integer", "value": 0 },
-          { "kind": "integer", "value": 1 }
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          }
         ]
       }
     },
     {
       "name": "smove_existing",
       "now_ms": 0,
-      "argv": ["SMOVE", "s2", "s1", "d"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "SMOVE",
+        "s2",
+        "s1",
+        "d"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "sismember_after_smove",
       "now_ms": 0,
-      "argv": ["SISMEMBER", "s1", "d"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "SISMEMBER",
+        "s1",
+        "d"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "sismember_removed_by_smove",
       "now_ms": 0,
-      "argv": ["SISMEMBER", "s2", "d"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "SISMEMBER",
+        "s2",
+        "d"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "smove_missing_member",
       "now_ms": 0,
-      "argv": ["SMOVE", "s2", "s1", "z"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "SMOVE",
+        "s2",
+        "s1",
+        "z"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "sinterstore_dest",
       "now_ms": 0,
-      "argv": ["SADD", "si1", "a", "b", "c"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "SADD",
+        "si1",
+        "a",
+        "b",
+        "c"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "sinterstore_src2",
       "now_ms": 0,
-      "argv": ["SADD", "si2", "b", "c", "d"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "SADD",
+        "si2",
+        "b",
+        "c",
+        "d"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "sinterstore_result",
       "now_ms": 0,
-      "argv": ["SINTERSTORE", "sidst", "si1", "si2"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "SINTERSTORE",
+        "sidst",
+        "si1",
+        "si2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
     {
       "name": "sunionstore_result",
       "now_ms": 0,
-      "argv": ["SUNIONSTORE", "sudst", "si1", "si2"],
-      "expect": { "kind": "integer", "value": 4 }
+      "argv": [
+        "SUNIONSTORE",
+        "sudst",
+        "si1",
+        "si2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 4
+      }
     },
     {
       "name": "sdiffstore_result",
       "now_ms": 0,
-      "argv": ["SDIFFSTORE", "sddst", "si1", "si2"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "SDIFFSTORE",
+        "sddst",
+        "si1",
+        "si2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "sintercard_basic",
       "now_ms": 0,
-      "argv": ["SINTERCARD", "2", "si1", "si2"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "si1",
+        "si2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
     {
       "name": "sintercard_with_limit",
       "now_ms": 0,
-      "argv": ["SINTERCARD", "2", "si1", "si2", "LIMIT", "1"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "si1",
+        "si2",
+        "LIMIT",
+        "1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "sadd_wrongtype_on_string",
       "now_ms": 0,
-      "argv": ["SET", "strkey3", "v"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "strkey3",
+        "v"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "sadd_wrongtype_error",
       "now_ms": 0,
-      "argv": ["SADD", "strkey3", "a"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "SADD",
+        "strkey3",
+        "a"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
-
     {
       "name": "smembers_missing_key",
       "now_ms": 100,
-      "argv": ["SMEMBERS", "nokey"],
-      "expect": { "kind": "array", "value": [] }
+      "argv": [
+        "SMEMBERS",
+        "nokey"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
     },
     {
       "name": "sismember_missing_key",
       "now_ms": 100,
-      "argv": ["SISMEMBER", "nokey", "x"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "SISMEMBER",
+        "nokey",
+        "x"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "smismember_missing_key",
       "now_ms": 100,
-      "argv": ["SMISMEMBER", "nokey", "a", "b"],
+      "argv": [
+        "SMISMEMBER",
+        "nokey",
+        "a",
+        "b"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "integer", "value": 0 },
-          { "kind": "integer", "value": 0 }
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          }
         ]
       }
     },
-
     {
       "name": "srandmember_seed_single",
       "now_ms": 200,
-      "argv": ["SADD", "srand1", "only"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "SADD",
+        "srand1",
+        "only"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "srandmember_single_element",
       "now_ms": 200,
-      "argv": ["SRANDMEMBER", "srand1"],
-      "expect": { "kind": "bulk", "value": "only" }
+      "argv": [
+        "SRANDMEMBER",
+        "srand1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "only"
+      }
     },
     {
       "name": "srandmember_count_positive",
       "now_ms": 200,
-      "argv": ["SRANDMEMBER", "srand1", "5"],
+      "argv": [
+        "SRANDMEMBER",
+        "srand1",
+        "5"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "only" }
+          {
+            "kind": "bulk",
+            "value": "only"
+          }
         ]
       }
     },
     {
       "name": "srandmember_count_zero",
       "now_ms": 200,
-      "argv": ["SRANDMEMBER", "srand1", "0"],
-      "expect": { "kind": "array", "value": [] }
+      "argv": [
+        "SRANDMEMBER",
+        "srand1",
+        "0"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
     },
     {
       "name": "srandmember_count_negative",
       "now_ms": 200,
-      "argv": ["SRANDMEMBER", "srand1", "-3"],
+      "argv": [
+        "SRANDMEMBER",
+        "srand1",
+        "-3"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "only" },
-          { "kind": "bulk", "value": "only" },
-          { "kind": "bulk", "value": "only" }
+          {
+            "kind": "bulk",
+            "value": "only"
+          },
+          {
+            "kind": "bulk",
+            "value": "only"
+          },
+          {
+            "kind": "bulk",
+            "value": "only"
+          }
         ]
       }
     },
     {
       "name": "srandmember_missing_key",
       "now_ms": 200,
-      "argv": ["SRANDMEMBER", "nokey"],
-      "expect": { "kind": "bulk", "value": null }
+      "argv": [
+        "SRANDMEMBER",
+        "nokey"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
     },
     {
       "name": "srandmember_missing_key_with_count",
       "now_ms": 200,
-      "argv": ["SRANDMEMBER", "nokey", "5"],
-      "expect": { "kind": "array", "value": [] }
+      "argv": [
+        "SRANDMEMBER",
+        "nokey",
+        "5"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
     },
-
     {
       "name": "spop_seed_single",
       "now_ms": 300,
-      "argv": ["SADD", "spop1", "elem"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "SADD",
+        "spop1",
+        "elem"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "spop_single_element",
       "now_ms": 300,
-      "argv": ["SPOP", "spop1"],
-      "expect": { "kind": "bulk", "value": "elem" }
+      "argv": [
+        "SPOP",
+        "spop1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "elem"
+      }
     },
     {
       "name": "spop_empty_after_pop",
       "now_ms": 300,
-      "argv": ["SCARD", "spop1"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "SCARD",
+        "spop1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "spop_from_empty",
       "now_ms": 300,
-      "argv": ["SPOP", "spop1"],
-      "expect": { "kind": "bulk", "value": null }
+      "argv": [
+        "SPOP",
+        "spop1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
     },
     {
       "name": "spop_missing_key",
       "now_ms": 300,
-      "argv": ["SPOP", "nokey"],
-      "expect": { "kind": "bulk", "value": null }
+      "argv": [
+        "SPOP",
+        "nokey"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
     },
     {
       "name": "spop_seed_count",
       "now_ms": 300,
-      "argv": ["SADD", "spop2", "x"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "SADD",
+        "spop2",
+        "x"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "spop_with_count",
       "now_ms": 300,
-      "argv": ["SPOP", "spop2", "5"],
+      "argv": [
+        "SPOP",
+        "spop2",
+        "5"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "x" }
+          {
+            "kind": "bulk",
+            "value": "x"
+          }
         ]
       }
     },
     {
       "name": "spop_missing_key_with_count",
       "now_ms": 300,
-      "argv": ["SPOP", "nokey", "3"],
-      "expect": { "kind": "array", "value": [] }
+      "argv": [
+        "SPOP",
+        "nokey",
+        "3"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
     },
-
     {
       "name": "srem_multiple",
       "now_ms": 400,
-      "argv": ["SADD", "srem_multi", "a", "b", "c", "d"],
-      "expect": { "kind": "integer", "value": 4 }
+      "argv": [
+        "SADD",
+        "srem_multi",
+        "a",
+        "b",
+        "c",
+        "d"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 4
+      }
     },
     {
       "name": "srem_multiple_existing_and_missing",
       "now_ms": 400,
-      "argv": ["SREM", "srem_multi", "a", "z", "c"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "SREM",
+        "srem_multi",
+        "a",
+        "z",
+        "c"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
     {
       "name": "srem_verify_remaining",
       "now_ms": 400,
-      "argv": ["SCARD", "srem_multi"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "SCARD",
+        "srem_multi"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
-
     {
       "name": "sinter_with_nonexistent_key",
       "now_ms": 500,
-      "argv": ["SINTER", "si1", "nokey"],
-      "expect": { "kind": "array", "value": [] }
+      "argv": [
+        "SINTER",
+        "si1",
+        "nokey"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
     },
     {
       "name": "sunion_with_nonexistent_key",
       "now_ms": 500,
-      "argv": ["SUNION", "si1", "nokey"],
+      "argv": [
+        "SUNION",
+        "si1",
+        "nokey"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "a" },
-          { "kind": "bulk", "value": "b" },
-          { "kind": "bulk", "value": "c" }
+          {
+            "kind": "bulk",
+            "value": "a"
+          },
+          {
+            "kind": "bulk",
+            "value": "b"
+          },
+          {
+            "kind": "bulk",
+            "value": "c"
+          }
         ]
       }
     },
     {
       "name": "sdiff_with_nonexistent_key",
       "now_ms": 500,
-      "argv": ["SDIFF", "si1", "nokey"],
+      "argv": [
+        "SDIFF",
+        "si1",
+        "nokey"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "a" },
-          { "kind": "bulk", "value": "b" },
-          { "kind": "bulk", "value": "c" }
+          {
+            "kind": "bulk",
+            "value": "a"
+          },
+          {
+            "kind": "bulk",
+            "value": "b"
+          },
+          {
+            "kind": "bulk",
+            "value": "c"
+          }
         ]
       }
     },
-
     {
       "name": "sscan_seed",
       "now_ms": 600,
-      "argv": ["SADD", "sscan_set", "alpha", "beta", "gamma"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "SADD",
+        "sscan_set",
+        "alpha",
+        "beta",
+        "gamma"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "sscan_full",
       "now_ms": 600,
-      "argv": ["SSCAN", "sscan_set", "0"],
+      "argv": [
+        "SSCAN",
+        "sscan_set",
+        "0"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
           {
             "kind": "array",
             "value": [
-              { "kind": "bulk", "value": "alpha" },
-              { "kind": "bulk", "value": "beta" },
-              { "kind": "bulk", "value": "gamma" }
+              {
+                "kind": "bulk",
+                "value": "alpha"
+              },
+              {
+                "kind": "bulk",
+                "value": "beta"
+              },
+              {
+                "kind": "bulk",
+                "value": "gamma"
+              }
             ]
           }
         ]
@@ -409,219 +838,443 @@
     {
       "name": "sscan_missing_key",
       "now_ms": 600,
-      "argv": ["SSCAN", "nokey", "0"],
+      "argv": [
+        "SSCAN",
+        "nokey",
+        "0"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "0" },
-          { "kind": "array", "value": [] }
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
+          {
+            "kind": "array",
+            "value": []
+          }
         ]
       }
     },
     {
       "name": "sscan_with_match",
       "now_ms": 600,
-      "argv": ["SSCAN", "sscan_set", "0", "MATCH", "a*"],
+      "argv": [
+        "SSCAN",
+        "sscan_set",
+        "0",
+        "MATCH",
+        "a*"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "0" },
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
           {
             "kind": "array",
             "value": [
-              { "kind": "bulk", "value": "alpha" }
+              {
+                "kind": "bulk",
+                "value": "alpha"
+              }
             ]
           }
         ]
       }
     },
-
     {
       "name": "sintercard_limit_zero",
       "now_ms": 700,
-      "argv": ["SINTERCARD", "2", "si1", "si2", "LIMIT", "0"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "si1",
+        "si2",
+        "LIMIT",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
     {
       "name": "sintercard_wrong_numkeys",
       "now_ms": 700,
-      "argv": ["SINTERCARD", "0", "si1"],
-      "expect": { "kind": "error", "value": "ERR numkeys can't be non-positive value" }
+      "argv": [
+        "SINTERCARD",
+        "0",
+        "si1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR numkeys can't be non-positive value"
+      }
     },
-
     {
       "name": "smove_nonexistent_source",
       "now_ms": 800,
-      "argv": ["SMOVE", "nokey", "s1", "x"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "SMOVE",
+        "nokey",
+        "s1",
+        "x"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
-
     {
       "name": "sadd_wrong_arity",
       "now_ms": 900,
-      "argv": ["SADD"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SADD' command" }
+      "argv": [
+        "SADD"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SADD' command"
+      }
     },
     {
       "name": "srem_wrong_arity",
       "now_ms": 900,
-      "argv": ["SREM"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SREM' command" }
+      "argv": [
+        "SREM"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SREM' command"
+      }
     },
     {
       "name": "srandmember_wrong_arity",
       "now_ms": 900,
-      "argv": ["SRANDMEMBER"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SRANDMEMBER' command" }
+      "argv": [
+        "SRANDMEMBER"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SRANDMEMBER' command"
+      }
     },
     {
       "name": "spop_wrong_arity",
       "now_ms": 900,
-      "argv": ["SPOP"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SPOP' command" }
+      "argv": [
+        "SPOP"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SPOP' command"
+      }
     },
     {
       "name": "sinterstore_wrong_arity",
       "now_ms": 900,
-      "argv": ["SINTERSTORE", "dst"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SINTERSTORE' command" }
+      "argv": [
+        "SINTERSTORE",
+        "dst"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SINTERSTORE' command"
+      }
     },
-
     {
       "name": "store_verify_setup_a",
       "now_ms": 1000,
-      "argv": ["SADD", "sv_a", "1", "2", "3"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "SADD",
+        "sv_a",
+        "1",
+        "2",
+        "3"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "store_verify_setup_b",
       "now_ms": 1000,
-      "argv": ["SADD", "sv_b", "2", "3", "4"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "SADD",
+        "sv_b",
+        "2",
+        "3",
+        "4"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "sinterstore_verify",
       "now_ms": 1000,
-      "argv": ["SINTERSTORE", "sv_inter", "sv_a", "sv_b"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "SINTERSTORE",
+        "sv_inter",
+        "sv_a",
+        "sv_b"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
     {
       "name": "sinterstore_verify_members",
       "now_ms": 1000,
-      "argv": ["SMEMBERS", "sv_inter"],
+      "argv": [
+        "SMEMBERS",
+        "sv_inter"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "2" },
-          { "kind": "bulk", "value": "3" }
+          {
+            "kind": "bulk",
+            "value": "2"
+          },
+          {
+            "kind": "bulk",
+            "value": "3"
+          }
         ]
       }
     },
     {
       "name": "sunionstore_verify",
       "now_ms": 1010,
-      "argv": ["SUNIONSTORE", "sv_union", "sv_a", "sv_b"],
-      "expect": { "kind": "integer", "value": 4 }
+      "argv": [
+        "SUNIONSTORE",
+        "sv_union",
+        "sv_a",
+        "sv_b"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 4
+      }
     },
     {
       "name": "sunionstore_verify_members",
       "now_ms": 1010,
-      "argv": ["SMEMBERS", "sv_union"],
+      "argv": [
+        "SMEMBERS",
+        "sv_union"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "1" },
-          { "kind": "bulk", "value": "2" },
-          { "kind": "bulk", "value": "3" },
-          { "kind": "bulk", "value": "4" }
+          {
+            "kind": "bulk",
+            "value": "1"
+          },
+          {
+            "kind": "bulk",
+            "value": "2"
+          },
+          {
+            "kind": "bulk",
+            "value": "3"
+          },
+          {
+            "kind": "bulk",
+            "value": "4"
+          }
         ]
       }
     },
     {
       "name": "sdiffstore_verify",
       "now_ms": 1020,
-      "argv": ["SDIFFSTORE", "sv_diff", "sv_a", "sv_b"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "SDIFFSTORE",
+        "sv_diff",
+        "sv_a",
+        "sv_b"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "sdiffstore_verify_members",
       "now_ms": 1020,
-      "argv": ["SMEMBERS", "sv_diff"],
+      "argv": [
+        "SMEMBERS",
+        "sv_diff"
+      ],
       "expect": {
         "kind": "array",
-        "value": [{ "kind": "bulk", "value": "1" }]
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "1"
+          }
+        ]
       }
     },
-
     {
       "name": "three_way_setup_c",
       "now_ms": 1100,
-      "argv": ["SADD", "sv_c", "3", "4", "5"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "SADD",
+        "sv_c",
+        "3",
+        "4",
+        "5"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "sdiff_three_sets",
       "now_ms": 1100,
-      "argv": ["SDIFF", "sv_a", "sv_b", "sv_c"],
+      "argv": [
+        "SDIFF",
+        "sv_a",
+        "sv_b",
+        "sv_c"
+      ],
       "expect": {
         "kind": "array",
-        "value": [{ "kind": "bulk", "value": "1" }]
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "1"
+          }
+        ]
       }
     },
     {
       "name": "sunion_three_sets",
       "now_ms": 1100,
-      "argv": ["SUNION", "sv_a", "sv_b", "sv_c"],
+      "argv": [
+        "SUNION",
+        "sv_a",
+        "sv_b",
+        "sv_c"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "1" },
-          { "kind": "bulk", "value": "2" },
-          { "kind": "bulk", "value": "3" },
-          { "kind": "bulk", "value": "4" },
-          { "kind": "bulk", "value": "5" }
+          {
+            "kind": "bulk",
+            "value": "1"
+          },
+          {
+            "kind": "bulk",
+            "value": "2"
+          },
+          {
+            "kind": "bulk",
+            "value": "3"
+          },
+          {
+            "kind": "bulk",
+            "value": "4"
+          },
+          {
+            "kind": "bulk",
+            "value": "5"
+          }
         ]
       }
     },
     {
       "name": "sinter_three_sets",
       "now_ms": 1100,
-      "argv": ["SINTER", "sv_a", "sv_b", "sv_c"],
+      "argv": [
+        "SINTER",
+        "sv_a",
+        "sv_b",
+        "sv_c"
+      ],
       "expect": {
         "kind": "array",
-        "value": [{ "kind": "bulk", "value": "3" }]
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "3"
+          }
+        ]
       }
     },
-
     {
       "name": "sinterstore_empty_input",
       "now_ms": 1200,
-      "argv": ["SINTERSTORE", "sv_empty_dst", "nokey_set", "sv_a"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "SINTERSTORE",
+        "sv_empty_dst",
+        "nokey_set",
+        "sv_a"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "sintercard_nokey",
       "now_ms": 1210,
-      "argv": ["SINTERCARD", "2", "nokey_set", "sv_a"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "nokey_set",
+        "sv_a"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "sintercard_single_key",
       "now_ms": 1210,
-      "argv": ["SINTERCARD", "1", "sv_a"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "SINTERCARD",
+        "1",
+        "sv_a"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
-
     {
       "name": "smove_wrongtype_setup",
       "now_ms": 1300,
-      "argv": ["SET", "sv_str", "val"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "sv_str",
+        "val"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "smove_wrongtype_dst",
       "now_ms": 1300,
-      "argv": ["SMOVE", "sv_a", "sv_str", "1"],
+      "argv": [
+        "SMOVE",
+        "sv_a",
+        "sv_str",
+        "1"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -630,91 +1283,561 @@
     {
       "name": "smove_wrongtype_src",
       "now_ms": 1300,
-      "argv": ["SMOVE", "sv_str", "sv_a", "x"],
+      "argv": [
+        "SMOVE",
+        "sv_str",
+        "sv_a",
+        "x"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
       }
     },
-
     {
       "name": "spop_count_setup",
       "now_ms": 1400,
-      "argv": ["SADD", "spop_c", "a", "b", "c", "d", "e"],
-      "expect": { "kind": "integer", "value": 5 }
+      "argv": [
+        "SADD",
+        "spop_c",
+        "a",
+        "b",
+        "c",
+        "d",
+        "e"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 5
+      }
     },
     {
       "name": "spop_count_0",
       "now_ms": 1400,
-      "argv": ["SPOP", "spop_c", "0"],
-      "expect": { "kind": "array", "value": [] }
+      "argv": [
+        "SPOP",
+        "spop_c",
+        "0"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
     },
     {
       "name": "spop_count_0_no_change",
       "now_ms": 1400,
-      "argv": ["SCARD", "spop_c"],
-      "expect": { "kind": "integer", "value": 5 }
+      "argv": [
+        "SCARD",
+        "spop_c"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 5
+      }
     },
     {
       "name": "spop_count_missing_key",
       "now_ms": 1410,
-      "argv": ["SPOP", "spop_nokey", "3"],
-      "expect": { "kind": "array", "value": [] }
+      "argv": [
+        "SPOP",
+        "spop_nokey",
+        "3"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
     },
-
     {
       "name": "smismember_wrong_arity",
       "now_ms": 1500,
-      "argv": ["SMISMEMBER", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SMISMEMBER' command" }
+      "argv": [
+        "SMISMEMBER",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SMISMEMBER' command"
+      }
     },
     {
       "name": "sintercard_wrong_arity",
       "now_ms": 1500,
-      "argv": ["SINTERCARD"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SINTERCARD' command" }
+      "argv": [
+        "SINTERCARD"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SINTERCARD' command"
+      }
     },
     {
       "name": "sunionstore_wrong_arity",
       "now_ms": 1500,
-      "argv": ["SUNIONSTORE", "dst"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SUNIONSTORE' command" }
+      "argv": [
+        "SUNIONSTORE",
+        "dst"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SUNIONSTORE' command"
+      }
     },
     {
       "name": "sdiffstore_wrong_arity",
       "now_ms": 1500,
-      "argv": ["SDIFFSTORE", "dst"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SDIFFSTORE' command" }
+      "argv": [
+        "SDIFFSTORE",
+        "dst"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SDIFFSTORE' command"
+      }
     },
     {
       "name": "smove_wrong_arity",
       "now_ms": 1500,
-      "argv": ["SMOVE", "a"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SMOVE' command" }
+      "argv": [
+        "SMOVE",
+        "a"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SMOVE' command"
+      }
     },
     {
       "name": "sinter_wrong_arity",
       "now_ms": 1500,
-      "argv": ["SINTER"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SINTER' command" }
+      "argv": [
+        "SINTER"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SINTER' command"
+      }
     },
     {
       "name": "sunion_wrong_arity",
       "now_ms": 1500,
-      "argv": ["SUNION"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SUNION' command" }
+      "argv": [
+        "SUNION"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SUNION' command"
+      }
     },
     {
       "name": "sdiff_wrong_arity",
       "now_ms": 1500,
-      "argv": ["SDIFF"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SDIFF' command" }
+      "argv": [
+        "SDIFF"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SDIFF' command"
+      }
     },
     {
       "name": "sscan_wrong_arity",
       "now_ms": 1500,
-      "argv": ["SSCAN", "k"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SSCAN' command" }
+      "argv": [
+        "SSCAN",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SSCAN' command"
+      }
+    },
+    {
+      "name": "srandmember_setup_neg",
+      "now_ms": 100,
+      "argv": [
+        "SADD",
+        "srand_neg",
+        "a",
+        "b",
+        "c"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
+    },
+    {
+      "name": "spop_count_exceeds_single",
+      "now_ms": 100,
+      "argv": [
+        "SADD",
+        "spop_single",
+        "only"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "spop_count_exceeds_pop",
+      "now_ms": 100,
+      "argv": [
+        "SPOP",
+        "spop_single",
+        "10"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "only"
+          }
+        ]
+      }
+    },
+    {
+      "name": "spop_empty_after_big_pop",
+      "now_ms": 100,
+      "argv": [
+        "SCARD",
+        "spop_single"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "spop_empty_with_count",
+      "now_ms": 100,
+      "argv": [
+        "SPOP",
+        "nonexistent_set",
+        "5"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "spop_missing_no_count",
+      "now_ms": 100,
+      "argv": [
+        "SPOP",
+        "nonexistent_set"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
+    },
+    {
+      "name": "srandmember_count_zero",
+      "now_ms": 100,
+      "argv": [
+        "SRANDMEMBER",
+        "srand_neg",
+        "0"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "srandmember_missing_with_count",
+      "now_ms": 100,
+      "argv": [
+        "SRANDMEMBER",
+        "nosuchset",
+        "3"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "srandmember_missing_no_count",
+      "now_ms": 100,
+      "argv": [
+        "SRANDMEMBER",
+        "nosuchset"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
+    },
+    {
+      "name": "sdiff_nonexistent_first",
+      "now_ms": 100,
+      "argv": [
+        "SDIFF",
+        "nosuchset",
+        "srand_neg"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "sdiff_single_element_vs_empty",
+      "now_ms": 100,
+      "argv": [
+        "SADD",
+        "sdiff_solo",
+        "x"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "sdiff_single_vs_nonexistent",
+      "now_ms": 100,
+      "argv": [
+        "SDIFF",
+        "sdiff_solo",
+        "nosuchset"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "x"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sintercard_setup_a",
+      "now_ms": 100,
+      "argv": [
+        "SADD",
+        "sic_a",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 5
+      }
+    },
+    {
+      "name": "sintercard_setup_b",
+      "now_ms": 100,
+      "argv": [
+        "SADD",
+        "sic_b",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 5
+      }
+    },
+    {
+      "name": "sintercard_full",
+      "now_ms": 100,
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_a",
+        "sic_b"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
+    },
+    {
+      "name": "sintercard_limit_zero_full",
+      "now_ms": 100,
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_a",
+        "sic_b",
+        "LIMIT",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
+    },
+    {
+      "name": "sintercard_limit_one",
+      "now_ms": 100,
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_a",
+        "sic_b",
+        "LIMIT",
+        "1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "sintercard_limit_exceeds",
+      "now_ms": 100,
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_a",
+        "sic_b",
+        "LIMIT",
+        "100"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
+    },
+    {
+      "name": "sintercard_with_nonexistent",
+      "now_ms": 100,
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_a",
+        "nosuchset"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "smismember_with_dups",
+      "now_ms": 100,
+      "argv": [
+        "SMISMEMBER",
+        "srand_neg",
+        "a",
+        "z",
+        "a"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "sadd_wrong_arity",
+      "now_ms": 100,
+      "argv": [
+        "SADD",
+        "myset"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SADD' command"
+      }
+    },
+    {
+      "name": "srem_nonexistent_key",
+      "now_ms": 100,
+      "argv": [
+        "SREM",
+        "nosuchset",
+        "member"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "smove_creates_dest_setup",
+      "now_ms": 100,
+      "argv": [
+        "SADD",
+        "smove_src",
+        "x",
+        "y",
+        "z"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
+    },
+    {
+      "name": "smove_creates_dest",
+      "now_ms": 100,
+      "argv": [
+        "SMOVE",
+        "smove_src",
+        "smove_new_dest",
+        "x"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "smove_verify_dest",
+      "now_ms": 100,
+      "argv": [
+        "SMEMBERS",
+        "smove_new_dest"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "x"
+          }
+        ]
+      }
+    },
+    {
+      "name": "smove_verify_src",
+      "now_ms": 100,
+      "argv": [
+        "SCARD",
+        "smove_src"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     }
   ]
 }
