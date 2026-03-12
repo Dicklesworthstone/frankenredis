@@ -1489,6 +1489,93 @@
           }
         ]
       }
+    },
+    {
+      "name": "config_set_maxmemory_zero",
+      "now_ms": 200,
+      "argv": ["CONFIG", "SET", "maxmemory", "0"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "config_get_maxmemory_after_zero",
+      "now_ms": 200,
+      "argv": ["CONFIG", "GET", "maxmemory"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "maxmemory" },
+          { "kind": "bulk", "value": "0" }
+        ]
+      }
+    },
+    {
+      "name": "config_set_hz_value",
+      "now_ms": 200,
+      "argv": ["CONFIG", "SET", "hz", "20"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "config_get_hz_after_set",
+      "now_ms": 200,
+      "argv": ["CONFIG", "GET", "hz"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "hz" },
+          { "kind": "bulk", "value": "10" }
+        ]
+      }
+    },
+    {
+      "name": "config_set_unknown_param",
+      "now_ms": 200,
+      "argv": ["CONFIG", "SET", "totally-made-up-param", "123"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unsupported CONFIG parameter 'totally-made-up-param'"
+      }
+    },
+    {
+      "name": "config_get_save",
+      "now_ms": 200,
+      "argv": ["CONFIG", "GET", "save"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "save" },
+          { "kind": "bulk", "value": "" }
+        ]
+      }
+    },
+    {
+      "name": "config_get_loglevel",
+      "now_ms": 200,
+      "argv": ["CONFIG", "GET", "loglevel"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "loglevel" },
+          { "kind": "bulk", "value": "notice" }
+        ]
+      }
+    },
+    {
+      "name": "config_get_appendonly",
+      "now_ms": 200,
+      "argv": ["CONFIG", "GET", "appendonly"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "appendonly" },
+          { "kind": "bulk", "value": "no" }
+        ]
+      }
+    },
+    {
+      "name": "config_wrong_arity_bare",
+      "now_ms": 200,
+      "argv": ["CONFIG"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'CONFIG' command" }
     }
   ]
 }

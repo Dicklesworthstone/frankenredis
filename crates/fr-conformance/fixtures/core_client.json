@@ -959,6 +959,96 @@
         "kind": "bulk",
         "value": null
       }
+    },
+    {
+      "name": "client_setname_empty_clears",
+      "now_ms": 200,
+      "argv": ["CLIENT", "SETNAME", "tempname"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_setname_empty_verify_set",
+      "now_ms": 201,
+      "argv": ["CLIENT", "GETNAME"],
+      "expect": { "kind": "bulk", "value": "tempname" }
+    },
+    {
+      "name": "client_setname_empty_string",
+      "now_ms": 202,
+      "argv": ["CLIENT", "SETNAME", ""],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_getname_after_empty_setname",
+      "now_ms": 203,
+      "argv": ["CLIENT", "GETNAME"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "client_pause_write_mode",
+      "now_ms": 210,
+      "argv": ["CLIENT", "PAUSE", "100", "WRITE"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_pause_all_mode",
+      "now_ms": 211,
+      "argv": ["CLIENT", "PAUSE", "100", "ALL"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_unpause",
+      "now_ms": 212,
+      "argv": ["CLIENT", "UNPAUSE"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_setinfo_lib_name",
+      "now_ms": 220,
+      "argv": ["CLIENT", "SETINFO", "LIB-NAME", "mylib"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_setinfo_lib_ver",
+      "now_ms": 221,
+      "argv": ["CLIENT", "SETINFO", "LIB-VER", "1.0.0"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_no_evict_on",
+      "now_ms": 230,
+      "argv": ["CLIENT", "NO-EVICT", "ON"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_no_evict_off",
+      "now_ms": 231,
+      "argv": ["CLIENT", "NO-EVICT", "OFF"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_no_touch_on",
+      "now_ms": 232,
+      "argv": ["CLIENT", "NO-TOUCH", "ON"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_no_touch_off",
+      "now_ms": 233,
+      "argv": ["CLIENT", "NO-TOUCH", "OFF"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "client_wrong_arity_bare",
+      "now_ms": 240,
+      "argv": ["CLIENT"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'CLIENT' command" }
+    },
+    {
+      "name": "client_reply_on",
+      "now_ms": 250,
+      "argv": ["CLIENT", "REPLY", "ON"],
+      "expect": { "kind": "simple", "value": "OK" }
     }
   ]
 }

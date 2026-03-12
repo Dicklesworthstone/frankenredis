@@ -611,6 +611,120 @@
       "now_ms": 822,
       "argv": ["BITCOUNT", "bitstr"],
       "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "bitop_and_self",
+      "now_ms": 900,
+      "argv": ["BITOP", "AND", "bo1", "bo1"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "bitop_or_self",
+      "now_ms": 901,
+      "argv": ["BITOP", "OR", "bo1", "bo1"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "bitop_and_missing_sources",
+      "now_ms": 902,
+      "argv": ["BITOP", "AND", "bo_empty_result", "nosuch_bm1", "nosuch_bm2"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "bitop_or_missing_sources",
+      "now_ms": 903,
+      "argv": ["BITOP", "OR", "bo_empty_result2", "nosuch_bm3", "nosuch_bm4"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "bitcount_nonexistent_with_range",
+      "now_ms": 904,
+      "argv": ["BITCOUNT", "nosuchbitmap", "5", "10"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "bitpos_setup_allzeros",
+      "now_ms": 910,
+      "argv": ["SET", "allzeros", "\u0000\u0000\u0000"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "bitpos_allzeros_find_one",
+      "now_ms": 911,
+      "argv": ["BITPOS", "allzeros", "1"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "bitpos_nonexistent_find_zero",
+      "now_ms": 912,
+      "argv": ["BITPOS", "nosuchbitmap2", "0"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "bitpos_nonexistent_find_one",
+      "now_ms": 913,
+      "argv": ["BITPOS", "nosuchbitmap3", "1"],
+      "expect": { "kind": "integer", "value": -1 }
+    },
+    {
+      "name": "bitfield_incrby_wrap_underflow",
+      "now_ms": 920,
+      "argv": ["BITFIELD", "bf_wrap_test", "SET", "u8", "0", "5", "INCRBY", "u8", "0", "-10"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 0 },
+          { "kind": "integer", "value": 251 }
+        ]
+      }
+    },
+    {
+      "name": "bitfield_incrby_sat_overflow",
+      "now_ms": 921,
+      "argv": ["BITFIELD", "bf_sat_test", "SET", "u8", "0", "250", "OVERFLOW", "SAT", "INCRBY", "u8", "0", "20"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 0 },
+          { "kind": "integer", "value": 255 }
+        ]
+      }
+    },
+    {
+      "name": "bitfield_incrby_fail_overflow",
+      "now_ms": 922,
+      "argv": ["BITFIELD", "bf_fail_test", "SET", "u8", "0", "250", "OVERFLOW", "FAIL", "INCRBY", "u8", "0", "20"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "integer", "value": 0 },
+          { "kind": "bulk", "value": null }
+        ]
+      }
+    },
+    {
+      "name": "setbit_wrong_arity",
+      "now_ms": 930,
+      "argv": ["SETBIT", "k"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'SETBIT' command" }
+    },
+    {
+      "name": "getbit_wrong_arity",
+      "now_ms": 931,
+      "argv": ["GETBIT", "k"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GETBIT' command" }
+    },
+    {
+      "name": "setbit_bad_offset",
+      "now_ms": 932,
+      "argv": ["SETBIT", "k", "abc", "1"],
+      "expect": { "kind": "error", "value": "ERR bit offset is not an integer or out of range" }
+    },
+    {
+      "name": "setbit_bad_value",
+      "now_ms": 933,
+      "argv": ["SETBIT", "k", "0", "2"],
+      "expect": { "kind": "error", "value": "ERR bit is not an integer or out of range" }
     }
   ]
 }

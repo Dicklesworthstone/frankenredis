@@ -551,13 +551,13 @@
       "name": "setbit_not_integer_offset",
       "now_ms": 15,
       "argv": ["SETBIT", "k", "abc", "1"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "expect": { "kind": "error", "value": "ERR bit offset is not an integer or out of range" }
     },
     {
       "name": "setbit_invalid_value",
       "now_ms": 15,
       "argv": ["SETBIT", "k", "0", "2"],
-      "expect": { "kind": "error", "value": "ERR value is not an integer or out of range" }
+      "expect": { "kind": "error", "value": "ERR bit is not an integer or out of range" }
     },
     {
       "name": "getbit_not_integer_offset",

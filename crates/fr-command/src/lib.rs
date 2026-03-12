@@ -5370,13 +5370,21 @@ fn setbit(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 4 {
         return Err(CommandError::WrongArity("SETBIT"));
     }
-    let offset = parse_i64_arg(&argv[2])?;
+    let offset = parse_i64_arg(&argv[2]).map_err(|_| {
+        CommandError::Custom("ERR bit offset is not an integer or out of range".to_string())
+    })?;
     if !(0..4_294_967_296).contains(&offset) {
-        return Err(CommandError::InvalidInteger);
+        return Err(CommandError::Custom(
+            "ERR bit offset is not an integer or out of range".to_string(),
+        ));
     }
-    let bit_val = parse_i64_arg(&argv[3])?;
+    let bit_val = parse_i64_arg(&argv[3]).map_err(|_| {
+        CommandError::Custom("ERR bit is not an integer or out of range".to_string())
+    })?;
     if bit_val != 0 && bit_val != 1 {
-        return Err(CommandError::InvalidInteger);
+        return Err(CommandError::Custom(
+            "ERR bit is not an integer or out of range".to_string(),
+        ));
     }
     let old = store.setbit(&argv[1], offset as usize, bit_val == 1, now_ms)?;
     Ok(RespFrame::Integer(if old { 1 } else { 0 }))

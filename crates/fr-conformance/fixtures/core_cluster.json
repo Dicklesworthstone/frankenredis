@@ -702,6 +702,48 @@
         "kind": "error",
         "value": "ERR wrong number of arguments for 'CLUSTER' command"
       }
+    },
+    {
+      "name": "cluster_countkeysinslot_max_slot",
+      "now_ms": 200,
+      "argv": ["CLUSTER", "COUNTKEYSINSLOT", "16383"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "cluster_keyslot_empty_string",
+      "now_ms": 200,
+      "argv": ["CLUSTER", "KEYSLOT", ""],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "cluster_getkeysinslot_empty_slot",
+      "now_ms": 200,
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "16383", "100"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "cluster_getkeysinslot_zero_count",
+      "now_ms": 200,
+      "argv": ["CLUSTER", "GETKEYSINSLOT", "0", "0"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "cluster_unknown_subcommand",
+      "now_ms": 200,
+      "argv": ["CLUSTER", "NOSUCHSUB"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP."
+      }
+    },
+    {
+      "name": "cluster_wrong_arity_bare",
+      "now_ms": 200,
+      "argv": ["CLUSTER"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLUSTER' command"
+      }
     }
   ]
 }
