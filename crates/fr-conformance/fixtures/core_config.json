@@ -536,6 +536,63 @@
         "kind": "array",
         "value": []
       }
+    },
+    {
+      "name": "config_get_glob_question_mark_hz",
+      "now_ms": 0,
+      "argv": ["CONFIG", "GET", "h?"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "hz" },
+          { "kind": "bulk", "value": "10" }
+        ]
+      }
+    },
+    {
+      "name": "config_get_glob_question_mark_port",
+      "now_ms": 0,
+      "argv": ["CONFIG", "GET", "por?"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "port" },
+          { "kind": "bulk", "value": "6379" }
+        ]
+      }
+    },
+    {
+      "name": "config_get_glob_question_mark_no_match",
+      "now_ms": 0,
+      "argv": ["CONFIG", "GET", "hz?"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "config_get_glob_char_class_dir",
+      "now_ms": 0,
+      "argv": ["CONFIG", "GET", "di[r]"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "dir" },
+          { "kind": "bulk", "value": "." }
+        ]
+      }
+    },
+    {
+      "name": "config_get_glob_middle_star",
+      "now_ms": 0,
+      "argv": ["CONFIG", "GET", "repl-*-sync"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "repl-diskless-sync" },
+          { "kind": "bulk", "value": "yes" }
+        ]
+      }
     }
   ]
 }

@@ -29,6 +29,7 @@ use fr_protocol::{RespFrame, RespParseError, parse_frame};
 use fr_repl::{ReplOffset, WaitAofThreshold, WaitThreshold, evaluate_wait, evaluate_waitaof};
 use fr_store::{
     EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState, Store,
+    glob_match,
 };
 
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1995,16 +1996,7 @@ impl Runtime {
     }
 
     fn config_pattern_matches(pattern: &str, parameter: &str) -> bool {
-        if pattern == "*" {
-            return true;
-        }
-        if pattern == parameter {
-            return true;
-        }
-        if let Some(prefix) = pattern.strip_suffix('*') {
-            return parameter.starts_with(prefix);
-        }
-        false
+        glob_match(pattern.as_bytes(), parameter.as_bytes())
     }
 
     fn handle_asking_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
