@@ -499,6 +499,244 @@
         "kind": "error",
         "value": "ERR wrong number of arguments for 'HRANDFIELD' command"
       }
+    },
+
+    {
+      "name": "hincrby_overflow_setup",
+      "now_ms": 800,
+      "argv": ["HSET", "hovf", "big", "9223372036854775806"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "hincrby_near_max",
+      "now_ms": 801,
+      "argv": ["HINCRBY", "hovf", "big", "1"],
+      "expect": { "kind": "integer", "value": 9223372036854775807 }
+    },
+    {
+      "name": "hincrby_overflow_error",
+      "now_ms": 802,
+      "argv": ["HINCRBY", "hovf", "big", "1"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR increment or decrement would overflow"
+      }
+    },
+    {
+      "name": "hincrbyfloat_nan_error",
+      "now_ms": 803,
+      "argv": ["HINCRBYFLOAT", "hovf", "ff", "nan"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not a valid float"
+      }
+    },
+    {
+      "name": "hincrbyfloat_inf_error",
+      "now_ms": 804,
+      "argv": ["HINCRBYFLOAT", "hovf", "ff", "inf"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not a valid float"
+      }
+    },
+    {
+      "name": "wrongtype_setup_string_key",
+      "now_ms": 808,
+      "argv": ["SET", "strkey", "hello"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "hsetnx_wrongtype",
+      "now_ms": 810,
+      "argv": ["HSETNX", "strkey", "field", "value"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "hgetall_empty_after_delete",
+      "now_ms": 820,
+      "argv": ["HSET", "hempty", "f1", "v1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "hgetall_empty_delete_field",
+      "now_ms": 821,
+      "argv": ["HDEL", "hempty", "f1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "hgetall_empty_hash_returns_empty",
+      "now_ms": 822,
+      "argv": ["HGETALL", "hempty"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "hmset_wrong_arity_odd",
+      "now_ms": 830,
+      "argv": ["HMSET", "h", "field"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'HMSET' command"
+      }
+    },
+    {
+      "name": "hset_wrong_arity_odd",
+      "now_ms": 831,
+      "argv": ["HSET", "h", "field", "val", "orphan"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'HSET' command"
+      }
+    },
+    {
+      "name": "hset_returns_new_count_only",
+      "now_ms": 840,
+      "argv": ["HSET", "h2", "counter", "newval", "newfield", "newval2"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "hexists_wrong_arity",
+      "now_ms": 850,
+      "argv": ["HEXISTS"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'HEXISTS' command"
+      }
+    },
+    {
+      "name": "hlen_wrong_arity",
+      "now_ms": 851,
+      "argv": ["HLEN"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'HLEN' command"
+      }
+    },
+    {
+      "name": "hincrby_wrong_arity",
+      "now_ms": 852,
+      "argv": ["HINCRBY", "h"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'HINCRBY' command"
+      }
+    },
+    {
+      "name": "hincrbyfloat_wrong_arity",
+      "now_ms": 853,
+      "argv": ["HINCRBYFLOAT", "h"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'HINCRBYFLOAT' command"
+      }
+    },
+    {
+      "name": "hsetnx_wrong_arity",
+      "now_ms": 854,
+      "argv": ["HSETNX"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'HSETNX' command"
+      }
+    },
+    {
+      "name": "hstrlen_wrong_arity",
+      "now_ms": 855,
+      "argv": ["HSTRLEN"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'HSTRLEN' command"
+      }
+    },
+    {
+      "name": "hincrby_non_integer_increment",
+      "now_ms": 860,
+      "argv": ["HINCRBY", "h2", "counter", "abc"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "hrandfield_count_larger_than_hash",
+      "now_ms": 870,
+      "argv": ["HRANDFIELD", "hrand1", "10"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "only_field" }
+        ]
+      }
+    },
+    {
+      "name": "hrandfield_negative_with_duplicates",
+      "now_ms": 871,
+      "argv": ["HRANDFIELD", "hrand1", "-3"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "only_field" },
+          { "kind": "bulk", "value": "only_field" },
+          { "kind": "bulk", "value": "only_field" }
+        ]
+      }
+    },
+    {
+      "name": "hrandfield_negative_withvalues",
+      "now_ms": 872,
+      "argv": ["HRANDFIELD", "hrand1", "-2", "WITHVALUES"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "only_field" },
+          { "kind": "bulk", "value": "only_value" },
+          { "kind": "bulk", "value": "only_field" },
+          { "kind": "bulk", "value": "only_value" }
+        ]
+      }
+    },
+
+    {
+      "name": "hdel_wrongtype",
+      "now_ms": 880,
+      "argv": ["HDEL", "strkey", "field"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "hgetall_wrongtype",
+      "now_ms": 881,
+      "argv": ["HGETALL", "strkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "hkeys_wrongtype",
+      "now_ms": 882,
+      "argv": ["HKEYS", "strkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "hvals_wrongtype",
+      "now_ms": 883,
+      "argv": ["HVALS", "strkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     }
   ]
 }
