@@ -397,6 +397,252 @@
       "now_ms": 400,
       "argv": ["GEOHASH"],
       "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GEOHASH' command" }
+    },
+
+    {
+      "name": "georadius_withcoord",
+      "now_ms": 200,
+      "argv": ["GEORADIUS", "geo2", "15", "37", "200", "km", "ASC", "WITHCOORD"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "Catania" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "15.087267458438873" },
+                  { "kind": "bulk", "value": "37.50266842333162" }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "Palermo" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "13.361389338970184" },
+                  { "kind": "bulk", "value": "38.1155563954963" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "georadius_withdist",
+      "now_ms": 200,
+      "argv": ["GEORADIUS", "geo2", "15", "37", "200", "km", "ASC", "WITHDIST"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "Catania" },
+              { "kind": "bulk", "value": "56.4413" }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "Palermo" },
+              { "kind": "bulk", "value": "190.4424" }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "geosearch_fromlonlat_byradius_withcoord_withdist",
+      "now_ms": 200,
+      "argv": ["GEOSEARCH", "geo2", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "ASC", "WITHCOORD", "WITHDIST"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "Catania" },
+              { "kind": "bulk", "value": "56.4413" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "15.087267458438873" },
+                  { "kind": "bulk", "value": "37.50266842333162" }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "Palermo" },
+              { "kind": "bulk", "value": "190.4424" },
+              {
+                "kind": "array",
+                "value": [
+                  { "kind": "bulk", "value": "13.361389338970184" },
+                  { "kind": "bulk", "value": "38.1155563954963" }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+
+    {
+      "name": "geosearch_bybox_narrow",
+      "now_ms": 200,
+      "argv": ["GEOSEARCH", "geo2", "FROMLONLAT", "15", "37.5", "BYBOX", "100", "100", "km", "ASC"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "Catania" }
+        ]
+      }
+    },
+
+    {
+      "name": "geosearch_frommember_missing",
+      "now_ms": 200,
+      "argv": ["GEOSEARCH", "geo2", "FROMMEMBER", "Missing", "BYRADIUS", "100", "km"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR could not decode requested zset member"
+      }
+    },
+
+    {
+      "name": "geosearch_desc_order",
+      "now_ms": 200,
+      "argv": ["GEOSEARCH", "geo2", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "DESC"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "Palermo" },
+          { "kind": "bulk", "value": "Catania" }
+        ]
+      }
+    },
+
+    {
+      "name": "geosearchstore_storedist",
+      "now_ms": 300,
+      "argv": ["GEOSEARCHSTORE", "geo_dist_dest", "geo2", "FROMLONLAT", "15", "37", "BYRADIUS", "200", "km", "STOREDIST"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+
+    {
+      "name": "geoadd_incomplete_triple",
+      "now_ms": 500,
+      "argv": ["GEOADD", "geo4", "13.0", "38.0"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GEOADD' command" }
+    },
+
+    {
+      "name": "wrongtype_geoadd_on_string",
+      "now_ms": 500,
+      "argv": ["SET", "strkey", "hello"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "wrongtype_geoadd_on_string_error",
+      "now_ms": 501,
+      "argv": ["GEOADD", "strkey", "13.0", "38.0", "place"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "wrongtype_geopos_on_string_error",
+      "now_ms": 502,
+      "argv": ["GEOPOS", "strkey", "place"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "wrongtype_geodist_on_string_error",
+      "now_ms": 503,
+      "argv": ["GEODIST", "strkey", "a", "b"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+    {
+      "name": "wrongtype_geohash_on_string_error",
+      "now_ms": 504,
+      "argv": ["GEOHASH", "strkey", "place"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+    },
+
+    {
+      "name": "geopos_wrong_arity",
+      "now_ms": 600,
+      "argv": ["GEOPOS"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GEOPOS' command" }
+    },
+    {
+      "name": "geodist_wrong_arity",
+      "now_ms": 601,
+      "argv": ["GEODIST", "geo"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GEODIST' command" }
+    },
+    {
+      "name": "geosearch_wrong_arity",
+      "now_ms": 602,
+      "argv": ["GEOSEARCH", "geo"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GEOSEARCH' command" }
+    },
+    {
+      "name": "geosearchstore_wrong_arity",
+      "now_ms": 603,
+      "argv": ["GEOSEARCHSTORE", "dst"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GEOSEARCHSTORE' command" }
+    },
+    {
+      "name": "georadiusbymember_wrong_arity",
+      "now_ms": 604,
+      "argv": ["GEORADIUSBYMEMBER", "geo"],
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'GEORADIUSBYMEMBER' command" }
+    },
+
+    {
+      "name": "geoadd_multiple_members_at_once",
+      "now_ms": 700,
+      "argv": ["GEOADD", "geo5", "-122.4194", "37.7749", "SanFrancisco", "-118.2437", "34.0522", "LosAngeles", "-87.6298", "41.8781", "Chicago"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "geodist_sf_la",
+      "now_ms": 701,
+      "argv": ["GEODIST", "geo5", "SanFrancisco", "LosAngeles", "km"],
+      "expect": { "kind": "bulk", "value": "559.2783" }
+    },
+    {
+      "name": "geosearch_large_radius_all",
+      "now_ms": 702,
+      "argv": ["GEOSEARCH", "geo5", "FROMLONLAT", "-100", "40", "BYRADIUS", "3000", "km", "ASC"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "Chicago" },
+          { "kind": "bulk", "value": "LosAngeles" },
+          { "kind": "bulk", "value": "SanFrancisco" }
+        ]
+      }
+    },
+    {
+      "name": "geosearch_small_radius_none",
+      "now_ms": 703,
+      "argv": ["GEOSEARCH", "geo5", "FROMLONLAT", "0", "0", "BYRADIUS", "1", "km"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
     }
   ]
 }
