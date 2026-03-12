@@ -3,6 +3,7 @@
 use std::{
     collections::BTreeMap,
     sync::atomic::{AtomicU64, Ordering},
+    time::Instant,
 };
 
 use fr_command::{CommandError, commands_in_acl_category, dispatch_argv, frame_to_argv};
@@ -717,7 +718,6 @@ pub struct Runtime {
     /// Slow log entry ID counter.
     slowlog_next_id: u64,
     /// Slow log threshold in microseconds (slowlog-log-slower-than config).
-    #[allow(dead_code)]
     slowlog_log_slower_than_us: i64,
     /// Slow log maximum length.
     slowlog_max_len: usize,
@@ -1247,7 +1247,11 @@ impl Runtime {
         }
 
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
-        match dispatch_argv(&argv, &mut self.store, now_ms) {
+        let start = Instant::now();
+        let result = dispatch_argv(&argv, &mut self.store, now_ms);
+        let elapsed_us = start.elapsed().as_micros() as u64;
+        self.record_slowlog(&argv, elapsed_us, now_ms);
+        match result {
             Ok(reply) => {
                 self.capture_aof_record(&argv);
                 reply
@@ -1821,10 +1825,28 @@ impl Runtime {
                 self.maxmemory_bytes.to_string().into_bytes(),
             )));
         }
+        // Dynamic slowlog params — override the static defaults
+        if Self::config_pattern_matches(&pattern, "slowlog-log-slower-than") {
+            entries.push(RespFrame::BulkString(Some(
+                b"slowlog-log-slower-than".to_vec(),
+            )));
+            entries.push(RespFrame::BulkString(Some(
+                self.slowlog_log_slower_than_us.to_string().into_bytes(),
+            )));
+        }
+        if Self::config_pattern_matches(&pattern, "slowlog-max-len") {
+            entries.push(RespFrame::BulkString(Some(b"slowlog-max-len".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.slowlog_max_len.to_string().into_bytes(),
+            )));
+        }
         // Static configuration parameters that clients commonly probe
         for &(name, value) in CONFIG_STATIC_PARAMS {
-            // Skip maxmemory from statics — we already emitted the dynamic value above
-            if name == "maxmemory" {
+            // Skip dynamically-managed params — we already emitted live values above
+            if name == "maxmemory"
+                || name == "slowlog-log-slower-than"
+                || name == "slowlog-max-len"
+            {
                 continue;
             }
             if Self::config_pattern_matches(&pattern, name) {
@@ -1843,6 +1865,8 @@ impl Runtime {
         let mut next_requirepass: Option<Option<Vec<u8>>> = None;
         let mut next_acllog_max_len = self.acllog_max_len;
         let mut next_maxmemory: Option<usize> = None;
+        let mut next_slowlog_slower_than: Option<i64> = None;
+        let mut next_slowlog_max_len: Option<usize> = None;
 
         for pair in argv[2..].chunks_exact(2) {
             let parameter = match std::str::from_utf8(&pair[0]) {
@@ -1884,6 +1908,27 @@ impl Runtime {
                 next_maxmemory = Some(parsed);
                 continue;
             }
+            if parameter.eq_ignore_ascii_case("slowlog-log-slower-than") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) => value,
+                    Err(err) => return command_error_to_resp(err),
+                };
+                next_slowlog_slower_than = Some(parsed);
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("slowlog-max-len") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as usize,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument '?' for CONFIG SET 'slowlog-max-len'".to_string(),
+                        );
+                    }
+                    Err(err) => return command_error_to_resp(err),
+                };
+                next_slowlog_max_len = Some(parsed);
+                continue;
+            }
             // Accept known CONFIG parameters as no-ops to avoid breaking clients.
             // These are recognized but their values are not yet stored dynamically.
             let is_known_param = CONFIG_STATIC_PARAMS
@@ -1903,6 +1948,16 @@ impl Runtime {
         self.acllog_max_len = next_acllog_max_len;
         if let Some(maxmemory) = next_maxmemory {
             self.maxmemory_bytes = maxmemory;
+        }
+        if let Some(threshold) = next_slowlog_slower_than {
+            self.slowlog_log_slower_than_us = threshold;
+        }
+        if let Some(max_len) = next_slowlog_max_len {
+            self.slowlog_max_len = max_len;
+            // Trim existing entries if the new max is smaller.
+            while self.slowlog.len() > self.slowlog_max_len {
+                self.slowlog.remove(0);
+            }
         }
         RespFrame::SimpleString("OK".to_string())
     }
@@ -2164,6 +2219,29 @@ impl Runtime {
             RespFrame::Error(format!(
                 "ERR unknown subcommand or wrong number of arguments for 'slowlog|{sub}'"
             ))
+        }
+    }
+
+    /// Record a command execution in the slow log if it exceeded the threshold.
+    fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
+        if self.slowlog_log_slower_than_us < 0 {
+            // Negative threshold disables slow log recording.
+            return;
+        }
+        if (duration_us as i64) < self.slowlog_log_slower_than_us {
+            return;
+        }
+        let entry = SlowlogEntry {
+            id: self.slowlog_next_id,
+            timestamp_sec: now_ms / 1000,
+            duration_us,
+            argv: argv.to_vec(),
+        };
+        self.slowlog_next_id += 1;
+        self.slowlog.push(entry);
+        // Trim to max length (keep newest entries at the end).
+        while self.slowlog.len() > self.slowlog_max_len {
+            self.slowlog.remove(0);
         }
     }
 

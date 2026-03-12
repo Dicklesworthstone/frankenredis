@@ -786,6 +786,126 @@
       "now_ms": 24000,
       "argv": ["COMMAND", "NOSUCH"],
       "expect": { "kind": "error", "value": "ERR unknown subcommand or wrong number of arguments for 'command|NOSUCH'" }
+    },
+    {
+      "name": "slowlog_config_set_threshold_zero",
+      "now_ms": 25000,
+      "argv": ["CONFIG", "SET", "slowlog-log-slower-than", "0"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slowlog_trigger_set_command",
+      "now_ms": 25000,
+      "argv": ["SET", "slowlog_key1", "value1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slowlog_len_after_one_command",
+      "now_ms": 25000,
+      "argv": ["SLOWLOG", "LEN"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "slowlog_trigger_second_command",
+      "now_ms": 25000,
+      "argv": ["SET", "slowlog_key2", "value2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slowlog_len_after_two_commands",
+      "now_ms": 25000,
+      "argv": ["SLOWLOG", "LEN"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "slowlog_reset_clears",
+      "now_ms": 25000,
+      "argv": ["SLOWLOG", "RESET"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slowlog_len_after_reset",
+      "now_ms": 25000,
+      "argv": ["SLOWLOG", "LEN"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "slowlog_config_set_max_len_2",
+      "now_ms": 26000,
+      "argv": ["CONFIG", "SET", "slowlog-max-len", "2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slowlog_fill_a",
+      "now_ms": 26000,
+      "argv": ["SET", "sl_a", "1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slowlog_fill_b",
+      "now_ms": 26000,
+      "argv": ["SET", "sl_b", "2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slowlog_fill_c",
+      "now_ms": 26000,
+      "argv": ["SET", "sl_c", "3"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slowlog_len_capped_at_max",
+      "now_ms": 26000,
+      "argv": ["SLOWLOG", "LEN"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "slowlog_config_get_threshold",
+      "now_ms": 26000,
+      "argv": ["CONFIG", "GET", "slowlog-log-slower-than"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "slowlog-log-slower-than" },
+          { "kind": "bulk", "value": "0" }
+        ]
+      }
+    },
+    {
+      "name": "slowlog_config_get_max_len",
+      "now_ms": 26000,
+      "argv": ["CONFIG", "GET", "slowlog-max-len"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "slowlog-max-len" },
+          { "kind": "bulk", "value": "2" }
+        ]
+      }
+    },
+    {
+      "name": "slowlog_disable_with_negative_threshold",
+      "now_ms": 27000,
+      "argv": ["CONFIG", "SET", "slowlog-log-slower-than", "-1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slowlog_reset_before_disable_test",
+      "now_ms": 27000,
+      "argv": ["SLOWLOG", "RESET"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slowlog_trigger_while_disabled",
+      "now_ms": 27000,
+      "argv": ["SET", "sl_disabled", "val"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "slowlog_len_stays_zero_when_disabled",
+      "now_ms": 27000,
+      "argv": ["SLOWLOG", "LEN"],
+      "expect": { "kind": "integer", "value": 0 }
     }
   ]
 }
