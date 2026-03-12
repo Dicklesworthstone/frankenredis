@@ -655,6 +655,137 @@
         "kind": "error",
         "value": "ERR Unsupported CONFIG parameter 'totally_unknown_param'"
       }
+    },
+    {
+      "name": "object_help",
+      "now_ms": 24000,
+      "argv": ["OBJECT", "HELP"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "OBJECT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:" },
+          { "kind": "bulk", "value": "ENCODING <key> - Return the encoding of the object at <key>." },
+          { "kind": "bulk", "value": "FREQ <key> - Return the access frequency of <key>." },
+          { "kind": "bulk", "value": "HELP - Return subcommand help summary." },
+          { "kind": "bulk", "value": "IDLETIME <key> - Return the idle time of <key>." },
+          { "kind": "bulk", "value": "REFCOUNT <key> - Return the reference count of <key>." }
+        ]
+      }
+    },
+    {
+      "name": "memory_help",
+      "now_ms": 24000,
+      "argv": ["MEMORY", "HELP"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "MEMORY <subcommand> [<arg> [value] ...]. Subcommands are:" },
+          { "kind": "bulk", "value": "DOCTOR - Return memory problems reports." },
+          { "kind": "bulk", "value": "MALLOC-STATS - Return internal statistics report from the memory allocator." },
+          { "kind": "bulk", "value": "PURGE - Ask the allocator to release memory." },
+          { "kind": "bulk", "value": "STATS - Return information about the memory usage of the server." },
+          { "kind": "bulk", "value": "USAGE <key> [SAMPLES <count>] - Return memory in bytes used by <key> and its value." },
+          { "kind": "bulk", "value": "HELP - Return subcommand help summary." }
+        ]
+      }
+    },
+    {
+      "name": "memory_malloc_stats",
+      "now_ms": 24000,
+      "argv": ["MEMORY", "MALLOC-STATS"],
+      "expect": { "kind": "bulk", "value": "Memory allocator stats not available" }
+    },
+    {
+      "name": "memory_stats",
+      "now_ms": 24000,
+      "argv": ["MEMORY", "STATS"],
+      "expect": { "kind": "bulk", "value": "peak.allocated:0\r\ntotal.allocated:0\r\nstartup.allocated:0\r\nreplication.backlog:0\r\nclients.slaves:0\r\nclients.normal:0\r\naof.buffer:0\r\n" }
+    },
+    {
+      "name": "latency_help",
+      "now_ms": 24000,
+      "argv": ["LATENCY", "HELP"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "LATENCY <subcommand> [<arg> ...]. Subcommands are:" },
+          { "kind": "bulk", "value": "LATEST - Return the latest latency samples." },
+          { "kind": "bulk", "value": "HISTORY <event> - Return latency history for an event." },
+          { "kind": "bulk", "value": "RESET [<event> ...] - Reset latency data." },
+          { "kind": "bulk", "value": "GRAPH <event> - Return an ASCII graph of latency." },
+          { "kind": "bulk", "value": "HELP - Return subcommand help summary." }
+        ]
+      }
+    },
+    {
+      "name": "script_help",
+      "now_ms": 24000,
+      "argv": ["SCRIPT", "HELP"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "SCRIPT <subcommand> [<arg> [value] ...]. Subcommands are:" },
+          { "kind": "bulk", "value": "EXISTS <sha1> [<sha1> ...] - Check existence of scripts by SHA1." },
+          { "kind": "bulk", "value": "FLUSH [ASYNC|SYNC] - Remove all scripts from the cache." },
+          { "kind": "bulk", "value": "KILL - Kill the currently executing script." },
+          { "kind": "bulk", "value": "LOAD <script> - Load a script into the cache." },
+          { "kind": "bulk", "value": "HELP - Return subcommand help summary." }
+        ]
+      }
+    },
+    {
+      "name": "debug_jmap",
+      "now_ms": 24000,
+      "argv": ["DEBUG", "JMAP"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "debug_reload",
+      "now_ms": 24000,
+      "argv": ["DEBUG", "RELOAD"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "debug_object",
+      "now_ms": 24000,
+      "argv": ["DEBUG", "OBJECT", "somekey"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "debug_unknown_subcommand",
+      "now_ms": 24000,
+      "argv": ["DEBUG", "NOSUCH"],
+      "expect": { "kind": "error", "value": "ERR Unknown subcommand or wrong number of arguments for DEBUG NOSUCH" }
+    },
+    {
+      "name": "memory_unknown_subcommand",
+      "now_ms": 24000,
+      "argv": ["MEMORY", "NOSUCH"],
+      "expect": { "kind": "error", "value": "ERR unknown subcommand or wrong number of arguments for 'memory|NOSUCH'" }
+    },
+    {
+      "name": "latency_unknown_subcommand",
+      "now_ms": 24000,
+      "argv": ["LATENCY", "NOSUCH"],
+      "expect": { "kind": "error", "value": "ERR unknown subcommand or wrong number of arguments for 'latency|NOSUCH'" }
+    },
+    {
+      "name": "command_docs",
+      "now_ms": 24000,
+      "argv": ["COMMAND", "DOCS"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "command_getkeys",
+      "now_ms": 24000,
+      "argv": ["COMMAND", "GETKEYS"],
+      "expect": { "kind": "array", "value": [] }
+    },
+    {
+      "name": "command_unknown_subcommand",
+      "now_ms": 24000,
+      "argv": ["COMMAND", "NOSUCH"],
+      "expect": { "kind": "error", "value": "ERR unknown subcommand or wrong number of arguments for 'command|NOSUCH'" }
     }
   ]
 }
