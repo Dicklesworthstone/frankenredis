@@ -8,9 +8,27 @@
       "expect": { "kind": "simple", "value": "OK" }
     },
     {
+      "name": "replconf_ack_zero",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "ACK", "0"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replconf_ack_large_offset",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "ACK", "999999999"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
       "name": "replconf_listening_port_ok",
       "now_ms": 0,
       "argv": ["REPLCONF", "listening-port", "6380"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replconf_listening_port_different",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "listening-port", "12345"],
       "expect": { "kind": "simple", "value": "OK" }
     },
     {
@@ -26,9 +44,27 @@
       "expect": { "kind": "simple", "value": "OK" }
     },
     {
+      "name": "replconf_capa_unknown",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "capa", "unknown_capability"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
       "name": "replconf_ip_address_ok",
       "now_ms": 0,
       "argv": ["REPLCONF", "ip-address", "192.168.1.1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replconf_ip_address_ipv6",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "ip-address", "::1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replconf_ip_address_localhost",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "ip-address", "127.0.0.1"],
       "expect": { "kind": "simple", "value": "OK" }
     },
     {
@@ -45,6 +81,25 @@
       }
     },
     {
+      "name": "replconf_getack_lowercase",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "getack", "*"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "REPLCONF" },
+          { "kind": "bulk", "value": "ACK" },
+          { "kind": "bulk", "value": "0" }
+        ]
+      }
+    },
+    {
+      "name": "replconf_unknown_subcommand_accepts",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "UNKNOWN", "something"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
       "name": "replconf_wrong_arity",
       "now_ms": 0,
       "argv": ["REPLCONF"],
@@ -52,6 +107,18 @@
         "kind": "error",
         "value": "ERR wrong number of arguments for 'REPLCONF' command"
       }
+    },
+    {
+      "name": "replconf_case_insensitive_ack",
+      "now_ms": 0,
+      "argv": ["replconf", "ack", "50"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replconf_case_insensitive_listening_port",
+      "now_ms": 0,
+      "argv": ["replconf", "LISTENING-PORT", "9999"],
+      "expect": { "kind": "simple", "value": "OK" }
     },
     {
       "name": "psync_returns_fullresync",
@@ -66,9 +133,45 @@
       "expect": { "kind": "simple", "value": "FULLRESYNC 0000000000000000000000000000000000000000 0" }
     },
     {
-      "name": "psync_wrong_arity",
+      "name": "psync_with_full_replid",
+      "now_ms": 0,
+      "argv": ["PSYNC", "8371445ee590757f1e609db72c1e90dcaafc6e94", "12345"],
+      "expect": { "kind": "simple", "value": "FULLRESYNC 0000000000000000000000000000000000000000 0" }
+    },
+    {
+      "name": "psync_with_zero_offset",
+      "now_ms": 0,
+      "argv": ["PSYNC", "?", "0"],
+      "expect": { "kind": "simple", "value": "FULLRESYNC 0000000000000000000000000000000000000000 0" }
+    },
+    {
+      "name": "psync_case_insensitive",
+      "now_ms": 0,
+      "argv": ["psync", "?", "-1"],
+      "expect": { "kind": "simple", "value": "FULLRESYNC 0000000000000000000000000000000000000000 0" }
+    },
+    {
+      "name": "psync_wrong_arity_too_few",
       "now_ms": 0,
       "argv": ["PSYNC", "?"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PSYNC' command"
+      }
+    },
+    {
+      "name": "psync_wrong_arity_too_many",
+      "now_ms": 0,
+      "argv": ["PSYNC", "?", "-1", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PSYNC' command"
+      }
+    },
+    {
+      "name": "psync_wrong_arity_no_args",
+      "now_ms": 0,
+      "argv": ["PSYNC"],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'PSYNC' command"
@@ -81,9 +184,33 @@
       "expect": { "kind": "simple", "value": "OK Already a master" }
     },
     {
+      "name": "replicaof_no_one_case_insensitive",
+      "now_ms": 0,
+      "argv": ["REPLICAOF", "no", "one"],
+      "expect": { "kind": "simple", "value": "OK Already a master" }
+    },
+    {
+      "name": "replicaof_no_one_mixed_case",
+      "now_ms": 0,
+      "argv": ["REPLICAOF", "No", "One"],
+      "expect": { "kind": "simple", "value": "OK Already a master" }
+    },
+    {
       "name": "replicaof_host_port",
       "now_ms": 0,
       "argv": ["REPLICAOF", "127.0.0.1", "6379"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replicaof_host_port_different",
+      "now_ms": 0,
+      "argv": ["REPLICAOF", "redis.example.com", "6380"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replicaof_host_ipv6",
+      "now_ms": 0,
+      "argv": ["REPLICAOF", "::1", "6379"],
       "expect": { "kind": "simple", "value": "OK" }
     },
     {
@@ -93,7 +220,19 @@
       "expect": { "kind": "simple", "value": "OK Already a master" }
     },
     {
-      "name": "replicaof_wrong_arity",
+      "name": "slaveof_no_one_case_insensitive",
+      "now_ms": 0,
+      "argv": ["SLAVEOF", "no", "one"],
+      "expect": { "kind": "simple", "value": "OK Already a master" }
+    },
+    {
+      "name": "slaveof_host_port",
+      "now_ms": 0,
+      "argv": ["SLAVEOF", "127.0.0.1", "6379"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replicaof_wrong_arity_one_arg",
       "now_ms": 0,
       "argv": ["REPLICAOF", "127.0.0.1"],
       "expect": {
@@ -102,9 +241,55 @@
       }
     },
     {
+      "name": "replicaof_wrong_arity_no_args",
+      "now_ms": 0,
+      "argv": ["REPLICAOF"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'REPLICAOF' command"
+      }
+    },
+    {
+      "name": "slaveof_wrong_arity_one_arg",
+      "now_ms": 0,
+      "argv": ["SLAVEOF", "127.0.0.1"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'REPLICAOF' command"
+      }
+    },
+    {
+      "name": "slaveof_wrong_arity_no_args",
+      "now_ms": 0,
+      "argv": ["SLAVEOF"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'REPLICAOF' command"
+      }
+    },
+    {
+      "name": "slaveof_case_insensitive_command",
+      "now_ms": 0,
+      "argv": ["slaveof", "NO", "ONE"],
+      "expect": { "kind": "simple", "value": "OK Already a master" }
+    },
+    {
       "name": "role_returns_master",
       "now_ms": 0,
       "argv": ["ROLE"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "master" },
+          { "kind": "integer", "value": 0 },
+          { "kind": "array", "value": [] }
+        ]
+      }
+    },
+    {
+      "name": "role_case_insensitive",
+      "now_ms": 0,
+      "argv": ["role"],
       "expect": {
         "kind": "array",
         "value": [
@@ -121,6 +306,73 @@
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'ROLE' command"
+      }
+    },
+    {
+      "name": "readonly_ok",
+      "now_ms": 0,
+      "argv": ["READONLY"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "readwrite_ok",
+      "now_ms": 0,
+      "argv": ["READWRITE"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "readonly_wrong_arity",
+      "now_ms": 0,
+      "argv": ["READONLY", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'READONLY' command"
+      }
+    },
+    {
+      "name": "readwrite_wrong_arity",
+      "now_ms": 0,
+      "argv": ["READWRITE", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'READWRITE' command"
+      }
+    },
+    {
+      "name": "readonly_case_insensitive",
+      "now_ms": 0,
+      "argv": ["readonly"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "readwrite_case_insensitive",
+      "now_ms": 0,
+      "argv": ["readwrite"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "replicaof_after_slaveof_no_one",
+      "now_ms": 0,
+      "argv": ["REPLICAOF", "NO", "ONE"],
+      "expect": { "kind": "simple", "value": "OK Already a master" }
+    },
+    {
+      "name": "replconf_ack_after_replicaof",
+      "now_ms": 0,
+      "argv": ["REPLCONF", "ACK", "200"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "role_still_master_after_operations",
+      "now_ms": 0,
+      "argv": ["ROLE"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "master" },
+          { "kind": "integer", "value": 0 },
+          { "kind": "array", "value": [] }
+        ]
       }
     }
   ]
