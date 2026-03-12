@@ -7195,8 +7195,48 @@ fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
             }
         }
         Ok(RespFrame::Array(Some(entries)))
-    } else if sub.eq_ignore_ascii_case("DOCS") || sub.eq_ignore_ascii_case("GETKEYS") {
+    } else if sub.eq_ignore_ascii_case("DOCS") {
+        // COMMAND DOCS: return empty map for now (stub)
         Ok(RespFrame::Array(Some(Vec::new())))
+    } else if sub.eq_ignore_ascii_case("GETKEYS") {
+        // COMMAND GETKEYS <command> [args...]
+        if argv.len() < 3 {
+            return Ok(RespFrame::Error(
+                "ERR Invalid arguments for 'COMMAND GETKEYS'".to_string(),
+            ));
+        }
+        let cmd_name =
+            std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        let found = COMMAND_TABLE
+            .iter()
+            .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name));
+        match found {
+            Some(&(_name, _arity, _flags, first_key, last_key, step)) => {
+                if first_key == 0 {
+                    return Ok(RespFrame::Array(Some(Vec::new())));
+                }
+                // The simulated argv for the command starts at argv[2..]
+                let cmd_argv = &argv[2..];
+                let mut keys = Vec::new();
+                let actual_last = if last_key < 0 {
+                    cmd_argv.len() as i64 + last_key
+                } else {
+                    last_key
+                };
+                let step_val = if step == 0 { 1 } else { step };
+                let mut i = first_key;
+                while i <= actual_last && (i as usize) < cmd_argv.len() {
+                    keys.push(RespFrame::BulkString(Some(
+                        cmd_argv[i as usize].clone(),
+                    )));
+                    i += step_val;
+                }
+                Ok(RespFrame::Array(Some(keys)))
+            }
+            None => Ok(RespFrame::Error(format!(
+                "ERR Invalid command specified, or key spec not found for '{cmd_name}'"
+            ))),
+        }
     } else {
         Ok(RespFrame::Error(format!(
             "ERR unknown subcommand or wrong number of arguments for 'command|{sub}'"

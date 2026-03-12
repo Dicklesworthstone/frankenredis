@@ -253,15 +253,15 @@
       }
     },
     {
-      "name": "command_getkeys_returns_empty_array",
+      "name": "command_getkeys_no_cmd_arg",
       "now_ms": 11003,
       "argv": [
         "COMMAND",
         "GETKEYS"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR Invalid arguments for 'COMMAND GETKEYS'"
       }
     },
     {
@@ -1443,15 +1443,24 @@
       }
     },
     {
-      "name": "command_getkeys",
+      "name": "command_getkeys_hset",
       "now_ms": 24000,
       "argv": [
         "COMMAND",
-        "GETKEYS"
+        "GETKEYS",
+        "HSET",
+        "myhash",
+        "f1",
+        "v1"
       ],
       "expect": {
         "kind": "array",
-        "value": []
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "myhash"
+          }
+        ]
       }
     },
     {
@@ -1914,7 +1923,7 @@
       }
     },
     {
-      "name": "command_unknown_subcommand",
+      "name": "command_unknown_subcommand_nosuch",
       "now_ms": 100,
       "argv": [
         "COMMAND",
@@ -1956,6 +1965,229 @@
       "expect": {
         "kind": "simple",
         "value": "Background append only file rewriting started"
+      }
+    },
+    {
+      "name": "command_getkeys_set",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYS",
+        "SET",
+        "mykey",
+        "myval"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "mykey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "command_getkeys_get",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYS",
+        "GET",
+        "mykey"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "mykey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "command_getkeys_mget",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYS",
+        "MGET",
+        "key1",
+        "key2",
+        "key3"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "key1"
+          },
+          {
+            "kind": "bulk",
+            "value": "key2"
+          },
+          {
+            "kind": "bulk",
+            "value": "key3"
+          }
+        ]
+      }
+    },
+    {
+      "name": "command_getkeys_mset",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYS",
+        "MSET",
+        "k1",
+        "v1",
+        "k2",
+        "v2"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "k1"
+          },
+          {
+            "kind": "bulk",
+            "value": "k2"
+          }
+        ]
+      }
+    },
+    {
+      "name": "command_getkeys_del",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYS",
+        "DEL",
+        "a",
+        "b",
+        "c"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "a"
+          },
+          {
+            "kind": "bulk",
+            "value": "b"
+          },
+          {
+            "kind": "bulk",
+            "value": "c"
+          }
+        ]
+      }
+    },
+    {
+      "name": "command_getkeys_ping_no_keys",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYS",
+        "PING"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "command_getkeys_unknown_command",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYS",
+        "NOSUCHCMD",
+        "arg1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Invalid command specified, or key spec not found for 'NOSUCHCMD'"
+      }
+    },
+    {
+      "name": "command_getkeys_no_args",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYS"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Invalid arguments for 'COMMAND GETKEYS'"
+      }
+    },
+    {
+      "name": "command_getkeys_rename",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYS",
+        "RENAME",
+        "src",
+        "dst"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "src"
+          },
+          {
+            "kind": "bulk",
+            "value": "dst"
+          }
+        ]
+      }
+    },
+    {
+      "name": "latency_latest_empty",
+      "now_ms": 0,
+      "argv": [
+        "LATENCY",
+        "LATEST"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "latency_history_empty",
+      "now_ms": 0,
+      "argv": [
+        "LATENCY",
+        "HISTORY",
+        "event"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "latency_reset_ok",
+      "now_ms": 0,
+      "argv": [
+        "LATENCY",
+        "RESET"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
       }
     }
   ]
