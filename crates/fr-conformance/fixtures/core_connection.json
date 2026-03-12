@@ -1025,6 +1025,420 @@
         "kind": "integer",
         "value": 0
       }
+    },
+    {
+      "name": "command_count_returns_integer",
+      "now_ms": 100,
+      "argv": [
+        "COMMAND",
+        "COUNT"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 230
+      }
+    },
+    {
+      "name": "command_info_get",
+      "now_ms": 100,
+      "argv": [
+        "COMMAND",
+        "INFO",
+        "GET"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "get"
+              },
+              {
+                "kind": "integer",
+                "value": 2
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "simple",
+                    "value": "readonly"
+                  },
+                  {
+                    "kind": "simple",
+                    "value": "fast"
+                  }
+                ]
+              },
+              {
+                "kind": "integer",
+                "value": 1
+              },
+              {
+                "kind": "integer",
+                "value": 1
+              },
+              {
+                "kind": "integer",
+                "value": 1
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "command_info_nonexistent",
+      "now_ms": 100,
+      "argv": [
+        "COMMAND",
+        "INFO",
+        "NOSUCHCOMMAND"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "command_docs_returns_array",
+      "now_ms": 100,
+      "argv": [
+        "COMMAND",
+        "DOCS"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "command_unknown_subcommand",
+      "now_ms": 100,
+      "argv": [
+        "COMMAND",
+        "NOSUCH"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown subcommand or wrong number of arguments for 'command|NOSUCH'"
+      }
+    },
+    {
+      "name": "debug_sleep_returns_ok",
+      "now_ms": 100,
+      "argv": [
+        "DEBUG",
+        "SLEEP",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "debug_set_active_expire_ok",
+      "now_ms": 100,
+      "argv": [
+        "DEBUG",
+        "SET-ACTIVE-EXPIRE",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "debug_object_ok",
+      "now_ms": 100,
+      "argv": [
+        "DEBUG",
+        "OBJECT",
+        "somekey"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "debug_unknown_subcommand",
+      "now_ms": 100,
+      "argv": [
+        "DEBUG",
+        "NOSUCH"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for DEBUG NOSUCH"
+      }
+    },
+    {
+      "name": "debug_wrong_arity",
+      "now_ms": 100,
+      "argv": [
+        "DEBUG"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'DEBUG' command"
+      }
+    },
+    {
+      "name": "lolwut_returns_string",
+      "now_ms": 100,
+      "argv": [
+        "LOLWUT"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "\nO#*+- .oO#*+- .O#*+- .oO#*+- .o#*+- .oO#\n*+- .oO#*+- .oO#+- .oO#*+- .oO#*- .oO#*+\n+ .oO#*+- .oO#*+-.oO#*+- .oO#*+- oO#*+- \n .O#*+- .oO#*+- .o#*+- .oO#*+- .oO*+- .o\noO#+- .oO#*+- .oO#*- .oO#*+- .oO#*+ .oO#\n#*+-.oO#*+- .oO#*+- oO#*+- .oO#*+- .O#*+\n+- .o#*+- .oO#*+- .oO*+- .oO#*+- .oO#+- \n .oO#*- .oO#*+- .oO#*+ .oO#*+- .oO#*+-.o\noO#*+- oO#*+- .oO#*+- .O#*+- .oO#*+- .o#\n#*+- .oO*+- .oO#*+- .oO#+- .oO#*+- .oO#*\n+- .oO#*+ .oO#*+- .oO#*+-.oO#*+- .oO#*+-\n .oO#*+- .O#*+- .oO#*+- .o#*+- .oO#*+- .\n\nFrankenRedis ver. 0.1.0 -- LOLWUT v1\n"
+      }
+    },
+    {
+      "name": "lolwut_with_version",
+      "now_ms": 100,
+      "argv": [
+        "LOLWUT",
+        "VERSION",
+        "6"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "\noO#*+- .oO*+- .oO#*+- .oO#+- .oO#*+- .oO\n#*+- .oO#*+ .oO#*+- .oO#*+-.oO#*+- .oO#*\n+- .oO#*+- .O#*+- .oO#*+- .o#*+- .oO#*+-\n .oO#*+- .oO#+- .oO#*+- .oO#*- .oO#*+- .\noO#*+- .oO#*+-.oO#*+- .oO#*+- oO#*+- .oO\n#*+- .oO#*+- .o#*+- .oO#*+- .oO*+- .oO#*\n+- .oO#*+- .oO#*- .oO#*+- .oO#*+ .oO#*+-\n-.oO#*+- .oO#*+- oO#*+- .oO#*+- .O#*+- .\n.o#*+- .oO#*+- .oO*+- .oO#*+- .oO#+- .oO\nO#*- .oO#*+- .oO#*+ .oO#*+- .oO#*+-.oO#*\n*+- oO#*+- .oO#*+- .O#*+- .oO#*+- .o#*+-\n- .oO*+- .oO#*+- .oO#+- .oO#*+- .oO#*- .\n\nFrankenRedis ver. 0.1.0 -- LOLWUT v6\n"
+      }
+    },
+    {
+      "name": "move_same_db_returns_0",
+      "now_ms": 100,
+      "argv": [
+        "MOVE",
+        "key",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "move_other_db_error",
+      "now_ms": 100,
+      "argv": [
+        "MOVE",
+        "key",
+        "1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR index out of range"
+      }
+    },
+    {
+      "name": "move_wrong_arity",
+      "now_ms": 100,
+      "argv": [
+        "MOVE",
+        "key"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'MOVE' command"
+      }
+    },
+    {
+      "name": "object_help_returns_array",
+      "now_ms": 100,
+      "argv": [
+        "OBJECT",
+        "HELP"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "OBJECT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"
+          },
+          {
+            "kind": "bulk",
+            "value": "ENCODING <key> - Return the encoding of the object at <key>."
+          },
+          {
+            "kind": "bulk",
+            "value": "FREQ <key> - Return the access frequency of <key>."
+          },
+          {
+            "kind": "bulk",
+            "value": "HELP - Return subcommand help summary."
+          },
+          {
+            "kind": "bulk",
+            "value": "IDLETIME <key> - Return the idle time of <key>."
+          },
+          {
+            "kind": "bulk",
+            "value": "REFCOUNT <key> - Return the reference count of <key>."
+          }
+        ]
+      }
+    },
+    {
+      "name": "object_unknown_subcommand",
+      "now_ms": 100,
+      "argv": [
+        "OBJECT",
+        "NOSUCH",
+        "key"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for OBJECT NOSUCH"
+      }
+    },
+    {
+      "name": "object_wrong_arity",
+      "now_ms": 100,
+      "argv": [
+        "OBJECT"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'OBJECT' command"
+      }
+    },
+    {
+      "name": "latency_latest_empty",
+      "now_ms": 100,
+      "argv": [
+        "LATENCY",
+        "LATEST"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "latency_history_empty",
+      "now_ms": 100,
+      "argv": [
+        "LATENCY",
+        "HISTORY",
+        "event"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "latency_reset_ok",
+      "now_ms": 100,
+      "argv": [
+        "LATENCY",
+        "RESET"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "touch_nonexistent_returns_0",
+      "now_ms": 100,
+      "argv": [
+        "TOUCH",
+        "nonexistent"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "touch_setup",
+      "now_ms": 100,
+      "argv": [
+        "SET",
+        "touch_key",
+        "val"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "touch_existing_returns_1",
+      "now_ms": 100,
+      "argv": [
+        "TOUCH",
+        "touch_key"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "touch_multiple_keys",
+      "now_ms": 100,
+      "argv": [
+        "TOUCH",
+        "touch_key",
+        "nonexistent",
+        "touch_key"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "unlink_is_del",
+      "now_ms": 100,
+      "argv": [
+        "UNLINK",
+        "touch_key"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "unlink_verify_deleted",
+      "now_ms": 100,
+      "argv": [
+        "EXISTS",
+        "touch_key"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "connection_cleanup",
+      "now_ms": 200,
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     }
   ]
 }
