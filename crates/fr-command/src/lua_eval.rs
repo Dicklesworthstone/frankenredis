@@ -1870,7 +1870,7 @@ impl<'a> LuaState<'a> {
                 let results = self.call_function(&func, &mut arg_vals, env, varargs)?;
                 // Write back table mutations (table.sort/insert/remove mutate args[0] in-place)
                 if let LuaValue::RustFunction(ref name) = func {
-                    if matches!(name.as_str(), "table.sort" | "table.insert" | "table.remove") {
+                    if matches!(name.as_str(), "table.sort" | "table.insert" | "table.remove" | "rawset") {
                         if let Some(Expr::Name(var_name)) = args.first() {
                             if !env.set_existing_local(var_name, arg_vals[0].clone()) {
                                 self.globals.insert(var_name.clone(), arg_vals[0].clone());
@@ -2339,7 +2339,18 @@ impl<'a> LuaState<'a> {
                     Ok(vec![LuaValue::Nil])
                 }
             }
-            "rawset" | "setmetatable" => {
+            "rawset" => {
+                // rawset(table, key, value) — set and return table
+                if args.len() >= 3 {
+                    let key = args[1].clone();
+                    let val = args[2].clone();
+                    if let LuaValue::Table(ref mut t) = args[0] {
+                        t.set(key, val);
+                    }
+                }
+                Ok(vec![args.first().cloned().unwrap_or(LuaValue::Nil)])
+            }
+            "setmetatable" => {
                 // Return first argument (table) — metatables not supported
                 Ok(vec![args.first().cloned().unwrap_or(LuaValue::Nil)])
             }
@@ -2780,15 +2791,50 @@ impl<'a> LuaState<'a> {
             }
             "table.sort" => {
                 if !args.is_empty() {
-                    if let LuaValue::Table(ref mut t) = args[0] {
+                    let comp_fn = args.get(1).cloned();
+                    // Extract array so we can call comparator without borrow conflicts
+                    let mut arr = if let LuaValue::Table(ref mut t) = args[0] {
+                        std::mem::take(&mut t.array)
+                    } else {
+                        return Ok(vec![LuaValue::Nil]);
+                    };
+                    if let Some(comp) = comp_fn {
+                        // Custom comparator: use insertion sort since we need
+                        // to call self.call_function for each comparison
+                        for i in 1..arr.len() {
+                            let key = arr[i].clone();
+                            let mut j = i;
+                            while j > 0 {
+                                let mut cmp_args = vec![key.clone(), arr[j - 1].clone()];
+                                let result = self.call_function(
+                                    &comp,
+                                    &mut cmp_args,
+                                    env,
+                                    &mut Vec::new(),
+                                )?;
+                                let key_before =
+                                    result.first().map(|v| v.is_truthy()).unwrap_or(false);
+                                if !key_before {
+                                    break;
+                                }
+                                arr[j] = arr[j - 1].clone();
+                                j -= 1;
+                            }
+                            arr[j] = key;
+                        }
+                    } else {
                         // Default sort: compare as strings or numbers
-                        t.array.sort_by(|a, b| match (a, b) {
+                        arr.sort_by(|a, b| match (a, b) {
                             (LuaValue::Number(x), LuaValue::Number(y)) => {
                                 x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
                             }
                             (LuaValue::Str(x), LuaValue::Str(y)) => x.cmp(y),
                             _ => std::cmp::Ordering::Equal,
                         });
+                    }
+                    // Put array back
+                    if let LuaValue::Table(ref mut t) = args[0] {
+                        t.array = arr;
                     }
                 }
                 Ok(vec![LuaValue::Nil])
