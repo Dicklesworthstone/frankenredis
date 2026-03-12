@@ -916,6 +916,139 @@
         "kind": "integer",
         "value": 0
       }
+    },
+
+    {
+      "name": "pfadd_case_insensitive",
+      "now_ms": 200,
+      "argv": ["pfadd", "hll_ci", "x"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfcount_case_insensitive",
+      "now_ms": 200,
+      "argv": ["pfcount", "hll_ci"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfmerge_case_insensitive",
+      "now_ms": 200,
+      "argv": ["pfmerge", "hll_ci_dst", "hll_ci"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pfcount_ci_dst_verify",
+      "now_ms": 200,
+      "argv": ["PFCOUNT", "hll_ci_dst"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+
+    {
+      "name": "pfcount_all_nonexistent_returns_0",
+      "now_ms": 200,
+      "argv": ["PFCOUNT", "nope1", "nope2", "nope3"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+
+    {
+      "name": "pfadd_large_setup",
+      "now_ms": 200,
+      "argv": ["PFADD", "hll_large", "e1", "e2", "e3", "e4", "e5", "e6", "e7", "e8", "e9", "e10",
+               "e11", "e12", "e13", "e14", "e15", "e16", "e17", "e18", "e19", "e20",
+               "e21", "e22", "e23", "e24", "e25", "e26", "e27", "e28", "e29", "e30"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfcount_large_approximate",
+      "now_ms": 200,
+      "argv": ["PFCOUNT", "hll_large"],
+      "expect": { "kind": "integer", "value": 30 }
+    },
+
+    {
+      "name": "pfadd_numeric_string_elements",
+      "now_ms": 200,
+      "argv": ["PFADD", "hll_num", "1", "2", "3", "100", "999"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfcount_numeric_string_elements",
+      "now_ms": 200,
+      "argv": ["PFCOUNT", "hll_num"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+
+    {
+      "name": "pfmerge_nonexistent_dest_from_nonexistent_sources",
+      "now_ms": 200,
+      "argv": ["PFMERGE", "hll_merge_none_dst", "nope1", "nope2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pfcount_merged_nonexistent_returns_0",
+      "now_ms": 200,
+      "argv": ["PFCOUNT", "hll_merge_none_dst"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+
+    {
+      "name": "pfadd_dest_wrongtype_setup",
+      "now_ms": 200,
+      "argv": ["SET", "hll_str_key", "not-an-hll"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pfmerge_dest_is_non_hll_string",
+      "now_ms": 200,
+      "argv": ["PFMERGE", "hll_str_key", "hll_ci"],
+      "expect": { "kind": "error", "value": "WRONGTYPE Key is not a valid HyperLogLog string value." }
+    },
+
+    {
+      "name": "pfadd_after_pfmerge",
+      "now_ms": 200,
+      "argv": ["PFADD", "hll_ci_dst", "y", "z"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "pfcount_after_merge_and_add",
+      "now_ms": 200,
+      "argv": ["PFCOUNT", "hll_ci_dst"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+
+    {
+      "name": "pfmerge_multiple_overlapping",
+      "now_ms": 200,
+      "argv": ["PFMERGE", "hll_multi_dst", "hll_ci", "hll_ci_dst", "hll_num"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "pfcount_multi_merge",
+      "now_ms": 200,
+      "argv": ["PFCOUNT", "hll_multi_dst"],
+      "expect": { "kind": "integer", "value": 8 }
+    },
+
+    {
+      "name": "pfcount_union_without_merge",
+      "now_ms": 200,
+      "argv": ["PFCOUNT", "hll_ci", "hll_num"],
+      "expect": { "kind": "integer", "value": 6 }
+    },
+
+    {
+      "name": "object_encoding_hll_is_raw",
+      "now_ms": 200,
+      "argv": ["OBJECT", "ENCODING", "hll_ci"],
+      "expect": { "kind": "bulk", "value": "raw" }
+    },
+
+    {
+      "name": "type_of_hll_is_string",
+      "now_ms": 200,
+      "argv": ["TYPE", "hll_ci"],
+      "expect": { "kind": "simple", "value": "string" }
     }
   ]
 }
