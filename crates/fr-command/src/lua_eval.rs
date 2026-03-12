@@ -1358,7 +1358,8 @@ impl<'a> LuaState<'a> {
         let mut math_table = LuaTable::new();
         for name in &[
             "floor", "ceil", "abs", "max", "min", "sqrt", "huge", "random", "randomseed", "fmod",
-            "log", "exp", "pow", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+            "log", "log10", "exp", "pow", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+            "modf", "frexp", "ldexp",
         ] {
             math_table.set(
                 LuaValue::Str(name.as_bytes().to_vec()),
@@ -1453,6 +1454,22 @@ impl<'a> LuaState<'a> {
             LuaValue::Str(b"sha1hex".to_vec()),
             LuaValue::RustFunction("redis.sha1hex".to_string()),
         );
+        redis_table.set(
+            LuaValue::Str(b"replicate_commands".to_vec()),
+            LuaValue::RustFunction("redis.replicate_commands".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"set_repl".to_vec()),
+            LuaValue::RustFunction("redis.set_repl".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"breakpoint".to_vec()),
+            LuaValue::RustFunction("redis.breakpoint".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"debug".to_vec()),
+            LuaValue::RustFunction("redis.debug".to_string()),
+        );
         redis_table.set(LuaValue::Str(b"LOG_DEBUG".to_vec()), LuaValue::Number(0.0));
         redis_table.set(
             LuaValue::Str(b"LOG_VERBOSE".to_vec()),
@@ -1463,8 +1480,25 @@ impl<'a> LuaState<'a> {
             LuaValue::Str(b"LOG_WARNING".to_vec()),
             LuaValue::Number(3.0),
         );
+        // Replication mode constants
+        redis_table.set(LuaValue::Str(b"REPL_NONE".to_vec()), LuaValue::Number(0.0));
+        redis_table.set(
+            LuaValue::Str(b"REPL_SLAVE".to_vec()),
+            LuaValue::Number(1.0),
+        );
+        redis_table.set(LuaValue::Str(b"REPL_AOF".to_vec()), LuaValue::Number(2.0));
+        redis_table.set(LuaValue::Str(b"REPL_ALL".to_vec()), LuaValue::Number(3.0));
         self.globals
             .insert("redis".to_string(), LuaValue::Table(redis_table));
+
+        // Set up os table (Redis Lua only exposes os.clock)
+        let mut os_table = LuaTable::new();
+        os_table.set(
+            LuaValue::Str(b"clock".to_vec()),
+            LuaValue::RustFunction("os.clock".to_string()),
+        );
+        self.globals
+            .insert("os".to_string(), LuaValue::Table(os_table));
     }
 
     pub fn execute(&mut self, source: &[u8]) -> Result<LuaValue, String> {
@@ -2112,6 +2146,23 @@ impl<'a> LuaState<'a> {
                 // Silently ignore log calls
                 Ok(vec![LuaValue::Nil])
             }
+            "redis.replicate_commands" => {
+                // No-op: effects replication was removed in Redis 7.0+
+                // Always returns true for compatibility
+                Ok(vec![LuaValue::Bool(true)])
+            }
+            "redis.set_repl" => {
+                // No-op: replication control stub
+                Ok(vec![LuaValue::Nil])
+            }
+            "redis.breakpoint" => {
+                // No-op: debugging stub
+                Ok(vec![LuaValue::Nil])
+            }
+            "redis.debug" => {
+                // No-op: debugging stub
+                Ok(vec![LuaValue::Nil])
+            }
             "redis.sha1hex" => {
                 let data = args
                     .first()
@@ -2499,9 +2550,55 @@ impl<'a> LuaState<'a> {
                 let x = args.get(1).and_then(|v| v.to_number()).unwrap_or(1.0);
                 Ok(vec![LuaValue::Number(y.atan2(x))])
             }
+            "math.log10" => {
+                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                Ok(vec![LuaValue::Number(n.log10())])
+            }
+            "math.modf" => {
+                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let trunc = n.trunc();
+                let frac = n - trunc;
+                Ok(vec![LuaValue::Number(trunc), LuaValue::Number(frac)])
+            }
+            "math.frexp" => {
+                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                if n == 0.0 {
+                    Ok(vec![LuaValue::Number(0.0), LuaValue::Number(0.0)])
+                } else {
+                    // frexp: n = m * 2^e where 0.5 <= |m| < 1
+                    let bits = n.to_bits();
+                    let exp_raw = ((bits >> 52) & 0x7FF) as i64;
+                    if exp_raw == 0 {
+                        // subnormal
+                        let norm = n * (1u64 << 52) as f64;
+                        let bits2 = norm.to_bits();
+                        let exp2 = ((bits2 >> 52) & 0x7FF) as i64;
+                        let e = exp2 - 1023 - 52;
+                        let mantissa_bits = (bits2 & 0x000F_FFFF_FFFF_FFFF) | 0x3FE0_0000_0000_0000;
+                        let m = f64::from_bits(mantissa_bits).copysign(n);
+                        Ok(vec![LuaValue::Number(m), LuaValue::Number((e + 1) as f64)])
+                    } else {
+                        let e = exp_raw - 1023;
+                        let mantissa_bits = (bits & 0x000F_FFFF_FFFF_FFFF) | 0x3FE0_0000_0000_0000;
+                        let m = f64::from_bits(mantissa_bits).copysign(n);
+                        Ok(vec![LuaValue::Number(m), LuaValue::Number((e + 1) as f64)])
+                    }
+                }
+            }
+            "math.ldexp" => {
+                let m = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let e = args.get(1).and_then(|v| v.to_number()).unwrap_or(0.0) as i32;
+                Ok(vec![LuaValue::Number(m * 2f64.powi(e))])
+            }
             "math.randomseed" => {
                 // Seed is ignored — we use deterministic random for Redis scripting
                 Ok(vec![LuaValue::Nil])
+            }
+            // ── OS library ───────────────────────────────────────────────
+            "os.clock" => {
+                // Returns CPU time in seconds (approximation using wall clock)
+                // Redis Lua provides this for basic timing
+                Ok(vec![LuaValue::Number(0.0)])
             }
             // ── String library ──────────────────────────────────────────
             "string.len" => {
@@ -2905,10 +3002,32 @@ impl<'a> LuaState<'a> {
                 }
                 Ok(vec![LuaValue::Nil])
             }
-            "table.getn" | "table.maxn" => {
+            "table.getn" => {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
                 if let LuaValue::Table(t) = &table {
                     Ok(vec![LuaValue::Number(t.len() as f64)])
+                } else {
+                    Ok(vec![LuaValue::Number(0.0)])
+                }
+            }
+            "table.maxn" => {
+                // Returns the largest positive numeric key in the table
+                let table = args.first().cloned().unwrap_or(LuaValue::Nil);
+                if let LuaValue::Table(t) = &table {
+                    let mut max_n: f64 = 0.0;
+                    // Check array part
+                    if !t.array.is_empty() {
+                        max_n = t.array.len() as f64;
+                    }
+                    // Check hash part for numeric keys
+                    for (k, _) in &t.hash {
+                        if let LuaValue::Number(n) = k {
+                            if *n > max_n {
+                                max_n = *n;
+                            }
+                        }
+                    }
+                    Ok(vec![LuaValue::Number(max_n)])
                 } else {
                     Ok(vec![LuaValue::Number(0.0)])
                 }

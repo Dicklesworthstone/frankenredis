@@ -2264,6 +2264,487 @@
         "kind": "integer",
         "value": 1024
       }
+    },
+    {
+      "name": "eval_math_log10_100",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return math.floor(math.log10(100))",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "eval_math_log10_1000",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return math.floor(math.log10(1000))",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
+    },
+    {
+      "name": "eval_math_modf_positive",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local i, f = math.modf(3.75)\nreturn i",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
+    },
+    {
+      "name": "eval_math_modf_fractional",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local i, f = math.modf(3.75)\nreturn math.floor(f * 100)",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 75
+      }
+    },
+    {
+      "name": "eval_math_modf_negative",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local i, f = math.modf(-2.5)\nreturn i",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": -2
+      }
+    },
+    {
+      "name": "eval_math_modf_whole",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local i, f = math.modf(7.0)\nreturn i",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 7
+      }
+    },
+    {
+      "name": "eval_math_frexp_basic",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local m, e = math.frexp(8)\nreturn e",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 4
+      }
+    },
+    {
+      "name": "eval_math_frexp_mantissa",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local m, e = math.frexp(8)\nreturn math.floor(m * 1000)",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 500
+      }
+    },
+    {
+      "name": "eval_math_frexp_zero",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local m, e = math.frexp(0)\nreturn m + e",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "eval_math_ldexp_basic",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return math.ldexp(0.5, 4)",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 8
+      }
+    },
+    {
+      "name": "eval_math_frexp_ldexp_roundtrip",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local m, e = math.frexp(42)\nreturn math.ldexp(m, e)",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 42
+      }
+    },
+    {
+      "name": "eval_os_clock_returns_number",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return type(os.clock())",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "number"
+      }
+    },
+    {
+      "name": "eval_os_clock_non_negative",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "if os.clock() >= 0 then return 1 else return 0 end",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "eval_redis_replicate_commands",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "redis.replicate_commands()\nreturn 'ok'",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "ok"
+      }
+    },
+    {
+      "name": "eval_redis_replicate_commands_returns_true",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local r = redis.replicate_commands()\nif r then return 1 else return 0 end",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "eval_redis_set_repl_no_error",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "redis.replicate_commands()\nredis.set_repl(redis.REPL_ALL)\nreturn 'ok'",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "ok"
+      }
+    },
+    {
+      "name": "eval_redis_repl_constants",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return redis.REPL_NONE + redis.REPL_SLAVE + redis.REPL_AOF + redis.REPL_ALL",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 6
+      }
+    },
+    {
+      "name": "eval_redis_breakpoint_no_error",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "redis.breakpoint()\nreturn 'ok'",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "ok"
+      }
+    },
+    {
+      "name": "eval_redis_debug_no_error",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "redis.debug('test message')\nreturn 'ok'",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "ok"
+      }
+    },
+    {
+      "name": "eval_math_log10_1",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return math.floor(math.log10(1))",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "eval_math_fmod_basic",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return math.fmod(10, 3)",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "eval_math_exp_zero",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return math.exp(0)",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "eval_math_log_e",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return math.floor(math.log(math.exp(1)) * 1000)",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1000
+      }
+    },
+    {
+      "name": "eval_table_getn",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return table.getn({10, 20, 30})",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
+    },
+    {
+      "name": "eval_table_maxn",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {}\nt[1] = 'a'\nt[5] = 'b'\nreturn table.maxn(t)",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 5
+      }
+    },
+    {
+      "name": "eval_math_huge",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "if math.huge > 999999999 then return 1 else return 0 end",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "eval_cjson_encode_table",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return cjson.encode({1, 2, 3})",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "[1,2,3]"
+      }
+    },
+    {
+      "name": "eval_cjson_decode_array",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = cjson.decode('[10,20,30]')\nreturn t[2]",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 20
+      }
+    },
+    {
+      "name": "eval_redis_sha1hex",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return redis.sha1hex('hello')",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"
+      }
+    },
+    {
+      "name": "eval_rawget_existing",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {x = 42}\nreturn rawget(t, 'x')",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 42
+      }
+    },
+    {
+      "name": "eval_rawlen_table",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return rawlen({10, 20, 30})",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
+    },
+    {
+      "name": "eval_ipairs_iteration",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local sum = 0\nfor i, v in ipairs({10, 20, 30}) do sum = sum + v end\nreturn sum",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 60
+      }
+    },
+    {
+      "name": "eval_next_table_traversal",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {x = 1}\nlocal k, v = next(t)\nif k then return 1 else return 0 end",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "eval_unpack_basic",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local a, b, c = unpack({10, 20, 30})\nreturn a + b + c",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 60
+      }
+    },
+    {
+      "name": "eval_assert_success",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return assert(42)",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 42
+      }
+    },
+    {
+      "name": "eval_math_tan_zero",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return math.floor(math.tan(0) * 1000)",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "eval_math_atan2_basic",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return math.floor(math.atan2(1, 1) * 1000)",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 785
+      }
     }
   ]
 }
