@@ -3347,96 +3347,156 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                     result.push('%');
                     continue;
                 }
-                // Parse format specifier
-                let mut spec = String::from('%');
-                // Flags
+                // Parse flags
+                let mut left_align = false;
+                let mut zero_pad = false;
+                let mut show_sign = false;
+                let mut space_sign = false;
+                let mut alt_form = false;
                 while let Some(&fc) = chars.peek() {
-                    if fc == '-' || fc == '+' || fc == ' ' || fc == '0' || fc == '#' {
-                        spec.push(fc);
-                        chars.next();
-                    } else {
-                        break;
+                    match fc {
+                        '-' => left_align = true,
+                        '0' => zero_pad = true,
+                        '+' => show_sign = true,
+                        ' ' => space_sign = true,
+                        '#' => alt_form = true,
+                        _ => break,
                     }
+                    chars.next();
                 }
                 // Width
+                let mut width: Option<usize> = None;
+                let mut w_str = String::new();
                 while let Some(&fc) = chars.peek() {
                     if fc.is_ascii_digit() {
-                        spec.push(fc);
+                        w_str.push(fc);
                         chars.next();
                     } else {
                         break;
                     }
                 }
+                if !w_str.is_empty() {
+                    width = w_str.parse().ok();
+                }
                 // Precision
+                let mut precision: Option<usize> = None;
                 if chars.peek() == Some(&'.') {
-                    spec.push('.');
                     chars.next();
+                    let mut p_str = String::new();
                     while let Some(&fc) = chars.peek() {
                         if fc.is_ascii_digit() {
-                            spec.push(fc);
+                            p_str.push(fc);
                             chars.next();
                         } else {
                             break;
                         }
                     }
+                    precision = Some(p_str.parse().unwrap_or(0));
                 }
                 // Conversion
                 if let Some(conv) = chars.next() {
                     let arg = args.get(arg_idx).cloned().unwrap_or(LuaValue::Nil);
                     arg_idx += 1;
-                    match conv {
-                        'd' | 'i' => {
+                    let formatted = match conv {
+                        'd' | 'i' | 'u' => {
                             let n = arg.to_number().unwrap_or(0.0) as i64;
-                            result.push_str(&format!("{n}"));
+                            let s = if show_sign && n >= 0 {
+                                format!("+{n}")
+                            } else if space_sign && n >= 0 {
+                                format!(" {n}")
+                            } else {
+                                format!("{n}")
+                            };
+                            lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
                         }
-                        'f' | 'g' | 'e' => {
+                        'f' => {
                             let n = arg.to_number().unwrap_or(0.0);
-                            match conv {
-                                'f' => result.push_str(&format!("{n:.6}")),
-                                'e' => result.push_str(&format!("{n:e}")),
-                                _ => result.push_str(&format!("{n}")),
-                            }
+                            let prec = precision.unwrap_or(6);
+                            let s = if show_sign && n >= 0.0 {
+                                format!("+{n:.prec$}")
+                            } else if space_sign && n >= 0.0 {
+                                format!(" {n:.prec$}")
+                            } else {
+                                format!("{n:.prec$}")
+                            };
+                            lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
+                        }
+                        'e' | 'E' => {
+                            let n = arg.to_number().unwrap_or(0.0);
+                            let prec = precision.unwrap_or(6);
+                            let s = lua_fmt_scientific(n, prec, conv == 'E');
+                            let s = if show_sign && n >= 0.0 {
+                                format!("+{s}")
+                            } else {
+                                s
+                            };
+                            lua_fmt_pad(&s, width, left_align, ' ')
+                        }
+                        'g' | 'G' => {
+                            let n = arg.to_number().unwrap_or(0.0);
+                            let prec = precision.unwrap_or(6).max(1);
+                            let s = lua_fmt_g(n, prec, conv == 'G');
+                            let s = if show_sign && n >= 0.0 {
+                                format!("+{s}")
+                            } else {
+                                s
+                            };
+                            lua_fmt_pad(&s, width, left_align, ' ')
                         }
                         's' => {
                             let s = arg.to_display_string();
-                            result.push_str(&String::from_utf8_lossy(&s));
+                            let mut s = String::from_utf8_lossy(&s).to_string();
+                            if let Some(prec) = precision {
+                                s.truncate(prec);
+                            }
+                            lua_fmt_pad(&s, width, left_align, ' ')
                         }
                         'q' => {
                             let s = arg.to_display_string();
-                            result.push('"');
+                            let mut q = String::new();
+                            q.push('"');
                             for &b in &s {
                                 match b {
-                                    b'\\' => result.push_str("\\\\"),
-                                    b'"' => result.push_str("\\\""),
-                                    b'\n' => result.push_str("\\n"),
-                                    b'\r' => result.push_str("\\r"),
-                                    b'\0' => result.push_str("\\0"),
-                                    _ => result.push(b as char),
+                                    b'\\' => q.push_str("\\\\"),
+                                    b'"' => q.push_str("\\\""),
+                                    b'\n' => q.push_str("\\n"),
+                                    b'\r' => q.push_str("\\r"),
+                                    b'\0' => q.push_str("\\0"),
+                                    _ => q.push(b as char),
                                 }
                             }
-                            result.push('"');
+                            q.push('"');
+                            q
                         }
                         'x' | 'X' => {
                             let n = arg.to_number().unwrap_or(0.0) as u64;
-                            if conv == 'x' {
-                                result.push_str(&format!("{n:x}"));
+                            let s = if conv == 'x' {
+                                if alt_form { format!("0x{n:x}") } else { format!("{n:x}") }
+                            } else if alt_form {
+                                format!("0X{n:X}")
                             } else {
-                                result.push_str(&format!("{n:X}"));
-                            }
+                                format!("{n:X}")
+                            };
+                            lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
                         }
                         'o' => {
                             let n = arg.to_number().unwrap_or(0.0) as u64;
-                            result.push_str(&format!("{n:o}"));
+                            let s = if alt_form {
+                                format!("0{n:o}")
+                            } else {
+                                format!("{n:o}")
+                            };
+                            lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
                         }
                         'c' => {
                             let n = arg.to_number().unwrap_or(0.0) as u8;
-                            result.push(n as char);
+                            String::from(n as char)
                         }
                         _ => {
-                            spec.push(conv);
-                            result.push_str(&spec);
+                            format!("%{conv}")
                         }
-                    }
+                    };
+                    result.push_str(&formatted);
                 }
             } else {
                 result.push(c);
@@ -3446,6 +3506,62 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
         }
     }
     Ok(result)
+}
+
+/// Pad a string to a given width, respecting left-align and pad character.
+fn lua_fmt_pad(s: &str, width: Option<usize>, left_align: bool, pad: char) -> String {
+    let w = match width {
+        Some(w) if w > s.len() => w,
+        _ => return s.to_string(),
+    };
+    let padding = w - s.len();
+    if left_align {
+        format!("{s}{}", " ".repeat(padding))
+    } else if pad == '0' && (s.starts_with('-') || s.starts_with('+') || s.starts_with(' ')) {
+        // Zero-pad after sign
+        let (sign, rest) = s.split_at(1);
+        format!("{sign}{}{rest}", "0".repeat(padding))
+    } else {
+        format!("{}{s}", std::iter::repeat(pad).take(padding).collect::<String>())
+    }
+}
+
+/// Format a number in scientific notation (%e/%E).
+fn lua_fmt_scientific(n: f64, prec: usize, upper: bool) -> String {
+    if n == 0.0 {
+        let e = if upper { 'E' } else { 'e' };
+        return format!("{:.prec$}{e}+00", 0.0);
+    }
+    let abs = n.abs();
+    let exp = abs.log10().floor() as i32;
+    let mantissa = n / 10f64.powi(exp);
+    let e = if upper { 'E' } else { 'e' };
+    let sign = if exp >= 0 { '+' } else { '-' };
+    format!("{mantissa:.prec$}{e}{sign}{:02}", exp.unsigned_abs())
+}
+
+/// Format using %g/%G: use %e if exponent < -4 or >= precision, else %f without trailing zeros.
+fn lua_fmt_g(n: f64, prec: usize, upper: bool) -> String {
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    let abs = n.abs();
+    let exp = abs.log10().floor() as i32;
+    if exp < -4 || exp >= prec as i32 {
+        let s = lua_fmt_scientific(n, prec.saturating_sub(1), upper);
+        s
+    } else {
+        let decimal_prec = (prec as i32 - 1 - exp).max(0) as usize;
+        let s = format!("{n:.decimal_prec$}");
+        // Remove trailing zeros after decimal point
+        if s.contains('.') {
+            let s = s.trim_end_matches('0');
+            let s = s.trim_end_matches('.');
+            s.to_string()
+        } else {
+            s
+        }
+    }
 }
 
 // ── cjson helpers ───────────────────────────────────────────────────────

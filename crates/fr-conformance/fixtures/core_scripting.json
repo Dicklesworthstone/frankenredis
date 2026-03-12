@@ -2004,6 +2004,136 @@
         "kind": "integer",
         "value": 3
       }
+    },
+    {
+      "name": "eval_string_format_width_string",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return string.format('%10s', 'hello')",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "     hello"
+      }
+    },
+    {
+      "name": "eval_string_format_left_align",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return string.format('%-10s', 'hello')",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "hello     "
+      }
+    },
+    {
+      "name": "eval_string_format_zero_pad",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return string.format('%05d', 42)",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "00042"
+      }
+    },
+    {
+      "name": "eval_string_format_precision_float",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return string.format('%.2f', 3.14159)",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "3.14"
+      }
+    },
+    {
+      "name": "eval_string_format_precision_string",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return string.format('%.3s', 'hello')",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "hel"
+      }
+    },
+    {
+      "name": "eval_string_format_hex",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return string.format('%x', 255)",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "ff"
+      }
+    },
+    {
+      "name": "eval_string_format_hex_upper",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return string.format('%X', 255)",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "FF"
+      }
+    },
+    {
+      "name": "eval_string_format_plus_sign",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return string.format('%+d', 42)",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "+42"
+      }
+    },
+    {
+      "name": "eval_string_format_multiple_args",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return string.format('%s=%d', 'age', 30)",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "age=30"
+      }
+    },
+    {
+      "name": "eval_string_format_width_int",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return string.format('%8d', 42)",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "      42"
+      }
     }
   ]
 }
