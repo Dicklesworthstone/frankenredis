@@ -1913,6 +1913,385 @@
         "kind": "bulk",
         "value": "intset"
       }
+    },
+    {
+      "name": "persist_nonexistent_key",
+      "now_ms": 200,
+      "argv": [
+        "PERSIST",
+        "nosuch_persist"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "persist_no_ttl_key_setup",
+      "now_ms": 200,
+      "argv": [
+        "SET",
+        "persist_nottl",
+        "val"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "persist_no_ttl_key",
+      "now_ms": 200,
+      "argv": [
+        "PERSIST",
+        "persist_nottl"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "rename_nonexistent",
+      "now_ms": 200,
+      "argv": [
+        "RENAME",
+        "nosuch_rename_src",
+        "nosuch_rename_dst"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
+    },
+    {
+      "name": "rename_same_key_setup",
+      "now_ms": 200,
+      "argv": [
+        "SET",
+        "rename_same",
+        "val"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "rename_same_key",
+      "now_ms": 200,
+      "argv": [
+        "RENAME",
+        "rename_same",
+        "rename_same"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "renamenx_nonexistent_src",
+      "now_ms": 200,
+      "argv": [
+        "RENAMENX",
+        "nosuch_rnx_src",
+        "nosuch_rnx_dst"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
+    },
+    {
+      "name": "touch_nonexistent",
+      "now_ms": 200,
+      "argv": [
+        "TOUCH",
+        "nosuch_touch1",
+        "nosuch_touch2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "touch_mixed_setup",
+      "now_ms": 200,
+      "argv": [
+        "SET",
+        "touch_exists",
+        "v"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "touch_mixed",
+      "now_ms": 200,
+      "argv": [
+        "TOUCH",
+        "touch_exists",
+        "nosuch_touch3"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "unlink_nonexistent",
+      "now_ms": 200,
+      "argv": [
+        "UNLINK",
+        "nosuch_unlink1",
+        "nosuch_unlink2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "exists_multi_setup1",
+      "now_ms": 200,
+      "argv": [
+        "SET",
+        "exi1",
+        "a"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "exists_multi_setup2",
+      "now_ms": 200,
+      "argv": [
+        "SET",
+        "exi2",
+        "b"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "exists_multi",
+      "now_ms": 200,
+      "argv": [
+        "EXISTS",
+        "exi1",
+        "exi2",
+        "nosuch_exi"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "exists_duplicate_key",
+      "now_ms": 200,
+      "argv": [
+        "EXISTS",
+        "exi1",
+        "exi1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "object_encoding_nonexistent",
+      "now_ms": 200,
+      "argv": [
+        "OBJECT",
+        "ENCODING",
+        "nosuch_obj"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
+    },
+    {
+      "name": "object_refcount_nonexistent",
+      "now_ms": 200,
+      "argv": [
+        "OBJECT",
+        "REFCOUNT",
+        "nosuch_obj"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
+    },
+    {
+      "name": "object_idletime_nonexistent",
+      "now_ms": 200,
+      "argv": [
+        "OBJECT",
+        "IDLETIME",
+        "nosuch_obj"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
+    },
+    {
+      "name": "object_freq_nonexistent",
+      "now_ms": 200,
+      "argv": [
+        "OBJECT",
+        "FREQ",
+        "nosuch_obj"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
+    },
+    {
+      "name": "object_unknown_subcmd",
+      "now_ms": 200,
+      "argv": [
+        "OBJECT",
+        "BLAH",
+        "key"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for OBJECT BLAH"
+      }
+    },
+    {
+      "name": "type_none",
+      "now_ms": 200,
+      "argv": [
+        "TYPE",
+        "nosuch_type"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "none"
+      }
+    },
+    {
+      "name": "del_multi_setup1",
+      "now_ms": 200,
+      "argv": [
+        "SET",
+        "delmulti1",
+        "a"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "del_multi_setup2",
+      "now_ms": 200,
+      "argv": [
+        "SET",
+        "delmulti2",
+        "b"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "del_multi",
+      "now_ms": 200,
+      "argv": [
+        "DEL",
+        "delmulti1",
+        "delmulti2",
+        "nosuch_del"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "rename_wrong_arity",
+      "now_ms": 200,
+      "argv": [
+        "RENAME",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'RENAME' command"
+      }
+    },
+    {
+      "name": "renamenx_wrong_arity",
+      "now_ms": 200,
+      "argv": [
+        "RENAMENX",
+        "k"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'RENAMENX' command"
+      }
+    },
+    {
+      "name": "type_wrong_arity",
+      "now_ms": 200,
+      "argv": [
+        "TYPE"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'TYPE' command"
+      }
+    },
+    {
+      "name": "persist_wrong_arity",
+      "now_ms": 200,
+      "argv": [
+        "PERSIST"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'PERSIST' command"
+      }
+    },
+    {
+      "name": "del_wrong_arity",
+      "now_ms": 200,
+      "argv": [
+        "DEL"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'DEL' command"
+      }
+    },
+    {
+      "name": "object_wrong_arity",
+      "now_ms": 200,
+      "argv": [
+        "OBJECT"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'OBJECT' command"
+      }
     }
   ]
 }
