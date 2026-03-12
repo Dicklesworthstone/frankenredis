@@ -90,6 +90,7 @@ pub fn dispatch_argv(
         Some(CommandId::Keys) => return keys(argv, store, now_ms),
         Some(CommandId::Dbsize) => return dbsize(argv, store, now_ms),
         Some(CommandId::Flushdb) => return flushdb(argv, store),
+        Some(CommandId::Flushall) => return flushall(argv, store),
         Some(CommandId::Hset) => return hset(argv, store, now_ms),
         Some(CommandId::Hget) => return hget(argv, store, now_ms),
         Some(CommandId::Hdel) => return hdel(argv, store, now_ms),
@@ -314,6 +315,7 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
             | CommandId::Rename
             | CommandId::Renamenx
             | CommandId::Flushdb
+            | CommandId::Flushall
             | CommandId::Hset
             | CommandId::Hdel
             | CommandId::Hmset
@@ -414,6 +416,7 @@ enum CommandId {
     Keys,
     Dbsize,
     Flushdb,
+    Flushall,
     Hset,
     Hget,
     Hdel,
@@ -946,7 +949,7 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
             } else if eq_ascii_command(cmd, b"RENAMENX") {
                 Some(CommandId::Renamenx)
             } else if eq_ascii_command(cmd, b"FLUSHALL") {
-                Some(CommandId::Flushdb)
+                Some(CommandId::Flushall)
             } else if eq_ascii_command(cmd, b"SMEMBERS") {
                 Some(CommandId::Smembers)
             } else if eq_ascii_command(cmd, b"ZREVRANK") {
@@ -1600,6 +1603,14 @@ fn dbsize(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 fn flushdb(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     if argv.len() > 2 {
         return Err(CommandError::WrongArity("FLUSHDB"));
+    }
+    store.flushdb();
+    Ok(RespFrame::SimpleString("OK".to_string()))
+}
+
+fn flushall(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
+    if argv.len() > 2 {
+        return Err(CommandError::WrongArity("FLUSHALL"));
     }
     store.flushdb();
     Ok(RespFrame::SimpleString("OK".to_string()))
@@ -6601,6 +6612,7 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("scan", -2, "readonly", 0, 0, 0),
     ("dbsize", 1, "readonly fast", 0, 0, 0),
     ("flushdb", -1, "write", 0, 0, 0),
+    ("flushall", -1, "write", 0, 0, 0),
     ("select", 2, "fast", 0, 0, 0),
     ("move", 3, "write fast", 1, 1, 1),
     ("copy", -3, "write", 1, 2, 1),
@@ -9382,8 +9394,11 @@ mod tests {
         if eq_ascii_command(cmd, b"DBSIZE") {
             return Some(CommandId::Dbsize);
         }
-        if eq_ascii_command(cmd, b"FLUSHDB") || eq_ascii_command(cmd, b"FLUSHALL") {
+        if eq_ascii_command(cmd, b"FLUSHDB") {
             return Some(CommandId::Flushdb);
+        }
+        if eq_ascii_command(cmd, b"FLUSHALL") {
+            return Some(CommandId::Flushall);
         }
         if eq_ascii_command(cmd, b"HSET") {
             return Some(CommandId::Hset);

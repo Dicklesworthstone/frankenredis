@@ -369,6 +369,21 @@
       "argv": ["DBSIZE"],
       "expect": { "kind": "integer", "value": 0 }
     },
+    {
+      "name": "flushall_wrong_arity",
+      "now_ms": 147,
+      "argv": ["FLUSHALL", "ASYNC", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'FLUSHALL' command"
+      }
+    },
+    {
+      "name": "flushall_sync_arg",
+      "now_ms": 148,
+      "argv": ["FLUSHALL", "SYNC"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
 
     {
       "name": "time_large_millis",

@@ -307,6 +307,369 @@
           { "kind": "integer", "value": 0 }
         ]
       }
+    },
+
+    {
+      "name": "subscribe_multiple_channels",
+      "now_ms": 0,
+      "argv": ["SUBSCRIBE", "alpha", "beta", "gamma"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "subscribe" },
+              { "kind": "bulk", "value": "alpha" },
+              { "kind": "integer", "value": 1 }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "subscribe" },
+              { "kind": "bulk", "value": "beta" },
+              { "kind": "integer", "value": 2 }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "subscribe" },
+              { "kind": "bulk", "value": "gamma" },
+              { "kind": "integer", "value": 3 }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "pubsub_channels_with_pattern_alpha",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "CHANNELS", "al*"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "alpha" }
+        ]
+      }
+    },
+    {
+      "name": "pubsub_channels_pattern_no_match",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "CHANNELS", "zz*"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "pubsub_numsub_no_args",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "NUMSUB"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "pubsub_numsub_multi",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "NUMSUB", "alpha", "beta", "nosuch"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "alpha" },
+          { "kind": "integer", "value": 1 },
+          { "kind": "bulk", "value": "beta" },
+          { "kind": "integer", "value": 1 },
+          { "kind": "bulk", "value": "nosuch" },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "publish_to_alpha_has_subscriber",
+      "now_ms": 0,
+      "argv": ["PUBLISH", "alpha", "msg1"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "publish_to_unsubscribed_channel",
+      "now_ms": 0,
+      "argv": ["PUBLISH", "delta", "msg2"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "psubscribe_multiple_patterns",
+      "now_ms": 0,
+      "argv": ["PSUBSCRIBE", "al*", "be*"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "psubscribe" },
+              { "kind": "bulk", "value": "al*" },
+              { "kind": "integer", "value": 4 }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "psubscribe" },
+              { "kind": "bulk", "value": "be*" },
+              { "kind": "integer", "value": 5 }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "pubsub_numpat_two",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "NUMPAT"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "publish_alpha_both_direct_and_pattern",
+      "now_ms": 0,
+      "argv": ["PUBLISH", "alpha", "msg3"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "publish_beta_both_direct_and_pattern",
+      "now_ms": 0,
+      "argv": ["PUBLISH", "beta", "msg4"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "unsubscribe_alpha",
+      "now_ms": 0,
+      "argv": ["UNSUBSCRIBE", "alpha"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "unsubscribe" },
+          { "kind": "bulk", "value": "alpha" },
+          { "kind": "integer", "value": 4 }
+        ]
+      }
+    },
+    {
+      "name": "publish_alpha_pattern_only",
+      "now_ms": 0,
+      "argv": ["PUBLISH", "alpha", "msg5"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "punsubscribe_be",
+      "now_ms": 0,
+      "argv": ["PUNSUBSCRIBE", "be*"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "punsubscribe" },
+          { "kind": "bulk", "value": "be*" },
+          { "kind": "integer", "value": 3 }
+        ]
+      }
+    },
+    {
+      "name": "punsubscribe_al",
+      "now_ms": 0,
+      "argv": ["PUNSUBSCRIBE", "al*"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "punsubscribe" },
+          { "kind": "bulk", "value": "al*" },
+          { "kind": "integer", "value": 2 }
+        ]
+      }
+    },
+    {
+      "name": "pubsub_numpat_after_punsubscribe",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "NUMPAT"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "unsubscribe_beta",
+      "now_ms": 0,
+      "argv": ["UNSUBSCRIBE", "beta"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "unsubscribe" },
+          { "kind": "bulk", "value": "beta" },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "unsubscribe_gamma",
+      "now_ms": 0,
+      "argv": ["UNSUBSCRIBE", "gamma"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "unsubscribe" },
+          { "kind": "bulk", "value": "gamma" },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "pubsub_channels_empty_after_cleanup",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "CHANNELS"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "subscribe_same_channel_twice",
+      "now_ms": 0,
+      "argv": ["SUBSCRIBE", "dup"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "subscribe" },
+          { "kind": "bulk", "value": "dup" },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "subscribe_same_channel_again",
+      "now_ms": 0,
+      "argv": ["SUBSCRIBE", "dup"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "subscribe" },
+          { "kind": "bulk", "value": "dup" },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "pubsub_numsub_dup_channel",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "NUMSUB", "dup"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "dup" },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "unsubscribe_dup",
+      "now_ms": 0,
+      "argv": ["UNSUBSCRIBE", "dup"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "unsubscribe" },
+          { "kind": "bulk", "value": "dup" },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "ssubscribe_wrong_arity",
+      "now_ms": 0,
+      "argv": ["SSUBSCRIBE"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SSUBSCRIBE' command"
+      }
+    },
+    {
+      "name": "spublish_wrong_arity_one_arg",
+      "now_ms": 0,
+      "argv": ["SPUBLISH", "ch"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'SPUBLISH' command"
+      }
+    },
+    {
+      "name": "ssubscribe_multiple_channels",
+      "now_ms": 0,
+      "argv": ["SSUBSCRIBE", "sch1", "sch2"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "ssubscribe" },
+          { "kind": "bulk", "value": "sch2" },
+          { "kind": "integer", "value": 2 }
+        ]
+      }
+    },
+    {
+      "name": "spublish_standalone_zero",
+      "now_ms": 0,
+      "argv": ["SPUBLISH", "sch1", "shardmsg"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "pubsub_shardchannels_standalone_empty",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "SHARDCHANNELS"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "pubsub_shardnumsub_standalone_zeros",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "SHARDNUMSUB", "sch1", "sch2", "nosuch"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "sch1" },
+          { "kind": "integer", "value": 0 },
+          { "kind": "bulk", "value": "sch2" },
+          { "kind": "integer", "value": 0 },
+          { "kind": "bulk", "value": "nosuch" },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "sunsubscribe_no_args_stub",
+      "now_ms": 0,
+      "argv": ["SUNSUBSCRIBE"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "sunsubscribe" },
+          { "kind": "bulk", "value": null },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "pubsub_help",
+      "now_ms": 0,
+      "argv": ["PUBSUB", "HELP"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "PUBSUB <subcommand> [<arg> [value] ...]. Subcommands are:" },
+          { "kind": "bulk", "value": "CHANNELS [<pattern>] - Return channels with active subscribers matching pattern." },
+          { "kind": "bulk", "value": "NUMSUB [<channel> ...] - Return subscriber counts for channels." },
+          { "kind": "bulk", "value": "NUMPAT - Return number of pattern subscriptions." },
+          { "kind": "bulk", "value": "HELP - Return subcommand help summary." }
+        ]
+      }
     }
   ]
 }

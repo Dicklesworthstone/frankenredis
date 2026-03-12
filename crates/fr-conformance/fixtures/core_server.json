@@ -104,7 +104,7 @@
       "name": "command_count_matches_table_size",
       "now_ms": 11000,
       "argv": ["COMMAND", "COUNT"],
-      "expect": { "kind": "integer", "value": 229 }
+      "expect": { "kind": "integer", "value": 230 }
     },
     {
       "name": "command_info_single_known_entry",
