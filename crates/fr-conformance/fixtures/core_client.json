@@ -365,6 +365,40 @@
       "now_ms": 100,
       "argv": ["CLIENT", "SETINFO", "LIB-NAME", "has space"],
       "expect": { "kind": "error", "value": "ERR lib-name can only contain characters that are allowed in CLIENT SETNAME" }
+    },
+    {
+      "name": "hello_setname_sets_client_name",
+      "now_ms": 110,
+      "argv": ["CLIENT", "SETNAME", "before_hello"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "hello_with_setname",
+      "now_ms": 110,
+      "argv": ["HELLO", "2", "SETNAME", "fromhello"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "server" },
+          { "kind": "bulk", "value": "frankenredis" },
+          { "kind": "bulk", "value": "version" },
+          { "kind": "bulk", "value": "0.1.0" },
+          { "kind": "bulk", "value": "proto" },
+          { "kind": "integer", "value": 2 }
+        ]
+      }
+    },
+    {
+      "name": "getname_after_hello_setname",
+      "now_ms": 110,
+      "argv": ["CLIENT", "GETNAME"],
+      "expect": { "kind": "bulk", "value": "fromhello" }
+    },
+    {
+      "name": "hello_setname_space_error",
+      "now_ms": 110,
+      "argv": ["HELLO", "2", "SETNAME", "has space"],
+      "expect": { "kind": "error", "value": "ERR Client names cannot contain spaces, newlines or special characters." }
     }
   ]
 }

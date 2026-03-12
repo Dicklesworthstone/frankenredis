@@ -1417,8 +1417,9 @@ impl Runtime {
     }
 
     fn handle_hello_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
-        if argv.len() < 2 {
-            return command_error_to_resp(CommandError::WrongArity("HELLO"));
+        // HELLO with no args: return server info using current protocol (Redis 7+)
+        if argv.len() == 1 {
+            return build_hello_response(2);
         }
 
         let protocol_version = match parse_i64_arg(&argv[1]) {
@@ -1448,6 +1449,23 @@ impl Runtime {
                     return command_error_to_resp(CommandError::SyntaxError);
                 };
                 auth_credentials = Some((username.as_slice(), password.as_slice()));
+                continue;
+            }
+            if option.eq_ignore_ascii_case("SETNAME") {
+                let Some(name) = options.next() else {
+                    return command_error_to_resp(CommandError::SyntaxError);
+                };
+                if name.contains(&b' ') {
+                    return RespFrame::Error(
+                        "ERR Client names cannot contain spaces, newlines or special characters."
+                            .to_string(),
+                    );
+                }
+                if name.is_empty() {
+                    self.client_name = None;
+                } else {
+                    self.client_name = Some(name.clone());
+                }
                 continue;
             }
             return command_error_to_resp(CommandError::SyntaxError);

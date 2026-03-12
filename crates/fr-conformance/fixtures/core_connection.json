@@ -272,12 +272,19 @@
       }
     },
     {
-      "name": "hello_wrong_arity",
+      "name": "hello_no_version_returns_info",
       "now_ms": 104,
       "argv": ["HELLO"],
       "expect": {
-        "kind": "error",
-        "value": "ERR wrong number of arguments for 'HELLO' command"
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "server" },
+          { "kind": "bulk", "value": "frankenredis" },
+          { "kind": "bulk", "value": "version" },
+          { "kind": "bulk", "value": "0.1.0" },
+          { "kind": "bulk", "value": "proto" },
+          { "kind": "integer", "value": 2 }
+        ]
       }
     },
 
