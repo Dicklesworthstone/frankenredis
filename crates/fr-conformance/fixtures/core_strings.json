@@ -1678,7 +1678,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR invalid expire time in 'set' command"
       }
     },
     {
@@ -2756,6 +2756,205 @@
       "expect": {
         "kind": "bulk",
         "value": "Hello"
+      }
+    },
+    {
+      "name": "set_ex_zero_rejects",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "zeroex",
+        "val",
+        "EX",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR invalid expire time in 'set' command"
+      }
+    },
+    {
+      "name": "set_px_zero_rejects",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "zeropx",
+        "val",
+        "PX",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR invalid expire time in 'set' command"
+      }
+    },
+    {
+      "name": "set_exat_zero_rejects",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "zeroexat",
+        "val",
+        "EXAT",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR invalid expire time in 'set' command"
+      }
+    },
+    {
+      "name": "set_pxat_zero_rejects",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "zeropxat",
+        "val",
+        "PXAT",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR invalid expire time in 'set' command"
+      }
+    },
+    {
+      "name": "set_ex_negative_rejects",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "negex",
+        "val",
+        "EX",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR invalid expire time in 'set' command"
+      }
+    },
+    {
+      "name": "set_px_negative_rejects",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "negpx",
+        "val",
+        "PX",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR invalid expire time in 'set' command"
+      }
+    },
+    {
+      "name": "set_ex_one_works",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "exone",
+        "val",
+        "EX",
+        "1"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "getex_setup_for_zero_test",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "getexzero",
+        "hello"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "getex_ex_zero_rejects",
+      "now_ms": 1000,
+      "argv": [
+        "GETEX",
+        "getexzero",
+        "EX",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR invalid expire time in 'getex' command"
+      }
+    },
+    {
+      "name": "getex_px_zero_rejects",
+      "now_ms": 1000,
+      "argv": [
+        "GETEX",
+        "getexzero",
+        "PX",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR invalid expire time in 'getex' command"
+      }
+    },
+    {
+      "name": "getex_exat_zero_rejects",
+      "now_ms": 1000,
+      "argv": [
+        "GETEX",
+        "getexzero",
+        "EXAT",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR invalid expire time in 'getex' command"
+      }
+    },
+    {
+      "name": "getex_pxat_zero_rejects",
+      "now_ms": 1000,
+      "argv": [
+        "GETEX",
+        "getexzero",
+        "PXAT",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR invalid expire time in 'getex' command"
+      }
+    },
+    {
+      "name": "getex_ex_one_works",
+      "now_ms": 1000,
+      "argv": [
+        "GETEX",
+        "getexzero",
+        "EX",
+        "1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "hello"
+      }
+    },
+    {
+      "name": "set_zero_expiry_cleanup",
+      "now_ms": 1000,
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
       }
     }
   ]

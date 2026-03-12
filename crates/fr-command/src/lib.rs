@@ -1186,7 +1186,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             let Some(ttl_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            expiry_mode = ExpiryMode::Px(parse_u64_arg(ttl_arg)?);
+            expiry_mode = ExpiryMode::Px(parse_set_expire_arg(ttl_arg)?);
         } else if option.eq_ignore_ascii_case("EX") {
             if !matches!(expiry_mode, ExpiryMode::None) {
                 return Err(CommandError::SyntaxError);
@@ -1194,7 +1194,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             let Some(seconds_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            expiry_mode = ExpiryMode::Ex(parse_u64_arg(seconds_arg)?);
+            expiry_mode = ExpiryMode::Ex(parse_set_expire_arg(seconds_arg)?);
         } else if option.eq_ignore_ascii_case("PXAT") {
             if !matches!(expiry_mode, ExpiryMode::None) {
                 return Err(CommandError::SyntaxError);
@@ -1202,7 +1202,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             let Some(ts_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            expiry_mode = ExpiryMode::Pxat(parse_u64_arg(ts_arg)?);
+            expiry_mode = ExpiryMode::Pxat(parse_set_expire_arg(ts_arg)?);
         } else if option.eq_ignore_ascii_case("EXAT") {
             if !matches!(expiry_mode, ExpiryMode::None) {
                 return Err(CommandError::SyntaxError);
@@ -1210,7 +1210,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             let Some(ts_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            expiry_mode = ExpiryMode::Exat(parse_u64_arg(ts_arg)?);
+            expiry_mode = ExpiryMode::Exat(parse_set_expire_arg(ts_arg)?);
         } else if option.eq_ignore_ascii_case("KEEPTTL") {
             if !matches!(expiry_mode, ExpiryMode::None) {
                 return Err(CommandError::SyntaxError);
@@ -5783,6 +5783,22 @@ fn parse_i64_arg(arg: &[u8]) -> Result<i64, CommandError> {
         .map_err(|_| CommandError::InvalidInteger)
 }
 
+/// Parse an expire time argument for SET/GETEX commands.
+/// Redis rejects 0 and negative values with a specific error message.
+fn parse_expire_time_arg(arg: &[u8], command: &str) -> Result<u64, CommandError> {
+    let val = parse_i64_arg(arg)?;
+    if val <= 0 {
+        return Err(CommandError::Custom(format!(
+            "ERR invalid expire time in '{command}' command"
+        )));
+    }
+    Ok(val as u64)
+}
+
+fn parse_set_expire_arg(arg: &[u8]) -> Result<u64, CommandError> {
+    parse_expire_time_arg(arg, "set")
+}
+
 fn parse_u64_arg(arg: &[u8]) -> Result<u64, CommandError> {
     let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
     text.parse::<u64>()
@@ -5932,37 +5948,25 @@ fn getex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             if argv.len() != 4 {
                 return Err(CommandError::SyntaxError);
             }
-            let secs = std::str::from_utf8(&argv[3])
-                .map_err(|_| CommandError::InvalidInteger)?
-                .parse::<u64>()
-                .map_err(|_| CommandError::InvalidInteger)?;
+            let secs = parse_expire_time_arg(&argv[3], "getex")?;
             Some(Some(now_ms.saturating_add(secs * 1000)))
         } else if opt.eq_ignore_ascii_case("PX") {
             if argv.len() != 4 {
                 return Err(CommandError::SyntaxError);
             }
-            let ms = std::str::from_utf8(&argv[3])
-                .map_err(|_| CommandError::InvalidInteger)?
-                .parse::<u64>()
-                .map_err(|_| CommandError::InvalidInteger)?;
+            let ms = parse_expire_time_arg(&argv[3], "getex")?;
             Some(Some(now_ms.saturating_add(ms)))
         } else if opt.eq_ignore_ascii_case("EXAT") {
             if argv.len() != 4 {
                 return Err(CommandError::SyntaxError);
             }
-            let ts = std::str::from_utf8(&argv[3])
-                .map_err(|_| CommandError::InvalidInteger)?
-                .parse::<u64>()
-                .map_err(|_| CommandError::InvalidInteger)?;
+            let ts = parse_expire_time_arg(&argv[3], "getex")?;
             Some(Some(ts * 1000))
         } else if opt.eq_ignore_ascii_case("PXAT") {
             if argv.len() != 4 {
                 return Err(CommandError::SyntaxError);
             }
-            let ts_ms = std::str::from_utf8(&argv[3])
-                .map_err(|_| CommandError::InvalidInteger)?
-                .parse::<u64>()
-                .map_err(|_| CommandError::InvalidInteger)?;
+            let ts_ms = parse_expire_time_arg(&argv[3], "getex")?;
             Some(Some(ts_ms))
         } else if opt.eq_ignore_ascii_case("PERSIST") {
             if argv.len() != 3 {

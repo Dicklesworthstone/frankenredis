@@ -16,7 +16,7 @@ fn smoke_report_is_stable() {
     assert!(Path::new(&fixture_path).exists());
 
     let diff = run_fixture(&cfg, "core_strings.json").expect("fixture runs");
-    assert_eq!(diff.total, diff.passed);
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
     assert!(diff.failed.is_empty());
 
     let errors = run_fixture(&cfg, "core_errors.json").expect("error fixture");

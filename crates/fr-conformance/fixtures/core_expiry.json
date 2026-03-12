@@ -1807,6 +1807,331 @@
         "kind": "integer",
         "value": 5500
       }
+    },
+    {
+      "name": "expire_zero_setup",
+      "now_ms": 1000,
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "expire_zero_set_key",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "ezdel",
+        "value"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "expire_zero_deletes_key",
+      "now_ms": 1000,
+      "argv": [
+        "EXPIRE",
+        "ezdel",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "expire_zero_key_gone",
+      "now_ms": 1000,
+      "argv": [
+        "EXISTS",
+        "ezdel"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "expire_negative_set_key",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "enegdel",
+        "value"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "expire_negative_deletes_key",
+      "now_ms": 1000,
+      "argv": [
+        "EXPIRE",
+        "enegdel",
+        "-1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "expire_negative_key_gone",
+      "now_ms": 1000,
+      "argv": [
+        "EXISTS",
+        "enegdel"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "pexpire_zero_set_key",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "pezdel",
+        "value"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "pexpire_zero_deletes_key",
+      "now_ms": 1000,
+      "argv": [
+        "PEXPIRE",
+        "pezdel",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pexpire_zero_key_gone",
+      "now_ms": 1000,
+      "argv": [
+        "EXISTS",
+        "pezdel"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "pexpire_negative_set_key",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "penegdel",
+        "value"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "pexpire_negative_deletes_key",
+      "now_ms": 1000,
+      "argv": [
+        "PEXPIRE",
+        "penegdel",
+        "-100"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pexpire_negative_key_gone",
+      "now_ms": 1000,
+      "argv": [
+        "EXISTS",
+        "penegdel"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "expireat_zero_set_key",
+      "now_ms": 1000000,
+      "argv": [
+        "SET",
+        "eatzero",
+        "value"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "expireat_zero_deletes_key",
+      "now_ms": 1000000,
+      "argv": [
+        "EXPIREAT",
+        "eatzero",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "expireat_zero_key_gone",
+      "now_ms": 1000000,
+      "argv": [
+        "EXISTS",
+        "eatzero"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "persist_no_ttl_setup",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "persistno",
+        "value"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "persist_no_ttl_returns_zero",
+      "now_ms": 1000,
+      "argv": [
+        "PERSIST",
+        "persistno"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "persist_with_ttl_setup",
+      "now_ms": 1000,
+      "argv": [
+        "SET",
+        "persistyes",
+        "value",
+        "EX",
+        "100"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "persist_with_ttl_returns_one",
+      "now_ms": 1000,
+      "argv": [
+        "PERSIST",
+        "persistyes"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "persist_ttl_removed",
+      "now_ms": 1000,
+      "argv": [
+        "TTL",
+        "persistyes"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": -1
+      }
+    },
+    {
+      "name": "persist_nonexistent_returns_zero",
+      "now_ms": 1000,
+      "argv": [
+        "PERSIST",
+        "nosuchkey999"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "ttl_nonexistent_returns_minus2",
+      "now_ms": 1000,
+      "argv": [
+        "TTL",
+        "nokey999"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": -2
+      }
+    },
+    {
+      "name": "pttl_nonexistent_returns_minus2",
+      "now_ms": 1000,
+      "argv": [
+        "PTTL",
+        "nokey999"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": -2
+      }
+    },
+    {
+      "name": "expire_nonexistent_returns_zero",
+      "now_ms": 1000,
+      "argv": [
+        "EXPIRE",
+        "nokey999",
+        "100"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "expire_edge_cleanup",
+      "now_ms": 1000,
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     }
   ]
 }
