@@ -2846,6 +2846,7 @@ fn command_error_to_resp(error: CommandError) -> RespFrame {
             }
             fr_store::StoreError::GenericError(msg) => RespFrame::Error(msg),
         },
+        CommandError::Custom(msg) => RespFrame::Error(msg),
     }
 }
 

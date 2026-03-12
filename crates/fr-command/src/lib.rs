@@ -22,6 +22,7 @@ pub enum CommandError {
     SyntaxError,
     NoSuchKey,
     Store(StoreError),
+    Custom(String),
 }
 
 impl From<StoreError> for CommandError {
@@ -8208,15 +8209,23 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
 
 #[allow(clippy::type_complexity)]
 fn parse_eval_args(argv: &[Vec<u8>]) -> Result<(usize, &[Vec<u8>], &[Vec<u8>]), CommandError> {
-    // Parse numkeys
+    // Parse numkeys — first try as i64 to detect negatives
     let numkeys_str =
         std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    let numkeys: usize = numkeys_str
+    let numkeys_i64: i64 = numkeys_str
         .parse()
         .map_err(|_| CommandError::InvalidInteger)?;
+    if numkeys_i64 < 0 {
+        return Err(CommandError::Custom(
+            "ERR Number of keys can't be negative".to_string(),
+        ));
+    }
+    let numkeys = numkeys_i64 as usize;
     let total_after = argv.len() - 3;
     if numkeys > total_after {
-        return Err(CommandError::InvalidInteger);
+        return Err(CommandError::Custom(
+            "ERR Number of keys can't be greater than number of args".to_string(),
+        ));
     }
     let keys = &argv[3..3 + numkeys];
     let args = &argv[3 + numkeys..];

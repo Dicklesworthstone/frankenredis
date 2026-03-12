@@ -1137,7 +1137,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Number of keys can't be negative"
       }
     },
     {
@@ -1163,7 +1163,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Number of keys can't be negative"
       }
     },
     {
@@ -1248,7 +1248,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Number of keys can't be greater than number of args"
       }
     },
     {
@@ -1261,7 +1261,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Number of keys can't be greater than number of args"
       }
     },
     {
