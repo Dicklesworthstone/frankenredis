@@ -3070,6 +3070,293 @@
         "kind": "simple",
         "value": "OK"
       }
+    },
+    {
+      "name": "mget_setup",
+      "now_ms": 100,
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "mget_setup_keys",
+      "now_ms": 100,
+      "argv": [
+        "MSET",
+        "mk1",
+        "v1",
+        "mk2",
+        "v2",
+        "mk3",
+        "v3"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "mget_all_exist",
+      "now_ms": 100,
+      "argv": [
+        "MGET",
+        "mk1",
+        "mk2",
+        "mk3"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "v1"
+          },
+          {
+            "kind": "bulk",
+            "value": "v2"
+          },
+          {
+            "kind": "bulk",
+            "value": "v3"
+          }
+        ]
+      }
+    },
+    {
+      "name": "mget_some_missing",
+      "now_ms": 100,
+      "argv": [
+        "MGET",
+        "mk1",
+        "nokey",
+        "mk3"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "v1"
+          },
+          {
+            "kind": "bulk",
+            "value": null
+          },
+          {
+            "kind": "bulk",
+            "value": "v3"
+          }
+        ]
+      }
+    },
+    {
+      "name": "mget_all_missing",
+      "now_ms": 100,
+      "argv": [
+        "MGET",
+        "nokey1",
+        "nokey2"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": null
+          },
+          {
+            "kind": "bulk",
+            "value": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "mget_single_key",
+      "now_ms": 100,
+      "argv": [
+        "MGET",
+        "mk1"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "v1"
+          }
+        ]
+      }
+    },
+    {
+      "name": "mset_overwrite",
+      "now_ms": 100,
+      "argv": [
+        "MSET",
+        "mk1",
+        "new1",
+        "mk2",
+        "new2"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "mset_verify",
+      "now_ms": 100,
+      "argv": [
+        "MGET",
+        "mk1",
+        "mk2"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "new1"
+          },
+          {
+            "kind": "bulk",
+            "value": "new2"
+          }
+        ]
+      }
+    },
+    {
+      "name": "mset_wrong_arity_odd",
+      "now_ms": 100,
+      "argv": [
+        "MSET",
+        "k1",
+        "v1",
+        "k2"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'MSET' command"
+      }
+    },
+    {
+      "name": "msetnx_all_new",
+      "now_ms": 100,
+      "argv": [
+        "MSETNX",
+        "mnx1",
+        "v1",
+        "mnx2",
+        "v2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "msetnx_one_exists",
+      "now_ms": 100,
+      "argv": [
+        "MSETNX",
+        "mnx1",
+        "new",
+        "mnx3",
+        "v3"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "msetnx_blocked_verify",
+      "now_ms": 100,
+      "argv": [
+        "MGET",
+        "mnx1",
+        "mnx3"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "v1"
+          },
+          {
+            "kind": "bulk",
+            "value": null
+          }
+        ]
+      }
+    },
+    {
+      "name": "incrbyfloat_format_integer_result",
+      "now_ms": 100,
+      "argv": [
+        "SET",
+        "ifmt",
+        "10.5"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "incrbyfloat_format_add_half",
+      "now_ms": 100,
+      "argv": [
+        "INCRBYFLOAT",
+        "ifmt",
+        "0.5"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "11"
+      }
+    },
+    {
+      "name": "incrbyfloat_format_small_decimal",
+      "now_ms": 100,
+      "argv": [
+        "SET",
+        "ifmt2",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "incrbyfloat_format_pi",
+      "now_ms": 100,
+      "argv": [
+        "INCRBYFLOAT",
+        "ifmt2",
+        "3.14159"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "3.14159"
+      }
+    },
+    {
+      "name": "mget_cleanup",
+      "now_ms": 100,
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     }
   ]
 }
