@@ -3654,6 +3654,187 @@
         "kind": "error",
         "value": "ERR wrong number of arguments for 'ZRANGESTORE' command"
       }
+    },
+    {
+      "name": "zmpop_setup_a",
+      "now_ms": 1000,
+      "argv": ["ZADD", "zmpop_a", "1", "one", "2", "two", "3", "three"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "zmpop_min_single",
+      "now_ms": 1000,
+      "argv": ["ZMPOP", "1", "zmpop_a", "MIN"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "zmpop_a" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "one" },
+              { "kind": "bulk", "value": "1" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "zmpop_max_single",
+      "now_ms": 1000,
+      "argv": ["ZMPOP", "1", "zmpop_a", "MAX"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "zmpop_a" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "three" },
+              { "kind": "bulk", "value": "3" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "zmpop_verify_remaining",
+      "now_ms": 1000,
+      "argv": ["ZCARD", "zmpop_a"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "zmpop_setup_b",
+      "now_ms": 1010,
+      "argv": ["ZADD", "zmpop_b", "10", "alpha", "20", "beta", "30", "gamma", "40", "delta"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "zmpop_min_count_2",
+      "now_ms": 1010,
+      "argv": ["ZMPOP", "1", "zmpop_b", "MIN", "COUNT", "2"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "zmpop_b" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "alpha" },
+              { "kind": "bulk", "value": "10" },
+              { "kind": "bulk", "value": "beta" },
+              { "kind": "bulk", "value": "20" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "zmpop_max_count_2",
+      "now_ms": 1010,
+      "argv": ["ZMPOP", "1", "zmpop_b", "MAX", "COUNT", "2"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "zmpop_b" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "delta" },
+              { "kind": "bulk", "value": "40" },
+              { "kind": "bulk", "value": "gamma" },
+              { "kind": "bulk", "value": "30" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "zmpop_verify_empty",
+      "now_ms": 1010,
+      "argv": ["ZCARD", "zmpop_b"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "zmpop_nonexistent_key",
+      "now_ms": 1020,
+      "argv": ["ZMPOP", "1", "nosuchzmpop", "MIN"],
+      "expect": { "kind": "null_array" }
+    },
+    {
+      "name": "zmpop_empty_set",
+      "now_ms": 1020,
+      "argv": ["ZMPOP", "1", "zmpop_b", "MIN"],
+      "expect": { "kind": "null_array" }
+    },
+    {
+      "name": "zmpop_multi_key_setup",
+      "now_ms": 1030,
+      "argv": ["ZADD", "zmpop_c", "5", "x", "10", "y"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "zmpop_multi_key_first_empty",
+      "now_ms": 1030,
+      "argv": ["ZMPOP", "2", "zmpop_b", "zmpop_c", "MIN"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "zmpop_c" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "x" },
+              { "kind": "bulk", "value": "5" }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "zmpop_zero_numkeys",
+      "now_ms": 1040,
+      "argv": ["ZMPOP", "0", "zmpop_c", "MIN"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR numkeys can't be non-positive value"
+      }
+    },
+    {
+      "name": "zmpop_wrong_arity",
+      "now_ms": 1040,
+      "argv": ["ZMPOP"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'ZMPOP' command"
+      }
+    },
+    {
+      "name": "zmpop_bad_direction",
+      "now_ms": 1040,
+      "argv": ["ZMPOP", "1", "zmpop_c", "MIDDLE"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "zmpop_count_exceeds_size",
+      "now_ms": 1050,
+      "argv": ["ZMPOP", "1", "zmpop_c", "MIN", "COUNT", "100"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "zmpop_c" },
+          {
+            "kind": "array",
+            "value": [
+              { "kind": "bulk", "value": "y" },
+              { "kind": "bulk", "value": "10" }
+            ]
+          }
+        ]
+      }
     }
   ]
 }

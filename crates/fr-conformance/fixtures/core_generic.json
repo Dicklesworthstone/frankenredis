@@ -2346,6 +2346,57 @@
           { "kind": "bulk", "value": "other_c" }
         ]
       }
+    },
+    {
+      "name": "dump_missing_key",
+      "now_ms": 900,
+      "argv": ["DUMP", "nosuchdumpkey"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "dump_wrong_arity_no_args",
+      "now_ms": 900,
+      "argv": ["DUMP"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'DUMP' command"
+      }
+    },
+    {
+      "name": "dump_wrong_arity_extra",
+      "now_ms": 900,
+      "argv": ["DUMP", "a", "b"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'DUMP' command"
+      }
+    },
+    {
+      "name": "restore_wrong_arity",
+      "now_ms": 900,
+      "argv": ["RESTORE", "key"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'RESTORE' command"
+      }
+    },
+    {
+      "name": "restore_invalid_payload",
+      "now_ms": 900,
+      "argv": ["RESTORE", "rkey", "0", "invalidpayload"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR DUMP payload version or checksum are wrong"
+      }
+    },
+    {
+      "name": "restore_invalid_payload_long",
+      "now_ms": 910,
+      "argv": ["RESTORE", "rkey2", "0", "thispayloadislongenoughtopassminimumlengthcheckbutfailscrc"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR DUMP payload version or checksum are wrong"
+      }
     }
   ]
 }
