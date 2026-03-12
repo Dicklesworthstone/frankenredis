@@ -4059,7 +4059,7 @@ fn xreadgroup_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     let key = String::from_utf8_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
-        "NOGROUP No such key '{key}' or consumer group '{group}' in XREADGROUP with GROUP option"
+        "NOGROUP No such consumer group '{group}' for key name '{key}'"
     ))
 }
 
@@ -4067,7 +4067,7 @@ fn xgroup_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     let key = String::from_utf8_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
-        "NOGROUP No such key '{key}' or consumer group '{group}' in XGROUP command"
+        "NOGROUP No such consumer group '{group}' for key name '{key}'"
     ))
 }
 
@@ -4075,7 +4075,7 @@ fn xclaim_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     let key = String::from_utf8_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
-        "NOGROUP No such key '{key}' or consumer group '{group}' in XCLAIM command"
+        "NOGROUP No such consumer group '{group}' for key name '{key}'"
     ))
 }
 
@@ -4083,7 +4083,7 @@ fn xautoclaim_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     let key = String::from_utf8_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
-        "NOGROUP No such key '{key}' or consumer group '{group}' in XAUTOCLAIM command"
+        "NOGROUP No such consumer group '{group}' for key name '{key}'"
     ))
 }
 
@@ -4091,7 +4091,7 @@ fn xpending_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     let key = String::from_utf8_lossy(key);
     let group = String::from_utf8_lossy(group);
     RespFrame::Error(format!(
-        "NOGROUP No such key '{key}' or consumer group '{group}' in XPENDING command"
+        "NOGROUP No such consumer group '{group}' for key name '{key}'"
     ))
 }
 
@@ -14499,7 +14499,7 @@ mod tests {
         assert_eq!(
             nogroup,
             RespFrame::Error(
-                "NOGROUP No such key 's' or consumer group 'g-missing' in XREADGROUP with GROUP option"
+                "NOGROUP No such consumer group 'g-missing' for key name 's'"
                     .to_string()
             )
         );
@@ -15030,7 +15030,7 @@ mod tests {
         assert_eq!(
             missing,
             RespFrame::Error(
-                "NOGROUP No such key 's' or consumer group 'g1' in XPENDING command".to_string()
+                "NOGROUP No such consumer group 'g1' for key name 's'".to_string()
             )
         );
     }
@@ -15314,7 +15314,7 @@ mod tests {
         assert_eq!(
             xclaim_missing,
             RespFrame::Error(
-                "NOGROUP No such key 's' or consumer group 'g1' in XCLAIM command".to_string()
+                "NOGROUP No such consumer group 'g1' for key name 's'".to_string()
             )
         );
 
@@ -15334,7 +15334,7 @@ mod tests {
         assert_eq!(
             xautoclaim_missing,
             RespFrame::Error(
-                "NOGROUP No such key 's' or consumer group 'g1' in XAUTOCLAIM command".to_string()
+                "NOGROUP No such consumer group 'g1' for key name 's'".to_string()
             )
         );
     }
@@ -16153,7 +16153,7 @@ mod tests {
         assert_eq!(
             nogroup,
             RespFrame::Error(
-                "NOGROUP No such key 's' or consumer group 'g1' in XGROUP command".to_string()
+                "NOGROUP No such consumer group 'g1' for key name 's'".to_string()
             )
         );
 
@@ -16374,7 +16374,7 @@ mod tests {
         assert_eq!(
             missing_key,
             RespFrame::Error(
-                "NOGROUP No such key 'missing' or consumer group 'g1' in XGROUP command"
+                "NOGROUP No such consumer group 'g1' for key name 'missing'"
                     .to_string()
             )
         );
@@ -16406,7 +16406,7 @@ mod tests {
         assert_eq!(
             missing_group,
             RespFrame::Error(
-                "NOGROUP No such key 's' or consumer group 'g1' in XGROUP command".to_string()
+                "NOGROUP No such consumer group 'g1' for key name 's'".to_string()
             )
         );
 

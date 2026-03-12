@@ -208,7 +208,7 @@
       "argv": ["SETBIT", "bm_err", "0", "2"],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR bit is not an integer or out of range"
       }
     },
     {
@@ -399,7 +399,7 @@
       "argv": ["SETBIT", "bm_err2", "-1", "1"],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR bit offset is not an integer or out of range"
       }
     },
     {
@@ -408,7 +408,7 @@
       "argv": ["GETBIT", "bm_err2", "-1"],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR bit offset is not an integer or out of range"
       }
     },
     {
@@ -417,7 +417,7 @@
       "argv": ["SETBIT", "bm_err3", "abc", "1"],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR bit offset is not an integer or out of range"
       }
     },
 

@@ -1755,7 +1755,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOGROUP No such key 'read1' or consumer group 'missing_group' in XGROUP command"
+        "value": "NOGROUP No such consumer group 'missing_group' for key name 'read1'"
       }
     },
     {
@@ -1798,7 +1798,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOGROUP No such key 'read1' or consumer group 'missing_group' in XGROUP command"
+        "value": "NOGROUP No such consumer group 'missing_group' for key name 'read1'"
       }
     },
     {
@@ -1813,7 +1813,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOGROUP No such key 'missing_stream' or consumer group 'g1' in XGROUP command"
+        "value": "NOGROUP No such consumer group 'g1' for key name 'missing_stream'"
       }
     },
     {
@@ -1828,7 +1828,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOGROUP No such key 'read1' or consumer group 'missing_group' in XGROUP command"
+        "value": "NOGROUP No such consumer group 'missing_group' for key name 'read1'"
       }
     },
     {
@@ -1843,7 +1843,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOGROUP No such key 'missing_stream' or consumer group 'g1' in XGROUP command"
+        "value": "NOGROUP No such consumer group 'g1' for key name 'missing_stream'"
       }
     },
     {
@@ -2582,7 +2582,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOGROUP No such key 'group_read_stream' or consumer group 'missing_group' in XREADGROUP with GROUP option"
+        "value": "NOGROUP No such consumer group 'missing_group' for key name 'group_read_stream'"
       }
     },
     {
@@ -3204,7 +3204,7 @@
       ],
       "expect": {
         "kind": "bulk",
-        "value": "5-1"
+        "value": "300-0"
       }
     },
     {
@@ -3227,8 +3227,8 @@
         "1-1"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR The ID specified in XSETID is not present in the target stream"
       }
     },
     {
@@ -4128,7 +4128,7 @@
         "value": [
           {
             "kind": "bulk",
-            "value": "2-1"
+            "value": "3-1"
           },
           {
             "kind": "array",
