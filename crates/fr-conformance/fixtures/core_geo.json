@@ -1599,6 +1599,48 @@
           }
         ]
       }
+    },
+    {
+      "name": "geosearch_both_center_error",
+      "now_ms": 100,
+      "argv": [
+        "GEOSEARCH",
+        "geo_order",
+        "FROMLONLAT",
+        "0",
+        "0",
+        "FROMMEMBER",
+        "a",
+        "BYRADIUS",
+        "100",
+        "km"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided"
+      }
+    },
+    {
+      "name": "geosearch_both_shape_error",
+      "now_ms": 100,
+      "argv": [
+        "GEOSEARCH",
+        "geo_order",
+        "FROMLONLAT",
+        "0",
+        "0",
+        "BYRADIUS",
+        "100",
+        "km",
+        "BYBOX",
+        "100",
+        "100",
+        "km"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR exactly one of BYRADIUS or BYBOX must be provided"
+      }
     }
   ]
 }

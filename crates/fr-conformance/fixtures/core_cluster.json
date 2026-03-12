@@ -632,6 +632,76 @@
         "kind": "integer",
         "value": 15332
       }
+    },
+    {
+      "name": "cluster_reset_invalid_arg",
+      "now_ms": 100,
+      "argv": [
+        "CLUSTER",
+        "RESET",
+        "INVALID"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "cluster_reset_wrong_arity_extra",
+      "now_ms": 100,
+      "argv": [
+        "CLUSTER",
+        "RESET",
+        "HARD",
+        "extra"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLUSTER' command"
+      }
+    },
+    {
+      "name": "cluster_keyslot_wrong_arity_extra",
+      "now_ms": 100,
+      "argv": [
+        "CLUSTER",
+        "KEYSLOT",
+        "foo",
+        "extra"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLUSTER' command"
+      }
+    },
+    {
+      "name": "cluster_countkeysinslot_wrong_arity_extra",
+      "now_ms": 100,
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT",
+        "0",
+        "extra"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLUSTER' command"
+      }
+    },
+    {
+      "name": "cluster_getkeysinslot_wrong_arity_extra",
+      "now_ms": 100,
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "0",
+        "10",
+        "extra"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'CLUSTER' command"
+      }
     }
   ]
 }

@@ -1263,6 +1263,46 @@
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
       }
+    },
+    {
+      "name": "function_flush_invalid_arg",
+      "now_ms": 100,
+      "argv": [
+        "FUNCTION",
+        "FLUSH",
+        "INVALID"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR FUNCTION FLUSH only supports ASYNC and SYNC options"
+      }
+    },
+    {
+      "name": "script_flush_invalid_arg",
+      "now_ms": 100,
+      "argv": [
+        "SCRIPT",
+        "FLUSH",
+        "INVALID"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR SCRIPT FLUSH only supports ASYNC and SYNC options"
+      }
+    },
+    {
+      "name": "function_delete_wrong_arity_extra",
+      "now_ms": 100,
+      "argv": [
+        "FUNCTION",
+        "DELETE",
+        "lib1",
+        "lib2"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'FUNCTION' command"
+      }
     }
   ]
 }

@@ -2882,14 +2882,22 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     let mut i = 2;
     let mut center_lon: Option<f64> = None;
     let mut center_lat: Option<f64> = None;
+    let mut has_center = false;
     let mut radius_m: Option<f64> = None;
     let mut box_width_m: Option<f64> = None;
     let mut box_height_m: Option<f64> = None;
+    let mut has_shape = false;
     let mut unit_mult = 1.0_f64;
 
     // Parse FROMMEMBER/FROMLONLAT and BYRADIUS/BYBOX
     while i < argv.len() {
         if eq_ascii_command(&argv[i], b"FROMMEMBER") {
+            if has_center {
+                return Ok(RespFrame::Error(
+                    "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
+                ));
+            }
+            has_center = true;
             i += 1;
             if i >= argv.len() {
                 return Err(CommandError::SyntaxError);
@@ -2907,6 +2915,12 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                 ));
             }
         } else if eq_ascii_command(&argv[i], b"FROMLONLAT") {
+            if has_center {
+                return Ok(RespFrame::Error(
+                    "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
+                ));
+            }
+            has_center = true;
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -2920,6 +2934,12 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             });
             i += 2;
         } else if eq_ascii_command(&argv[i], b"BYRADIUS") {
+            if has_shape {
+                return Ok(RespFrame::Error(
+                    "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
+                ));
+            }
+            has_shape = true;
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -2939,6 +2959,12 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             radius_m = Some(r * um);
             i += 2;
         } else if eq_ascii_command(&argv[i], b"BYBOX") {
+            if has_shape {
+                return Ok(RespFrame::Error(
+                    "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
+                ));
+            }
+            has_shape = true;
             if i + 3 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -3048,13 +3074,21 @@ fn geosearchstore(
     let mut i = 2;
     let mut center_lon: Option<f64> = None;
     let mut center_lat: Option<f64> = None;
+    let mut has_center = false;
     let mut radius_m: Option<f64> = None;
     let mut box_width_m: Option<f64> = None;
     let mut box_height_m: Option<f64> = None;
+    let mut has_shape = false;
     let mut unit_mult = 1.0_f64;
 
     while i < synth.len() {
         if eq_ascii_command(&synth[i], b"FROMMEMBER") {
+            if has_center {
+                return Ok(RespFrame::Error(
+                    "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
+                ));
+            }
+            has_center = true;
             i += 1;
             if i >= synth.len() {
                 return Err(CommandError::SyntaxError);
@@ -3072,6 +3106,12 @@ fn geosearchstore(
                 ));
             }
         } else if eq_ascii_command(&synth[i], b"FROMLONLAT") {
+            if has_center {
+                return Ok(RespFrame::Error(
+                    "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
+                ));
+            }
+            has_center = true;
             if i + 2 >= synth.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -3085,6 +3125,12 @@ fn geosearchstore(
             });
             i += 2;
         } else if eq_ascii_command(&synth[i], b"BYRADIUS") {
+            if has_shape {
+                return Ok(RespFrame::Error(
+                    "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
+                ));
+            }
+            has_shape = true;
             if i + 2 >= synth.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -3104,6 +3150,12 @@ fn geosearchstore(
             radius_m = Some(r * um);
             i += 2;
         } else if eq_ascii_command(&synth[i], b"BYBOX") {
+            if has_shape {
+                return Ok(RespFrame::Error(
+                    "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
+                ));
+            }
+            has_shape = true;
             if i + 3 >= synth.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -4394,15 +4446,24 @@ fn cluster_cmd(
     } else if sub.eq_ignore_ascii_case("NODES") {
         Ok(RespFrame::BulkString(Some(Vec::new())))
     } else if sub.eq_ignore_ascii_case("RESET") {
+        if argv.len() > 3 {
+            return Err(CommandError::WrongArity("CLUSTER"));
+        }
+        if argv.len() == 3 {
+            let mode = std::str::from_utf8(&argv[2]).unwrap_or("");
+            if !mode.eq_ignore_ascii_case("HARD") && !mode.eq_ignore_ascii_case("SOFT") {
+                return Err(CommandError::SyntaxError);
+            }
+        }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("KEYSLOT") {
-        if argv.len() < 3 {
+        if argv.len() != 3 {
             return Err(CommandError::WrongArity("CLUSTER"));
         }
         let slot = crc16_slot(&argv[2]);
         Ok(RespFrame::Integer(slot as i64))
     } else if sub.eq_ignore_ascii_case("GETKEYSINSLOT") {
-        if argv.len() < 4 {
+        if argv.len() != 4 {
             return Err(CommandError::WrongArity("CLUSTER"));
         }
         let slot: u16 = parse_i64_arg(&argv[2]).map(|v| v.clamp(0, 16383) as u16)?;
@@ -4414,7 +4475,7 @@ fn cluster_cmd(
             .collect();
         Ok(RespFrame::Array(Some(frames)))
     } else if sub.eq_ignore_ascii_case("COUNTKEYSINSLOT") {
-        if argv.len() < 3 {
+        if argv.len() != 3 {
             return Err(CommandError::WrongArity("CLUSTER"));
         }
         let slot: u16 = parse_i64_arg(&argv[2]).map(|v| v.clamp(0, 16383) as u16)?;
@@ -4750,10 +4811,21 @@ fn function_cmd(
             Err(e) => Err(CommandError::Store(e)),
         }
     } else if sub.eq_ignore_ascii_case("FLUSH") {
+        if argv.len() > 3 {
+            return Err(CommandError::WrongArity("FUNCTION"));
+        }
+        if argv.len() == 3 {
+            let mode = std::str::from_utf8(&argv[2]).unwrap_or("");
+            if !mode.eq_ignore_ascii_case("ASYNC") && !mode.eq_ignore_ascii_case("SYNC") {
+                return Ok(RespFrame::Error(
+                    "ERR FUNCTION FLUSH only supports ASYNC and SYNC options".to_string(),
+                ));
+            }
+        }
         store.function_flush();
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("DELETE") {
-        if argv.len() < 3 {
+        if argv.len() != 3 {
             return Err(CommandError::WrongArity("FUNCTION"));
         }
         let name = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -8224,6 +8296,17 @@ fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             .collect();
         Ok(RespFrame::Array(Some(results)))
     } else if sub.eq_ignore_ascii_case("FLUSH") {
+        if argv.len() > 3 {
+            return Err(CommandError::WrongArity("SCRIPT"));
+        }
+        if argv.len() == 3 {
+            let mode = std::str::from_utf8(&argv[2]).unwrap_or("");
+            if !mode.eq_ignore_ascii_case("ASYNC") && !mode.eq_ignore_ascii_case("SYNC") {
+                return Ok(RespFrame::Error(
+                    "ERR SCRIPT FLUSH only supports ASYNC and SYNC options".to_string(),
+                ));
+            }
+        }
         store.script_flush();
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("KILL") {
