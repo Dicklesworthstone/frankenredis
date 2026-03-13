@@ -273,8 +273,8 @@ pub fn dispatch_argv(
         Some(CommandId::Function) => return function_cmd(argv, store, now_ms),
         Some(CommandId::Fcall) => return fcall_cmd(argv, store, now_ms),
         Some(CommandId::FcallRo) => return fcall_cmd(argv, store, now_ms),
-        Some(CommandId::Ssubscribe) => return ssubscribe_cmd(argv),
-        Some(CommandId::Sunsubscribe) => return sunsubscribe_cmd(argv),
+        Some(CommandId::Ssubscribe) => return ssubscribe_cmd(argv, store),
+        Some(CommandId::Sunsubscribe) => return sunsubscribe_cmd(argv, store),
         Some(CommandId::Spublish) => return spublish_cmd(argv),
         Some(CommandId::SortRo) => return sort_ro_cmd(argv, store, now_ms),
         Some(CommandId::Readonly) => return readonly_cmd(argv),
@@ -5036,27 +5036,73 @@ fn transform_register_function(line: &str) -> Option<String> {
 
 // ── SSUBSCRIBE / SUNSUBSCRIBE / SPUBLISH (shard Pub/Sub) ───────────
 
-fn ssubscribe_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn ssubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     // SSUBSCRIBE shardchannel [shardchannel ...]
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SSUBSCRIBE"));
     }
-    let last = &argv[argv.len() - 1];
-    Ok(RespFrame::Array(Some(vec![
-        RespFrame::BulkString(Some(b"ssubscribe".to_vec())),
-        RespFrame::BulkString(Some(last.clone())),
-        RespFrame::Integer((argv.len() - 1) as i64),
-    ])))
+    if argv.len() == 2 {
+        let count = store.ssubscribe(argv[1].clone()) as i64;
+        return Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"ssubscribe".to_vec())),
+            RespFrame::BulkString(Some(argv[1].clone())),
+            RespFrame::Integer(count),
+        ])));
+    }
+    let mut replies = Vec::with_capacity(argv.len() - 1);
+    for channel in &argv[1..] {
+        let count = store.ssubscribe(channel.clone()) as i64;
+        replies.push(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"ssubscribe".to_vec())),
+            RespFrame::BulkString(Some(channel.clone())),
+            RespFrame::Integer(count),
+        ])));
+    }
+    Ok(RespFrame::Array(Some(replies)))
 }
 
-fn sunsubscribe_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn sunsubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     // SUNSUBSCRIBE [shardchannel ...]
-    let count = if argv.len() > 1 { argv.len() - 1 } else { 0 };
-    Ok(RespFrame::Array(Some(vec![
-        RespFrame::BulkString(Some(b"sunsubscribe".to_vec())),
-        RespFrame::BulkString(None),
-        RespFrame::Integer(count as i64),
-    ])))
+    if argv.len() < 2 {
+        // Unsubscribe from all shard channels (sorted for deterministic order)
+        let mut channels: Vec<Vec<u8>> = store.subscribed_shard_channels.iter().cloned().collect();
+        channels.sort();
+        if channels.is_empty() {
+            return Ok(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"sunsubscribe".to_vec())),
+                RespFrame::BulkString(None),
+                RespFrame::Integer(0),
+            ])));
+        }
+        let mut replies = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let count = store.sunsubscribe(&channel) as i64;
+            replies.push(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"sunsubscribe".to_vec())),
+                RespFrame::BulkString(Some(channel)),
+                RespFrame::Integer(count),
+            ])));
+        }
+        return Ok(RespFrame::Array(Some(replies)));
+    }
+    if argv.len() == 2 {
+        let count = store.sunsubscribe(&argv[1]) as i64;
+        return Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"sunsubscribe".to_vec())),
+            RespFrame::BulkString(Some(argv[1].clone())),
+            RespFrame::Integer(count),
+        ])));
+    }
+    let mut replies = Vec::with_capacity(argv.len() - 1);
+    for channel in &argv[1..] {
+        let count = store.sunsubscribe(channel) as i64;
+        replies.push(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"sunsubscribe".to_vec())),
+            RespFrame::BulkString(Some(channel.clone())),
+            RespFrame::Integer(count),
+        ])));
+    }
+    Ok(RespFrame::Array(Some(replies)))
 }
 
 fn spublish_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
@@ -8048,13 +8094,26 @@ fn pubsub_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
     } else if sub.eq_ignore_ascii_case("NUMPAT") {
         Ok(RespFrame::Integer(store.pubsub_numpat() as i64))
     } else if sub.eq_ignore_ascii_case("SHARDCHANNELS") {
-        // Shard channels not tracked in standalone mode
-        Ok(RespFrame::Array(Some(Vec::new())))
+        let mut channels: Vec<Vec<u8>> =
+            store.subscribed_shard_channels.iter().cloned().collect();
+        if argv.len() > 2 {
+            let pattern = &argv[2];
+            channels.retain(|ch| glob_match(pattern, ch));
+        }
+        channels.sort();
+        Ok(RespFrame::Array(Some(
+            channels
+                .into_iter()
+                .map(|ch| RespFrame::BulkString(Some(ch)))
+                .collect(),
+        )))
     } else if sub.eq_ignore_ascii_case("SHARDNUMSUB") {
         let mut result = Vec::new();
         for ch in &argv[2..] {
             result.push(RespFrame::BulkString(Some(ch.clone())));
-            result.push(RespFrame::Integer(0));
+            let count =
+                if store.subscribed_shard_channels.contains(ch.as_slice()) { 1i64 } else { 0 };
+            result.push(RespFrame::Integer(count));
         }
         Ok(RespFrame::Array(Some(result)))
     } else if sub.eq_ignore_ascii_case("HELP") {

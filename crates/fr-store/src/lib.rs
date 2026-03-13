@@ -303,6 +303,8 @@ pub struct Store {
     pub subscribed_channels: HashSet<Vec<u8>>,
     /// Pub/Sub: patterns this client is subscribed to.
     pub subscribed_patterns: HashSet<Vec<u8>>,
+    /// Pub/Sub: shard channels this client is subscribed to (Redis 7.0+).
+    pub subscribed_shard_channels: HashSet<Vec<u8>>,
     /// Pub/Sub: pending messages for delivery.
     pub pubsub_pending: Vec<PubSubMessage>,
     /// Function libraries: library_name → FunctionLibrary.
@@ -5535,6 +5537,18 @@ impl Store {
     /// Return the number of pattern subscriptions.
     pub fn pubsub_numpat(&self) -> usize {
         self.subscribed_patterns.len()
+    }
+
+    /// Subscribe to a shard channel. Returns the total shard subscription count.
+    pub fn ssubscribe(&mut self, channel: Vec<u8>) -> usize {
+        self.subscribed_shard_channels.insert(channel);
+        self.subscribed_shard_channels.len()
+    }
+
+    /// Unsubscribe from a shard channel. Returns the total shard subscription count.
+    pub fn sunsubscribe(&mut self, channel: &[u8]) -> usize {
+        self.subscribed_shard_channels.remove(channel);
+        self.subscribed_shard_channels.len()
     }
 
     /// Return all subscribed channel names.
