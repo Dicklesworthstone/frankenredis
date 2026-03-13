@@ -3332,6 +3332,17 @@ fn parse_stream_id(arg: &[u8]) -> Result<StreamId, RespFrame> {
     Ok((ms, seq))
 }
 
+/// Parse a partial auto-ID like "1000-*" → Some(1000).
+/// Returns None if the format doesn't match "ms-*".
+fn parse_partial_auto_id(arg: &[u8]) -> Option<u64> {
+    let text = std::str::from_utf8(arg).ok()?;
+    let (ms_str, seq_str) = text.split_once('-')?;
+    if seq_str != "*" {
+        return None;
+    }
+    ms_str.parse::<u64>().ok()
+}
+
 #[inline]
 fn format_stream_id(id: StreamId) -> Vec<u8> {
     format!("{}-{}", id.0, id.1).into_bytes()
@@ -3483,6 +3494,24 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     let last_id = store.xlast_id(&argv[1], now_ms)?;
     let id = if eq_ascii_command(&argv[id_idx], b"*") {
         next_auto_stream_id(last_id, now_ms)
+    } else if let Some(partial_ms) = parse_partial_auto_id(&argv[id_idx]) {
+        // "ms-*" format: explicit timestamp, auto-generate sequence
+        let seq = match last_id {
+            Some((last_ms, last_seq)) if partial_ms == last_ms => last_seq.saturating_add(1),
+            Some((last_ms, _)) if partial_ms < last_ms => {
+                return Ok(RespFrame::Error(
+                    "ERR The ID specified in XADD is equal or smaller than the target stream top item"
+                        .to_string(),
+                ));
+            }
+            _ => 0,
+        };
+        let id = (partial_ms, seq);
+        if id == (0, 0) {
+            (0, 1) // minimum allowed ID
+        } else {
+            id
+        }
     } else {
         let id = match parse_stream_id(&argv[id_idx]) {
             Ok(id) => id,

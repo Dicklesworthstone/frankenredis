@@ -4826,6 +4826,64 @@
 
 
     {
+      "name": "xadd_partial_auto_id_flush",
+      "now_ms": 94000,
+      "argv": ["FLUSHDB"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xadd_partial_auto_first_entry",
+      "now_ms": 94000,
+      "argv": ["XADD", "pstream", "5000-*", "k", "v1"],
+      "expect": { "kind": "bulk", "value": "5000-0" }
+    },
+    {
+      "name": "xadd_partial_auto_same_ms_increments_seq",
+      "now_ms": 94000,
+      "argv": ["XADD", "pstream", "5000-*", "k", "v2"],
+      "expect": { "kind": "bulk", "value": "5000-1" }
+    },
+    {
+      "name": "xadd_partial_auto_same_ms_increments_again",
+      "now_ms": 94000,
+      "argv": ["XADD", "pstream", "5000-*", "k", "v3"],
+      "expect": { "kind": "bulk", "value": "5000-2" }
+    },
+    {
+      "name": "xadd_partial_auto_new_ms_resets_seq",
+      "now_ms": 94000,
+      "argv": ["XADD", "pstream", "6000-*", "k", "v4"],
+      "expect": { "kind": "bulk", "value": "6000-0" }
+    },
+    {
+      "name": "xadd_partial_auto_verify_length",
+      "now_ms": 94000,
+      "argv": ["XLEN", "pstream"],
+      "expect": { "kind": "integer", "value": 4 }
+    },
+    {
+      "name": "xadd_partial_auto_lower_ms_rejected",
+      "now_ms": 94000,
+      "argv": ["XADD", "pstream", "4000-*", "k", "v5"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR The ID specified in XADD is equal or smaller than the target stream top item"
+      }
+    },
+    {
+      "name": "xadd_partial_auto_with_maxlen",
+      "now_ms": 94000,
+      "argv": ["XADD", "pstream", "MAXLEN", "2", "7000-*", "k", "v6"],
+      "expect": { "kind": "bulk", "value": "7000-0" }
+    },
+    {
+      "name": "xadd_partial_auto_maxlen_verify",
+      "now_ms": 94000,
+      "argv": ["XLEN", "pstream"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+
+    {
       "name": "xtrim_minid_flush",
       "now_ms": 93000,
       "argv": ["FLUSHDB"],
