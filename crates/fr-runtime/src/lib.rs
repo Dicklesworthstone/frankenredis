@@ -28,8 +28,8 @@ use fr_persist::{
 use fr_protocol::{RespFrame, RespParseError, parse_frame};
 use fr_repl::{ReplOffset, WaitAofThreshold, WaitThreshold, evaluate_wait, evaluate_waitaof};
 use fr_store::{
-    EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState, Store,
-    glob_match,
+    EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState,
+    MaxmemoryPolicy, Store, glob_match,
 };
 
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1898,34 +1898,62 @@ impl Runtime {
         }
         // Dynamic encoding thresholds — live values from Store
         let encoding_params: &[(&str, usize)] = &[
-            ("hash-max-listpack-entries", self.store.hash_max_listpack_entries),
-            ("hash-max-listpack-value", self.store.hash_max_listpack_value),
+            (
+                "hash-max-listpack-entries",
+                self.store.hash_max_listpack_entries,
+            ),
+            (
+                "hash-max-listpack-value",
+                self.store.hash_max_listpack_value,
+            ),
             ("set-max-intset-entries", self.store.set_max_intset_entries),
-            ("set-max-listpack-entries", self.store.set_max_listpack_entries),
-            ("zset-max-listpack-entries", self.store.zset_max_listpack_entries),
-            ("zset-max-listpack-value", self.store.zset_max_listpack_value),
+            (
+                "set-max-listpack-entries",
+                self.store.set_max_listpack_entries,
+            ),
+            (
+                "zset-max-listpack-entries",
+                self.store.zset_max_listpack_entries,
+            ),
+            (
+                "zset-max-listpack-value",
+                self.store.zset_max_listpack_value,
+            ),
         ];
         for &(name, value) in encoding_params {
             if Self::config_pattern_matches(pattern, name) {
                 entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
-                entries.push(RespFrame::BulkString(Some(
-                    value.to_string().into_bytes(),
-                )));
+                entries.push(RespFrame::BulkString(Some(value.to_string().into_bytes())));
             }
+        }
+        // Dynamic maxmemory-policy — live value from Store
+        if Self::config_pattern_matches(pattern, "maxmemory-policy") {
+            entries.push(RespFrame::BulkString(Some(b"maxmemory-policy".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.store
+                    .maxmemory_policy
+                    .as_config_str()
+                    .as_bytes()
+                    .to_vec(),
+            )));
         }
         // Also emit ziplist aliases from Store (they alias the same live values).
         let ziplist_aliases: &[(&str, usize)] = &[
-            ("hash-max-ziplist-entries", self.store.hash_max_listpack_entries),
+            (
+                "hash-max-ziplist-entries",
+                self.store.hash_max_listpack_entries,
+            ),
             ("hash-max-ziplist-value", self.store.hash_max_listpack_value),
-            ("zset-max-ziplist-entries", self.store.zset_max_listpack_entries),
+            (
+                "zset-max-ziplist-entries",
+                self.store.zset_max_listpack_entries,
+            ),
             ("zset-max-ziplist-value", self.store.zset_max_listpack_value),
         ];
         for &(name, value) in ziplist_aliases {
             if Self::config_pattern_matches(pattern, name) {
                 entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
-                entries.push(RespFrame::BulkString(Some(
-                    value.to_string().into_bytes(),
-                )));
+                entries.push(RespFrame::BulkString(Some(value.to_string().into_bytes())));
             }
         }
         // Static configuration parameters that clients commonly probe.
@@ -1933,6 +1961,7 @@ impl Runtime {
         for &(name, default_value) in CONFIG_STATIC_PARAMS {
             // Skip dynamically-managed params — we already emitted live values above
             if name == "maxmemory"
+                || name == "maxmemory-policy"
                 || name == "slowlog-log-slower-than"
                 || name == "slowlog-max-len"
                 || name == "hz"
@@ -1969,9 +1998,12 @@ impl Runtime {
         let mut next_requirepass: Option<Option<Vec<u8>>> = None;
         let mut next_acllog_max_len = self.acllog_max_len;
         let mut next_maxmemory: Option<usize> = None;
+        let mut next_maxmemory_policy: Option<MaxmemoryPolicy> = None;
         let mut next_slowlog_slower_than: Option<i64> = None;
         let mut next_slowlog_max_len: Option<usize> = None;
+        let mut next_hz: Option<u64> = None;
         let mut encoding_threshold_updates: Vec<(&str, usize)> = Vec::new();
+        let mut static_override_updates: Vec<(String, String)> = Vec::new();
 
         for pair in argv[2..].chunks_exact(2) {
             let parameter = match std::str::from_utf8(&pair[0]) {
@@ -2013,6 +2045,23 @@ impl Runtime {
                 next_maxmemory = Some(parsed);
                 continue;
             }
+            if parameter.eq_ignore_ascii_case("maxmemory-policy") {
+                let value_str = match std::str::from_utf8(&pair[1]) {
+                    Ok(value) => value,
+                    Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+                };
+                match MaxmemoryPolicy::from_config_str(value_str) {
+                    Some(policy) => {
+                        next_maxmemory_policy = Some(policy);
+                    }
+                    None => {
+                        return RespFrame::Error(format!(
+                            "ERR Invalid argument '{value_str}' for CONFIG SET 'maxmemory-policy'"
+                        ));
+                    }
+                }
+                continue;
+            }
             if parameter.eq_ignore_ascii_case("slowlog-log-slower-than") {
                 let parsed = match parse_i64_arg(&pair[1]) {
                     Ok(value) => value,
@@ -2044,7 +2093,7 @@ impl Runtime {
                     }
                     Err(err) => return command_error_to_resp(err),
                 };
-                self.hz = parsed;
+                next_hz = Some(parsed);
                 continue;
             }
             // Encoding threshold parameters — update Store fields for live effect.
@@ -2069,27 +2118,27 @@ impl Runtime {
                     }
                 };
                 // Normalize ziplist aliases to their listpack equivalents.
-                let canonical: &'static str =
-                    if parameter.eq_ignore_ascii_case("hash-max-listpack-entries")
-                        || parameter.eq_ignore_ascii_case("hash-max-ziplist-entries")
-                    {
-                        "hash-max-listpack-entries"
-                    } else if parameter.eq_ignore_ascii_case("hash-max-listpack-value")
-                        || parameter.eq_ignore_ascii_case("hash-max-ziplist-value")
-                    {
-                        "hash-max-listpack-value"
-                    } else if parameter.eq_ignore_ascii_case("set-max-intset-entries") {
-                        "set-max-intset-entries"
-                    } else if parameter.eq_ignore_ascii_case("set-max-listpack-entries") {
-                        "set-max-listpack-entries"
-                    } else if parameter.eq_ignore_ascii_case("zset-max-listpack-entries")
-                        || parameter.eq_ignore_ascii_case("zset-max-ziplist-entries")
-                    {
-                        "zset-max-listpack-entries"
-                    } else {
-                        // zset-max-listpack-value or zset-max-ziplist-value
-                        "zset-max-listpack-value"
-                    };
+                let canonical: &'static str = if parameter
+                    .eq_ignore_ascii_case("hash-max-listpack-entries")
+                    || parameter.eq_ignore_ascii_case("hash-max-ziplist-entries")
+                {
+                    "hash-max-listpack-entries"
+                } else if parameter.eq_ignore_ascii_case("hash-max-listpack-value")
+                    || parameter.eq_ignore_ascii_case("hash-max-ziplist-value")
+                {
+                    "hash-max-listpack-value"
+                } else if parameter.eq_ignore_ascii_case("set-max-intset-entries") {
+                    "set-max-intset-entries"
+                } else if parameter.eq_ignore_ascii_case("set-max-listpack-entries") {
+                    "set-max-listpack-entries"
+                } else if parameter.eq_ignore_ascii_case("zset-max-listpack-entries")
+                    || parameter.eq_ignore_ascii_case("zset-max-ziplist-entries")
+                {
+                    "zset-max-listpack-entries"
+                } else {
+                    // zset-max-listpack-value or zset-max-ziplist-value
+                    "zset-max-listpack-value"
+                };
                 encoding_threshold_updates.push((canonical, parsed));
                 continue;
             }
@@ -2105,7 +2154,7 @@ impl Runtime {
                     .map(|&(name, _)| name.to_string())
                     .unwrap();
                 let value = String::from_utf8_lossy(&pair[1]).to_string();
-                self.config_overrides.insert(canonical, value);
+                static_override_updates.push((canonical, value));
                 continue;
             }
             return RespFrame::Error(format!("ERR Unsupported CONFIG parameter '{parameter}'"));
@@ -2120,6 +2169,9 @@ impl Runtime {
         if let Some(maxmemory) = next_maxmemory {
             self.maxmemory_bytes = maxmemory;
         }
+        if let Some(maxmemory_policy) = next_maxmemory_policy {
+            self.store.maxmemory_policy = maxmemory_policy;
+        }
         if let Some(threshold) = next_slowlog_slower_than {
             self.slowlog_log_slower_than_us = threshold;
         }
@@ -2129,6 +2181,9 @@ impl Runtime {
             while self.slowlog.len() > self.slowlog_max_len {
                 self.slowlog.remove(0);
             }
+        }
+        if let Some(hz) = next_hz {
+            self.hz = hz;
         }
         // Apply encoding threshold updates to Store and CONFIG GET state.
         for (param, value) in encoding_threshold_updates {
@@ -2143,6 +2198,9 @@ impl Runtime {
             }
             self.config_overrides
                 .insert(param.to_string(), value.to_string());
+        }
+        for (param, value) in static_override_updates {
+            self.config_overrides.insert(param, value);
         }
         RespFrame::SimpleString("OK".to_string())
     }
@@ -2299,8 +2357,7 @@ impl Runtime {
                     );
                 }
                 self.client_lib_name = if val.is_empty() { None } else { Some(val) };
-            } else if attr.eq_ignore_ascii_case("LIB-VER") || attr.eq_ignore_ascii_case("lib-ver")
-            {
+            } else if attr.eq_ignore_ascii_case("LIB-VER") || attr.eq_ignore_ascii_case("lib-ver") {
                 if val.contains(' ') || val.contains('\n') {
                     return RespFrame::Error(
                         "ERR lib-ver can only contain characters that are allowed in CLIENT SETNAME"
@@ -2986,9 +3043,7 @@ fn command_error_to_resp(error: CommandError) -> RespFrame {
                 RespFrame::Error("ERR value is not a valid float".to_string())
             }
             fr_store::StoreError::IncrFloatNaN => {
-                RespFrame::Error(
-                    "ERR increment would produce NaN or Infinity".to_string(),
-                )
+                RespFrame::Error("ERR increment would produce NaN or Infinity".to_string())
             }
             fr_store::StoreError::IntegerOverflow => {
                 RespFrame::Error("ERR increment or decrement would overflow".to_string())
@@ -4607,11 +4662,80 @@ mod tests {
                 RespFrame::BulkString(Some(b"100".to_vec())),
             ]))
         );
-        // Other common params still accepted as no-ops
+        // Common static params should persist through CONFIG GET as well.
         let set = rt.execute_frame(command(&[b"CONFIG", b"SET", b"timeout", b"300"]), 1);
         assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
+        let get = rt.execute_frame(command(&[b"CONFIG", b"GET", b"timeout"]), 1);
+        assert_eq!(
+            get,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"timeout".to_vec())),
+                RespFrame::BulkString(Some(b"300".to_vec())),
+            ]))
+        );
         let set = rt.execute_frame(command(&[b"CONFIG", b"SET", b"loglevel", b"warning"]), 2);
         assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
+        let get = rt.execute_frame(command(&[b"CONFIG", b"GET", b"loglevel"]), 2);
+        assert_eq!(
+            get,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"loglevel".to_vec())),
+                RespFrame::BulkString(Some(b"warning".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn config_set_is_atomic_across_runtime_store_and_static_overrides() {
+        let mut rt = Runtime::default_strict();
+
+        let set = rt.execute_frame(
+            command(&[
+                b"CONFIG",
+                b"SET",
+                b"timeout",
+                b"300",
+                b"hz",
+                b"100",
+                b"maxmemory-policy",
+                b"allkeys-lru",
+                b"maxmemory",
+                b"-1",
+            ]),
+            0,
+        );
+        assert_eq!(
+            set,
+            RespFrame::Error("ERR Invalid argument '?' for CONFIG SET 'maxmemory'".to_string())
+        );
+
+        let timeout = rt.execute_frame(command(&[b"CONFIG", b"GET", b"timeout"]), 1);
+        assert_eq!(
+            timeout,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"timeout".to_vec())),
+                RespFrame::BulkString(Some(b"0".to_vec())),
+            ]))
+        );
+
+        let hz = rt.execute_frame(command(&[b"CONFIG", b"GET", b"hz"]), 1);
+        assert_eq!(
+            hz,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"hz".to_vec())),
+                RespFrame::BulkString(Some(b"10".to_vec())),
+            ]))
+        );
+
+        let maxmemory_policy =
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"maxmemory-policy"]), 1);
+        assert_eq!(
+            maxmemory_policy,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"maxmemory-policy".to_vec())),
+                RespFrame::BulkString(Some(b"noeviction".to_vec())),
+            ]))
+        );
     }
 
     // ── AOF persistence round-trip tests ────────────────────────────────

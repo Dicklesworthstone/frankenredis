@@ -234,6 +234,61 @@ pub struct MaxmemoryPressureState {
     pub level: MaxmemoryPressureLevel,
 }
 
+/// Maxmemory eviction policy — controls which keys are chosen for eviction
+/// when memory pressure exceeds the maxmemory limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MaxmemoryPolicy {
+    /// Don't evict anything, return errors on writes that exceed the limit.
+    #[default]
+    Noeviction,
+    /// Evict any key, preferring the least recently used.
+    AllkeysLru,
+    /// Evict only keys with an expiry, preferring the least recently used.
+    VolatileLru,
+    /// Evict any key at random.
+    AllkeysRandom,
+    /// Evict only keys with an expiry at random.
+    VolatileRandom,
+    /// Evict keys with an expiry, preferring those closest to expiring.
+    VolatileTtl,
+    /// Evict any key, preferring the least frequently used (approximated as LRU).
+    AllkeysLfu,
+    /// Evict only keys with an expiry, preferring the least frequently used.
+    VolatileLfu,
+}
+
+impl MaxmemoryPolicy {
+    /// Parse from a Redis config string (e.g. "allkeys-lru").
+    pub fn from_config_str(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "noeviction" => Some(Self::Noeviction),
+            "allkeys-lru" => Some(Self::AllkeysLru),
+            "volatile-lru" => Some(Self::VolatileLru),
+            "allkeys-random" => Some(Self::AllkeysRandom),
+            "volatile-random" => Some(Self::VolatileRandom),
+            "volatile-ttl" => Some(Self::VolatileTtl),
+            "allkeys-lfu" => Some(Self::AllkeysLfu),
+            "volatile-lfu" => Some(Self::VolatileLfu),
+            _ => None,
+        }
+    }
+
+    /// Return the Redis config string representation.
+    #[must_use]
+    pub fn as_config_str(self) -> &'static str {
+        match self {
+            Self::Noeviction => "noeviction",
+            Self::AllkeysLru => "allkeys-lru",
+            Self::VolatileLru => "volatile-lru",
+            Self::AllkeysRandom => "allkeys-random",
+            Self::VolatileRandom => "volatile-random",
+            Self::VolatileTtl => "volatile-ttl",
+            Self::AllkeysLfu => "allkeys-lfu",
+            Self::VolatileLfu => "volatile-lfu",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EvictionSafetyGateState {
     pub loading: bool,
@@ -310,6 +365,9 @@ pub struct Store {
     /// Function libraries: library_name → FunctionLibrary.
     function_libraries: HashMap<String, FunctionLibrary>,
 
+    // Eviction policy — configurable via CONFIG SET maxmemory-policy.
+    pub maxmemory_policy: MaxmemoryPolicy,
+
     // Encoding thresholds — configurable via CONFIG SET, used by OBJECT ENCODING.
     pub hash_max_listpack_entries: usize,
     pub hash_max_listpack_value: usize,
@@ -331,6 +389,7 @@ impl Default for Store {
             subscribed_shard_channels: HashSet::new(),
             pubsub_pending: Vec::new(),
             function_libraries: HashMap::new(),
+            maxmemory_policy: MaxmemoryPolicy::default(),
             hash_max_listpack_entries: 128,
             hash_max_listpack_value: 64,
             set_max_intset_entries: 512,
@@ -1515,8 +1574,7 @@ impl Store {
                 Value::Hash(m) => {
                     let mut pairs: Vec<(&Vec<u8>, &Vec<u8>)> = m.iter().collect();
                     pairs.sort_by_key(|(k, _)| *k);
-                    let result: Vec<Vec<u8>> =
-                        pairs.into_iter().map(|(_, v)| v.clone()).collect();
+                    let result: Vec<Vec<u8>> = pairs.into_iter().map(|(_, v)| v.clone()).collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -1847,8 +1905,7 @@ impl Store {
                         return Ok(Vec::new());
                     }
                     let e = e.min(len as usize - 1);
-                    let result: Vec<Vec<u8>> =
-                        l.iter().skip(s).take(e - s + 1).cloned().collect();
+                    let result: Vec<Vec<u8>> = l.iter().skip(s).take(e - s + 1).cloned().collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -4620,10 +4677,7 @@ impl Store {
 
         // Include dest if it already holds an HLL, and preserve its TTL
         self.drop_if_expired(dest, now_ms);
-        let existing_ttl = self
-            .entries
-            .get(dest)
-            .and_then(|e| e.expires_at_ms);
+        let existing_ttl = self.entries.get(dest).and_then(|e| e.expires_at_ms);
         if let Some(entry) = self.entries.get(dest) {
             match &entry.value {
                 Value::String(data) => {
@@ -4661,8 +4715,10 @@ impl Store {
         }
 
         let data = hll_encode(&merged);
-        self.entries
-            .insert(dest.to_vec(), Entry::new(Value::String(data), existing_ttl, now_ms));
+        self.entries.insert(
+            dest.to_vec(),
+            Entry::new(Value::String(data), existing_ttl, now_ms),
+        );
         Ok(())
     }
 
@@ -5170,8 +5226,7 @@ impl Store {
         }
         // Copy stream last-generated-id if source has one
         if let Some(&last_id) = self.stream_last_ids.get(source) {
-            self.stream_last_ids
-                .insert(destination.to_vec(), last_id);
+            self.stream_last_ids.insert(destination.to_vec(), last_id);
         }
         self.entries.insert(destination.to_vec(), entry);
         Ok(true)
@@ -5365,16 +5420,71 @@ impl Store {
             .sum()
     }
 
-    fn select_eviction_candidate(&mut self, now_ms: u64) -> Option<Vec<u8>> {
-        let mut keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
-        keys.sort();
-        for key in keys {
-            self.drop_if_expired(&key, now_ms);
-            if self.entries.contains_key(key.as_slice()) {
-                return Some(key);
+    fn select_eviction_candidate(&mut self, _now_ms: u64) -> Option<Vec<u8>> {
+        match self.maxmemory_policy {
+            MaxmemoryPolicy::Noeviction => None,
+
+            MaxmemoryPolicy::AllkeysLru | MaxmemoryPolicy::AllkeysLfu => {
+                // Pick the key with the smallest last_access_ms (least recently used).
+                // LFU is approximated as LRU since we don't track access frequency.
+                let mut best_key: Option<Vec<u8>> = None;
+                let mut best_access: u64 = u64::MAX;
+                for (key, entry) in &self.entries {
+                    if entry.last_access_ms < best_access {
+                        best_access = entry.last_access_ms;
+                        best_key = Some(key.clone());
+                    }
+                }
+                best_key
+            }
+
+            MaxmemoryPolicy::VolatileLru | MaxmemoryPolicy::VolatileLfu => {
+                // Pick the volatile key (has expiry) with the smallest last_access_ms.
+                let mut best_key: Option<Vec<u8>> = None;
+                let mut best_access: u64 = u64::MAX;
+                for (key, entry) in &self.entries {
+                    if entry.expires_at_ms.is_some() && entry.last_access_ms < best_access {
+                        best_access = entry.last_access_ms;
+                        best_key = Some(key.clone());
+                    }
+                }
+                best_key
+            }
+
+            MaxmemoryPolicy::VolatileTtl => {
+                // Pick the volatile key with the smallest expires_at_ms (soonest to expire).
+                let mut best_key: Option<Vec<u8>> = None;
+                let mut best_ttl: u64 = u64::MAX;
+                for (key, entry) in &self.entries {
+                    if let Some(exp) = entry.expires_at_ms
+                        && exp < best_ttl
+                    {
+                        best_ttl = exp;
+                        best_key = Some(key.clone());
+                    }
+                }
+                best_key
+            }
+
+            MaxmemoryPolicy::AllkeysRandom => {
+                // Deterministic "random" — pick first key in sorted order.
+                let mut keys: Vec<&Vec<u8>> = self.entries.keys().collect();
+                keys.sort();
+                keys.first().map(|k| (*k).clone())
+            }
+
+            MaxmemoryPolicy::VolatileRandom => {
+                // Deterministic "random" — pick first volatile key in sorted order.
+                let mut keys: Vec<&Vec<u8>> = self
+                    .entries
+                    .iter()
+                    .filter(|(_, e)| e.expires_at_ms.is_some())
+                    .map(|(k, _)| k)
+                    .collect();
+                keys.sort();
+                keys.first().map(|k| (*k).clone())
             }
         }
-        None
     }
 
     /// Load a script into the cache, returning its SHA1 hex digest.
@@ -6099,11 +6209,7 @@ impl Store {
                     // Emit XSETID to preserve the last-generated-id.
                     if let Some(&(ms, seq)) = self.stream_last_ids.get(&key) {
                         let id = format!("{ms}-{seq}");
-                        commands.push(vec![
-                            b"XSETID".to_vec(),
-                            key.clone(),
-                            id.into_bytes(),
-                        ]);
+                        commands.push(vec![b"XSETID".to_vec(), key.clone(), id.into_bytes()]);
                     }
 
                     // Emit XGROUP CREATE for each consumer group.
@@ -6736,10 +6842,10 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 #[cfg(test)]
 mod tests {
     use super::{
-        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPressureLevel,
-        PttlValue, ScoreBound, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
-        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
-        StreamPendingEntry, ValueType,
+        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPolicy,
+        MaxmemoryPressureLevel, PttlValue, ScoreBound, Store, StoreError, StreamAutoClaimOptions,
+        StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
+        StreamGroupReadOptions, StreamPendingEntry, ValueType,
     };
 
     fn group_read_options(
@@ -6902,6 +7008,7 @@ mod tests {
     #[test]
     fn fr_p2c_008_u012_bounded_eviction_loop_reports_running_when_budget_exhausted() {
         let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
         for idx in 0..8 {
             let key = format!("fr:p2c:008:evict:{idx}");
             store.set(key.into_bytes(), vec![b'v'; 32], None, 0);
@@ -6917,6 +7024,7 @@ mod tests {
     #[test]
     fn fr_p2c_008_u012_bounded_eviction_loop_reports_ok_when_pressure_cleared() {
         let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
         for idx in 0..6 {
             let key = format!("fr:p2c:008:evict:ok:{idx}");
             store.set(key.into_bytes(), vec![b'v'; 24], None, 0);
@@ -9507,8 +9615,12 @@ mod tests {
         store
             .xadd(b"s", (1, 0), &[(b"k".to_vec(), b"v".to_vec())], 100)
             .unwrap();
-        store.xgroup_create(b"s", b"grp1", (0, 0), false, 100).unwrap();
-        store.xgroup_create(b"s", b"grp2", (1, 0), false, 100).unwrap();
+        store
+            .xgroup_create(b"s", b"grp1", (0, 0), false, 100)
+            .unwrap();
+        store
+            .xgroup_create(b"s", b"grp2", (1, 0), false, 100)
+            .unwrap();
         let cmds = store.to_aof_commands(100);
         // XADD + 2x XGROUP CREATE (no XSETID since none was explicitly set)
         assert_eq!(cmds.len(), 3);

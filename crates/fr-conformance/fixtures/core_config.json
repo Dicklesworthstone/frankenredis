@@ -2023,6 +2023,136 @@
         "kind": "error",
         "value": "ERR Unknown subcommand or wrong number of arguments for CONFIG BOGUS"
       }
+    },
+
+    {
+      "name": "config_reset_maxmemory_policy_for_test",
+      "now_ms": 0,
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "noeviction"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "config_get_maxmemory_policy_noeviction",
+      "now_ms": 0,
+      "argv": ["CONFIG", "GET", "maxmemory-policy"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "maxmemory-policy" },
+          { "kind": "bulk", "value": "noeviction" }
+        ]
+      }
+    },
+    {
+      "name": "config_set_maxmemory_policy_allkeys_lru",
+      "now_ms": 0,
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "allkeys-lru"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "config_get_maxmemory_policy_allkeys_lru",
+      "now_ms": 0,
+      "argv": ["CONFIG", "GET", "maxmemory-policy"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "maxmemory-policy" },
+          { "kind": "bulk", "value": "allkeys-lru" }
+        ]
+      }
+    },
+    {
+      "name": "config_set_maxmemory_policy_volatile_ttl",
+      "now_ms": 0,
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "volatile-ttl"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "config_get_maxmemory_policy_volatile_ttl",
+      "now_ms": 0,
+      "argv": ["CONFIG", "GET", "maxmemory-policy"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "maxmemory-policy" },
+          { "kind": "bulk", "value": "volatile-ttl" }
+        ]
+      }
+    },
+    {
+      "name": "config_set_maxmemory_policy_invalid",
+      "now_ms": 0,
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "bogus-policy"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Invalid argument 'bogus-policy' for CONFIG SET 'maxmemory-policy'"
+      }
+    },
+    {
+      "name": "config_set_maxmemory_policy_noeviction_restore",
+      "now_ms": 0,
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "noeviction"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+
+    {
+      "name": "oom_setup_seed_data",
+      "now_ms": 0,
+      "argv": ["SET", "oom_seed", "this-is-some-data-to-consume-memory"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "oom_setup_maxmemory_tiny",
+      "now_ms": 0,
+      "argv": ["CONFIG", "SET", "maxmemory", "1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "oom_write_rejected_noeviction",
+      "now_ms": 0,
+      "argv": ["SET", "oom_test", "value"],
+      "expect": {
+        "kind": "error",
+        "value": "OOM command not allowed when used memory > 'maxmemory'."
+      },
+      "expect_threat": {
+        "threat_class": "resource_exhaustion",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "evict.eviction_loop_contract_violation",
+        "subsystem": "eviction",
+        "action": "maxmemory_enforcement"
+      }
+    },
+    {
+      "name": "oom_read_allowed_noeviction",
+      "now_ms": 0,
+      "argv": ["GET", "oom_test"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "oom_switch_to_allkeys_lru",
+      "now_ms": 0,
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "allkeys-lru"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "oom_write_succeeds_with_eviction",
+      "now_ms": 100,
+      "argv": ["SET", "oom_test", "value"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "oom_cleanup_maxmemory_off",
+      "now_ms": 100,
+      "argv": ["CONFIG", "SET", "maxmemory", "0"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "oom_cleanup_policy_off",
+      "now_ms": 100,
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "noeviction"],
+      "expect": { "kind": "simple", "value": "OK" }
     }
   ]
 }
