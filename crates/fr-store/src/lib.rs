@@ -3611,6 +3611,41 @@ impl Store {
         }
     }
 
+    /// XTRIM key MINID threshold — remove entries with IDs less than `min_id`.
+    pub fn xtrim_minid(
+        &mut self,
+        key: &[u8],
+        min_id: StreamId,
+        now_ms: u64,
+    ) -> Result<usize, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::Stream(entries) => {
+                    let remove_ids: Vec<StreamId> = entries
+                        .keys()
+                        .copied()
+                        .take_while(|id| *id < min_id)
+                        .collect();
+                    let removed = remove_ids.len();
+                    for id in &remove_ids {
+                        entries.remove(id);
+                    }
+                    if let Some(groups) = self.stream_groups.get_mut(key) {
+                        for group_state in groups.values_mut() {
+                            for id in &remove_ids {
+                                group_state.pending.remove(id);
+                            }
+                        }
+                    }
+                    Ok(removed)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
+    }
+
     pub fn xread(
         &mut self,
         key: &[u8],

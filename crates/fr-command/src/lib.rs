@@ -3396,22 +3396,95 @@ fn parse_xread_id(arg: &[u8]) -> Result<StreamId, RespFrame> {
 }
 
 fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() < 5 || !(argv.len() - 3).is_multiple_of(2) {
+    if argv.len() < 5 {
         return Err(CommandError::WrongArity("XADD"));
     }
 
-    let mut fields = Vec::with_capacity((argv.len() - 3) / 2);
-    let mut idx = 3;
+    // Parse optional flags before the ID: NOMKSTREAM, MAXLEN/MINID
+    let mut idx = 2;
+    let mut nomkstream = false;
+    let mut trim_maxlen: Option<usize> = None;
+    let mut trim_minid: Option<StreamId> = None;
+
+    while idx < argv.len() {
+        if eq_ascii_command(&argv[idx], b"NOMKSTREAM") {
+            nomkstream = true;
+            idx += 1;
+        } else if eq_ascii_command(&argv[idx], b"MAXLEN") {
+            idx += 1;
+            if idx >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            // Skip optional = or ~ (approximate trimming treated as exact)
+            if eq_ascii_command(&argv[idx], b"=") || eq_ascii_command(&argv[idx], b"~") {
+                idx += 1;
+                if idx >= argv.len() {
+                    return Err(CommandError::SyntaxError);
+                }
+            }
+            let n = parse_i64_arg(&argv[idx])?;
+            if n < 0 {
+                return Ok(RespFrame::Error(
+                    "ERR The MAXLEN argument must be >= 0.".to_string(),
+                ));
+            }
+            trim_maxlen = Some(n as usize);
+            idx += 1;
+        } else if eq_ascii_command(&argv[idx], b"MINID") {
+            idx += 1;
+            if idx >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            // Skip optional = or ~
+            if eq_ascii_command(&argv[idx], b"=") || eq_ascii_command(&argv[idx], b"~") {
+                idx += 1;
+                if idx >= argv.len() {
+                    return Err(CommandError::SyntaxError);
+                }
+            }
+            let min_id = match parse_stream_id(&argv[idx]) {
+                Ok(id) => id,
+                Err(reply) => return Ok(reply),
+            };
+            trim_minid = Some(min_id);
+            idx += 1;
+        } else {
+            break;
+        }
+    }
+
+    // argv[idx] should now be the ID, followed by field-value pairs
+    if idx >= argv.len() {
+        return Err(CommandError::WrongArity("XADD"));
+    }
+    let id_idx = idx;
+    idx += 1;
+    // Must have at least one field-value pair after the ID
+    if idx >= argv.len() || (argv.len() - idx) % 2 != 0 {
+        return Err(CommandError::WrongArity("XADD"));
+    }
+
+    let mut fields = Vec::with_capacity((argv.len() - idx) / 2);
     while idx + 1 < argv.len() {
         fields.push((argv[idx].clone(), argv[idx + 1].clone()));
         idx += 2;
     }
 
+    // NOMKSTREAM: if key doesn't exist, return nil
+    if nomkstream && store.xlen(&argv[1], now_ms).unwrap_or(0) == 0 {
+        // Check if key exists as a stream at all
+        match store.xlast_id(&argv[1], now_ms) {
+            Ok(None) => return Ok(RespFrame::BulkString(None)),
+            Err(StoreError::WrongType) => return Err(CommandError::Store(StoreError::WrongType)),
+            _ => {} // Key exists as empty stream, proceed
+        }
+    }
+
     let last_id = store.xlast_id(&argv[1], now_ms)?;
-    let id = if eq_ascii_command(&argv[2], b"*") {
+    let id = if eq_ascii_command(&argv[id_idx], b"*") {
         next_auto_stream_id(last_id, now_ms)
     } else {
-        let id = match parse_stream_id(&argv[2]) {
+        let id = match parse_stream_id(&argv[id_idx]) {
             Ok(id) => id,
             Err(reply) => return Ok(reply),
         };
@@ -3432,6 +3505,15 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     };
 
     store.xadd(&argv[1], id, &fields, now_ms)?;
+
+    // Apply inline trimming after the add
+    if let Some(max_len) = trim_maxlen {
+        let _ = store.xtrim(&argv[1], max_len, now_ms);
+    }
+    if let Some(min_id) = trim_minid {
+        let _ = store.xtrim_minid(&argv[1], min_id, now_ms);
+    }
+
     Ok(RespFrame::BulkString(Some(format_stream_id(id))))
 }
 
@@ -3464,31 +3546,46 @@ fn xdel(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
 }
 
 fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 4 && argv.len() != 5 {
+    if argv.len() < 4 || argv.len() > 5 {
         return Err(CommandError::WrongArity("XTRIM"));
     }
-    if !eq_ascii_command(&argv[2], b"MAXLEN") {
+
+    let is_maxlen = eq_ascii_command(&argv[2], b"MAXLEN");
+    let is_minid = eq_ascii_command(&argv[2], b"MINID");
+    if !is_maxlen && !is_minid {
         return Err(CommandError::SyntaxError);
     }
 
-    let threshold = if argv.len() == 5 {
-        if !eq_ascii_command(&argv[3], b"=") {
+    // Skip optional = or ~ modifier
+    let threshold_idx = if argv.len() == 5 {
+        if !eq_ascii_command(&argv[3], b"=") && !eq_ascii_command(&argv[3], b"~") {
             return Err(CommandError::SyntaxError);
         }
-        &argv[4]
+        4
     } else {
-        &argv[3]
+        3
     };
 
-    let max_len_raw = parse_i64_arg(threshold)?;
-    if max_len_raw < 0 {
-        return Err(CommandError::InvalidInteger);
+    if is_maxlen {
+        let max_len_raw = parse_i64_arg(&argv[threshold_idx])?;
+        if max_len_raw < 0 {
+            return Err(CommandError::InvalidInteger);
+        }
+        let max_len = usize::try_from(max_len_raw).unwrap_or(usize::MAX);
+        let removed = store.xtrim(&argv[1], max_len, now_ms)?;
+        Ok(RespFrame::Integer(
+            i64::try_from(removed).unwrap_or(i64::MAX),
+        ))
+    } else {
+        let min_id = match parse_stream_id(&argv[threshold_idx]) {
+            Ok(id) => id,
+            Err(reply) => return Ok(reply),
+        };
+        let removed = store.xtrim_minid(&argv[1], min_id, now_ms)?;
+        Ok(RespFrame::Integer(
+            i64::try_from(removed).unwrap_or(i64::MAX),
+        ))
     }
-    let max_len = usize::try_from(max_len_raw).unwrap_or(usize::MAX);
-    let removed = store.xtrim(&argv[1], max_len, now_ms)?;
-    Ok(RespFrame::Integer(
-        i64::try_from(removed).unwrap_or(i64::MAX),
-    ))
 }
 
 fn stream_record_to_frame(id: StreamId, fields: Vec<(Vec<u8>, Vec<u8>)>) -> RespFrame {
@@ -14106,23 +14203,25 @@ mod tests {
         .expect("xtrim missing key");
         assert_eq!(missing, RespFrame::Integer(0));
 
-        let syntax_mode = dispatch_argv(
+        // MINID is now supported — should return Integer(0) on missing key
+        let minid_missing = dispatch_argv(
             &[
                 b"XTRIM".to_vec(),
-                b"stream".to_vec(),
+                b"missing".to_vec(),
                 b"MINID".to_vec(),
-                b"1".to_vec(),
+                b"1-0".to_vec(),
             ],
             &mut store,
             0,
         )
-        .expect_err("xtrim invalid mode");
-        assert!(matches!(syntax_mode, CommandError::SyntaxError));
+        .expect("xtrim minid missing key");
+        assert_eq!(minid_missing, RespFrame::Integer(0));
 
-        let syntax_option = dispatch_argv(
+        // ~ (approximate) is now accepted as a modifier
+        let approx = dispatch_argv(
             &[
                 b"XTRIM".to_vec(),
-                b"stream".to_vec(),
+                b"missing".to_vec(),
                 b"MAXLEN".to_vec(),
                 b"~".to_vec(),
                 b"1".to_vec(),
@@ -14130,8 +14229,8 @@ mod tests {
             &mut store,
             0,
         )
-        .expect_err("xtrim invalid option");
-        assert!(matches!(syntax_option, CommandError::SyntaxError));
+        .expect("xtrim approx missing key");
+        assert_eq!(approx, RespFrame::Integer(0));
 
         let invalid_integer = dispatch_argv(
             &[

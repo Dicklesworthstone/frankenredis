@@ -644,7 +644,7 @@
       "argv": [
         "XTRIM",
         "stream",
-        "MINID",
+        "BADMODE",
         "1"
       ],
       "expect": {
@@ -4625,6 +4625,253 @@
         "kind": "integer",
         "value": 1
       }
+    },
+
+
+
+    {
+      "name": "xadd_maxlen_setup_flush",
+      "now_ms": 90000,
+      "argv": ["FLUSHDB"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xadd_maxlen_seed_1",
+      "now_ms": 90000,
+      "argv": ["XADD", "trimstream", "1-0", "k", "v1"],
+      "expect": { "kind": "bulk", "value": "1-0" }
+    },
+    {
+      "name": "xadd_maxlen_seed_2",
+      "now_ms": 90000,
+      "argv": ["XADD", "trimstream", "2-0", "k", "v2"],
+      "expect": { "kind": "bulk", "value": "2-0" }
+    },
+    {
+      "name": "xadd_maxlen_seed_3",
+      "now_ms": 90000,
+      "argv": ["XADD", "trimstream", "3-0", "k", "v3"],
+      "expect": { "kind": "bulk", "value": "3-0" }
+    },
+    {
+      "name": "xadd_with_maxlen_trims_to_2",
+      "now_ms": 90000,
+      "argv": ["XADD", "trimstream", "MAXLEN", "2", "4-0", "k", "v4"],
+      "expect": { "kind": "bulk", "value": "4-0" }
+    },
+    {
+      "name": "xadd_maxlen_verify_length",
+      "now_ms": 90000,
+      "argv": ["XLEN", "trimstream"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "xadd_maxlen_verify_oldest_removed",
+      "now_ms": 90000,
+      "argv": ["XRANGE", "trimstream", "-", "+"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "array", "value": [
+            { "kind": "bulk", "value": "3-0" },
+            { "kind": "array", "value": [
+              { "kind": "bulk", "value": "k" },
+              { "kind": "bulk", "value": "v3" }
+            ]}
+          ]},
+          { "kind": "array", "value": [
+            { "kind": "bulk", "value": "4-0" },
+            { "kind": "array", "value": [
+              { "kind": "bulk", "value": "k" },
+              { "kind": "bulk", "value": "v4" }
+            ]}
+          ]}
+        ]
+      }
+    },
+    {
+      "name": "xadd_maxlen_approx_trims",
+      "now_ms": 90000,
+      "argv": ["XADD", "trimstream", "MAXLEN", "~", "1", "5-0", "k", "v5"],
+      "expect": { "kind": "bulk", "value": "5-0" }
+    },
+    {
+      "name": "xadd_maxlen_approx_verify_length",
+      "now_ms": 90000,
+      "argv": ["XLEN", "trimstream"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xadd_maxlen_equals_modifier",
+      "now_ms": 90000,
+      "argv": ["XADD", "trimstream", "MAXLEN", "=", "1", "6-0", "k", "v6"],
+      "expect": { "kind": "bulk", "value": "6-0" }
+    },
+    {
+      "name": "xadd_maxlen_equals_verify_length",
+      "now_ms": 90000,
+      "argv": ["XLEN", "trimstream"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+
+
+
+    {
+      "name": "xadd_minid_flush",
+      "now_ms": 91000,
+      "argv": ["FLUSHDB"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xadd_minid_seed_1",
+      "now_ms": 91000,
+      "argv": ["XADD", "minids", "100-0", "k", "a"],
+      "expect": { "kind": "bulk", "value": "100-0" }
+    },
+    {
+      "name": "xadd_minid_seed_2",
+      "now_ms": 91000,
+      "argv": ["XADD", "minids", "200-0", "k", "b"],
+      "expect": { "kind": "bulk", "value": "200-0" }
+    },
+    {
+      "name": "xadd_minid_seed_3",
+      "now_ms": 91000,
+      "argv": ["XADD", "minids", "300-0", "k", "c"],
+      "expect": { "kind": "bulk", "value": "300-0" }
+    },
+    {
+      "name": "xadd_with_minid_trims_old",
+      "now_ms": 91000,
+      "argv": ["XADD", "minids", "MINID", "200-0", "400-0", "k", "d"],
+      "expect": { "kind": "bulk", "value": "400-0" }
+    },
+    {
+      "name": "xadd_minid_verify_length",
+      "now_ms": 91000,
+      "argv": ["XLEN", "minids"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "xadd_minid_verify_entries",
+      "now_ms": 91000,
+      "argv": ["XRANGE", "minids", "-", "+"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "array", "value": [
+            { "kind": "bulk", "value": "200-0" },
+            { "kind": "array", "value": [
+              { "kind": "bulk", "value": "k" },
+              { "kind": "bulk", "value": "b" }
+            ]}
+          ]},
+          { "kind": "array", "value": [
+            { "kind": "bulk", "value": "300-0" },
+            { "kind": "array", "value": [
+              { "kind": "bulk", "value": "k" },
+              { "kind": "bulk", "value": "c" }
+            ]}
+          ]},
+          { "kind": "array", "value": [
+            { "kind": "bulk", "value": "400-0" },
+            { "kind": "array", "value": [
+              { "kind": "bulk", "value": "k" },
+              { "kind": "bulk", "value": "d" }
+            ]}
+          ]}
+        ]
+      }
+    },
+
+
+
+    {
+      "name": "xadd_nomkstream_flush",
+      "now_ms": 92000,
+      "argv": ["FLUSHDB"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xadd_nomkstream_nonexistent_returns_nil",
+      "now_ms": 92000,
+      "argv": ["XADD", "noexist", "NOMKSTREAM", "*", "k", "v"],
+      "expect": { "kind": "bulk", "value": null }
+    },
+    {
+      "name": "xadd_nomkstream_verify_not_created",
+      "now_ms": 92000,
+      "argv": ["EXISTS", "noexist"],
+      "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "xadd_nomkstream_existing_stream_works",
+      "now_ms": 92000,
+      "argv": ["XADD", "existing", "1-0", "k", "v"],
+      "expect": { "kind": "bulk", "value": "1-0" }
+    },
+    {
+      "name": "xadd_nomkstream_on_existing_succeeds",
+      "now_ms": 92000,
+      "argv": ["XADD", "existing", "NOMKSTREAM", "2-0", "k", "v2"],
+      "expect": { "kind": "bulk", "value": "2-0" }
+    },
+    {
+      "name": "xadd_nomkstream_verify_length",
+      "now_ms": 92000,
+      "argv": ["XLEN", "existing"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+
+
+
+    {
+      "name": "xtrim_minid_flush",
+      "now_ms": 93000,
+      "argv": ["FLUSHDB"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xtrim_minid_seed_1",
+      "now_ms": 93000,
+      "argv": ["XADD", "ts", "10-0", "k", "a"],
+      "expect": { "kind": "bulk", "value": "10-0" }
+    },
+    {
+      "name": "xtrim_minid_seed_2",
+      "now_ms": 93000,
+      "argv": ["XADD", "ts", "20-0", "k", "b"],
+      "expect": { "kind": "bulk", "value": "20-0" }
+    },
+    {
+      "name": "xtrim_minid_seed_3",
+      "now_ms": 93000,
+      "argv": ["XADD", "ts", "30-0", "k", "c"],
+      "expect": { "kind": "bulk", "value": "30-0" }
+    },
+    {
+      "name": "xtrim_minid_removes_below_threshold",
+      "now_ms": 93000,
+      "argv": ["XTRIM", "ts", "MINID", "20-0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xtrim_minid_verify_length",
+      "now_ms": 93000,
+      "argv": ["XLEN", "ts"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "xtrim_minid_approx",
+      "now_ms": 93000,
+      "argv": ["XTRIM", "ts", "MINID", "~", "30-0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xtrim_minid_verify_final",
+      "now_ms": 93000,
+      "argv": ["XLEN", "ts"],
+      "expect": { "kind": "integer", "value": 1 }
     }
   ]
 }
