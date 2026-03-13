@@ -4980,6 +4980,11 @@ impl Store {
             self.stream_groups
                 .insert(destination.to_vec(), groups.clone());
         }
+        // Copy stream last-generated-id if source has one
+        if let Some(&last_id) = self.stream_last_ids.get(source) {
+            self.stream_last_ids
+                .insert(destination.to_vec(), last_id);
+        }
         self.entries.insert(destination.to_vec(), entry);
         Ok(true)
     }
