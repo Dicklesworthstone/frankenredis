@@ -1423,7 +1423,7 @@ impl Runtime {
     fn handle_hello_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         // HELLO with no args: return server info using current protocol (Redis 7+)
         if argv.len() == 1 {
-            return build_hello_response(2);
+            return build_hello_response(2, self.client_id);
         }
 
         let protocol_version = match parse_i64_arg(&argv[1]) {
@@ -1489,7 +1489,7 @@ impl Runtime {
             return RespFrame::Error(NOAUTH_ERROR.to_string());
         }
 
-        build_hello_response(protocol_version)
+        build_hello_response(protocol_version, self.client_id)
     }
 
     fn authenticate_user(&mut self, username: &[u8], password: &[u8]) -> Result<(), AuthFailure> {
@@ -2800,14 +2800,22 @@ fn hello_bulk(value: &str) -> RespFrame {
     RespFrame::BulkString(Some(value.as_bytes().to_vec()))
 }
 
-fn build_hello_response(protocol_version: i64) -> RespFrame {
+fn build_hello_response(protocol_version: i64, client_id: u64) -> RespFrame {
     RespFrame::Array(Some(vec![
         hello_bulk("server"),
-        hello_bulk("frankenredis"),
+        hello_bulk("redis"),
         hello_bulk("version"),
-        hello_bulk(env!("CARGO_PKG_VERSION")),
+        hello_bulk("7.2.0"),
         hello_bulk("proto"),
         RespFrame::Integer(protocol_version),
+        hello_bulk("id"),
+        RespFrame::Integer(client_id as i64),
+        hello_bulk("mode"),
+        hello_bulk("standalone"),
+        hello_bulk("role"),
+        hello_bulk("master"),
+        hello_bulk("modules"),
+        RespFrame::Array(Some(Vec::new())),
     ]))
 }
 
@@ -3356,11 +3364,19 @@ mod tests {
             ok,
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"server".to_vec())),
-                RespFrame::BulkString(Some(b"frankenredis".to_vec())),
+                RespFrame::BulkString(Some(b"redis".to_vec())),
                 RespFrame::BulkString(Some(b"version".to_vec())),
-                RespFrame::BulkString(Some(env!("CARGO_PKG_VERSION").as_bytes().to_vec())),
+                RespFrame::BulkString(Some(b"7.2.0".to_vec())),
                 RespFrame::BulkString(Some(b"proto".to_vec())),
                 RespFrame::Integer(3),
+                RespFrame::BulkString(Some(b"id".to_vec())),
+                RespFrame::Integer(rt.client_id as i64),
+                RespFrame::BulkString(Some(b"mode".to_vec())),
+                RespFrame::BulkString(Some(b"standalone".to_vec())),
+                RespFrame::BulkString(Some(b"role".to_vec())),
+                RespFrame::BulkString(Some(b"master".to_vec())),
+                RespFrame::BulkString(Some(b"modules".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
             ]))
         );
         assert!(rt.is_authenticated());
@@ -3399,11 +3415,19 @@ mod tests {
             out,
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"server".to_vec())),
-                RespFrame::BulkString(Some(b"frankenredis".to_vec())),
+                RespFrame::BulkString(Some(b"redis".to_vec())),
                 RespFrame::BulkString(Some(b"version".to_vec())),
-                RespFrame::BulkString(Some(env!("CARGO_PKG_VERSION").as_bytes().to_vec())),
+                RespFrame::BulkString(Some(b"7.2.0".to_vec())),
                 RespFrame::BulkString(Some(b"proto".to_vec())),
                 RespFrame::Integer(3),
+                RespFrame::BulkString(Some(b"id".to_vec())),
+                RespFrame::Integer(rt.client_id as i64),
+                RespFrame::BulkString(Some(b"mode".to_vec())),
+                RespFrame::BulkString(Some(b"standalone".to_vec())),
+                RespFrame::BulkString(Some(b"role".to_vec())),
+                RespFrame::BulkString(Some(b"master".to_vec())),
+                RespFrame::BulkString(Some(b"modules".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
             ]))
         );
         assert!(rt.is_authenticated());

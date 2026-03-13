@@ -109,6 +109,7 @@ pub enum ExpectedFrame {
     Bulk { value: Option<String> },
     Array { value: Vec<ExpectedFrame> },
     NullArray,
+    AnyInteger,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -188,7 +189,6 @@ pub fn run_fixture(
         let evidence_before = runtime.evidence().events().len();
         let frame = case_to_frame(&case);
         let actual = runtime.execute_frame(frame, case.now_ms);
-        let expected = expected_to_frame(&case.expect);
         let new_events = &runtime.evidence().events()[evidence_before..];
         let threat_result = validate_threat_expectation(case.expect_threat.as_ref(), new_events);
         let log_result = validate_structured_log_emission(
@@ -203,9 +203,10 @@ pub fn run_fixture(
             },
             new_events,
         );
-        let frame_ok = actual == expected;
+        let frame_ok = frame_matches_expected(&actual, &case.expect);
         let passed = frame_ok && threat_result.is_ok() && log_result.is_ok();
         if !passed {
+            let expected = expected_to_frame(&case.expect);
             let reason_code = reason_code_from_evidence(new_events);
             let replay_cmd = replay_cmd_from_evidence(new_events);
             let artifact_refs = artifact_refs_from_evidence(new_events);
@@ -388,7 +389,6 @@ pub fn run_protocol_fixture(
         let actual = parse_frame(&encoded)
             .map_err(|err| format!("runtime emitted invalid RESP frame in {}: {err}", case.name))?
             .frame;
-        let expected = expected_to_frame(&case.expect);
         let new_events = &runtime.evidence().events()[evidence_before..];
         let threat_result = validate_threat_expectation(case.expect_threat.as_ref(), new_events);
         let log_result = validate_structured_log_emission(
@@ -403,9 +403,10 @@ pub fn run_protocol_fixture(
             },
             new_events,
         );
-        let frame_ok = actual == expected;
+        let frame_ok = frame_matches_expected(&actual, &case.expect);
         let passed = frame_ok && threat_result.is_ok() && log_result.is_ok();
         if !passed {
+            let expected = expected_to_frame(&case.expect);
             let reason_code = reason_code_from_evidence(new_events);
             let replay_cmd = replay_cmd_from_evidence(new_events);
             let artifact_refs = artifact_refs_from_evidence(new_events);
@@ -961,6 +962,24 @@ fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
             RespFrame::Array(Some(value.iter().map(expected_to_frame).collect()))
         }
         ExpectedFrame::NullArray => RespFrame::Array(None),
+        ExpectedFrame::AnyInteger => RespFrame::Integer(0),
+    }
+}
+
+fn frame_matches_expected(actual: &RespFrame, expected: &ExpectedFrame) -> bool {
+    match expected {
+        ExpectedFrame::AnyInteger => matches!(actual, RespFrame::Integer(_)),
+        ExpectedFrame::Array { value } => match actual {
+            RespFrame::Array(Some(items)) => {
+                items.len() == value.len()
+                    && items
+                        .iter()
+                        .zip(value.iter())
+                        .all(|(a, e)| frame_matches_expected(a, e))
+            }
+            _ => false,
+        },
+        _ => *actual == expected_to_frame(expected),
     }
 }
 
@@ -1548,7 +1567,7 @@ mod tests {
             (
                 "wrong_arity_get",
                 &["GET"],
-                "ERR wrong number of arguments for 'GET' command",
+                "ERR wrong number of arguments for 'get' command",
             ),
             (
                 "set_syntax_error",
@@ -2671,15 +2690,33 @@ mod tests {
         );
         match hello_reply {
             RespFrame::Array(Some(parts)) => {
-                assert_eq!(parts.len(), 6);
+                assert_eq!(parts.len(), 14);
                 assert_eq!(parts[0], RespFrame::BulkString(Some(b"server".to_vec())));
                 assert_eq!(
                     parts[1],
-                    RespFrame::BulkString(Some(b"frankenredis".to_vec()))
+                    RespFrame::BulkString(Some(b"redis".to_vec()))
                 );
                 assert_eq!(parts[2], RespFrame::BulkString(Some(b"version".to_vec())));
+                assert_eq!(
+                    parts[3],
+                    RespFrame::BulkString(Some(b"7.2.0".to_vec()))
+                );
                 assert_eq!(parts[4], RespFrame::BulkString(Some(b"proto".to_vec())));
                 assert_eq!(parts[5], RespFrame::Integer(3));
+                assert_eq!(parts[6], RespFrame::BulkString(Some(b"id".to_vec())));
+                assert!(matches!(parts[7], RespFrame::Integer(_)));
+                assert_eq!(parts[8], RespFrame::BulkString(Some(b"mode".to_vec())));
+                assert_eq!(
+                    parts[9],
+                    RespFrame::BulkString(Some(b"standalone".to_vec()))
+                );
+                assert_eq!(parts[10], RespFrame::BulkString(Some(b"role".to_vec())));
+                assert_eq!(
+                    parts[11],
+                    RespFrame::BulkString(Some(b"master".to_vec()))
+                );
+                assert_eq!(parts[12], RespFrame::BulkString(Some(b"modules".to_vec())));
+                assert_eq!(parts[13], RespFrame::Array(Some(Vec::new())));
             }
             other => panic!("HELLO AUTH path returned unexpected frame: {other:?}"),
         }
@@ -3054,7 +3091,7 @@ mod tests {
         let wrong_arity = runtime.execute_frame(command_frame(&["CLUSTER"]), 700);
         assert_eq!(
             wrong_arity,
-            RespFrame::Error("ERR wrong number of arguments for 'CLUSTER' command".to_string())
+            RespFrame::Error("ERR wrong number of arguments for 'cluster' command".to_string())
         );
 
         let help = runtime.execute_frame(command_frame(&["CLUSTER", "HELP"]), 701);
@@ -3146,7 +3183,7 @@ mod tests {
         let wrong_arity = runtime.execute_frame(command_frame(&["READONLY", "extra"]), 708);
         assert_eq!(
             wrong_arity,
-            RespFrame::Error("ERR wrong number of arguments for 'READONLY' command".to_string())
+            RespFrame::Error("ERR wrong number of arguments for 'readonly' command".to_string())
         );
 
         let event = EvidenceEvent {

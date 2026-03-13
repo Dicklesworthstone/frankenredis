@@ -80,7 +80,7 @@
           },
           {
             "kind": "bulk",
-            "value": "frankenredis"
+            "value": "redis"
           },
           {
             "kind": "bulk",
@@ -88,7 +88,7 @@
           },
           {
             "kind": "bulk",
-            "value": "0.1.0"
+            "value": "7.2.0"
           },
           {
             "kind": "bulk",
@@ -97,6 +97,37 @@
           {
             "kind": "integer",
             "value": 2
+          },
+          {
+            "kind": "bulk",
+            "value": "id"
+          },
+          {
+            "kind": "any_integer"
+          },
+          {
+            "kind": "bulk",
+            "value": "mode"
+          },
+          {
+            "kind": "bulk",
+            "value": "standalone"
+          },
+          {
+            "kind": "bulk",
+            "value": "role"
+          },
+          {
+            "kind": "bulk",
+            "value": "master"
+          },
+          {
+            "kind": "bulk",
+            "value": "modules"
+          },
+          {
+            "kind": "array",
+            "value": []
           }
         ]
       }
@@ -132,7 +163,7 @@
           },
           {
             "kind": "bulk",
-            "value": "frankenredis"
+            "value": "redis"
           },
           {
             "kind": "bulk",
@@ -140,7 +171,7 @@
           },
           {
             "kind": "bulk",
-            "value": "0.1.0"
+            "value": "7.2.0"
           },
           {
             "kind": "bulk",
@@ -149,6 +180,37 @@
           {
             "kind": "integer",
             "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "id"
+          },
+          {
+            "kind": "any_integer"
+          },
+          {
+            "kind": "bulk",
+            "value": "mode"
+          },
+          {
+            "kind": "bulk",
+            "value": "standalone"
+          },
+          {
+            "kind": "bulk",
+            "value": "role"
+          },
+          {
+            "kind": "bulk",
+            "value": "master"
+          },
+          {
+            "kind": "bulk",
+            "value": "modules"
+          },
+          {
+            "kind": "array",
+            "value": []
           }
         ]
       }
