@@ -1896,6 +1896,38 @@ impl Runtime {
                 self.hz.to_string().into_bytes(),
             )));
         }
+        // Dynamic encoding thresholds — live values from Store
+        let encoding_params: &[(&str, usize)] = &[
+            ("hash-max-listpack-entries", self.store.hash_max_listpack_entries),
+            ("hash-max-listpack-value", self.store.hash_max_listpack_value),
+            ("set-max-intset-entries", self.store.set_max_intset_entries),
+            ("set-max-listpack-entries", self.store.set_max_listpack_entries),
+            ("zset-max-listpack-entries", self.store.zset_max_listpack_entries),
+            ("zset-max-listpack-value", self.store.zset_max_listpack_value),
+        ];
+        for &(name, value) in encoding_params {
+            if Self::config_pattern_matches(pattern, name) {
+                entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
+                entries.push(RespFrame::BulkString(Some(
+                    value.to_string().into_bytes(),
+                )));
+            }
+        }
+        // Also emit ziplist aliases from Store (they alias the same live values).
+        let ziplist_aliases: &[(&str, usize)] = &[
+            ("hash-max-ziplist-entries", self.store.hash_max_listpack_entries),
+            ("hash-max-ziplist-value", self.store.hash_max_listpack_value),
+            ("zset-max-ziplist-entries", self.store.zset_max_listpack_entries),
+            ("zset-max-ziplist-value", self.store.zset_max_listpack_value),
+        ];
+        for &(name, value) in ziplist_aliases {
+            if Self::config_pattern_matches(pattern, name) {
+                entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
+                entries.push(RespFrame::BulkString(Some(
+                    value.to_string().into_bytes(),
+                )));
+            }
+        }
         // Static configuration parameters that clients commonly probe.
         // If a parameter has been overridden via CONFIG SET, use the override.
         for &(name, default_value) in CONFIG_STATIC_PARAMS {
@@ -1904,6 +1936,16 @@ impl Runtime {
                 || name == "slowlog-log-slower-than"
                 || name == "slowlog-max-len"
                 || name == "hz"
+                || name == "hash-max-listpack-entries"
+                || name == "hash-max-listpack-value"
+                || name == "hash-max-ziplist-entries"
+                || name == "hash-max-ziplist-value"
+                || name == "set-max-intset-entries"
+                || name == "set-max-listpack-entries"
+                || name == "zset-max-listpack-entries"
+                || name == "zset-max-listpack-value"
+                || name == "zset-max-ziplist-entries"
+                || name == "zset-max-ziplist-value"
             {
                 continue;
             }
@@ -1929,6 +1971,7 @@ impl Runtime {
         let mut next_maxmemory: Option<usize> = None;
         let mut next_slowlog_slower_than: Option<i64> = None;
         let mut next_slowlog_max_len: Option<usize> = None;
+        let mut encoding_threshold_updates: Vec<(&str, usize)> = Vec::new();
 
         for pair in argv[2..].chunks_exact(2) {
             let parameter = match std::str::from_utf8(&pair[0]) {
@@ -2004,6 +2047,52 @@ impl Runtime {
                 self.hz = parsed;
                 continue;
             }
+            // Encoding threshold parameters — update Store fields for live effect.
+            if parameter.eq_ignore_ascii_case("hash-max-listpack-entries")
+                || parameter.eq_ignore_ascii_case("hash-max-listpack-value")
+                || parameter.eq_ignore_ascii_case("hash-max-ziplist-entries")
+                || parameter.eq_ignore_ascii_case("hash-max-ziplist-value")
+                || parameter.eq_ignore_ascii_case("set-max-intset-entries")
+                || parameter.eq_ignore_ascii_case("set-max-listpack-entries")
+                || parameter.eq_ignore_ascii_case("zset-max-listpack-entries")
+                || parameter.eq_ignore_ascii_case("zset-max-listpack-value")
+                || parameter.eq_ignore_ascii_case("zset-max-ziplist-entries")
+                || parameter.eq_ignore_ascii_case("zset-max-ziplist-value")
+            {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as usize,
+                    Ok(_) | Err(_) => {
+                        return RespFrame::Error(format!(
+                            "ERR Invalid argument '{}' for CONFIG SET '{parameter}'",
+                            String::from_utf8_lossy(&pair[1])
+                        ));
+                    }
+                };
+                // Normalize ziplist aliases to their listpack equivalents.
+                let canonical: &'static str =
+                    if parameter.eq_ignore_ascii_case("hash-max-listpack-entries")
+                        || parameter.eq_ignore_ascii_case("hash-max-ziplist-entries")
+                    {
+                        "hash-max-listpack-entries"
+                    } else if parameter.eq_ignore_ascii_case("hash-max-listpack-value")
+                        || parameter.eq_ignore_ascii_case("hash-max-ziplist-value")
+                    {
+                        "hash-max-listpack-value"
+                    } else if parameter.eq_ignore_ascii_case("set-max-intset-entries") {
+                        "set-max-intset-entries"
+                    } else if parameter.eq_ignore_ascii_case("set-max-listpack-entries") {
+                        "set-max-listpack-entries"
+                    } else if parameter.eq_ignore_ascii_case("zset-max-listpack-entries")
+                        || parameter.eq_ignore_ascii_case("zset-max-ziplist-entries")
+                    {
+                        "zset-max-listpack-entries"
+                    } else {
+                        // zset-max-listpack-value or zset-max-ziplist-value
+                        "zset-max-listpack-value"
+                    };
+                encoding_threshold_updates.push((canonical, parsed));
+                continue;
+            }
             // Accept known CONFIG parameters and store the overridden value so
             // CONFIG GET returns the SET value rather than the compiled-in default.
             let is_known_param = CONFIG_STATIC_PARAMS
@@ -2040,6 +2129,20 @@ impl Runtime {
             while self.slowlog.len() > self.slowlog_max_len {
                 self.slowlog.remove(0);
             }
+        }
+        // Apply encoding threshold updates to Store and CONFIG GET state.
+        for (param, value) in encoding_threshold_updates {
+            match param {
+                "hash-max-listpack-entries" => self.store.hash_max_listpack_entries = value,
+                "hash-max-listpack-value" => self.store.hash_max_listpack_value = value,
+                "set-max-intset-entries" => self.store.set_max_intset_entries = value,
+                "set-max-listpack-entries" => self.store.set_max_listpack_entries = value,
+                "zset-max-listpack-entries" => self.store.zset_max_listpack_entries = value,
+                "zset-max-listpack-value" => self.store.zset_max_listpack_value = value,
+                _ => {}
+            }
+            self.config_overrides
+                .insert(param.to_string(), value.to_string());
         }
         RespFrame::SimpleString("OK".to_string())
     }

@@ -291,7 +291,7 @@ impl ValueType {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Store {
     entries: HashMap<Vec<u8>, Entry>,
     stream_groups: HashMap<Vec<u8>, StreamGroupState>,
@@ -309,6 +309,36 @@ pub struct Store {
     pub pubsub_pending: Vec<PubSubMessage>,
     /// Function libraries: library_name → FunctionLibrary.
     function_libraries: HashMap<String, FunctionLibrary>,
+
+    // Encoding thresholds — configurable via CONFIG SET, used by OBJECT ENCODING.
+    pub hash_max_listpack_entries: usize,
+    pub hash_max_listpack_value: usize,
+    pub set_max_intset_entries: usize,
+    pub set_max_listpack_entries: usize,
+    pub zset_max_listpack_entries: usize,
+    pub zset_max_listpack_value: usize,
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Self {
+            entries: HashMap::new(),
+            stream_groups: HashMap::new(),
+            stream_last_ids: HashMap::new(),
+            script_cache: HashMap::new(),
+            subscribed_channels: HashSet::new(),
+            subscribed_patterns: HashSet::new(),
+            subscribed_shard_channels: HashSet::new(),
+            pubsub_pending: Vec::new(),
+            function_libraries: HashMap::new(),
+            hash_max_listpack_entries: 128,
+            hash_max_listpack_value: 64,
+            set_max_intset_entries: 512,
+            set_max_listpack_entries: 128,
+            zset_max_listpack_entries: 128,
+            zset_max_listpack_value: 64,
+        }
+    }
 }
 
 /// A registered function library (Redis 7.0+ FUNCTION framework).
@@ -987,7 +1017,12 @@ impl Store {
                 }
             }
             Value::Hash(m) => {
-                if m.len() <= 128 && m.iter().all(|(k, v)| k.len() <= 64 && v.len() <= 64) {
+                if m.len() <= self.hash_max_listpack_entries
+                    && m.iter().all(|(k, v)| {
+                        k.len() <= self.hash_max_listpack_value
+                            && v.len() <= self.hash_max_listpack_value
+                    })
+                {
                     "listpack"
                 } else {
                     "hashtable"
@@ -1001,9 +1036,7 @@ impl Store {
                 }
             }
             Value::Set(s) => {
-                // Redis uses intset when all members are parseable as integers
-                // and set size <= set-max-intset-entries (default 512).
-                if s.len() <= 512
+                if s.len() <= self.set_max_intset_entries
                     && s.iter().all(|m| {
                         std::str::from_utf8(m)
                             .ok()
@@ -1012,14 +1045,18 @@ impl Store {
                     })
                 {
                     "intset"
-                } else if s.len() <= 128 && s.iter().all(|m| m.len() <= 64) {
+                } else if s.len() <= self.set_max_listpack_entries
+                    && s.iter().all(|m| m.len() <= 64)
+                {
                     "listpack"
                 } else {
                     "hashtable"
                 }
             }
             Value::SortedSet(zs) => {
-                if zs.len() <= 128 && zs.keys().all(|k| k.len() <= 64) {
+                if zs.len() <= self.zset_max_listpack_entries
+                    && zs.keys().all(|k| k.len() <= self.zset_max_listpack_value)
+                {
                     "listpack"
                 } else {
                     "skiplist"

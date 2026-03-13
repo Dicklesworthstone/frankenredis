@@ -222,6 +222,168 @@
         "kind": "error",
         "value": "ERR wrong number of arguments for 'object' command"
       }
+    },
+
+    {
+      "name": "config_set_hash_max_listpack_entries_low",
+      "now_ms": 30000,
+      "argv": ["CONFIG", "SET", "hash-max-listpack-entries", "2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "hash_3fields_setup",
+      "now_ms": 30001,
+      "argv": ["HSET", "obj_hash_big", "f1", "v1", "f2", "v2", "f3", "v3"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "object_encoding_hash_hashtable",
+      "now_ms": 30002,
+      "argv": ["OBJECT", "ENCODING", "obj_hash_big"],
+      "expect": { "kind": "bulk", "value": "hashtable" }
+    },
+    {
+      "name": "hash_2fields_still_listpack_setup",
+      "now_ms": 30003,
+      "argv": ["HSET", "obj_hash_ok", "f1", "v1", "f2", "v2"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "object_encoding_hash_still_listpack",
+      "now_ms": 30004,
+      "argv": ["OBJECT", "ENCODING", "obj_hash_ok"],
+      "expect": { "kind": "bulk", "value": "listpack" }
+    },
+    {
+      "name": "config_set_hash_max_listpack_value_low",
+      "now_ms": 30010,
+      "argv": ["CONFIG", "SET", "hash-max-listpack-value", "5"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "hash_long_value_setup",
+      "now_ms": 30011,
+      "argv": ["HSET", "obj_hash_longval", "k", "this-value-is-longer-than-five-bytes"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "object_encoding_hash_long_value_hashtable",
+      "now_ms": 30012,
+      "argv": ["OBJECT", "ENCODING", "obj_hash_longval"],
+      "expect": { "kind": "bulk", "value": "hashtable" }
+    },
+    {
+      "name": "config_get_hash_max_listpack_entries",
+      "now_ms": 30020,
+      "argv": ["CONFIG", "GET", "hash-max-listpack-entries"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "hash-max-listpack-entries" },
+          { "kind": "bulk", "value": "2" }
+        ]
+      }
+    },
+
+    {
+      "name": "config_set_zset_max_listpack_entries_low",
+      "now_ms": 31000,
+      "argv": ["CONFIG", "SET", "zset-max-listpack-entries", "1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "zset_2members_setup",
+      "now_ms": 31001,
+      "argv": ["ZADD", "obj_zs_big", "1.0", "a", "2.0", "b"],
+      "expect": { "kind": "integer", "value": 2 }
+    },
+    {
+      "name": "object_encoding_zset_skiplist",
+      "now_ms": 31002,
+      "argv": ["OBJECT", "ENCODING", "obj_zs_big"],
+      "expect": { "kind": "bulk", "value": "skiplist" }
+    },
+
+    {
+      "name": "config_set_set_max_listpack_entries_low",
+      "now_ms": 32000,
+      "argv": ["CONFIG", "SET", "set-max-listpack-entries", "2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "set_3members_setup",
+      "now_ms": 32001,
+      "argv": ["SADD", "obj_set_big", "alpha", "beta", "gamma"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "object_encoding_set_hashtable",
+      "now_ms": 32002,
+      "argv": ["OBJECT", "ENCODING", "obj_set_big"],
+      "expect": { "kind": "bulk", "value": "hashtable" }
+    },
+
+    {
+      "name": "config_reset_set_listpack_for_intset_test",
+      "now_ms": 32999,
+      "argv": ["CONFIG", "SET", "set-max-listpack-entries", "128"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "config_set_set_max_intset_entries_low",
+      "now_ms": 33000,
+      "argv": ["CONFIG", "SET", "set-max-intset-entries", "2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "intset_3members_setup",
+      "now_ms": 33001,
+      "argv": ["SADD", "obj_intset_big", "1", "2", "3"],
+      "expect": { "kind": "integer", "value": 3 }
+    },
+    {
+      "name": "object_encoding_intset_to_listpack",
+      "now_ms": 33002,
+      "argv": ["OBJECT", "ENCODING", "obj_intset_big"],
+      "expect": { "kind": "bulk", "value": "listpack" }
+    },
+
+    {
+      "name": "config_set_zset_value_low",
+      "now_ms": 34000,
+      "argv": ["CONFIG", "SET", "zset-max-listpack-value", "3"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "zset_long_member_setup",
+      "now_ms": 34001,
+      "argv": ["ZADD", "obj_zs_longmem", "1.0", "longmember"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "object_encoding_zset_long_member_skiplist",
+      "now_ms": 34002,
+      "argv": ["OBJECT", "ENCODING", "obj_zs_longmem"],
+      "expect": { "kind": "bulk", "value": "skiplist" }
+    },
+
+    {
+      "name": "config_set_via_ziplist_alias",
+      "now_ms": 35000,
+      "argv": ["CONFIG", "SET", "hash-max-ziplist-entries", "100"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "config_get_listpack_reflects_ziplist_set",
+      "now_ms": 35001,
+      "argv": ["CONFIG", "GET", "hash-max-listpack-entries"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "hash-max-listpack-entries" },
+          { "kind": "bulk", "value": "100" }
+        ]
+      }
     }
   ]
 }
