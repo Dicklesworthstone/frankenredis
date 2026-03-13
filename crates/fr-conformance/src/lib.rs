@@ -3479,7 +3479,7 @@ mod tests {
         let cluster_wrong_arity = runtime.execute_frame(command_frame(&["CLUSTER"]), 760);
         assert_eq!(
             cluster_wrong_arity,
-            RespFrame::Error("ERR wrong number of arguments for 'CLUSTER' command".to_string())
+            RespFrame::Error("ERR wrong number of arguments for 'cluster' command".to_string())
         );
 
         let cluster_unknown = runtime.execute_frame(command_frame(&["CLUSTER", "NOPE"]), 761);
@@ -3498,15 +3498,15 @@ mod tests {
             runtime.execute_frame(command_frame(&["READWRITE", "extra"]), 764);
         assert_eq!(
             readonly_wrong_arity,
-            RespFrame::Error("ERR wrong number of arguments for 'READONLY' command".to_string())
+            RespFrame::Error("ERR wrong number of arguments for 'readonly' command".to_string())
         );
         assert_eq!(
             asking_wrong_arity,
-            RespFrame::Error("ERR wrong number of arguments for 'ASKING' command".to_string())
+            RespFrame::Error("ERR wrong number of arguments for 'asking' command".to_string())
         );
         assert_eq!(
             readwrite_wrong_arity,
-            RespFrame::Error("ERR wrong number of arguments for 'READWRITE' command".to_string())
+            RespFrame::Error("ERR wrong number of arguments for 'readwrite' command".to_string())
         );
 
         let router_event = EvidenceEvent {
@@ -3869,7 +3869,7 @@ mod tests {
         let mut runtime = Runtime::default_strict();
         assert_eq!(
             runtime.execute_frame(command_frame(&["EXPIRE", "fr:p2c:008:adv:key"]), 860),
-            RespFrame::Error("ERR wrong number of arguments for 'EXPIRE' command".to_string()),
+            RespFrame::Error("ERR wrong number of arguments for 'expire' command".to_string()),
         );
         assert_eq!(
             runtime.execute_frame(
@@ -3880,14 +3880,14 @@ mod tests {
         );
         assert_eq!(
             runtime.execute_frame(command_frame(&["TTL", "fr:p2c:008:adv:key", "extra"]), 862),
-            RespFrame::Error("ERR wrong number of arguments for 'TTL' command".to_string()),
+            RespFrame::Error("ERR wrong number of arguments for 'ttl' command".to_string()),
         );
         assert_eq!(
             runtime.execute_frame(
                 command_frame(&["PERSIST", "fr:p2c:008:adv:key", "extra"]),
                 863
             ),
-            RespFrame::Error("ERR wrong number of arguments for 'PERSIST' command".to_string()),
+            RespFrame::Error("ERR wrong number of arguments for 'persist' command".to_string()),
         );
 
         let command_event = EvidenceEvent {
