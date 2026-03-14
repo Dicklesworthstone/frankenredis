@@ -684,18 +684,15 @@ impl EvidenceLedger {
     }
 }
 
+/// State that belongs to the long-lived server process rather than a client.
 #[derive(Debug)]
-pub struct Runtime {
-    policy: RuntimePolicy,
+pub struct ServerState {
     store: Store,
     aof_records: Vec<AofRecord>,
     evidence: EvidenceLedger,
     tls_state: TlsRuntimeState,
-    auth_state: AuthState,
     acllog_max_len: i64,
-    cluster_state: ClusterClientState,
     replication_ack_state: ReplicationAckState,
-    transaction_state: TransactionState,
     maxmemory_bytes: usize,
     maxmemory_not_counted_bytes: usize,
     maxmemory_eviction_sample_limit: usize,
@@ -706,18 +703,6 @@ pub struct Runtime {
     active_expire_key_cursor: usize,
     active_expire_budget: ActiveExpireCycleBudget,
     last_active_expire_cycle: Option<ActiveExpireCycleStats>,
-    /// Per-client connection ID (monotonically increasing).
-    client_id: u64,
-    /// Per-client name set via CLIENT SETNAME.
-    client_name: Option<Vec<u8>>,
-    /// Client library name set via CLIENT SETINFO LIB-NAME (Redis 7.2+).
-    client_lib_name: Option<String>,
-    /// Client library version set via CLIENT SETINFO LIB-VER (Redis 7.2+).
-    client_lib_ver: Option<String>,
-    /// Flags: client no-evict mode.
-    client_no_evict: bool,
-    /// Flags: client no-touch mode.
-    client_no_touch: bool,
     /// Server hz (timer interrupt frequency).
     hz: u64,
     /// Slow log: ring buffer of slow queries.
@@ -734,6 +719,228 @@ pub struct Runtime {
     aof_path: Option<std::path::PathBuf>,
     /// Dynamically overridden CONFIG parameters (set via CONFIG SET, returned by CONFIG GET).
     config_overrides: HashMap<String, String>,
+}
+
+impl Default for ServerState {
+    fn default() -> Self {
+        Self {
+            store: Store::new(),
+            aof_records: Vec::new(),
+            evidence: EvidenceLedger::default(),
+            tls_state: TlsRuntimeState::default(),
+            acllog_max_len: DEFAULT_ACLLOG_MAX_LEN,
+            replication_ack_state: ReplicationAckState::default(),
+            maxmemory_bytes: 0,
+            maxmemory_not_counted_bytes: 0,
+            maxmemory_eviction_sample_limit: 16,
+            maxmemory_eviction_max_cycles: 4,
+            eviction_safety_gate: EvictionSafetyGateState::default(),
+            last_eviction_loop: None,
+            active_expire_db_cursor: 0,
+            active_expire_key_cursor: 0,
+            active_expire_budget: ActiveExpireCycleBudget::default(),
+            last_active_expire_cycle: None,
+            hz: 10,
+            slowlog: Vec::new(),
+            slowlog_next_id: 0,
+            slowlog_log_slower_than_us: 10_000,
+            slowlog_max_len: 128,
+            last_save_time_sec: 0,
+            aof_path: None,
+            config_overrides: HashMap::new(),
+        }
+    }
+}
+
+impl ServerState {
+    pub fn set_aof_path(&mut self, path: std::path::PathBuf) {
+        self.aof_path = Some(path);
+    }
+
+    pub fn load_aof(&mut self, now_ms: u64) -> Result<usize, PersistError> {
+        let path = match &self.aof_path {
+            Some(path) => path.clone(),
+            None => return Ok(0),
+        };
+        let records = fr_persist::read_aof_file(&path)?;
+        let count = records.len();
+        for record in &records {
+            let _ = dispatch_argv(&record.argv, &mut self.store, now_ms);
+        }
+        Ok(count)
+    }
+
+    #[must_use]
+    pub fn run_active_expire_cycle(
+        &mut self,
+        now_ms: u64,
+        cycle_kind: ActiveExpireCycleKind,
+    ) -> ActiveExpireCycleStats {
+        let plan = plan_active_expire_cycle(
+            cycle_kind,
+            self.store.count_expiring_keys(),
+            self.active_expire_db_cursor,
+            1,
+            self.active_expire_budget,
+        );
+        let cycle_result = self.store.run_active_expire_cycle(
+            now_ms,
+            self.active_expire_key_cursor,
+            plan.sample_limit,
+        );
+        self.active_expire_db_cursor = plan.next_db_index;
+        self.active_expire_key_cursor = cycle_result.next_cursor;
+
+        let stats = ActiveExpireCycleStats {
+            plan,
+            sampled_keys: cycle_result.sampled_keys,
+            evicted_keys: cycle_result.evicted_keys,
+        };
+        self.last_active_expire_cycle = Some(stats);
+        stats
+    }
+
+    #[must_use]
+    pub fn last_active_expire_cycle_stats(&self) -> Option<ActiveExpireCycleStats> {
+        self.last_active_expire_cycle
+    }
+
+    #[must_use]
+    pub fn tls_runtime_state(&self) -> &TlsRuntimeState {
+        &self.tls_state
+    }
+
+    pub fn configure_maxmemory_enforcement(
+        &mut self,
+        maxmemory_bytes: usize,
+        not_counted_bytes: usize,
+        sample_limit: usize,
+        max_cycles: usize,
+    ) {
+        self.maxmemory_bytes = maxmemory_bytes;
+        self.maxmemory_not_counted_bytes = not_counted_bytes;
+        self.maxmemory_eviction_sample_limit = sample_limit.max(1);
+        self.maxmemory_eviction_max_cycles = max_cycles;
+    }
+
+    pub fn set_eviction_safety_gate(&mut self, safety_gate: EvictionSafetyGateState) {
+        self.eviction_safety_gate = safety_gate;
+    }
+
+    #[must_use]
+    pub fn maxmemory_pressure_state(&self) -> fr_store::MaxmemoryPressureState {
+        self.store
+            .classify_maxmemory_pressure(self.maxmemory_bytes, self.maxmemory_not_counted_bytes)
+    }
+
+    #[must_use]
+    pub fn last_eviction_loop_result(&self) -> Option<EvictionLoopResult> {
+        self.last_eviction_loop
+    }
+
+    #[cfg(test)]
+    fn set_replication_ack_state_for_tests(
+        &mut self,
+        primary_offset: u64,
+        local_fsync_offset: u64,
+        replica_ack_offsets: &[u64],
+        replica_fsync_offsets: &[u64],
+    ) {
+        self.replication_ack_state.primary_offset = ReplOffset(primary_offset);
+        self.replication_ack_state.local_fsync_offset = ReplOffset(local_fsync_offset);
+        self.replication_ack_state.replica_ack_offsets = replica_ack_offsets
+            .iter()
+            .map(|offset| ReplOffset(*offset))
+            .collect();
+        self.replication_ack_state.replica_fsync_offsets = replica_fsync_offsets
+            .iter()
+            .map(|offset| ReplOffset(*offset))
+            .collect();
+    }
+
+    fn reset_slowlog(&mut self) {
+        self.slowlog.clear();
+        self.slowlog_next_id = 0;
+    }
+
+    fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
+        if self.slowlog_log_slower_than_us < 0 {
+            return;
+        }
+        if (duration_us as i64) < self.slowlog_log_slower_than_us {
+            return;
+        }
+        let entry = SlowlogEntry {
+            id: self.slowlog_next_id,
+            timestamp_sec: now_ms / 1000,
+            duration_us,
+            argv: argv.to_vec(),
+        };
+        self.slowlog_next_id += 1;
+        self.slowlog.push(entry);
+        while self.slowlog.len() > self.slowlog_max_len {
+            self.slowlog.remove(0);
+        }
+    }
+
+    fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
+        if !Runtime::command_advances_replication_offset(argv) {
+            return;
+        }
+        self.aof_records.push(AofRecord {
+            argv: argv.to_vec(),
+        });
+        self.replication_ack_state.primary_offset.0 = self
+            .replication_ack_state
+            .primary_offset
+            .0
+            .saturating_add(1);
+        self.replication_ack_state.local_fsync_offset = self.replication_ack_state.primary_offset;
+    }
+}
+
+/// State that is clearly scoped to a single client session.
+#[derive(Debug)]
+pub struct ClientSession {
+    cluster_state: ClusterClientState,
+    transaction_state: TransactionState,
+    /// Per-client connection ID (monotonically increasing).
+    client_id: u64,
+    /// Per-client name set via CLIENT SETNAME.
+    client_name: Option<Vec<u8>>,
+    /// Client library name set via CLIENT SETINFO LIB-NAME (Redis 7.2+).
+    client_lib_name: Option<String>,
+    /// Client library version set via CLIENT SETINFO LIB-VER (Redis 7.2+).
+    client_lib_ver: Option<String>,
+    /// Flags: client no-evict mode.
+    client_no_evict: bool,
+    /// Flags: client no-touch mode.
+    client_no_touch: bool,
+}
+
+impl Default for ClientSession {
+    fn default() -> Self {
+        Self {
+            cluster_state: ClusterClientState::default(),
+            transaction_state: TransactionState::default(),
+            client_id: CLIENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
+            client_name: None,
+            client_lib_name: None,
+            client_lib_ver: None,
+            client_no_evict: false,
+            client_no_touch: false,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Runtime {
+    policy: RuntimePolicy,
+    server: ServerState,
+    session: ClientSession,
+    /// Temporary mixed auth state until bd-zuyq.1.3 splits server ACL config from
+    /// per-session authenticated-user tracking.
+    auth_state: AuthState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -762,46 +969,16 @@ impl Runtime {
     pub fn new(policy: RuntimePolicy) -> Self {
         Self {
             policy,
-            store: Store::new(),
-            aof_records: Vec::new(),
-            evidence: EvidenceLedger::default(),
-            tls_state: TlsRuntimeState::default(),
+            server: ServerState::default(),
+            session: ClientSession::default(),
             auth_state: AuthState::default(),
-            acllog_max_len: DEFAULT_ACLLOG_MAX_LEN,
-            cluster_state: ClusterClientState::default(),
-            replication_ack_state: ReplicationAckState::default(),
-            transaction_state: TransactionState::default(),
-            maxmemory_bytes: 0,
-            maxmemory_not_counted_bytes: 0,
-            maxmemory_eviction_sample_limit: 16,
-            maxmemory_eviction_max_cycles: 4,
-            eviction_safety_gate: EvictionSafetyGateState::default(),
-            last_eviction_loop: None,
-            active_expire_db_cursor: 0,
-            active_expire_key_cursor: 0,
-            active_expire_budget: ActiveExpireCycleBudget::default(),
-            last_active_expire_cycle: None,
-            client_id: CLIENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
-            client_name: None,
-            client_lib_name: None,
-            client_lib_ver: None,
-            client_no_evict: false,
-            client_no_touch: false,
-            hz: 10,
-            slowlog: Vec::new(),
-            slowlog_next_id: 0,
-            slowlog_log_slower_than_us: 10_000, // default: 10ms
-            slowlog_max_len: 128,
-            last_save_time_sec: 0,
-            aof_path: None,
-            config_overrides: HashMap::new(),
         }
     }
 
     /// Set the AOF persistence file path. When set, SAVE/BGSAVE will write
     /// a full AOF rewrite to this path.
     pub fn set_aof_path(&mut self, path: std::path::PathBuf) {
-        self.aof_path = Some(path);
+        self.server.set_aof_path(path);
     }
 
     /// Load and replay AOF records from the configured path, restoring store state.
@@ -809,16 +986,7 @@ impl Runtime {
     /// Each AOF record is dispatched through the command router as if it were
     /// a client command. Returns the number of records replayed, or an error.
     pub fn load_aof(&mut self, now_ms: u64) -> Result<usize, PersistError> {
-        let path = match &self.aof_path {
-            Some(p) => p.clone(),
-            None => return Ok(0),
-        };
-        let records = fr_persist::read_aof_file(&path)?;
-        let count = records.len();
-        for record in &records {
-            let _ = dispatch_argv(&record.argv, &mut self.store, now_ms);
-        }
-        Ok(count)
+        self.server.load_aof(now_ms)
     }
 
     #[must_use]
@@ -871,28 +1039,7 @@ impl Runtime {
         now_ms: u64,
         cycle_kind: ActiveExpireCycleKind,
     ) -> ActiveExpireCycleStats {
-        let plan = plan_active_expire_cycle(
-            cycle_kind,
-            self.store.count_expiring_keys(),
-            self.active_expire_db_cursor,
-            1,
-            self.active_expire_budget,
-        );
-        let cycle_result = self.store.run_active_expire_cycle(
-            now_ms,
-            self.active_expire_key_cursor,
-            plan.sample_limit,
-        );
-        self.active_expire_db_cursor = plan.next_db_index;
-        self.active_expire_key_cursor = cycle_result.next_cursor;
-
-        let stats = ActiveExpireCycleStats {
-            plan,
-            sampled_keys: cycle_result.sampled_keys,
-            evicted_keys: cycle_result.evicted_keys,
-        };
-        self.last_active_expire_cycle = Some(stats);
-        stats
+        self.server.run_active_expire_cycle(now_ms, cycle_kind)
     }
 
     #[must_use]
@@ -902,7 +1049,7 @@ impl Runtime {
 
     #[must_use]
     pub fn last_active_expire_cycle_stats(&self) -> Option<ActiveExpireCycleStats> {
-        self.last_active_expire_cycle
+        self.server.last_active_expire_cycle_stats()
     }
 
     pub fn replay_event_loop_phase_trace(
@@ -980,17 +1127,17 @@ impl Runtime {
 
     #[must_use]
     pub fn evidence(&self) -> &EvidenceLedger {
-        &self.evidence
+        &self.server.evidence
     }
 
     #[must_use]
     pub fn aof_records(&self) -> &[AofRecord] {
-        &self.aof_records
+        &self.server.aof_records
     }
 
     #[must_use]
     pub fn encoded_aof_stream(&self) -> Vec<u8> {
-        encode_aof_stream(&self.aof_records)
+        encode_aof_stream(&self.server.aof_records)
     }
 
     pub fn replay_aof_stream(
@@ -1015,7 +1162,22 @@ impl Runtime {
 
     #[must_use]
     pub fn tls_runtime_state(&self) -> &TlsRuntimeState {
-        &self.tls_state
+        self.server.tls_runtime_state()
+    }
+
+    #[must_use]
+    pub fn server_state(&self) -> &ServerState {
+        &self.server
+    }
+
+    #[must_use]
+    pub fn server_state_mut(&mut self) -> &mut ServerState {
+        &mut self.server
+    }
+
+    #[must_use]
+    pub fn client_session(&self) -> &ClientSession {
+        &self.session
     }
 
     pub fn configure_maxmemory_enforcement(
@@ -1025,25 +1187,26 @@ impl Runtime {
         sample_limit: usize,
         max_cycles: usize,
     ) {
-        self.maxmemory_bytes = maxmemory_bytes;
-        self.maxmemory_not_counted_bytes = not_counted_bytes;
-        self.maxmemory_eviction_sample_limit = sample_limit.max(1);
-        self.maxmemory_eviction_max_cycles = max_cycles;
+        self.server.configure_maxmemory_enforcement(
+            maxmemory_bytes,
+            not_counted_bytes,
+            sample_limit,
+            max_cycles,
+        );
     }
 
     pub fn set_eviction_safety_gate(&mut self, safety_gate: EvictionSafetyGateState) {
-        self.eviction_safety_gate = safety_gate;
+        self.server.set_eviction_safety_gate(safety_gate);
     }
 
     #[must_use]
     pub fn maxmemory_pressure_state(&self) -> fr_store::MaxmemoryPressureState {
-        self.store
-            .classify_maxmemory_pressure(self.maxmemory_bytes, self.maxmemory_not_counted_bytes)
+        self.server.maxmemory_pressure_state()
     }
 
     #[must_use]
     pub fn last_eviction_loop_result(&self) -> Option<EvictionLoopResult> {
-        self.last_eviction_loop
+        self.server.last_eviction_loop_result()
     }
 
     pub fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
@@ -1061,12 +1224,12 @@ impl Runtime {
 
     #[must_use]
     pub fn is_cluster_read_only(&self) -> bool {
-        self.cluster_state.mode == ClusterClientMode::ReadOnly
+        self.session.cluster_state.mode == ClusterClientMode::ReadOnly
     }
 
     #[must_use]
     pub fn is_cluster_asking(&self) -> bool {
-        self.cluster_state.asking
+        self.session.cluster_state.asking
     }
 
     #[cfg(test)]
@@ -1077,16 +1240,12 @@ impl Runtime {
         replica_ack_offsets: &[u64],
         replica_fsync_offsets: &[u64],
     ) {
-        self.replication_ack_state.primary_offset = ReplOffset(primary_offset);
-        self.replication_ack_state.local_fsync_offset = ReplOffset(local_fsync_offset);
-        self.replication_ack_state.replica_ack_offsets = replica_ack_offsets
-            .iter()
-            .map(|offset| ReplOffset(*offset))
-            .collect();
-        self.replication_ack_state.replica_fsync_offsets = replica_fsync_offsets
-            .iter()
-            .map(|offset| ReplOffset(*offset))
-            .collect();
+        self.server.set_replication_ack_state_for_tests(
+            primary_offset,
+            local_fsync_offset,
+            replica_ack_offsets,
+            replica_fsync_offsets,
+        );
     }
 
     pub fn apply_tls_config(
@@ -1096,9 +1255,9 @@ impl Runtime {
     ) -> Result<(), TlsCfgError> {
         let packet_id = next_packet_id();
         let input_digest = digest_bytes(format!("{candidate:?}").as_bytes());
-        let state_before = self.store.state_digest();
+        let state_before = self.server.store.state_digest();
 
-        let plan = match plan_tls_runtime_apply(&self.tls_state, candidate) {
+        let plan = match plan_tls_runtime_apply(&self.server.tls_state, candidate) {
             Ok(plan) => plan,
             Err(error) => {
                 let preferred_deviation = preferred_tls_deviation_for_error(&error);
@@ -1115,7 +1274,7 @@ impl Runtime {
             }
         };
 
-        let mut next_state = self.tls_state.clone();
+        let mut next_state = self.server.tls_state.clone();
         match plan.listener_transition {
             TlsListenerTransition::Enable => next_state.tls_listener_enabled = true,
             TlsListenerTransition::Disable => next_state.tls_listener_enabled = false,
@@ -1131,14 +1290,14 @@ impl Runtime {
         if plan.requires_connection_type_configure {
             next_state.connection_type_configured = true;
         }
-        self.tls_state = next_state;
+        self.server.tls_state = next_state;
         Ok(())
     }
 
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
         let packet_id = next_packet_id();
         let input_digest = digest_bytes(&frame.to_bytes());
-        let state_before = self.store.state_digest();
+        let state_before = self.server.store.state_digest();
 
         if let Some(reply) =
             self.preflight_gate(&frame, now_ms, packet_id, &input_digest, &state_before)
@@ -1244,8 +1403,8 @@ impl Runtime {
         }
 
         // If inside a MULTI transaction, queue the command instead of executing it
-        if self.transaction_state.in_transaction {
-            self.transaction_state.command_queue.push(argv);
+        if self.session.transaction_state.in_transaction {
+            self.session.transaction_state.command_queue.push(argv);
             return RespFrame::SimpleString("QUEUED".to_string());
         }
 
@@ -1261,7 +1420,7 @@ impl Runtime {
 
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
         let start = Instant::now();
-        let result = dispatch_argv(&argv, &mut self.store, now_ms);
+        let result = dispatch_argv(&argv, &mut self.server.store, now_ms);
         let elapsed_us = start.elapsed().as_micros() as u64;
         self.record_slowlog(&argv, elapsed_us, now_ms);
         match result {
@@ -1276,7 +1435,7 @@ impl Runtime {
     pub fn execute_bytes(&mut self, input: &[u8], now_ms: u64) -> Vec<u8> {
         let packet_id = next_packet_id();
         let input_digest = digest_bytes(input);
-        let state_before = self.store.state_digest();
+        let state_before = self.server.store.state_digest();
         match parse_frame(input) {
             Ok(parsed) => self.execute_frame(parsed.frame, now_ms).to_bytes(),
             Err(err) => {
@@ -1308,20 +1467,20 @@ impl Runtime {
         input_digest: &str,
         state_before: &str,
     ) -> Option<RespFrame> {
-        if self.maxmemory_bytes == 0 {
-            self.last_eviction_loop = None;
+        if self.server.maxmemory_bytes == 0 {
+            self.server.last_eviction_loop = None;
             return None;
         }
 
-        let loop_result = self.store.run_bounded_eviction_loop(
+        let loop_result = self.server.store.run_bounded_eviction_loop(
             now_ms,
-            self.maxmemory_bytes,
-            self.maxmemory_not_counted_bytes,
-            self.maxmemory_eviction_sample_limit,
-            self.maxmemory_eviction_max_cycles,
-            self.eviction_safety_gate,
+            self.server.maxmemory_bytes,
+            self.server.maxmemory_not_counted_bytes,
+            self.server.maxmemory_eviction_sample_limit,
+            self.server.maxmemory_eviction_max_cycles,
+            self.server.eviction_safety_gate,
         );
-        self.last_eviction_loop = Some(loop_result);
+        self.server.last_eviction_loop = Some(loop_result);
 
         if loop_result.status == EvictionLoopStatus::Ok {
             return None;
@@ -1379,21 +1538,7 @@ impl Runtime {
     }
 
     fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
-        if argv.is_empty() {
-            return;
-        }
-        if !Self::command_advances_replication_offset(argv) {
-            return;
-        }
-        self.aof_records.push(AofRecord {
-            argv: argv.to_vec(),
-        });
-        self.replication_ack_state.primary_offset.0 = self
-            .replication_ack_state
-            .primary_offset
-            .0
-            .saturating_add(1);
-        self.replication_ack_state.local_fsync_offset = self.replication_ack_state.primary_offset;
+        self.server.capture_aof_record(argv);
     }
 
     fn command_advances_replication_offset(argv: &[Vec<u8>]) -> bool {
@@ -1426,7 +1571,7 @@ impl Runtime {
     fn handle_hello_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         // HELLO with no args: return server info using current protocol (Redis 7+)
         if argv.len() == 1 {
-            return build_hello_response(2, self.client_id);
+            return build_hello_response(2, self.session.client_id);
         }
 
         let protocol_version = match parse_i64_arg(&argv[1]) {
@@ -1469,9 +1614,9 @@ impl Runtime {
                     );
                 }
                 if name.is_empty() {
-                    self.client_name = None;
+                    self.session.client_name = None;
                 } else {
-                    self.client_name = Some(name.clone());
+                    self.session.client_name = Some(name.clone());
                 }
                 continue;
             }
@@ -1492,7 +1637,7 @@ impl Runtime {
             return RespFrame::Error(NOAUTH_ERROR.to_string());
         }
 
-        build_hello_response(protocol_version, self.client_id)
+        build_hello_response(protocol_version, self.session.client_id)
     }
 
     fn authenticate_user(&mut self, username: &[u8], password: &[u8]) -> Result<(), AuthFailure> {
@@ -1821,8 +1966,7 @@ impl Runtime {
                 return command_error_to_resp(CommandError::WrongArity("CONFIG"));
             }
             // Reset tracked statistics: clear slowlog, reset next ID, reset config overrides
-            self.slowlog.clear();
-            self.slowlog_next_id = 0;
+            self.server.reset_slowlog();
             return RespFrame::SimpleString("OK".to_string());
         }
         if sub.eq_ignore_ascii_case("REWRITE") {
@@ -1864,14 +2008,14 @@ impl Runtime {
         if Self::config_pattern_matches(pattern, "acllog-max-len") {
             entries.push(RespFrame::BulkString(Some(b"acllog-max-len".to_vec())));
             entries.push(RespFrame::BulkString(Some(
-                self.acllog_max_len.to_string().into_bytes(),
+                self.server.acllog_max_len.to_string().into_bytes(),
             )));
         }
         // Dynamic maxmemory — override the static default
         if Self::config_pattern_matches(pattern, "maxmemory") {
             entries.push(RespFrame::BulkString(Some(b"maxmemory".to_vec())));
             entries.push(RespFrame::BulkString(Some(
-                self.maxmemory_bytes.to_string().into_bytes(),
+                self.server.maxmemory_bytes.to_string().into_bytes(),
             )));
         }
         // Dynamic slowlog params — override the static defaults
@@ -1880,44 +2024,50 @@ impl Runtime {
                 b"slowlog-log-slower-than".to_vec(),
             )));
             entries.push(RespFrame::BulkString(Some(
-                self.slowlog_log_slower_than_us.to_string().into_bytes(),
+                self.server
+                    .slowlog_log_slower_than_us
+                    .to_string()
+                    .into_bytes(),
             )));
         }
         if Self::config_pattern_matches(pattern, "slowlog-max-len") {
             entries.push(RespFrame::BulkString(Some(b"slowlog-max-len".to_vec())));
             entries.push(RespFrame::BulkString(Some(
-                self.slowlog_max_len.to_string().into_bytes(),
+                self.server.slowlog_max_len.to_string().into_bytes(),
             )));
         }
         // Dynamic hz — override the static default
         if Self::config_pattern_matches(pattern, "hz") {
             entries.push(RespFrame::BulkString(Some(b"hz".to_vec())));
             entries.push(RespFrame::BulkString(Some(
-                self.hz.to_string().into_bytes(),
+                self.server.hz.to_string().into_bytes(),
             )));
         }
         // Dynamic encoding thresholds — live values from Store
         let encoding_params: &[(&str, usize)] = &[
             (
                 "hash-max-listpack-entries",
-                self.store.hash_max_listpack_entries,
+                self.server.store.hash_max_listpack_entries,
             ),
             (
                 "hash-max-listpack-value",
-                self.store.hash_max_listpack_value,
+                self.server.store.hash_max_listpack_value,
             ),
-            ("set-max-intset-entries", self.store.set_max_intset_entries),
+            (
+                "set-max-intset-entries",
+                self.server.store.set_max_intset_entries,
+            ),
             (
                 "set-max-listpack-entries",
-                self.store.set_max_listpack_entries,
+                self.server.store.set_max_listpack_entries,
             ),
             (
                 "zset-max-listpack-entries",
-                self.store.zset_max_listpack_entries,
+                self.server.store.zset_max_listpack_entries,
             ),
             (
                 "zset-max-listpack-value",
-                self.store.zset_max_listpack_value,
+                self.server.store.zset_max_listpack_value,
             ),
         ];
         for &(name, value) in encoding_params {
@@ -1930,7 +2080,8 @@ impl Runtime {
         if Self::config_pattern_matches(pattern, "maxmemory-policy") {
             entries.push(RespFrame::BulkString(Some(b"maxmemory-policy".to_vec())));
             entries.push(RespFrame::BulkString(Some(
-                self.store
+                self.server
+                    .store
                     .maxmemory_policy
                     .as_config_str()
                     .as_bytes()
@@ -1941,14 +2092,20 @@ impl Runtime {
         let ziplist_aliases: &[(&str, usize)] = &[
             (
                 "hash-max-ziplist-entries",
-                self.store.hash_max_listpack_entries,
+                self.server.store.hash_max_listpack_entries,
             ),
-            ("hash-max-ziplist-value", self.store.hash_max_listpack_value),
+            (
+                "hash-max-ziplist-value",
+                self.server.store.hash_max_listpack_value,
+            ),
             (
                 "zset-max-ziplist-entries",
-                self.store.zset_max_listpack_entries,
+                self.server.store.zset_max_listpack_entries,
             ),
-            ("zset-max-ziplist-value", self.store.zset_max_listpack_value),
+            (
+                "zset-max-ziplist-value",
+                self.server.store.zset_max_listpack_value,
+            ),
         ];
         for &(name, value) in ziplist_aliases {
             if Self::config_pattern_matches(pattern, name) {
@@ -1981,6 +2138,7 @@ impl Runtime {
             if Self::config_pattern_matches(pattern, name) {
                 entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
                 let value = self
+                    .server
                     .config_overrides
                     .get(name)
                     .map(|v| v.as_bytes().to_vec())
@@ -1996,7 +2154,7 @@ impl Runtime {
         }
 
         let mut next_requirepass: Option<Option<Vec<u8>>> = None;
-        let mut next_acllog_max_len = self.acllog_max_len;
+        let mut next_acllog_max_len = self.server.acllog_max_len;
         let mut next_maxmemory: Option<usize> = None;
         let mut next_maxmemory_policy: Option<MaxmemoryPolicy> = None;
         let mut next_slowlog_slower_than: Option<i64> = None;
@@ -2165,42 +2323,43 @@ impl Runtime {
             self.auth_state
                 .set_requirepass_with_session_policy(requirepass, true);
         }
-        self.acllog_max_len = next_acllog_max_len;
+        self.server.acllog_max_len = next_acllog_max_len;
         if let Some(maxmemory) = next_maxmemory {
-            self.maxmemory_bytes = maxmemory;
+            self.server.maxmemory_bytes = maxmemory;
         }
         if let Some(maxmemory_policy) = next_maxmemory_policy {
-            self.store.maxmemory_policy = maxmemory_policy;
+            self.server.store.maxmemory_policy = maxmemory_policy;
         }
         if let Some(threshold) = next_slowlog_slower_than {
-            self.slowlog_log_slower_than_us = threshold;
+            self.server.slowlog_log_slower_than_us = threshold;
         }
         if let Some(max_len) = next_slowlog_max_len {
-            self.slowlog_max_len = max_len;
+            self.server.slowlog_max_len = max_len;
             // Trim existing entries if the new max is smaller.
-            while self.slowlog.len() > self.slowlog_max_len {
-                self.slowlog.remove(0);
+            while self.server.slowlog.len() > self.server.slowlog_max_len {
+                self.server.slowlog.remove(0);
             }
         }
         if let Some(hz) = next_hz {
-            self.hz = hz;
+            self.server.hz = hz;
         }
         // Apply encoding threshold updates to Store and CONFIG GET state.
         for (param, value) in encoding_threshold_updates {
             match param {
-                "hash-max-listpack-entries" => self.store.hash_max_listpack_entries = value,
-                "hash-max-listpack-value" => self.store.hash_max_listpack_value = value,
-                "set-max-intset-entries" => self.store.set_max_intset_entries = value,
-                "set-max-listpack-entries" => self.store.set_max_listpack_entries = value,
-                "zset-max-listpack-entries" => self.store.zset_max_listpack_entries = value,
-                "zset-max-listpack-value" => self.store.zset_max_listpack_value = value,
+                "hash-max-listpack-entries" => self.server.store.hash_max_listpack_entries = value,
+                "hash-max-listpack-value" => self.server.store.hash_max_listpack_value = value,
+                "set-max-intset-entries" => self.server.store.set_max_intset_entries = value,
+                "set-max-listpack-entries" => self.server.store.set_max_listpack_entries = value,
+                "zset-max-listpack-entries" => self.server.store.zset_max_listpack_entries = value,
+                "zset-max-listpack-value" => self.server.store.zset_max_listpack_value = value,
                 _ => {}
             }
-            self.config_overrides
+            self.server
+                .config_overrides
                 .insert(param.to_string(), value.to_string());
         }
         for (param, value) in static_override_updates {
-            self.config_overrides.insert(param, value);
+            self.server.config_overrides.insert(param, value);
         }
         RespFrame::SimpleString("OK".to_string())
     }
@@ -2213,7 +2372,7 @@ impl Runtime {
         if argv.len() != 1 {
             return command_error_to_resp(CommandError::WrongArity("ASKING"));
         }
-        self.cluster_state.asking = true;
+        self.session.cluster_state.asking = true;
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -2221,7 +2380,7 @@ impl Runtime {
         if argv.len() != 1 {
             return command_error_to_resp(CommandError::WrongArity("READONLY"));
         }
-        self.cluster_state.mode = ClusterClientMode::ReadOnly;
+        self.session.cluster_state.mode = ClusterClientMode::ReadOnly;
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -2229,8 +2388,8 @@ impl Runtime {
         if argv.len() != 1 {
             return command_error_to_resp(CommandError::WrongArity("READWRITE"));
         }
-        self.cluster_state.mode = ClusterClientMode::ReadWrite;
-        self.cluster_state.asking = false;
+        self.session.cluster_state.mode = ClusterClientMode::ReadWrite;
+        self.session.cluster_state.asking = false;
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -2254,16 +2413,16 @@ impl Runtime {
                 );
             }
             if argv[2].is_empty() {
-                self.client_name = None;
+                self.session.client_name = None;
             } else {
-                self.client_name = Some(argv[2].clone());
+                self.session.client_name = Some(argv[2].clone());
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("GETNAME") {
             if argv.len() != 2 {
                 return command_error_to_resp(CommandError::WrongArity("CLIENT"));
             }
-            match &self.client_name {
+            match &self.session.client_name {
                 Some(name) => RespFrame::BulkString(Some(name.clone())),
                 None => RespFrame::BulkString(None),
             }
@@ -2271,32 +2430,33 @@ impl Runtime {
             if argv.len() != 2 {
                 return command_error_to_resp(CommandError::WrongArity("CLIENT"));
             }
-            RespFrame::Integer(self.client_id as i64)
+            RespFrame::Integer(self.session.client_id as i64)
         } else if sub.eq_ignore_ascii_case("LIST") || sub.eq_ignore_ascii_case("INFO") {
             // Build real client info line from tracked state
             let name_str = self
+                .session
                 .client_name
                 .as_ref()
                 .map(|n| String::from_utf8_lossy(n).to_string())
                 .unwrap_or_default();
-            let flags = if self.transaction_state.in_transaction {
+            let flags = if self.session.transaction_state.in_transaction {
                 "x"
             } else {
                 "N"
             };
-            let multi_count = if self.transaction_state.in_transaction {
-                self.transaction_state.command_queue.len() as i64
+            let multi_count = if self.session.transaction_state.in_transaction {
+                self.session.transaction_state.command_queue.len() as i64
             } else {
                 -1
             };
-            let lib_name = self.client_lib_name.as_deref().unwrap_or("");
-            let lib_ver = self.client_lib_ver.as_deref().unwrap_or("");
+            let lib_name = self.session.client_lib_name.as_deref().unwrap_or("");
+            let lib_ver = self.session.client_lib_ver.as_deref().unwrap_or("");
             let info_line = format!(
                 "id={} addr=127.0.0.1:0 laddr=127.0.0.1:6379 fd=0 name={} db=0 sub=0 psub=0 ssub=0 multi={} watch={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user=default lib-name={} lib-ver={} resp=2 flags={}\r\n",
-                self.client_id,
+                self.session.client_id,
                 name_str,
                 multi_count,
-                self.transaction_state.watched_keys.len(),
+                self.session.transaction_state.watched_keys.len(),
                 sub.to_ascii_lowercase(),
                 lib_name,
                 lib_ver,
@@ -2312,9 +2472,9 @@ impl Runtime {
                 Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
             };
             if mode.eq_ignore_ascii_case("ON") {
-                self.client_no_evict = true;
+                self.session.client_no_evict = true;
             } else if mode.eq_ignore_ascii_case("OFF") {
-                self.client_no_evict = false;
+                self.session.client_no_evict = false;
             } else {
                 return RespFrame::Error("ERR argument must be 'on' or 'off'".to_string());
             }
@@ -2328,9 +2488,9 @@ impl Runtime {
                 Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
             };
             if mode.eq_ignore_ascii_case("ON") {
-                self.client_no_touch = true;
+                self.session.client_no_touch = true;
             } else if mode.eq_ignore_ascii_case("OFF") {
-                self.client_no_touch = false;
+                self.session.client_no_touch = false;
             } else {
                 return RespFrame::Error("ERR argument must be 'on' or 'off'".to_string());
             }
@@ -2356,7 +2516,7 @@ impl Runtime {
                             .to_string(),
                     );
                 }
-                self.client_lib_name = if val.is_empty() { None } else { Some(val) };
+                self.session.client_lib_name = if val.is_empty() { None } else { Some(val) };
             } else if attr.eq_ignore_ascii_case("LIB-VER") || attr.eq_ignore_ascii_case("lib-ver") {
                 if val.contains(' ') || val.contains('\n') {
                     return RespFrame::Error(
@@ -2364,7 +2524,7 @@ impl Runtime {
                             .to_string(),
                     );
                 }
-                self.client_lib_ver = if val.is_empty() { None } else { Some(val) };
+                self.session.client_lib_ver = if val.is_empty() { None } else { Some(val) };
             } else {
                 return RespFrame::Error(format!(
                     "ERR Unrecognized option '{attr}' for CLIENT SETINFO"
@@ -2420,12 +2580,12 @@ impl Runtime {
             return command_error_to_resp(CommandError::WrongArity("RESET"));
         }
         // Reset all per-client state to initial values
-        self.client_name = None;
-        self.client_lib_name = None;
-        self.client_lib_ver = None;
-        self.client_no_evict = false;
-        self.client_no_touch = false;
-        self.transaction_state = TransactionState::default();
+        self.session.client_name = None;
+        self.session.client_lib_name = None;
+        self.session.client_lib_ver = None;
+        self.session.client_no_evict = false;
+        self.session.client_no_touch = false;
+        self.session.transaction_state = TransactionState::default();
         // Re-authenticate as default user (deauth + implicit re-auth for no-password default)
         self.auth_state.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
         // Redis returns +RESET\r\n (a simple string "RESET")
@@ -2447,9 +2607,10 @@ impl Runtime {
                     _ => return command_error_to_resp(CommandError::InvalidInteger),
                 }
             } else {
-                self.slowlog_max_len
+                self.server.slowlog_max_len
             };
             let entries: Vec<RespFrame> = self
+                .server
                 .slowlog
                 .iter()
                 .rev()
@@ -2472,10 +2633,9 @@ impl Runtime {
                 .collect();
             RespFrame::Array(Some(entries))
         } else if sub.eq_ignore_ascii_case("LEN") {
-            RespFrame::Integer(self.slowlog.len() as i64)
+            RespFrame::Integer(self.server.slowlog.len() as i64)
         } else if sub.eq_ignore_ascii_case("RESET") {
-            self.slowlog.clear();
-            self.slowlog_next_id = 0;
+            self.server.reset_slowlog();
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("HELP") {
             RespFrame::Array(Some(vec![
@@ -2500,25 +2660,7 @@ impl Runtime {
 
     /// Record a command execution in the slow log if it exceeded the threshold.
     fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
-        if self.slowlog_log_slower_than_us < 0 {
-            // Negative threshold disables slow log recording.
-            return;
-        }
-        if (duration_us as i64) < self.slowlog_log_slower_than_us {
-            return;
-        }
-        let entry = SlowlogEntry {
-            id: self.slowlog_next_id,
-            timestamp_sec: now_ms / 1000,
-            duration_us,
-            argv: argv.to_vec(),
-        };
-        self.slowlog_next_id += 1;
-        self.slowlog.push(entry);
-        // Trim to max length (keep newest entries at the end).
-        while self.slowlog.len() > self.slowlog_max_len {
-            self.slowlog.remove(0);
-        }
+        self.server.record_slowlog(argv, duration_us, now_ms);
     }
 
     fn handle_save_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
@@ -2526,14 +2668,14 @@ impl Runtime {
             return command_error_to_resp(CommandError::WrongArity("SAVE"));
         }
         // Persist store state to AOF file if a path is configured.
-        if let Some(path) = &self.aof_path {
-            let commands = self.store.to_aof_commands(now_ms);
+        if let Some(path) = &self.server.aof_path {
+            let commands = self.server.store.to_aof_commands(now_ms);
             let records = argv_to_aof_records(commands);
             if let Err(_e) = write_aof_file(path, &records) {
                 return RespFrame::Error("ERR error saving dataset to disk".to_string());
             }
         }
-        self.last_save_time_sec = now_ms / 1000;
+        self.server.last_save_time_sec = now_ms / 1000;
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -2543,14 +2685,14 @@ impl Runtime {
         }
         // In a single-threaded context, BGSAVE behaves like SAVE.
         // Persist store state to AOF file if a path is configured.
-        if let Some(path) = &self.aof_path {
-            let commands = self.store.to_aof_commands(now_ms);
+        if let Some(path) = &self.server.aof_path {
+            let commands = self.server.store.to_aof_commands(now_ms);
             let records = argv_to_aof_records(commands);
             if let Err(_e) = write_aof_file(path, &records) {
                 return RespFrame::Error("ERR error saving dataset to disk".to_string());
             }
         }
-        self.last_save_time_sec = now_ms / 1000;
+        self.server.last_save_time_sec = now_ms / 1000;
         RespFrame::SimpleString("Background saving started".to_string())
     }
 
@@ -2558,7 +2700,7 @@ impl Runtime {
         if argv.len() != 1 {
             return command_error_to_resp(CommandError::WrongArity("LASTSAVE"));
         }
-        RespFrame::Integer(self.last_save_time_sec as i64)
+        RespFrame::Integer(self.server.last_save_time_sec as i64)
     }
 
     fn handle_bgrewriteaof_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
@@ -2566,8 +2708,8 @@ impl Runtime {
             return command_error_to_resp(CommandError::WrongArity("BGREWRITEAOF"));
         }
         // Rewrite the AOF file with a snapshot of the current store state.
-        if let Some(path) = &self.aof_path {
-            let commands = self.store.to_aof_commands(now_ms);
+        if let Some(path) = &self.server.aof_path {
+            let commands = self.server.store.to_aof_commands(now_ms);
             let records = argv_to_aof_records(commands);
             if let Err(_e) = write_aof_file(path, &records) {
                 return RespFrame::Error("ERR error rewriting AOF file".to_string());
@@ -2623,7 +2765,7 @@ impl Runtime {
         }
 
         if subcommand == ClusterSubcommand::Dispatch {
-            return match dispatch_argv(argv, &mut self.store, now_ms) {
+            return match dispatch_argv(argv, &mut self.server.store, now_ms) {
                 Ok(reply) => reply,
                 Err(err) => command_error_to_resp(err),
             };
@@ -2645,9 +2787,9 @@ impl Runtime {
         }
 
         let outcome = evaluate_wait(
-            &self.replication_ack_state.replica_ack_offsets,
+            &self.server.replication_ack_state.replica_ack_offsets,
             WaitThreshold {
-                required_offset: self.replication_ack_state.primary_offset,
+                required_offset: self.server.replication_ack_state.primary_offset,
                 required_replicas,
             },
         );
@@ -2674,17 +2816,17 @@ impl Runtime {
         let required_local_offset = if required_local == 0 {
             ReplOffset(0)
         } else {
-            self.replication_ack_state.primary_offset
+            self.server.replication_ack_state.primary_offset
         };
         let required_replica_offset = if required_replicas == 0 {
             ReplOffset(0)
         } else {
-            self.replication_ack_state.primary_offset
+            self.server.replication_ack_state.primary_offset
         };
 
         let outcome = evaluate_waitaof(
-            self.replication_ack_state.local_fsync_offset,
-            &self.replication_ack_state.replica_fsync_offsets,
+            self.server.replication_ack_state.local_fsync_offset,
+            &self.server.replication_ack_state.replica_fsync_offsets,
             WaitAofThreshold {
                 required_local_offset,
                 required_replica_offset,
@@ -2700,11 +2842,11 @@ impl Runtime {
     }
 
     fn handle_multi_command(&mut self) -> RespFrame {
-        if self.transaction_state.in_transaction {
+        if self.session.transaction_state.in_transaction {
             return RespFrame::Error("ERR MULTI calls can not be nested".to_string());
         }
-        self.transaction_state.in_transaction = true;
-        self.transaction_state.command_queue.clear();
+        self.session.transaction_state.in_transaction = true;
+        self.session.transaction_state.command_queue.clear();
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -2715,17 +2857,17 @@ impl Runtime {
         input_digest: &str,
         state_before: &str,
     ) -> RespFrame {
-        if !self.transaction_state.in_transaction {
+        if !self.session.transaction_state.in_transaction {
             return RespFrame::Error("ERR EXEC without MULTI".to_string());
         }
-        let queued = std::mem::take(&mut self.transaction_state.command_queue);
-        self.transaction_state.in_transaction = false;
+        let queued = std::mem::take(&mut self.session.transaction_state.command_queue);
+        self.session.transaction_state.in_transaction = false;
 
         // Check watched keys: if any were modified, abort the transaction
-        let watch_failed = self.transaction_state.watch_dirty || {
+        let watch_failed = self.session.transaction_state.watch_dirty || {
             let mut dirty = false;
-            for (key, original_fp) in &self.transaction_state.watched_keys {
-                let current_fp = self.store.key_fingerprint(key, now_ms);
+            for (key, original_fp) in &self.session.transaction_state.watched_keys {
+                let current_fp = self.server.store.key_fingerprint(key, now_ms);
                 if current_fp != *original_fp {
                     dirty = true;
                     break;
@@ -2733,8 +2875,8 @@ impl Runtime {
             }
             dirty
         };
-        self.transaction_state.watched_keys.clear();
-        self.transaction_state.watch_dirty = false;
+        self.session.transaction_state.watched_keys.clear();
+        self.session.transaction_state.watch_dirty = false;
 
         if watch_failed {
             return RespFrame::Array(None);
@@ -2754,7 +2896,7 @@ impl Runtime {
             }
 
             let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
-            match dispatch_argv(argv, &mut self.store, now_ms) {
+            match dispatch_argv(argv, &mut self.server.store, now_ms) {
                 Ok(reply) => {
                     self.capture_aof_record(argv);
                     results.push(reply);
@@ -2766,13 +2908,13 @@ impl Runtime {
     }
 
     fn handle_discard_command(&mut self) -> RespFrame {
-        if !self.transaction_state.in_transaction {
+        if !self.session.transaction_state.in_transaction {
             return RespFrame::Error("ERR DISCARD without MULTI".to_string());
         }
-        self.transaction_state.in_transaction = false;
-        self.transaction_state.command_queue.clear();
-        self.transaction_state.watched_keys.clear();
-        self.transaction_state.watch_dirty = false;
+        self.session.transaction_state.in_transaction = false;
+        self.session.transaction_state.command_queue.clear();
+        self.session.transaction_state.watched_keys.clear();
+        self.session.transaction_state.watch_dirty = false;
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -2782,12 +2924,15 @@ impl Runtime {
                 "ERR wrong number of arguments for 'watch' command".to_string(),
             );
         }
-        if self.transaction_state.in_transaction {
+        if self.session.transaction_state.in_transaction {
             return RespFrame::Error("ERR WATCH inside MULTI is not allowed".to_string());
         }
         for key in &argv[1..] {
-            let fp = self.store.key_fingerprint(key, now_ms);
-            self.transaction_state.watched_keys.push((key.clone(), fp));
+            let fp = self.server.store.key_fingerprint(key, now_ms);
+            self.session
+                .transaction_state
+                .watched_keys
+                .push((key.clone(), fp));
         }
         RespFrame::SimpleString("OK".to_string())
     }
@@ -2798,8 +2943,8 @@ impl Runtime {
                 "ERR wrong number of arguments for 'unwatch' command".to_string(),
             );
         }
-        self.transaction_state.watched_keys.clear();
-        self.transaction_state.watch_dirty = false;
+        self.session.transaction_state.watched_keys.clear();
+        self.session.transaction_state.watch_dirty = false;
         RespFrame::SimpleString("OK".to_string())
     }
 
@@ -2876,9 +3021,9 @@ impl Runtime {
         let (decision_action, severity) = self
             .policy
             .decide(input.threat_class, input.preferred_deviation);
-        let state_after = self.store.state_digest();
+        let state_after = self.server.store.state_digest();
         let output_digest = digest_bytes(&input.output.to_bytes());
-        self.evidence.record(EvidenceEvent {
+        self.server.evidence.record(EvidenceEvent {
             ts_utc: format_ts_utc(input.now_ms),
             ts_ms: input.now_ms,
             packet_id: input.packet_id,
@@ -3115,7 +3260,7 @@ pub mod ecosystem {
 mod tests {
     use std::time::Instant;
 
-    use fr_command::CommandError;
+    use fr_command::{CommandError, dispatch_argv};
     use fr_config::{
         DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
         TlsAuthClients, TlsConfig, TlsProtocol,
@@ -3129,7 +3274,7 @@ mod tests {
     use fr_protocol::{RespFrame, parse_frame};
 
     use super::{
-        ClusterSubcommand, Runtime, classify_cluster_subcommand,
+        ClientSession, ClusterSubcommand, Runtime, ServerState, classify_cluster_subcommand,
         classify_cluster_subcommand_linear, classify_runtime_special_command,
         classify_runtime_special_command_linear,
     };
@@ -3143,11 +3288,81 @@ mod tests {
         ))
     }
 
+    fn argv(parts: &[&[u8]]) -> Vec<Vec<u8>> {
+        parts.iter().map(|part| (*part).to_vec()).collect()
+    }
+
     #[test]
     fn fr_p2c_001_u001_runtime_exposes_deterministic_phase_order() {
         let plan =
             Runtime::plan_event_loop_tick(1, 3, TickBudget::default(), EventLoopMode::Normal);
         assert_eq!(plan.phase_order, EVENT_LOOP_PHASE_ORDER);
+    }
+
+    #[test]
+    fn fr_p2c_001_u001a_runtime_command_paths_update_server_state() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"maxmemory",
+                    b"1024",
+                    b"hz",
+                    b"42",
+                    b"timeout",
+                    b"30",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(rt.server.maxmemory_bytes, 1024);
+        assert_eq!(rt.server.hz, 42);
+        assert_eq!(
+            rt.server
+                .config_overrides
+                .get("timeout")
+                .map(String::as_str),
+            Some("30")
+        );
+    }
+
+    #[test]
+    fn fr_p2c_001_u001b_server_state_is_shared_while_sessions_remain_isolated() {
+        let mut server = ServerState::default();
+        let mut writer = ClientSession::default();
+        let reader = ClientSession::default();
+
+        writer.client_name = Some(b"writer".to_vec());
+        server.configure_maxmemory_enforcement(64, 0, 16, 4);
+        server
+            .config_overrides
+            .insert("timeout".to_string(), "60".to_string());
+
+        assert_eq!(
+            dispatch_argv(
+                &argv(&[b"SET", b"shared:key", b"value"]),
+                &mut server.store,
+                0
+            ),
+            Ok(RespFrame::SimpleString("OK".to_string()))
+        );
+        assert_eq!(
+            dispatch_argv(&argv(&[b"GET", b"shared:key"]), &mut server.store, 1),
+            Ok(RespFrame::BulkString(Some(b"value".to_vec())))
+        );
+        assert_eq!(server.maxmemory_bytes, 64);
+        assert_eq!(
+            server.config_overrides.get("timeout").map(String::as_str),
+            Some("60")
+        );
+        assert_eq!(writer.client_name.as_deref(), Some(b"writer".as_slice()));
+        assert_eq!(reader.client_name, None);
+        assert_ne!(writer.client_id, reader.client_id);
     }
 
     #[test]
@@ -3553,7 +3768,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"proto".to_vec())),
                 RespFrame::Integer(3),
                 RespFrame::BulkString(Some(b"id".to_vec())),
-                RespFrame::Integer(rt.client_id as i64),
+                RespFrame::Integer(rt.session.client_id as i64),
                 RespFrame::BulkString(Some(b"mode".to_vec())),
                 RespFrame::BulkString(Some(b"standalone".to_vec())),
                 RespFrame::BulkString(Some(b"role".to_vec())),
@@ -3604,7 +3819,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"proto".to_vec())),
                 RespFrame::Integer(3),
                 RespFrame::BulkString(Some(b"id".to_vec())),
-                RespFrame::Integer(rt.client_id as i64),
+                RespFrame::Integer(rt.session.client_id as i64),
                 RespFrame::BulkString(Some(b"mode".to_vec())),
                 RespFrame::BulkString(Some(b"standalone".to_vec())),
                 RespFrame::BulkString(Some(b"role".to_vec())),
