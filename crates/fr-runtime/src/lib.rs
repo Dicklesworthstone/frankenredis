@@ -220,7 +220,6 @@ impl AclUser {
 struct AuthState {
     requirepass: Option<Vec<u8>>,
     acl_users: BTreeMap<Vec<u8>, AclUser>,
-    authenticated_user: Option<Vec<u8>>,
 }
 
 impl Default for AuthState {
@@ -230,22 +229,12 @@ impl Default for AuthState {
         Self {
             requirepass: None,
             acl_users,
-            authenticated_user: Some(DEFAULT_AUTH_USER.to_vec()),
         }
     }
 }
 
 impl AuthState {
     fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
-        self.set_requirepass_with_session_policy(requirepass, false);
-    }
-
-    fn set_requirepass_with_session_policy(
-        &mut self,
-        requirepass: Option<Vec<u8>>,
-        preserve_authenticated_user: bool,
-    ) {
-        let previous_authenticated_user = self.authenticated_user.clone();
         self.requirepass = requirepass.clone();
         let default_user = self
             .acl_users
@@ -257,14 +246,6 @@ impl AuthState {
             // Redis bridge behavior: empty requirepass maps back to default-user nopass.
             default_user.passwords.clear();
         }
-
-        if !self.auth_required() {
-            self.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
-        } else if preserve_authenticated_user {
-            self.authenticated_user = previous_authenticated_user;
-        } else {
-            self.authenticated_user = None;
-        }
     }
 
     fn add_user(&mut self, username: Vec<u8>, password: Vec<u8>) {
@@ -273,11 +254,6 @@ impl AuthState {
             .entry(username)
             .or_insert_with(AclUser::new_default);
         user.passwords = vec![password];
-        self.authenticated_user = None;
-    }
-
-    fn is_authenticated(&self) -> bool {
-        self.authenticated_user.is_some()
     }
 
     fn auth_required(&self) -> bool {
@@ -286,16 +262,6 @@ impl AuthState {
 
     fn requirepass(&self) -> Option<&[u8]> {
         self.requirepass.as_deref()
-    }
-
-    fn requires_auth(&self) -> bool {
-        self.auth_required() && !self.is_authenticated()
-    }
-
-    fn current_user_name(&self) -> &[u8] {
-        self.authenticated_user
-            .as_deref()
-            .unwrap_or(DEFAULT_AUTH_USER)
     }
 
     fn user_names(&self) -> Vec<&[u8]> {
@@ -356,6 +322,12 @@ impl AuthState {
             return false;
         }
         self.acl_users.remove(username).is_some()
+    }
+
+    fn can_authenticate_as(&self, username: &[u8]) -> bool {
+        self.acl_users
+            .get(username)
+            .is_some_and(|user| user.enabled)
     }
 }
 
@@ -690,6 +662,7 @@ pub struct ServerState {
     store: Store,
     aof_records: Vec<AofRecord>,
     evidence: EvidenceLedger,
+    auth_state: AuthState,
     tls_state: TlsRuntimeState,
     acllog_max_len: i64,
     replication_ack_state: ReplicationAckState,
@@ -727,6 +700,7 @@ impl Default for ServerState {
             store: Store::new(),
             aof_records: Vec::new(),
             evidence: EvidenceLedger::default(),
+            auth_state: AuthState::default(),
             tls_state: TlsRuntimeState::default(),
             acllog_max_len: DEFAULT_ACLLOG_MAX_LEN,
             replication_ack_state: ReplicationAckState::default(),
@@ -904,6 +878,12 @@ impl ServerState {
 pub struct ClientSession {
     cluster_state: ClusterClientState,
     transaction_state: TransactionState,
+    authenticated_user: Option<Vec<u8>>,
+    /// Per-client selected database. SELECT support lands later, but the state
+    /// must already be session-scoped before multiple concurrent clients exist.
+    selected_db: usize,
+    /// RESP protocol negotiated via HELLO. Redis defaults new connections to RESP2.
+    resp_protocol_version: i64,
     /// Per-client connection ID (monotonically increasing).
     client_id: u64,
     /// Per-client name set via CLIENT SETNAME.
@@ -923,6 +903,9 @@ impl Default for ClientSession {
         Self {
             cluster_state: ClusterClientState::default(),
             transaction_state: TransactionState::default(),
+            authenticated_user: None,
+            selected_db: 0,
+            resp_protocol_version: 2,
             client_id: CLIENT_ID_COUNTER.fetch_add(1, Ordering::Relaxed),
             client_name: None,
             client_lib_name: None,
@@ -933,14 +916,65 @@ impl Default for ClientSession {
     }
 }
 
+impl ClientSession {
+    fn new_for_server(server: &ServerState) -> Self {
+        let mut session = Self::default();
+        session.refresh_authentication_for_server(&server.auth_state, false);
+        session
+    }
+
+    fn is_authenticated(&self) -> bool {
+        self.authenticated_user.is_some()
+    }
+
+    fn requires_auth(&self, auth_state: &AuthState) -> bool {
+        auth_state.auth_required() && !self.is_authenticated()
+    }
+
+    fn current_user_name(&self) -> &[u8] {
+        self.authenticated_user
+            .as_deref()
+            .unwrap_or(DEFAULT_AUTH_USER)
+    }
+
+    fn refresh_authentication_for_server(
+        &mut self,
+        auth_state: &AuthState,
+        preserve_authenticated_user: bool,
+    ) {
+        let previous_authenticated_user = preserve_authenticated_user
+            .then(|| self.authenticated_user.clone())
+            .flatten();
+        if !auth_state.auth_required() {
+            self.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
+        } else if let Some(username) = previous_authenticated_user
+            && auth_state.can_authenticate_as(&username)
+        {
+            self.authenticated_user = Some(username);
+        } else {
+            self.authenticated_user = None;
+        }
+    }
+
+    fn reset_connection_state(&mut self, auth_state: &AuthState) {
+        self.cluster_state = ClusterClientState::default();
+        self.transaction_state = TransactionState::default();
+        self.selected_db = 0;
+        self.resp_protocol_version = 2;
+        self.client_name = None;
+        self.client_lib_name = None;
+        self.client_lib_ver = None;
+        self.client_no_evict = false;
+        self.client_no_touch = false;
+        self.refresh_authentication_for_server(auth_state, false);
+    }
+}
+
 #[derive(Debug)]
 pub struct Runtime {
     policy: RuntimePolicy,
     server: ServerState,
     session: ClientSession,
-    /// Temporary mixed auth state until bd-zuyq.1.3 splits server ACL config from
-    /// per-session authenticated-user tracking.
-    auth_state: AuthState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -967,11 +1001,12 @@ struct ThreatEventInput<'a> {
 impl Runtime {
     #[must_use]
     pub fn new(policy: RuntimePolicy) -> Self {
+        let server = ServerState::default();
+        let session = ClientSession::new_for_server(&server);
         Self {
             policy,
-            server: ServerState::default(),
-            session: ClientSession::default(),
-            auth_state: AuthState::default(),
+            server,
+            session,
         }
     }
 
@@ -1210,16 +1245,18 @@ impl Runtime {
     }
 
     pub fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
-        self.auth_state.set_requirepass(requirepass);
+        self.apply_requirepass_update(requirepass, false);
     }
 
     pub fn add_user(&mut self, username: Vec<u8>, password: Vec<u8>) {
-        self.auth_state.add_user(username, password);
+        self.server.auth_state.add_user(username, password);
+        self.session
+            .refresh_authentication_for_server(&self.server.auth_state, false);
     }
 
     #[must_use]
     pub fn is_authenticated(&self) -> bool {
-        self.auth_state.is_authenticated()
+        self.session.is_authenticated()
     }
 
     #[must_use]
@@ -1245,6 +1282,18 @@ impl Runtime {
             local_fsync_offset,
             replica_ack_offsets,
             replica_fsync_offsets,
+        );
+    }
+
+    fn apply_requirepass_update(
+        &mut self,
+        requirepass: Option<Vec<u8>>,
+        preserve_authenticated_user: bool,
+    ) {
+        self.server.auth_state.set_requirepass(requirepass);
+        self.session.refresh_authentication_for_server(
+            &self.server.auth_state,
+            preserve_authenticated_user,
         );
     }
 
@@ -1339,7 +1388,7 @@ impl Runtime {
             _ => {}
         }
 
-        if self.auth_state.requires_auth() {
+        if self.session.requires_auth(&self.server.auth_state) {
             let reply = RespFrame::Error(NOAUTH_ERROR.to_string());
             self.record_threat_event(ThreatEventInput {
                 now_ms,
@@ -1571,7 +1620,10 @@ impl Runtime {
     fn handle_hello_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         // HELLO with no args: return server info using current protocol (Redis 7+)
         if argv.len() == 1 {
-            return build_hello_response(2, self.session.client_id);
+            return build_hello_response(
+                self.session.resp_protocol_version,
+                self.session.client_id,
+            );
         }
 
         let protocol_version = match parse_i64_arg(&argv[1]) {
@@ -1587,6 +1639,7 @@ impl Runtime {
         }
 
         let mut auth_credentials: Option<(&[u8], &[u8])> = None;
+        let mut next_client_name: Option<Option<Vec<u8>>> = None;
         let mut options = argv[2..].iter();
         while let Some(option_arg) = options.next() {
             let option = match std::str::from_utf8(option_arg) {
@@ -1613,11 +1666,11 @@ impl Runtime {
                             .to_string(),
                     );
                 }
-                if name.is_empty() {
-                    self.session.client_name = None;
+                next_client_name = Some(if name.is_empty() {
+                    None
                 } else {
-                    self.session.client_name = Some(name.clone());
-                }
+                    Some(name.clone())
+                });
                 continue;
             }
             return command_error_to_resp(CommandError::SyntaxError);
@@ -1633,19 +1686,23 @@ impl Runtime {
                     return RespFrame::Error(WRONGPASS_ERROR.to_string());
                 }
             }
-        } else if self.auth_state.requires_auth() {
+        } else if self.session.requires_auth(&self.server.auth_state) {
             return RespFrame::Error(NOAUTH_ERROR.to_string());
         }
 
+        if let Some(client_name) = next_client_name {
+            self.session.client_name = client_name;
+        }
+        self.session.resp_protocol_version = protocol_version;
         build_hello_response(protocol_version, self.session.client_id)
     }
 
     fn authenticate_user(&mut self, username: &[u8], password: &[u8]) -> Result<(), AuthFailure> {
-        if !self.auth_state.auth_required() {
+        if !self.server.auth_state.auth_required() {
             return Err(AuthFailure::NotConfigured);
         }
 
-        let Some(acl_user) = self.auth_state.acl_users.get(username) else {
+        let Some(acl_user) = self.server.auth_state.acl_users.get(username) else {
             return Err(AuthFailure::WrongPass);
         };
 
@@ -1657,7 +1714,7 @@ impl Runtime {
             return Err(AuthFailure::WrongPass);
         }
 
-        self.auth_state.authenticated_user = Some(username.to_vec());
+        self.session.authenticated_user = Some(username.to_vec());
         Ok(())
     }
 
@@ -1704,7 +1761,7 @@ impl Runtime {
         if argv.len() != 2 {
             return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
         }
-        let username = self.auth_state.current_user_name();
+        let username = self.session.current_user_name();
         RespFrame::BulkString(Some(username.to_vec()))
     }
 
@@ -1712,7 +1769,7 @@ impl Runtime {
         if argv.len() != 2 {
             return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
         }
-        let entries = self.auth_state.acl_list_entries();
+        let entries = self.server.auth_state.acl_list_entries();
         RespFrame::Array(Some(
             entries
                 .into_iter()
@@ -1725,7 +1782,7 @@ impl Runtime {
         if argv.len() != 2 {
             return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
         }
-        let names = self.auth_state.user_names();
+        let names = self.server.auth_state.user_names();
         RespFrame::Array(Some(
             names
                 .into_iter()
@@ -1740,7 +1797,7 @@ impl Runtime {
         }
         let username = argv[2].clone();
         let rules: Vec<&[u8]> = argv[3..].iter().map(Vec::as_slice).collect();
-        match self.auth_state.set_user(username, &rules) {
+        match self.server.auth_state.set_user(username, &rules) {
             Ok(()) => RespFrame::SimpleString("OK".to_string()),
             Err(msg) => RespFrame::Error(msg),
         }
@@ -1755,7 +1812,7 @@ impl Runtime {
             if username.as_slice() == DEFAULT_AUTH_USER {
                 return RespFrame::Error("ERR The 'default' user cannot be removed".to_string());
             }
-            if self.auth_state.del_user(username) {
+            if self.server.auth_state.del_user(username) {
                 deleted += 1;
             }
         }
@@ -1766,7 +1823,7 @@ impl Runtime {
         if argv.len() != 3 {
             return RespFrame::Error(ACL_UNKNOWN_SUBCOMMAND_ERROR.to_string());
         }
-        let Some(user) = self.auth_state.get_user(&argv[2]) else {
+        let Some(user) = self.server.auth_state.get_user(&argv[2]) else {
             return RespFrame::BulkString(None);
         };
         let flags_str = if user.enabled {
@@ -2002,7 +2059,11 @@ impl Runtime {
         if Self::config_pattern_matches(pattern, "requirepass") {
             entries.push(RespFrame::BulkString(Some(b"requirepass".to_vec())));
             entries.push(RespFrame::BulkString(Some(
-                self.auth_state.requirepass().unwrap_or_default().to_vec(),
+                self.server
+                    .auth_state
+                    .requirepass()
+                    .unwrap_or_default()
+                    .to_vec(),
             )));
         }
         if Self::config_pattern_matches(pattern, "acllog-max-len") {
@@ -2320,8 +2381,7 @@ impl Runtime {
 
         if let Some(requirepass) = next_requirepass {
             // CONFIG SET requirepass should bridge ACL defaults without dropping this session.
-            self.auth_state
-                .set_requirepass_with_session_policy(requirepass, true);
+            self.apply_requirepass_update(requirepass, true);
         }
         self.server.acllog_max_len = next_acllog_max_len;
         if let Some(maxmemory) = next_maxmemory {
@@ -2452,14 +2512,17 @@ impl Runtime {
             let lib_name = self.session.client_lib_name.as_deref().unwrap_or("");
             let lib_ver = self.session.client_lib_ver.as_deref().unwrap_or("");
             let info_line = format!(
-                "id={} addr=127.0.0.1:0 laddr=127.0.0.1:6379 fd=0 name={} db=0 sub=0 psub=0 ssub=0 multi={} watch={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user=default lib-name={} lib-ver={} resp=2 flags={}\r\n",
+                "id={} addr=127.0.0.1:0 laddr=127.0.0.1:6379 fd=0 name={} db={} sub=0 psub=0 ssub=0 multi={} watch={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user={} lib-name={} lib-ver={} resp={} flags={}\r\n",
                 self.session.client_id,
                 name_str,
+                self.session.selected_db,
                 multi_count,
                 self.session.transaction_state.watched_keys.len(),
                 sub.to_ascii_lowercase(),
+                String::from_utf8_lossy(self.session.current_user_name()),
                 lib_name,
                 lib_ver,
+                self.session.resp_protocol_version,
                 flags,
             );
             RespFrame::BulkString(Some(info_line.into_bytes()))
@@ -2579,15 +2642,7 @@ impl Runtime {
         if argv.len() != 1 {
             return command_error_to_resp(CommandError::WrongArity("RESET"));
         }
-        // Reset all per-client state to initial values
-        self.session.client_name = None;
-        self.session.client_lib_name = None;
-        self.session.client_lib_ver = None;
-        self.session.client_no_evict = false;
-        self.session.client_no_touch = false;
-        self.session.transaction_state = TransactionState::default();
-        // Re-authenticate as default user (deauth + implicit re-auth for no-password default)
-        self.auth_state.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
+        self.session.reset_connection_state(&self.server.auth_state);
         // Redis returns +RESET\r\n (a simple string "RESET")
         RespFrame::SimpleString("RESET".to_string())
     }
@@ -3274,9 +3329,9 @@ mod tests {
     use fr_protocol::{RespFrame, parse_frame};
 
     use super::{
-        ClientSession, ClusterSubcommand, Runtime, ServerState, classify_cluster_subcommand,
-        classify_cluster_subcommand_linear, classify_runtime_special_command,
-        classify_runtime_special_command_linear,
+        ClientSession, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER, Runtime,
+        ServerState, classify_cluster_subcommand, classify_cluster_subcommand_linear,
+        classify_runtime_special_command, classify_runtime_special_command_linear,
     };
 
     fn command(parts: &[&[u8]]) -> RespFrame {
@@ -3334,8 +3389,8 @@ mod tests {
     #[test]
     fn fr_p2c_001_u001b_server_state_is_shared_while_sessions_remain_isolated() {
         let mut server = ServerState::default();
-        let mut writer = ClientSession::default();
-        let reader = ClientSession::default();
+        let mut writer = ClientSession::new_for_server(&server);
+        let reader = ClientSession::new_for_server(&server);
 
         writer.client_name = Some(b"writer".to_vec());
         server.configure_maxmemory_enforcement(64, 0, 16, 4);
@@ -3363,6 +3418,39 @@ mod tests {
         assert_eq!(writer.client_name.as_deref(), Some(b"writer".as_slice()));
         assert_eq!(reader.client_name, None);
         assert_ne!(writer.client_id, reader.client_id);
+    }
+
+    #[test]
+    fn fr_p2c_001_u001c_client_sessions_isolate_auth_protocol_db_and_transaction_state() {
+        let mut server = ServerState::default();
+        server.auth_state.set_requirepass(Some(b"secret".to_vec()));
+
+        let mut authenticated = ClientSession::new_for_server(&server);
+        let isolated = ClientSession::new_for_server(&server);
+
+        assert!(!authenticated.is_authenticated());
+        assert!(!isolated.is_authenticated());
+
+        authenticated.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
+        authenticated.selected_db = 5;
+        authenticated.resp_protocol_version = 3;
+        authenticated.client_name = Some(b"alpha".to_vec());
+        authenticated.transaction_state.in_transaction = true;
+        authenticated
+            .transaction_state
+            .watched_keys
+            .push((b"watched".to_vec(), 7));
+        authenticated.cluster_state.mode = ClusterClientMode::ReadOnly;
+        authenticated.cluster_state.asking = true;
+
+        assert_eq!(isolated.authenticated_user, None);
+        assert_eq!(isolated.selected_db, 0);
+        assert_eq!(isolated.resp_protocol_version, 2);
+        assert_eq!(isolated.client_name, None);
+        assert!(!isolated.transaction_state.in_transaction);
+        assert!(isolated.transaction_state.watched_keys.is_empty());
+        assert_eq!(isolated.cluster_state.mode, ClusterClientMode::ReadWrite);
+        assert!(!isolated.cluster_state.asking);
     }
 
     #[test]
@@ -3781,6 +3869,28 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_004_u004a_hello_failed_auth_does_not_leak_setname_or_protocol_state() {
+        let mut rt = Runtime::default_strict();
+        rt.set_requirepass(Some(b"secret".to_vec()));
+
+        let wrong = rt.execute_frame(
+            command(&[
+                b"HELLO", b"3", b"SETNAME", b"leak", b"AUTH", b"default", b"bad",
+            ]),
+            0,
+        );
+        assert_eq!(
+            wrong,
+            RespFrame::Error(
+                "WRONGPASS invalid username-password pair or user is disabled.".to_string()
+            )
+        );
+        assert_eq!(rt.session.client_name, None);
+        assert_eq!(rt.session.resp_protocol_version, 2);
+        assert!(!rt.is_authenticated());
+    }
+
+    #[test]
     fn fr_p2c_004_u005_noauth_gate_runs_before_dispatch() {
         let mut rt = Runtime::default_strict();
         rt.set_requirepass(Some(b"secret".to_vec()));
@@ -3847,6 +3957,87 @@ mod tests {
         assert_eq!(
             missing_username_and_password,
             RespFrame::Error("ERR syntax error".to_string())
+        );
+    }
+
+    #[test]
+    fn fr_p2c_004_u009b_client_list_reflects_session_protocol_db_and_user_state() {
+        let mut rt = Runtime::default_strict();
+        rt.session.selected_db = 5;
+
+        let hello = rt.execute_frame(command(&[b"HELLO", b"3", b"SETNAME", b"alpha"]), 0);
+        assert_eq!(
+            hello,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"server".to_vec())),
+                RespFrame::BulkString(Some(b"redis".to_vec())),
+                RespFrame::BulkString(Some(b"version".to_vec())),
+                RespFrame::BulkString(Some(b"7.2.0".to_vec())),
+                RespFrame::BulkString(Some(b"proto".to_vec())),
+                RespFrame::Integer(3),
+                RespFrame::BulkString(Some(b"id".to_vec())),
+                RespFrame::Integer(rt.session.client_id as i64),
+                RespFrame::BulkString(Some(b"mode".to_vec())),
+                RespFrame::BulkString(Some(b"standalone".to_vec())),
+                RespFrame::BulkString(Some(b"role".to_vec())),
+                RespFrame::BulkString(Some(b"master".to_vec())),
+                RespFrame::BulkString(Some(b"modules".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
+        );
+
+        let client_list = rt.execute_frame(command(&[b"CLIENT", b"LIST"]), 1);
+        let info = match client_list {
+            RespFrame::BulkString(Some(info)) => String::from_utf8(info).expect("client info utf8"),
+            other => panic!("unexpected client list response: {other:?}"),
+        };
+        assert!(info.contains("name=alpha"));
+        assert!(info.contains("db=5"));
+        assert!(info.contains("user=default"));
+        assert!(info.contains("resp=3"));
+    }
+
+    #[test]
+    fn fr_p2c_004_u009c_reset_clears_session_protocol_and_deauths_when_auth_required() {
+        let mut rt = Runtime::default_strict();
+        rt.set_requirepass(Some(b"secret".to_vec()));
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"secret"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"HELLO", b"3", b"SETNAME", b"alpha"]), 1),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"server".to_vec())),
+                RespFrame::BulkString(Some(b"redis".to_vec())),
+                RespFrame::BulkString(Some(b"version".to_vec())),
+                RespFrame::BulkString(Some(b"7.2.0".to_vec())),
+                RespFrame::BulkString(Some(b"proto".to_vec())),
+                RespFrame::Integer(3),
+                RespFrame::BulkString(Some(b"id".to_vec())),
+                RespFrame::Integer(rt.session.client_id as i64),
+                RespFrame::BulkString(Some(b"mode".to_vec())),
+                RespFrame::BulkString(Some(b"standalone".to_vec())),
+                RespFrame::BulkString(Some(b"role".to_vec())),
+                RespFrame::BulkString(Some(b"master".to_vec())),
+                RespFrame::BulkString(Some(b"modules".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
+        );
+        rt.session.selected_db = 7;
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"RESET"]), 2),
+            RespFrame::SimpleString("RESET".to_string())
+        );
+        assert!(!rt.is_authenticated());
+        assert_eq!(rt.session.selected_db, 0);
+        assert_eq!(rt.session.resp_protocol_version, 2);
+        assert_eq!(rt.session.client_name, None);
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 3),
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
         );
     }
 
