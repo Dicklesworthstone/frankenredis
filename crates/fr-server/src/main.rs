@@ -86,8 +86,6 @@ fn main() -> ExitCode {
         "FrankenRedis v{} starting (mode={mode_str}, port={port})",
         env!("CARGO_PKG_VERSION"),
     );
-    let _ = &runtime; // confirm runtime is live
-
     // Placeholder: stdin RESP loop for smoke-testing the bootstrap path.
     // A real TCP listener is deferred to bd-zuyq.3.1.
     eprintln!("Accepting inline commands on stdin (one per line). Ctrl-D to quit.");
