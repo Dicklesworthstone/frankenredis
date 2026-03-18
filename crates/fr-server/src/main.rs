@@ -693,7 +693,7 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
         let deadline_ms = if timeout_secs == 0.0 {
             u64::MAX
         } else {
-            now_ms + (timeout_secs * 1000.0) as u64
+            now_ms.saturating_add((timeout_secs * 1000.0) as u64)
         };
         let keys: Vec<Vec<u8>> = items[1..items.len() - 1]
             .iter()
@@ -733,7 +733,7 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
         let deadline_ms = if timeout_secs == 0.0 {
             u64::MAX
         } else {
-            now_ms + (timeout_secs * 1000.0) as u64
+            now_ms.saturating_add((timeout_secs * 1000.0) as u64)
         };
         let source = match &items[1] {
             RespFrame::BulkString(Some(b)) => b.clone(),
@@ -778,7 +778,7 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
         let deadline_ms = if timeout_secs == 0.0 {
             u64::MAX
         } else {
-            now_ms + (timeout_secs * 1000.0) as u64
+            now_ms.saturating_add((timeout_secs * 1000.0) as u64)
         };
         let source = match &items[1] {
             RespFrame::BulkString(Some(b)) => b.clone(),
