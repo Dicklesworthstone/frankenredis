@@ -13,3 +13,6 @@ path = "src/main.rs"
 fr-runtime = { path = "../fr-runtime" }
 fr-config = { path = "../fr-config" }
 fr-protocol = { path = "../fr-protocol" }
+fr-command = { path = "../fr-command" }
+fr-eventloop = { path = "../fr-eventloop" }
+mio = { version = "1.0", features = ["net", "os-poll"] }

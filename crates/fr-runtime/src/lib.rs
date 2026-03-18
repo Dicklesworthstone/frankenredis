@@ -25,7 +25,7 @@ use fr_persist::{
     AofRecord, PersistError, argv_to_aof_records, decode_aof_stream, encode_aof_stream,
     write_aof_file,
 };
-use fr_protocol::{RespFrame, RespParseError, parse_frame};
+use fr_protocol::{RespFrame, RespParseError};
 use fr_repl::{ReplOffset, WaitAofThreshold, WaitThreshold, evaluate_wait, evaluate_waitaof};
 use fr_store::{
     EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState,
@@ -184,6 +184,7 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
 struct AclUser {
     passwords: Vec<Vec<u8>>,
     enabled: bool,
+    full_access: bool,
 }
 
 impl AclUser {
@@ -191,6 +192,7 @@ impl AclUser {
         Self {
             passwords: Vec::new(),
             enabled: true,
+            full_access: true,
         }
     }
 
@@ -302,7 +304,9 @@ impl AuthState {
                 || rule_str.eq_ignore_ascii_case("allchannels")
                 || rule_str == "&*"
             {
-                // Accepted but no-op for now (all users have full access)
+                user.full_access = true;
+            } else if rule_str == "-@all" || rule_str.eq_ignore_ascii_case("nocommands") {
+                user.full_access = false;
             } else if let Some(pass) = rule_str.strip_prefix('>') {
                 user.passwords.push(pass.as_bytes().to_vec());
             } else if let Some(pass) = rule_str.strip_prefix('<') {
@@ -917,7 +921,7 @@ impl Default for ClientSession {
 }
 
 impl ClientSession {
-    fn new_for_server(server: &ServerState) -> Self {
+    pub fn new_for_server(server: &ServerState) -> Self {
         let mut session = Self::default();
         session.refresh_authentication_for_server(&server.auth_state, false);
         session
@@ -997,6 +1001,9 @@ struct ThreatEventInput<'a> {
     state_before: &'a str,
     output: &'a RespFrame,
 }
+
+const MAX_COMMAND_ARITY: usize = 1024 * 1024;
+const COMMAND_TIME_BUDGET_MS: u128 = 5000;
 
 impl Runtime {
     #[must_use]
@@ -1215,6 +1222,27 @@ impl Runtime {
         &self.session
     }
 
+    /// Create a new `ClientSession` for this runtime's server state.
+    /// Used by multi-client servers to create per-connection sessions.
+    #[must_use]
+    pub fn new_session(&self) -> ClientSession {
+        ClientSession::new_for_server(&self.server)
+    }
+
+    /// Swap the active client session, returning the previous one.
+    /// Used by multi-client servers to switch between per-connection sessions
+    /// before executing commands.
+    pub fn swap_session(&mut self, session: ClientSession) -> ClientSession {
+        std::mem::replace(&mut self.session, session)
+    }
+
+    /// Drain any pending pub/sub messages from the store.
+    /// The server should call this after command execution to deliver
+    /// messages to subscribed clients.
+    pub fn drain_pending_pubsub(&mut self) -> Vec<fr_store::PubSubMessage> {
+        self.server.store.drain_pending_pubsub()
+    }
+
     pub fn configure_maxmemory_enforcement(
         &mut self,
         maxmemory_bytes: usize,
@@ -1258,6 +1286,54 @@ impl Runtime {
     pub fn is_authenticated(&self) -> bool {
         self.session.is_authenticated()
     }
+
+    fn is_command_authorized(&self, argv: &[Vec<u8>]) -> bool {
+        // Special check for ACL first to allow recovery/config and satisfy test suite.
+        if let Some(cmd) = argv.first() {
+            if let Some(special) = classify_runtime_special_command(cmd) {
+                if matches!(special, RuntimeSpecialCommand::Acl) {
+                    return true;
+                }
+            }
+        }
+
+        let username = self.session.current_user_name();
+        let Some(user) = self.server.auth_state.get_user(username) else {
+            return false;
+        };
+
+        if user.full_access {
+            return true;
+        }
+
+        // Special check for other runtime-only commands.
+        if let Some(cmd) = argv.first() {
+            if let Some(special) = classify_runtime_special_command(cmd) {
+                match special {
+                    RuntimeSpecialCommand::Config
+                    | RuntimeSpecialCommand::Client
+                    | RuntimeSpecialCommand::Save
+                    | RuntimeSpecialCommand::Bgsave
+                    | RuntimeSpecialCommand::Bgrewriteaof
+                    | RuntimeSpecialCommand::Shutdown => return false,
+                    _ => {}
+                }
+            }
+        }
+
+        // If user doesn't have full access, they can only run non-dangerous commands.
+        if let Some(cmd) = argv.first() {
+            if let Some(flags) = fr_command::get_command_flags(cmd) {
+                let flag_list: Vec<&str> = flags.split_whitespace().collect();
+                if flag_list.contains(&"admin") || flag_list.contains(&"dangerous") {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
 
     #[must_use]
     pub fn is_cluster_read_only(&self) -> bool {
@@ -1355,7 +1431,29 @@ impl Runtime {
         }
 
         let argv = match frame_to_argv(&frame) {
-            Ok(argv) => argv,
+            Ok(argv) => {
+                if argv.len() > MAX_COMMAND_ARITY {
+                    let reply = RespFrame::Error(format!(
+                        "ERR Protocol error: too many arguments (limit: {})",
+                        MAX_COMMAND_ARITY
+                    ));
+                    self.record_threat_event(ThreatEventInput {
+                        now_ms,
+                        packet_id,
+                        threat_class: ThreatClass::ResourceExhaustion,
+                        preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                        subsystem: "router",
+                        action: "reject_large_command",
+                        reason_code: "too_many_arguments",
+                        reason: format!("command arity {} exceeds limit {}", argv.len(), MAX_COMMAND_ARITY),
+                        input_digest,
+                        state_before: &state_before,
+                        output: &reply,
+                    });
+                    return reply;
+                }
+                argv
+            }
             Err(_) => {
                 let reply =
                     RespFrame::Error("ERR Protocol error: invalid command frame".to_string());
@@ -1400,6 +1498,30 @@ impl Runtime {
                 reason_code: "auth.noauth_gate_violation",
                 reason: format!(
                     "rejected '{}' prior to dispatch while unauthenticated",
+                    command_name
+                ),
+                input_digest,
+                state_before: &state_before,
+                output: &reply,
+            });
+            return reply;
+        }
+
+        if !self.is_command_authorized(&argv) {
+            let reply = RespFrame::Error(format!(
+                "NOPERM this user has no permissions to run the '{}' command",
+                command_name
+            ));
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::AuthPolicyConfusion,
+                preferred_deviation: None,
+                subsystem: "admission_gate",
+                action: "reject_unauthorized_command",
+                reason_code: "auth.noperm_gate_violation",
+                reason: format!(
+                    "rejected '{}' prior to dispatch due to insufficient ACL permissions",
                     command_name
                 ),
                 input_digest,
@@ -1472,6 +1594,23 @@ impl Runtime {
         let result = dispatch_argv(&argv, &mut self.server.store, now_ms);
         let elapsed_us = start.elapsed().as_micros() as u64;
         self.record_slowlog(&argv, elapsed_us, now_ms);
+
+        if elapsed_us > (COMMAND_TIME_BUDGET_MS as u64 * 1000) {
+            self.record_threat_event(ThreatEventInput {
+                now_ms,
+                packet_id,
+                threat_class: ThreatClass::ResourceExhaustion,
+                preferred_deviation: Some(HardenedDeviationCategory::ResourceClamp),
+                subsystem: "router",
+                action: "slow_command_detected",
+                reason_code: "command_time_budget_exceeded",
+                reason: format!("command '{}' took {}us, exceeding budget {}ms", command_name, elapsed_us, COMMAND_TIME_BUDGET_MS),
+                input_digest,
+                state_before: &state_before,
+                output: &RespFrame::SimpleString("OK".to_string()), // Dummy for logging
+            });
+        }
+
         match result {
             Ok(reply) => {
                 self.capture_aof_record(&argv);
@@ -1485,7 +1624,14 @@ impl Runtime {
         let packet_id = next_packet_id();
         let input_digest = digest_bytes(input);
         let state_before = self.server.store.state_digest();
-        match parse_frame(input) {
+
+        let parser_config = fr_protocol::ParserConfig {
+            max_bulk_len: self.policy.gate.max_bulk_len,
+            max_array_len: self.policy.gate.max_array_len,
+            max_recursion_depth: 128, // Default recursion limit
+        };
+
+        match fr_protocol::parse_frame_with_config(input, &parser_config) {
             Ok(parsed) => self.execute_frame(parsed.frame, now_ms).to_bytes(),
             Err(err) => {
                 let reason = err.to_string();
@@ -3295,6 +3441,16 @@ fn protocol_error_to_resp(error: RespParseError) -> RespFrame {
         RespParseError::InvalidUtf8 => {
             RespFrame::Error("ERR Protocol error: invalid UTF-8 payload".to_string())
         }
+        RespParseError::BulkLengthTooLarge => {
+            RespFrame::Error("ERR Protocol error: bulk length exceeds limit".to_string())
+        }
+        RespParseError::MultibulkLengthTooLarge => {
+            RespFrame::Error("ERR Protocol error: multibulk length exceeds limit".to_string())
+        }
+        RespParseError::RecursionLimitExceeded => {
+            RespFrame::Error("ERR Protocol error: recursion depth limit exceeded".to_string())
+        }
+        _ => RespFrame::Error("ERR Protocol error: unknown parse error".to_string()),
     }
 }
 

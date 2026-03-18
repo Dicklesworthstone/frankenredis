@@ -2,7 +2,7 @@
 
 use fr_expire::evaluate_expiry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
-use std::ops::Bound::{Excluded, Unbounded};
+use std::ops::Bound::{Excluded, Included, Unbounded};
 
 pub type StreamId = (u64, u64);
 pub type StreamField = (Vec<u8>, Vec<u8>);
@@ -32,6 +32,8 @@ pub enum PubSubMessage {
         channel: Vec<u8>,
         data: Vec<u8>,
     },
+    /// Shard-channel subscription match: `["smessage", channel, data]`.
+    SMessage { channel: Vec<u8>, data: Vec<u8> },
 }
 
 /// Score bound for sorted set range queries (ZRANGEBYSCORE, ZCOUNT, etc.).
@@ -158,15 +160,157 @@ pub enum StoreError {
     GenericError(String),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SortedSet {
+    /// member -> score
+    dict: HashMap<Vec<u8>, f64>,
+    /// (score, member) -> ()
+    /// We use ScoreMember wrapper to handle f64 comparison and lexicographical member tie-breaking.
+    ordered: BTreeMap<ScoreMember, ()>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ScoreMember {
+    score: f64,
+    member: Vec<u8>,
+}
+
+impl Eq for ScoreMember {}
+
+impl PartialOrd for ScoreMember {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScoreMember {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| self.member.cmp(&other.member))
+    }
+}
+
+impl ScoreMember {
+    fn min_for_score(score: f64) -> Self {
+        Self {
+            score,
+            member: Vec::new(),
+        }
+    }
+
+    fn max_for_score(score: f64) -> Self {
+        // High-water mark for member part.
+        Self {
+            score,
+            member: vec![255; 1024],
+        }
+    }
+}
+
+impl SortedSet {
+    fn new() -> Self {
+        Self {
+            dict: HashMap::new(),
+            ordered: BTreeMap::new(),
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.dict.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.dict.is_empty()
+    }
+
+    fn insert(&mut self, member: Vec<u8>, score: f64) -> bool {
+        if let Some(old_score) = self.dict.insert(member.clone(), score) {
+            if old_score == score {
+                return false;
+            }
+            self.ordered.remove(&ScoreMember {
+                score: old_score,
+                member: member.clone(),
+            });
+        }
+        self.ordered.insert(ScoreMember { score, member }, ());
+        true
+    }
+
+    fn remove(&mut self, member: &[u8]) -> bool {
+        if let Some(score) = self.dict.remove(member) {
+            self.ordered.remove(&ScoreMember {
+                score,
+                member: member.to_vec(),
+            });
+            true
+        } else {
+            false
+        }
+    }
+
+    fn get_score(&self, member: &[u8]) -> Option<f64> {
+        self.dict.get(member).copied()
+    }
+
+    fn iter_asc(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
+        self.ordered.keys().map(|sm| (&sm.member, &sm.score))
+    }
+
+    fn iter_desc(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
+        self.ordered.keys().rev().map(|sm| (&sm.member, &sm.score))
+    }
+
+    fn pop_min(&mut self) -> Option<(Vec<u8>, f64)> {
+        let sm = self.ordered.first_key_value()?.0.clone();
+        self.ordered.remove(&sm);
+        self.dict.remove(&sm.member);
+        Some((sm.member, sm.score))
+    }
+
+    fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
+        let sm = self.ordered.last_key_value()?.0.clone();
+        self.ordered.remove(&sm);
+        self.dict.remove(&sm.member);
+        Some((sm.member, sm.score))
+    }
+
+    /// Iterate over (member, score) pairs in hash-map order (unordered).
+    fn iter(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
+        self.dict.iter()
+    }
+
+    /// Return an iterator over the member keys.
+    fn keys(&self) -> impl Iterator<Item = &Vec<u8>> {
+        self.dict.keys()
+    }
+
+    /// Look up a score by member (delegates to dict).
+    fn get(&self, member: &[u8]) -> Option<&f64> {
+        self.dict.get(member)
+    }
+}
+
+impl From<std::collections::HashMap<Vec<u8>, f64>> for SortedSet {
+    fn from(map: std::collections::HashMap<Vec<u8>, f64>) -> Self {
+        let mut ss = SortedSet::new();
+        for (member, score) in map {
+            ss.insert(member, score);
+        }
+        ss
+    }
+}
+
 /// The inner value held by a key in the store.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     String(Vec<u8>),
-    Hash(HashMap<Vec<u8>, Vec<u8>>),
+    Hash(BTreeMap<Vec<u8>, Vec<u8>>),
     List(VecDeque<Vec<u8>>),
     Set(HashSet<Vec<u8>>),
-    /// Sorted set: member -> score mapping. Ordered iteration is done on demand.
-    SortedSet(HashMap<Vec<u8>, f64>),
+    /// Sorted set: dual-indexed for efficiency.
+    SortedSet(SortedSet),
     /// Stream entries keyed by `(milliseconds, sequence)` stream IDs.
     Stream(StreamEntries),
 }
@@ -348,7 +492,7 @@ impl ValueType {
 
 #[derive(Debug)]
 pub struct Store {
-    entries: HashMap<Vec<u8>, Entry>,
+    entries: BTreeMap<Vec<u8>, Entry>,
     stream_groups: HashMap<Vec<u8>, StreamGroupState>,
     /// Per-stream last-generated-id set by XSETID (may be higher than max entry).
     stream_last_ids: HashMap<Vec<u8>, StreamId>,
@@ -375,12 +519,15 @@ pub struct Store {
     pub set_max_listpack_entries: usize,
     pub zset_max_listpack_entries: usize,
     pub zset_max_listpack_value: usize,
+
+    /// Seed for deterministic pseudo-random operations (HRANDFIELD, RANDOMKEY, etc.).
+    pub rng_seed: u64,
 }
 
 impl Default for Store {
     fn default() -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: BTreeMap::new(),
             stream_groups: HashMap::new(),
             stream_last_ids: HashMap::new(),
             script_cache: HashMap::new(),
@@ -396,6 +543,7 @@ impl Default for Store {
             set_max_listpack_entries: 128,
             zset_max_listpack_entries: 128,
             zset_max_listpack_value: 64,
+            rng_seed: 0xDEADBEEF_C0FFEE11,
         }
     }
 }
@@ -442,6 +590,14 @@ impl Store {
         self.entries.is_empty()
     }
 
+    fn next_rand(&mut self) -> u64 {
+        self.rng_seed = self
+            .rng_seed
+            .wrapping_mul(0x5851_f42d_4c95_7f2d)
+            .wrapping_add(1);
+        self.rng_seed
+    }
+
     /// Get a string value. Returns `None` if the key doesn't exist.
     /// Returns `Err(WrongType)` if the key holds a non-string value.
     pub fn get(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
@@ -473,11 +629,12 @@ impl Store {
         key: Vec<u8>,
         value: Vec<u8>,
         expires_at_ms: Option<u64>,
+        now_ms: u64,
     ) {
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
         self.entries
-            .insert(key, Entry::new(Value::String(value), expires_at_ms, 0));
+            .insert(key, Entry::new(Value::String(value), expires_at_ms, now_ms));
     }
 
     /// Returns the current absolute expiry timestamp for a key, if any.
@@ -766,21 +923,19 @@ impl Store {
             Some(entry) => match &entry.value {
                 Value::String(v) => {
                     let len = v.len() as i64;
-                    let s = if start < 0 {
-                        (len + start).max(0) as usize
-                    } else {
-                        start as usize
-                    };
-                    let e = if end < 0 {
-                        (len + end).max(0) as usize
-                    } else {
-                        end as usize
-                    };
-                    if s > e || s >= v.len() {
+                    let mut s = if start < 0 { len + start } else { start };
+                    let mut e = if end < 0 { len + end } else { end };
+                    if s < 0 {
+                        s = 0;
+                    }
+                    if e < 0 {
+                        e = 0;
+                    }
+                    if s > e || len == 0 || s >= len {
                         Ok(Vec::new())
                     } else {
-                        let end_idx = (e + 1).min(v.len());
-                        Ok(v[s..end_idx].to_vec())
+                        let end_idx = (e + 1).min(len) as usize;
+                        Ok(v[s as usize..end_idx].to_vec())
                     }
                 }
                 _ => Err(StoreError::WrongType),
@@ -1189,11 +1344,16 @@ impl Store {
 
     #[must_use]
     pub fn keys_matching(&mut self, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
-        // Expire all keys first so we don't return expired ones.
-        let all_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
-        for key in &all_keys {
-            self.drop_if_expired(key, now_ms);
-        }
+        // Reap expired keys efficiently first.
+        self.entries.retain(|key, entry| {
+            if evaluate_expiry(now_ms, entry.expires_at_ms).should_evict {
+                self.stream_groups.remove(key.as_slice());
+                self.stream_last_ids.remove(key.as_slice());
+                false
+            } else {
+                true
+            }
+        });
         let mut result: Vec<Vec<u8>> = self
             .entries
             .keys()
@@ -1206,10 +1366,16 @@ impl Store {
 
     #[must_use]
     pub fn dbsize(&mut self, now_ms: u64) -> usize {
-        let all_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
-        for key in &all_keys {
-            self.drop_if_expired(key, now_ms);
-        }
+        // Reap expired keys efficiently first.
+        self.entries.retain(|key, entry| {
+            if evaluate_expiry(now_ms, entry.expires_at_ms).should_evict {
+                self.stream_groups.remove(key.as_slice());
+                self.stream_last_ids.remove(key.as_slice());
+                false
+            } else {
+                true
+            }
+        });
         self.entries.len()
     }
 
@@ -1378,26 +1544,35 @@ impl Store {
             };
         }
 
-        let mut keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
-        keys.sort();
-        let key_count = keys.len();
+        let key_count = self.entries.len();
         let normalized_start = start_cursor % key_count;
-        let sampled_keys = sample_limit.min(key_count);
-        let next_key_anchor = keys[(normalized_start + sampled_keys) % key_count].clone();
-        let mut evicted_keys = 0usize;
+        let sampled_keys_count = sample_limit.min(key_count);
 
-        for offset in 0..sampled_keys {
-            let key_index = (normalized_start + offset) % key_count;
-            let key = &keys[key_index];
+        // Identify the next key anchor before we start evicting.
+        let next_key_anchor = self
+            .entries
+            .keys()
+            .nth((normalized_start + sampled_keys_count) % key_count)
+            .cloned();
+
+        // Collect keys to check by skipping to the cursor.
+        let keys_to_check: Vec<Vec<u8>> = self
+            .entries
+            .keys()
+            .skip(normalized_start)
+            .take(sampled_keys_count)
+            .cloned()
+            .collect();
+
+        let mut evicted_keys = 0usize;
+        for key in &keys_to_check {
             let should_evict = evaluate_expiry(
                 now_ms,
-                self.entries
-                    .get(key.as_slice())
-                    .and_then(|entry| entry.expires_at_ms),
+                self.entries.get(key).and_then(|entry| entry.expires_at_ms),
             )
             .should_evict;
             if should_evict {
-                self.entries.remove(key.as_slice());
+                self.entries.remove(key);
                 self.stream_groups.remove(key.as_slice());
                 self.stream_last_ids.remove(key.as_slice());
                 evicted_keys = evicted_keys.saturating_add(1);
@@ -1405,17 +1580,14 @@ impl Store {
         }
 
         ActiveExpireCycleResult {
-            sampled_keys,
+            sampled_keys: sampled_keys_count,
             evicted_keys,
             next_cursor: if self.entries.is_empty() {
                 0
+            } else if let Some(anchor) = next_key_anchor {
+                self.entries.keys().position(|k| k == &anchor).unwrap_or(0)
             } else {
-                let mut remaining_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
-                remaining_keys.sort();
-                remaining_keys
-                    .iter()
-                    .position(|key| *key == next_key_anchor)
-                    .unwrap_or(0)
+                0
             },
         }
     }
@@ -1436,23 +1608,17 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::Hash(m) => {
-                    let is_new = !m.contains_key(&field);
-                    m.insert(field, value);
-                    Ok(is_new)
-                }
-                _ => Err(StoreError::WrongType),
-            },
-            None => {
-                let mut m = HashMap::new();
-                m.insert(field, value);
-                self.entries
-                    .insert(key.to_vec(), Entry::new(Value::Hash(m), None, now_ms));
-                Ok(true)
-            }
-        }
+        let entry = self
+            .entries
+            .entry(key.to_vec())
+            .or_insert_with(|| Entry::new(Value::Hash(BTreeMap::new()), None, now_ms));
+        let Value::Hash(m) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
+        let is_new = !m.contains_key(&field);
+        m.insert(field, value);
+        entry.touch(now_ms);
+        Ok(is_new)
     }
 
     pub fn hget(
@@ -1539,9 +1705,8 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(m) => {
-                    let mut pairs: Vec<(Vec<u8>, Vec<u8>)> =
+                    let pairs: Vec<(Vec<u8>, Vec<u8>)> =
                         m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    pairs.sort_by(|a, b| a.0.cmp(&b.0));
                     entry.touch(now_ms);
                     Ok(pairs)
                 }
@@ -1556,8 +1721,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(m) => {
-                    let mut keys: Vec<Vec<u8>> = m.keys().cloned().collect();
-                    keys.sort();
+                    let keys: Vec<Vec<u8>> = m.keys().cloned().collect();
                     entry.touch(now_ms);
                     Ok(keys)
                 }
@@ -1572,9 +1736,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(m) => {
-                    let mut pairs: Vec<(&Vec<u8>, &Vec<u8>)> = m.iter().collect();
-                    pairs.sort_by_key(|(k, _)| *k);
-                    let result: Vec<Vec<u8>> = pairs.into_iter().map(|(_, v)| v.clone()).collect();
+                    let result: Vec<Vec<u8>> = m.values().cloned().collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -1613,29 +1775,23 @@ impl Store {
         now_ms: u64,
     ) -> Result<i64, StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::Hash(m) => {
-                    let current = match m.get(field) {
-                        Some(v) => parse_i64(v).map_err(|_| StoreError::HashValueNotInteger)?,
-                        None => 0,
-                    };
-                    let next = current
-                        .checked_add(delta)
-                        .ok_or(StoreError::IntegerOverflow)?;
-                    m.insert(field.to_vec(), next.to_string().into_bytes());
-                    Ok(next)
-                }
-                _ => Err(StoreError::WrongType),
-            },
-            None => {
-                let mut m = HashMap::new();
-                m.insert(field.to_vec(), delta.to_string().into_bytes());
-                self.entries
-                    .insert(key.to_vec(), Entry::new(Value::Hash(m), None, now_ms));
-                Ok(delta)
-            }
-        }
+        let entry = self
+            .entries
+            .entry(key.to_vec())
+            .or_insert_with(|| Entry::new(Value::Hash(BTreeMap::new()), None, now_ms));
+        let Value::Hash(m) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
+        let current = match m.get(field) {
+            Some(v) => parse_i64(v).map_err(|_| StoreError::HashValueNotInteger)?,
+            None => 0,
+        };
+        let next = current
+            .checked_add(delta)
+            .ok_or(StoreError::IntegerOverflow)?;
+        m.insert(field.to_vec(), next.to_string().into_bytes());
+        entry.touch(now_ms);
+        Ok(next)
     }
 
     pub fn hsetnx(
@@ -1646,26 +1802,19 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::Hash(m) => {
-                    use std::collections::hash_map::Entry as HEntry;
-                    if let HEntry::Vacant(e) = m.entry(field) {
-                        e.insert(value);
-                        Ok(true)
-                    } else {
-                        Ok(false)
-                    }
-                }
-                _ => Err(StoreError::WrongType),
-            },
-            None => {
-                let mut m = HashMap::new();
-                m.insert(field, value);
-                self.entries
-                    .insert(key.to_vec(), Entry::new(Value::Hash(m), None, now_ms));
-                Ok(true)
-            }
+        let entry = self
+            .entries
+            .entry(key.to_vec())
+            .or_insert_with(|| Entry::new(Value::Hash(BTreeMap::new()), None, now_ms));
+        let Value::Hash(m) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
+        if m.contains_key(&field) {
+            Ok(false)
+        } else {
+            m.insert(field, value);
+            entry.touch(now_ms);
+            Ok(true)
         }
     }
 
@@ -1692,40 +1841,40 @@ impl Store {
         now_ms: u64,
     ) -> Result<f64, StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::Hash(m) => {
-                    let current = match m.get(field) {
-                        Some(v) => parse_f64(v)?,
-                        None => 0.0,
-                    };
-                    let next = current + delta;
-                    if next.is_nan() {
-                        return Err(StoreError::IncrFloatNaN);
-                    }
-                    m.insert(field.to_vec(), next.to_string().into_bytes());
-                    Ok(next)
-                }
-                _ => Err(StoreError::WrongType),
-            },
-            None => {
-                if delta.is_nan() {
-                    return Err(StoreError::IncrFloatNaN);
-                }
-                let mut m = HashMap::new();
-                m.insert(field.to_vec(), delta.to_string().into_bytes());
-                self.entries
-                    .insert(key.to_vec(), Entry::new(Value::Hash(m), None, now_ms));
-                Ok(delta)
-            }
+        let entry = self
+            .entries
+            .entry(key.to_vec())
+            .or_insert_with(|| Entry::new(Value::Hash(BTreeMap::new()), None, now_ms));
+        let Value::Hash(m) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
+        let current = match m.get(field) {
+            Some(v) => parse_f64(v)?,
+            None => 0.0,
+        };
+        let next = current + delta;
+        if next.is_nan() {
+            return Err(StoreError::IncrFloatNaN);
         }
+        m.insert(field.to_vec(), next.to_string().into_bytes());
+        entry.touch(now_ms);
+        Ok(next)
     }
 
     pub fn hrandfield(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
+        let rand_val = self.next_rand();
+        match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
-                Value::Hash(m) => Ok(m.keys().next().cloned()),
+                Value::Hash(m) => {
+                    if m.is_empty() {
+                        return Ok(None);
+                    }
+                    let idx = (rand_val as usize) % m.len();
+                    let field = m.keys().nth(idx).cloned();
+                    entry.touch(now_ms);
+                    Ok(field)
+                }
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(None),
@@ -1743,32 +1892,51 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
+        // Pre-generate some random values if we need many (for negative count).
+        // For positive count, we'll need many for the shuffle.
+        // Actually, it's easier to just pick the random values we need inside the match if we can.
+        // But we can't because of the borrow.
+        // So let's handle the hash lookup first, get the fields, and then do the work.
+        
+        let mut result_type = None;
+        if let Some(entry) = self.entries.get_mut(key) {
+            match &entry.value {
                 Value::Hash(m) => {
                     if m.is_empty() {
                         return Ok(Vec::new());
                     }
-                    let fields: Vec<(&Vec<u8>, &Vec<u8>)> = m.iter().collect();
-                    if count >= 0 {
-                        let n = (count as usize).min(fields.len());
-                        Ok(fields[..n]
-                            .iter()
-                            .map(|(k, v)| ((*k).clone(), (*v).clone()))
-                            .collect())
-                    } else {
-                        let abs_count = count.unsigned_abs() as usize;
-                        let mut result = Vec::with_capacity(abs_count);
-                        for i in 0..abs_count {
-                            let (k, v) = &fields[i % fields.len()];
-                            result.push(((*k).clone(), (*v).clone()));
-                        }
-                        Ok(result)
-                    }
+                    let fields: Vec<(Vec<u8>, Vec<u8>)> = m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    entry.touch(now_ms);
+                    result_type = Some(fields);
                 }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(Vec::new()),
+                _ => return Err(StoreError::WrongType),
+            }
+        }
+
+        let fields = match result_type {
+            Some(f) => f,
+            None => return Ok(Vec::new()),
+        };
+
+        if count >= 0 {
+            let n = (count as usize).min(fields.len());
+            let mut indices: Vec<usize> = (0..fields.len()).collect();
+            for i in 0..n {
+                let j = i + (self.next_rand() as usize % (fields.len() - i));
+                indices.swap(i, j);
+            }
+            Ok(indices[..n]
+                .iter()
+                .map(|&idx| fields[idx].clone())
+                .collect())
+        } else {
+            let abs_count = count.unsigned_abs() as usize;
+            let mut result = Vec::with_capacity(abs_count);
+            for _ in 0..abs_count {
+                let idx = (self.next_rand() as usize) % fields.len();
+                result.push(fields[idx].clone());
+            }
+            Ok(result)
         }
     }
 
@@ -1844,6 +2012,8 @@ impl Store {
                         self.entries.remove(key);
                         self.stream_groups.remove(key);
                         self.stream_last_ids.remove(key);
+                    } else {
+                        entry.touch(now_ms);
                     }
                     Ok(val)
                 }
@@ -1863,6 +2033,8 @@ impl Store {
                         self.entries.remove(key);
                         self.stream_groups.remove(key);
                         self.stream_last_ids.remove(key);
+                    } else {
+                        entry.touch(now_ms);
                     }
                     Ok(val)
                 }
@@ -2629,22 +2801,32 @@ impl Store {
 
     pub fn spop(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let rand_val = self.next_rand();
         let mut should_remove_key = false;
         let member = match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::Set(s) => {
-                    // HashSet iteration order is arbitrary, which provides pseudo-random behavior
-                    let member = s.iter().next().cloned();
-                    if let Some(ref m) = member {
-                        s.remove(m);
+            Some(entry) => {
+                let result = match &mut entry.value {
+                    Value::Set(s) => {
+                        if s.is_empty() {
+                            return Ok(None);
+                        }
+                        let idx = (rand_val as usize) % s.len();
+                        let member = s.iter().nth(idx).cloned();
+                        if let Some(ref m) = member {
+                            s.remove(m);
+                        }
+                        if s.is_empty() {
+                            should_remove_key = true;
+                        }
+                        Ok(member)
                     }
-                    if s.is_empty() {
-                        should_remove_key = true;
-                    }
-                    Ok(member)
+                    _ => Err(StoreError::WrongType),
+                };
+                if result.is_ok() {
+                    entry.touch(now_ms);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                result
+            }
             None => Ok(None),
         }?;
         if should_remove_key {
@@ -2662,39 +2844,30 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
         let mut result = Vec::new();
-        let mut should_remove_key = false;
-        if let Some(entry) = self.entries.get_mut(key) {
-            match &mut entry.value {
-                Value::Set(s) => {
-                    for _ in 0..count {
-                        let Some(m) = s.iter().next().cloned() else {
-                            break;
-                        };
-                        s.remove(&m);
-                        result.push(m);
-                    }
-                    if s.is_empty() {
-                        should_remove_key = true;
-                    }
-                }
-                _ => return Err(StoreError::WrongType),
+        for _ in 0..count {
+            match self.spop(key, now_ms)? {
+                Some(m) => result.push(m),
+                None => break,
             }
-        }
-        if should_remove_key {
-            self.entries.remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
         }
         Ok(result)
     }
 
     pub fn srandmember(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
+        let rand_val = self.next_rand();
+        match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
-                Value::Set(s) => Ok(s.iter().next().cloned()),
+                Value::Set(s) => {
+                    if s.is_empty() {
+                        return Ok(None);
+                    }
+                    let idx = (rand_val as usize) % s.len();
+                    let member = s.iter().nth(idx).cloned();
+                    entry.touch(now_ms);
+                    Ok(member)
+                }
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(None),
@@ -2711,31 +2884,44 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
+        let mut result_data = None;
+        if let Some(entry) = self.entries.get_mut(key) {
+            match &entry.value {
                 Value::Set(s) => {
-                    if s.is_empty() {
-                        return Ok(Vec::new());
-                    }
-                    let members: Vec<&Vec<u8>> = s.iter().collect();
-                    if count >= 0 {
-                        // Positive: distinct members, up to count or set size
-                        let n = (count as usize).min(members.len());
-                        Ok(members[..n].iter().map(|m| (*m).clone()).collect())
-                    } else {
-                        // Negative: |count| members with possible repeats
-                        // (cycling through set members deterministically)
-                        let abs_count = count.unsigned_abs() as usize;
-                        let mut result = Vec::with_capacity(abs_count);
-                        for i in 0..abs_count {
-                            result.push(members[i % members.len()].clone());
-                        }
-                        Ok(result)
+                    if !s.is_empty() {
+                        let members: Vec<Vec<u8>> = s.iter().cloned().collect();
+                        entry.touch(now_ms);
+                        result_data = Some(members);
                     }
                 }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(Vec::new()),
+                _ => return Err(StoreError::WrongType),
+            }
+        }
+
+        let members = match result_data {
+            Some(m) => m,
+            None => return Ok(Vec::new()),
+        };
+
+        if count >= 0 {
+            let n = (count as usize).min(members.len());
+            let mut indices: Vec<usize> = (0..members.len()).collect();
+            for i in 0..n {
+                let j = i + (self.next_rand() as usize % (members.len() - i));
+                indices.swap(i, j);
+            }
+            Ok(indices[..n]
+                .iter()
+                .map(|&idx| members[idx].clone())
+                .collect())
+        } else {
+            let abs_count = count.unsigned_abs() as usize;
+            let mut result = Vec::with_capacity(abs_count);
+            for _ in 0..abs_count {
+                let idx = (self.next_rand() as usize) % members.len();
+                result.push(members[idx].clone());
+            }
+            Ok(result)
         }
     }
 
@@ -2881,7 +3067,7 @@ impl Store {
         let entry = self
             .entries
             .entry(key.to_vec())
-            .or_insert_with(|| Entry::new(Value::SortedSet(HashMap::new()), None, now_ms));
+            .or_insert_with(|| Entry::new(Value::SortedSet(SortedSet::new()), None, now_ms));
         let Value::SortedSet(zs) = &mut entry.value else {
             return Err(StoreError::WrongType);
         };
@@ -2936,7 +3122,7 @@ impl Store {
         };
         let mut removed = 0_u64;
         for member in members {
-            if zs.remove(*member).is_some() {
+            if zs.remove(*member) {
                 removed += 1;
             }
         }
@@ -2959,7 +3145,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let result = zs.get(member).copied();
+                    let result = zs.get_score(member);
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -2996,12 +3182,12 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let Some(score) = zs.get(member).copied() else {
+                    let Some(score) = zs.get_score(member) else {
                         return Ok(None);
                     };
                     let rank = zs
-                        .iter()
-                        .filter(|(m, s)| score_member_lt(**s, m, score, member))
+                        .iter_asc()
+                        .take_while(|&(m, s)| score_member_lt(*s, m, score, member))
                         .count();
                     entry.touch(now_ms);
                     Ok(Some(rank))
@@ -3023,12 +3209,12 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let Some(score) = zs.get(member).copied() else {
+                    let Some(score) = zs.get_score(member) else {
                         return Ok(None);
                     };
                     let rank = zs
-                        .iter()
-                        .filter(|(m, s)| score_member_lt(score, member, **s, m))
+                        .iter_desc()
+                        .take_while(|&(m, s)| score_member_lt(score, member, *s, m))
                         .count();
                     entry.touch(now_ms);
                     Ok(Some(rank))
@@ -3051,16 +3237,19 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let sorted = sorted_members_asc(zs);
-                    let len = sorted.len() as i64;
+                    let len = zs.len() as i64;
                     let s = normalize_index(start, len);
                     let e = normalize_index(stop, len);
-                    if s > e || s >= sorted.len() {
+                    if s > e || s >= zs.len() {
                         return Ok(Vec::new());
                     }
-                    let end = (e + 1).min(sorted.len());
-                    let result: Vec<Vec<u8>> =
-                        sorted[s..end].iter().map(|(_, m)| m.clone()).collect();
+                    let count = (e - s + 1) as usize;
+                    let result: Vec<Vec<u8>> = zs
+                        .iter_asc()
+                        .skip(s)
+                        .take(count)
+                        .map(|(m, _)| m.clone())
+                        .collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -3082,17 +3271,19 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let mut sorted = sorted_members_asc(zs);
-                    sorted.reverse();
-                    let len = sorted.len() as i64;
+                    let len = zs.len() as i64;
                     let s = normalize_index(start, len);
                     let e = normalize_index(stop, len);
-                    if s > e || s >= sorted.len() {
+                    if s > e || s >= zs.len() {
                         return Ok(Vec::new());
                     }
-                    let end = (e + 1).min(sorted.len());
-                    let result: Vec<Vec<u8>> =
-                        sorted[s..end].iter().map(|(_, m)| m.clone()).collect();
+                    let count = (e - s + 1) as usize;
+                    let result: Vec<Vec<u8>> = zs
+                        .iter_desc()
+                        .skip(s)
+                        .take(count)
+                        .map(|(m, _)| m.clone())
+                        .collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -3114,11 +3305,19 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let sorted = sorted_members_asc(zs);
-                    let result: Vec<Vec<u8>> = sorted
-                        .into_iter()
-                        .filter(|(s, _)| score_in_range(*s, min, max))
-                        .map(|(_, m)| m)
+                    let lower = match min {
+                        ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
+                        ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
+                    };
+                    let upper = match max {
+                        ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
+                        ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
+                    };
+
+                    let result: Vec<Vec<u8>> = zs
+                        .ordered
+                        .range((lower, upper))
+                        .map(|(sm, _)| sm.member.clone())
                         .collect();
                     entry.touch(now_ms);
                     Ok(result)
@@ -3141,11 +3340,19 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let sorted = sorted_members_asc(zs);
-                    let result: Vec<(Vec<u8>, f64)> = sorted
-                        .into_iter()
-                        .filter(|(s, _)| score_in_range(*s, min, max))
-                        .map(|(s, m)| (m, s))
+                    let lower = match min {
+                        ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
+                        ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
+                    };
+                    let upper = match max {
+                        ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
+                        ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
+                    };
+
+                    let result: Vec<(Vec<u8>, f64)> = zs
+                        .ordered
+                        .range((lower, upper))
+                        .map(|(sm, _)| (sm.member.clone(), sm.score))
                         .collect();
                     entry.touch(now_ms);
                     Ok(result)
@@ -3158,7 +3365,7 @@ impl Store {
 
     /// Create or overwrite a sorted set from member-score pairs.
     pub fn zstore_from_pairs(&mut self, key: Vec<u8>, pairs: Vec<(Vec<u8>, f64)>, now_ms: u64) {
-        let mut zs = HashMap::new();
+        let mut zs = SortedSet::new();
         for (member, score) in pairs {
             zs.insert(member, score);
         }
@@ -3181,8 +3388,8 @@ impl Store {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
                     let result = zs
-                        .values()
-                        .filter(|s| score_in_range(**s, min, max))
+                        .iter_asc()
+                        .filter(|&(_, &s)| score_in_range(s, min, max))
                         .count();
                     entry.touch(now_ms);
                     Ok(result)
@@ -3205,12 +3412,13 @@ impl Store {
         let entry = self
             .entries
             .entry(key.to_vec())
-            .or_insert_with(|| Entry::new(Value::SortedSet(HashMap::new()), None, now_ms));
+            .or_insert_with(|| Entry::new(Value::SortedSet(SortedSet::new()), None, now_ms));
         let Value::SortedSet(zs) = &mut entry.value else {
             return Err(StoreError::WrongType);
         };
-        let new_score = zs.get(&member).unwrap_or(&0.0) + delta;
+        let new_score = zs.get_score(&member).unwrap_or(0.0) + delta;
         zs.insert(member, new_score);
+        entry.touch(now_ms);
         Ok(new_score)
     }
 
@@ -3227,23 +3435,17 @@ impl Store {
         let Value::SortedSet(zs) = &mut entry.value else {
             return Err(StoreError::WrongType);
         };
-        if zs.is_empty() {
-            return Ok(None);
+        let result = zs.pop_min();
+        let is_empty = zs.is_empty();
+        if result.is_some() {
+            entry.touch(now_ms);
+            if is_empty {
+                self.entries.remove(key);
+                self.stream_groups.remove(key);
+                self.stream_last_ids.remove(key);
+            }
         }
-        let min_member = zs
-            .iter()
-            .min_by(|(m1, s1), (m2, s2)| cmp_score_member(**s1, m1, **s2, m2))
-            .map(|(m, s)| (m.clone(), *s));
-        let Some(min_member) = min_member else {
-            return Ok(None);
-        };
-        zs.remove(&min_member.0);
-        if zs.is_empty() {
-            self.entries.remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
-        }
-        Ok(Some(min_member))
+        Ok(result)
     }
 
     /// Remove and return the member with the highest score.
@@ -3259,23 +3461,17 @@ impl Store {
         let Value::SortedSet(zs) = &mut entry.value else {
             return Err(StoreError::WrongType);
         };
-        if zs.is_empty() {
-            return Ok(None);
+        let result = zs.pop_max();
+        let is_empty = zs.is_empty();
+        if result.is_some() {
+            entry.touch(now_ms);
+            if is_empty {
+                self.entries.remove(key);
+                self.stream_groups.remove(key);
+                self.stream_last_ids.remove(key);
+            }
         }
-        let max_member = zs
-            .iter()
-            .max_by(|(m1, s1), (m2, s2)| cmp_score_member(**s1, m1, **s2, m2))
-            .map(|(m, s)| (m.clone(), *s));
-        let Some(max_member) = max_member else {
-            return Ok(None);
-        };
-        zs.remove(&max_member.0);
-        if zs.is_empty() {
-            self.entries.remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
-        }
-        Ok(Some(max_member))
+        Ok(result)
     }
 
     /// Remove and return up to `count` members with the lowest scores.
@@ -3285,11 +3481,27 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        let Some(entry) = self.entries.get_mut(key) else {
+            return Ok(Vec::new());
+        };
+        let Value::SortedSet(zs) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
         let mut result = Vec::new();
         for _ in 0..count {
-            match self.zpopmin(key, now_ms)? {
+            match zs.pop_min() {
                 Some(pair) => result.push(pair),
                 None => break,
+            }
+        }
+        let is_empty = zs.is_empty();
+        if !result.is_empty() {
+            entry.touch(now_ms);
+            if is_empty {
+                self.entries.remove(key);
+                self.stream_groups.remove(key);
+                self.stream_last_ids.remove(key);
             }
         }
         Ok(result)
@@ -3302,11 +3514,27 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        let Some(entry) = self.entries.get_mut(key) else {
+            return Ok(Vec::new());
+        };
+        let Value::SortedSet(zs) = &mut entry.value else {
+            return Err(StoreError::WrongType);
+        };
         let mut result = Vec::new();
         for _ in 0..count {
-            match self.zpopmax(key, now_ms)? {
+            match zs.pop_max() {
                 Some(pair) => result.push(pair),
                 None => break,
+            }
+        }
+        let is_empty = zs.is_empty();
+        if !result.is_empty() {
+            entry.touch(now_ms);
+            if is_empty {
+                self.entries.remove(key);
+                self.stream_groups.remove(key);
+                self.stream_last_ids.remove(key);
             }
         }
         Ok(result)
@@ -3324,17 +3552,18 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let sorted = sorted_members_asc(zs);
-                    let len = sorted.len() as i64;
+                    let len = zs.len() as i64;
                     let s = normalize_index(start, len);
                     let e = normalize_index(stop, len);
-                    if s > e || s >= sorted.len() {
+                    if s > e || s >= zs.len() {
                         return Ok(Vec::new());
                     }
-                    let end = (e + 1).min(sorted.len());
-                    let result: Vec<(Vec<u8>, f64)> = sorted[s..end]
-                        .iter()
-                        .map(|(score, m)| (m.clone(), *score))
+                    let count = (e - s + 1) as usize;
+                    let result: Vec<(Vec<u8>, f64)> = zs
+                        .iter_asc()
+                        .skip(s)
+                        .take(count)
+                        .map(|(m, &s)| (m.clone(), s))
                         .collect();
                     entry.touch(now_ms);
                     Ok(result)
@@ -3356,18 +3585,18 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let mut sorted = sorted_members_asc(zs);
-                    sorted.reverse();
-                    let len = sorted.len() as i64;
+                    let len = zs.len() as i64;
                     let s = normalize_index(start, len);
                     let e = normalize_index(stop, len);
-                    if s > e || s >= sorted.len() {
+                    if s > e || s >= zs.len() {
                         return Ok(Vec::new());
                     }
-                    let end = (e + 1).min(sorted.len());
-                    let result: Vec<(Vec<u8>, f64)> = sorted[s..end]
-                        .iter()
-                        .map(|(score, m)| (m.clone(), *score))
+                    let count = (e - s + 1) as usize;
+                    let result: Vec<(Vec<u8>, f64)> = zs
+                        .iter_desc()
+                        .skip(s)
+                        .take(count)
+                        .map(|(m, &s)| (m.clone(), s))
                         .collect();
                     entry.touch(now_ms);
                     Ok(result)
@@ -3389,12 +3618,14 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let mut sorted = sorted_members_asc(zs);
-                    sorted.reverse();
-                    let result: Vec<Vec<u8>> = sorted
-                        .into_iter()
-                        .filter(|(score, _)| *score >= min && *score <= max)
-                        .map(|(_, m)| m)
+                    let lower = Included(ScoreMember::min_for_score(min));
+                    let upper = Included(ScoreMember::max_for_score(max));
+
+                    let result: Vec<Vec<u8>> = zs
+                        .ordered
+                        .range((lower, upper))
+                        .rev()
+                        .map(|(sm, _)| sm.member.clone())
                         .collect();
                     entry.touch(now_ms);
                     Ok(result)
@@ -3416,11 +3647,10 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let sorted = sorted_members_asc(zs);
-                    let result: Vec<Vec<u8>> = sorted
-                        .into_iter()
-                        .filter(|(_, m)| lex_in_range(m, min, max))
-                        .map(|(_, m)| m)
+                    let result: Vec<Vec<u8>> = zs
+                        .iter_asc()
+                        .filter(|(m, _)| lex_in_range(m, min, max))
+                        .map(|(m, _)| m.clone())
                         .collect();
                     entry.touch(now_ms);
                     Ok(result)
@@ -3438,9 +3668,22 @@ impl Store {
         min: &[u8],
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        let mut members = self.zrangebylex(key, min, max, now_ms)?;
-        members.reverse();
-        Ok(members)
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => {
+                    let result: Vec<Vec<u8>> = zs
+                        .iter_desc()
+                        .filter(|(m, _)| lex_in_range(m, min, max))
+                        .map(|(m, _)| m.clone())
+                        .collect();
+                    entry.touch(now_ms);
+                    Ok(result)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
     }
 
     pub fn zlexcount(
@@ -3450,8 +3693,21 @@ impl Store {
         max: &[u8],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        let members = self.zrangebylex(key, min, max, now_ms)?;
-        Ok(members.len())
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => {
+                    let result = zs
+                        .iter_asc()
+                        .filter(|(m, _)| lex_in_range(m, min, max))
+                        .count();
+                    entry.touch(now_ms);
+                    Ok(result)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(0),
+        }
     }
 
     pub fn zremrangebyrank(
@@ -3465,26 +3721,33 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::SortedSet(zs) => {
-                    let sorted = sorted_members_asc(zs);
-                    let len = sorted.len();
+                    let len = zs.len();
                     let s = normalize_index(start, len as i64);
                     let e = normalize_index(stop, len as i64);
                     if s > e || s >= len {
                         return Ok(0);
                     }
-                    let end = (e + 1).min(len);
-                    let to_remove: Vec<Vec<u8>> =
-                        sorted[s..end].iter().map(|(_, m)| m.clone()).collect();
-                    let count = to_remove.len();
+                    let count = (e - s + 1).min(len - s);
+                    let to_remove: Vec<Vec<u8>> = zs
+                        .iter_asc()
+                        .skip(s)
+                        .take(count)
+                        .map(|(m, _)| m.clone())
+                        .collect();
+                    let removed_count = to_remove.len();
                     for m in &to_remove {
                         zs.remove(m);
                     }
-                    if zs.is_empty() {
-                        self.entries.remove(key);
-                        self.stream_groups.remove(key);
-                        self.stream_last_ids.remove(key);
+                    let is_empty = zs.is_empty();
+                    if removed_count > 0 {
+                        entry.touch(now_ms);
+                        if is_empty {
+                            self.entries.remove(key);
+                            self.stream_groups.remove(key);
+                            self.stream_last_ids.remove(key);
+                        }
                     }
-                    Ok(count)
+                    Ok(removed_count)
                 }
                 _ => Err(StoreError::WrongType),
             },
@@ -3504,20 +3767,24 @@ impl Store {
             Some(entry) => match &mut entry.value {
                 Value::SortedSet(zs) => {
                     let to_remove: Vec<Vec<u8>> = zs
-                        .iter()
-                        .filter(|(_, score)| score_in_range(**score, min, max))
+                        .iter_asc()
+                        .filter(|&(_, &score)| score_in_range(score, min, max))
                         .map(|(m, _)| m.clone())
                         .collect();
-                    let count = to_remove.len();
+                    let removed_count = to_remove.len();
                     for m in &to_remove {
                         zs.remove(m);
                     }
-                    if zs.is_empty() {
-                        self.entries.remove(key);
-                        self.stream_groups.remove(key);
-                        self.stream_last_ids.remove(key);
+                    let is_empty = zs.is_empty();
+                    if removed_count > 0 {
+                        entry.touch(now_ms);
+                        if is_empty {
+                            self.entries.remove(key);
+                            self.stream_groups.remove(key);
+                            self.stream_last_ids.remove(key);
+                        }
                     }
-                    Ok(count)
+                    Ok(removed_count)
                 }
                 _ => Err(StoreError::WrongType),
             },
@@ -3536,22 +3803,25 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::SortedSet(zs) => {
-                    let sorted = sorted_members_asc(zs);
-                    let to_remove: Vec<Vec<u8>> = sorted
-                        .into_iter()
-                        .filter(|(_, m)| lex_in_range(m, min, max))
-                        .map(|(_, m)| m)
+                    let to_remove: Vec<Vec<u8>> = zs
+                        .iter_asc()
+                        .filter(|(m, _)| lex_in_range(m, min, max))
+                        .map(|(m, _)| m.clone())
                         .collect();
-                    let count = to_remove.len();
+                    let removed_count = to_remove.len();
                     for m in &to_remove {
                         zs.remove(m);
                     }
-                    if zs.is_empty() {
-                        self.entries.remove(key);
-                        self.stream_groups.remove(key);
-                        self.stream_last_ids.remove(key);
+                    let is_empty = zs.is_empty();
+                    if removed_count > 0 {
+                        entry.touch(now_ms);
+                        if is_empty {
+                            self.entries.remove(key);
+                            self.stream_groups.remove(key);
+                            self.stream_last_ids.remove(key);
+                        }
                     }
-                    Ok(count)
+                    Ok(removed_count)
                 }
                 _ => Err(StoreError::WrongType),
             },
@@ -3561,9 +3831,18 @@ impl Store {
 
     pub fn zrandmember(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
+        let rand_val = self.next_rand();
+        match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => Ok(zs.keys().next().cloned()),
+                Value::SortedSet(zs) => {
+                    if zs.is_empty() {
+                        return Ok(None);
+                    }
+                    let idx = (rand_val as usize) % zs.len();
+                    let member = zs.iter_asc().nth(idx).map(|(m, _)| m.clone());
+                    entry.touch(now_ms);
+                    Ok(member)
+                }
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(None),
@@ -3572,7 +3851,7 @@ impl Store {
 
     /// Return `count` random members from a sorted set.
     /// Positive count: up to `count` distinct members.
-    /// Negative count: `|count|` members with possible repeats.
+    /// Negative count: `|count|` fields with possible repeats.
     pub fn zrandmember_count(
         &mut self,
         key: &[u8],
@@ -3580,32 +3859,44 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
+        let mut result_data = None;
+        if let Some(entry) = self.entries.get_mut(key) {
+            match &entry.value {
                 Value::SortedSet(zs) => {
-                    if zs.is_empty() {
-                        return Ok(Vec::new());
-                    }
-                    let members: Vec<(&Vec<u8>, &f64)> = zs.iter().collect();
-                    if count >= 0 {
-                        let n = (count as usize).min(members.len());
-                        Ok(members[..n]
-                            .iter()
-                            .map(|(m, s)| ((*m).clone(), **s))
-                            .collect())
-                    } else {
-                        let abs_count = count.unsigned_abs() as usize;
-                        let mut result = Vec::with_capacity(abs_count);
-                        for i in 0..abs_count {
-                            let (m, s) = &members[i % members.len()];
-                            result.push(((*m).clone(), **s));
-                        }
-                        Ok(result)
+                    if !zs.is_empty() {
+                        let members: Vec<(Vec<u8>, f64)> = zs.iter_asc().map(|(m, s)| (m.clone(), *s)).collect();
+                        entry.touch(now_ms);
+                        result_data = Some(members);
                     }
                 }
-                _ => Err(StoreError::WrongType),
-            },
-            None => Ok(Vec::new()),
+                _ => return Err(StoreError::WrongType),
+            }
+        }
+
+        let members = match result_data {
+            Some(m) => m,
+            None => return Ok(Vec::new()),
+        };
+
+        if count >= 0 {
+            let n = (count as usize).min(members.len());
+            let mut indices: Vec<usize> = (0..members.len()).collect();
+            for i in 0..n {
+                let j = i + (self.next_rand() as usize % (members.len() - i));
+                indices.swap(i, j);
+            }
+            Ok(indices[..n]
+                .iter()
+                .map(|&idx| members[idx].clone())
+                .collect())
+        } else {
+            let abs_count = count.unsigned_abs() as usize;
+            let mut result = Vec::with_capacity(abs_count);
+            for _ in 0..abs_count {
+                let idx = (self.next_rand() as usize) % members.len();
+                result.push(members[idx].clone());
+            }
+            Ok(result)
         }
     }
 
@@ -3620,7 +3911,7 @@ impl Store {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
                     let result: Vec<Option<f64>> =
-                        members.iter().map(|m| zs.get(*m).copied()).collect();
+                        members.iter().map(|m| zs.get_score(*m)).collect();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -4766,13 +5057,22 @@ impl Store {
         keys: &[&[u8]],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        // Collect values, treating missing keys as empty strings
+        // Collect values, treating missing keys as empty strings.
+        // Enforce a total memory limit for the operation to prevent DoS.
+        const MAX_BITOP_TOTAL_BYTES: usize = 512 * 1024 * 1024; // 512 MiB
+        let mut total_bytes = 0usize;
         let mut values: Vec<Vec<u8>> = Vec::with_capacity(keys.len());
         for &key in keys {
             self.drop_if_expired(key, now_ms);
             match self.entries.get(key) {
                 Some(entry) => match &entry.value {
-                    Value::String(v) => values.push(v.clone()),
+                    Value::String(v) => {
+                        total_bytes = total_bytes.saturating_add(v.len());
+                        if total_bytes > MAX_BITOP_TOTAL_BYTES {
+                            return Err(StoreError::GenericError("BITOP total input size exceeds limit".to_string()));
+                        }
+                        values.push(v.clone());
+                    }
                     _ => return Err(StoreError::WrongType),
                 },
                 None => values.push(Vec::new()),
@@ -4831,8 +5131,7 @@ impl Store {
         aggregate: &[u8],
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        let mut combined: std::collections::HashMap<Vec<u8>, f64> =
-            std::collections::HashMap::new();
+        let mut combined: HashMap<Vec<u8>, f64> = HashMap::new();
 
         for (i, &key) in keys.iter().enumerate() {
             self.drop_if_expired(key, now_ms);
@@ -4840,7 +5139,7 @@ impl Store {
             if let Some(entry) = self.entries.get(key) {
                 match &entry.value {
                     Value::SortedSet(zs) => {
-                        for (member, &score) in zs {
+                        for (member, &score) in zs.iter() {
                             let weighted = score * weight;
                             use std::collections::hash_map::Entry as HEntry;
                             match combined.entry(member.clone()) {
@@ -4860,11 +5159,15 @@ impl Store {
         }
 
         let count = combined.len();
+        let mut zs = SortedSet::new();
+        for (m, s) in combined {
+            zs.insert(m, s);
+        }
         self.stream_groups.remove(dest);
         self.stream_last_ids.remove(dest);
         self.entries.insert(
             dest.to_vec(),
-            Entry::new(Value::SortedSet(combined), None, now_ms),
+            Entry::new(Value::SortedSet(zs), None, now_ms),
         );
         Ok(count)
     }
@@ -4884,7 +5187,7 @@ impl Store {
             self.entries.insert(
                 dest.to_vec(),
                 Entry::new(
-                    Value::SortedSet(std::collections::HashMap::new()),
+                    Value::SortedSet(SortedSet::new()),
                     None,
                     now_ms,
                 ),
@@ -4894,7 +5197,7 @@ impl Store {
 
         // Start with members from the first key
         self.drop_if_expired(keys[0], now_ms);
-        let mut result: std::collections::HashMap<Vec<u8>, f64> = match self.entries.get(keys[0]) {
+        let mut result: HashMap<Vec<u8>, f64> = match self.entries.get(keys[0]) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
                     let w = weights.first().copied().unwrap_or(1.0);
@@ -4902,7 +5205,7 @@ impl Store {
                 }
                 _ => return Err(StoreError::WrongType),
             },
-            None => std::collections::HashMap::new(),
+            None => HashMap::new(),
         };
 
         // Intersect with remaining keys
@@ -4930,11 +5233,15 @@ impl Store {
         }
 
         let count = result.len();
+        let mut zs = SortedSet::new();
+        for (m, s) in result {
+            zs.insert(m, s);
+        }
         self.stream_groups.remove(dest);
         self.stream_last_ids.remove(dest);
         self.entries.insert(
             dest.to_vec(),
-            Entry::new(Value::SortedSet(result), None, now_ms),
+            Entry::new(Value::SortedSet(zs), None, now_ms),
         );
         Ok(count)
     }
@@ -4965,39 +5272,75 @@ impl Store {
     /// Return a random live key, or None if the keyspace is empty.
     #[must_use]
     pub fn randomkey(&mut self, now_ms: u64) -> Option<Vec<u8>> {
-        // Expire all keys first so we don't return expired ones.
-        let all_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
-        for key in &all_keys {
-            self.drop_if_expired(key, now_ms);
+        if self.entries.is_empty() {
+            return None;
         }
-        self.entries.keys().next().cloned()
+
+        // Try up to 100 times to find a non-expired key randomly.
+        // This is much faster than expiring all keys in an O(N) scan.
+        for _ in 0..100 {
+            let idx = (self.next_rand() as usize) % self.entries.len();
+            let key = self.entries.keys().nth(idx).cloned()?;
+            
+            // Check if it's expired. If so, drop it and try again.
+            let should_evict = evaluate_expiry(
+                now_ms,
+                self.entries.get(&key).and_then(|entry| entry.expires_at_ms),
+            )
+            .should_evict;
+            if should_evict {
+                self.entries.remove(&key);
+                self.stream_groups.remove(key.as_slice());
+                self.stream_last_ids.remove(key.as_slice());
+                if self.entries.is_empty() {
+                    return None;
+                }
+                continue;
+            }
+            return Some(key);
+        }
+
+        // Fallback: if we failed many times, just pick the first key that isn't expired.
+        // This handles cases where many keys are expired but not yet reaped.
+        let mut expired_keys = Vec::new();
+        let mut result = None;
+        for (key, entry) in &self.entries {
+            if evaluate_expiry(now_ms, entry.expires_at_ms).should_evict {
+                expired_keys.push(key.clone());
+            } else {
+                result = Some(key.clone());
+                break;
+            }
+        }
+        for key in expired_keys {
+            self.entries.remove(&key);
+            self.stream_groups.remove(key.as_slice());
+            self.stream_last_ids.remove(key.as_slice());
+        }
+        result
     }
 
     /// Return up to `count` keys that hash to the given cluster slot.
     #[must_use]
     pub fn keys_in_slot(&mut self, slot: u16, count: usize, now_ms: u64) -> Vec<Vec<u8>> {
-        let all_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
-        for key in &all_keys {
-            self.drop_if_expired(key, now_ms);
-        }
         self.entries
-            .keys()
-            .filter(|k| crc16_slot(k) == slot)
+            .iter()
+            .filter(|(k, e)| {
+                crc16_slot(k) == slot && !evaluate_expiry(now_ms, e.expires_at_ms).should_evict
+            })
             .take(count)
-            .cloned()
+            .map(|(k, _)| k.clone())
             .collect()
     }
 
     /// Count live keys that hash to the given cluster slot.
     #[must_use]
     pub fn count_keys_in_slot(&mut self, slot: u16, now_ms: u64) -> usize {
-        let all_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
-        for key in &all_keys {
-            self.drop_if_expired(key, now_ms);
-        }
         self.entries
-            .keys()
-            .filter(|k| crc16_slot(k) == slot)
+            .iter()
+            .filter(|(k, e)| {
+                crc16_slot(k) == slot && !evaluate_expiry(now_ms, e.expires_at_ms).should_evict
+            })
             .count()
     }
 
@@ -5012,36 +5355,33 @@ impl Store {
         count: usize,
         now_ms: u64,
     ) -> (u64, Vec<Vec<u8>>) {
-        // Expire stale keys
-        let all_keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
-        for key in &all_keys {
-            self.drop_if_expired(key, now_ms);
-        }
-
-        let mut keys: Vec<Vec<u8>> = self.entries.keys().cloned().collect();
-        keys.sort();
-
         let start = cursor as usize;
-        if start >= keys.len() {
-            return (0, Vec::new());
-        }
-
         let batch_size = count.max(1);
         let mut result = Vec::new();
         let mut pos = start;
 
-        while pos < keys.len() && result.len() < batch_size {
-            if let Some(pat) = pattern {
-                if glob_match(pat, &keys[pos]) {
-                    result.push(keys[pos].clone());
-                }
-            } else {
-                result.push(keys[pos].clone());
-            }
-            pos += 1;
+        let total_keys = self.entries.len();
+        if start >= total_keys {
+            return (0, Vec::new());
         }
 
-        let next_cursor = if pos >= keys.len() { 0 } else { pos as u64 };
+        for (key, entry) in self.entries.iter().skip(start) {
+            pos += 1;
+            if evaluate_expiry(now_ms, entry.expires_at_ms).should_evict {
+                continue;
+            }
+            if let Some(pat) = pattern {
+                if !glob_match(pat, key) {
+                    continue;
+                }
+            }
+            result.push(key.clone());
+            if result.len() >= batch_size {
+                break;
+            }
+        }
+
+        let next_cursor = if pos >= total_keys { 0 } else { pos as u64 };
         (next_cursor, result)
     }
 
@@ -5056,33 +5396,34 @@ impl Store {
         now_ms: u64,
     ) -> Result<(u64, Vec<(Vec<u8>, Vec<u8>)>), StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
+        match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(h) => {
-                    let mut fields: Vec<(Vec<u8>, Vec<u8>)> =
-                        h.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    fields.sort_by(|a, b| a.0.cmp(&b.0));
-
                     let start = cursor as usize;
-                    if start >= fields.len() {
-                        return Ok((0, Vec::new()));
-                    }
-
                     let batch_size = count.max(1);
                     let mut result = Vec::new();
                     let mut pos = start;
-                    while pos < fields.len() && result.len() < batch_size {
-                        if let Some(pat) = pattern {
-                            if glob_match(pat, &fields[pos].0) {
-                                result.push(fields[pos].clone());
-                            }
-                        } else {
-                            result.push(fields[pos].clone());
-                        }
-                        pos += 1;
+
+                    let total_fields = h.len();
+                    if start >= total_fields {
+                        return Ok((0, Vec::new()));
                     }
 
-                    let next = if pos >= fields.len() { 0 } else { pos as u64 };
+                    for (field, value) in h.iter().skip(start) {
+                        pos += 1;
+                        if let Some(pat) = pattern {
+                            if !glob_match(pat, field) {
+                                continue;
+                            }
+                        }
+                        result.push((field.clone(), value.clone()));
+                        if result.len() >= batch_size {
+                            break;
+                        }
+                    }
+
+                    let next = if pos >= total_fields { 0 } else { pos as u64 };
+                    entry.touch(now_ms);
                     Ok((next, result))
                 }
                 _ => Err(StoreError::WrongType),
@@ -5101,10 +5442,11 @@ impl Store {
         now_ms: u64,
     ) -> Result<(u64, Vec<Vec<u8>>), StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
+        match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
-                    let mut members: Vec<Vec<u8>> = s.iter().cloned().collect();
+                    // Sets are unordered in HashSet, so we must sort for deterministic SCAN
+                    let mut members: Vec<&Vec<u8>> = s.iter().collect();
                     members.sort();
 
                     let start = cursor as usize;
@@ -5117,7 +5459,7 @@ impl Store {
                     let mut pos = start;
                     while pos < members.len() && result.len() < batch_size {
                         if let Some(pat) = pattern {
-                            if glob_match(pat, &members[pos]) {
+                            if glob_match(pat, members[pos]) {
                                 result.push(members[pos].clone());
                             }
                         } else {
@@ -5127,6 +5469,7 @@ impl Store {
                     }
 
                     let next = if pos >= members.len() { 0 } else { pos as u64 };
+                    entry.touch(now_ms);
                     Ok((next, result))
                 }
                 _ => Err(StoreError::WrongType),
@@ -5146,37 +5489,33 @@ impl Store {
         now_ms: u64,
     ) -> Result<(u64, Vec<(Vec<u8>, f64)>), StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
+        match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let mut pairs: Vec<(Vec<u8>, f64)> =
-                        zs.iter().map(|(m, &s)| (m.clone(), s)).collect();
-                    pairs.sort_by(|a, b| {
-                        a.1.partial_cmp(&b.1)
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                            .then(a.0.cmp(&b.0))
-                    });
-
                     let start = cursor as usize;
-                    if start >= pairs.len() {
+                    if start >= zs.len() {
                         return Ok((0, Vec::new()));
                     }
 
                     let batch_size = count.max(1);
                     let mut result = Vec::new();
                     let mut pos = start;
-                    while pos < pairs.len() && result.len() < batch_size {
-                        if let Some(pat) = pattern {
-                            if glob_match(pat, &pairs[pos].0) {
-                                result.push(pairs[pos].clone());
-                            }
-                        } else {
-                            result.push(pairs[pos].clone());
-                        }
+
+                    for (member, score) in zs.iter_asc().skip(start) {
                         pos += 1;
+                        if let Some(pat) = pattern {
+                            if !glob_match(pat, member) {
+                                continue;
+                            }
+                        }
+                        result.push((member.clone(), *score));
+                        if result.len() >= batch_size {
+                            break;
+                        }
                     }
 
-                    let next = if pos >= pairs.len() { 0 } else { pos as u64 };
+                    let next = if pos >= zs.len() { 0 } else { pos as u64 };
+                    entry.touch(now_ms);
                     Ok((next, result))
                 }
                 _ => Err(StoreError::WrongType),
@@ -5239,11 +5578,15 @@ impl Store {
     /// Returns Err(WrongType) for non-sortable types (string, hash, stream).
     pub fn sort_elements(&mut self, key: &[u8], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
+        match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::List(l) => Ok(l.iter().cloned().collect()),
                 Value::Set(s) => Ok(s.iter().cloned().collect()),
-                Value::SortedSet(zs) => Ok(zs.keys().cloned().collect()),
+                Value::SortedSet(zs) => {
+                    let result = zs.iter_asc().map(|(m, _)| m.clone()).collect();
+                    entry.touch(now_ms);
+                    Ok(result)
+                }
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(Vec::new()),
@@ -5284,9 +5627,7 @@ impl Store {
             }
             Value::Hash(m) => {
                 hash = fnv1a_update(hash, b"H");
-                let mut fields: Vec<_> = m.iter().collect();
-                fields.sort_by_key(|(k, _)| *k);
-                for (k, v) in fields {
+                for (k, v) in m {
                     hash = fnv1a_update(hash, k);
                     hash = fnv1a_update(hash, v);
                 }
@@ -5307,9 +5648,7 @@ impl Store {
             }
             Value::SortedSet(zs) => {
                 hash = fnv1a_update(hash, b"Z");
-                let mut pairs: Vec<_> = zs.iter().collect();
-                pairs.sort_by(|a, b| a.0.cmp(b.0));
-                for (member, score) in pairs {
+                for (member, score) in zs.iter_asc() {
                     hash = fnv1a_update(hash, member);
                     hash = fnv1a_update(hash, &score.to_bits().to_le_bytes());
                 }
@@ -5333,10 +5672,8 @@ impl Store {
 
     #[must_use]
     pub fn state_digest(&self) -> String {
-        let mut rows = self.entries.iter().collect::<Vec<_>>();
-        rows.sort_by_key(|(key, _)| *key);
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-        for (key, entry) in rows {
+        for (key, entry) in &self.entries {
             hash = fnv1a_update(hash, key);
             match &entry.value {
                 Value::String(v) => {
@@ -5345,9 +5682,7 @@ impl Store {
                 }
                 Value::Hash(m) => {
                     hash = fnv1a_update(hash, b"H");
-                    let mut fields: Vec<_> = m.iter().collect();
-                    fields.sort_by_key(|(k, _)| *k);
-                    for (k, v) in fields {
+                    for (k, v) in m {
                         hash = fnv1a_update(hash, k);
                         hash = fnv1a_update(hash, v);
                     }
@@ -5368,9 +5703,7 @@ impl Store {
                 }
                 Value::SortedSet(zs) => {
                     hash = fnv1a_update(hash, b"Z");
-                    let mut pairs: Vec<_> = zs.iter().collect();
-                    pairs.sort_by(|a, b| a.0.cmp(b.0));
-                    for (member, score) in pairs {
+                    for (member, score) in zs.iter_asc() {
                         hash = fnv1a_update(hash, member);
                         hash = fnv1a_update(hash, &score.to_bits().to_le_bytes());
                     }
@@ -5396,13 +5729,17 @@ impl Store {
     pub fn store_sorted_set(
         &mut self,
         dest: &[u8],
-        members: std::collections::HashMap<Vec<u8>, f64>,
+        members: HashMap<Vec<u8>, f64>,
     ) {
+        let mut zs = SortedSet::new();
+        for (m, s) in members {
+            zs.insert(m, s);
+        }
         self.stream_groups.remove(dest);
         self.stream_last_ids.remove(dest);
         self.entries.insert(
             dest.to_vec(),
-            Entry::new(Value::SortedSet(members), None, 0),
+            Entry::new(Value::SortedSet(zs), None, 0),
         );
     }
 
@@ -5827,6 +6164,20 @@ impl Store {
         receivers
     }
 
+    /// Publish a message to a shard channel. Returns number of shard subscribers
+    /// that received it.
+    pub fn spublish(&mut self, channel: &[u8], message: &[u8]) -> usize {
+        if self.subscribed_shard_channels.contains(channel) {
+            self.pubsub_pending.push(PubSubMessage::SMessage {
+                channel: channel.to_vec(),
+                data: message.to_vec(),
+            });
+            1
+        } else {
+            0
+        }
+    }
+
     /// Drain all pending Pub/Sub messages.
     pub fn drain_pending_pubsub(&mut self) -> Vec<PubSubMessage> {
         self.pubsub_pending.drain(..).collect()
@@ -5840,6 +6191,11 @@ impl Store {
     /// Return the number of pattern subscriptions.
     pub fn pubsub_numpat(&self) -> usize {
         self.subscribed_patterns.len()
+    }
+
+    /// Return the number of shard subscribers for a shard channel.
+    pub fn pubsub_shardnumsub_count(&self, channel: &[u8]) -> usize {
+        usize::from(self.subscribed_shard_channels.contains(channel))
     }
 
     /// Subscribe to a shard channel. Returns the total shard subscription count.
@@ -5906,7 +6262,7 @@ impl Store {
             Value::SortedSet(zs) => {
                 buf.push(5); // type 5 = sorted set
                 encode_length(&mut buf, zs.len());
-                for (member, score) in zs {
+                for (member, score) in zs.iter() {
                     encode_length(&mut buf, member.len());
                     buf.extend_from_slice(member);
                     buf.extend_from_slice(&score.to_le_bytes());
@@ -6012,7 +6368,7 @@ impl Store {
                 // Hash
                 let (count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
-                let mut hash = HashMap::with_capacity(count);
+                let mut hash = BTreeMap::new();
                 for _ in 0..count {
                     let (flen, fc) = decode_length(payload, cursor)?;
                     cursor += fc;
@@ -6036,7 +6392,7 @@ impl Store {
                 // Sorted set
                 let (count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
-                let mut zs = HashMap::with_capacity(count);
+                let mut zs = SortedSet::new();
                 for _ in 0..count {
                     let (mlen, mc) = decode_length(payload, cursor)?;
                     cursor += mc;
@@ -6262,15 +6618,14 @@ fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
-/// Encode a length as a variable-length integer (1–5 bytes).
+/// Encode a length as a variable-length integer (1 or 5 bytes).
 fn encode_length(buf: &mut Vec<u8>, len: usize) {
     if len < 0x80 {
         buf.push(len as u8);
     } else {
+        // Use 5 bytes: 0x80 marker followed by 4-byte little-endian value
+        buf.push(0x80);
         buf.extend_from_slice(&(len as u32).to_le_bytes());
-        // Mark the first byte with high bit to indicate 4-byte encoding
-        let pos = buf.len() - 4;
-        buf[pos] |= 0x80;
     }
 }
 
@@ -6280,16 +6635,18 @@ fn decode_length(data: &[u8], offset: usize) -> Result<(usize, usize), StoreErro
         return Err(StoreError::InvalidDumpPayload);
     }
     let first = data[offset];
-    if first & 0x80 == 0 {
+    if first < 0x80 {
         Ok((first as usize, 1))
-    } else {
-        if offset + 4 > data.len() {
+    } else if first == 0x80 {
+        if offset + 5 > data.len() {
             return Err(StoreError::InvalidDumpPayload);
         }
         let mut bytes = [0u8; 4];
-        bytes.copy_from_slice(&data[offset..offset + 4]);
-        bytes[0] &= 0x7F; // Clear the marker bit
-        Ok((u32::from_le_bytes(bytes) as usize, 4))
+        bytes.copy_from_slice(&data[offset + 1..offset + 5]);
+        Ok((u32::from_le_bytes(bytes) as usize, 5))
+    } else {
+        // Values > 0x80 that are not our 0x80 marker are invalid in this encoding
+        Err(StoreError::InvalidDumpPayload)
     }
 }
 
@@ -6576,7 +6933,7 @@ fn score_member_lt(s1: f64, m1: &[u8], s2: f64, m2: &[u8]) -> bool {
 }
 
 /// Return sorted members as (score, member) pairs in ascending order.
-fn sorted_members_asc(zs: &HashMap<Vec<u8>, f64>) -> Vec<(f64, Vec<u8>)> {
+fn sorted_members_asc(zs: &SortedSet) -> Vec<(f64, Vec<u8>)> {
     let mut pairs: Vec<(f64, Vec<u8>)> = zs.iter().map(|(m, &s)| (s, m.clone())).collect();
     pairs.sort_by(|(s1, m1), (s2, m2)| cmp_score_member(*s1, m1, *s2, m2));
     pairs
