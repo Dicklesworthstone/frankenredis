@@ -158,6 +158,8 @@ const RDB_TYPE_LIST: u8 = 1;
 const RDB_TYPE_SET: u8 = 2;
 const RDB_TYPE_ZSET: u8 = 5;
 const RDB_TYPE_HASH: u8 = 4;
+const RDB_CHECKSUM_LEN: usize = 8;
+const CRC64_REDIS_POLY: u64 = 0xAD93_D235_94C9_35A9;
 
 /// A key-value entry for RDB serialization.
 #[derive(Debug, Clone, PartialEq)]
@@ -194,6 +196,21 @@ fn rdb_encode_length(buf: &mut Vec<u8>, len: usize) {
 fn rdb_encode_string(buf: &mut Vec<u8>, data: &[u8]) {
     rdb_encode_length(buf, data.len());
     buf.extend_from_slice(data);
+}
+
+fn crc64_redis(data: &[u8]) -> u64 {
+    let mut crc = 0_u64;
+    for &byte in data {
+        crc ^= u64::from(byte);
+        for _ in 0..8 {
+            let lsb = crc & 1;
+            crc >>= 1;
+            if lsb != 0 {
+                crc ^= CRC64_REDIS_POLY;
+            }
+        }
+    }
+    crc
 }
 
 /// Encode a complete RDB file from a set of entries.
@@ -279,8 +296,8 @@ pub fn encode_rdb(entries: &[RdbEntry], aux: &[(&str, &str)]) -> Vec<u8> {
 
     // EOF
     buf.push(RDB_OPCODE_EOF);
-    // CRC64 placeholder (8 zero bytes — real CRC64 deferred to later bead)
-    buf.extend_from_slice(&[0u8; 8]);
+    let checksum = crc64_redis(&buf);
+    buf.extend_from_slice(&checksum.to_le_bytes());
 
     buf
 }
@@ -320,20 +337,44 @@ fn rdb_decode_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
 
 /// Decode an RDB file into entries. Returns entries and auxiliary metadata.
 pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String>), PersistError> {
-    if data.len() < 9 || &data[..5] != b"REDIS" {
+    if data.len() < 9 + RDB_CHECKSUM_LEN || &data[..5] != b"REDIS" {
+        return Err(PersistError::InvalidFrame);
+    }
+
+    let version = std::str::from_utf8(&data[5..9]).map_err(|_| PersistError::InvalidFrame)?;
+    if version != format!("{RDB_VERSION:04}") {
         return Err(PersistError::InvalidFrame);
     }
     let mut cursor = 9; // Skip "REDIS" + 4-digit version
     let mut entries = Vec::new();
     let mut aux = BTreeMap::new();
     let mut pending_expire_ms: Option<u64> = None;
+    let mut saw_eof = false;
 
     while cursor < data.len() {
         let opcode = data[cursor];
         cursor += 1;
 
         match opcode {
-            RDB_OPCODE_EOF => break,
+            RDB_OPCODE_EOF => {
+                if data.len() != cursor + RDB_CHECKSUM_LEN {
+                    return Err(PersistError::InvalidFrame);
+                }
+                let expected_checksum = u64::from_le_bytes(
+                    data[cursor..cursor + RDB_CHECKSUM_LEN]
+                        .try_into()
+                        .map_err(|_| PersistError::InvalidFrame)?,
+                );
+                let actual_checksum = crc64_redis(&data[..cursor]);
+                if expected_checksum != actual_checksum {
+                    return Err(PersistError::InvalidFrame);
+                }
+                if pending_expire_ms.is_some() {
+                    return Err(PersistError::InvalidFrame);
+                }
+                saw_eof = true;
+                break;
+            }
             RDB_OPCODE_AUX => {
                 let (key, consumed) =
                     rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
@@ -474,6 +515,10 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
                 return Err(PersistError::InvalidFrame);
             }
         }
+    }
+
+    if !saw_eof {
+        return Err(PersistError::InvalidFrame);
     }
 
     Ok((entries, aux))
@@ -622,7 +667,7 @@ mod tests {
 
     // ── RDB tests ────────────────────────────────────────────────────
 
-    use super::{RdbEntry, RdbValue, decode_rdb, encode_rdb};
+    use super::{RDB_CHECKSUM_LEN, RdbEntry, RdbValue, decode_rdb, encode_rdb};
 
     #[test]
     fn rdb_round_trip_string() {
@@ -747,6 +792,46 @@ mod tests {
     #[test]
     fn rdb_rejects_invalid_magic() {
         assert!(decode_rdb(b"NOTREDIS").is_err());
+    }
+
+    #[test]
+    fn rdb_rejects_checksum_mismatch() {
+        let entries = vec![RdbEntry {
+            key: b"tamper".to_vec(),
+            value: RdbValue::String(b"proof".to_vec()),
+            expire_ms: None,
+        }];
+        let mut encoded = encode_rdb(&entries, &[]);
+        let len = encoded.len();
+        encoded[len - 1] ^= 0xFF;
+
+        assert!(decode_rdb(&encoded).is_err());
+    }
+
+    #[test]
+    fn rdb_rejects_missing_eof_trailer() {
+        let entries = vec![RdbEntry {
+            key: b"missing".to_vec(),
+            value: RdbValue::String(b"eof".to_vec()),
+            expire_ms: None,
+        }];
+        let mut encoded = encode_rdb(&entries, &[]);
+        encoded.truncate(encoded.len() - (1 + RDB_CHECKSUM_LEN));
+
+        assert!(decode_rdb(&encoded).is_err());
+    }
+
+    #[test]
+    fn rdb_rejects_unsupported_version() {
+        let entries = vec![RdbEntry {
+            key: b"version".to_vec(),
+            value: RdbValue::String(b"mismatch".to_vec()),
+            expire_ms: None,
+        }];
+        let mut encoded = encode_rdb(&entries, &[]);
+        encoded[5..9].copy_from_slice(b"0010");
+
+        assert!(decode_rdb(&encoded).is_err());
     }
 
     #[test]

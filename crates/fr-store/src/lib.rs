@@ -1556,13 +1556,24 @@ impl Store {
             .cloned();
 
         // Collect keys to check by skipping to the cursor.
-        let keys_to_check: Vec<Vec<u8>> = self
+        // BTreeMap iteration doesn't wrap, so we may need two passes.
+        let mut keys_to_check: Vec<Vec<u8>> = self
             .entries
             .keys()
             .skip(normalized_start)
             .take(sampled_keys_count)
             .cloned()
             .collect();
+
+        if keys_to_check.len() < sampled_keys_count {
+            let remaining = sampled_keys_count - keys_to_check.len();
+            keys_to_check.extend(
+                self.entries
+                    .keys()
+                    .take(remaining)
+                    .cloned()
+            );
+        }
 
         let mut evicted_keys = 0usize;
         for key in &keys_to_check {
@@ -3118,15 +3129,13 @@ impl Store {
         let mut added = 0_usize;
         let mut changed = 0_usize;
         for (score, member) in members {
-            match zs.get(member) {
-                Some(&old_score) => {
+            match zs.get_score(member) {
+                Some(old_score) => {
                     // Existing member
                     if opts.nx {
                         continue; // NX: don't update existing
                     }
-                    let should_update = if opts.gt && opts.lt {
-                        *score != old_score // GT+LT: update if different
-                    } else if opts.gt {
+                    let should_update = if opts.gt {
                         *score > old_score
                     } else if opts.lt {
                         *score < old_score
@@ -3147,6 +3156,9 @@ impl Store {
                     added += 1;
                 }
             }
+        }
+        if added > 0 || changed > 0 {
+            entry.touch(now_ms);
         }
         if opts.ch {
             Ok((added + changed, changed))
@@ -3695,6 +3707,35 @@ impl Store {
                         .iter_asc()
                         .filter(|(m, _)| lex_in_range(m, min, max))
                         .map(|(m, _)| m.clone())
+                        .collect();
+                    entry.touch(now_ms);
+                    Ok(result)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
+    pub fn zrevrangebyscore_withscores(
+        &mut self,
+        key: &[u8],
+        max: f64,
+        min: f64,
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => {
+                    let lower = Included(ScoreMember::min_for_score(min));
+                    let upper = Included(ScoreMember::max_for_score(max));
+
+                    let result: Vec<(Vec<u8>, f64)> = zs
+                        .ordered
+                        .range((lower, upper))
+                        .rev()
+                        .map(|(sm, _)| (sm.member.clone(), sm.score))
                         .collect();
                     entry.touch(now_ms);
                     Ok(result)
@@ -5180,7 +5221,7 @@ impl Store {
         for (i, &key) in keys.iter().enumerate() {
             self.drop_if_expired(key, now_ms);
             let weight = weights.get(i).copied().unwrap_or(1.0);
-            if let Some(entry) = self.entries.get(key) {
+            if let Some(entry) = self.entries.get_mut(key) {
                 match &entry.value {
                     Value::SortedSet(zs) => {
                         for (member, &score) in zs.iter() {
@@ -5196,6 +5237,7 @@ impl Store {
                                 }
                             }
                         }
+                        entry.touch(now_ms);
                     }
                     _ => return Err(StoreError::WrongType),
                 }
@@ -5241,11 +5283,13 @@ impl Store {
 
         // Start with members from the first key
         self.drop_if_expired(keys[0], now_ms);
-        let mut result: HashMap<Vec<u8>, f64> = match self.entries.get(keys[0]) {
+        let mut result: HashMap<Vec<u8>, f64> = match self.entries.get_mut(keys[0]) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
                     let w = weights.first().copied().unwrap_or(1.0);
-                    zs.iter().map(|(m, &s)| (m.clone(), s * w)).collect()
+                    let res = zs.dict.iter().map(|(m, &s)| (m.clone(), s * w)).collect();
+                    entry.touch(now_ms);
+                    res
                 }
                 _ => return Err(StoreError::WrongType),
             },
@@ -5256,17 +5300,18 @@ impl Store {
         for (i, &key) in keys.iter().enumerate().skip(1) {
             self.drop_if_expired(key, now_ms);
             let weight = weights.get(i).copied().unwrap_or(1.0);
-            match self.entries.get(key) {
+            match self.entries.get_mut(key) {
                 Some(entry) => match &entry.value {
                     Value::SortedSet(zs) => {
                         result.retain(|member, score| {
-                            if let Some(&other_score) = zs.get(member) {
+                            if let Some(&other_score) = zs.dict.get(member) {
                                 *score = aggregate_scores(*score, other_score * weight, aggregate);
                                 true
                             } else {
                                 false
                             }
                         });
+                        entry.touch(now_ms);
                     }
                     _ => return Err(StoreError::WrongType),
                 },

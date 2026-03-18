@@ -48,6 +48,10 @@ enum BlockingOp {
         wherefrom: Vec<u8>,
         whereto: Vec<u8>,
     },
+    /// BZPOPMAX: pop max score from first available key.
+    BZpopMax { keys: Vec<Vec<u8>> },
+    /// BZPOPMIN: pop min score from first available key.
+    BZpopMin { keys: Vec<Vec<u8>> },
 }
 
 /// A client that is blocked waiting for data on one or more keys.
@@ -294,7 +298,7 @@ fn main() -> ExitCode {
 
         // Check blocked clients (BLPOP/BRPOP/BLMOVE) for available data
         // or timeout expiry.
-        check_blocked_clients(&mut clients, &mut runtime);
+        check_blocked_clients(&mut clients, &mut runtime, &mut poll);
 
         // Clean up clients marked for closing whose write buffers are drained.
         let to_remove: Vec<Token> = clients
@@ -669,7 +673,7 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
         return None;
     };
 
-    if cmd.eq_ignore_ascii_case(b"BLPOP") || cmd.eq_ignore_ascii_case(b"BRPOP") {
+    if cmd.eq_ignore_ascii_case(b"BLPOP") || cmd.eq_ignore_ascii_case(b"BRPOP") || cmd.eq_ignore_ascii_case(b"BZPOPMAX") || cmd.eq_ignore_ascii_case(b"BZPOPMIN") {
         if items.len() < 3 {
             return None;
         }
@@ -703,8 +707,12 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
         }
         let op = if cmd.eq_ignore_ascii_case(b"BLPOP") {
             BlockingOp::BLpop { keys }
-        } else {
+        } else if cmd.eq_ignore_ascii_case(b"BRPOP") {
             BlockingOp::BRpop { keys }
+        } else if cmd.eq_ignore_ascii_case(b"BZPOPMAX") {
+            BlockingOp::BZpopMax { keys }
+        } else {
+            BlockingOp::BZpopMin { keys }
         };
         Some(BlockedState { op, deadline_ms })
     } else if cmd.eq_ignore_ascii_case(b"BLMOVE") {
@@ -762,6 +770,7 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
 fn check_blocked_clients(
     clients: &mut HashMap<Token, ClientConnection>,
     runtime: &mut Runtime,
+    poll: &mut Poll,
 ) {
     let ts = now_ms();
     let blocked_tokens: Vec<Token> = clients
@@ -782,13 +791,14 @@ fn check_blocked_clients(
         if ts >= blocked.deadline_ms {
             // Timeout expired — send nil.
             let nil_response = match &blocked.op {
-                BlockingOp::BLpop { .. } | BlockingOp::BRpop { .. } => {
+                BlockingOp::BLpop { .. } | BlockingOp::BRpop { .. } | BlockingOp::BZpopMax { .. } | BlockingOp::BZpopMin { .. } => {
                     RespFrame::Array(None)
                 }
                 BlockingOp::BLmove { .. } => RespFrame::BulkString(None),
             };
             conn.write_buf.extend_from_slice(&nil_response.to_bytes());
             conn.blocked = None;
+            let _ = flush_or_rearm_client(token, conn, poll);
             continue;
         }
 
@@ -804,8 +814,31 @@ fn check_blocked_clients(
         if let Some(response) = result {
             conn.write_buf.extend_from_slice(&response.to_bytes());
             conn.blocked = None;
+            let _ = flush_or_rearm_client(token, conn, poll);
         }
     }
+}
+
+fn flush_or_rearm_client(token: Token, conn: &mut ClientConnection, poll: &mut Poll) -> io::Result<()> {
+    if conn.write_buf.is_empty() {
+        return Ok(());
+    }
+
+    match conn.try_flush()? {
+        true => {
+            poll.registry()
+                .reregister(&mut conn.stream, token, Interest::READABLE)?;
+        }
+        false => {
+            poll.registry().reregister(
+                &mut conn.stream,
+                token,
+                Interest::READABLE | Interest::WRITABLE,
+            )?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Try to fulfill a blocked operation by checking if the watched keys have
@@ -846,6 +879,49 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                         RespFrame::BulkString(Some(key.clone())),
                         response,
                     ])));
+                }
+            }
+            None
+        }
+        BlockingOp::BZpopMax { keys } => {
+            for key in keys {
+                let argv = vec![b"ZPOPMAX".to_vec(), key.clone()];
+                let frame = RespFrame::Array(Some(
+                    argv.iter()
+                        .map(|a| RespFrame::BulkString(Some(a.clone())))
+                        .collect(),
+                ));
+                let response = runtime.execute_frame(frame, now_ms);
+                if response != RespFrame::Array(None) {
+                    // ZPOPMAX returns [member, score]. BZPOPMAX needs [key, member, score]
+                    if let RespFrame::Array(Some(mut items)) = response {
+                        if items.len() == 2 {
+                            let mut result = vec![RespFrame::BulkString(Some(key.clone()))];
+                            result.append(&mut items);
+                            return Some(RespFrame::Array(Some(result)));
+                        }
+                    }
+                }
+            }
+            None
+        }
+        BlockingOp::BZpopMin { keys } => {
+            for key in keys {
+                let argv = vec![b"ZPOPMIN".to_vec(), key.clone()];
+                let frame = RespFrame::Array(Some(
+                    argv.iter()
+                        .map(|a| RespFrame::BulkString(Some(a.clone())))
+                        .collect(),
+                ));
+                let response = runtime.execute_frame(frame, now_ms);
+                if response != RespFrame::Array(None) {
+                    if let RespFrame::Array(Some(mut items)) = response {
+                        if items.len() == 2 {
+                            let mut result = vec![RespFrame::BulkString(Some(key.clone()))];
+                            result.append(&mut items);
+                            return Some(RespFrame::Array(Some(result)));
+                        }
+                    }
                 }
             }
             None

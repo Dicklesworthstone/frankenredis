@@ -2881,21 +2881,8 @@ impl Runtime {
         if argv.len() != 1 {
             return command_error_to_resp(CommandError::WrongArity("SAVE"));
         }
-        // Persist store state to AOF file if a path is configured.
-        if let Some(path) = &self.server.aof_path {
-            let commands = self.server.store.to_aof_commands(now_ms);
-            let records = argv_to_aof_records(commands);
-            if let Err(_e) = write_aof_file(path, &records) {
-                return RespFrame::Error("ERR error saving dataset to disk".to_string());
-            }
-        }
-        // Persist store state to RDB file if a path is configured.
-        if let Some(path) = &self.server.rdb_path {
-            let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
-            let aux = [("redis-ver", "7.0.0"), ("frankenredis", "true")];
-            if let Err(_e) = write_rdb_file(path, &entries, &aux) {
-                return RespFrame::Error("ERR error saving RDB snapshot to disk".to_string());
-            }
+        if let Err(reply) = self.persist_snapshot_to_disk(now_ms) {
+            return reply;
         }
         self.server.last_save_time_sec = now_ms / 1000;
         RespFrame::SimpleString("OK".to_string())
@@ -2906,16 +2893,35 @@ impl Runtime {
             return command_error_to_resp(CommandError::WrongArity("BGSAVE"));
         }
         // In a single-threaded context, BGSAVE behaves like SAVE.
-        // Persist store state to AOF file if a path is configured.
-        if let Some(path) = &self.server.aof_path {
-            let commands = self.server.store.to_aof_commands(now_ms);
-            let records = argv_to_aof_records(commands);
-            if let Err(_e) = write_aof_file(path, &records) {
-                return RespFrame::Error("ERR error saving dataset to disk".to_string());
-            }
+        if let Err(reply) = self.persist_snapshot_to_disk(now_ms) {
+            return reply;
         }
         self.server.last_save_time_sec = now_ms / 1000;
         RespFrame::SimpleString("Background saving started".to_string())
+    }
+
+    fn persist_snapshot_to_disk(&mut self, now_ms: u64) -> Result<(), RespFrame> {
+        if let Some(path) = &self.server.aof_path {
+            let commands = self.server.store.to_aof_commands(now_ms);
+            let records = argv_to_aof_records(commands);
+            if write_aof_file(path, &records).is_err() {
+                return Err(RespFrame::Error(
+                    "ERR error saving dataset to disk".to_string(),
+                ));
+            }
+        }
+
+        if let Some(path) = &self.server.rdb_path {
+            let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+            let aux = [("redis-ver", "7.0.0"), ("frankenredis", "true")];
+            if write_rdb_file(path, &entries, &aux).is_err() {
+                return Err(RespFrame::Error(
+                    "ERR error saving RDB snapshot to disk".to_string(),
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     fn handle_lastsave_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -5421,6 +5427,36 @@ mod tests {
 
         // Cleanup
         let _ = std::fs::remove_file(&aof_path);
+    }
+
+    #[test]
+    fn bgsave_writes_rdb_snapshot_when_path_is_configured() {
+        let dir = std::env::temp_dir().join("fr_runtime_rdb_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let rdb_path = dir.join("test_bgsave.rdb");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(rdb_path.clone());
+        rt.execute_frame(command(&[b"SET", b"persisted", b"value"]), 100);
+
+        let result = rt.execute_frame(command(&[b"BGSAVE"]), 200);
+        assert_eq!(
+            result,
+            RespFrame::SimpleString("Background saving started".to_string())
+        );
+        assert!(rdb_path.exists(), "BGSAVE should write the configured RDB file");
+
+        let (entries, aux) = fr_persist::read_rdb_file(&rdb_path).expect("read rdb");
+        assert_eq!(aux.get("frankenredis"), Some(&"true".to_string()));
+        assert!(
+            entries.iter().any(|entry| {
+                entry.key == b"persisted"
+                    && entry.value == fr_persist::RdbValue::String(b"value".to_vec())
+            }),
+            "RDB snapshot should contain the persisted key"
+        );
+
+        let _ = std::fs::remove_file(&rdb_path);
     }
 
     #[test]

@@ -2183,6 +2183,12 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             "ERR GT, LT, and NX options at the same time are not compatible".to_string(),
         ));
     }
+    // GT and LT are mutually exclusive
+    if gt && lt {
+        return Ok(RespFrame::Error(
+            "ERR GT and LT options at the same time are not compatible".to_string(),
+        ));
+    }
 
     let remaining = argv.len() - i;
     if remaining < 2 || !remaining.is_multiple_of(2) {
