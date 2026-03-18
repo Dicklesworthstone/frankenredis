@@ -254,7 +254,7 @@ impl SortedSet {
         self.dict.get(member).copied()
     }
 
-    fn iter_asc(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
+    pub fn iter_asc(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
         self.ordered.keys().map(|sm| (&sm.member, &sm.score))
     }
 
@@ -6475,6 +6475,26 @@ impl Store {
     /// followed by PEXPIREAT if the key has an expiry. Expired entries are skipped.
     ///
     /// This is the core of AOF rewrite: the output can be wrapped in `AofRecord`
+    /// Return all key names in the store (sorted for determinism).
+    #[must_use]
+    pub fn all_keys(&self) -> Vec<Vec<u8>> {
+        self.entries.keys().cloned().collect()
+    }
+
+    /// Drop a key if it has expired. Public wrapper for RDB/snapshot use.
+    pub fn expire_key_if_stale(&mut self, key: &[u8], now_ms: u64) {
+        self.drop_if_expired(key, now_ms);
+    }
+
+    /// Get a reference to an entry's value and expiry for RDB serialization.
+    /// Returns None if the key doesn't exist.
+    #[must_use]
+    pub fn get_value_and_expiry(&self, key: &[u8]) -> Option<(&Value, Option<u64>)> {
+        self.entries
+            .get(key)
+            .map(|entry| (&entry.value, entry.expires_at_ms))
+    }
+
     /// and encoded/replayed to reconstruct the database from scratch.
     #[must_use]
     pub fn to_aof_commands(&mut self, now_ms: u64) -> Vec<Vec<Vec<u8>>> {

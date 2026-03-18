@@ -22,8 +22,8 @@ use fr_eventloop::{
     validate_fd_registration_bounds, validate_pending_write_delivery, validate_read_path,
 };
 use fr_persist::{
-    AofRecord, PersistError, argv_to_aof_records, decode_aof_stream, encode_aof_stream,
-    write_aof_file,
+    AofRecord, PersistError, RdbEntry, RdbValue, argv_to_aof_records, decode_aof_stream,
+    encode_aof_stream, write_aof_file, write_rdb_file,
 };
 use fr_protocol::{RespFrame, RespParseError};
 use fr_repl::{ReplOffset, WaitAofThreshold, WaitThreshold, evaluate_wait, evaluate_waitaof};
@@ -694,6 +694,8 @@ pub struct ServerState {
     last_save_time_sec: u64,
     /// Path for AOF persistence file (used by SAVE/BGSAVE).
     aof_path: Option<std::path::PathBuf>,
+    /// Path for RDB persistence file (used by SAVE/BGSAVE).
+    rdb_path: Option<std::path::PathBuf>,
     /// Dynamically overridden CONFIG parameters (set via CONFIG SET, returned by CONFIG GET).
     config_overrides: HashMap<String, String>,
 }
@@ -725,6 +727,7 @@ impl Default for ServerState {
             slowlog_max_len: 128,
             last_save_time_sec: 0,
             aof_path: None,
+            rdb_path: None,
             config_overrides: HashMap::new(),
         }
     }
@@ -733,6 +736,10 @@ impl Default for ServerState {
 impl ServerState {
     pub fn set_aof_path(&mut self, path: std::path::PathBuf) {
         self.aof_path = Some(path);
+    }
+
+    pub fn set_rdb_path(&mut self, path: std::path::PathBuf) {
+        self.rdb_path = Some(path);
     }
 
     pub fn load_aof(&mut self, now_ms: u64) -> Result<usize, PersistError> {
@@ -1021,6 +1028,12 @@ impl Runtime {
     /// a full AOF rewrite to this path.
     pub fn set_aof_path(&mut self, path: std::path::PathBuf) {
         self.server.set_aof_path(path);
+    }
+
+    /// Set the RDB persistence file path. When set, SAVE/BGSAVE will write
+    /// an RDB snapshot to this path.
+    pub fn set_rdb_path(&mut self, path: std::path::PathBuf) {
+        self.server.set_rdb_path(path);
     }
 
     /// Load and replay AOF records from the configured path, restoring store state.
@@ -2876,6 +2889,14 @@ impl Runtime {
                 return RespFrame::Error("ERR error saving dataset to disk".to_string());
             }
         }
+        // Persist store state to RDB file if a path is configured.
+        if let Some(path) = &self.server.rdb_path {
+            let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+            let aux = [("redis-ver", "7.0.0"), ("frankenredis", "true")];
+            if let Err(_e) = write_rdb_file(path, &entries, &aux) {
+                return RespFrame::Error("ERR error saving RDB snapshot to disk".to_string());
+            }
+        }
         self.server.last_save_time_sec = now_ms / 1000;
         RespFrame::SimpleString("OK".to_string())
     }
@@ -3414,6 +3435,51 @@ fn command_error_to_resp(error: CommandError) -> RespFrame {
         },
         CommandError::Custom(msg) => RespFrame::Error(msg),
     }
+}
+
+/// Convert Store entries to RDB entries for snapshot persistence.
+fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
+    use fr_store::Value;
+
+    // Expire stale keys first.
+    let all_keys = store.all_keys();
+    for key in &all_keys {
+        store.expire_key_if_stale(key, now_ms);
+    }
+
+    let mut entries = Vec::new();
+    for key in store.all_keys() {
+        let Some((value, expires_at_ms)) = store.get_value_and_expiry(&key) else {
+            continue;
+        };
+        let rdb_value = match value {
+            Value::String(v) => RdbValue::String(v.clone()),
+            Value::List(l) => RdbValue::List(l.iter().cloned().collect()),
+            Value::Set(s) => {
+                let mut members: Vec<Vec<u8>> = s.iter().cloned().collect();
+                members.sort();
+                RdbValue::Set(members)
+            }
+            Value::Hash(h) => {
+                let mut fields: Vec<(Vec<u8>, Vec<u8>)> =
+                    h.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                fields.sort_by(|a, b| a.0.cmp(&b.0));
+                RdbValue::Hash(fields)
+            }
+            Value::SortedSet(zs) => {
+                let members: Vec<(Vec<u8>, f64)> =
+                    zs.iter_asc().map(|(m, s)| (m.clone(), *s)).collect();
+                RdbValue::SortedSet(members)
+            }
+            Value::Stream(_) => continue, // Streams not yet supported in RDB
+        };
+        entries.push(RdbEntry {
+            key,
+            value: rdb_value,
+            expire_ms: expires_at_ms,
+        });
+    }
+    entries
 }
 
 fn protocol_error_to_resp(error: RespParseError) -> RespFrame {

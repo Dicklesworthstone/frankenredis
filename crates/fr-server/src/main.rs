@@ -112,6 +112,7 @@ fn main() -> ExitCode {
     let mut port = DEFAULT_PORT;
     let mut mode_str = "hardened";
     let mut aof_path: Option<String> = None;
+    let mut rdb_path: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -151,6 +152,14 @@ fn main() -> ExitCode {
                 }
                 aof_path = Some(args[i].clone());
             }
+            "--rdb" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --rdb requires a file path");
+                    return ExitCode::from(1);
+                }
+                rdb_path = Some(args[i].clone());
+            }
             "--help" | "-h" => {
                 println!("frankenredis — FrankenRedis server");
                 println!();
@@ -160,6 +169,7 @@ fn main() -> ExitCode {
                 println!("  --port <PORT>   Listen port (default: {DEFAULT_PORT})");
                 println!("  --mode <MODE>   Runtime mode: strict or hardened (default: hardened)");
                 println!("  --aof <PATH>    AOF persistence file path (enables persistence)");
+                println!("  --rdb <PATH>    RDB snapshot file path (enables SAVE/BGSAVE snapshots)");
                 println!("  --help          Show this help");
                 return ExitCode::SUCCESS;
             }
@@ -190,6 +200,12 @@ fn main() -> ExitCode {
                 eprintln!("AOF: load warning: {e:?} (starting with empty store)");
             }
         }
+    }
+
+    // Configure RDB snapshot persistence if requested.
+    if let Some(path) = &rdb_path {
+        runtime.set_rdb_path(std::path::PathBuf::from(path));
+        eprintln!("RDB: snapshot path configured at {path} (SAVE/BGSAVE will write here)");
     }
 
     let addr: SocketAddr = ([0, 0, 0, 0], port).into();
@@ -957,5 +973,34 @@ mod tests {
         let response = RespFrame::Error("ERR fallback".to_string());
 
         assert_eq!(replication_follow_up_bytes(&frame, &response), None);
+    }
+
+    #[test]
+    fn inline_command_parsing() {
+        let (frame, consumed) =
+            crate::try_parse_inline(b"SET key value\r\n").expect("parse inline");
+        assert_eq!(consumed, 15);
+        let RespFrame::Array(Some(items)) = frame else {
+            panic!("expected array");
+        };
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0], RespFrame::BulkString(Some(b"SET".to_vec())));
+        assert_eq!(items[1], RespFrame::BulkString(Some(b"key".to_vec())));
+        assert_eq!(items[2], RespFrame::BulkString(Some(b"value".to_vec())));
+    }
+
+    #[test]
+    fn inline_quoted_strings() {
+        let args = crate::split_inline_args(b"SET key \"hello world\"");
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], b"SET");
+        assert_eq!(args[1], b"key");
+        assert_eq!(args[2], b"hello world");
+    }
+
+    #[test]
+    fn inline_incomplete_returns_error() {
+        let result = crate::try_parse_inline(b"SET key value");
+        assert!(result.is_err());
     }
 }
