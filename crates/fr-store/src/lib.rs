@@ -2682,25 +2682,39 @@ impl Store {
         for key in keys {
             self.drop_if_expired(key, now_ms);
         }
-        let mut result = match self.entries.get(keys[0]) {
+        let mut result = match self.entries.get_mut(keys[0]) {
             Some(entry) => match &entry.value {
-                Value::Set(s) => s.clone(),
+                Value::Set(s) => {
+                    let res = s.clone();
+                    entry.touch(now_ms);
+                    res
+                }
                 _ => return Err(StoreError::WrongType),
             },
             None => return Ok(Vec::new()),
         };
         for key in &keys[1..] {
             if result.is_empty() {
-                break;
+                // Keep touching remaining valid keys
+                if let Some(entry) = self.entries.get_mut(*key) {
+                    if let Value::Set(_) = &entry.value {
+                        entry.touch(now_ms);
+                    } else {
+                        return Err(StoreError::WrongType);
+                    }
+                }
+                continue;
             }
-            match self.entries.get(*key) {
+            match self.entries.get_mut(*key) {
                 Some(entry) => match &entry.value {
-                    Value::Set(s) => result.retain(|m| s.contains(m)),
+                    Value::Set(s) => {
+                        result.retain(|m| s.contains(m));
+                        entry.touch(now_ms);
+                    }
                     _ => return Err(StoreError::WrongType),
                 },
                 None => {
                     result.clear();
-                    break;
                 }
             }
         }
@@ -2721,25 +2735,38 @@ impl Store {
         for key in keys {
             self.drop_if_expired(key, now_ms);
         }
-        let mut result = match self.entries.get(keys[0]) {
+        let mut result = match self.entries.get_mut(keys[0]) {
             Some(entry) => match &entry.value {
-                Value::Set(s) => s.clone(),
+                Value::Set(s) => {
+                    let res = s.clone();
+                    entry.touch(now_ms);
+                    res
+                }
                 _ => return Err(StoreError::WrongType),
             },
             None => return Ok(0),
         };
         for key in &keys[1..] {
             if result.is_empty() {
-                break;
+                if let Some(entry) = self.entries.get_mut(*key) {
+                    if let Value::Set(_) = &entry.value {
+                        entry.touch(now_ms);
+                    } else {
+                        return Err(StoreError::WrongType);
+                    }
+                }
+                continue;
             }
-            match self.entries.get(*key) {
+            match self.entries.get_mut(*key) {
                 Some(entry) => match &entry.value {
-                    Value::Set(s) => result.retain(|m| s.contains(m)),
+                    Value::Set(s) => {
+                        result.retain(|m| s.contains(m));
+                        entry.touch(now_ms);
+                    }
                     _ => return Err(StoreError::WrongType),
                 },
                 None => {
                     result.clear();
-                    break;
                 }
             }
         }
@@ -2757,9 +2784,12 @@ impl Store {
         }
         let mut result = HashSet::new();
         for key in keys {
-            if let Some(entry) = self.entries.get(*key) {
+            if let Some(entry) = self.entries.get_mut(*key) {
                 match &entry.value {
-                    Value::Set(s) => result.extend(s.iter().cloned()),
+                    Value::Set(s) => {
+                        result.extend(s.iter().cloned());
+                        entry.touch(now_ms);
+                    }
                     _ => return Err(StoreError::WrongType),
                 }
             }
@@ -2776,20 +2806,34 @@ impl Store {
         for key in keys {
             self.drop_if_expired(key, now_ms);
         }
-        let mut result = match self.entries.get(keys[0]) {
+        let mut result = match self.entries.get_mut(keys[0]) {
             Some(entry) => match &entry.value {
-                Value::Set(s) => s.clone(),
+                Value::Set(s) => {
+                    let res = s.clone();
+                    entry.touch(now_ms);
+                    res
+                }
                 _ => return Err(StoreError::WrongType),
             },
             None => return Ok(Vec::new()),
         };
         for key in &keys[1..] {
             if result.is_empty() {
-                break;
+                if let Some(entry) = self.entries.get_mut(*key) {
+                    if let Value::Set(_) = &entry.value {
+                        entry.touch(now_ms);
+                    } else {
+                        return Err(StoreError::WrongType);
+                    }
+                }
+                continue;
             }
-            if let Some(entry) = self.entries.get(*key) {
+            if let Some(entry) = self.entries.get_mut(*key) {
                 match &entry.value {
-                    Value::Set(s) => result.retain(|m| !s.contains(m)),
+                    Value::Set(s) => {
+                        result.retain(|m| !s.contains(m));
+                        entry.touch(now_ms);
+                    }
                     _ => return Err(StoreError::WrongType),
                 }
             }

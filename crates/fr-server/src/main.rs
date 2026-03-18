@@ -450,10 +450,21 @@ fn process_buffered_frames(conn: &mut ClientConnection, runtime: &mut Runtime) {
             break;
         }
 
-        // Try inline command parsing first if the buffer doesn't start with
-        // a RESP prefix. redis-cli sends inline commands for simple operations.
-        let parse_result = if !conn.read_buf.is_empty() && conn.read_buf[0] != b'*' {
-            try_parse_inline(&conn.read_buf)
+        // Try inline command parsing only for true non-RESP input. RESP uses
+        // multiple leading prefixes; treating every non-array prefix as inline
+        // can misclassify protocol frames and break parsing.
+        let parse_result = if !conn.read_buf.is_empty()
+            && should_try_inline_parsing(conn.read_buf[0])
+        {
+            match try_parse_inline(&conn.read_buf) {
+                Ok(InlineParseResult::EmptyLine(consumed)) => {
+                    // Silently consume empty lines (Redis behavior).
+                    conn.read_buf.drain(..consumed);
+                    continue;
+                }
+                Ok(InlineParseResult::Command(frame, consumed)) => Ok((frame, consumed)),
+                Err(e) => Err(e),
+            }
         } else {
             parse_frame(&conn.read_buf).map(|p| (p.frame, p.consumed))
         };
@@ -516,7 +527,22 @@ fn process_buffered_frames(conn: &mut ClientConnection, runtime: &mut Runtime) {
 /// Try to parse an inline command (non-RESP). Inline commands are
 /// space-separated tokens terminated by \r\n or \n.
 /// Returns (frame, consumed_bytes) on success.
-fn try_parse_inline(buf: &[u8]) -> Result<(RespFrame, usize), fr_protocol::RespParseError> {
+/// Result of inline parsing: either a command frame or an empty line that
+/// should be silently consumed.
+enum InlineParseResult {
+    Command(RespFrame, usize),
+    EmptyLine(usize),
+}
+
+fn should_try_inline_parsing(first_byte: u8) -> bool {
+    !matches!(
+        first_byte,
+        b'+' | b'-' | b':' | b'$' | b'*' | b'~' | b'%' | b'#' | b',' | b'_' | b'(' | b'='
+            | b'|' | b'>' | b'!'
+    )
+}
+
+fn try_parse_inline(buf: &[u8]) -> Result<InlineParseResult, fr_protocol::RespParseError> {
     // Find the line terminator.
     let newline_pos = buf.iter().position(|&b| b == b'\n');
     let Some(nl) = newline_pos else {
@@ -529,15 +555,12 @@ fn try_parse_inline(buf: &[u8]) -> Result<(RespFrame, usize), fr_protocol::RespP
         nl
     };
     let line = &buf[..line_end];
-    if line.is_empty() {
-        // Empty line — skip it by returning a PING (or just ignore).
-        return Err(fr_protocol::RespParseError::Incomplete);
-    }
 
     // Split on whitespace, respecting double-quoted strings.
     let argv = split_inline_args(line);
     if argv.is_empty() {
-        return Err(fr_protocol::RespParseError::Incomplete);
+        // Empty line (bare \r\n) — consume it silently (Redis behavior).
+        return Ok(InlineParseResult::EmptyLine(consumed));
     }
 
     let frame = RespFrame::Array(Some(
@@ -545,7 +568,7 @@ fn try_parse_inline(buf: &[u8]) -> Result<(RespFrame, usize), fr_protocol::RespP
             .map(|a| RespFrame::BulkString(Some(a)))
             .collect(),
     ));
-    Ok((frame, consumed))
+    Ok(InlineParseResult::Command(frame, consumed))
 }
 
 /// Split inline command arguments, supporting double-quoted strings.
@@ -888,6 +911,7 @@ fn handle_writable(token: Token, clients: &mut HashMap<Token, ClientConnection>,
 #[cfg(test)]
 mod tests {
     use crate::replication_follow_up_bytes;
+    use crate::{InlineParseResult, should_try_inline_parsing};
     use fr_config::RuntimePolicy;
     use fr_protocol::RespFrame;
     use fr_runtime::Runtime;
@@ -977,8 +1001,10 @@ mod tests {
 
     #[test]
     fn inline_command_parsing() {
-        let (frame, consumed) =
-            crate::try_parse_inline(b"SET key value\r\n").expect("parse inline");
+        let parsed = crate::try_parse_inline(b"SET key value\r\n").expect("parse inline");
+        let InlineParseResult::Command(frame, consumed) = parsed else {
+            panic!("expected inline command");
+        };
         assert_eq!(consumed, 15);
         let RespFrame::Array(Some(items)) = frame else {
             panic!("expected array");
@@ -1002,5 +1028,30 @@ mod tests {
     fn inline_incomplete_returns_error() {
         let result = crate::try_parse_inline(b"SET key value");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn blank_inline_line_is_consumed_without_command() {
+        let result = crate::try_parse_inline(b"\r\n").expect("blank line should parse");
+        match result {
+            InlineParseResult::EmptyLine(consumed) => assert_eq!(consumed, 2),
+            InlineParseResult::Command(_, _) => panic!("blank line should not become a command"),
+        }
+    }
+
+    #[test]
+    fn inline_parser_gate_recognizes_all_resp_prefixes() {
+        for prefix in [
+            b'+', b'-', b':', b'$', b'*', b'~', b'%', b'#', b',', b'_', b'(', b'=', b'|',
+            b'>', b'!',
+        ] {
+            assert!(
+                !should_try_inline_parsing(prefix),
+                "prefix {prefix:?} should stay on RESP parser path"
+            );
+        }
+
+        assert!(should_try_inline_parsing(b'P'));
+        assert!(should_try_inline_parsing(b' '));
     }
 }
