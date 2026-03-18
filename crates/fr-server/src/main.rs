@@ -760,6 +760,43 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
             },
             deadline_ms,
         })
+    } else if cmd.eq_ignore_ascii_case(b"BRPOPLPUSH") {
+        if items.len() != 4 {
+            return None;
+        }
+        let timeout_bytes = match &items[3] {
+            RespFrame::BulkString(Some(b)) => b,
+            _ => return None,
+        };
+        let timeout_secs: f64 = std::str::from_utf8(timeout_bytes)
+            .ok()?
+            .parse()
+            .ok()?;
+        if timeout_secs < 0.0 {
+            return None;
+        }
+        let deadline_ms = if timeout_secs == 0.0 {
+            u64::MAX
+        } else {
+            now_ms + (timeout_secs * 1000.0) as u64
+        };
+        let source = match &items[1] {
+            RespFrame::BulkString(Some(b)) => b.clone(),
+            _ => return None,
+        };
+        let destination = match &items[2] {
+            RespFrame::BulkString(Some(b)) => b.clone(),
+            _ => return None,
+        };
+        Some(BlockedState {
+            op: BlockingOp::BLmove {
+                source,
+                destination,
+                wherefrom: b"RIGHT".to_vec(),
+                whereto: b"LEFT".to_vec(),
+            },
+            deadline_ms,
+        })
     } else {
         None
     }

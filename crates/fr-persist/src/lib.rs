@@ -120,7 +120,9 @@ pub fn write_aof_file(path: &Path, records: &[AofRecord]) -> Result<(), PersistE
     let mut file = std::fs::File::create(&tmp_path)?;
     file.write_all(&encoded)?;
     file.sync_all()?;
+    drop(file);
     std::fs::rename(&tmp_path, path)?;
+    sync_parent_dir(path)?;
     Ok(())
 }
 
@@ -211,6 +213,16 @@ fn crc64_redis(data: &[u8]) -> u64 {
         }
     }
     crc
+}
+
+fn sync_parent_dir(path: &Path) -> Result<(), PersistError> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    let dir = std::fs::File::open(parent)?;
+    dir.sync_all()?;
+    Ok(())
 }
 
 /// Encode a complete RDB file from a set of entries.
@@ -531,7 +543,9 @@ pub fn write_rdb_file(path: &Path, entries: &[RdbEntry], aux: &[(&str, &str)]) -
     let mut file = std::fs::File::create(&tmp_path)?;
     file.write_all(&encoded)?;
     file.sync_all()?;
+    drop(file);
     std::fs::rename(&tmp_path, path)?;
+    sync_parent_dir(path)?;
     Ok(())
 }
 
@@ -663,6 +677,12 @@ mod tests {
         let path = std::path::Path::new("/tmp/fr_persist_nonexistent_test_file.aof");
         let loaded = super::read_aof_file(path).expect("read missing");
         assert!(loaded.is_empty());
+    }
+
+    #[test]
+    fn sync_parent_dir_accepts_relative_paths() {
+        super::sync_parent_dir(std::path::Path::new("relative-test.aof"))
+            .expect("sync relative parent");
     }
 
     // ── RDB tests ────────────────────────────────────────────────────

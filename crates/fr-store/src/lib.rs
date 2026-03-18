@@ -764,7 +764,9 @@ impl Store {
             match &mut entry.value {
                 Value::String(v) => {
                     v.extend_from_slice(value);
-                    Ok(v.len())
+                    let len = v.len();
+                    entry.touch(now_ms);
+                    Ok(len)
                 }
                 _ => Err(StoreError::WrongType),
             }
@@ -952,24 +954,34 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
-        let (mut current, expires_at_ms) = match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => (v.clone(), entry.expires_at_ms),
-                _ => return Err(StoreError::WrongType),
-            },
-            None => (Vec::new(), None),
-        };
         let needed = offset + value.len();
-        if current.len() < needed {
-            current.resize(needed, 0);
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                let len = match &mut entry.value {
+                    Value::String(v) => {
+                        if v.len() < needed {
+                            v.resize(needed, 0);
+                        }
+                        v[offset..offset + value.len()].copy_from_slice(value);
+                        v.len()
+                    }
+                    _ => return Err(StoreError::WrongType),
+                };
+                entry.touch(now_ms);
+                Ok(len)
+            }
+            None => {
+                let mut current = Vec::new();
+                current.resize(needed, 0);
+                current[offset..offset + value.len()].copy_from_slice(value);
+                let new_len = current.len();
+                self.entries.insert(
+                    key.to_vec(),
+                    Entry::new(Value::String(current), None, now_ms),
+                );
+                Ok(new_len)
+            }
         }
-        current[offset..offset + value.len()].copy_from_slice(value);
-        let new_len = current.len();
-        self.entries.insert(
-            key.to_vec(),
-            Entry::new(Value::String(current), expires_at_ms, now_ms),
-        );
-        Ok(new_len)
     }
 
     // ── Bitmap (string extension) operations ─────────────────────
@@ -984,27 +996,37 @@ impl Store {
         self.drop_if_expired(key, now_ms);
         let byte_idx = offset / 8;
         let bit_idx = 7 - (offset % 8); // MSB-first within each byte
-        let (mut bytes, expires_at_ms) = match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => (v.clone(), entry.expires_at_ms),
-                _ => return Err(StoreError::WrongType),
+        match self.entries.get_mut(key) {
+            Some(entry) => match &mut entry.value {
+                Value::String(v) => {
+                    if v.len() <= byte_idx {
+                        v.resize(byte_idx + 1, 0);
+                    }
+                    let old_bit = (v[byte_idx] >> bit_idx) & 1 == 1;
+                    if value {
+                        v[byte_idx] |= 1 << bit_idx;
+                    } else {
+                        v[byte_idx] &= !(1 << bit_idx);
+                    }
+                    entry.touch(now_ms);
+                    Ok(old_bit)
+                }
+                _ => Err(StoreError::WrongType),
             },
-            None => (Vec::new(), None),
-        };
-        if bytes.len() <= byte_idx {
-            bytes.resize(byte_idx + 1, 0);
+            None => {
+                let mut v = Vec::new();
+                v.resize(byte_idx + 1, 0);
+                let old_bit = false;
+                if value {
+                    v[byte_idx] |= 1 << bit_idx;
+                }
+                self.entries.insert(
+                    key.to_vec(),
+                    Entry::new(Value::String(v), None, now_ms),
+                );
+                Ok(old_bit)
+            }
         }
-        let old_bit = (bytes[byte_idx] >> bit_idx) & 1 == 1;
-        if value {
-            bytes[byte_idx] |= 1 << bit_idx;
-        } else {
-            bytes[byte_idx] &= !(1 << bit_idx);
-        }
-        self.entries.insert(
-            key.to_vec(),
-            Entry::new(Value::String(bytes), expires_at_ms, now_ms),
-        );
-        Ok(old_bit)
     }
 
     pub fn getbit(&mut self, key: &[u8], offset: usize, now_ms: u64) -> Result<bool, StoreError> {
@@ -1966,7 +1988,9 @@ impl Store {
                     for v in values {
                         l.push_front(v.clone());
                     }
-                    Ok(l.len())
+                    let len = l.len();
+                    entry.touch(now_ms);
+                    Ok(len)
                 }
                 _ => Err(StoreError::WrongType),
             },
@@ -1996,7 +2020,9 @@ impl Store {
                     for v in values {
                         l.push_back(v.clone());
                     }
-                    Ok(l.len())
+                    let len = l.len();
+                    entry.touch(now_ms);
+                    Ok(len)
                 }
                 _ => Err(StoreError::WrongType),
             },
@@ -2140,6 +2166,7 @@ impl Store {
                     }
                     let idx = normalize_index(index, len);
                     l[idx] = value;
+                    entry.touch(now_ms);
                     Ok(())
                 }
                 _ => Err(StoreError::WrongType),
@@ -2252,7 +2279,9 @@ impl Store {
                 Value::List(l) => {
                     if let Some(pos) = l.iter().position(|v| v.as_slice() == pivot) {
                         l.insert(pos, value);
-                        Ok(l.len() as i64)
+                        let len = l.len();
+                        entry.touch(now_ms);
+                        Ok(len as i64)
                     } else {
                         Ok(-1)
                     }
@@ -2276,7 +2305,9 @@ impl Store {
                 Value::List(l) => {
                     if let Some(pos) = l.iter().position(|v| v.as_slice() == pivot) {
                         l.insert(pos + 1, value);
-                        Ok(l.len() as i64)
+                        let len = l.len();
+                        entry.touch(now_ms);
+                        Ok(len as i64)
                     } else {
                         Ok(-1)
                     }
@@ -2435,6 +2466,8 @@ impl Store {
                         self.entries.remove(key);
                         self.stream_groups.remove(key);
                         self.stream_last_ids.remove(key);
+                    } else {
+                        entry.touch(now_ms);
                     }
                     Ok(())
                 }
@@ -2592,6 +2625,7 @@ impl Store {
                             added += 1;
                         }
                     }
+                    entry.touch(now_ms);
                     Ok(added)
                 }
                 _ => Err(StoreError::WrongType),
@@ -2626,6 +2660,8 @@ impl Store {
                         self.entries.remove(key);
                         self.stream_groups.remove(key);
                         self.stream_last_ids.remove(key);
+                    } else if removed > 0 {
+                        entry.touch(now_ms);
                     }
                     Ok(removed)
                 }
@@ -3006,21 +3042,29 @@ impl Store {
         }
 
         // Remove from source
-        let removed = match self.entries.get_mut(source) {
-            Some(entry) => match &mut entry.value {
-                Value::Set(s) => s.remove(member),
+        let mut source_empty = false;
+        let mut removed = false;
+        if let Some(entry) = self.entries.get_mut(source) {
+            match &mut entry.value {
+                Value::Set(s) => {
+                    removed = s.remove(member);
+                    if removed {
+                        source_empty = s.is_empty();
+                    }
+                }
                 _ => return Err(StoreError::WrongType),
-            },
-            None => return Ok(false),
-        };
+            }
+            if removed {
+                entry.touch(now_ms);
+            }
+        } else {
+            return Ok(false);
+        }
         if !removed {
             return Ok(false);
         }
         // Clean up empty source
-        if let Some(entry) = self.entries.get(source)
-            && let Value::Set(s) = &entry.value
-            && s.is_empty()
-        {
+        if source_empty {
             self.entries.remove(source);
             self.stream_groups.remove(source);
             self.stream_last_ids.remove(source);
