@@ -522,6 +522,9 @@ pub struct Store {
 
     /// Seed for deterministic pseudo-random operations (HRANDFIELD, RANDOMKEY, etc.).
     pub rng_seed: u64,
+
+    /// Total number of successful mutations since startup.
+    pub dirty: u64,
 }
 
 impl Default for Store {
@@ -544,6 +547,7 @@ impl Default for Store {
             zset_max_listpack_entries: 128,
             zset_max_listpack_value: 64,
             rng_seed: 0xDEADBEEF_C0FFEE11,
+            dirty: 0,
         }
     }
 }
@@ -621,6 +625,7 @@ impl Store {
         self.stream_last_ids.remove(key.as_slice());
         self.entries
             .insert(key, Entry::new(Value::String(value), expires_at_ms, now_ms));
+        self.dirty += 1;
     }
 
     /// SET variant that takes an absolute expiry timestamp (for EXAT/PXAT/KEEPTTL).
@@ -635,6 +640,7 @@ impl Store {
         self.stream_last_ids.remove(key.as_slice());
         self.entries
             .insert(key, Entry::new(Value::String(value), expires_at_ms, now_ms));
+        self.dirty += 1;
     }
 
     /// Returns the current absolute expiry timestamp for a key, if any.
@@ -653,6 +659,7 @@ impl Store {
                 removed = removed.saturating_add(1);
             }
         }
+        self.dirty += removed;
         removed
     }
 
@@ -684,6 +691,7 @@ impl Store {
                 now_ms,
             ),
         );
+        self.dirty += 1;
         Ok(next)
     }
 
@@ -707,6 +715,7 @@ impl Store {
             self.entries.remove(key);
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
+            self.dirty += 1;
             return true;
         }
 
@@ -714,6 +723,7 @@ impl Store {
         let expires_at_ms = now_ms.saturating_add(ttl_ms);
         if let Some(entry) = self.entries.get_mut(key) {
             entry.expires_at_ms = Some(expires_at_ms);
+            self.dirty += 1;
         }
         true
     }
@@ -728,12 +738,14 @@ impl Store {
             self.entries.remove(key);
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
+            self.dirty += 1;
             return true;
         }
 
         let expires_at_ms = u64::try_from(when_ms).unwrap_or(u64::MAX);
         if let Some(entry) = self.entries.get_mut(key) {
             entry.expires_at_ms = Some(expires_at_ms);
+            self.dirty += 1;
         }
         true
     }
@@ -766,6 +778,7 @@ impl Store {
                     v.extend_from_slice(value);
                     let len = v.len();
                     entry.touch(now_ms);
+                    self.dirty += 1;
                     Ok(len)
                 }
                 _ => Err(StoreError::WrongType),
@@ -776,6 +789,7 @@ impl Store {
                 key.to_vec(),
                 Entry::new(Value::String(value.to_vec()), None, now_ms),
             );
+            self.dirty += 1;
             Ok(len)
         }
     }
@@ -824,6 +838,7 @@ impl Store {
         }
         self.entries
             .insert(key, Entry::new(Value::String(value), None, now_ms));
+        self.dirty += 1;
         true
     }
 
@@ -843,6 +858,7 @@ impl Store {
         };
         self.entries
             .insert(key, Entry::new(Value::String(value), expires_at_ms, now_ms));
+        self.dirty += 1;
         Ok(old)
     }
 
@@ -866,6 +882,7 @@ impl Store {
                 now_ms,
             ),
         );
+        self.dirty += 1;
         Ok(next)
     }
 
@@ -890,6 +907,7 @@ impl Store {
                 now_ms,
             ),
         );
+        self.dirty += 1;
         Ok(next)
     }
 
@@ -907,6 +925,7 @@ impl Store {
         };
         self.stream_groups.remove(key);
         self.stream_last_ids.remove(key);
+        self.dirty += 1;
         match entry.value {
             Value::String(v) => Ok(Some(v)),
             _ => Err(StoreError::WrongType),
@@ -968,6 +987,7 @@ impl Store {
                     _ => return Err(StoreError::WrongType),
                 };
                 entry.touch(now_ms);
+                self.dirty += 1;
                 Ok(len)
             }
             None => {
@@ -979,6 +999,7 @@ impl Store {
                     key.to_vec(),
                     Entry::new(Value::String(current), None, now_ms),
                 );
+                self.dirty += 1;
                 Ok(new_len)
             }
         }
@@ -999,6 +1020,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::String(v) => {
+                    let old_len = v.len();
                     if v.len() <= byte_idx {
                         v.resize(byte_idx + 1, 0);
                     }
@@ -1007,6 +1029,9 @@ impl Store {
                         v[byte_idx] |= 1 << bit_idx;
                     } else {
                         v[byte_idx] &= !(1 << bit_idx);
+                    }
+                    if old_len != v.len() || old_bit != value {
+                        self.dirty = self.dirty.saturating_add(1);
                     }
                     entry.touch(now_ms);
                     Ok(old_bit)
@@ -1024,6 +1049,7 @@ impl Store {
                     key.to_vec(),
                     Entry::new(Value::String(v), None, now_ms),
                 );
+                self.dirty = self.dirty.saturating_add(1);
                 Ok(old_bit)
             }
         }
@@ -1099,12 +1125,18 @@ impl Store {
         // Ensure the byte array is large enough
         let end_bit = bit_offset + u64::from(bits);
         let needed_bytes = end_bit.div_ceil(8) as usize;
+        let old_len = bytes.len();
         if bytes.len() < needed_bytes {
             bytes.resize(needed_bytes, 0);
         }
 
         // Write the new value
         bitfield_write(&mut bytes, bit_offset, bits, value);
+
+        let signed = false;
+        if old_len != bytes.len() || old_value != bitfield_read(&bytes, bit_offset, bits, signed) {
+            self.dirty = self.dirty.saturating_add(1);
+        }
 
         self.entries.insert(
             key.to_vec(),
@@ -1209,6 +1241,7 @@ impl Store {
             && entry.expires_at_ms.is_some()
         {
             entry.expires_at_ms = None;
+            self.dirty = self.dirty.saturating_add(1);
             return true;
         }
         false
@@ -1629,6 +1662,7 @@ impl Store {
         self.entries.clear();
         self.stream_groups.clear();
         self.stream_last_ids.clear();
+        self.dirty += 1;
     }
 
     // ── Hash operations ─────────────────────────────────────────
@@ -1651,6 +1685,7 @@ impl Store {
         let is_new = !m.contains_key(&field);
         m.insert(field, value);
         entry.touch(now_ms);
+        self.dirty = self.dirty.saturating_add(1);
         Ok(is_new)
     }
 
@@ -3043,23 +3078,24 @@ impl Store {
 
         // Remove from source
         let mut source_empty = false;
-        let mut removed = false;
-        if let Some(entry) = self.entries.get_mut(source) {
-            match &mut entry.value {
+        let removed = if let Some(entry) = self.entries.get_mut(source) {
+            let removed = match &mut entry.value {
                 Value::Set(s) => {
-                    removed = s.remove(member);
-                    if removed {
+                    let r = s.remove(member);
+                    if r {
                         source_empty = s.is_empty();
                     }
+                    r
                 }
                 _ => return Err(StoreError::WrongType),
-            }
+            };
             if removed {
                 entry.touch(now_ms);
             }
+            removed
         } else {
             return Ok(false);
-        }
+        };
         if !removed {
             return Ok(false);
         }
@@ -5152,6 +5188,7 @@ impl Store {
             self.entries.remove(key);
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
+            self.dirty = self.dirty.saturating_add(1);
         }
     }
 

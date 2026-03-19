@@ -1301,15 +1301,6 @@ impl Runtime {
     }
 
     fn is_command_authorized(&self, argv: &[Vec<u8>]) -> bool {
-        // Special check for ACL first to allow recovery/config and satisfy test suite.
-        if let Some(cmd) = argv.first() {
-            if let Some(special) = classify_runtime_special_command(cmd) {
-                if matches!(special, RuntimeSpecialCommand::Acl) {
-                    return true;
-                }
-            }
-        }
-
         let username = self.session.current_user_name();
         let Some(user) = self.server.auth_state.get_user(username) else {
             return false;
@@ -1445,7 +1436,17 @@ impl Runtime {
         let packet_id = next_packet_id();
         let input_digest = digest_bytes(&frame.to_bytes());
         let state_before = self.server.store.state_digest();
+        self.execute_frame_internal(frame, now_ms, packet_id, input_digest, state_before)
+    }
 
+    fn execute_frame_internal(
+        &mut self,
+        frame: RespFrame,
+        now_ms: u64,
+        packet_id: u64,
+        input_digest: String,
+        state_before: String,
+    ) -> RespFrame {
         if let Some(reply) =
             self.preflight_gate(&frame, now_ms, packet_id, &input_digest, &state_before)
         {
@@ -1467,7 +1468,11 @@ impl Runtime {
                         subsystem: "router",
                         action: "reject_large_command",
                         reason_code: "too_many_arguments",
-                        reason: format!("command arity {} exceeds limit {}", argv.len(), MAX_COMMAND_ARITY),
+                        reason: format!(
+                            "command arity {} exceeds limit {}",
+                            argv.len(),
+                            MAX_COMMAND_ARITY
+                        ),
                         input_digest,
                         state_before: &state_before,
                         output: &reply,
@@ -1496,11 +1501,9 @@ impl Runtime {
             }
         };
 
-        let command_name = match std::str::from_utf8(&argv[0]) {
-            Ok(command_name) => command_name,
-            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
-        };
-        let special_command = classify_runtime_special_command(command_name.as_bytes());
+        let special_command = classify_runtime_special_command(&argv[0]);
+        let command_name_lossy = String::from_utf8_lossy(&argv[0]);
+        let command_name = &command_name_lossy;
 
         match special_command {
             Some(RuntimeSpecialCommand::Auth) => return self.handle_auth_command(&argv),
@@ -1612,9 +1615,11 @@ impl Runtime {
         }
 
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
+        let dirty_before = self.server.store.dirty;
         let start = Instant::now();
         let result = dispatch_argv(&argv, &mut self.server.store, now_ms);
         let elapsed_us = start.elapsed().as_micros() as u64;
+        let dirty_after = self.server.store.dirty;
         self.record_slowlog(&argv, elapsed_us, now_ms);
 
         if elapsed_us > (COMMAND_TIME_BUDGET_MS as u64 * 1000) {
@@ -1626,7 +1631,10 @@ impl Runtime {
                 subsystem: "router",
                 action: "slow_command_detected",
                 reason_code: "command_time_budget_exceeded",
-                reason: format!("command '{}' took {}us, exceeding budget {}ms", command_name, elapsed_us, COMMAND_TIME_BUDGET_MS),
+                reason: format!(
+                    "command '{}' took {}us, exceeding budget {}ms",
+                    command_name, elapsed_us, COMMAND_TIME_BUDGET_MS
+                ),
                 input_digest,
                 state_before: &state_before,
                 output: &RespFrame::SimpleString("OK".to_string()), // Dummy for logging
@@ -1635,7 +1643,9 @@ impl Runtime {
 
         match result {
             Ok(reply) => {
-                self.capture_aof_record(&argv);
+                if dirty_after > dirty_before {
+                    self.capture_aof_record(&argv);
+                }
                 reply
             }
             Err(err) => command_error_to_resp(err),
@@ -1654,7 +1664,9 @@ impl Runtime {
         };
 
         match fr_protocol::parse_frame_with_config(input, &parser_config) {
-            Ok(parsed) => self.execute_frame(parsed.frame, now_ms).to_bytes(),
+            Ok(parsed) => self
+                .execute_frame_internal(parsed.frame, now_ms, packet_id, input_digest, state_before)
+                .to_bytes(),
             Err(err) => {
                 let reason = err.to_string();
                 let reply = protocol_error_to_resp(err);
@@ -5483,5 +5495,38 @@ mod tests {
         ));
         let count = rt.load_aof(100).expect("should succeed for missing file");
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn fr_p2c_004_u013_acl_commands_are_gated_for_non_admin_users() {
+        let mut rt = Runtime::default_strict();
+
+        // 1. Create a non-admin user 'alice'
+        // Use default (admin) to set up alice
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"alice", b"on", b">pass", b"-@all"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // 2. Authenticate as alice
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"pass"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.session.current_user_name(), b"alice");
+
+        // 3. Try to run an ACL command as alice
+        let out = rt.execute_frame(command(&[b"ACL", b"WHOAMI"]), 2);
+
+        // After fix, it should return NOPERM
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "NOPERM this user has no permissions to run the 'ACL' command".to_string()
+            )
+        );
     }
 }
