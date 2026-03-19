@@ -3871,9 +3871,12 @@ fn json_escape_bytes(bytes: &[u8]) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0C}' => out.push_str("\\f"),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
+            c if c <= '\u{1F}' => out.push_str(&format!("\\u{:04x}", c as u32)),
             _ => out.push(c),
         }
     }
@@ -3947,9 +3950,37 @@ fn json_to_lua_value(s: &str) -> Result<LuaValue, String> {
                     match esc {
                         b'"' => result.push(b'"'),
                         b'\\' => result.push(b'\\'),
+                        b'b' => result.push(0x08),
+                        b'f' => result.push(0x0C),
                         b'n' => result.push(b'\n'),
                         b'r' => result.push(b'\r'),
                         b't' => result.push(b'\t'),
+                        b'u' => {
+                            let mut hex = [0u8; 4];
+                            let mut read_len = 0usize;
+                            let mut complete = true;
+                            for digit in &mut hex {
+                                if let Some(next) = chars.next() {
+                                    *digit = next;
+                                    read_len += 1;
+                                } else {
+                                    complete = false;
+                                    break;
+                                }
+                            }
+                            if complete
+                                && let Ok(hex_str) = std::str::from_utf8(&hex)
+                                && let Ok(codepoint) = u32::from_str_radix(hex_str, 16)
+                                && let Some(decoded) = char::from_u32(codepoint)
+                            {
+                                let mut utf8 = [0u8; 4];
+                                let encoded = decoded.encode_utf8(&mut utf8);
+                                result.extend_from_slice(encoded.as_bytes());
+                            } else {
+                                result.extend_from_slice(br"\u");
+                                result.extend_from_slice(&hex[..read_len]);
+                            }
+                        }
                         _ => {
                             result.push(b'\\');
                             result.push(esc);
@@ -4080,7 +4111,7 @@ pub fn eval_script(
 
 #[cfg(test)]
 mod tests {
-    use super::{LuaTable, LuaValue, lua_value_to_json};
+    use super::{LuaTable, LuaValue, json_to_lua_value, lua_value_to_json};
 
     #[test]
     fn cjson_encode_escapes_object_keys() {
@@ -4106,5 +4137,21 @@ mod tests {
             lua_value_to_json(&LuaValue::Table(table)),
             "{\"a\":2,\"z\":1}"
         );
+    }
+
+    #[test]
+    fn cjson_encode_escapes_all_json_control_characters() {
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Str(b"\x08\x0c\x01".to_vec())),
+            "\"\\b\\f\\u0001\""
+        );
+    }
+
+    #[test]
+    fn cjson_decode_understands_control_character_escapes() {
+        match json_to_lua_value("\"\\b\\f\\u0001\"") {
+            Ok(LuaValue::Str(bytes)) => assert_eq!(bytes, vec![0x08, 0x0C, 0x01]),
+            other => panic!("unexpected decode result: {other:?}"),
+        }
     }
 }

@@ -641,6 +641,22 @@ impl Store {
         self.rng_seed
     }
 
+    fn list_fits_legacy_listpack_size(&self, list: &VecDeque<Vec<u8>>) -> bool {
+        if self.list_max_listpack_size >= 0 {
+            return list.len() <= self.list_max_listpack_size as usize;
+        }
+
+        let max_bytes: usize = match self.list_max_listpack_size {
+            -1 => 4096,
+            -2 => 8192,
+            -3 => 16384,
+            -4 => 32768,
+            _ => 65536, // -5 and below
+        };
+        let total: usize = list.iter().map(|v| v.len() + 11).sum(); // 11 bytes overhead per entry
+        total <= max_bytes
+    }
+
     /// Get a string value. Returns `None` if the key doesn't exist.
     /// Returns `Err(WrongType)` if the key holds a non-string value.
     pub fn get(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
@@ -1333,7 +1349,8 @@ impl Store {
                 }
             }
             Value::List(l) => {
-                if l.len() <= self.list_max_listpack_entries
+                if self.list_fits_legacy_listpack_size(l)
+                    && l.len() <= self.list_max_listpack_entries
                     && l.iter().all(|v| v.len() <= self.list_max_listpack_value)
                 {
                     "listpack"
@@ -7565,6 +7582,25 @@ mod tests {
         assert!(!store.expire_seconds(b"missing", 5, 0));
         assert!(!store.expire_milliseconds(b"missing", 5, 0));
         assert!(!store.expire_at_milliseconds(b"missing", 5_000, 0));
+    }
+
+    #[test]
+    fn object_encoding_list_honors_legacy_listpack_entry_limit() {
+        let mut store = Store::new();
+        store.list_max_listpack_size = 1;
+        let _ = store.rpush(b"list", &[b"a".to_vec(), b"b".to_vec()], 0);
+
+        assert_eq!(store.object_encoding(b"list", 0), Some("quicklist"));
+    }
+
+    #[test]
+    fn object_encoding_list_honors_legacy_listpack_byte_limit() {
+        let mut store = Store::new();
+        store.list_max_listpack_size = -1;
+        let large = vec![b'x'; 5000];
+        let _ = store.rpush(b"list", &[large], 0);
+
+        assert_eq!(store.object_encoding(b"list", 0), Some("quicklist"));
     }
 
     #[test]
