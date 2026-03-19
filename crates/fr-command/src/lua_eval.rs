@@ -177,6 +177,31 @@ impl LuaValue {
         }
     }
 
+    fn to_redis_arg(&self) -> Result<Vec<u8>, String> {
+        match self {
+            LuaValue::Nil => Err("Lua nil can't be used as a Redis argument".to_string()),
+            LuaValue::Bool(b) => {
+                if *b {
+                    Ok(b"1".to_vec())
+                } else {
+                    Ok(b"0".to_vec())
+                }
+            }
+            LuaValue::Number(n) => {
+                if *n == (*n as i64) as f64 && n.is_finite() {
+                    Ok(format!("{}", *n as i64).into_bytes())
+                } else {
+                    Ok(format!("{n}").into_bytes())
+                }
+            }
+            LuaValue::Str(s) => Ok(s.clone()),
+            LuaValue::Table(_) => Err("Lua table can't be used as a Redis argument".to_string()),
+            LuaValue::Function(_) | LuaValue::RustFunction(_) => {
+                Err("Lua function can't be used as a Redis argument".to_string())
+            }
+        }
+    }
+
     fn to_display_string(&self) -> Vec<u8> {
         match self {
             LuaValue::Nil => b"nil".to_vec(),
@@ -3132,7 +3157,7 @@ impl<'a> LuaState<'a> {
         // Build argv for dispatch
         let mut argv: Vec<Vec<u8>> = Vec::new();
         for arg in args {
-            argv.push(arg.to_display_string());
+            argv.push(arg.to_redis_arg()?);
         }
 
         match dispatch_argv(&argv, self.store, self.now_ms) {

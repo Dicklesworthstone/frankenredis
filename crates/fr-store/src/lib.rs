@@ -544,6 +544,7 @@ pub struct Store {
     // Encoding thresholds — configurable via CONFIG SET, used by OBJECT ENCODING.
     pub hash_max_listpack_entries: usize,
     pub hash_max_listpack_value: usize,
+    pub list_max_listpack_size: i64,
     pub set_max_intset_entries: usize,
     pub set_max_listpack_entries: usize,
     pub zset_max_listpack_entries: usize,
@@ -554,6 +555,9 @@ pub struct Store {
 
     /// Total number of successful mutations since startup.
     pub dirty: u64,
+
+    /// Current recursion depth of Lua script execution.
+    pub script_nesting_level: usize,
 }
 
 impl Default for Store {
@@ -571,12 +575,14 @@ impl Default for Store {
             maxmemory_policy: MaxmemoryPolicy::default(),
             hash_max_listpack_entries: 128,
             hash_max_listpack_value: 64,
+            list_max_listpack_size: -2,
             set_max_intset_entries: 512,
             set_max_listpack_entries: 128,
             zset_max_listpack_entries: 128,
             zset_max_listpack_value: 64,
             rng_seed: 0xDEADBEEF_C0FFEE11,
             dirty: 0,
+            script_nesting_level: 0,
         }
     }
 }
@@ -1323,7 +1329,22 @@ impl Store {
                 }
             }
             Value::List(l) => {
-                if l.len() <= 128 && l.iter().all(|v| v.len() <= 64) {
+                // list-max-listpack-size: positive = max entries, negative = max bytes per node
+                // -1=4kb, -2=8kb, -3=16kb, -4=32kb, -5=64kb
+                let fits_listpack = if self.list_max_listpack_size >= 0 {
+                    l.len() <= self.list_max_listpack_size as usize
+                } else {
+                    let max_bytes: usize = match self.list_max_listpack_size {
+                        -1 => 4096,
+                        -2 => 8192,
+                        -3 => 16384,
+                        -4 => 32768,
+                        _ => 65536, // -5 and below
+                    };
+                    let total: usize = l.iter().map(|v| v.len() + 11).sum(); // 11 bytes overhead per entry
+                    total <= max_bytes
+                };
+                if fits_listpack {
                     "listpack"
                 } else {
                     "quicklist"
@@ -3130,8 +3151,8 @@ impl Store {
 
         // Remove from source
         let mut source_empty = false;
-        let removed = if let Some(entry) = self.entries.get_mut(source) {
-            let removed = match &mut entry.value {
+        let was_removed = if let Some(entry) = self.entries.get_mut(source) {
+            let r = match &mut entry.value {
                 Value::Set(s) => {
                     let r = s.remove(member);
                     if r {
@@ -3141,16 +3162,19 @@ impl Store {
                 }
                 _ => return Err(StoreError::WrongType),
             };
-            if removed {
+            if r {
                 entry.touch(now_ms);
+                self.dirty = self.dirty.saturating_add(1);
             }
-            removed
+            r
         } else {
             return Ok(false);
         };
-        if !removed {
+
+        if !was_removed {
             return Ok(false);
         }
+
         // Clean up empty source
         if source_empty {
             self.entries.remove(source);
@@ -4199,6 +4223,8 @@ impl Store {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
                     entries.insert(id, fields.to_vec());
+                    entry.touch(now_ms);
+                    self.dirty = self.dirty.saturating_add(1);
                     Ok(())
                 }
                 _ => Err(StoreError::WrongType),
@@ -4212,6 +4238,7 @@ impl Store {
                     key.to_vec(),
                     Entry::new(Value::Stream(entries), None, now_ms),
                 );
+                self.dirty = self.dirty.saturating_add(1);
                 Ok(())
             }
         }
@@ -4316,6 +4343,10 @@ impl Store {
                             }
                         }
                     }
+                    if removed > 0 {
+                        entry.touch(now_ms);
+                        self.dirty = self.dirty.saturating_add(removed as u64);
+                    }
                     Ok(removed)
                 }
                 _ => Err(StoreError::WrongType),
@@ -4344,6 +4375,10 @@ impl Store {
                                 group_state.pending.remove(id);
                             }
                         }
+                    }
+                    if to_remove > 0 {
+                        entry.touch(now_ms);
+                        self.dirty = self.dirty.saturating_add(to_remove as u64);
                     }
                     Ok(to_remove)
                 }
@@ -4459,7 +4494,7 @@ impl Store {
                             }
                             StreamGroupReadCursor::Id(start_id) => {
                                 for (id, pending_entry) in
-                                    group_state.pending.range((Excluded(start_id), Unbounded))
+                                    group_state.pending.range((Included(start_id), Unbounded))
                                 {
                                     if pending_entry.consumer.as_slice() != consumer {
                                         continue;
@@ -5062,6 +5097,9 @@ impl Store {
                         }
                         keep
                     });
+                    if removed_pending > 0 {
+                        self.dirty = self.dirty.saturating_add(1); // Redis treats this as 1 mutation
+                    }
                     Ok(Some(removed_pending))
                 }
                 _ => Err(StoreError::WrongType),
@@ -5096,6 +5134,9 @@ impl Store {
                             acked += 1;
                         }
                     }
+                    if acked > 0 {
+                        self.dirty = self.dirty.saturating_add(acked as u64);
+                    }
                     Ok(acked)
                 }
                 _ => Err(StoreError::WrongType),
@@ -5115,10 +5156,12 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
+        match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => {
                     self.stream_last_ids.insert(key.to_vec(), last_id);
+                    entry.touch(now_ms);
+                    self.dirty = self.dirty.saturating_add(1);
                     Ok(true)
                 }
                 _ => Err(StoreError::WrongType),
@@ -5993,7 +6036,7 @@ impl Store {
             .map(|entry| estimate_entry_memory_usage_bytes(key, entry))
     }
 
-    fn estimate_memory_usage_bytes(&self) -> usize {
+    pub fn estimate_memory_usage_bytes(&self) -> usize {
         self.entries
             .iter()
             .map(|(key, entry)| estimate_entry_memory_usage_bytes(key, entry))

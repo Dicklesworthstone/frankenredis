@@ -1922,8 +1922,6 @@ const GEO_LONG_MIN: f64 = -180.0;
 const GEO_LONG_MAX: f64 = 180.0;
 const GEO_LAT_MIN: f64 = -85.051_128_78;
 const GEO_LAT_MAX: f64 = 85.051_128_78;
-const GEO_STANDARD_LAT_MIN: f64 = -90.0;
-const GEO_STANDARD_LAT_MAX: f64 = 90.0;
 const GEO_EARTH_RADIUS_IN_METERS: f64 = 6_372_797.560_856;
 const GEO_BASE32_ALPHABET: &[u8; 32] = b"0123456789bcdefghjkmnpqrstuvwxyz";
 
@@ -2002,7 +2000,7 @@ fn geo_encode(
     let scale = (1_u64 << u32::from(step)) as f64;
     let lat_offset = ((latitude - lat_min) / (lat_max - lat_min) * scale) as u32;
     let long_offset = ((longitude - long_min) / (long_max - long_min) * scale) as u32;
-    Some(geo_interleave64(lat_offset, long_offset))
+    Some(geo_interleave64(long_offset, lat_offset))
 }
 
 #[inline]
@@ -2024,8 +2022,8 @@ fn geo_decode(bits: u64, long_min: f64, long_max: f64, lat_min: f64, lat_max: f6
     let scale = (1_u64 << step) as f64;
     let hash_sep = geo_deinterleave64(bits);
 
-    let ilato = hash_sep as u32;
-    let ilono = (hash_sep >> 32) as u32;
+    let ilono = hash_sep as u32;
+    let ilato = (hash_sep >> 32) as u32;
     let lat_scale = lat_max - lat_min;
     let long_scale = long_max - long_min;
 
@@ -2117,8 +2115,8 @@ fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
         latitude,
         GEO_LONG_MIN,
         GEO_LONG_MAX,
-        GEO_STANDARD_LAT_MIN,
-        GEO_STANDARD_LAT_MAX,
+        GEO_LAT_MIN,
+        GEO_LAT_MAX,
         GEO_STEP_MAX,
     )?;
 
@@ -2585,32 +2583,19 @@ fn geoadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         idx += 3;
     }
 
-    let mut added = 0_i64;
-    let mut changed = 0_i64;
-    for (score, member) in pairs {
-        let existing = store.zscore(&argv[1], &member, now_ms)?;
-        if nx && existing.is_some() {
-            continue;
-        }
-        if xx && existing.is_none() {
-            continue;
-        }
+    let (total_changed, _only_updated) = store.zadd_with_options(
+        &argv[1],
+        &pairs,
+        fr_store::ZaddOptions {
+            xx,
+            nx,
+            ch,
+            ..Default::default()
+        },
+        now_ms,
+    )?;
 
-        store.zadd(&argv[1], &[(score, member)], now_ms)?;
-        match existing {
-            Some(old_score) => {
-                if old_score != score {
-                    changed += 1;
-                }
-            }
-            None => {
-                added += 1;
-                changed += 1;
-            }
-        }
-    }
-
-    Ok(RespFrame::Integer(if ch { changed } else { added }))
+    Ok(RespFrame::Integer(total_changed as i64))
 }
 
 fn geohash(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -2905,7 +2890,7 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         Some(m) => m,
         None => {
             return Ok(RespFrame::Error(
-                "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+                "ERR unsupported unit provided. please use m, km, ft, mi".to_string(),
             ));
         }
     };
@@ -2936,7 +2921,9 @@ fn georadiusbymember(
     }
     let score = store.zscore(&argv[1], &argv[2], now_ms)?;
     let Some(score) = score else {
-        return Ok(RespFrame::Array(Some(Vec::new())));
+        return Ok(RespFrame::Error(
+            "ERR could not decode requested zset member".to_string(),
+        ));
     };
     let Some((center_lon, center_lat)) = geo_decode_score(score) else {
         return Ok(RespFrame::Array(Some(Vec::new())));
@@ -2949,7 +2936,7 @@ fn georadiusbymember(
         Some(m) => m,
         None => {
             return Ok(RespFrame::Error(
-                "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+                "ERR unsupported unit provided. please use m, km, ft, mi".to_string(),
             ));
         }
     };
@@ -3047,7 +3034,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                 Some(m) => m,
                 None => {
                     return Ok(RespFrame::Error(
-                        "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+                        "ERR unsupported unit provided. please use m, km, ft, mi".to_string(),
                     ));
                 }
             };
@@ -3076,7 +3063,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                 Some(m) => m,
                 None => {
                     return Ok(RespFrame::Error(
-                        "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+                        "ERR unsupported unit provided. please use m, km, ft, mi".to_string(),
                     ));
                 }
             };
@@ -3238,7 +3225,7 @@ fn geosearchstore(
                 Some(m) => m,
                 None => {
                     return Ok(RespFrame::Error(
-                        "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+                        "ERR unsupported unit provided. please use m, km, ft, mi".to_string(),
                     ));
                 }
             };
@@ -3267,7 +3254,7 @@ fn geosearchstore(
                 Some(m) => m,
                 None => {
                     return Ok(RespFrame::Error(
-                        "ERR unsupported unit provided. please use M, KM, FT, MI".to_string(),
+                        "ERR unsupported unit provided. please use m, km, ft, mi".to_string(),
                     ));
                 }
             };
@@ -5157,6 +5144,11 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("FCALL"));
     }
+    if store.script_nesting_level >= 1 {
+        return Ok(RespFrame::Error(
+            "ERR EVAL nested calls are not allowed".to_string(),
+        ));
+    }
     let func_name = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     let (_numkeys, keys, args) = parse_eval_args(argv)?;
 
@@ -5204,7 +5196,8 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 
     let keys_vec: Vec<Vec<u8>> = keys.to_vec();
     let args_vec: Vec<Vec<u8>> = args.to_vec();
-    match lua_eval::eval_script(
+    store.script_nesting_level += 1;
+    let result = match lua_eval::eval_script(
         wrapper_script.as_bytes(),
         &keys_vec,
         &args_vec,
@@ -5213,7 +5206,9 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     ) {
         Ok(frame) => Ok(frame),
         Err(e) => Ok(RespFrame::Error(format!("ERR Error running function: {e}"))),
-    }
+    };
+    store.script_nesting_level -= 1;
+    result
 }
 
 /// Transform `redis.register_function('name', function(k,a) body end)` into
@@ -6775,6 +6770,22 @@ fn select(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     }
 }
 
+fn format_bytes_human(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.2}G", b / GB)
+    } else if b >= MB {
+        format!("{:.2}M", b / MB)
+    } else if b >= KB {
+        format!("{:.2}K", b / KB)
+    } else {
+        format!("{bytes}B")
+    }
+}
+
 fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     let keyspace_size = store.dbsize(now_ms);
     let section = if argv.len() >= 2 {
@@ -6834,22 +6845,36 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
 
     // Memory section
     if is_all || section.eq_ignore_ascii_case("memory") {
+        let used_memory = store.estimate_memory_usage_bytes();
+        let used_memory_human = format_bytes_human(used_memory);
+        // RSS approximation: use used_memory since we don't have OS-level info
+        let used_memory_rss = used_memory;
+        let used_memory_rss_human = format_bytes_human(used_memory_rss);
+        let policy_str = store.maxmemory_policy.as_config_str();
+        let frag_ratio = if used_memory > 0 {
+            used_memory_rss as f64 / used_memory as f64
+        } else {
+            1.0
+        };
+
         info.push_str("# Memory\r\n");
-        info.push_str("used_memory:0\r\n");
-        info.push_str("used_memory_human:0B\r\n");
-        info.push_str("used_memory_rss:0\r\n");
-        info.push_str("used_memory_rss_human:0B\r\n");
-        info.push_str("used_memory_peak:0\r\n");
-        info.push_str("used_memory_peak_human:0B\r\n");
-        info.push_str("used_memory_peak_perc:0.00%\r\n");
+        info.push_str(&format!("used_memory:{used_memory}\r\n"));
+        info.push_str(&format!("used_memory_human:{used_memory_human}\r\n"));
+        info.push_str(&format!("used_memory_rss:{used_memory_rss}\r\n"));
+        info.push_str(&format!(
+            "used_memory_rss_human:{used_memory_rss_human}\r\n"
+        ));
+        info.push_str(&format!("used_memory_peak:{used_memory}\r\n"));
+        info.push_str(&format!("used_memory_peak_human:{used_memory_human}\r\n"));
+        info.push_str("used_memory_peak_perc:100.00%\r\n");
         info.push_str("used_memory_overhead:0\r\n");
         info.push_str("used_memory_startup:0\r\n");
-        info.push_str("used_memory_dataset:0\r\n");
-        info.push_str("used_memory_dataset_perc:0.00%\r\n");
+        info.push_str(&format!("used_memory_dataset:{used_memory}\r\n"));
+        info.push_str("used_memory_dataset_perc:100.00%\r\n");
         info.push_str("maxmemory:0\r\n");
         info.push_str("maxmemory_human:0B\r\n");
-        info.push_str("maxmemory_policy:noeviction\r\n");
-        info.push_str("mem_fragmentation_ratio:1.00\r\n");
+        info.push_str(&format!("maxmemory_policy:{policy_str}\r\n"));
+        info.push_str(&format!("mem_fragmentation_ratio:{frag_ratio:.2}\r\n"));
         info.push_str("mem_allocator:rust-alloc\r\n");
         info.push_str("active_defrag_running:0\r\n");
         info.push_str("lazyfree_pending_objects:0\r\n");
@@ -6868,7 +6893,7 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("current_fork_perc:0.00\r\n");
         info.push_str("current_save_keys_processed:0\r\n");
         info.push_str("current_save_keys_total:0\r\n");
-        info.push_str("rdb_changes_since_last_save:0\r\n");
+        info.push_str(&format!("rdb_changes_since_last_save:{}\r\n", store.dirty));
         info.push_str("rdb_bgsave_in_progress:0\r\n");
         info.push_str("rdb_last_save_time:0\r\n");
         info.push_str("rdb_last_bgsave_status:ok\r\n");
@@ -6995,7 +7020,10 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     if is_all || section.eq_ignore_ascii_case("keyspace") {
         info.push_str("# Keyspace\r\n");
         if keyspace_size > 0 {
-            info.push_str(&format!("db0:keys={keyspace_size},expires=0,avg_ttl=0\r\n"));
+            let expires = store.count_expiring_keys();
+            info.push_str(&format!(
+                "db0:keys={keyspace_size},expires={expires},avg_ttl=0\r\n"
+            ));
         }
         info.push_str("\r\n");
     }
@@ -8665,6 +8693,11 @@ fn eval_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("EVAL"));
     }
+    if store.script_nesting_level >= 1 {
+        return Ok(RespFrame::Error(
+            "ERR EVAL nested calls are not allowed".to_string(),
+        ));
+    }
     let script = &argv[1];
     let (_numkeys, keys, args) = parse_eval_args(argv)?;
 
@@ -8674,10 +8707,13 @@ fn eval_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     // Execute
     let keys_vec: Vec<Vec<u8>> = keys.to_vec();
     let args_vec: Vec<Vec<u8>> = args.to_vec();
-    match lua_eval::eval_script(script, &keys_vec, &args_vec, store, now_ms) {
+    store.script_nesting_level += 1;
+    let result = match lua_eval::eval_script(script, &keys_vec, &args_vec, store, now_ms) {
         Ok(frame) => Ok(frame),
         Err(e) => Ok(RespFrame::Error(format!("ERR Error running script: {e}"))),
-    }
+    };
+    store.script_nesting_level -= 1;
+    result
 }
 
 fn evalsha_cmd(
@@ -8688,6 +8724,11 @@ fn evalsha_cmd(
     // EVALSHA sha1 numkeys [key ...] [arg ...]
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("EVALSHA"));
+    }
+    if store.script_nesting_level >= 1 {
+        return Ok(RespFrame::Error(
+            "ERR EVAL nested calls are not allowed".to_string(),
+        ));
     }
     let sha1 = &argv[1];
     let (_numkeys, keys, args) = parse_eval_args(argv)?;
@@ -8704,10 +8745,13 @@ fn evalsha_cmd(
 
     let keys_vec: Vec<Vec<u8>> = keys.to_vec();
     let args_vec: Vec<Vec<u8>> = args.to_vec();
-    match lua_eval::eval_script(&script, &keys_vec, &args_vec, store, now_ms) {
+    store.script_nesting_level += 1;
+    let result = match lua_eval::eval_script(&script, &keys_vec, &args_vec, store, now_ms) {
         Ok(frame) => Ok(frame),
         Err(e) => Ok(RespFrame::Error(format!("ERR Error running script: {e}"))),
-    }
+    };
+    store.script_nesting_level -= 1;
+    result
 }
 
 fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {

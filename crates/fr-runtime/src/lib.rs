@@ -1774,6 +1774,9 @@ impl Runtime {
         let Some(command) = argv.first() else {
             return false;
         };
+        if eq_ascii_token(command, b"MULTI") || eq_ascii_token(command, b"EXEC") {
+            return true;
+        }
         fr_command::is_write_command(command)
     }
 
@@ -2317,6 +2320,31 @@ impl Runtime {
                 entries.push(RespFrame::BulkString(Some(value.to_string().into_bytes())));
             }
         }
+        // Dynamic list encoding threshold — live value from Store (signed)
+        if Self::config_pattern_matches(pattern, "list-max-listpack-size") {
+            entries.push(RespFrame::BulkString(Some(
+                b"list-max-listpack-size".to_vec(),
+            )));
+            entries.push(RespFrame::BulkString(Some(
+                self.server
+                    .store
+                    .list_max_listpack_size
+                    .to_string()
+                    .into_bytes(),
+            )));
+        }
+        if Self::config_pattern_matches(pattern, "list-max-ziplist-size") {
+            entries.push(RespFrame::BulkString(Some(
+                b"list-max-ziplist-size".to_vec(),
+            )));
+            entries.push(RespFrame::BulkString(Some(
+                self.server
+                    .store
+                    .list_max_listpack_size
+                    .to_string()
+                    .into_bytes(),
+            )));
+        }
         // Dynamic maxmemory-policy — live value from Store
         if Self::config_pattern_matches(pattern, "maxmemory-policy") {
             entries.push(RespFrame::BulkString(Some(b"maxmemory-policy".to_vec())));
@@ -2373,6 +2401,8 @@ impl Runtime {
                 || name == "zset-max-listpack-value"
                 || name == "zset-max-ziplist-entries"
                 || name == "zset-max-ziplist-value"
+                || name == "list-max-listpack-size"
+                || name == "list-max-ziplist-size"
             {
                 continue;
             }
@@ -2495,6 +2525,22 @@ impl Runtime {
                 next_hz = Some(parsed);
                 continue;
             }
+            // List encoding threshold — accepts negative values (-1 to -5 for byte limits).
+            if parameter.eq_ignore_ascii_case("list-max-listpack-size")
+                || parameter.eq_ignore_ascii_case("list-max-ziplist-size")
+            {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if (-5..=i64::MAX).contains(&value) => value,
+                    Ok(_) | Err(_) => {
+                        return RespFrame::Error(format!(
+                            "ERR Invalid argument '{}' for CONFIG SET '{parameter}'",
+                            String::from_utf8_lossy(&pair[1])
+                        ));
+                    }
+                };
+                self.server.store.list_max_listpack_size = parsed;
+                continue;
+            }
             // Encoding threshold parameters — update Store fields for live effect.
             if parameter.eq_ignore_ascii_case("hash-max-listpack-entries")
                 || parameter.eq_ignore_ascii_case("hash-max-listpack-value")
@@ -2547,11 +2593,13 @@ impl Runtime {
                 .iter()
                 .any(|&(name, _)| name.eq_ignore_ascii_case(parameter));
             if is_known_param {
+                // Safety: is_known_param guarantees the find will succeed, but
+                // use expect() to make intent explicit if invariant breaks.
                 let canonical = CONFIG_STATIC_PARAMS
                     .iter()
                     .find(|&&(name, _)| name.eq_ignore_ascii_case(parameter))
                     .map(|&(name, _)| name.to_string())
-                    .unwrap();
+                    .expect("is_known_param was true but find returned None");
                 let value = String::from_utf8_lossy(&pair[1]).to_string();
                 static_override_updates.push((canonical, value));
                 continue;
@@ -3132,6 +3180,9 @@ impl Runtime {
         }
 
         let mut results = Vec::with_capacity(queued.len());
+        // Record MULTI
+        self.capture_aof_record(&[b"MULTI".to_vec()]);
+
         for argv in &queued {
             if let Some(reply) = self.enforce_maxmemory_before_dispatch(
                 argv,
@@ -3153,6 +3204,10 @@ impl Runtime {
                 Err(err) => results.push(command_error_to_resp(err)),
             }
         }
+
+        // Record EXEC
+        self.capture_aof_record(&[b"EXEC".to_vec()]);
+
         RespFrame::Array(Some(results))
     }
 

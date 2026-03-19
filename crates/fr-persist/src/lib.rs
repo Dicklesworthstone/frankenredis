@@ -333,7 +333,34 @@ fn rdb_decode_length(data: &[u8]) -> Option<(usize, usize)> {
             let len = u32::from_be_bytes([data[1], data[2], data[3], data[4]]) as usize;
             Some((len, 5))
         }
-        _ => None, // Special encoding (integers) — not handled yet
+        3 => {
+            // Special encoding (integers or LZF)
+            match first & 0x3F {
+                0 => {
+                    // 8-bit integer
+                    let val = *data.get(1)? as usize;
+                    Some((val, 2))
+                }
+                1 => {
+                    // 16-bit integer
+                    if data.len() < 3 {
+                        return None;
+                    }
+                    let val = u16::from_le_bytes([data[1], data[2]]) as usize;
+                    Some((val, 3))
+                }
+                2 => {
+                    // 32-bit integer
+                    if data.len() < 5 {
+                        return None;
+                    }
+                    let val = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
+                    Some((val, 5))
+                }
+                _ => None, // LZF or unknown special encoding
+            }
+        }
+        _ => unreachable!(),
     }
 }
 
@@ -366,6 +393,20 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
     while cursor < data.len() {
         let opcode = data[cursor];
         cursor += 1;
+
+        // Reset expiry if this opcode is not a type byte and not a known expiry opcode.
+        // This prevents 'leaking' an expiry to the next key if something unexpected happens.
+        let is_type_byte = matches!(
+            opcode,
+            RDB_TYPE_STRING | RDB_TYPE_LIST | RDB_TYPE_SET | RDB_TYPE_HASH | RDB_TYPE_ZSET
+        );
+        let is_expiry_opcode = matches!(opcode, RDB_OPCODE_EXPIRETIME_MS | 0xFD);
+
+        if !is_type_byte && !is_expiry_opcode && pending_expire_ms.is_some() {
+            // In a well-formed RDB, expiry must be followed by a type byte.
+            // If we see SELECTDB or something else here, the file is malformed.
+            return Err(PersistError::InvalidFrame);
+        }
 
         match opcode {
             RDB_OPCODE_EOF => {
