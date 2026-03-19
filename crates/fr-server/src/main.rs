@@ -14,7 +14,7 @@ use std::process::ExitCode;
 use fr_command::pubsub_message_to_frame;
 use fr_config::RuntimePolicy;
 use fr_eventloop::{EventLoopMode, TickBudget, plan_tick, validate_accept_path, validate_read_path};
-use fr_protocol::{RespFrame, parse_frame};
+use fr_protocol::RespFrame;
 use fr_runtime::{ClientSession, Runtime};
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Token};
@@ -876,7 +876,11 @@ fn check_blocked_clients(
         let updated_session = runtime.swap_session(prev);
         conn.session = updated_session;
 
-        if conn.blocked.is_none() {
+        // Always try to flush/rearm if there's pending write data,
+        // even if the client re-blocked during pipelined command
+        // processing — the response from the first unblock still
+        // needs to reach the client.
+        if !conn.write_buf.is_empty() {
             let _ = flush_or_rearm_client(token, conn, poll);
         }
     }
