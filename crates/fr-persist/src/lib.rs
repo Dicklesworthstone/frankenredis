@@ -556,7 +556,7 @@ pub fn read_rdb_file(
     match std::fs::read(path) {
         Ok(data) => {
             if data.is_empty() {
-                return Ok((Vec::new(), BTreeMap::new()));
+                return Err(PersistError::InvalidFrame);
             }
             decode_rdb(&data)
         }
@@ -855,10 +855,23 @@ mod tests {
     }
 
     #[test]
-    fn rdb_empty_file_returns_empty() {
+    fn rdb_missing_file_returns_empty() {
         let path = std::path::Path::new("/tmp/fr_persist_nonexistent_test_file.rdb");
         let (entries, _) = super::read_rdb_file(path).expect("read missing");
         assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn rdb_existing_empty_file_is_rejected() {
+        let dir = std::env::temp_dir().join("fr_persist_rdb_empty_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("empty.rdb");
+        std::fs::write(&path, []).expect("create empty rdb");
+
+        let err = super::read_rdb_file(&path).expect_err("empty rdb must fail");
+        assert_eq!(err, PersistError::InvalidFrame);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

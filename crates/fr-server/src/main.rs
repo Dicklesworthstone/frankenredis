@@ -419,6 +419,14 @@ fn handle_readable(
         }
     }
 
+    // If the client is blocked (BLPOP/BRPOP/etc.), don't process new
+    // commands. We still read data above (to detect disconnection and
+    // prevent kernel buffer overflow), but commands are held in read_buf
+    // until the blocking operation completes or times out.
+    if conn.blocked.is_some() {
+        return;
+    }
+
     // Swap in this client's session, process frames, swap back.
     let session = std::mem::take(&mut conn.session);
     let prev = runtime.swap_session(session);
@@ -835,6 +843,16 @@ fn check_blocked_clients(
             };
             conn.write_buf.extend_from_slice(&nil_response.to_bytes());
             conn.blocked = None;
+
+            // Process any commands the client pipelined while blocked.
+            if !conn.read_buf.is_empty() {
+                let session = std::mem::take(&mut conn.session);
+                let prev = runtime.swap_session(session);
+                process_buffered_frames(conn, runtime);
+                let updated_session = runtime.swap_session(prev);
+                conn.session = updated_session;
+            }
+
             let _ = flush_or_rearm_client(token, conn, poll);
             continue;
         }
@@ -845,12 +863,20 @@ fn check_blocked_clients(
 
         let result = try_fulfill_blocked(&blocked.op, runtime, ts);
 
-        let updated_session = runtime.swap_session(prev);
-        conn.session = updated_session;
-
         if let Some(response) = result {
             conn.write_buf.extend_from_slice(&response.to_bytes());
             conn.blocked = None;
+
+            // Process any commands the client pipelined while blocked.
+            if !conn.read_buf.is_empty() {
+                process_buffered_frames(conn, runtime);
+            }
+        }
+
+        let updated_session = runtime.swap_session(prev);
+        conn.session = updated_session;
+
+        if conn.blocked.is_none() {
             let _ = flush_or_rearm_client(token, conn, poll);
         }
     }
