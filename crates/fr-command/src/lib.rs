@@ -70,7 +70,9 @@ impl CommandError {
                 fr_store::StoreError::IntegerOverflow => {
                     RespFrame::Error("ERR increment or decrement would overflow".to_string())
                 }
-                fr_store::StoreError::KeyNotFound => RespFrame::Error("ERR no such key".to_string()),
+                fr_store::StoreError::KeyNotFound => {
+                    RespFrame::Error("ERR no such key".to_string())
+                }
                 fr_store::StoreError::WrongType => RespFrame::Error(
                     "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
                 ),
@@ -12997,6 +12999,30 @@ mod tests {
         )
         .expect("zscore missing");
         assert_eq!(out, RespFrame::BulkString(None));
+    }
+
+    #[test]
+    fn zscore_never_emits_negative_zero() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"-0".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd negative zero");
+
+        let out = dispatch_argv(
+            &[b"ZSCORE".to_vec(), b"zs".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("zscore");
+        assert_eq!(out, RespFrame::BulkString(Some(b"0".to_vec())));
     }
 
     #[test]

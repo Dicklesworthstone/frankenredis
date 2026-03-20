@@ -208,8 +208,8 @@ impl PartialOrd for ScoreMember {
 
 impl Ord for ScoreMember {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.score
-            .total_cmp(&other.score)
+        canonicalize_zero_score(self.score)
+            .total_cmp(&canonicalize_zero_score(other.score))
             .then_with(|| self.member.cmp(&other.member))
     }
 }
@@ -8451,6 +8451,22 @@ mod tests {
                 b"z",
                 ScoreBound::Inclusive(f64::NEG_INFINITY),
                 ScoreBound::Inclusive(f64::INFINITY),
+                0,
+        )
+        .unwrap();
+        assert_eq!(pairs, vec![(b"a".to_vec(), 0.0)]);
+    }
+
+    #[test]
+    fn zrangebyscore_treats_negative_zero_bounds_as_zero() {
+        let mut store = Store::new();
+        store.zadd(b"z", &[(0.0, b"a".to_vec())], 0).unwrap();
+
+        let pairs = store
+            .zrangebyscore_withscores(
+                b"z",
+                ScoreBound::Inclusive(-0.0),
+                ScoreBound::Inclusive(-0.0),
                 0,
             )
             .unwrap();

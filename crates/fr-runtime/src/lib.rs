@@ -1612,7 +1612,7 @@ impl Runtime {
                 Some(cmd) => cmd,
                 None => {
                     self.session.transaction_state.exec_abort = true;
-                    return (CommandError::InvalidCommandFrame).to_resp();
+                    return CommandError::InvalidCommandFrame.to_resp();
                 }
             };
             if !fr_command::is_known_command(cmd_bytes) {
@@ -1834,7 +1834,7 @@ impl Runtime {
 
         let protocol_version = match parse_i64_arg(&argv[1]) {
             Ok(version) => version,
-            Err(err) => return (err).to_resp(),
+            Err(err) => return err.to_resp(),
         };
 
         if protocol_version != 2 && protocol_version != 3 {
@@ -1850,21 +1850,21 @@ impl Runtime {
         while let Some(option_arg) = options.next() {
             let option = match std::str::from_utf8(option_arg) {
                 Ok(option) => option,
-                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
             if option.eq_ignore_ascii_case("AUTH") {
                 let Some(username) = options.next() else {
-                    return (CommandError::SyntaxError).to_resp();
+                    return CommandError::SyntaxError.to_resp();
                 };
                 let Some(password) = options.next() else {
-                    return (CommandError::SyntaxError).to_resp();
+                    return CommandError::SyntaxError.to_resp();
                 };
                 auth_credentials = Some((username.as_slice(), password.as_slice()));
                 continue;
             }
             if option.eq_ignore_ascii_case("SETNAME") {
                 let Some(name) = options.next() else {
-                    return (CommandError::SyntaxError).to_resp();
+                    return CommandError::SyntaxError.to_resp();
                 };
                 if name.contains(&b' ') {
                     return RespFrame::Error(
@@ -1879,7 +1879,7 @@ impl Runtime {
                 });
                 continue;
             }
-            return (CommandError::SyntaxError).to_resp();
+            return CommandError::SyntaxError.to_resp();
         }
 
         if let Some((username, password)) = auth_credentials {
@@ -1930,7 +1930,7 @@ impl Runtime {
         }
         let sub = match std::str::from_utf8(&argv[1]) {
             Ok(s) => s,
-            Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+            Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
         };
 
         if sub.eq_ignore_ascii_case("WHOAMI") {
@@ -2097,7 +2097,7 @@ impl Runtime {
         } else if argv.len() == 3 {
             let cat = match std::str::from_utf8(&argv[2]) {
                 Ok(c) => c,
-                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
             if CATEGORIES.iter().any(|c| c.eq_ignore_ascii_case(cat)) {
                 let cmds = commands_in_acl_category(cat);
@@ -2162,7 +2162,7 @@ impl Runtime {
         } else if argv.len() == 3 {
             let sub = match std::str::from_utf8(&argv[2]) {
                 Ok(s) => s,
-                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
             if sub.eq_ignore_ascii_case("RESET") {
                 RespFrame::SimpleString("OK".to_string())
@@ -2216,7 +2216,7 @@ impl Runtime {
         }
         let sub = match std::str::from_utf8(&argv[1]) {
             Ok(sub) => sub,
-            Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+            Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
         };
         if sub.eq_ignore_ascii_case("GET") {
             return self.handle_config_get(argv);
@@ -2252,7 +2252,7 @@ impl Runtime {
         for arg in &argv[2..] {
             let raw_pattern = match std::str::from_utf8(arg) {
                 Ok(pattern) => pattern,
-                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
             let pattern = raw_pattern.to_ascii_lowercase();
             self.collect_config_entries(&pattern, &mut entries);
@@ -2470,7 +2470,7 @@ impl Runtime {
         for pair in argv[2..].chunks_exact(2) {
             let parameter = match std::str::from_utf8(&pair[0]) {
                 Ok(parameter) => parameter,
-                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
             if parameter.eq_ignore_ascii_case("requirepass") {
                 next_requirepass = Some(if pair[1].is_empty() {
@@ -2489,7 +2489,7 @@ impl Runtime {
                                 .to_string(),
                         );
                     }
-                    Err(err) => return (err).to_resp(),
+                    Err(err) => return err.to_resp(),
                 };
                 next_acllog_max_len = parsed;
                 continue;
@@ -2502,7 +2502,7 @@ impl Runtime {
                             "ERR Invalid argument '?' for CONFIG SET 'maxmemory'".to_string(),
                         );
                     }
-                    Err(err) => return (err).to_resp(),
+                    Err(err) => return err.to_resp(),
                 };
                 next_maxmemory = Some(parsed);
                 continue;
@@ -2510,7 +2510,7 @@ impl Runtime {
             if parameter.eq_ignore_ascii_case("maxmemory-policy") {
                 let value_str = match std::str::from_utf8(&pair[1]) {
                     Ok(value) => value,
-                    Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+                    Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
                 };
                 match MaxmemoryPolicy::from_config_str(value_str) {
                     Some(policy) => {
@@ -2527,7 +2527,7 @@ impl Runtime {
             if parameter.eq_ignore_ascii_case("slowlog-log-slower-than") {
                 let parsed = match parse_i64_arg(&pair[1]) {
                     Ok(value) => value,
-                    Err(err) => return (err).to_resp(),
+                    Err(err) => return err.to_resp(),
                 };
                 next_slowlog_slower_than = Some(parsed);
                 continue;
@@ -2540,7 +2540,7 @@ impl Runtime {
                             "ERR Invalid argument '?' for CONFIG SET 'slowlog-max-len'".to_string(),
                         );
                     }
-                    Err(err) => return (err).to_resp(),
+                    Err(err) => return err.to_resp(),
                 };
                 next_slowlog_max_len = Some(parsed);
                 continue;
@@ -2553,7 +2553,7 @@ impl Runtime {
                             "ERR Invalid argument '?' for CONFIG SET 'hz'".to_string(),
                         );
                     }
-                    Err(err) => return (err).to_resp(),
+                    Err(err) => return err.to_resp(),
                 };
                 next_hz = Some(parsed);
                 continue;
@@ -2728,7 +2728,7 @@ impl Runtime {
         }
         let sub = match std::str::from_utf8(&argv[1]) {
             Ok(s) => s,
-            Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+            Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
         };
         if sub.eq_ignore_ascii_case("SETNAME") {
             if argv.len() != 3 {
@@ -2801,7 +2801,7 @@ impl Runtime {
             }
             let mode = match std::str::from_utf8(&argv[2]) {
                 Ok(m) => m,
-                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
             if mode.eq_ignore_ascii_case("ON") {
                 self.session.client_no_evict = true;
@@ -2817,7 +2817,7 @@ impl Runtime {
             }
             let mode = match std::str::from_utf8(&argv[2]) {
                 Ok(m) => m,
-                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
             if mode.eq_ignore_ascii_case("ON") {
                 self.session.client_no_touch = true;
@@ -2834,11 +2834,11 @@ impl Runtime {
             }
             let attr = match std::str::from_utf8(&argv[2]) {
                 Ok(a) => a,
-                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
             let val = match std::str::from_utf8(&argv[3]) {
                 Ok(v) => v.to_string(),
-                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
             if attr.eq_ignore_ascii_case("LIB-NAME") || attr.eq_ignore_ascii_case("lib-name") {
                 // Redis validates: lib-name must not contain spaces or newlines
@@ -2880,7 +2880,7 @@ impl Runtime {
                 return CommandError::WrongArity("CLIENT").to_resp();
             }
             if parse_i64_arg(&argv[2]).is_err() {
-                return (CommandError::InvalidInteger).to_resp();
+                return CommandError::InvalidInteger.to_resp();
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("UNPAUSE") {
@@ -2922,13 +2922,13 @@ impl Runtime {
         }
         let sub = match std::str::from_utf8(&argv[1]) {
             Ok(s) => s,
-            Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+            Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
         };
         if sub.eq_ignore_ascii_case("GET") {
             let count = if argv.len() >= 3 {
                 match parse_i64_arg(&argv[2]) {
                     Ok(c) if c >= 0 => c as usize,
-                    _ => return (CommandError::InvalidInteger).to_resp(),
+                    _ => return CommandError::InvalidInteger.to_resp(),
                 }
             } else {
                 self.server.slowlog_max_len
@@ -3064,7 +3064,7 @@ impl Runtime {
         for arg in &argv[1..] {
             let s = match std::str::from_utf8(arg) {
                 Ok(s) => s,
-                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
             if !s.eq_ignore_ascii_case("NOSAVE")
                 && !s.eq_ignore_ascii_case("SAVE")
@@ -3086,7 +3086,7 @@ impl Runtime {
         }
         let subcommand = match classify_cluster_subcommand(&argv[1]) {
             Ok(subcommand) => subcommand,
-            Err(err) => return (err).to_resp(),
+            Err(err) => return err.to_resp(),
         };
 
         if subcommand == ClusterSubcommand::Help {
@@ -3118,10 +3118,10 @@ impl Runtime {
         }
         let required_replicas = match parse_i64_arg(&argv[1]) {
             Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
-            _ => return (CommandError::InvalidInteger).to_resp(),
+            _ => return CommandError::InvalidInteger.to_resp(),
         };
         if !matches!(parse_i64_arg(&argv[2]), Ok(value) if value >= 0) {
-            return (CommandError::InvalidInteger).to_resp();
+            return CommandError::InvalidInteger.to_resp();
         }
 
         let outcome = evaluate_wait(
@@ -3141,14 +3141,14 @@ impl Runtime {
         }
         let required_local = match parse_i64_arg(&argv[1]) {
             Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
-            _ => return (CommandError::InvalidInteger).to_resp(),
+            _ => return CommandError::InvalidInteger.to_resp(),
         };
         let required_replicas = match parse_i64_arg(&argv[2]) {
             Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
-            _ => return (CommandError::InvalidInteger).to_resp(),
+            _ => return CommandError::InvalidInteger.to_resp(),
         };
         if !matches!(parse_i64_arg(&argv[3]), Ok(value) if value >= 0) {
-            return (CommandError::InvalidInteger).to_resp();
+            return CommandError::InvalidInteger.to_resp();
         }
 
         let required_local_offset = if required_local == 0 {

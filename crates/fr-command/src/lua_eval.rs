@@ -3168,7 +3168,10 @@ impl<'a> LuaState<'a> {
         match dispatch_argv(&argv, self.store, self.now_ms) {
             Ok(frame) => Ok(vec![resp_to_lua(&frame)]),
             Err(e) => {
-                let err_msg = format!("{e:?}");
+                let err_msg = match e.to_resp() {
+                    RespFrame::Error(msg) => msg,
+                    _ => format!("{e:?}"),
+                };
                 if is_pcall {
                     let mut t = LuaTable::new();
                     t.set(

@@ -755,6 +755,18 @@ pub(crate) fn is_psync_frame(frame: &RespFrame) -> bool {
     false
 }
 
+fn parse_blocking_deadline(timeout_bytes: &[u8], now_ms: u64) -> Option<u64> {
+    let timeout_secs: f64 = std::str::from_utf8(timeout_bytes).ok()?.parse().ok()?;
+    if !timeout_secs.is_finite() || timeout_secs < 0.0 {
+        return None;
+    }
+    Some(if timeout_secs == 0.0 {
+        u64::MAX
+    } else {
+        now_ms.saturating_add((timeout_secs * 1000.0) as u64)
+    })
+}
+
 /// Extract the BLOCK timeout from XREAD/XREADGROUP args and compute a deadline.
 fn parse_xread_block_deadline(items: &[RespFrame], now_ms: u64) -> Option<u64> {
     for (i, item) in items.iter().enumerate() {
@@ -803,16 +815,7 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
             Some(RespFrame::BulkString(Some(b))) => b,
             _ => return None,
         };
-        let timeout_secs: f64 = std::str::from_utf8(timeout_bytes).ok()?.parse().ok()?;
-        if timeout_secs < 0.0 {
-            return None;
-        }
-        // timeout 0 means block indefinitely (until data arrives).
-        let deadline_ms = if timeout_secs == 0.0 {
-            u64::MAX
-        } else {
-            now_ms.saturating_add((timeout_secs * 1000.0) as u64)
-        };
+        let deadline_ms = parse_blocking_deadline(timeout_bytes, now_ms)?;
         let keys: Vec<Vec<u8>> = items[1..items.len() - 1]
             .iter()
             .filter_map(|f| match f {
@@ -841,15 +844,7 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
             RespFrame::BulkString(Some(b)) => b,
             _ => return None,
         };
-        let timeout_secs: f64 = std::str::from_utf8(timeout_bytes).ok()?.parse().ok()?;
-        if timeout_secs < 0.0 {
-            return None;
-        }
-        let deadline_ms = if timeout_secs == 0.0 {
-            u64::MAX
-        } else {
-            now_ms.saturating_add((timeout_secs * 1000.0) as u64)
-        };
+        let deadline_ms = parse_blocking_deadline(timeout_bytes, now_ms)?;
         let source = match &items[1] {
             RespFrame::BulkString(Some(b)) => b.clone(),
             _ => return None,
@@ -883,15 +878,7 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
             RespFrame::BulkString(Some(b)) => b,
             _ => return None,
         };
-        let timeout_secs: f64 = std::str::from_utf8(timeout_bytes).ok()?.parse().ok()?;
-        if timeout_secs < 0.0 {
-            return None;
-        }
-        let deadline_ms = if timeout_secs == 0.0 {
-            u64::MAX
-        } else {
-            now_ms.saturating_add((timeout_secs * 1000.0) as u64)
-        };
+        let deadline_ms = parse_blocking_deadline(timeout_bytes, now_ms)?;
         let source = match &items[1] {
             RespFrame::BulkString(Some(b)) => b.clone(),
             _ => return None,
@@ -920,15 +907,7 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
             RespFrame::BulkString(Some(b)) => b,
             _ => return None,
         };
-        let timeout_secs: f64 = std::str::from_utf8(timeout_bytes).ok()?.parse().ok()?;
-        if timeout_secs < 0.0 {
-            return None;
-        }
-        let deadline_ms = if timeout_secs == 0.0 {
-            u64::MAX
-        } else {
-            now_ms.saturating_add((timeout_secs * 1000.0) as u64)
-        };
+        let deadline_ms = parse_blocking_deadline(timeout_bytes, now_ms)?;
         let argv: Vec<Vec<u8>> = items
             .iter()
             .filter_map(|f| match f {
@@ -1268,7 +1247,10 @@ fn handle_writable(
 #[cfg(test)]
 mod tests {
     use crate::replication_follow_up_bytes;
-    use crate::{InlineParseResult, should_try_inline_parsing};
+    use crate::{
+        InlineParseResult, parse_blocking_deadline, should_try_inline_parsing,
+        try_build_blocked_state,
+    };
     use fr_config::RuntimePolicy;
     use fr_protocol::RespFrame;
     use fr_runtime::Runtime;
@@ -1394,6 +1376,25 @@ mod tests {
             InlineParseResult::EmptyLine(consumed) => assert_eq!(consumed, 2),
             InlineParseResult::Command(_, _) => panic!("blank line should not become a command"),
         }
+    }
+
+    #[test]
+    fn parse_blocking_deadline_rejects_nonfinite_values() {
+        assert_eq!(parse_blocking_deadline(b"0", 123), Some(u64::MAX));
+        assert_eq!(parse_blocking_deadline(b"-1", 123), None);
+        assert_eq!(parse_blocking_deadline(b"NaN", 123), None);
+        assert_eq!(parse_blocking_deadline(b"inf", 123), None);
+        assert_eq!(parse_blocking_deadline(b"+inf", 123), None);
+    }
+
+    #[test]
+    fn blocking_state_builder_rejects_nonfinite_blpop_timeout() {
+        let frame = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"BLPOP".to_vec())),
+            RespFrame::BulkString(Some(b"queue".to_vec())),
+            RespFrame::BulkString(Some(b"inf".to_vec())),
+        ]));
+        assert!(try_build_blocked_state(&frame, 1_000).is_none());
     }
 
     #[test]
