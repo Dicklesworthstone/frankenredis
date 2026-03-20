@@ -3280,6 +3280,7 @@ impl Store {
                 Entry::new(Value::Set(set), None, now_ms),
             );
         }
+        self.dirty = self.dirty.saturating_add(1);
         Ok(count)
     }
 
@@ -3301,6 +3302,7 @@ impl Store {
                 Entry::new(Value::Set(set), None, now_ms),
             );
         }
+        self.dirty = self.dirty.saturating_add(1);
         Ok(count)
     }
 
@@ -3322,6 +3324,7 @@ impl Store {
                 Entry::new(Value::Set(set), None, now_ms),
             );
         }
+        self.dirty = self.dirty.saturating_add(1);
         Ok(count)
     }
 
@@ -5296,10 +5299,10 @@ impl Store {
         if created || modified {
             let expires_at = self.entries.get(key).and_then(|e| e.expires_at_ms);
             let data = hll_encode(&registers);
-            self.entries.insert(
-                key.to_vec(),
-                Entry::new(Value::String(data), expires_at, now_ms),
-            );
+            let mut entry = Entry::new(Value::String(data), expires_at, now_ms);
+            entry.touch(now_ms);
+            self.entries.insert(key.to_vec(), entry);
+            self.dirty = self.dirty.saturating_add(1);
         }
         Ok(created || modified)
     }
@@ -5380,10 +5383,10 @@ impl Store {
         }
 
         let data = hll_encode(&merged);
-        self.entries.insert(
-            dest.to_vec(),
-            Entry::new(Value::String(data), existing_ttl, now_ms),
-        );
+        let mut entry = Entry::new(Value::String(data), existing_ttl, now_ms);
+        entry.touch(now_ms);
+        self.entries.insert(dest.to_vec(), entry);
+        self.dirty = self.dirty.saturating_add(1);
         Ok(())
     }
 
@@ -5547,6 +5550,7 @@ impl Store {
             dest.to_vec(),
             Entry::new(Value::SortedSet(zs), None, now_ms),
         );
+        self.dirty = self.dirty.saturating_add(1);
         Ok(count)
     }
 
@@ -5566,6 +5570,7 @@ impl Store {
                 dest.to_vec(),
                 Entry::new(Value::SortedSet(SortedSet::new()), None, now_ms),
             );
+            self.dirty = self.dirty.saturating_add(1);
             return Ok(0);
         }
 
@@ -5620,6 +5625,7 @@ impl Store {
             dest.to_vec(),
             Entry::new(Value::SortedSet(zs), None, now_ms),
         );
+        self.dirty = self.dirty.saturating_add(1);
         Ok(count)
     }
 
