@@ -254,8 +254,16 @@ impl SortedSet {
     }
 
     fn insert(&mut self, member: Vec<u8>, score: f64) -> bool {
+        let score = canonicalize_zero_score(score);
         if let Some(old_score) = self.dict.insert(member.clone(), score) {
-            if old_score.total_cmp(&score).is_eq() {
+            let old_canonical = canonicalize_zero_score(old_score);
+            if old_canonical.total_cmp(&score).is_eq() {
+                if old_score.total_cmp(&score).is_eq() {
+                    return false;
+                }
+                self.ordered
+                    .remove(&ScoreMember::actual(old_score, member.clone()));
+                self.ordered.insert(ScoreMember::actual(score, member), ());
                 return false;
             }
             self.ordered
@@ -3312,8 +3320,7 @@ impl Store {
                         } else {
                             true
                         };
-                        if should_update && *score != old_score {
-                            zs.insert(member.clone(), *score);
+                        if should_update && zs.insert(member.clone(), *score) {
                             changed += 1;
                         }
                     }
@@ -7246,12 +7253,18 @@ fn normalize_index(index: i64, len: i64) -> usize {
 /// Compare (score, member) pairs for sorted set ordering.
 /// Redis sorts by score first, then by member lexicographically for ties.
 fn cmp_score_member(s1: f64, m1: &[u8], s2: f64, m2: &[u8]) -> std::cmp::Ordering {
-    s1.total_cmp(&s2).then_with(|| m1.cmp(m2))
+    canonicalize_zero_score(s1)
+        .total_cmp(&canonicalize_zero_score(s2))
+        .then_with(|| m1.cmp(m2))
 }
 
 /// Returns true if (s1, m1) < (s2, m2) in Redis sorted set ordering.
 fn score_member_lt(s1: f64, m1: &[u8], s2: f64, m2: &[u8]) -> bool {
     cmp_score_member(s1, m1, s2, m2) == std::cmp::Ordering::Less
+}
+
+fn canonicalize_zero_score(score: f64) -> f64 {
+    if score == 0.0 { 0.0 } else { score }
 }
 
 /// Check if a member falls within a lex range.
@@ -8421,6 +8434,27 @@ mod tests {
         let added2 = store.zadd(b"z", &[(3.0, b"a".to_vec())], 0).unwrap();
         assert_eq!(added2, 0);
         assert_eq!(store.zscore(b"z", b"a", 0).unwrap(), Some(3.0));
+    }
+
+    #[test]
+    fn zadd_canonicalizes_negative_zero_scores() {
+        let mut store = Store::new();
+        assert_eq!(store.zadd(b"z", &[(-0.0, b"a".to_vec())], 0).unwrap(), 1);
+
+        let score = store.zscore(b"z", b"a", 0).unwrap().unwrap();
+        assert_eq!(score, 0.0);
+        assert!(!score.is_sign_negative());
+
+        assert_eq!(store.zadd(b"z", &[(0.0, b"a".to_vec())], 0).unwrap(), 0);
+        let pairs = store
+            .zrangebyscore_withscores(
+                b"z",
+                ScoreBound::Inclusive(f64::NEG_INFINITY),
+                ScoreBound::Inclusive(f64::INFINITY),
+                0,
+            )
+            .unwrap();
+        assert_eq!(pairs, vec![(b"a".to_vec(), 0.0)]);
     }
 
     #[test]
