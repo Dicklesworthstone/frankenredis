@@ -55,6 +55,10 @@ enum BlockingOp {
     BZpopMax { keys: Vec<Vec<u8>> },
     /// BZPOPMIN: pop min score from first available key.
     BZpopMin { keys: Vec<Vec<u8>> },
+    /// BLMPOP: pop from multiple lists with direction and count.
+    BLmpop { argv: Vec<Vec<u8>> },
+    /// BZMPOP: pop from multiple sorted sets with MIN/MAX and count.
+    BZmpop { argv: Vec<Vec<u8>> },
     /// XREAD BLOCK: read from streams, blocking until data arrives.
     BXread { argv: Vec<Vec<u8>> },
     /// XREADGROUP BLOCK: read from stream consumer group, blocking.
@@ -901,6 +905,39 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
             },
             deadline_ms,
         })
+    } else if cmd.eq_ignore_ascii_case(b"BLMPOP") || cmd.eq_ignore_ascii_case(b"BZMPOP") {
+        // BLMPOP timeout numkeys key [...] LEFT|RIGHT [COUNT n]
+        // BZMPOP timeout numkeys key [...] MIN|MAX [COUNT n]
+        // Timeout is argv[1] in seconds (float).
+        if items.len() < 5 {
+            return None;
+        }
+        let timeout_bytes = match &items[1] {
+            RespFrame::BulkString(Some(b)) => b,
+            _ => return None,
+        };
+        let timeout_secs: f64 = std::str::from_utf8(timeout_bytes).ok()?.parse().ok()?;
+        if timeout_secs < 0.0 {
+            return None;
+        }
+        let deadline_ms = if timeout_secs == 0.0 {
+            u64::MAX
+        } else {
+            now_ms.saturating_add((timeout_secs * 1000.0) as u64)
+        };
+        let argv: Vec<Vec<u8>> = items
+            .iter()
+            .filter_map(|f| match f {
+                RespFrame::BulkString(Some(b)) => Some(b.clone()),
+                _ => None,
+            })
+            .collect();
+        let op = if cmd.eq_ignore_ascii_case(b"BLMPOP") {
+            BlockingOp::BLmpop { argv }
+        } else {
+            BlockingOp::BZmpop { argv }
+        };
+        Some(BlockedState { op, deadline_ms })
     } else if cmd.eq_ignore_ascii_case(b"XREAD") || cmd.eq_ignore_ascii_case(b"XREADGROUP") {
         let deadline_ms = parse_xread_block_deadline(items, now_ms)?;
         let argv: Vec<Vec<u8>> = items
@@ -952,6 +989,8 @@ fn check_blocked_clients(
                 | BlockingOp::BRpop { .. }
                 | BlockingOp::BZpopMax { .. }
                 | BlockingOp::BZpopMin { .. }
+                | BlockingOp::BLmpop { .. }
+                | BlockingOp::BZmpop { .. }
                 | BlockingOp::BXread { .. }
                 | BlockingOp::BXreadgroup { .. } => RespFrame::Array(None),
                 BlockingOp::BLmove { .. } => RespFrame::BulkString(None),
@@ -1146,6 +1185,20 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
             ));
             let response = runtime.execute_frame(frame, now_ms);
             if response != RespFrame::BulkString(None) {
+                Some(response)
+            } else {
+                None
+            }
+        }
+        BlockingOp::BLmpop { argv } | BlockingOp::BZmpop { argv } => {
+            // Re-execute the full BLMPOP/BZMPOP command to check for new data.
+            let frame = RespFrame::Array(Some(
+                argv.iter()
+                    .map(|a| RespFrame::BulkString(Some(a.clone())))
+                    .collect(),
+            ));
+            let response = runtime.execute_frame(frame, now_ms);
+            if response != RespFrame::Array(None) {
                 Some(response)
             } else {
                 None
