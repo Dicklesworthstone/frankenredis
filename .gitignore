@@ -90,3 +90,7 @@ storage.sqlite3.bak
 storage.sqlite3.corrupt-*
 storage.sqlite3-shm.corrupt-*
 storage.sqlite3-wal.corrupt-*
+
+# Bug scanner / audit tool output
+critical_bugs.jsonl
+ubs_full_report.txt
