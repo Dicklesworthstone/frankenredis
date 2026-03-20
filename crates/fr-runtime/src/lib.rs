@@ -613,6 +613,7 @@ struct TransactionState {
     command_queue: Vec<Vec<Vec<u8>>>,
     watched_keys: Vec<(Vec<u8>, u64)>,
     watch_dirty: bool,
+    exec_abort: bool,
 }
 
 /// A single slow log entry recording a command that exceeded the threshold.
@@ -751,9 +752,14 @@ impl ServerState {
         };
         let records = fr_persist::read_aof_file(&path)?;
         let count = records.len();
-        for record in &records {
-            let _ = dispatch_argv(&record.argv, &mut self.store, now_ms);
+        let mut replayed_store = Store::new();
+        for (index, record) in records.iter().enumerate() {
+            let replay_now_ms = now_ms.saturating_add(index as u64);
+            dispatch_argv(&record.argv, &mut replayed_store, replay_now_ms)
+                .map_err(|_| PersistError::InvalidFrame)?;
         }
+        self.store = replayed_store;
+        self.aof_records = records;
         Ok(count)
     }
 
@@ -1602,6 +1608,21 @@ impl Runtime {
 
         // If inside a MULTI transaction, queue the command instead of executing it
         if self.session.transaction_state.in_transaction {
+            let cmd_bytes = match argv.first() {
+                Some(cmd) => cmd,
+                None => {
+                    self.session.transaction_state.exec_abort = true;
+                    return (CommandError::InvalidCommandFrame).to_resp();
+                }
+            };
+            if !fr_command::is_known_command(cmd_bytes) {
+                self.session.transaction_state.exec_abort = true;
+                let cmd_str = std::str::from_utf8(cmd_bytes).unwrap_or("");
+                return RespFrame::Error(format!(
+                    "ERR unknown command '{}'",
+                    fr_command::trim_and_cap_string(cmd_str, 128)
+                ));
+            }
             self.session.transaction_state.command_queue.push(argv);
             return RespFrame::SimpleString("QUEUED".to_string());
         }
@@ -1650,7 +1671,7 @@ impl Runtime {
                 }
                 reply
             }
-            Err(err) => command_error_to_resp(err),
+            Err(err) => (err).to_resp(),
         }
     }
 
@@ -1784,7 +1805,7 @@ impl Runtime {
 
     fn handle_auth_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 2 && argv.len() != 3 {
-            return command_error_to_resp(CommandError::WrongArity("AUTH"));
+            return CommandError::WrongArity("AUTH").to_resp();
         }
 
         let (username, password) = if argv.len() == 2 {
@@ -1813,7 +1834,7 @@ impl Runtime {
 
         let protocol_version = match parse_i64_arg(&argv[1]) {
             Ok(version) => version,
-            Err(err) => return command_error_to_resp(err),
+            Err(err) => return (err).to_resp(),
         };
 
         if protocol_version != 2 && protocol_version != 3 {
@@ -1829,21 +1850,21 @@ impl Runtime {
         while let Some(option_arg) = options.next() {
             let option = match std::str::from_utf8(option_arg) {
                 Ok(option) => option,
-                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
             };
             if option.eq_ignore_ascii_case("AUTH") {
                 let Some(username) = options.next() else {
-                    return command_error_to_resp(CommandError::SyntaxError);
+                    return (CommandError::SyntaxError).to_resp();
                 };
                 let Some(password) = options.next() else {
-                    return command_error_to_resp(CommandError::SyntaxError);
+                    return (CommandError::SyntaxError).to_resp();
                 };
                 auth_credentials = Some((username.as_slice(), password.as_slice()));
                 continue;
             }
             if option.eq_ignore_ascii_case("SETNAME") {
                 let Some(name) = options.next() else {
-                    return command_error_to_resp(CommandError::SyntaxError);
+                    return (CommandError::SyntaxError).to_resp();
                 };
                 if name.contains(&b' ') {
                     return RespFrame::Error(
@@ -1858,7 +1879,7 @@ impl Runtime {
                 });
                 continue;
             }
-            return command_error_to_resp(CommandError::SyntaxError);
+            return (CommandError::SyntaxError).to_resp();
         }
 
         if let Some((username, password)) = auth_credentials {
@@ -1909,7 +1930,7 @@ impl Runtime {
         }
         let sub = match std::str::from_utf8(&argv[1]) {
             Ok(s) => s,
-            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+            Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
         };
 
         if sub.eq_ignore_ascii_case("WHOAMI") {
@@ -2076,7 +2097,7 @@ impl Runtime {
         } else if argv.len() == 3 {
             let cat = match std::str::from_utf8(&argv[2]) {
                 Ok(c) => c,
-                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
             };
             if CATEGORIES.iter().any(|c| c.eq_ignore_ascii_case(cat)) {
                 let cmds = commands_in_acl_category(cat);
@@ -2141,7 +2162,7 @@ impl Runtime {
         } else if argv.len() == 3 {
             let sub = match std::str::from_utf8(&argv[2]) {
                 Ok(s) => s,
-                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
             };
             if sub.eq_ignore_ascii_case("RESET") {
                 RespFrame::SimpleString("OK".to_string())
@@ -2191,11 +2212,11 @@ impl Runtime {
 
     fn handle_config_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 2 {
-            return command_error_to_resp(CommandError::WrongArity("CONFIG"));
+            return CommandError::WrongArity("CONFIG").to_resp();
         }
         let sub = match std::str::from_utf8(&argv[1]) {
             Ok(sub) => sub,
-            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+            Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
         };
         if sub.eq_ignore_ascii_case("GET") {
             return self.handle_config_get(argv);
@@ -2205,7 +2226,7 @@ impl Runtime {
         }
         if sub.eq_ignore_ascii_case("RESETSTAT") {
             if argv.len() != 2 {
-                return command_error_to_resp(CommandError::WrongArity("CONFIG"));
+                return CommandError::WrongArity("CONFIG").to_resp();
             }
             // Reset tracked statistics: clear slowlog, reset next ID, reset config overrides
             self.server.reset_slowlog();
@@ -2213,7 +2234,7 @@ impl Runtime {
         }
         if sub.eq_ignore_ascii_case("REWRITE") {
             if argv.len() != 2 {
-                return command_error_to_resp(CommandError::WrongArity("CONFIG"));
+                return CommandError::WrongArity("CONFIG").to_resp();
             }
             return RespFrame::SimpleString("OK".to_string());
         }
@@ -2224,14 +2245,14 @@ impl Runtime {
 
     fn handle_config_get(&self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 3 {
-            return command_error_to_resp(CommandError::WrongArity("CONFIG"));
+            return CommandError::WrongArity("CONFIG").to_resp();
         }
         let mut entries = Vec::new();
         // Redis 7+ supports multiple patterns: CONFIG GET pattern1 pattern2 ...
         for arg in &argv[2..] {
             let raw_pattern = match std::str::from_utf8(arg) {
                 Ok(pattern) => pattern,
-                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
             };
             let pattern = raw_pattern.to_ascii_lowercase();
             self.collect_config_entries(&pattern, &mut entries);
@@ -2433,7 +2454,7 @@ impl Runtime {
 
     fn handle_config_set(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 4 || !argv.len().is_multiple_of(2) {
-            return command_error_to_resp(CommandError::WrongArity("CONFIG"));
+            return CommandError::WrongArity("CONFIG").to_resp();
         }
 
         let mut next_requirepass: Option<Option<Vec<u8>>> = None;
@@ -2449,7 +2470,7 @@ impl Runtime {
         for pair in argv[2..].chunks_exact(2) {
             let parameter = match std::str::from_utf8(&pair[0]) {
                 Ok(parameter) => parameter,
-                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
             };
             if parameter.eq_ignore_ascii_case("requirepass") {
                 next_requirepass = Some(if pair[1].is_empty() {
@@ -2468,7 +2489,7 @@ impl Runtime {
                                 .to_string(),
                         );
                     }
-                    Err(err) => return command_error_to_resp(err),
+                    Err(err) => return (err).to_resp(),
                 };
                 next_acllog_max_len = parsed;
                 continue;
@@ -2481,7 +2502,7 @@ impl Runtime {
                             "ERR Invalid argument '?' for CONFIG SET 'maxmemory'".to_string(),
                         );
                     }
-                    Err(err) => return command_error_to_resp(err),
+                    Err(err) => return (err).to_resp(),
                 };
                 next_maxmemory = Some(parsed);
                 continue;
@@ -2489,7 +2510,7 @@ impl Runtime {
             if parameter.eq_ignore_ascii_case("maxmemory-policy") {
                 let value_str = match std::str::from_utf8(&pair[1]) {
                     Ok(value) => value,
-                    Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+                    Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
                 };
                 match MaxmemoryPolicy::from_config_str(value_str) {
                     Some(policy) => {
@@ -2506,7 +2527,7 @@ impl Runtime {
             if parameter.eq_ignore_ascii_case("slowlog-log-slower-than") {
                 let parsed = match parse_i64_arg(&pair[1]) {
                     Ok(value) => value,
-                    Err(err) => return command_error_to_resp(err),
+                    Err(err) => return (err).to_resp(),
                 };
                 next_slowlog_slower_than = Some(parsed);
                 continue;
@@ -2519,7 +2540,7 @@ impl Runtime {
                             "ERR Invalid argument '?' for CONFIG SET 'slowlog-max-len'".to_string(),
                         );
                     }
-                    Err(err) => return command_error_to_resp(err),
+                    Err(err) => return (err).to_resp(),
                 };
                 next_slowlog_max_len = Some(parsed);
                 continue;
@@ -2532,7 +2553,7 @@ impl Runtime {
                             "ERR Invalid argument '?' for CONFIG SET 'hz'".to_string(),
                         );
                     }
-                    Err(err) => return command_error_to_resp(err),
+                    Err(err) => return (err).to_resp(),
                 };
                 next_hz = Some(parsed);
                 continue;
@@ -2678,7 +2699,7 @@ impl Runtime {
 
     fn handle_asking_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 1 {
-            return command_error_to_resp(CommandError::WrongArity("ASKING"));
+            return CommandError::WrongArity("ASKING").to_resp();
         }
         self.session.cluster_state.asking = true;
         RespFrame::SimpleString("OK".to_string())
@@ -2686,7 +2707,7 @@ impl Runtime {
 
     fn handle_readonly_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 1 {
-            return command_error_to_resp(CommandError::WrongArity("READONLY"));
+            return CommandError::WrongArity("READONLY").to_resp();
         }
         self.session.cluster_state.mode = ClusterClientMode::ReadOnly;
         RespFrame::SimpleString("OK".to_string())
@@ -2694,7 +2715,7 @@ impl Runtime {
 
     fn handle_readwrite_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 1 {
-            return command_error_to_resp(CommandError::WrongArity("READWRITE"));
+            return CommandError::WrongArity("READWRITE").to_resp();
         }
         self.session.cluster_state.mode = ClusterClientMode::ReadWrite;
         self.session.cluster_state.asking = false;
@@ -2703,15 +2724,15 @@ impl Runtime {
 
     fn handle_client_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 2 {
-            return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+            return CommandError::WrongArity("CLIENT").to_resp();
         }
         let sub = match std::str::from_utf8(&argv[1]) {
             Ok(s) => s,
-            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+            Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
         };
         if sub.eq_ignore_ascii_case("SETNAME") {
             if argv.len() != 3 {
-                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+                return CommandError::WrongArity("CLIENT").to_resp();
             }
             // Redis validates: name must not contain spaces
             if argv[2].contains(&b' ') {
@@ -2728,7 +2749,7 @@ impl Runtime {
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("GETNAME") {
             if argv.len() != 2 {
-                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+                return CommandError::WrongArity("CLIENT").to_resp();
             }
             match &self.session.client_name {
                 Some(name) => RespFrame::BulkString(Some(name.clone())),
@@ -2736,7 +2757,7 @@ impl Runtime {
             }
         } else if sub.eq_ignore_ascii_case("ID") {
             if argv.len() != 2 {
-                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+                return CommandError::WrongArity("CLIENT").to_resp();
             }
             RespFrame::Integer(self.session.client_id as i64)
         } else if sub.eq_ignore_ascii_case("LIST") || sub.eq_ignore_ascii_case("INFO") {
@@ -2776,11 +2797,11 @@ impl Runtime {
             RespFrame::BulkString(Some(info_line.into_bytes()))
         } else if sub.eq_ignore_ascii_case("NO-EVICT") {
             if argv.len() != 3 {
-                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+                return CommandError::WrongArity("CLIENT").to_resp();
             }
             let mode = match std::str::from_utf8(&argv[2]) {
                 Ok(m) => m,
-                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
             };
             if mode.eq_ignore_ascii_case("ON") {
                 self.session.client_no_evict = true;
@@ -2792,11 +2813,11 @@ impl Runtime {
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("NO-TOUCH") {
             if argv.len() != 3 {
-                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+                return CommandError::WrongArity("CLIENT").to_resp();
             }
             let mode = match std::str::from_utf8(&argv[2]) {
                 Ok(m) => m,
-                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
             };
             if mode.eq_ignore_ascii_case("ON") {
                 self.session.client_no_touch = true;
@@ -2809,15 +2830,15 @@ impl Runtime {
         } else if sub.eq_ignore_ascii_case("SETINFO") {
             // CLIENT SETINFO <attr> <value> (Redis 7.2+)
             if argv.len() != 4 {
-                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+                return CommandError::WrongArity("CLIENT").to_resp();
             }
             let attr = match std::str::from_utf8(&argv[2]) {
                 Ok(a) => a,
-                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
             };
             let val = match std::str::from_utf8(&argv[3]) {
                 Ok(v) => v.to_string(),
-                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
             };
             if attr.eq_ignore_ascii_case("LIB-NAME") || attr.eq_ignore_ascii_case("lib-name") {
                 // Redis validates: lib-name must not contain spaces or newlines
@@ -2845,7 +2866,7 @@ impl Runtime {
         } else if sub.eq_ignore_ascii_case("REPLY") {
             // CLIENT REPLY ON|OFF|SKIP
             if argv.len() != 3 {
-                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+                return CommandError::WrongArity("CLIENT").to_resp();
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("KILL") {
@@ -2856,27 +2877,27 @@ impl Runtime {
         } else if sub.eq_ignore_ascii_case("PAUSE") {
             // CLIENT PAUSE timeout [WRITE|ALL]
             if argv.len() < 3 {
-                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+                return CommandError::WrongArity("CLIENT").to_resp();
             }
             if parse_i64_arg(&argv[2]).is_err() {
-                return command_error_to_resp(CommandError::InvalidInteger);
+                return (CommandError::InvalidInteger).to_resp();
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("UNPAUSE") {
             if argv.len() != 2 {
-                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+                return CommandError::WrongArity("CLIENT").to_resp();
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("TRACKING") {
             // CLIENT TRACKING ON|OFF [REDIRECT id] [PREFIX prefix ...] [BCAST] [OPTIN] [OPTOUT] [NOLOOP]
             if argv.len() < 3 {
-                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+                return CommandError::WrongArity("CLIENT").to_resp();
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("CACHING") {
             // CLIENT CACHING YES|NO
             if argv.len() < 3 {
-                return command_error_to_resp(CommandError::WrongArity("CLIENT"));
+                return CommandError::WrongArity("CLIENT").to_resp();
             }
             RespFrame::SimpleString("OK".to_string())
         } else {
@@ -2888,7 +2909,7 @@ impl Runtime {
 
     fn handle_reset_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 1 {
-            return command_error_to_resp(CommandError::WrongArity("RESET"));
+            return CommandError::WrongArity("RESET").to_resp();
         }
         self.session.reset_connection_state(&self.server.auth_state);
         // Redis returns +RESET\r\n (a simple string "RESET")
@@ -2897,17 +2918,17 @@ impl Runtime {
 
     fn handle_slowlog_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 2 {
-            return command_error_to_resp(CommandError::WrongArity("SLOWLOG"));
+            return CommandError::WrongArity("SLOWLOG").to_resp();
         }
         let sub = match std::str::from_utf8(&argv[1]) {
             Ok(s) => s,
-            Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+            Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
         };
         if sub.eq_ignore_ascii_case("GET") {
             let count = if argv.len() >= 3 {
                 match parse_i64_arg(&argv[2]) {
                     Ok(c) if c >= 0 => c as usize,
-                    _ => return command_error_to_resp(CommandError::InvalidInteger),
+                    _ => return (CommandError::InvalidInteger).to_resp(),
                 }
             } else {
                 self.server.slowlog_max_len
@@ -2968,7 +2989,7 @@ impl Runtime {
 
     fn handle_save_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         if argv.len() != 1 {
-            return command_error_to_resp(CommandError::WrongArity("SAVE"));
+            return CommandError::WrongArity("SAVE").to_resp();
         }
         if let Err(reply) = self.persist_snapshot_to_disk(now_ms) {
             return reply;
@@ -2979,7 +3000,7 @@ impl Runtime {
 
     fn handle_bgsave_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         if argv.len() > 2 {
-            return command_error_to_resp(CommandError::WrongArity("BGSAVE"));
+            return CommandError::WrongArity("BGSAVE").to_resp();
         }
         // In a single-threaded context, BGSAVE behaves like SAVE.
         if let Err(reply) = self.persist_snapshot_to_disk(now_ms) {
@@ -3015,14 +3036,14 @@ impl Runtime {
 
     fn handle_lastsave_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 1 {
-            return command_error_to_resp(CommandError::WrongArity("LASTSAVE"));
+            return CommandError::WrongArity("LASTSAVE").to_resp();
         }
         RespFrame::Integer(self.server.last_save_time_sec as i64)
     }
 
     fn handle_bgrewriteaof_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         if argv.len() != 1 {
-            return command_error_to_resp(CommandError::WrongArity("BGREWRITEAOF"));
+            return CommandError::WrongArity("BGREWRITEAOF").to_resp();
         }
         // Rewrite the AOF file with a snapshot of the current store state.
         if let Some(path) = &self.server.aof_path {
@@ -3037,13 +3058,13 @@ impl Runtime {
 
     fn handle_shutdown_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() > 3 {
-            return command_error_to_resp(CommandError::WrongArity("SHUTDOWN"));
+            return CommandError::WrongArity("SHUTDOWN").to_resp();
         }
         // Validate flags: NOSAVE, SAVE, NOW, FORCE
         for arg in &argv[1..] {
             let s = match std::str::from_utf8(arg) {
                 Ok(s) => s,
-                Err(_) => return command_error_to_resp(CommandError::InvalidUtf8Argument),
+                Err(_) => return (CommandError::InvalidUtf8Argument).to_resp(),
             };
             if !s.eq_ignore_ascii_case("NOSAVE")
                 && !s.eq_ignore_ascii_case("SAVE")
@@ -3061,11 +3082,11 @@ impl Runtime {
 
     fn handle_cluster_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         if argv.len() < 2 {
-            return command_error_to_resp(CommandError::WrongArity("CLUSTER"));
+            return CommandError::WrongArity("CLUSTER").to_resp();
         }
         let subcommand = match classify_cluster_subcommand(&argv[1]) {
             Ok(subcommand) => subcommand,
-            Err(err) => return command_error_to_resp(err),
+            Err(err) => return (err).to_resp(),
         };
 
         if subcommand == ClusterSubcommand::Help {
@@ -3084,7 +3105,7 @@ impl Runtime {
         if subcommand == ClusterSubcommand::Dispatch {
             return match dispatch_argv(argv, &mut self.server.store, now_ms) {
                 Ok(reply) => reply,
-                Err(err) => command_error_to_resp(err),
+                Err(err) => (err).to_resp(),
             };
         }
 
@@ -3093,14 +3114,14 @@ impl Runtime {
 
     fn handle_wait_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 3 {
-            return command_error_to_resp(CommandError::WrongArity("WAIT"));
+            return CommandError::WrongArity("WAIT").to_resp();
         }
         let required_replicas = match parse_i64_arg(&argv[1]) {
             Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
-            _ => return command_error_to_resp(CommandError::InvalidInteger),
+            _ => return (CommandError::InvalidInteger).to_resp(),
         };
         if !matches!(parse_i64_arg(&argv[2]), Ok(value) if value >= 0) {
-            return command_error_to_resp(CommandError::InvalidInteger);
+            return (CommandError::InvalidInteger).to_resp();
         }
 
         let outcome = evaluate_wait(
@@ -3116,18 +3137,18 @@ impl Runtime {
 
     fn handle_waitaof_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 4 {
-            return command_error_to_resp(CommandError::WrongArity("WAITAOF"));
+            return CommandError::WrongArity("WAITAOF").to_resp();
         }
         let required_local = match parse_i64_arg(&argv[1]) {
             Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
-            _ => return command_error_to_resp(CommandError::InvalidInteger),
+            _ => return (CommandError::InvalidInteger).to_resp(),
         };
         let required_replicas = match parse_i64_arg(&argv[2]) {
             Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
-            _ => return command_error_to_resp(CommandError::InvalidInteger),
+            _ => return (CommandError::InvalidInteger).to_resp(),
         };
         if !matches!(parse_i64_arg(&argv[3]), Ok(value) if value >= 0) {
-            return command_error_to_resp(CommandError::InvalidInteger);
+            return (CommandError::InvalidInteger).to_resp();
         }
 
         let required_local_offset = if required_local == 0 {
@@ -3163,6 +3184,7 @@ impl Runtime {
             return RespFrame::Error("ERR MULTI calls can not be nested".to_string());
         }
         self.session.transaction_state.in_transaction = true;
+        self.session.transaction_state.exec_abort = false;
         self.session.transaction_state.command_queue.clear();
         RespFrame::SimpleString("OK".to_string())
     }
@@ -3178,7 +3200,17 @@ impl Runtime {
             return RespFrame::Error("ERR EXEC without MULTI".to_string());
         }
         let queued = std::mem::take(&mut self.session.transaction_state.command_queue);
+        let exec_abort = self.session.transaction_state.exec_abort;
         self.session.transaction_state.in_transaction = false;
+        self.session.transaction_state.exec_abort = false;
+
+        if exec_abort {
+            self.session.transaction_state.watched_keys.clear();
+            self.session.transaction_state.watch_dirty = false;
+            return RespFrame::Error(
+                "EXECABORT Transaction discarded because of previous errors.".to_string(),
+            );
+        }
 
         // Check watched keys: if any were modified, abort the transaction
         let watch_failed = self.session.transaction_state.watch_dirty || {
@@ -3221,7 +3253,7 @@ impl Runtime {
                     self.capture_aof_record(argv);
                     results.push(reply);
                 }
-                Err(err) => results.push(command_error_to_resp(err)),
+                Err(err) => results.push(err.to_resp()),
             }
         }
 
@@ -3236,6 +3268,7 @@ impl Runtime {
             return RespFrame::Error("ERR DISCARD without MULTI".to_string());
         }
         self.session.transaction_state.in_transaction = false;
+        self.session.transaction_state.exec_abort = false;
         self.session.transaction_state.command_queue.clear();
         self.session.transaction_state.watched_keys.clear();
         self.session.transaction_state.watch_dirty = false;
@@ -3473,72 +3506,6 @@ fn build_hello_response(protocol_version: i64, client_id: u64) -> RespFrame {
     ]))
 }
 
-fn command_error_to_resp(error: CommandError) -> RespFrame {
-    match error {
-        CommandError::InvalidCommandFrame => {
-            RespFrame::Error("ERR invalid command frame".to_string())
-        }
-        CommandError::InvalidUtf8Argument => {
-            RespFrame::Error("ERR invalid UTF-8 argument".to_string())
-        }
-        CommandError::UnknownCommand {
-            command,
-            args_preview,
-        } => {
-            let mut out = format!("ERR unknown command '{}'", command);
-            if let Some(args_preview) = args_preview {
-                out.push_str(", with args beginning with: ");
-                out.push_str(&args_preview);
-            }
-            RespFrame::Error(out)
-        }
-        CommandError::WrongArity(cmd) => RespFrame::Error(format!(
-            "ERR wrong number of arguments for '{}' command",
-            cmd.to_ascii_lowercase()
-        )),
-        CommandError::InvalidInteger => {
-            RespFrame::Error("ERR value is not an integer or out of range".to_string())
-        }
-        CommandError::SyntaxError => RespFrame::Error("ERR syntax error".to_string()),
-        CommandError::NoSuchKey => RespFrame::Error("ERR no such key".to_string()),
-        CommandError::Store(store_error) => match store_error {
-            fr_store::StoreError::ValueNotInteger => {
-                RespFrame::Error("ERR value is not an integer or out of range".to_string())
-            }
-            fr_store::StoreError::HashValueNotInteger => {
-                RespFrame::Error("ERR hash value is not an integer".to_string())
-            }
-            fr_store::StoreError::ValueNotFloat => {
-                RespFrame::Error("ERR value is not a valid float".to_string())
-            }
-            fr_store::StoreError::IncrFloatNaN => {
-                RespFrame::Error("ERR increment would produce NaN or Infinity".to_string())
-            }
-            fr_store::StoreError::IntegerOverflow => {
-                RespFrame::Error("ERR increment or decrement would overflow".to_string())
-            }
-            fr_store::StoreError::KeyNotFound => RespFrame::Error("ERR no such key".to_string()),
-            fr_store::StoreError::WrongType => RespFrame::Error(
-                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-            ),
-            fr_store::StoreError::InvalidHllValue => RespFrame::Error(
-                "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
-            ),
-            fr_store::StoreError::IndexOutOfRange => {
-                RespFrame::Error("ERR index out of range".to_string())
-            }
-            fr_store::StoreError::InvalidDumpPayload => {
-                RespFrame::Error("ERR DUMP payload version or checksum are wrong".to_string())
-            }
-            fr_store::StoreError::BusyKey => {
-                RespFrame::Error("BUSYKEY Target key name already exists.".to_string())
-            }
-            fr_store::StoreError::GenericError(msg) => RespFrame::Error(msg),
-        },
-        CommandError::Custom(msg) => RespFrame::Error(msg),
-    }
-}
-
 /// Convert Store entries to RDB entries for snapshot persistence.
 fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
     use fr_store::Value;
@@ -3649,7 +3616,7 @@ mod tests {
         EventLoopMode, EventLoopPhase, FdRegistrationError, LoopBootstrap, PendingWriteError,
         ReadPathError, ReadinessCallback, TickBudget,
     };
-    use fr_persist::{PersistError, decode_aof_stream};
+    use fr_persist::{AofRecord, PersistError, decode_aof_stream, write_aof_file};
     use fr_protocol::{RespFrame, parse_frame};
 
     use super::{
@@ -5573,6 +5540,66 @@ mod tests {
         ));
         let count = rt.load_aof(100).expect("should succeed for missing file");
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn load_aof_replaces_existing_store_and_tracks_loaded_records() {
+        let dir = std::env::temp_dir().join("fr_runtime_aof_replace_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let aof_path = dir.join("replace_state.aof");
+        let records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"fresh".to_vec(), b"value".to_vec()],
+        }];
+        write_aof_file(&aof_path, &records).expect("write test aof");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(aof_path.clone());
+        let stale_reply = rt.execute_frame(command(&[b"SET", b"stale", b"old"]), 0);
+        assert_eq!(stale_reply, RespFrame::SimpleString("OK".to_string()));
+
+        let loaded = rt.load_aof(50).expect("load should succeed");
+        assert_eq!(loaded, records.len());
+        assert_eq!(rt.aof_records(), records.as_slice());
+
+        let stale = rt.execute_frame(command(&[b"GET", b"stale"]), 100);
+        assert_eq!(stale, RespFrame::BulkString(None));
+        let fresh = rt.execute_frame(command(&[b"GET", b"fresh"]), 100);
+        assert_eq!(fresh, RespFrame::BulkString(Some(b"value".to_vec())));
+
+        let _ = std::fs::remove_file(&aof_path);
+    }
+
+    #[test]
+    fn load_aof_rejects_invalid_replay_without_mutating_existing_state() {
+        let dir = std::env::temp_dir().join("fr_runtime_aof_invalid_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let aof_path = dir.join("invalid_replay.aof");
+        let records = vec![
+            AofRecord {
+                argv: vec![b"SET".to_vec(), b"good".to_vec(), b"value".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"NOPE".to_vec(), b"bad".to_vec()],
+            },
+        ];
+        write_aof_file(&aof_path, &records).expect("write invalid test aof");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(aof_path.clone());
+        let original_reply = rt.execute_frame(command(&[b"SET", b"keep", b"safe"]), 0);
+        assert_eq!(original_reply, RespFrame::SimpleString("OK".to_string()));
+
+        let err = rt
+            .load_aof(50)
+            .expect_err("invalid replay must fail closed");
+        assert_eq!(err, PersistError::InvalidFrame);
+
+        let keep = rt.execute_frame(command(&[b"GET", b"keep"]), 100);
+        assert_eq!(keep, RespFrame::BulkString(Some(b"safe".to_vec())));
+        let good = rt.execute_frame(command(&[b"GET", b"good"]), 100);
+        assert_eq!(good, RespFrame::BulkString(None));
+
+        let _ = std::fs::remove_file(&aof_path);
     }
 
     #[test]
