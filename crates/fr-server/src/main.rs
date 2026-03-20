@@ -421,6 +421,7 @@ fn accept_connections(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_readable(
     token: Token,
     clients: &mut HashMap<Token, ClientConnection>,

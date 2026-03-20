@@ -1437,6 +1437,7 @@ impl Store {
         if let Some(last_id) = moved_last_id {
             self.stream_last_ids.insert(newkey.to_vec(), last_id);
         }
+        self.dirty = self.dirty.saturating_add(1);
         Ok(())
     }
 
@@ -1461,21 +1462,25 @@ impl Store {
         if let Some(last_id) = moved_last_id {
             self.stream_last_ids.insert(newkey.to_vec(), last_id);
         }
+        self.dirty = self.dirty.saturating_add(1);
         Ok(true)
     }
 
     #[must_use]
     pub fn keys_matching(&mut self, pattern: &[u8], now_ms: u64) -> Vec<Vec<u8>> {
         // Reap expired keys efficiently first.
+        let mut reaped = 0_u64;
         self.entries.retain(|key, entry| {
             if evaluate_expiry(now_ms, entry.expires_at_ms).should_evict {
                 self.stream_groups.remove(key.as_slice());
                 self.stream_last_ids.remove(key.as_slice());
+                reaped += 1;
                 false
             } else {
                 true
             }
         });
+        self.dirty = self.dirty.saturating_add(reaped);
         let mut result: Vec<Vec<u8>> = self
             .entries
             .keys()
@@ -1489,15 +1494,18 @@ impl Store {
     #[must_use]
     pub fn dbsize(&mut self, now_ms: u64) -> usize {
         // Reap expired keys efficiently first.
+        let mut reaped = 0_u64;
         self.entries.retain(|key, entry| {
             if evaluate_expiry(now_ms, entry.expires_at_ms).should_evict {
                 self.stream_groups.remove(key.as_slice());
                 self.stream_last_ids.remove(key.as_slice());
+                reaped += 1;
                 false
             } else {
                 true
             }
         });
+        self.dirty = self.dirty.saturating_add(reaped);
         self.entries.len()
     }
 
@@ -1774,23 +1782,28 @@ impl Store {
     pub fn hdel(&mut self, key: &[u8], fields: &[&[u8]], now_ms: u64) -> Result<u64, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
-            Some(entry) => match &mut entry.value {
-                Value::Hash(m) => {
-                    let mut removed = 0_u64;
-                    for field in fields {
-                        if m.remove(*field).is_some() {
-                            removed += 1;
-                        }
+            Some(entry) => {
+                let Value::Hash(m) = &mut entry.value else {
+                    return Err(StoreError::WrongType);
+                };
+                let mut removed = 0_u64;
+                for field in fields {
+                    if m.remove(*field).is_some() {
+                        removed += 1;
                     }
-                    if m.is_empty() {
-                        self.entries.remove(key);
-                        self.stream_groups.remove(key);
-                        self.stream_last_ids.remove(key);
-                    }
-                    Ok(removed)
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                let is_empty = m.is_empty();
+                if removed > 0 {
+                    entry.touch(now_ms);
+                    self.dirty = self.dirty.saturating_add(removed);
+                }
+                if is_empty {
+                    self.entries.remove(key);
+                    self.stream_groups.remove(key);
+                    self.stream_last_ids.remove(key);
+                }
+                Ok(removed)
+            }
             None => Ok(0),
         }
     }
@@ -1921,6 +1934,7 @@ impl Store {
             .ok_or(StoreError::IntegerOverflow)?;
         m.insert(field.to_vec(), next.to_string().into_bytes());
         entry.touch(now_ms);
+        self.dirty = self.dirty.saturating_add(1);
         Ok(next)
     }
 
@@ -1942,6 +1956,7 @@ impl Store {
         if let std::collections::btree_map::Entry::Vacant(slot) = m.entry(field) {
             slot.insert(value);
             entry.touch(now_ms);
+            self.dirty = self.dirty.saturating_add(1);
             Ok(true)
         } else {
             Ok(false)
@@ -1988,6 +2003,7 @@ impl Store {
         }
         m.insert(field.to_vec(), next.to_string().into_bytes());
         entry.touch(now_ms);
+        self.dirty = self.dirty.saturating_add(1);
         Ok(next)
     }
 
@@ -2102,6 +2118,7 @@ impl Store {
                     }
                     let len = l.len();
                     entry.touch(now_ms);
+                    self.dirty = self.dirty.saturating_add(values.len() as u64);
                     Ok(len)
                 }
                 _ => Err(StoreError::WrongType),
@@ -2114,6 +2131,7 @@ impl Store {
                 let len = l.len();
                 self.entries
                     .insert(key.to_vec(), Entry::new(Value::List(l), None, now_ms));
+                self.dirty = self.dirty.saturating_add(values.len() as u64);
                 Ok(len)
             }
         }
@@ -2134,6 +2152,7 @@ impl Store {
                     }
                     let len = l.len();
                     entry.touch(now_ms);
+                    self.dirty = self.dirty.saturating_add(values.len() as u64);
                     Ok(len)
                 }
                 _ => Err(StoreError::WrongType),
@@ -2146,6 +2165,7 @@ impl Store {
                 let len = l.len();
                 self.entries
                     .insert(key.to_vec(), Entry::new(Value::List(l), None, now_ms));
+                self.dirty = self.dirty.saturating_add(values.len() as u64);
                 Ok(len)
             }
         }
@@ -2157,11 +2177,14 @@ impl Store {
             Some(entry) => match &mut entry.value {
                 Value::List(l) => {
                     let val = l.pop_front();
+                    if val.is_some() {
+                        self.dirty = self.dirty.saturating_add(1);
+                    }
                     if l.is_empty() {
                         self.entries.remove(key);
                         self.stream_groups.remove(key);
                         self.stream_last_ids.remove(key);
-                    } else {
+                    } else if val.is_some() {
                         entry.touch(now_ms);
                     }
                     Ok(val)
@@ -2178,11 +2201,14 @@ impl Store {
             Some(entry) => match &mut entry.value {
                 Value::List(l) => {
                     let val = l.pop_back();
+                    if val.is_some() {
+                        self.dirty = self.dirty.saturating_add(1);
+                    }
                     if l.is_empty() {
                         self.entries.remove(key);
                         self.stream_groups.remove(key);
                         self.stream_last_ids.remove(key);
-                    } else {
+                    } else if val.is_some() {
                         entry.touch(now_ms);
                     }
                     Ok(val)
@@ -2279,6 +2305,7 @@ impl Store {
                     let idx = normalize_index(index, len);
                     l[idx] = value;
                     entry.touch(now_ms);
+                    self.dirty = self.dirty.saturating_add(1);
                     Ok(())
                 }
                 _ => Err(StoreError::WrongType),
@@ -2393,6 +2420,7 @@ impl Store {
                         l.insert(pos, value);
                         let len = l.len();
                         entry.touch(now_ms);
+                        self.dirty = self.dirty.saturating_add(1);
                         Ok(len as i64)
                     } else {
                         Ok(-1)
@@ -2419,6 +2447,7 @@ impl Store {
                         l.insert(pos + 1, value);
                         let len = l.len();
                         entry.touch(now_ms);
+                        self.dirty = self.dirty.saturating_add(1);
                         Ok(len as i64)
                     } else {
                         Ok(-1)
@@ -2468,10 +2497,15 @@ impl Store {
                         l.retain(|v| v.as_slice() != value);
                         removed = (old_len - l.len()) as u64;
                     }
-                    if l.is_empty() {
-                        self.entries.remove(key);
-                        self.stream_groups.remove(key);
-                        self.stream_last_ids.remove(key);
+                    if removed > 0 {
+                        self.dirty = self.dirty.saturating_add(removed);
+                        if l.is_empty() {
+                            self.entries.remove(key);
+                            self.stream_groups.remove(key);
+                            self.stream_last_ids.remove(key);
+                        } else {
+                            entry.touch(now_ms);
+                        }
                     }
                     Ok(removed)
                 }
@@ -2508,7 +2542,13 @@ impl Store {
         // Pop from source
         let popped = match self.entries.get_mut(source) {
             Some(entry) => match &mut entry.value {
-                Value::List(l) => l.pop_back(),
+                Value::List(l) => {
+                    let val = l.pop_back();
+                    if val.is_some() && !l.is_empty() {
+                        entry.touch(now_ms);
+                    }
+                    val
+                }
                 _ => return Err(StoreError::WrongType),
             },
             None => return Ok(None),
@@ -2537,7 +2577,10 @@ impl Store {
         // Push to destination
         match self.entries.get_mut(destination) {
             Some(entry) => match &mut entry.value {
-                Value::List(l) => l.push_front(val.clone()),
+                Value::List(l) => {
+                    l.push_front(val.clone());
+                    entry.touch(now_ms);
+                }
                 _ => return Err(StoreError::WrongType),
             },
             None => {
@@ -2549,6 +2592,7 @@ impl Store {
                 );
             }
         }
+        self.dirty = self.dirty.saturating_add(1);
         Ok(Some(val))
     }
 
@@ -2566,6 +2610,7 @@ impl Store {
                     let len = l.len() as i64;
                     let s = normalize_index(start, len);
                     let e = normalize_index(stop, len);
+                    let old_len = l.len();
                     if s > e || s >= len as usize {
                         l.clear();
                     } else {
@@ -2574,12 +2619,16 @@ impl Store {
                             l.iter().skip(s).take(end - s).cloned().collect();
                         *l = trimmed;
                     }
+                    let removed = old_len - l.len();
                     if l.is_empty() {
                         self.entries.remove(key);
                         self.stream_groups.remove(key);
                         self.stream_last_ids.remove(key);
-                    } else {
+                    } else if removed > 0 {
                         entry.touch(now_ms);
+                    }
+                    if removed > 0 {
+                        self.dirty = self.dirty.saturating_add(removed as u64);
                     }
                     Ok(())
                 }
@@ -2661,11 +2710,15 @@ impl Store {
         let popped = match self.entries.get_mut(source) {
             Some(entry) => match &mut entry.value {
                 Value::List(l) => {
-                    if eq_ascii_ci(wherefrom, b"LEFT") {
+                    let val = if eq_ascii_ci(wherefrom, b"LEFT") {
                         l.pop_front()
                     } else {
                         l.pop_back()
+                    };
+                    if val.is_some() && !l.is_empty() {
+                        entry.touch(now_ms);
                     }
+                    val
                 }
                 _ => return Err(StoreError::WrongType),
             },
@@ -2700,6 +2753,7 @@ impl Store {
                     } else {
                         l.push_back(val.clone());
                     }
+                    entry.touch(now_ms);
                 }
                 _ => return Err(StoreError::WrongType),
             },
@@ -2716,6 +2770,7 @@ impl Store {
                 );
             }
         }
+        self.dirty = self.dirty.saturating_add(1);
         Ok(Some(val))
     }
 
@@ -3338,10 +3393,7 @@ impl Store {
         };
         if added > 0 || changed > 0 {
             entry.touch(now_ms);
-            let mutated_count = if opts.ch { added + changed } else { added };
-            if mutated_count > 0 {
-                self.dirty = self.dirty.saturating_add(mutated_count as u64);
-            }
+            self.dirty = self.dirty.saturating_add((added + changed) as u64);
         }
         if opts.ch {
             Ok((added + changed, changed))
@@ -3633,10 +3685,15 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let result = zs
-                        .iter_asc()
-                        .filter(|&(_, &s)| score_in_range(s, min, max))
-                        .count();
+                    let lower = match min {
+                        ScoreBound::Inclusive(s) => Included(ScoreMember::min_for_score(s)),
+                        ScoreBound::Exclusive(s) => Excluded(ScoreMember::max_for_score(s)),
+                    };
+                    let upper = match max {
+                        ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
+                        ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
+                    };
+                    let result = zs.ordered.range((lower, upper)).count();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -3668,6 +3725,7 @@ impl Store {
         }
         zs.insert(member, new_score);
         entry.touch(now_ms);
+        self.dirty = self.dirty.saturating_add(1);
         Ok(new_score)
     }
 
@@ -3687,11 +3745,13 @@ impl Store {
         let result = zs.pop_min();
         let is_empty = zs.is_empty();
         if result.is_some() {
-            entry.touch(now_ms);
+            self.dirty = self.dirty.saturating_add(1);
             if is_empty {
                 self.entries.remove(key);
                 self.stream_groups.remove(key);
                 self.stream_last_ids.remove(key);
+            } else {
+                entry.touch(now_ms);
             }
         }
         Ok(result)
@@ -3713,11 +3773,13 @@ impl Store {
         let result = zs.pop_max();
         let is_empty = zs.is_empty();
         if result.is_some() {
-            entry.touch(now_ms);
+            self.dirty = self.dirty.saturating_add(1);
             if is_empty {
                 self.entries.remove(key);
                 self.stream_groups.remove(key);
                 self.stream_last_ids.remove(key);
+            } else {
+                entry.touch(now_ms);
             }
         }
         Ok(result)
@@ -5607,6 +5669,7 @@ impl Store {
                 self.entries.remove(&key);
                 self.stream_groups.remove(key.as_slice());
                 self.stream_last_ids.remove(key.as_slice());
+                self.dirty = self.dirty.saturating_add(1);
                 if self.entries.is_empty() {
                     return None;
                 }
@@ -5627,11 +5690,13 @@ impl Store {
                 break;
             }
         }
+        let reaped = expired_keys.len() as u64;
         for key in expired_keys {
             self.entries.remove(&key);
             self.stream_groups.remove(key.as_slice());
             self.stream_last_ids.remove(key.as_slice());
         }
+        self.dirty = self.dirty.saturating_add(reaped);
         result
     }
 
