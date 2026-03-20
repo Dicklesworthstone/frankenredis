@@ -1564,9 +1564,21 @@ impl Runtime {
             return reply;
         }
 
-        // Commands that must execute immediately even inside MULTI/EXEC:
-        // MULTI, EXEC, DISCARD, WATCH, UNWATCH, QUIT, RESET.
+        // Dispatch runtime-special commands. These execute immediately even
+        // inside MULTI/EXEC because they require runtime state not available
+        // during EXEC replay (which only uses dispatch_argv → Store).
         match special_command {
+            Some(RuntimeSpecialCommand::Acl) => return self.handle_acl_command(&argv),
+            Some(RuntimeSpecialCommand::Config) => return self.handle_config_command(&argv),
+            Some(RuntimeSpecialCommand::Client) => return self.handle_client_command(&argv),
+            Some(RuntimeSpecialCommand::Asking) => return self.handle_asking_command(&argv),
+            Some(RuntimeSpecialCommand::Readonly) => return self.handle_readonly_command(&argv),
+            Some(RuntimeSpecialCommand::Readwrite) => return self.handle_readwrite_command(&argv),
+            Some(RuntimeSpecialCommand::Cluster) => {
+                return self.handle_cluster_command(&argv, now_ms);
+            }
+            Some(RuntimeSpecialCommand::Wait) => return self.handle_wait_command(&argv),
+            Some(RuntimeSpecialCommand::Waitaof) => return self.handle_waitaof_command(&argv),
             Some(RuntimeSpecialCommand::Multi) => return self.handle_multi_command(),
             Some(RuntimeSpecialCommand::Exec) => {
                 return self.handle_exec_command(now_ms, packet_id, &input_digest, &state_before);
@@ -1576,12 +1588,28 @@ impl Runtime {
             Some(RuntimeSpecialCommand::Unwatch) => return self.handle_unwatch_command(&argv),
             Some(RuntimeSpecialCommand::Quit) => return RespFrame::SimpleString("OK".to_string()),
             Some(RuntimeSpecialCommand::Reset) => return self.handle_reset_command(&argv),
+            Some(RuntimeSpecialCommand::Slowlog) => {
+                return self.handle_slowlog_command(&argv);
+            }
+            Some(RuntimeSpecialCommand::Save) => {
+                return self.handle_save_command(&argv, now_ms);
+            }
+            Some(RuntimeSpecialCommand::Bgsave) => {
+                return self.handle_bgsave_command(&argv, now_ms);
+            }
+            Some(RuntimeSpecialCommand::Lastsave) => {
+                return self.handle_lastsave_command(&argv);
+            }
+            Some(RuntimeSpecialCommand::Bgrewriteaof) => {
+                return self.handle_bgrewriteaof_command(&argv, now_ms);
+            }
+            Some(RuntimeSpecialCommand::Shutdown) => {
+                return self.handle_shutdown_command(&argv);
+            }
             _ => {}
         }
 
-        // If inside a MULTI transaction, queue the command instead of executing it.
-        // All remaining commands (including runtime-special ones like CONFIG, ACL,
-        // CLIENT, etc.) are queued for atomic execution at EXEC time.
+        // If inside a MULTI transaction, queue the command instead of executing it
         if self.session.transaction_state.in_transaction {
             let cmd_bytes = match argv.first() {
                 Some(cmd) => cmd,
