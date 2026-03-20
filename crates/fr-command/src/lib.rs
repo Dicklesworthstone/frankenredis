@@ -25,6 +25,74 @@ pub enum CommandError {
     Custom(String),
 }
 
+impl CommandError {
+    pub fn to_resp(&self) -> RespFrame {
+        match self {
+            CommandError::InvalidCommandFrame => {
+                RespFrame::Error("ERR invalid command frame".to_string())
+            }
+            CommandError::InvalidUtf8Argument => {
+                RespFrame::Error("ERR invalid UTF-8 argument".to_string())
+            }
+            CommandError::UnknownCommand {
+                command,
+                args_preview,
+            } => {
+                let mut out = format!("ERR unknown command '{}'", command);
+                if let Some(args_preview) = args_preview {
+                    out.push_str(", with args beginning with: ");
+                    out.push_str(args_preview);
+                }
+                RespFrame::Error(out)
+            }
+            CommandError::WrongArity(cmd) => RespFrame::Error(format!(
+                "ERR wrong number of arguments for '{}' command",
+                cmd.to_ascii_lowercase()
+            )),
+            CommandError::InvalidInteger => {
+                RespFrame::Error("ERR value is not an integer or out of range".to_string())
+            }
+            CommandError::SyntaxError => RespFrame::Error("ERR syntax error".to_string()),
+            CommandError::NoSuchKey => RespFrame::Error("ERR no such key".to_string()),
+            CommandError::Store(store_error) => match store_error {
+                fr_store::StoreError::ValueNotInteger => {
+                    RespFrame::Error("ERR value is not an integer or out of range".to_string())
+                }
+                fr_store::StoreError::HashValueNotInteger => {
+                    RespFrame::Error("ERR hash value is not an integer".to_string())
+                }
+                fr_store::StoreError::ValueNotFloat => {
+                    RespFrame::Error("ERR value is not a valid float".to_string())
+                }
+                fr_store::StoreError::IncrFloatNaN => {
+                    RespFrame::Error("ERR increment would produce NaN or Infinity".to_string())
+                }
+                fr_store::StoreError::IntegerOverflow => {
+                    RespFrame::Error("ERR increment or decrement would overflow".to_string())
+                }
+                fr_store::StoreError::KeyNotFound => RespFrame::Error("ERR no such key".to_string()),
+                fr_store::StoreError::WrongType => RespFrame::Error(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
+                ),
+                fr_store::StoreError::InvalidHllValue => RespFrame::Error(
+                    "WRONGTYPE Key is not a valid HyperLogLog string value.".to_string(),
+                ),
+                fr_store::StoreError::IndexOutOfRange => {
+                    RespFrame::Error("ERR index out of range".to_string())
+                }
+                fr_store::StoreError::InvalidDumpPayload => {
+                    RespFrame::Error("ERR DUMP payload version or checksum are wrong".to_string())
+                }
+                fr_store::StoreError::BusyKey => {
+                    RespFrame::Error("BUSYKEY Target key name already exists.".to_string())
+                }
+                fr_store::StoreError::GenericError(msg) => RespFrame::Error(msg.clone()),
+            },
+            CommandError::Custom(msg) => RespFrame::Error(msg.clone()),
+        }
+    }
+}
+
 impl From<StoreError> for CommandError {
     fn from(value: StoreError) -> Self {
         Self::Store(value)
@@ -386,7 +454,7 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CommandId {
+pub enum CommandId {
     Ping,
     Echo,
     Set,
@@ -608,6 +676,11 @@ enum CommandId {
     Bzpopmin,
     Bzpopmax,
     Bzmpop,
+}
+
+#[inline]
+pub fn is_known_command(cmd: &[u8]) -> bool {
+    classify_command(cmd).is_some()
 }
 
 #[inline]
@@ -6174,7 +6247,7 @@ fn build_unknown_args_preview(argv: &[Vec<u8>]) -> Option<String> {
     if out.is_empty() { None } else { Some(out) }
 }
 
-fn trim_and_cap_string(input: &str, cap: usize) -> String {
+pub fn trim_and_cap_string(input: &str, cap: usize) -> String {
     let mut out = String::new();
     for ch in input.chars() {
         if out.len() + ch.len_utf8() > cap {
@@ -9409,7 +9482,7 @@ fn parse_blocking_timeout(arg: &[u8]) -> Result<f64, CommandError> {
     let timeout: f64 = text.parse().map_err(|_| {
         CommandError::Custom("ERR timeout is not a float or out of range".to_string())
     })?;
-    if timeout.is_nan() {
+    if !timeout.is_finite() {
         return Err(CommandError::Custom(
             "ERR timeout is not a float or out of range".to_string(),
         ));
@@ -17092,6 +17165,44 @@ mod tests {
     }
 
     #[test]
+    fn incrbyfloat_preserves_infinity_until_nan_transition() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+
+        let inf = dispatch_argv(
+            &[b"INCRBYFLOAT".to_vec(), b"k".to_vec(), b"inf".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("incrbyfloat inf");
+        assert_eq!(inf, RespFrame::BulkString(Some(b"inf".to_vec())));
+
+        let keep_inf = dispatch_argv(
+            &[b"INCRBYFLOAT".to_vec(), b"k".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("incrbyfloat keep inf");
+        assert_eq!(keep_inf, RespFrame::BulkString(Some(b"inf".to_vec())));
+
+        let nan_transition = dispatch_argv(
+            &[b"INCRBYFLOAT".to_vec(), b"k".to_vec(), b"-inf".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            nan_transition.to_resp(),
+            RespFrame::Error("ERR increment would produce NaN or Infinity".to_string())
+        );
+    }
+
+    #[test]
     fn setex_rejects_zero_ttl() {
         let mut store = Store::new();
         let err = dispatch_argv(
@@ -18801,6 +18912,19 @@ mod tests {
             0,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn blpop_nonfinite_timeout_rejected() {
+        let mut store = Store::new();
+        for timeout in [b"inf".as_slice(), b"+inf".as_slice(), b"NaN".as_slice()] {
+            let result = dispatch_argv(
+                &[b"BLPOP".to_vec(), b"key".to_vec(), timeout.to_vec()],
+                &mut store,
+                0,
+            );
+            assert!(result.is_err(), "timeout {timeout:?} must be rejected");
+        }
     }
 
     #[test]
