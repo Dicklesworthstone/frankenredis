@@ -1036,18 +1036,15 @@ impl Store {
                 Value::String(v) => {
                     let len = v.len() as i64;
                     let mut s = if start < 0 { len + start } else { start };
-                    let mut e = if end < 0 { len + end } else { end };
+                    let e = if end < 0 { len + end } else { end };
                     if s < 0 {
                         s = 0;
-                    }
-                    if e < 0 {
-                        e = 0;
                     }
                     if s > e || len == 0 || s >= len {
                         Ok(Vec::new())
                     } else {
-                        let end_idx = (e + 1).min(len) as usize;
-                        Ok(v[s as usize..end_idx].to_vec())
+                        let e_idx = e.min(len - 1) as usize;
+                        Ok(v[s as usize..e_idx + 1].to_vec())
                     }
                 }
                 _ => Err(StoreError::WrongType),
@@ -1252,15 +1249,18 @@ impl Store {
                         None => 0,
                     };
                     let e = match end {
-                        Some(e) if e < 0 => (len + e).max(0) as usize,
-                        Some(e) => e as usize,
-                        None => v.len().saturating_sub(1),
+                        Some(e) if e < 0 => len + e,
+                        Some(e) => e,
+                        None => len - 1,
                     };
-                    if s > e || s >= v.len() {
+                    if s as i64 > e || len == 0 || s >= v.len() {
                         return Ok(0);
                     }
-                    let end_idx = (e + 1).min(v.len());
-                    let count = v[s..end_idx].iter().map(|b| b.count_ones() as usize).sum();
+                    let end_idx_excl = (e.min(len - 1) as usize).min(v.len() - 1) + 1;
+                    let count = v[s..end_idx_excl]
+                        .iter()
+                        .map(|b| b.count_ones() as usize)
+                        .sum();
                     Ok(count)
                 }
                 _ => Err(StoreError::WrongType),
@@ -1299,15 +1299,15 @@ impl Store {
             None => 0,
         };
         let e = match end {
-            Some(e) if e < 0 => (len + e).max(0) as usize,
-            Some(e) => e as usize,
-            None => bytes.len().saturating_sub(1),
+            Some(e) if e < 0 => len + e,
+            Some(e) => e,
+            None => len - 1,
         };
-        if s > e || s >= bytes.len() {
+        if s as i64 > e || s >= bytes.len() {
             return Ok(-1);
         }
-        let end_idx = (e + 1).min(bytes.len());
-        let slice = &bytes[s..end_idx];
+        let end_idx_excl = (e.min(len - 1) as usize).min(bytes.len() - 1) + 1;
+        let slice = &bytes[s..end_idx_excl];
         for (byte_offset, &byte) in slice.iter().enumerate() {
             if bit {
                 if byte != 0 {
@@ -1324,7 +1324,7 @@ impl Store {
         // If searching for 0 with no explicit end, and all bits in range are 1,
         // return the position just past the last byte of the string
         if !bit && !has_end {
-            return Ok((end_idx * 8) as i64);
+            return Ok((end_idx_excl * 8) as i64);
         }
         Ok(-1)
     }
@@ -2299,12 +2299,13 @@ impl Store {
             Some(entry) => match &entry.value {
                 Value::List(l) => {
                     let len = l.len() as i64;
-                    let s = normalize_index(start, len);
-                    let e = normalize_index(stop, len);
-                    if s > e || s >= len as usize {
+                    let s = normalize_index(start, len).max(0);
+                    let e = normalize_index(stop, len).min(len - 1);
+                    if s > e || s >= len || e < 0 {
                         return Ok(Vec::new());
                     }
-                    let e = e.min(len as usize - 1);
+                    let s = s as usize;
+                    let e = e as usize;
                     let result: Vec<Vec<u8>> = l.iter().skip(s).take(e - s + 1).cloned().collect();
                     entry.touch(now_ms);
                     Ok(result)
@@ -2329,7 +2330,7 @@ impl Store {
                     if index < -len || index >= len {
                         return Ok(None);
                     }
-                    let idx = normalize_index(index, len);
+                    let idx = normalize_index(index, len) as usize;
                     let result = l.get(idx).cloned();
                     entry.touch(now_ms);
                     Ok(result)
@@ -2355,7 +2356,7 @@ impl Store {
                     if index < -len || index >= len {
                         return Err(StoreError::IndexOutOfRange);
                     }
-                    let idx = normalize_index(index, len);
+                    let idx = normalize_index(index, len) as usize;
                     l[idx] = value;
                     entry.touch(now_ms);
                     self.dirty = self.dirty.saturating_add(1);
@@ -2661,16 +2662,20 @@ impl Store {
             Some(entry) => match &mut entry.value {
                 Value::List(l) => {
                     let len = l.len() as i64;
-                    let s = normalize_index(start, len);
-                    let e = normalize_index(stop, len);
+                    let s = normalize_index(start, len).max(0);
+                    let e = normalize_index(stop, len).min(len - 1);
                     let old_len = l.len();
-                    if s > e || s >= len as usize {
+                    if s > e || s >= len || e < 0 {
                         l.clear();
                     } else {
-                        let end = (e + 1).min(len as usize);
-                        let trimmed: VecDeque<Vec<u8>> =
-                            l.iter().skip(s).take(end - s).cloned().collect();
-                        *l = trimmed;
+                        let s = s as usize;
+                        let e = e as usize;
+                        for _ in 0..s {
+                            l.pop_front();
+                        }
+                        while l.len() > (e - s + 1) {
+                            l.pop_back();
+                        }
                     }
                     let removed = old_len - l.len();
                     if l.is_empty() {
@@ -3593,13 +3598,15 @@ impl Store {
                     let len = zs.len() as i64;
                     let s = normalize_index(start, len);
                     let e = normalize_index(stop, len);
-                    if s > e || s >= zs.len() {
+                    if s > e || s >= len {
                         return Ok(Vec::new());
                     }
-                    let count = e - s + 1;
+                    let s_idx = s.max(0) as usize;
+                    let e_idx = e.min(len - 1) as usize;
+                    let count = e_idx - s_idx + 1;
                     let result: Vec<Vec<u8>> = zs
                         .iter_asc()
-                        .skip(s)
+                        .skip(s_idx)
                         .take(count)
                         .map(|(m, _)| m.clone())
                         .collect();
@@ -3627,13 +3634,15 @@ impl Store {
                     let len = zs.len() as i64;
                     let s = normalize_index(start, len);
                     let e = normalize_index(stop, len);
-                    if s > e || s >= zs.len() {
+                    if s > e || s >= len {
                         return Ok(Vec::new());
                     }
-                    let count = e - s + 1;
+                    let s_idx = s.max(0) as usize;
+                    let e_idx = e.min(len - 1) as usize;
+                    let count = e_idx - s_idx + 1;
                     let result: Vec<Vec<u8>> = zs
                         .iter_desc()
-                        .skip(s)
+                        .skip(s_idx)
                         .take(count)
                         .map(|(m, _)| m.clone())
                         .collect();
@@ -3921,13 +3930,15 @@ impl Store {
                     let len = zs.len() as i64;
                     let s = normalize_index(start, len);
                     let e = normalize_index(stop, len);
-                    if s > e || s >= zs.len() {
+                    if s > e || s >= len {
                         return Ok(Vec::new());
                     }
-                    let count = e - s + 1;
+                    let s_idx = s.max(0) as usize;
+                    let e_idx = e.min(len - 1) as usize;
+                    let count = e_idx - s_idx + 1;
                     let result: Vec<(Vec<u8>, f64)> = zs
                         .iter_asc()
-                        .skip(s)
+                        .skip(s_idx)
                         .take(count)
                         .map(|(m, &s)| (m.clone(), s))
                         .collect();
@@ -3954,13 +3965,15 @@ impl Store {
                     let len = zs.len() as i64;
                     let s = normalize_index(start, len);
                     let e = normalize_index(stop, len);
-                    if s > e || s >= zs.len() {
+                    if s > e || s >= len {
                         return Ok(Vec::new());
                     }
-                    let count = e - s + 1;
+                    let s_idx = s.max(0) as usize;
+                    let e_idx = e.min(len - 1) as usize;
+                    let count = e_idx - s_idx + 1;
                     let result: Vec<(Vec<u8>, f64)> = zs
                         .iter_desc()
-                        .skip(s)
+                        .skip(s_idx)
                         .take(count)
                         .map(|(m, &s)| (m.clone(), s))
                         .collect();
@@ -4119,13 +4132,15 @@ impl Store {
                     let len = zs.len();
                     let s = normalize_index(start, len as i64);
                     let e = normalize_index(stop, len as i64);
-                    if s > e || s >= len {
+                    if s > e || s >= len as i64 {
                         return Ok(0);
                     }
-                    let count = (e - s + 1).min(len - s);
+                    let s_idx = s.max(0) as usize;
+                    let e_idx = e.min(len as i64 - 1) as usize;
+                    let count = e_idx - s_idx + 1;
                     let to_remove: Vec<Vec<u8>> = zs
                         .iter_asc()
-                        .skip(s)
+                        .skip(s_idx)
                         .take(count)
                         .map(|(m, _)| m.clone())
                         .collect();
@@ -7385,12 +7400,11 @@ fn bitfield_write(bytes: &mut [u8], bit_offset: u64, bits: u8, value: i64) {
     }
 }
 
-fn normalize_index(index: i64, len: i64) -> usize {
+fn normalize_index(index: i64, len: i64) -> i64 {
     if index < 0 {
-        let adjusted = len.saturating_add(index);
-        if adjusted < 0 { 0 } else { adjusted as usize }
+        len.saturating_add(index)
     } else {
-        index as usize
+        index
     }
 }
 
@@ -8349,6 +8363,9 @@ mod tests {
             vec![b"b".to_vec(), b"c".to_vec()]
         );
         assert_eq!(store.lrange(b"l", 0, 0, 0).unwrap(), vec![b"a".to_vec()]);
+        // Redis parity: stop < -len or stop < start returns empty array
+        assert!(store.lrange(b"l", 0, -100, 0).unwrap().is_empty());
+        assert!(store.lrange(b"l", 1, 0, 0).unwrap().is_empty());
     }
 
     #[test]
@@ -8389,7 +8406,8 @@ mod tests {
             vec![b"b".to_vec(), b"c".to_vec()]
         );
 
-        store.ltrim(b"l", 9, 12, 0).unwrap();
+        // Redis parity: LTRIM 0 -100 clears the list
+        store.ltrim(b"l", 0, -100, 0).unwrap();
         assert!(!store.exists(b"l", 0));
     }
 
