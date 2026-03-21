@@ -361,6 +361,8 @@ fn main() -> ExitCode {
                 blocked_tokens.remove(&token);
                 closing_tokens.remove(&token);
                 write_tokens.remove(&token);
+                // Clean up Pub/Sub subscriptions for this client.
+                runtime.pubsub_cleanup_client(conn.session.client_id);
                 let _ = poll.registry().deregister(&mut conn.stream);
             }
         }

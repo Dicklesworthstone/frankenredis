@@ -1363,13 +1363,12 @@ impl Runtime {
     /// Subscribe the current client to a channel. Returns total subscription count.
     pub fn pubsub_subscribe(&mut self, channel: Vec<u8>) -> usize {
         let client_id = self.session.client_id;
+        self.server.store.subscribe(channel.clone());
         self.server
             .pubsub_channel_subs
             .entry(channel)
             .or_default()
             .insert(client_id);
-        // Also track in the per-client Store for PUBSUB NUMSUB queries
-        self.server.store.subscribe(channel.clone());
         self.pubsub_sub_count()
     }
 
@@ -1389,12 +1388,12 @@ impl Runtime {
     /// Subscribe the current client to a pattern. Returns total subscription count.
     pub fn pubsub_psubscribe(&mut self, pattern: Vec<u8>) -> usize {
         let client_id = self.session.client_id;
+        self.server.store.psubscribe(pattern.clone());
         self.server
             .pubsub_pattern_subs
             .entry(pattern)
             .or_default()
             .insert(client_id);
-        self.server.store.psubscribe(pattern.clone());
         self.pubsub_sub_count()
     }
 
@@ -1414,12 +1413,12 @@ impl Runtime {
     /// Subscribe the current client to a shard channel. Returns shard sub count.
     pub fn pubsub_ssubscribe(&mut self, channel: Vec<u8>) -> usize {
         let client_id = self.session.client_id;
+        self.server.store.ssubscribe(channel.clone());
         self.server
             .pubsub_shard_subs
             .entry(channel)
             .or_default()
             .insert(client_id);
-        self.server.store.ssubscribe(channel.clone());
         self.server.store.subscribed_shard_channels.len()
     }
 
@@ -1504,30 +1503,23 @@ impl Runtime {
 
     /// Remove all subscriptions for a client (called on disconnect).
     pub fn pubsub_cleanup_client(&mut self, client_id: u64) {
-        self.server
-            .pubsub_channel_subs
-            .retain(|_, clients| {
-                clients.remove(&client_id);
-                !clients.is_empty()
-            });
-        self.server
-            .pubsub_pattern_subs
-            .retain(|_, clients| {
-                clients.remove(&client_id);
-                !clients.is_empty()
-            });
-        self.server
-            .pubsub_shard_subs
-            .retain(|_, clients| {
-                clients.remove(&client_id);
-                !clients.is_empty()
-            });
+        self.server.pubsub_channel_subs.retain(|_, clients| {
+            clients.remove(&client_id);
+            !clients.is_empty()
+        });
+        self.server.pubsub_pattern_subs.retain(|_, clients| {
+            clients.remove(&client_id);
+            !clients.is_empty()
+        });
+        self.server.pubsub_shard_subs.retain(|_, clients| {
+            clients.remove(&client_id);
+            !clients.is_empty()
+        });
         self.server.pubsub_outbox.remove(&client_id);
     }
 
     fn pubsub_sub_count(&self) -> usize {
-        self.server.store.subscribed_channels.len()
-            + self.server.store.subscribed_patterns.len()
+        self.server.store.subscribed_channels.len() + self.server.store.subscribed_patterns.len()
     }
 
     pub fn configure_maxmemory_enforcement(
