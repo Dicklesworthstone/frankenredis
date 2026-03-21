@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
@@ -375,6 +375,14 @@ enum RuntimeSpecialCommand {
     Lastsave,
     Bgrewriteaof,
     Shutdown,
+    Subscribe,
+    Unsubscribe,
+    Psubscribe,
+    Punsubscribe,
+    Publish,
+    Ssubscribe,
+    Sunsubscribe,
+    Spublish,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -446,6 +454,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
                 Some(RuntimeSpecialCommand::Unwatch)
             } else if eq_ascii_token(cmd, b"SLOWLOG") {
                 Some(RuntimeSpecialCommand::Slowlog)
+            } else if eq_ascii_token(cmd, b"PUBLISH") {
+                Some(RuntimeSpecialCommand::Publish)
             } else {
                 None
             }
@@ -457,6 +467,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
                 Some(RuntimeSpecialCommand::Lastsave)
             } else if eq_ascii_token(cmd, b"SHUTDOWN") {
                 Some(RuntimeSpecialCommand::Shutdown)
+            } else if eq_ascii_token(cmd, b"SPUBLISH") {
+                Some(RuntimeSpecialCommand::Spublish)
             } else {
                 None
             }
@@ -464,6 +476,24 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
         9 => {
             if eq_ascii_token(cmd, b"READWRITE") {
                 Some(RuntimeSpecialCommand::Readwrite)
+            } else if eq_ascii_token(cmd, b"SUBSCRIBE") {
+                Some(RuntimeSpecialCommand::Subscribe)
+            } else {
+                None
+            }
+        }
+        10 => {
+            if eq_ascii_token(cmd, b"PSUBSCRIBE") {
+                Some(RuntimeSpecialCommand::Psubscribe)
+            } else if eq_ascii_token(cmd, b"SSUBSCRIBE") {
+                Some(RuntimeSpecialCommand::Ssubscribe)
+            } else {
+                None
+            }
+        }
+        11 => {
+            if eq_ascii_token(cmd, b"UNSUBSCRIBE") {
+                Some(RuntimeSpecialCommand::Unsubscribe)
             } else {
                 None
             }
@@ -471,6 +501,10 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
         12 => {
             if eq_ascii_token(cmd, b"BGREWRITEAOF") {
                 Some(RuntimeSpecialCommand::Bgrewriteaof)
+            } else if eq_ascii_token(cmd, b"PUNSUBSCRIBE") {
+                Some(RuntimeSpecialCommand::Punsubscribe)
+            } else if eq_ascii_token(cmd, b"SUNSUBSCRIBE") {
+                Some(RuntimeSpecialCommand::Sunsubscribe)
             } else {
                 None
             }
@@ -701,6 +735,16 @@ pub struct ServerState {
     rdb_path: Option<std::path::PathBuf>,
     /// Dynamically overridden CONFIG parameters (set via CONFIG SET, returned by CONFIG GET).
     config_overrides: HashMap<String, String>,
+
+    // ── Pub/Sub global state ────────────────────────────────────────
+    /// Channel → set of subscribed client IDs.
+    pubsub_channel_subs: HashMap<Vec<u8>, HashSet<u64>>,
+    /// Pattern → set of subscribed client IDs.
+    pubsub_pattern_subs: HashMap<Vec<u8>, HashSet<u64>>,
+    /// Shard channel → set of subscribed client IDs.
+    pubsub_shard_subs: HashMap<Vec<u8>, HashSet<u64>>,
+    /// Per-client outbox: client_id → pending messages for delivery.
+    pubsub_outbox: HashMap<u64, Vec<fr_store::PubSubMessage>>,
 }
 
 impl Default for ServerState {
@@ -732,6 +776,10 @@ impl Default for ServerState {
             aof_path: None,
             rdb_path: None,
             config_overrides: HashMap::new(),
+            pubsub_channel_subs: HashMap::new(),
+            pubsub_pattern_subs: HashMap::new(),
+            pubsub_shard_subs: HashMap::new(),
+            pubsub_outbox: HashMap::new(),
         }
     }
 }
@@ -1258,10 +1306,212 @@ impl Runtime {
     }
 
     /// Drain any pending pub/sub messages from the store.
-    /// The server should call this after command execution to deliver
-    /// messages to subscribed clients.
+    /// Drain pending pub/sub messages for the current session's client.
     pub fn drain_pending_pubsub(&mut self) -> Vec<fr_store::PubSubMessage> {
-        self.server.store.drain_pending_pubsub()
+        // First drain any messages from the per-client Store (legacy path for
+        // single-session tests), then drain from the global outbox.
+        let mut msgs = self.server.store.drain_pending_pubsub();
+        let client_id = self.session.client_id;
+        if let Some(outbox) = self.server.pubsub_outbox.get_mut(&client_id) {
+            msgs.append(outbox);
+        }
+        msgs
+    }
+
+    /// Drain pending pub/sub messages for a specific client by ID.
+    /// Used by the server event loop to deliver messages to non-active clients.
+    pub fn drain_pubsub_for_client(&mut self, client_id: u64) -> Vec<fr_store::PubSubMessage> {
+        self.server
+            .pubsub_outbox
+            .remove(&client_id)
+            .unwrap_or_default()
+    }
+
+    /// Return all client IDs that have pending pub/sub messages.
+    pub fn pubsub_clients_with_pending(&self) -> Vec<u64> {
+        self.server
+            .pubsub_outbox
+            .keys()
+            .copied()
+            .filter(|id| {
+                self.server
+                    .pubsub_outbox
+                    .get(id)
+                    .is_some_and(|v| !v.is_empty())
+            })
+            .collect()
+    }
+
+    // ── Pub/Sub global registry operations ──────────────────────────
+
+    /// Subscribe the current client to a channel. Returns total subscription count.
+    pub fn pubsub_subscribe(&mut self, channel: Vec<u8>) -> usize {
+        let client_id = self.session.client_id;
+        self.server
+            .pubsub_channel_subs
+            .entry(channel)
+            .or_default()
+            .insert(client_id);
+        // Also track in the per-client Store for PUBSUB NUMSUB queries
+        self.server.store.subscribe(channel.clone());
+        self.pubsub_sub_count()
+    }
+
+    /// Unsubscribe the current client from a channel. Returns total subscription count.
+    pub fn pubsub_unsubscribe(&mut self, channel: &[u8]) -> usize {
+        let client_id = self.session.client_id;
+        if let Some(subs) = self.server.pubsub_channel_subs.get_mut(channel) {
+            subs.remove(&client_id);
+            if subs.is_empty() {
+                self.server.pubsub_channel_subs.remove(channel);
+            }
+        }
+        self.server.store.unsubscribe(channel);
+        self.pubsub_sub_count()
+    }
+
+    /// Subscribe the current client to a pattern. Returns total subscription count.
+    pub fn pubsub_psubscribe(&mut self, pattern: Vec<u8>) -> usize {
+        let client_id = self.session.client_id;
+        self.server
+            .pubsub_pattern_subs
+            .entry(pattern)
+            .or_default()
+            .insert(client_id);
+        self.server.store.psubscribe(pattern.clone());
+        self.pubsub_sub_count()
+    }
+
+    /// Unsubscribe the current client from a pattern. Returns total subscription count.
+    pub fn pubsub_punsubscribe(&mut self, pattern: &[u8]) -> usize {
+        let client_id = self.session.client_id;
+        if let Some(subs) = self.server.pubsub_pattern_subs.get_mut(pattern) {
+            subs.remove(&client_id);
+            if subs.is_empty() {
+                self.server.pubsub_pattern_subs.remove(pattern);
+            }
+        }
+        self.server.store.punsubscribe(pattern);
+        self.pubsub_sub_count()
+    }
+
+    /// Subscribe the current client to a shard channel. Returns shard sub count.
+    pub fn pubsub_ssubscribe(&mut self, channel: Vec<u8>) -> usize {
+        let client_id = self.session.client_id;
+        self.server
+            .pubsub_shard_subs
+            .entry(channel)
+            .or_default()
+            .insert(client_id);
+        self.server.store.ssubscribe(channel.clone());
+        self.server.store.subscribed_shard_channels.len()
+    }
+
+    /// Unsubscribe the current client from a shard channel. Returns shard sub count.
+    pub fn pubsub_sunsubscribe(&mut self, channel: &[u8]) -> usize {
+        let client_id = self.session.client_id;
+        if let Some(subs) = self.server.pubsub_shard_subs.get_mut(channel) {
+            subs.remove(&client_id);
+            if subs.is_empty() {
+                self.server.pubsub_shard_subs.remove(channel);
+            }
+        }
+        self.server.store.sunsubscribe(channel);
+        self.server.store.subscribed_shard_channels.len()
+    }
+
+    /// Publish a message to a channel. Queues messages in each subscriber's
+    /// outbox. Returns the number of clients that received the message.
+    pub fn pubsub_publish(&mut self, channel: &[u8], message: &[u8]) -> usize {
+        let mut receivers = 0;
+
+        // Direct channel subscribers
+        if let Some(client_ids) = self.server.pubsub_channel_subs.get(channel) {
+            for &client_id in client_ids {
+                self.server
+                    .pubsub_outbox
+                    .entry(client_id)
+                    .or_default()
+                    .push(fr_store::PubSubMessage::Message {
+                        channel: channel.to_vec(),
+                        data: message.to_vec(),
+                    });
+                receivers += 1;
+            }
+        }
+
+        // Pattern subscribers — each matching pattern produces a pmessage
+        let matching: Vec<(Vec<u8>, Vec<u64>)> = self
+            .server
+            .pubsub_pattern_subs
+            .iter()
+            .filter(|(pattern, _)| fr_store::glob_match(pattern, channel))
+            .map(|(pattern, clients)| (pattern.clone(), clients.iter().copied().collect()))
+            .collect();
+
+        for (pattern, client_ids) in matching {
+            for client_id in client_ids {
+                self.server
+                    .pubsub_outbox
+                    .entry(client_id)
+                    .or_default()
+                    .push(fr_store::PubSubMessage::PMessage {
+                        pattern: pattern.clone(),
+                        channel: channel.to_vec(),
+                        data: message.to_vec(),
+                    });
+                receivers += 1;
+            }
+        }
+
+        receivers
+    }
+
+    /// Publish a message to a shard channel. Returns receiver count.
+    pub fn pubsub_spublish(&mut self, channel: &[u8], message: &[u8]) -> usize {
+        let mut receivers = 0;
+        if let Some(client_ids) = self.server.pubsub_shard_subs.get(channel) {
+            for &client_id in client_ids {
+                self.server
+                    .pubsub_outbox
+                    .entry(client_id)
+                    .or_default()
+                    .push(fr_store::PubSubMessage::SMessage {
+                        channel: channel.to_vec(),
+                        data: message.to_vec(),
+                    });
+                receivers += 1;
+            }
+        }
+        receivers
+    }
+
+    /// Remove all subscriptions for a client (called on disconnect).
+    pub fn pubsub_cleanup_client(&mut self, client_id: u64) {
+        self.server
+            .pubsub_channel_subs
+            .retain(|_, clients| {
+                clients.remove(&client_id);
+                !clients.is_empty()
+            });
+        self.server
+            .pubsub_pattern_subs
+            .retain(|_, clients| {
+                clients.remove(&client_id);
+                !clients.is_empty()
+            });
+        self.server
+            .pubsub_shard_subs
+            .retain(|_, clients| {
+                clients.remove(&client_id);
+                !clients.is_empty()
+            });
+        self.server.pubsub_outbox.remove(&client_id);
+    }
+
+    fn pubsub_sub_count(&self) -> usize {
+        self.server.store.subscribed_channels.len()
+            + self.server.store.subscribed_patterns.len()
     }
 
     pub fn configure_maxmemory_enforcement(
