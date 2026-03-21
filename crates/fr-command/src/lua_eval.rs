@@ -2524,11 +2524,28 @@ impl<'a> LuaState<'a> {
                 match &idx {
                     LuaValue::Str(s) if s == b"#" => Ok(vec![LuaValue::Number(rest.len() as f64)]),
                     _ => {
-                        let n = idx.to_number().ok_or("bad argument to 'select'")? as usize;
-                        if n >= 1 && n <= rest.len() {
-                            Ok(rest[n - 1..].to_vec())
+                        let raw_index = idx.to_number().ok_or("bad argument to 'select'")?;
+                        if !raw_index.is_finite() || raw_index.fract() != 0.0 {
+                            return Err("bad argument to 'select'".to_string());
+                        }
+
+                        let arg_count = rest.len() as i64;
+                        let index = raw_index as i64;
+                        if index == 0 || index < -arg_count {
+                            return Err(
+                                "bad argument #1 to 'select' (index out of range)".to_string()
+                            );
+                        }
+
+                        let start = if index > 0 {
+                            index
                         } else {
-                            Ok(vec![LuaValue::Nil])
+                            arg_count + index + 1
+                        };
+                        if start > arg_count {
+                            Ok(Vec::new())
+                        } else {
+                            Ok(rest[(start - 1) as usize..].to_vec())
                         }
                     }
                 }
@@ -4259,6 +4276,22 @@ mod tests {
         );
 
         assert!(matches!(result, Ok(RespFrame::Integer(99))));
+    }
+
+    #[test]
+    fn select_negative_index_counts_from_tail() {
+        let mut store = Store::new();
+        let result = eval_script(b"return select(-1, 'a', 'b', 'c')", &[], &[], &mut store, 0);
+
+        assert!(matches!(result, Ok(RespFrame::BulkString(Some(ref bytes))) if bytes == b"c"));
+    }
+
+    #[test]
+    fn select_zero_index_errors() {
+        let mut store = Store::new();
+        let result = eval_script(b"return select(0, 'a', 'b', 'c')", &[], &[], &mut store, 0);
+
+        assert!(matches!(result, Err(ref err) if err.contains("index out of range")));
     }
 
     #[test]
