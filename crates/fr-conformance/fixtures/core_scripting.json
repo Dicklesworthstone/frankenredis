@@ -930,6 +930,19 @@
       }
     },
     {
+      "name": "eval_nested_table_assignment_writes_back",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = { a = { b = 1 } }\nt.a.b = 42\nreturn t.a.b",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 42
+      }
+    },
+    {
       "name": "eval_string_lower",
       "now_ms": 0,
       "argv": [
@@ -1380,6 +1393,19 @@
       "expect": {
         "kind": "bulk",
         "value": "b"
+      }
+    },
+    {
+      "name": "eval_select_negative_index",
+      "now_ms": 100,
+      "argv": [
+        "EVAL",
+        "return select(-1, 'a', 'b', 'c')",
+        "0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "c"
       }
     },
     {
