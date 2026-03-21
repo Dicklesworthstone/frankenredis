@@ -7049,13 +7049,16 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
 
     // Clients section
     if is_all || section.eq_ignore_ascii_case("clients") {
+        let connected = store.stat_connected_clients.max(1); // at least 1 (the current client)
         info.push_str("# Clients\r\n");
-        info.push_str("connected_clients:1\r\n");
+        info.push_str(&format!("connected_clients:{connected}\r\n"));
         info.push_str("cluster_connections:0\r\n");
         info.push_str("maxclients:10000\r\n");
         info.push_str("client_recent_max_input_buffer:0\r\n");
         info.push_str("client_recent_max_output_buffer:0\r\n");
-        info.push_str("total_clients_connected_including_replicas:1\r\n");
+        info.push_str(&format!(
+            "total_clients_connected_including_replicas:{connected}\r\n"
+        ));
         info.push_str("blocked_clients:0\r\n");
         info.push_str("tracking_clients:0\r\n");
         info.push_str("clients_in_timeout_table:0\r\n");
@@ -7136,8 +7139,14 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     // Stats section
     if is_all || section.eq_ignore_ascii_case("stats") {
         info.push_str("# Stats\r\n");
-        info.push_str("total_connections_received:1\r\n");
-        info.push_str("total_commands_processed:0\r\n");
+        info.push_str(&format!(
+            "total_connections_received:{}\r\n",
+            store.stat_total_connections_received.max(1)
+        ));
+        info.push_str(&format!(
+            "total_commands_processed:{}\r\n",
+            store.stat_total_commands_processed
+        ));
         info.push_str("instantaneous_ops_per_sec:0\r\n");
         info.push_str("total_net_input_bytes:0\r\n");
         info.push_str("total_net_output_bytes:0\r\n");

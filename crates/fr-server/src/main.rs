@@ -300,7 +300,7 @@ fn main() -> ExitCode {
                         &mut clients,
                         &mut client_id_to_token,
                         &mut next_token,
-                        &runtime,
+                        &mut runtime,
                     );
                 }
                 token => {
@@ -370,8 +370,9 @@ fn main() -> ExitCode {
                 closing_tokens.remove(&token);
                 write_tokens.remove(&token);
                 client_id_to_token.remove(&conn.session.client_id);
-                // Clean up Pub/Sub subscriptions for this client.
+                // Clean up Pub/Sub subscriptions and stats for this client.
                 runtime.pubsub_cleanup_client(conn.session.client_id);
+                runtime.track_connection_closed();
                 let _ = poll.registry().deregister(&mut conn.stream);
             }
         }
@@ -384,7 +385,7 @@ fn accept_connections(
     clients: &mut HashMap<Token, ClientConnection>,
     client_id_to_token: &mut HashMap<u64, Token>,
     next_token: &mut usize,
-    runtime: &Runtime,
+    runtime: &mut Runtime,
 ) {
     loop {
         // Check maxclients gate via fr-eventloop before accepting.
@@ -427,6 +428,7 @@ fn accept_connections(
                 let client_id = session.client_id;
                 clients.insert(token, ClientConnection::new(stream, session));
                 client_id_to_token.insert(client_id, token);
+                runtime.track_connection_opened();
             }
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
             Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,

@@ -571,6 +571,14 @@ pub struct Store {
 
     /// Number of keys currently tracked in the expires set.
     pub expires_count: usize,
+
+    // ── Server-wide stats (updated by runtime, read by INFO) ────────
+    /// Total number of commands processed since server start.
+    pub stat_total_commands_processed: u64,
+    /// Total number of connections received since server start.
+    pub stat_total_connections_received: u64,
+    /// Number of currently connected clients.
+    pub stat_connected_clients: u64,
 }
 
 impl Default for Store {
@@ -599,6 +607,9 @@ impl Default for Store {
             dirty: 0,
             script_nesting_level: 0,
             expires_count: 0,
+            stat_total_commands_processed: 0,
+            stat_total_connections_received: 0,
+            stat_connected_clients: 0,
         }
     }
 }
@@ -965,6 +976,8 @@ impl Store {
             None => (0.0_f64, None),
         };
         let next = current + delta;
+        // Redis allows infinity results from INCRBYFLOAT/HINCRBYFLOAT.
+        // Only NaN is rejected (e.g., inf + (-inf) = NaN).
         if next.is_nan() {
             return Err(StoreError::IncrFloatNaN);
         }
@@ -1508,25 +1521,10 @@ impl Store {
     }
 
     #[must_use]
-    pub fn dbsize(&mut self, now_ms: u64) -> usize {
-        // Reap expired keys efficiently first.
-        let mut reaped = 0_u64;
-        let mut reaped_with_expiry = 0usize;
-        self.entries.retain(|key, entry| {
-            if evaluate_expiry(now_ms, entry.expires_at_ms).should_evict {
-                self.stream_groups.remove(key.as_slice());
-                self.stream_last_ids.remove(key.as_slice());
-                if entry.expires_at_ms.is_some() {
-                    reaped_with_expiry += 1;
-                }
-                reaped += 1;
-                false
-            } else {
-                true
-            }
-        });
-        self.expires_count = self.expires_count.saturating_sub(reaped_with_expiry);
-        self.dirty = self.dirty.saturating_add(reaped);
+    pub fn dbsize(&self, _now_ms: u64) -> usize {
+        // DBSIZE must be O(1). We do not actively reap expired keys here
+        // as that would require an O(N) scan. This matches legacy Redis
+        // behavior which returns the total count including pending expires.
         self.entries.len()
     }
 
@@ -2042,6 +2040,8 @@ impl Store {
             None => 0.0,
         };
         let next = current + delta;
+        // Redis allows infinity results from INCRBYFLOAT/HINCRBYFLOAT.
+        // Only NaN is rejected (e.g., inf + (-inf) = NaN).
         if next.is_nan() {
             return Err(StoreError::IncrFloatNaN);
         }
@@ -8125,7 +8125,15 @@ mod tests {
         store.set(b"a".to_vec(), b"1".to_vec(), None, 0);
         store.set(b"b".to_vec(), b"2".to_vec(), Some(100), 0);
         assert_eq!(store.dbsize(0), 2);
-        assert_eq!(store.dbsize(200), 1); // b expired
+
+        // dbsize is O(1) and does not actively reap expired keys.
+        // It should still return 2 even if 'b' is logically expired,
+        // until 'b' is actively or lazily reaped.
+        assert_eq!(store.dbsize(200), 2);
+
+        // Lazy reap
+        store.get(b"b", 200).unwrap();
+        assert_eq!(store.dbsize(200), 1);
     }
 
     #[test]

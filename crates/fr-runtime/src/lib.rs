@@ -1322,7 +1322,18 @@ impl Runtime {
         std::mem::replace(&mut self.session, session)
     }
 
-    /// Drain any pending pub/sub messages from the store.
+    /// Track a new client connection for INFO stats.
+    pub fn track_connection_opened(&mut self) {
+        self.server.store.stat_total_connections_received += 1;
+        self.server.store.stat_connected_clients += 1;
+    }
+
+    /// Track a client disconnection for INFO stats.
+    pub fn track_connection_closed(&mut self) {
+        self.server.store.stat_connected_clients =
+            self.server.store.stat_connected_clients.saturating_sub(1);
+    }
+
     /// Drain pending pub/sub messages for the current session's client.
     pub fn drain_pending_pubsub(&mut self) -> Vec<fr_store::PubSubMessage> {
         // First drain any messages from the per-client Store (legacy path for
@@ -1700,6 +1711,7 @@ impl Runtime {
     }
 
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
+        self.server.store.stat_total_commands_processed += 1;
         let packet_id = next_packet_id();
         let input_digest = digest_bytes(&frame.to_bytes());
         let state_before = self.server.store.state_digest();
