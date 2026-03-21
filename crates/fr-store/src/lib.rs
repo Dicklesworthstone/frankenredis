@@ -345,7 +345,7 @@ pub enum Value {
     String(Vec<u8>),
     Hash(BTreeMap<Vec<u8>, Vec<u8>>),
     List(VecDeque<Vec<u8>>),
-    Set(HashSet<Vec<u8>>),
+    Set(BTreeSet<Vec<u8>>),
     /// Sorted set: dual-indexed for efficiency.
     SortedSet(SortedSet),
     /// Stream entries keyed by `(milliseconds, sequence)` stream IDs.
@@ -2799,7 +2799,7 @@ impl Store {
                 _ => Err(StoreError::WrongType),
             },
             None => {
-                let mut s = HashSet::new();
+                let mut s = BTreeSet::new();
                 let mut added = 0_u64;
                 for m in members {
                     if s.insert(m.clone()) {
@@ -2846,8 +2846,7 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
-                    let mut members: Vec<Vec<u8>> = s.iter().cloned().collect();
-                    members.sort();
+                    let members: Vec<Vec<u8>> = s.iter().cloned().collect();
                     entry.touch(now_ms);
                     Ok(members)
                 }
@@ -2999,7 +2998,7 @@ impl Store {
         for key in keys {
             self.drop_if_expired(key, now_ms);
         }
-        let mut result = HashSet::new();
+        let mut result = BTreeSet::new();
         for key in keys {
             if let Some(entry) = self.entries.get_mut(*key) {
                 match &entry.value {
@@ -3274,7 +3273,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
-            let set: HashSet<Vec<u8>> = result.into_iter().collect();
+            let set: BTreeSet<Vec<u8>> = result.into_iter().collect();
             self.entries.insert(
                 destination.to_vec(),
                 Entry::new(Value::Set(set), None, now_ms),
@@ -3296,7 +3295,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
-            let set: HashSet<Vec<u8>> = result.into_iter().collect();
+            let set: BTreeSet<Vec<u8>> = result.into_iter().collect();
             self.entries.insert(
                 destination.to_vec(),
                 Entry::new(Value::Set(set), None, now_ms),
@@ -3318,7 +3317,7 @@ impl Store {
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
-            let set: HashSet<Vec<u8>> = result.into_iter().collect();
+            let set: BTreeSet<Vec<u8>> = result.into_iter().collect();
             self.entries.insert(
                 destination.to_vec(),
                 Entry::new(Value::Set(set), None, now_ms),
@@ -5831,30 +5830,28 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
-                    // Sets are unordered in HashSet, so we must sort for deterministic SCAN
-                    let mut members: Vec<&Vec<u8>> = s.iter().collect();
-                    members.sort();
-
                     let start = cursor as usize;
-                    if start >= members.len() {
+                    if start >= s.len() {
                         return Ok((0, Vec::new()));
                     }
 
                     let batch_size = count.max(1);
                     let mut result = Vec::new();
                     let mut pos = start;
-                    while pos < members.len() && result.len() < batch_size {
+                    for member in s.iter().skip(start) {
+                        pos += 1;
                         if let Some(pat) = pattern
-                            && !glob_match(pat, members[pos])
+                            && !glob_match(pat, member)
                         {
-                            pos += 1;
                             continue;
                         }
-                        result.push(members[pos].clone());
-                        pos += 1;
+                        result.push(member.clone());
+                        if result.len() >= batch_size {
+                            break;
+                        }
                     }
 
-                    let next = if pos >= members.len() { 0 } else { pos as u64 };
+                    let next = if pos >= s.len() { 0 } else { pos as u64 };
                     entry.touch(now_ms);
                     Ok((next, result))
                 }
@@ -6732,7 +6729,7 @@ impl Store {
                 // Set
                 let (count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
-                let mut set = HashSet::with_capacity(count);
+                let mut set = BTreeSet::new();
                 for _ in 0..count {
                     let (len, consumed) = decode_length(payload, cursor)?;
                     cursor += consumed;

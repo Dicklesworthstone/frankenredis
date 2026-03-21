@@ -1851,12 +1851,12 @@ impl<'a> LuaState<'a> {
             Expr::Index(table_expr, key_expr) => {
                 let table = self.eval_expr(table_expr, env, varargs)?;
                 let key = self.eval_expr(key_expr, env, varargs)?;
-                self.table_set_by_expr(table_expr, table, key, value, env)?;
+                self.table_set_by_expr(table_expr, table, key, value, env, varargs)?;
             }
             Expr::Field(table_expr, field) => {
                 let table = self.eval_expr(table_expr, env, varargs)?;
                 let key = LuaValue::Str(field.as_bytes().to_vec());
-                self.table_set_by_expr(table_expr, table, key, value, env)?;
+                self.table_set_by_expr(table_expr, table, key, value, env, varargs)?;
             }
             _ => return Err("invalid assignment target".to_string()),
         }
@@ -1870,25 +1870,42 @@ impl<'a> LuaState<'a> {
         key: LuaValue,
         value: LuaValue,
         env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
     ) -> Result<(), String> {
         if let LuaValue::Table(t) = &mut table {
             t.set(key, value);
-            // Write back
-            match table_expr {
-                Expr::Name(name) => {
-                    if !env.set_existing_local(name, table.clone()) {
-                        self.globals.insert(name.clone(), table);
-                    }
-                }
-                _ => {
-                    // For nested assignments, the mutation happened on a clone.
-                    // This is a known limitation; deeply nested table assignment
-                    // requires reference semantics not easily modeled here.
-                }
-            }
+            self.write_back_table_expr(table_expr, table, env, varargs)?;
             Ok(())
         } else {
             Err(format!("attempt to index a {} value", table.type_name()))
+        }
+    }
+
+    fn write_back_table_expr(
+        &mut self,
+        table_expr: &Expr,
+        table: LuaValue,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<(), String> {
+        match table_expr {
+            Expr::Name(name) => {
+                if !env.set_existing_local(name, table.clone()) {
+                    self.globals.insert(name.clone(), table);
+                }
+                Ok(())
+            }
+            Expr::Index(parent_expr, key_expr) => {
+                let parent = self.eval_expr(parent_expr, env, varargs)?;
+                let key = self.eval_expr(key_expr, env, varargs)?;
+                self.table_set_by_expr(parent_expr, parent, key, table, env, varargs)
+            }
+            Expr::Field(parent_expr, field) => {
+                let parent = self.eval_expr(parent_expr, env, varargs)?;
+                let key = LuaValue::Str(field.as_bytes().to_vec());
+                self.table_set_by_expr(parent_expr, parent, key, table, env, varargs)
+            }
+            _ => Err("invalid assignment target".to_string()),
         }
     }
 
@@ -4214,6 +4231,34 @@ mod tests {
         let result = eval_script(b"return tonumber('10', 16)", &[], &[], &mut store, 0);
 
         assert!(matches!(result, Ok(RespFrame::Integer(16))));
+    }
+
+    #[test]
+    fn nested_table_field_assignment_writes_back_through_parent_chain() {
+        let mut store = Store::new();
+        let result = eval_script(
+            b"local t = { a = { b = 1 } }\nt.a.b = 42\nreturn t.a.b",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+
+        assert!(matches!(result, Ok(RespFrame::Integer(42))));
+    }
+
+    #[test]
+    fn nested_table_index_assignment_writes_back_through_parent_chain() {
+        let mut store = Store::new();
+        let result = eval_script(
+            b"local t = { { 1, 2 } }\nt[1][2] = 99\nreturn t[1][2]",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+
+        assert!(matches!(result, Ok(RespFrame::Integer(99))));
     }
 
     #[test]
