@@ -33,6 +33,10 @@ pub enum CommandError {
     Custom(String),
 }
 
+fn hello_bulk(s: &str) -> RespFrame {
+    RespFrame::BulkString(Some(s.as_bytes().to_vec()))
+}
+
 impl CommandError {
     pub fn to_resp(&self) -> RespFrame {
         match self {
@@ -7778,12 +7782,10 @@ fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
                 return Ok(RespFrame::Array(Some(Vec::new())));
             } else if filter_type.eq_ignore_ascii_case("ACLCAT") {
                 if argv.len() < 5 {
-                    return Ok(RespFrame::Error(
-                        "ERR syntax error".to_string(),
-                    ));
+                    return Ok(RespFrame::Error("ERR syntax error".to_string()));
                 }
-                let category = std::str::from_utf8(&argv[4])
-                    .map_err(|_| CommandError::InvalidUtf8Argument)?;
+                let category =
+                    std::str::from_utf8(&argv[4]).map_err(|_| CommandError::InvalidUtf8Argument)?;
                 let cmds = commands_in_acl_category(category);
                 let names: Vec<RespFrame> = cmds
                     .into_iter()
@@ -7792,23 +7794,17 @@ fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
                 return Ok(RespFrame::Array(Some(names)));
             } else if filter_type.eq_ignore_ascii_case("PATTERN") {
                 if argv.len() < 5 {
-                    return Ok(RespFrame::Error(
-                        "ERR syntax error".to_string(),
-                    ));
+                    return Ok(RespFrame::Error("ERR syntax error".to_string()));
                 }
                 let pattern = &argv[4];
                 let names: Vec<RespFrame> = COMMAND_TABLE
                     .iter()
-                    .filter(|&&(name, ..)| {
-                        fr_store::glob_match(pattern, name.as_bytes())
-                    })
+                    .filter(|&&(name, ..)| fr_store::glob_match(pattern, name.as_bytes()))
                     .map(|&(name, ..)| RespFrame::BulkString(Some(name.as_bytes().to_vec())))
                     .collect();
                 return Ok(RespFrame::Array(Some(names)));
             } else {
-                return Ok(RespFrame::Error(
-                    "ERR syntax error".to_string(),
-                ));
+                return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
         }
         let names: Vec<RespFrame> = COMMAND_TABLE
@@ -23014,8 +23010,4 @@ mod tests {
         let out = dispatch_argv(&[b"PSYNC".to_vec(), b"?".to_vec()], &mut store, 0);
         assert!(out.is_err());
     }
-}
-
-fn hello_bulk(s: &str) -> RespFrame {
-    RespFrame::BulkString(Some(s.as_bytes().to_vec()))
 }

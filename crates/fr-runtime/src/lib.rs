@@ -40,6 +40,7 @@ const WRONGPASS_ERROR: &str = "WRONGPASS invalid username-password pair or user 
 const AUTH_NOT_CONFIGURED_ERROR: &str = "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?";
 const CLUSTER_UNKNOWN_SUBCOMMAND_ERROR: &str =
     "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP.";
+#[allow(dead_code)]
 const ACL_UNKNOWN_SUBCOMMAND_ERROR: &str =
     "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP.";
 const DEFAULT_ACLLOG_MAX_LEN: i64 = 128;
