@@ -573,6 +573,14 @@ fn process_buffered_frames(
 
         match parse_result {
             Ok((frame, consumed)) => {
+                // Subscription mode gate: reject most commands while subscribed.
+                if runtime.is_in_subscription_mode()
+                    && let Some(reject) = check_subscription_mode_gate(&frame, true)
+                {
+                    conn.write_buf.extend_from_slice(&reject.to_bytes());
+                    conn.read_buf.drain(..consumed);
+                    continue;
+                }
                 let response = runtime.execute_frame(frame.clone(), ts);
                 let parsed_frame = frame;
 
@@ -1272,6 +1280,33 @@ fn deliver_pubsub_messages(
             Interest::READABLE | Interest::WRITABLE,
         );
     }
+}
+
+/// Check if a command is allowed in subscription mode. Returns Some(error) if rejected.
+fn check_subscription_mode_gate(frame: &RespFrame, _in_sub_mode: bool) -> Option<RespFrame> {
+    let RespFrame::Array(Some(items)) = frame else {
+        return None;
+    };
+    let Some(RespFrame::BulkString(Some(cmd))) = items.first() else {
+        return None;
+    };
+    // Commands allowed in subscription mode per Redis behavior
+    if cmd.eq_ignore_ascii_case(b"SUBSCRIBE")
+        || cmd.eq_ignore_ascii_case(b"UNSUBSCRIBE")
+        || cmd.eq_ignore_ascii_case(b"PSUBSCRIBE")
+        || cmd.eq_ignore_ascii_case(b"PUNSUBSCRIBE")
+        || cmd.eq_ignore_ascii_case(b"SSUBSCRIBE")
+        || cmd.eq_ignore_ascii_case(b"SUNSUBSCRIBE")
+        || cmd.eq_ignore_ascii_case(b"PING")
+        || cmd.eq_ignore_ascii_case(b"RESET")
+        || cmd.eq_ignore_ascii_case(b"QUIT")
+    {
+        return None; // allowed
+    }
+    let cmd_str = String::from_utf8_lossy(cmd);
+    Some(RespFrame::Error(format!(
+        "ERR Can't execute '{cmd_str}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
+    )))
 }
 
 fn is_quit_frame(frame: &RespFrame) -> bool {

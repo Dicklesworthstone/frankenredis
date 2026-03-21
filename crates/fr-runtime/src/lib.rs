@@ -1539,6 +1539,13 @@ impl Runtime {
         self.server.store.subscribed_channels.len() + self.server.store.subscribed_patterns.len()
     }
 
+    /// Returns true if the current client has any active pub/sub subscriptions.
+    pub fn is_in_subscription_mode(&self) -> bool {
+        !self.server.store.subscribed_channels.is_empty()
+            || !self.server.store.subscribed_patterns.is_empty()
+            || !self.server.store.subscribed_shard_channels.is_empty()
+    }
+
     pub fn configure_maxmemory_enforcement(
         &mut self,
         maxmemory_bytes: usize,
