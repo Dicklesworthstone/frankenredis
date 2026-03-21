@@ -155,6 +155,13 @@ fn lua_raw_equal(a: &LuaValue, b: &LuaValue) -> bool {
     }
 }
 
+fn lua_bad_table_arg(function: &str, index: usize, value: &LuaValue) -> String {
+    format!(
+        "bad argument #{index} to '{function}' (table expected, got {})",
+        value.type_name()
+    )
+}
+
 impl LuaValue {
     fn is_truthy(&self) -> bool {
         !matches!(self, LuaValue::Nil | LuaValue::Bool(false))
@@ -2192,9 +2199,10 @@ impl<'a> LuaState<'a> {
                 } else {
                     Vec::new()
                 };
-                match self.exec_stmts(&lua_func.body, &mut new_env, &mut func_varargs)? {
-                    ControlFlow::Return(vals) => Ok(vals),
-                    _ => Ok(vec![LuaValue::Nil]),
+                match self.exec_stmts(&lua_func.body, &mut new_env, &mut func_varargs) {
+                    Ok(ControlFlow::Return(vals)) => Ok(vals),
+                    Ok(_) => Ok(vec![LuaValue::Nil]),
+                    Err(e) => Err(e),
                 }
             }
             LuaValue::Nil => Err("attempt to call a nil value".to_string()),
@@ -2382,6 +2390,9 @@ impl<'a> LuaState<'a> {
             }
             "pairs" => {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
+                if !matches!(table, LuaValue::Table(_)) {
+                    return Err(lua_bad_table_arg("pairs", 1, &table));
+                }
                 // Return next, table, nil
                 Ok(vec![
                     LuaValue::RustFunction("next".to_string()),
@@ -2391,6 +2402,9 @@ impl<'a> LuaState<'a> {
             }
             "ipairs" => {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
+                if !matches!(table, LuaValue::Table(_)) {
+                    return Err(lua_bad_table_arg("ipairs", 1, &table));
+                }
                 Ok(vec![
                     LuaValue::RustFunction("__ipairs_iter".to_string()),
                     table,
@@ -2450,12 +2464,30 @@ impl<'a> LuaState<'a> {
             "next" => {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let key = args.get(1).cloned().unwrap_or(LuaValue::Nil);
-                if let LuaValue::Table(t) = &table {
-                    // Find next key after the given key
-                    if matches!(key, LuaValue::Nil) {
-                        // Return first element
-                        if !t.array.is_empty() {
-                            return Ok(vec![LuaValue::Number(1.0), t.array[0].clone()]);
+                let LuaValue::Table(t) = &table else {
+                    return Err(lua_bad_table_arg("next", 1, &table));
+                };
+
+                // Find next key after the given key.
+                if matches!(key, LuaValue::Nil) {
+                    if !t.array.is_empty() {
+                        return Ok(vec![LuaValue::Number(1.0), t.array[0].clone()]);
+                    }
+                    let hash_pairs = t.hash_pairs();
+                    if let Some((k, v)) = hash_pairs.first() {
+                        return Ok(vec![k.clone(), v.clone()]);
+                    }
+                    return Ok(vec![LuaValue::Nil]);
+                }
+
+                if let LuaValue::Number(n) = &key {
+                    let idx = *n as usize;
+                    if idx >= 1 && idx <= t.array.len() && *n == idx as f64 {
+                        if idx < t.array.len() {
+                            return Ok(vec![
+                                LuaValue::Number((idx + 1) as f64),
+                                t.array[idx].clone(),
+                            ]);
                         }
                         let hash_pairs = t.hash_pairs();
                         if let Some((k, v)) = hash_pairs.first() {
@@ -2463,38 +2495,23 @@ impl<'a> LuaState<'a> {
                         }
                         return Ok(vec![LuaValue::Nil]);
                     }
-                    // Find position of current key
-                    if let LuaValue::Number(n) = &key {
-                        let idx = *n as usize;
-                        if idx >= 1 && idx <= t.array.len() {
-                            if idx < t.array.len() {
-                                return Ok(vec![
-                                    LuaValue::Number((idx + 1) as f64),
-                                    t.array[idx].clone(),
-                                ]);
-                            }
-                            // Past array, check hash
-                            let hash_pairs = t.hash_pairs();
-                            if let Some((k, v)) = hash_pairs.first() {
-                                return Ok(vec![k.clone(), v.clone()]);
-                            }
-                            return Ok(vec![LuaValue::Nil]);
-                        }
+                }
+
+                let hash_pairs = t.hash_pairs();
+                let mut found = false;
+                for (i, (k, _v)) in hash_pairs.iter().enumerate() {
+                    if found {
+                        return Ok(vec![hash_pairs[i].0.clone(), hash_pairs[i].1.clone()]);
                     }
-                    // Search in hash
-                    let hash_pairs = t.hash_pairs();
-                    let mut found = false;
-                    for (i, (k, _v)) in hash_pairs.iter().enumerate() {
-                        if found {
-                            return Ok(vec![hash_pairs[i].0.clone(), hash_pairs[i].1.clone()]);
-                        }
-                        if lua_raw_equal(k, &key) {
-                            found = true;
-                        }
+                    if lua_raw_equal(k, &key) {
+                        found = true;
                     }
+                }
+
+                if found {
                     Ok(vec![LuaValue::Nil])
                 } else {
-                    Ok(vec![LuaValue::Nil])
+                    Err("invalid key to 'next'".to_string())
                 }
             }
             "unpack" => {
@@ -2553,14 +2570,17 @@ impl<'a> LuaState<'a> {
             "rawget" => {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let key = args.get(1).cloned().unwrap_or(LuaValue::Nil);
-                if let LuaValue::Table(t) = &table {
-                    Ok(vec![t.get(&key)])
-                } else {
-                    Ok(vec![LuaValue::Nil])
-                }
+                let LuaValue::Table(t) = &table else {
+                    return Err(lua_bad_table_arg("rawget", 1, &table));
+                };
+                Ok(vec![t.get(&key)])
             }
             "rawset" => {
                 // rawset(table, key, value) — set and return table
+                let table = args.first().cloned().unwrap_or(LuaValue::Nil);
+                if !matches!(table, LuaValue::Table(_)) {
+                    return Err(lua_bad_table_arg("rawset", 1, &table));
+                }
                 if args.len() >= 3 {
                     let key = args[1].clone();
                     let val = args[2].clone();
@@ -2568,7 +2588,7 @@ impl<'a> LuaState<'a> {
                         t.set(key, val);
                     }
                 }
-                Ok(vec![args.first().cloned().unwrap_or(LuaValue::Nil)])
+                Ok(vec![table])
             }
             "setmetatable" => {
                 // Return first argument (table) — metatables not supported
@@ -3310,13 +3330,8 @@ fn lua_pattern_element_len(pat: &[u8], pi: usize) -> usize {
         return 0;
     }
     match pat[pi] {
-        b'%' => {
-            if pi + 1 < pat.len() {
-                2
-            } else {
-                1
-            }
-        }
+        b'%' if pi + 1 < pat.len() => 2,
+        b'%' => 1,
         b'[' => {
             // Find closing ]
             let mut j = pi + 1;
@@ -4292,6 +4307,60 @@ mod tests {
         let result = eval_script(b"return select(0, 'a', 'b', 'c')", &[], &[], &mut store, 0);
 
         assert!(matches!(result, Err(ref err) if err.contains("index out of range")));
+    }
+
+    #[test]
+    fn next_rejects_non_table_argument() {
+        let mut store = Store::new();
+        let result = eval_script(b"return next(42)", &[], &[], &mut store, 0);
+
+        assert!(matches!(result, Err(ref err) if err.contains("bad argument #1 to 'next'")));
+    }
+
+    #[test]
+    fn next_rejects_invalid_key() {
+        let mut store = Store::new();
+        let result = eval_script(
+            b"local t = {a = 1}\nreturn next(t, 'missing')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+
+        assert!(matches!(result, Err(ref err) if err.contains("invalid key to 'next'")));
+    }
+
+    #[test]
+    fn rawget_rejects_non_table_argument() {
+        let mut store = Store::new();
+        let result = eval_script(b"return rawget(42, 'x')", &[], &[], &mut store, 0);
+
+        assert!(matches!(result, Err(ref err) if err.contains("bad argument #1 to 'rawget'")));
+    }
+
+    #[test]
+    fn rawset_rejects_non_table_argument() {
+        let mut store = Store::new();
+        let result = eval_script(b"return rawset(42, 'x', 1)", &[], &[], &mut store, 0);
+
+        assert!(matches!(result, Err(ref err) if err.contains("bad argument #1 to 'rawset'")));
+    }
+
+    #[test]
+    fn pairs_rejects_non_table_argument() {
+        let mut store = Store::new();
+        let result = eval_script(b"return pairs(42)", &[], &[], &mut store, 0);
+
+        assert!(matches!(result, Err(ref err) if err.contains("bad argument #1 to 'pairs'")));
+    }
+
+    #[test]
+    fn ipairs_rejects_non_table_argument() {
+        let mut store = Store::new();
+        let result = eval_script(b"return ipairs(42)", &[], &[], &mut store, 0);
+
+        assert!(matches!(result, Err(ref err) if err.contains("bad argument #1 to 'ipairs'")));
     }
 
     #[test]

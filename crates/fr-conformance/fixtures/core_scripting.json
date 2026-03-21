@@ -1954,6 +1954,32 @@
       }
     },
     {
+      "name": "eval_rawget_rejects_non_table_argument",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return rawget(42, 'x')",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error running script: bad argument #1 to 'rawget' (table expected, got number)"
+      }
+    },
+    {
+      "name": "eval_rawset_rejects_non_table_argument",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return rawset(42, 'x', 1)",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error running script: bad argument #1 to 'rawset' (table expected, got number)"
+      }
+    },
+    {
       "name": "eval_table_sort_custom_comparator_desc",
       "now_ms": 0,
       "argv": [
@@ -2731,6 +2757,58 @@
       "expect": {
         "kind": "integer",
         "value": 1
+      }
+    },
+    {
+      "name": "eval_next_rejects_non_table_argument",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return next(42)",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error running script: bad argument #1 to 'next' (table expected, got number)"
+      }
+    },
+    {
+      "name": "eval_next_rejects_invalid_key",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {x = 1}\nreturn next(t, 'missing')",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error running script: invalid key to 'next'"
+      }
+    },
+    {
+      "name": "eval_pairs_rejects_non_table_argument",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return pairs(42)",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error running script: bad argument #1 to 'pairs' (table expected, got number)"
+      }
+    },
+    {
+      "name": "eval_ipairs_rejects_non_table_argument",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return ipairs(42)",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error running script: bad argument #1 to 'ipairs' (table expected, got number)"
       }
     },
     {
