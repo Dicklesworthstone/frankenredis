@@ -317,8 +317,9 @@ pub fn encode_rdb(entries: &[RdbEntry], aux: &[(&str, &str)]) -> Vec<u8> {
     buf
 }
 
-/// Decode an RDB length. Returns (length, bytes_consumed) or None on
-/// insufficient data.
+/// Decode an RDB length. Returns `(length, bytes_consumed)` or `None` on
+/// insufficient data. Note: this function returns `None` for special encodings (type 3)
+/// since they represent string values, not lengths.
 fn rdb_decode_length(data: &[u8]) -> Option<(usize, usize)> {
     let first = *data.first()?;
     let encoding = (first & 0xC0) >> 6;
@@ -348,45 +349,49 @@ fn rdb_decode_length(data: &[u8]) -> Option<(usize, usize)> {
                 None // Unhandled special encodings
             }
         }
-        3 => {
-            // Special encoding (integers or LZF)
-            match first & 0x3F {
-                0 => {
-                    // 8-bit integer
-                    let val = *data.get(1)? as usize;
-                    Some((val, 2))
-                }
-                1 => {
-                    // 16-bit integer
-                    if data.len() < 3 {
-                        return None;
-                    }
-                    let val = u16::from_le_bytes([data[1], data[2]]) as usize;
-                    Some((val, 3))
-                }
-                2 => {
-                    // 32-bit integer
-                    if data.len() < 5 {
-                        return None;
-                    }
-                    let val = u32::from_le_bytes([data[1], data[2], data[3], data[4]]) as usize;
-                    Some((val, 5))
-                }
-                _ => None, // LZF or unknown special encoding
-            }
-        }
-        _ => unreachable!(),
+        _ => None, // Special encodings (type 3) are handled by rdb_decode_string
     }
 }
 
-/// Decode an RDB string. Returns (bytes, consumed) or None.
+/// Decode an RDB string. Returns `(bytes, consumed)` or `None`.
 fn rdb_decode_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
-    let (len, hdr) = rdb_decode_length(data)?;
-    let end = hdr + len;
-    if data.len() < end {
-        return None;
+    let first = *data.first()?;
+    let encoding = (first & 0xC0) >> 6;
+    
+    if encoding == 3 {
+        // Special encoding (integers or LZF)
+        match first & 0x3F {
+            0 => {
+                // 8-bit integer
+                let val = *data.get(1)? as i8;
+                Some((val.to_string().into_bytes(), 2))
+            }
+            1 => {
+                // 16-bit integer
+                if data.len() < 3 {
+                    return None;
+                }
+                let val = i16::from_le_bytes([data[1], data[2]]);
+                Some((val.to_string().into_bytes(), 3))
+            }
+            2 => {
+                // 32-bit integer
+                if data.len() < 5 {
+                    return None;
+                }
+                let val = i32::from_le_bytes([data[1], data[2], data[3], data[4]]);
+                Some((val.to_string().into_bytes(), 5))
+            }
+            _ => None, // LZF or unknown special encoding not supported yet
+        }
+    } else {
+        let (len, hdr) = rdb_decode_length(data)?;
+        let end = hdr + len;
+        if data.len() < end {
+            return None;
+        }
+        Some((data[hdr..end].to_vec(), end))
     }
-    Some((data[hdr..end].to_vec(), end))
 }
 
 /// Decode an RDB file into entries. Returns entries and auxiliary metadata.

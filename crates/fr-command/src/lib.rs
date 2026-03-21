@@ -7765,6 +7765,52 @@ fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     if sub.eq_ignore_ascii_case("COUNT") {
         Ok(RespFrame::Integer(COMMAND_TABLE.len() as i64))
     } else if sub.eq_ignore_ascii_case("LIST") {
+        // COMMAND LIST [FILTERBY MODULE modname | ACLCAT category | PATTERN pattern]
+        if argv.len() >= 4
+            && std::str::from_utf8(&argv[2])
+                .ok()
+                .is_some_and(|s| s.eq_ignore_ascii_case("FILTERBY"))
+        {
+            let filter_type =
+                std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            if filter_type.eq_ignore_ascii_case("MODULE") {
+                // We have no modules — return empty list
+                return Ok(RespFrame::Array(Some(Vec::new())));
+            } else if filter_type.eq_ignore_ascii_case("ACLCAT") {
+                if argv.len() < 5 {
+                    return Ok(RespFrame::Error(
+                        "ERR syntax error".to_string(),
+                    ));
+                }
+                let category = std::str::from_utf8(&argv[4])
+                    .map_err(|_| CommandError::InvalidUtf8Argument)?;
+                let cmds = commands_in_acl_category(category);
+                let names: Vec<RespFrame> = cmds
+                    .into_iter()
+                    .map(|name| RespFrame::BulkString(Some(name.as_bytes().to_vec())))
+                    .collect();
+                return Ok(RespFrame::Array(Some(names)));
+            } else if filter_type.eq_ignore_ascii_case("PATTERN") {
+                if argv.len() < 5 {
+                    return Ok(RespFrame::Error(
+                        "ERR syntax error".to_string(),
+                    ));
+                }
+                let pattern = &argv[4];
+                let names: Vec<RespFrame> = COMMAND_TABLE
+                    .iter()
+                    .filter(|&&(name, ..)| {
+                        fr_store::glob_match(pattern, name.as_bytes())
+                    })
+                    .map(|&(name, ..)| RespFrame::BulkString(Some(name.as_bytes().to_vec())))
+                    .collect();
+                return Ok(RespFrame::Array(Some(names)));
+            } else {
+                return Ok(RespFrame::Error(
+                    "ERR syntax error".to_string(),
+                ));
+            }
+        }
         let names: Vec<RespFrame> = COMMAND_TABLE
             .iter()
             .map(|&(name, ..)| RespFrame::BulkString(Some(name.as_bytes().to_vec())))
