@@ -3390,13 +3390,14 @@ impl Runtime {
     fn handle_unsubscribe_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 2 {
             // Unsubscribe from all channels
-            let channels: Vec<Vec<u8>> = self
+            let mut channels: Vec<Vec<u8>> = self
                 .server
                 .store
                 .subscribed_channels
                 .iter()
                 .cloned()
                 .collect();
+            channels.sort();
             if channels.is_empty() {
                 return RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
@@ -3454,13 +3455,14 @@ impl Runtime {
 
     fn handle_punsubscribe_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 2 {
-            let patterns: Vec<Vec<u8>> = self
+            let mut patterns: Vec<Vec<u8>> = self
                 .server
                 .store
                 .subscribed_patterns
                 .iter()
                 .cloned()
                 .collect();
+            patterns.sort();
             if patterns.is_empty() {
                 return RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
@@ -3526,13 +3528,14 @@ impl Runtime {
 
     fn handle_sunsubscribe_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 2 {
-            let channels: Vec<Vec<u8>> = self
+            let mut channels: Vec<Vec<u8>> = self
                 .server
                 .store
                 .subscribed_shard_channels
                 .iter()
                 .cloned()
                 .collect();
+            channels.sort();
             if channels.is_empty() {
                 return RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"sunsubscribe".to_vec())),
