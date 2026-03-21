@@ -1383,6 +1383,19 @@
       }
     },
     {
+      "name": "eval_table_concat_rejects_non_table_argument",
+      "now_ms": 100,
+      "argv": [
+        "EVAL",
+        "return table.concat(42, '-')",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error running script: bad argument #1 to 'concat' (table expected, got number)"
+      }
+    },
+    {
       "name": "eval_select_function",
       "now_ms": 100,
       "argv": [
@@ -1550,6 +1563,32 @@
       }
     },
     {
+      "name": "eval_table_insert_rejects_non_table_argument",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "table.insert(42, 'x')",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error running script: bad argument #1 to 'insert' (table expected, got number)"
+      }
+    },
+    {
+      "name": "eval_table_insert_rejects_out_of_bounds_position",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "local t = {1, 2}\ntable.insert(t, 4, 3)",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error running script: bad argument #2 to 'insert' (position out of bounds)"
+      }
+    },
+    {
       "name": "eval_table_remove_last",
       "now_ms": 0,
       "argv": [
@@ -1560,6 +1599,19 @@
       "expect": {
         "kind": "integer",
         "value": 30
+      }
+    },
+    {
+      "name": "eval_table_remove_rejects_non_table_argument",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return table.remove(42)",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error running script: bad argument #1 to 'remove' (table expected, got number)"
       }
     },
     {

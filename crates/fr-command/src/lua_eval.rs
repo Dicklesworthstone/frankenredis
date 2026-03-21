@@ -162,6 +162,17 @@ fn lua_bad_table_arg(function: &str, index: usize, value: &LuaValue) -> String {
     )
 }
 
+fn lua_table_arg<'a>(
+    function: &str,
+    index: usize,
+    value: &'a LuaValue,
+) -> Result<&'a LuaTable, String> {
+    match value {
+        LuaValue::Table(table) => Ok(table),
+        _ => Err(lua_bad_table_arg(function, index, value)),
+    }
+}
+
 impl LuaValue {
     fn is_truthy(&self) -> bool {
         !matches!(self, LuaValue::Nil | LuaValue::Bool(false))
@@ -3067,6 +3078,10 @@ impl<'a> LuaState<'a> {
             }
             // ── Table library ───────────────────────────────────────────
             "table.insert" => {
+                let table = args.first().cloned().unwrap_or(LuaValue::Nil);
+                let LuaValue::Table(_) = &table else {
+                    return Err(lua_bad_table_arg("insert", 1, &table));
+                };
                 if args.len() == 2 {
                     // table.insert(t, value) — append
                     let val = args[1].clone();
@@ -3078,61 +3093,62 @@ impl<'a> LuaState<'a> {
                     let pos = args[1].to_number().unwrap_or(1.0) as usize;
                     let val = args[2].clone();
                     if let LuaValue::Table(ref mut t) = args[0] {
-                        let idx = pos.saturating_sub(1);
-                        if idx <= t.array.len() {
-                            t.array.insert(idx, val);
-                        } else {
-                            t.array.push(val);
+                        if pos < 1 || pos > t.array.len() + 1 {
+                            return Err(
+                                "bad argument #2 to 'insert' (position out of bounds)"
+                                    .to_string(),
+                            );
                         }
+                        let idx = pos.saturating_sub(1);
+                        t.array.insert(idx, val);
                     }
                 }
                 Ok(vec![LuaValue::Nil])
             }
             "table.remove" => {
-                if !args.is_empty() {
-                    // Read pos arg before mutably borrowing args[0]
-                    let pos_arg = args.get(1).and_then(|v| v.to_number());
-                    if let LuaValue::Table(ref mut t) = args[0] {
-                        let pos = pos_arg.unwrap_or(t.array.len() as f64) as usize;
-                        let removed = if pos >= 1 && pos <= t.array.len() {
-                            t.array.remove(pos - 1)
-                        } else {
-                            LuaValue::Nil
-                        };
-                        return Ok(vec![removed]);
-                    }
+                let table = args.first().cloned().unwrap_or(LuaValue::Nil);
+                if !matches!(table, LuaValue::Table(_)) {
+                    return Err(lua_bad_table_arg("remove", 1, &table));
+                }
+                // Read pos arg before mutably borrowing args[0].
+                let pos_arg = args.get(1).and_then(|v| v.to_number());
+                if let LuaValue::Table(ref mut t) = args[0] {
+                    let pos = pos_arg.unwrap_or(t.array.len() as f64) as usize;
+                    let removed = if pos >= 1 && pos <= t.array.len() {
+                        t.array.remove(pos - 1)
+                    } else {
+                        LuaValue::Nil
+                    };
+                    return Ok(vec![removed]);
                 }
                 Ok(vec![LuaValue::Nil])
             }
             "table.concat" => {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
+                let t = lua_table_arg("concat", 1, &table)?;
                 let sep = args
                     .get(1)
                     .map(|a| a.to_display_string())
                     .unwrap_or_default();
-                if let LuaValue::Table(t) = &table {
-                    let start = args.get(2).and_then(|v| v.to_number()).unwrap_or(1.0) as usize;
-                    let end = args
-                        .get(3)
-                        .and_then(|v| v.to_number())
-                        .unwrap_or(t.array.len() as f64) as usize;
-                    let mut parts: Vec<Vec<u8>> = Vec::new();
-                    for i in start..=end {
-                        if i >= 1 && i <= t.array.len() {
-                            parts.push(t.array[i - 1].to_display_string());
-                        }
+                let start = args.get(2).and_then(|v| v.to_number()).unwrap_or(1.0) as usize;
+                let end = args
+                    .get(3)
+                    .and_then(|v| v.to_number())
+                    .unwrap_or(t.array.len() as f64) as usize;
+                let mut parts: Vec<Vec<u8>> = Vec::new();
+                for i in start..=end {
+                    if i >= 1 && i <= t.array.len() {
+                        parts.push(t.array[i - 1].to_display_string());
                     }
-                    let mut result = Vec::new();
-                    for (i, part) in parts.iter().enumerate() {
-                        if i > 0 {
-                            result.extend_from_slice(&sep);
-                        }
-                        result.extend_from_slice(part);
-                    }
-                    Ok(vec![LuaValue::Str(result)])
-                } else {
-                    Ok(vec![LuaValue::Str(Vec::new())])
                 }
+                let mut result = Vec::new();
+                for (i, part) in parts.iter().enumerate() {
+                    if i > 0 {
+                        result.extend_from_slice(&sep);
+                    }
+                    result.extend_from_slice(part);
+                }
+                Ok(vec![LuaValue::Str(result)])
             }
             "table.sort" => {
                 if !args.is_empty() {
@@ -4361,6 +4377,38 @@ mod tests {
         let result = eval_script(b"return ipairs(42)", &[], &[], &mut store, 0);
 
         assert!(matches!(result, Err(ref err) if err.contains("bad argument #1 to 'ipairs'")));
+    }
+
+    #[test]
+    fn table_insert_rejects_non_table_argument() {
+        let mut store = Store::new();
+        let result = eval_script(b"table.insert(42, 'x')", &[], &[], &mut store, 0);
+
+        assert!(matches!(result, Err(ref err) if err.contains("bad argument #1 to 'insert'")));
+    }
+
+    #[test]
+    fn table_insert_rejects_out_of_bounds_position() {
+        let mut store = Store::new();
+        let result = eval_script(b"local t = {1, 2}\ntable.insert(t, 4, 3)", &[], &[], &mut store, 0);
+
+        assert!(matches!(result, Err(ref err) if err.contains("position out of bounds")));
+    }
+
+    #[test]
+    fn table_remove_rejects_non_table_argument() {
+        let mut store = Store::new();
+        let result = eval_script(b"return table.remove(42)", &[], &[], &mut store, 0);
+
+        assert!(matches!(result, Err(ref err) if err.contains("bad argument #1 to 'remove'")));
+    }
+
+    #[test]
+    fn table_concat_rejects_non_table_argument() {
+        let mut store = Store::new();
+        let result = eval_script(b"return table.concat(42, ',')", &[], &[], &mut store, 0);
+
+        assert!(matches!(result, Err(ref err) if err.contains("bad argument #1 to 'concat'")));
     }
 
     #[test]

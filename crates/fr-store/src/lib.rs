@@ -3,6 +3,7 @@
 use fr_expire::evaluate_expiry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub type StreamId = (u64, u64);
 pub type StreamField = (Vec<u8>, Vec<u8>);
@@ -572,13 +573,38 @@ pub struct Store {
     /// Number of keys currently tracked in the expires set.
     pub expires_count: usize,
 
-    // ── Server-wide stats (updated by runtime, read by INFO) ────────
+    // ── Server-wide metadata and stats (updated by runtime, read by INFO) ──
+    /// Unique 40-character hex run ID generated at startup.
+    pub server_run_id: String,
+    /// Server process ID.
+    pub server_pid: u32,
+    /// Server TCP port.
+    pub server_port: u16,
     /// Total number of commands processed since server start.
     pub stat_total_commands_processed: u64,
     /// Total number of connections received since server start.
     pub stat_total_connections_received: u64,
     /// Number of currently connected clients.
     pub stat_connected_clients: u64,
+}
+
+fn generate_run_id() -> String {
+    let now_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut state = now_nanos ^ u128::from(std::process::id());
+    let mut out = String::with_capacity(40);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    for _ in 0..40 {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        out.push(HEX[(state as usize) & 0x0f] as char);
+    }
+
+    out
 }
 
 impl Default for Store {
@@ -607,6 +633,9 @@ impl Default for Store {
             dirty: 0,
             script_nesting_level: 0,
             expires_count: 0,
+            server_run_id: generate_run_id(),
+            server_pid: std::process::id(),
+            server_port: 6379,
             stat_total_commands_processed: 0,
             stat_total_connections_received: 0,
             stat_connected_clients: 0,
@@ -7101,6 +7130,23 @@ fn decode_length(data: &[u8], offset: usize) -> Result<(usize, usize), StoreErro
 /// Public alias for use by fr-command's Lua evaluator (redis.sha1hex).
 pub fn sha1_hex_public(data: &[u8]) -> String {
     sha1_hex(data)
+}
+
+/// Generate a 40-character hex run ID (like Redis's run_id).
+/// Uses process ID and a timestamp-based seed for uniqueness.
+fn generate_run_id() -> String {
+    let pid = std::process::id() as u64;
+    let seed = pid
+        .wrapping_mul(0x5851_f42d_4c95_7f2d)
+        .wrapping_add(0xDEAD_BEEF);
+    let mut state = seed;
+    let mut hex = String::with_capacity(40);
+    for _ in 0..5 {
+        state = state.wrapping_mul(0x5851_f42d_4c95_7f2d).wrapping_add(1);
+        hex.push_str(&format!("{state:016x}"));
+    }
+    hex.truncate(40);
+    hex
 }
 
 /// Minimal SHA-1 implementation (pure Rust, no unsafe).
