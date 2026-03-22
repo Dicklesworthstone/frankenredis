@@ -404,7 +404,7 @@ pub fn dispatch_argv(
         Some(CommandId::Debug) => return debug_cmd(argv),
         Some(CommandId::Role) => return role_cmd(argv),
         Some(CommandId::Shutdown) => return shutdown_cmd(argv),
-        Some(CommandId::Move) => return move_cmd(argv),
+        Some(CommandId::Move) => return move_cmd(argv, store, now_ms),
         Some(CommandId::Latency) => return latency_cmd(argv),
         Some(CommandId::Bitfield) => return bitfield_cmd(argv, store, now_ms),
         Some(CommandId::BitfieldRo) => return bitfield_ro_cmd(argv, store, now_ms),
@@ -9331,17 +9331,21 @@ fn shutdown_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
 
-fn move_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn move_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // MOVE key db
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("MOVE"));
     }
     let db = parse_i64_arg(&argv[2])?;
-    if db == 0 {
-        // Same DB — no-op, return 0 (key already in this DB)
-        Ok(RespFrame::Integer(0))
+    if !(0..16).contains(&db) {
+        return Ok(RespFrame::Error("ERR out of range".to_string()));
+    }
+    // In single-namespace mode, all DBs share the same store.
+    // MOVE returns 0 if key doesn't exist, 1 if it does (no actual move needed).
+    if store.exists(&argv[1], now_ms) {
+        Ok(RespFrame::Integer(0)) // key "already exists" in target DB (shared namespace)
     } else {
-        Ok(RespFrame::Error("ERR index out of range".to_string()))
+        Ok(RespFrame::Integer(0)) // key doesn't exist
     }
 }
 
