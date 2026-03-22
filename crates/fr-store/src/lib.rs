@@ -8245,7 +8245,7 @@ mod tests {
         EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPolicy,
         MaxmemoryPressureLevel, PttlValue, ScoreBound, Store, StoreError, StreamAutoClaimOptions,
         StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
-        StreamGroupReadOptions, StreamPendingEntry, ValueType, decode_db_key, encode_db_key,
+        StreamGroupReadOptions, StreamPendingEntry, ValueType, encode_db_key,
     };
 
     fn group_read_options(
