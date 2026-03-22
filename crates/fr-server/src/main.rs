@@ -36,6 +36,8 @@ const QUERY_BUFFER_LIMIT: usize = 1024 * 1024;
 
 /// Maximum write buffer size per client (1 MiB).
 const MAX_WRITE_BUFFER: usize = 1024 * 1024;
+const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
+const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
 
 /// Describes a blocked-on-list operation.
 #[derive(Debug, Clone)]
@@ -122,6 +124,27 @@ struct ClientConnection {
 struct ReplicaPrimaryConnection {
     stream: StdTcpStream,
     read_buf: Vec<u8>,
+    write_buf: Vec<u8>,
+    next_ack_ms: u64,
+}
+
+struct ReplicaSyncState {
+    connection: Option<ReplicaPrimaryConnection>,
+    retry_after_ms: u64,
+}
+
+impl ReplicaSyncState {
+    fn new() -> Self {
+        Self {
+            connection: None,
+            retry_after_ms: 0,
+        }
+    }
+
+    fn schedule_retry(&mut self, now_ms: u64) {
+        self.connection = None;
+        self.retry_after_ms = now_ms.saturating_add(REPLICA_RECONNECT_BACKOFF_MS);
+    }
 }
 
 impl ClientConnection {
@@ -302,7 +325,7 @@ fn main() -> ExitCode {
     let mut blocked_tokens: HashSet<Token> = HashSet::new();
     let mut closing_tokens: HashSet<Token> = HashSet::new();
     let mut write_tokens: HashSet<Token> = HashSet::new();
-    let mut replica_primary: Option<ReplicaPrimaryConnection> = None;
+    let mut replica_sync = ReplicaSyncState::new();
     let mut next_token: usize = 1;
     let tick_budget = TickBudget::default();
 
@@ -374,10 +397,9 @@ fn main() -> ExitCode {
         // Run active expiry cycle once per tick (fast cycle).
         let _ = runtime.run_active_expire_cycle(ts, fr_eventloop::ActiveExpireCycleKind::Fast);
 
-        // Drive replica sync opportunistically in the main loop. The current
-        // implementation is a one-shot handshake/apply pass; long-lived
-        // streaming replication remains a follow-on slice.
-        drive_replica_sync(&mut runtime, &mut replica_primary, ts);
+        // Drive the primary link from the main loop so replicas can sustain
+        // online deltas, ACK traffic, and reconnect after link loss.
+        drive_replica_sync(&mut runtime, &mut replica_sync, ts);
 
         // Check blocked clients (BLPOP/BRPOP/BLMOVE) for available data
         // or timeout expiry.
@@ -902,6 +924,8 @@ fn sync_replica_with_primary(
     runtime: &mut Runtime,
     host: &str,
     port: u16,
+    requested_replid: &str,
+    requested_offset: i64,
     now_ms: u64,
 ) -> io::Result<ReplicaPrimaryConnection> {
     let mut stream = StdTcpStream::connect((host, port))?;
@@ -934,10 +958,6 @@ fn sync_replica_with_primary(
         "OK",
     )?;
 
-    let (requested_replid, requested_offset) =
-        runtime.replica_psync_request().ok_or_else(|| {
-            io::Error::new(ErrorKind::InvalidInput, "replica PSYNC request unavailable")
-        })?;
     let requested_offset = requested_offset.to_string();
     stream.write_all(
         &replica_handshake_frame(&[
@@ -975,7 +995,73 @@ fn sync_replica_with_primary(
     stream.set_read_timeout(None)?;
     stream.set_write_timeout(None)?;
     stream.set_nonblocking(true)?;
-    Ok(ReplicaPrimaryConnection { stream, read_buf })
+    Ok(ReplicaPrimaryConnection {
+        stream,
+        read_buf,
+        write_buf: Vec::new(),
+        next_ack_ms: now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS),
+    })
+}
+
+fn flush_replica_primary_writes(connection: &mut ReplicaPrimaryConnection) -> io::Result<()> {
+    while !connection.write_buf.is_empty() {
+        match connection.stream.write(&connection.write_buf) {
+            Ok(0) => {
+                return Err(io::Error::new(
+                    ErrorKind::WriteZero,
+                    "replica write zero on primary stream",
+                ));
+            }
+            Ok(written) => {
+                connection.write_buf.drain(..written);
+            }
+            Err(ref err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                break;
+            }
+            Err(ref err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+fn replication_stream_follow_up_bytes(frame: &RespFrame, response: &RespFrame) -> Option<Vec<u8>> {
+    let RespFrame::Array(Some(items)) = frame else {
+        return None;
+    };
+    if items.len() != 3 {
+        return None;
+    }
+    let (
+        RespFrame::BulkString(Some(command)),
+        RespFrame::BulkString(Some(subcommand)),
+        RespFrame::BulkString(Some(argument)),
+    ) = (&items[0], &items[1], &items[2])
+    else {
+        return None;
+    };
+    if !command.eq_ignore_ascii_case(b"REPLCONF")
+        || !subcommand.eq_ignore_ascii_case(b"GETACK")
+        || argument.as_slice() != b"*"
+    {
+        return None;
+    }
+    Some(response.to_bytes())
+}
+
+fn queue_replica_periodic_ack(
+    runtime: &Runtime,
+    connection: &mut ReplicaPrimaryConnection,
+    now_ms: u64,
+) {
+    if now_ms < connection.next_ack_ms {
+        return;
+    }
+    let Some(frame) = runtime.replica_ack_frame() else {
+        return;
+    };
+    connection.write_buf.extend_from_slice(&frame.to_bytes());
+    connection.next_ack_ms = now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS);
 }
 
 fn drain_replica_stream(
@@ -993,7 +1079,11 @@ fn drain_replica_stream(
             Ok(parsed) => {
                 let frame = parsed.frame;
                 connection.read_buf.drain(..parsed.consumed);
-                runtime.execute_frame(frame, now_ms.saturating_add(frame_index));
+                let response =
+                    runtime.execute_frame(frame.clone(), now_ms.saturating_add(frame_index));
+                if let Some(follow_up) = replication_stream_follow_up_bytes(&frame, &response) {
+                    connection.write_buf.extend_from_slice(&follow_up);
+                }
                 frame_index = frame_index.saturating_add(1);
             }
             Err(RespParseError::Incomplete) => break,
@@ -1009,20 +1099,30 @@ fn drain_replica_stream(
     Ok(disconnected)
 }
 
-fn drive_replica_sync(
-    runtime: &mut Runtime,
-    replica_primary: &mut Option<ReplicaPrimaryConnection>,
-    now_ms: u64,
-) {
-    if let Some(connection) = replica_primary.as_mut() {
+fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState, now_ms: u64) {
+    if let Some(connection) = replica_sync.connection.as_mut() {
+        queue_replica_periodic_ack(runtime, connection, now_ms);
+        if let Err(err) = flush_replica_primary_writes(connection) {
+            replica_sync.schedule_retry(now_ms);
+            runtime.set_replica_connection_state("reconnect");
+            eprintln!("warn: replica stream write failed: {err}");
+            return;
+        }
         match drain_replica_stream(runtime, connection, now_ms) {
-            Ok(false) => {}
+            Ok(false) => {
+                if let Err(err) = flush_replica_primary_writes(connection) {
+                    replica_sync.schedule_retry(now_ms);
+                    runtime.set_replica_connection_state("reconnect");
+                    eprintln!("warn: replica stream write failed: {err}");
+                    return;
+                }
+            }
             Ok(true) => {
-                *replica_primary = None;
+                replica_sync.schedule_retry(now_ms);
                 runtime.set_replica_connection_state("reconnect");
             }
             Err(err) => {
-                *replica_primary = None;
+                replica_sync.schedule_retry(now_ms);
                 runtime.set_replica_connection_state("reconnect");
                 eprintln!("warn: replica stream read failed: {err}");
             }
@@ -1030,20 +1130,36 @@ fn drive_replica_sync(
     }
 
     let Some((host, port)) = runtime.replica_sync_target() else {
-        *replica_primary = None;
+        replica_sync.connection = None;
+        replica_sync.retry_after_ms = 0;
         return;
     };
 
-    if replica_primary.is_some() {
+    if replica_sync.connection.is_some() || now_ms < replica_sync.retry_after_ms {
         return;
     }
 
+    let Some((requested_replid, requested_offset)) = runtime.replica_psync_request() else {
+        runtime.set_replica_connection_state("reconnect");
+        eprintln!("warn: replica sync request unavailable for {host}:{port}");
+        return;
+    };
+
     runtime.set_replica_connection_state("sync");
-    match sync_replica_with_primary(runtime, &host, port, now_ms) {
+    match sync_replica_with_primary(
+        runtime,
+        &host,
+        port,
+        &requested_replid,
+        requested_offset,
+        now_ms,
+    ) {
         Ok(connection) => {
-            *replica_primary = Some(connection);
+            replica_sync.connection = Some(connection);
+            replica_sync.retry_after_ms = 0;
         }
         Err(err) => {
+            replica_sync.schedule_retry(now_ms);
             runtime.set_replica_connection_state("reconnect");
             eprintln!("warn: replica sync with {host}:{port} failed: {err}");
         }
@@ -1677,7 +1793,8 @@ fn handle_writable(
 #[cfg(test)]
 mod tests {
     use crate::{
-        InlineParseResult, drive_replica_sync, parse_blocking_deadline, read_frame_from_stream,
+        InlineParseResult, REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS, ReplicaSyncState,
+        drive_replica_sync, parse_blocking_deadline, read_frame_from_stream,
         replica_handshake_frame, replication_follow_up_bytes, should_try_inline_parsing,
         try_build_blocked_state,
     };
@@ -1933,7 +2050,7 @@ mod tests {
         });
 
         let mut replica = Runtime::default_strict();
-        let mut replica_primary = None;
+        let mut replica_sync = ReplicaSyncState::new();
         replica.set_server_port(6381);
         assert_eq!(
             replica.execute_frame(
@@ -1946,7 +2063,7 @@ mod tests {
             ),
             RespFrame::SimpleString("OK".to_string())
         );
-        drive_replica_sync(&mut replica, &mut replica_primary, 3);
+        drive_replica_sync(&mut replica, &mut replica_sync, 3);
 
         assert_eq!(
             replica.execute_frame(
@@ -2066,7 +2183,7 @@ mod tests {
         });
 
         let mut replica = Runtime::default_strict();
-        let mut replica_primary = None;
+        let mut replica_sync = ReplicaSyncState::new();
         replica.set_server_port(6381);
         assert_eq!(
             replica.execute_frame(
@@ -2080,10 +2197,18 @@ mod tests {
             RespFrame::SimpleString("OK".to_string())
         );
 
-        drive_replica_sync(&mut replica, &mut replica_primary, 1);
-        drive_replica_sync(&mut replica, &mut replica_primary, 2);
-        drive_replica_sync(&mut replica, &mut replica_primary, 3);
-        drive_replica_sync(&mut replica, &mut replica_primary, 4);
+        drive_replica_sync(&mut replica, &mut replica_sync, 1);
+        drive_replica_sync(&mut replica, &mut replica_sync, 2);
+        drive_replica_sync(
+            &mut replica,
+            &mut replica_sync,
+            2 + REPLICA_RECONNECT_BACKOFF_MS + 1,
+        );
+        drive_replica_sync(
+            &mut replica,
+            &mut replica_sync,
+            3 + REPLICA_RECONNECT_BACKOFF_MS,
+        );
 
         assert_eq!(
             replica.execute_frame(
@@ -2114,6 +2239,107 @@ mod tests {
                 7,
             ),
             RespFrame::BulkString(Some(b"3".to_vec()))
+        );
+
+        server.join().expect("primary thread");
+    }
+
+    #[test]
+    fn replica_stream_answers_getack_and_emits_periodic_ack() {
+        let replid = "00000000000000000000000000000000000000bb".to_string();
+
+        let mut primary = Runtime::default_strict();
+        primary.set_server_port(6380);
+        assert_eq!(
+            primary.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"SET".to_vec())),
+                    RespFrame::BulkString(Some(b"alpha".to_vec())),
+                    RespFrame::BulkString(Some(b"1".to_vec())),
+                ])),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let snapshot = primary.encoded_rdb_snapshot(1);
+
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn({
+            let replid = replid.clone();
+            move || {
+                let parser = ParserConfig::default();
+
+                let (mut stream, _) = listener.accept().expect("accept replica");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_millis(500)))
+                    .expect("set read timeout");
+                let mut read_buf = Vec::new();
+                let _ = read_frame_from_stream(&mut stream, &mut read_buf, &parser).expect("ping");
+                stream
+                    .write_all(&RespFrame::SimpleString("PONG".to_string()).to_bytes())
+                    .unwrap();
+                let _ = read_frame_from_stream(&mut stream, &mut read_buf, &parser)
+                    .expect("replconf port");
+                stream
+                    .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                    .unwrap();
+                let _ = read_frame_from_stream(&mut stream, &mut read_buf, &parser)
+                    .expect("replconf capa");
+                stream
+                    .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                    .unwrap();
+                let psync =
+                    read_frame_from_stream(&mut stream, &mut read_buf, &parser).expect("psync");
+                assert_eq!(psync, replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]));
+                stream
+                    .write_all(
+                        &RespFrame::SimpleString(format!("FULLRESYNC {replid} 1")).to_bytes(),
+                    )
+                    .unwrap();
+                stream
+                    .write_all(&RespFrame::BulkString(Some(snapshot)).to_bytes())
+                    .unwrap();
+                stream
+                    .write_all(&replica_handshake_frame(&[b"REPLCONF", b"GETACK", b"*"]).to_bytes())
+                    .unwrap();
+
+                let immediate_ack = read_frame_from_stream(&mut stream, &mut read_buf, &parser)
+                    .expect("getack reply");
+                assert_eq!(
+                    immediate_ack,
+                    replica_handshake_frame(&[b"REPLCONF", b"ACK", b"1"])
+                );
+
+                let periodic_ack = read_frame_from_stream(&mut stream, &mut read_buf, &parser)
+                    .expect("periodic ack");
+                assert_eq!(
+                    periodic_ack,
+                    replica_handshake_frame(&[b"REPLCONF", b"ACK", b"1"])
+                );
+            }
+        });
+
+        let mut replica = Runtime::default_strict();
+        let mut replica_sync = ReplicaSyncState::new();
+        replica.set_server_port(6381);
+        assert_eq!(
+            replica.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"REPLICAOF".to_vec())),
+                    RespFrame::BulkString(Some(addr.ip().to_string().into_bytes())),
+                    RespFrame::BulkString(Some(addr.port().to_string().into_bytes())),
+                ])),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        drive_replica_sync(&mut replica, &mut replica_sync, 1);
+        drive_replica_sync(
+            &mut replica,
+            &mut replica_sync,
+            1 + REPLICA_ACK_INTERVAL_MS + 1,
         );
 
         server.join().expect("primary thread");
