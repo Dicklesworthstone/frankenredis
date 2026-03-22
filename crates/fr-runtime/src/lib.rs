@@ -767,10 +767,12 @@ impl ReplicationRuntimeState {
     }
 
     fn update_backlog_window(&mut self, end_offset: ReplOffset) {
-        let start = if end_offset.0 >= DEFAULT_REPL_BACKLOG_SIZE {
+        let start = if end_offset.0 == 0 {
+            ReplOffset(0)
+        } else if end_offset.0 >= DEFAULT_REPL_BACKLOG_SIZE {
             ReplOffset(end_offset.0 - DEFAULT_REPL_BACKLOG_SIZE + 1)
         } else {
-            ReplOffset(0)
+            ReplOffset(1)
         };
         self.backlog.start_offset = start;
         self.backlog.end_offset = end_offset;
@@ -1124,14 +1126,17 @@ impl ServerState {
         if !Runtime::command_advances_replication_offset(argv) {
             return;
         }
-        self.aof_records.push(AofRecord {
+        let record = AofRecord {
             argv: argv.to_vec(),
-        });
+        };
+        let encoded_len =
+            u64::try_from(record.to_resp_frame().to_bytes().len()).unwrap_or(u64::MAX);
+        self.aof_records.push(record);
         self.replication_ack_state.primary_offset.0 = self
             .replication_ack_state
             .primary_offset
             .0
-            .saturating_add(1);
+            .saturating_add(encoded_len);
         self.replication_ack_state.local_fsync_offset = self.replication_ack_state.primary_offset;
         self.replication_runtime_state
             .update_backlog_window(self.replication_ack_state.primary_offset);
@@ -1489,8 +1494,9 @@ impl Runtime {
 
     #[must_use]
     pub fn encoded_aof_stream_from_offset(&self, offset: u64) -> Vec<u8> {
+        let stream = self.encoded_aof_stream();
         let start = usize::try_from(offset).unwrap_or(usize::MAX);
-        encode_aof_stream(self.server.aof_records.get(start..).unwrap_or(&[]))
+        stream.get(start..).unwrap_or(&[]).to_vec()
     }
 
     #[must_use]
@@ -2982,6 +2988,41 @@ impl Runtime {
                 .to_resp();
             }
             self.handle_acl_help()
+        } else if sub.eq_ignore_ascii_case("DRYRUN") {
+            // ACL DRYRUN <username> <command> [<arg> ...]
+            if argv.len() < 4 {
+                return CommandError::WrongSubcommandArity {
+                    command: "ACL",
+                    subcommand: sub.to_string(),
+                }
+                .to_resp();
+            }
+            let username = &argv[2];
+            let user = self.server.auth_state.get_user(username);
+            match user {
+                Some(u) => {
+                    if u.full_access {
+                        RespFrame::SimpleString("OK".to_string())
+                    } else {
+                        // Non-full-access user: check if the command is allowed
+                        let test_argv: Vec<Vec<u8>> = argv[3..].to_vec();
+                        if self.is_command_authorized(&test_argv) {
+                            RespFrame::SimpleString("OK".to_string())
+                        } else {
+                            let cmd_name = String::from_utf8_lossy(&argv[3]);
+                            RespFrame::Error(format!(
+                                "ERR User '{}' has no permissions to run the '{}' command",
+                                String::from_utf8_lossy(username),
+                                cmd_name
+                            ))
+                        }
+                    }
+                }
+                None => RespFrame::Error(format!(
+                    "ERR User '{}' not found",
+                    String::from_utf8_lossy(username)
+                )),
+            }
         } else {
             CommandError::UnknownSubcommand {
                 command: "ACL",
@@ -4735,7 +4776,8 @@ impl Runtime {
         };
 
         let is_all = section.is_none() || section.is_some_and(|s| s.eq_ignore_ascii_case("all"));
-        let is_replication = is_all || section.is_some_and(|s| s.eq_ignore_ascii_case("replication"));
+        let is_replication =
+            is_all || section.is_some_and(|s| s.eq_ignore_ascii_case("replication"));
         let is_keyspace = is_all || section.is_some_and(|s| s.eq_ignore_ascii_case("keyspace"));
 
         if section.is_some() && !is_replication && !is_keyspace {
@@ -4746,15 +4788,15 @@ impl Runtime {
         }
 
         let mut info = Vec::new();
-        if is_replication {
-            if let RespFrame::BulkString(Some(bytes)) = self.handle_info_replication_section() {
-                info.extend_from_slice(&bytes);
-            }
+        if is_replication
+            && let RespFrame::BulkString(Some(bytes)) = self.handle_info_replication_section()
+        {
+            info.extend_from_slice(&bytes);
         }
-        if is_keyspace {
-            if let RespFrame::BulkString(Some(bytes)) = self.handle_info_keyspace_section(now_ms) {
-                info.extend_from_slice(&bytes);
-            }
+        if is_keyspace
+            && let RespFrame::BulkString(Some(bytes)) = self.handle_info_keyspace_section(now_ms)
+        {
+            info.extend_from_slice(&bytes);
         }
 
         if info.is_empty() {
@@ -4796,14 +4838,30 @@ impl Runtime {
         let mut info = String::from("# Replication\r\n");
         info.push_str(&format!("role:{role}\r\n"));
 
-        if matches!(self.server.replication_runtime_state.role, ReplicationRoleState::Master) {
-            for (i, replica) in self.server.replication_runtime_state.replicas.values().enumerate() {
+        if matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Master
+        ) {
+            for (i, replica) in self
+                .server
+                .replication_runtime_state
+                .replicas
+                .values()
+                .enumerate()
+            {
                 let ip = replica.ip_address.as_deref().unwrap_or("127.0.0.1");
                 let port = replica.listening_port;
                 let state = "online"; // We only track registered replicas
                 let offset = replica.ack_offset.0;
-                let lag = self.server.replication_ack_state.primary_offset.0.saturating_sub(offset);
-                info.push_str(&format!("slave{i}:ip={ip},port={port},state={state},offset={offset},lag={lag}\r\n"));
+                let lag = self
+                    .server
+                    .replication_ack_state
+                    .primary_offset
+                    .0
+                    .saturating_sub(offset);
+                info.push_str(&format!(
+                    "slave{i}:ip={ip},port={port},state={state},offset={offset},lag={lag}\r\n"
+                ));
             }
         }
 
@@ -5236,8 +5294,8 @@ impl Runtime {
         }
 
         let mut results = Vec::with_capacity(queued.len());
-        // Record MULTI
-        self.capture_aof_record(&[b"MULTI".to_vec()]);
+        let mut transaction_dirty = false;
+        let mut transaction_aof = Vec::new();
 
         for argv in &queued {
             if let Some(reply) = self.enforce_maxmemory_before_dispatch(
@@ -5252,18 +5310,51 @@ impl Runtime {
             }
 
             let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
-            match self.execute_db_scoped_command(argv, now_ms) {
+            let dirty_before = self.server.store.dirty;
+            let start = Instant::now();
+            let result = self.execute_db_scoped_command(argv, now_ms);
+            let elapsed_us = start.elapsed().as_micros() as u64;
+            let dirty_after = self.server.store.dirty;
+            self.record_slowlog(argv, elapsed_us, now_ms);
+
+            match result {
                 Ok(mut reply) => {
                     self.strip_db_prefixes_from_frame(&mut reply);
-                    self.capture_aof_record(argv);
+                    if dirty_after > dirty_before {
+                        transaction_dirty = true;
+                        transaction_aof.push(argv.clone());
+
+                        // Optimized blocking: track keys modified by write commands
+                        let cmd_keys = fr_command::command_keys(argv);
+                        for key in &cmd_keys {
+                            self.server.ready_keys.insert(key.clone());
+                        }
+                        // Keyspace notifications
+                        if self.server.store.notify_keyspace_events != 0 {
+                            let event = Self::command_to_keyspace_event(argv);
+                            let event_type = Self::command_to_notify_type(argv);
+                            let db = self.session.selected_db;
+                            for key in &cmd_keys {
+                                self.server
+                                    .store
+                                    .notify_keyspace_event(event_type, event, key, db);
+                            }
+                            self.deliver_keyspace_notifications();
+                        }
+                    }
                     results.push(reply);
                 }
                 Err(err) => results.push(err.to_resp()),
             }
         }
 
-        // Record EXEC
-        self.capture_aof_record(&[b"EXEC".to_vec()]);
+        if transaction_dirty {
+            self.capture_aof_record(&[b"MULTI".to_vec()]);
+            for argv in transaction_aof {
+                self.capture_aof_record(&argv);
+            }
+            self.capture_aof_record(&[b"EXEC".to_vec()]);
+        }
 
         RespFrame::Array(Some(results))
     }
@@ -6880,14 +6971,21 @@ mod tests {
             RespFrame::SimpleString("OK".to_string())
         );
         let replid = rt.server.replication_runtime_state.backlog.replid.clone();
+        let live_offset = rt.replication_primary_offset().0.to_string();
 
         assert_eq!(
-            rt.execute_frame(command(&[b"PSYNC", replid.as_bytes(), b"1"]), 1),
+            rt.execute_frame(
+                command(&[b"PSYNC", replid.as_bytes(), live_offset.as_bytes()]),
+                1
+            ),
             RespFrame::SimpleString("CONTINUE".to_string())
         );
         assert_eq!(
-            rt.execute_frame(command(&[b"PSYNC", b"wrong-replid", b"1"]), 2),
-            RespFrame::SimpleString(format!("FULLRESYNC {} 1", replid))
+            rt.execute_frame(
+                command(&[b"PSYNC", b"wrong-replid", live_offset.as_bytes()]),
+                2
+            ),
+            RespFrame::SimpleString(format!("FULLRESYNC {} {}", replid, live_offset))
         );
     }
 
@@ -6901,6 +6999,26 @@ mod tests {
                 "FULLRESYNC 0000000000000000000000000000000000000000 0".to_string()
             )
         );
+    }
+
+    #[test]
+    fn replication_info_reports_byte_offsets() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"rep:key", b"value"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let expected_offset = rt.replication_primary_offset().0;
+
+        let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 1);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            panic!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains(&format!("master_repl_offset:{expected_offset}\r\n")));
+        assert!(info.contains(&format!("repl_backlog_histlen:{expected_offset}\r\n")));
+        assert!(info.contains("repl_backlog_first_byte_offset:1\r\n"));
     }
 
     #[test]
@@ -6950,6 +7068,7 @@ mod tests {
             other => panic!("expected fullresync, got {other:?}"),
         };
         let snapshot = primary.encoded_rdb_snapshot(3);
+        let fullresync_offset = primary.replication_primary_offset().0;
 
         let mut replica = Runtime::default_strict();
         assert_eq!(
@@ -6987,7 +7106,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
                 RespFrame::Integer(6380),
                 RespFrame::BulkString(Some(b"connected".to_vec())),
-                RespFrame::Integer(3),
+                RespFrame::Integer(i64::try_from(fullresync_offset).unwrap_or(i64::MAX)),
             ]))
         );
     }
@@ -7004,6 +7123,7 @@ mod tests {
             other => panic!("expected fullresync, got {other:?}"),
         };
         let snapshot = primary.encoded_rdb_snapshot(1);
+        let fullresync_offset = primary.replication_primary_offset().0;
 
         let mut replica = Runtime::default_strict();
         assert_eq!(
@@ -7018,7 +7138,8 @@ mod tests {
             primary.execute_frame(command(&[b"SET", b"beta", b"2"]), 4),
             RespFrame::SimpleString("OK".to_string())
         );
-        let backlog = primary.encoded_aof_stream_from_offset(1);
+        let backlog = primary.encoded_aof_stream_from_offset(fullresync_offset);
+        let continued_offset = primary.replication_primary_offset().0;
         replica
             .apply_replication_sync_payload("CONTINUE", &backlog, 5)
             .expect("apply backlog");
@@ -7038,7 +7159,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
                 RespFrame::Integer(6380),
                 RespFrame::BulkString(Some(b"connected".to_vec())),
-                RespFrame::Integer(2),
+                RespFrame::Integer(i64::try_from(continued_offset).unwrap_or(i64::MAX)),
             ]))
         );
     }
