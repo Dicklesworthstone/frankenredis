@@ -5549,15 +5549,23 @@ impl Store {
                     *byte = first.get(i).copied().unwrap_or(0);
                 }
             }
+            
+            let is_and = eq_ascii_ci(op, b"AND");
+            let is_or = eq_ascii_ci(op, b"OR");
+            let is_xor = eq_ascii_ci(op, b"XOR");
+
             for val in values.iter().skip(1) {
-                for (i, byte) in result.iter_mut().enumerate() {
-                    let b = val.get(i).copied().unwrap_or(0);
-                    if eq_ascii_ci(op, b"AND") {
-                        *byte &= b;
-                    } else if eq_ascii_ci(op, b"OR") {
-                        *byte |= b;
-                    } else if eq_ascii_ci(op, b"XOR") {
-                        *byte ^= b;
+                if is_and {
+                    for (i, byte) in result.iter_mut().enumerate() {
+                        *byte &= val.get(i).copied().unwrap_or(0);
+                    }
+                } else if is_or {
+                    for (i, byte) in result.iter_mut().enumerate() {
+                        *byte |= val.get(i).copied().unwrap_or(0);
+                    }
+                } else if is_xor {
+                    for (i, byte) in result.iter_mut().enumerate() {
+                        *byte ^= val.get(i).copied().unwrap_or(0);
                     }
                 }
             }
