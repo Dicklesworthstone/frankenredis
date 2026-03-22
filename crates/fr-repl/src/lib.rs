@@ -194,6 +194,43 @@ pub enum PsyncDecision {
     FullResync { rejection: PsyncRejection },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PsyncReply {
+    Continue,
+    FullResync { replid: String, offset: ReplOffset },
+}
+
+pub fn parse_psync_reply(line: &str) -> Result<PsyncReply, ReplError> {
+    if line == "CONTINUE" {
+        return Ok(PsyncReply::Continue);
+    }
+    let mut parts = line.split_ascii_whitespace();
+    let Some(kind) = parts.next() else {
+        return Err(ReplError::PsyncReplyStateMismatch {
+            state: HandshakeState::PsyncSent,
+        });
+    };
+    if kind != "FULLRESYNC" {
+        return Err(ReplError::PsyncReplyStateMismatch {
+            state: HandshakeState::PsyncSent,
+        });
+    }
+    let (Some(replid), Some(offset_text), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(ReplError::PsyncReplyStateMismatch {
+            state: HandshakeState::PsyncSent,
+        });
+    };
+    let offset = offset_text
+        .parse::<u64>()
+        .map_err(|_| ReplError::PsyncReplyStateMismatch {
+            state: HandshakeState::PsyncSent,
+        })?;
+    Ok(PsyncReply::FullResync {
+        replid: replid.to_string(),
+        offset: ReplOffset(offset),
+    })
+}
+
 #[must_use]
 pub fn decide_psync(
     backlog: &BacklogWindow,
@@ -273,8 +310,8 @@ pub fn evaluate_waitaof(
 mod tests {
     use super::{
         BacklogWindow, HandshakeFsm, HandshakeState, HandshakeStep, PsyncDecision, PsyncRejection,
-        ReplError, ReplOffset, ReplProgress, ReplState, WaitAofThreshold, WaitThreshold,
-        decide_psync, evaluate_wait, evaluate_waitaof,
+        PsyncReply, ReplError, ReplOffset, ReplProgress, ReplState, WaitAofThreshold,
+        WaitThreshold, decide_psync, evaluate_wait, evaluate_waitaof, parse_psync_reply,
     };
 
     #[test]
@@ -393,6 +430,25 @@ mod tests {
                 rejection: PsyncRejection::OffsetOutOfRange
             }
         );
+    }
+
+    #[test]
+    fn parse_psync_reply_accepts_continue_and_fullresync() {
+        assert_eq!(parse_psync_reply("CONTINUE"), Ok(PsyncReply::Continue));
+        assert_eq!(
+            parse_psync_reply("FULLRESYNC replid-a 42"),
+            Ok(PsyncReply::FullResync {
+                replid: "replid-a".to_string(),
+                offset: ReplOffset(42),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_psync_reply_rejects_invalid_shape() {
+        assert!(parse_psync_reply("FULLRESYNC only-two").is_err());
+        assert!(parse_psync_reply("FULLRESYNC replid nope").is_err());
+        assert!(parse_psync_reply("ERR nope").is_err());
     }
 
     #[test]

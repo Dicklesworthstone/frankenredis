@@ -23,12 +23,12 @@ use fr_eventloop::{
 };
 use fr_persist::{
     AofRecord, PersistError, RdbEntry, RdbValue, argv_to_aof_records, decode_aof_stream,
-    encode_aof_stream, encode_rdb, write_aof_file, write_rdb_file,
+    decode_rdb, encode_aof_stream, encode_rdb, write_aof_file, write_rdb_file,
 };
 use fr_protocol::{RespFrame, RespParseError};
 use fr_repl::{
-    BacklogWindow, ReplOffset, WaitAofThreshold, WaitThreshold, decide_psync, evaluate_wait,
-    evaluate_waitaof,
+    BacklogWindow, PsyncReply, ReplOffset, WaitAofThreshold, WaitThreshold, decide_psync,
+    evaluate_wait, evaluate_waitaof, parse_psync_reply,
 };
 use fr_store::{
     EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState,
@@ -1518,6 +1518,41 @@ impl Runtime {
             replies.push(reply);
         }
         replies
+    }
+
+    pub fn apply_replication_sync_payload(
+        &mut self,
+        reply_line: &str,
+        payload: &[u8],
+        now_ms: u64,
+    ) -> Result<(), PersistError> {
+        match parse_psync_reply(reply_line).map_err(|_| PersistError::InvalidFrame)? {
+            PsyncReply::Continue => {
+                self.replay_aof_stream(payload, now_ms)?;
+            }
+            PsyncReply::FullResync { replid, offset } => {
+                let (entries, _aux) = decode_rdb(payload)?;
+                let mut store = Store::new();
+                apply_rdb_entries_to_store(&mut store, &entries, now_ms)?;
+                self.server.store = store;
+                self.server.aof_records.clear();
+                self.server.aof_selected_db = 0;
+                self.session.selected_db = 0;
+                self.server
+                    .replication_runtime_state
+                    .backlog
+                    .rotate(replid, offset, offset);
+                self.server.replication_ack_state.primary_offset = offset;
+                self.server.replication_ack_state.local_fsync_offset = offset;
+            }
+        }
+        if let ReplicationRoleState::Replica { ref mut state, .. } =
+            self.server.replication_runtime_state.role
+        {
+            *state = "connected";
+        }
+        self.server.refresh_replica_ack_snapshots();
+        Ok(())
     }
 
     #[must_use]
@@ -5130,6 +5165,76 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
     entries
 }
 
+fn apply_rdb_entries_to_store(
+    store: &mut Store,
+    entries: &[RdbEntry],
+    now_ms: u64,
+) -> Result<(), PersistError> {
+    for entry in entries {
+        let key = encode_db_key(entry.db, &entry.key);
+        match &entry.value {
+            RdbValue::String(value) => {
+                store.set_with_abs_expiry(key, value.clone(), entry.expire_ms, now_ms);
+            }
+            RdbValue::List(items) => {
+                store
+                    .rpush(&key, items, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?;
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
+            RdbValue::Set(members) => {
+                store
+                    .sadd(&key, members, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?;
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
+            RdbValue::Hash(fields) => {
+                for (field, value) in fields {
+                    store
+                        .hset(&key, field.clone(), value.clone(), now_ms)
+                        .map_err(|_| PersistError::InvalidFrame)?;
+                }
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
+            RdbValue::SortedSet(members) => {
+                let zset_members: Vec<(f64, Vec<u8>)> = members
+                    .iter()
+                    .map(|(member, score)| (*score, member.clone()))
+                    .collect();
+                store
+                    .zadd(&key, &zset_members, now_ms)
+                    .map_err(|_| PersistError::InvalidFrame)?;
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn protocol_error_to_resp(error: RespParseError) -> RespFrame {
     match error {
         RespParseError::InvalidBulkLength => {
@@ -6405,6 +6510,119 @@ mod tests {
             .expect("replica state");
         assert_eq!(replica.ack_offset, fr_repl::ReplOffset(10));
         assert_eq!(replica.fsync_offset, fr_repl::ReplOffset(10));
+    }
+
+    #[test]
+    fn replication_fullresync_apply_replaces_store_and_tracks_offset() {
+        let mut primary = Runtime::default_strict();
+        assert_eq!(
+            primary.execute_frame(command(&[b"SET", b"zero", b"0"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            primary.execute_frame(command(&[b"SELECT", b"2"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            primary.execute_frame(command(&[b"SET", b"two", b"2"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let reply = match primary.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 3) {
+            RespFrame::SimpleString(line) => line,
+            other => panic!("expected fullresync, got {other:?}"),
+        };
+        let snapshot = primary.encoded_rdb_snapshot(3);
+
+        let mut replica = Runtime::default_strict();
+        assert_eq!(
+            replica.execute_frame(command(&[b"SET", b"stale", b"value"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            replica.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        replica
+            .apply_replication_sync_payload(&reply, &snapshot, 4)
+            .expect("apply fullresync");
+
+        assert_eq!(
+            replica.execute_frame(command(&[b"GET", b"stale"]), 5),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            replica.execute_frame(command(&[b"GET", b"zero"]), 6),
+            RespFrame::BulkString(Some(b"0".to_vec()))
+        );
+        assert_eq!(
+            replica.execute_frame(command(&[b"SELECT", b"2"]), 7),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            replica.execute_frame(command(&[b"GET", b"two"]), 8),
+            RespFrame::BulkString(Some(b"2".to_vec()))
+        );
+        assert_eq!(
+            replica.execute_frame(command(&[b"ROLE"]), 9),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"slave".to_vec())),
+                RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                RespFrame::Integer(6380),
+                RespFrame::BulkString(Some(b"connected".to_vec())),
+                RespFrame::Integer(2),
+            ]))
+        );
+    }
+
+    #[test]
+    fn replication_continue_apply_replays_backlog_tail() {
+        let mut primary = Runtime::default_strict();
+        assert_eq!(
+            primary.execute_frame(command(&[b"SET", b"alpha", b"1"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let fullresync = match primary.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 1) {
+            RespFrame::SimpleString(line) => line,
+            other => panic!("expected fullresync, got {other:?}"),
+        };
+        let snapshot = primary.encoded_rdb_snapshot(1);
+
+        let mut replica = Runtime::default_strict();
+        assert_eq!(
+            replica.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        replica
+            .apply_replication_sync_payload(&fullresync, &snapshot, 3)
+            .expect("apply fullresync");
+
+        assert_eq!(
+            primary.execute_frame(command(&[b"SET", b"beta", b"2"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let backlog = primary.encoded_aof_stream_from_offset(1);
+        replica
+            .apply_replication_sync_payload("CONTINUE", &backlog, 5)
+            .expect("apply backlog");
+
+        assert_eq!(
+            replica.execute_frame(command(&[b"GET", b"alpha"]), 6),
+            RespFrame::BulkString(Some(b"1".to_vec()))
+        );
+        assert_eq!(
+            replica.execute_frame(command(&[b"GET", b"beta"]), 7),
+            RespFrame::BulkString(Some(b"2".to_vec()))
+        );
+        assert_eq!(
+            replica.execute_frame(command(&[b"ROLE"]), 8),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"slave".to_vec())),
+                RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                RespFrame::Integer(6380),
+                RespFrame::BulkString(Some(b"connected".to_vec())),
+                RespFrame::Integer(2),
+            ]))
+        );
     }
 
     #[test]
