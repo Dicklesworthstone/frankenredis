@@ -1298,6 +1298,11 @@ impl Runtime {
         self.server.store.server_port = port;
     }
 
+    #[must_use]
+    pub fn server_port(&self) -> u16 {
+        self.server.store.server_port
+    }
+
     /// Load and replay AOF records from the configured path, restoring store state.
     ///
     /// Each AOF record is dispatched through the command router as if it were
@@ -1553,6 +1558,25 @@ impl Runtime {
         }
         self.server.refresh_replica_ack_snapshots();
         Ok(())
+    }
+
+    #[must_use]
+    pub fn replica_sync_target(&self) -> Option<(String, u16)> {
+        match &self.server.replication_runtime_state.role {
+            ReplicationRoleState::Replica { host, port, state } if *state != "connected" => {
+                Some((host.clone(), *port))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn set_replica_connection_state(&mut self, state: &'static str) {
+        if let ReplicationRoleState::Replica {
+            state: role_state, ..
+        } = &mut self.server.replication_runtime_state.role
+        {
+            *role_state = state;
+        }
     }
 
     #[must_use]
@@ -4630,7 +4654,7 @@ impl Runtime {
         self.server.replication_runtime_state.role = ReplicationRoleState::Replica {
             host,
             port,
-            state: "connected",
+            state: "connect",
         };
         RespFrame::SimpleString("OK".to_string())
     }
@@ -6434,7 +6458,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"slave".to_vec())),
                 RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
                 RespFrame::Integer(6380),
-                RespFrame::BulkString(Some(b"connected".to_vec())),
+                RespFrame::BulkString(Some(b"connect".to_vec())),
                 RespFrame::Integer(0),
             ]))
         );
