@@ -32,7 +32,7 @@ use fr_repl::{
 };
 use fr_store::{
     EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState,
-    MaxmemoryPolicy, Store, decode_db_key, encode_db_key, glob_match,
+    MaxmemoryPolicy, NUM_DATABASES, Store, decode_db_key, encode_db_key, glob_match,
 };
 
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -864,9 +864,6 @@ impl EvidenceLedger {
 }
 
 /// State that belongs to the long-lived server process rather than a client.
-/// Number of databases (matches Redis default).
-pub const NUM_DATABASES: usize = 16;
-
 #[derive(Debug)]
 pub struct ServerState {
     store: Store,
@@ -2572,6 +2569,22 @@ impl Runtime {
         }
     }
 
+    fn strip_db_prefixes_from_frame(&self, frame: &mut RespFrame) {
+        match frame {
+            RespFrame::BulkString(Some(bytes)) => {
+                if let Some((_, logical)) = decode_db_key(bytes) {
+                    *bytes = logical.to_vec();
+                }
+            }
+            RespFrame::Array(Some(frames)) => {
+                for f in frames {
+                    self.strip_db_prefixes_from_frame(f);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Clear the set of keys that were modified in the current tick.
     pub fn clear_ready_keys(&mut self) {
         self.server.ready_keys.clear();
@@ -2733,26 +2746,6 @@ impl Runtime {
         rewritten
     }
 
-    fn expire_stale_keys(&mut self, now_ms: u64) {
-        let keys = self.server.store.all_keys();
-        for key in keys {
-            self.server.store.expire_key_if_stale(&key, now_ms);
-        }
-    }
-
-    fn logical_keys_in_selected_db(&mut self, now_ms: u64) -> Vec<Vec<u8>> {
-        self.expire_stale_keys(now_ms);
-        let mut keys = Vec::new();
-        for physical in self.server.store.all_keys() {
-            let (db, logical) = decode_db_key(&physical).unwrap_or((0, physical.as_slice()));
-            if db == self.session.selected_db {
-                keys.push(logical.to_vec());
-            }
-        }
-        keys.sort();
-        keys
-    }
-
     fn execute_db_scoped_command(
         &mut self,
         argv: &[Vec<u8>],
@@ -2786,7 +2779,9 @@ impl Runtime {
             return self.handle_info_command(argv, now_ms);
         }
         let namespaced = self.namespace_argv_for_selected_db(argv);
-        dispatch_argv(&namespaced, &mut self.server.store, now_ms)
+        let mut reply = dispatch_argv(&namespaced, &mut self.server.store, now_ms)?;
+        self.strip_db_prefixes_from_frame(&mut reply);
+        Ok(reply)
     }
 
     fn handle_auth_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -3978,6 +3973,56 @@ impl Runtime {
                 return CommandError::WrongArity("CLIENT").to_resp();
             }
             RespFrame::SimpleString("OK".to_string())
+        } else if sub.eq_ignore_ascii_case("GETREDIR") {
+            // CLIENT GETREDIR — returns redirect ID for tracking (-1 = not tracking)
+            if argv.len() != 2 {
+                return CommandError::WrongArity("CLIENT").to_resp();
+            }
+            RespFrame::Integer(-1) // not tracking
+        } else if sub.eq_ignore_ascii_case("TRACKINGINFO") {
+            // CLIENT TRACKINGINFO — returns tracking info
+            if argv.len() != 2 {
+                return CommandError::WrongArity("CLIENT").to_resp();
+            }
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"off".to_vec()))])),
+                RespFrame::BulkString(Some(b"redirect".to_vec())),
+                RespFrame::Integer(-1),
+                RespFrame::BulkString(Some(b"prefixes".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
+        } else if sub.eq_ignore_ascii_case("UNBLOCK") {
+            // CLIENT UNBLOCK client-id [TIMEOUT|ERROR]
+            if argv.len() < 3 {
+                return CommandError::WrongArity("CLIENT").to_resp();
+            }
+            // In single-runtime mode, return 0 (no clients unblocked)
+            RespFrame::Integer(0)
+        } else if sub.eq_ignore_ascii_case("HELP") {
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(
+                    b"CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_vec(),
+                )),
+                RespFrame::BulkString(Some(b"CACHING (YES|NO)".to_vec())),
+                RespFrame::BulkString(Some(b"GETNAME".to_vec())),
+                RespFrame::BulkString(Some(b"GETREDIR".to_vec())),
+                RespFrame::BulkString(Some(b"ID".to_vec())),
+                RespFrame::BulkString(Some(b"INFO".to_vec())),
+                RespFrame::BulkString(Some(b"KILL <option> ...".to_vec())),
+                RespFrame::BulkString(Some(b"LIST [TYPE (NORMAL|MASTER|REPLICA|PUBSUB)]".to_vec())),
+                RespFrame::BulkString(Some(b"NO-EVICT (ON|OFF)".to_vec())),
+                RespFrame::BulkString(Some(b"NO-TOUCH (ON|OFF)".to_vec())),
+                RespFrame::BulkString(Some(b"PAUSE <timeout> [WRITE|ALL]".to_vec())),
+                RespFrame::BulkString(Some(b"REPLY (ON|OFF|SKIP)".to_vec())),
+                RespFrame::BulkString(Some(b"SETINFO <option> <value>".to_vec())),
+                RespFrame::BulkString(Some(b"SETNAME <connection-name>".to_vec())),
+                RespFrame::BulkString(Some(b"TRACKING (ON|OFF) ...".to_vec())),
+                RespFrame::BulkString(Some(b"TRACKINGINFO".to_vec())),
+                RespFrame::BulkString(Some(b"UNBLOCK <client-id> [TIMEOUT|ERROR]".to_vec())),
+                RespFrame::BulkString(Some(b"UNPAUSE".to_vec())),
+                RespFrame::BulkString(Some(b"HELP".to_vec())),
+            ]))
         } else {
             CommandError::UnknownSubcommand {
                 command: "CLIENT",
@@ -4426,10 +4471,12 @@ impl Runtime {
         if argv.len() != 2 {
             return Err(CommandError::WrongArity("KEYS"));
         }
-        let frames = self
-            .logical_keys_in_selected_db(now_ms)
+        let matched = self
+            .server
+            .store
+            .keys_matching_in_db(self.session.selected_db, &argv[1], now_ms);
+        let frames = matched
             .into_iter()
-            .filter(|key| glob_match(&argv[1], key))
             .map(|key| RespFrame::BulkString(Some(key)))
             .collect();
         Ok(RespFrame::Array(Some(frames)))
@@ -4439,17 +4486,7 @@ impl Runtime {
         if argv.len() != 1 {
             return Err(CommandError::WrongArity("DBSIZE"));
         }
-        let size = self
-            .server
-            .store
-            .all_keys()
-            .into_iter()
-            .filter(|physical| {
-                decode_db_key(physical)
-                    .map(|(db, _)| db == self.session.selected_db)
-                    .unwrap_or(self.session.selected_db == 0)
-            })
-            .count();
+        let size = self.server.store.dbsize_in_db(self.session.selected_db);
         Ok(RespFrame::Integer(i64::try_from(size).unwrap_or(i64::MAX)))
     }
 
@@ -4532,23 +4569,16 @@ impl Runtime {
             }
         }
 
-        let physical_keys = self.server.store.all_keys();
-        for physical in &physical_keys {
-            self.server.store.expire_key_if_stale(physical, now_ms);
-        }
-
-        let mut logical = Vec::new();
-        for physical in self.server.store.all_keys() {
-            let (db, logical_key) = decode_db_key(&physical).unwrap_or((0, physical.as_slice()));
-            if db != self.session.selected_db {
-                continue;
-            }
+        let logical_keys = self.server.store.keys_in_db(self.session.selected_db, now_ms);
+        let mut filtered = Vec::new();
+        for logical_key in logical_keys {
             if let Some(expected_pattern) = pattern
-                && !glob_match(expected_pattern, logical_key)
+                && !glob_match(expected_pattern, &logical_key)
             {
                 continue;
             }
             if let Some(expected_type) = type_filter {
+                let physical = encode_db_key(self.session.selected_db, &logical_key);
                 let expected = std::str::from_utf8(expected_type).unwrap_or("");
                 if self
                     .server
@@ -4559,20 +4589,20 @@ impl Runtime {
                     continue;
                 }
             }
-            logical.push(logical_key.to_vec());
+            filtered.push(logical_key);
         }
-        logical.sort();
+        filtered.sort();
 
-        if cursor >= logical.len() {
+        if cursor >= filtered.len() {
             return Ok(RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"0".to_vec())),
                 RespFrame::Array(Some(Vec::new())),
             ])));
         }
 
-        let end = cursor.saturating_add(count.max(1)).min(logical.len());
-        let next_cursor = if end >= logical.len() { 0 } else { end };
-        let batch = logical[cursor..end]
+        let end = cursor.saturating_add(count.max(1)).min(filtered.len());
+        let next_cursor = if end >= filtered.len() { 0 } else { end };
+        let batch = filtered[cursor..end]
             .iter()
             .cloned()
             .map(|key| RespFrame::BulkString(Some(key)))
@@ -4677,30 +4707,17 @@ impl Runtime {
         }
 
         let namespaced = self.namespace_argv_for_selected_db(argv);
-        dispatch_argv(&namespaced, &mut self.server.store, now_ms)
+        let mut reply = dispatch_argv(&namespaced, &mut self.server.store, now_ms)?;
+        self.strip_db_prefixes_from_frame(&mut reply);
+        Ok(reply)
     }
 
-    fn handle_info_keyspace_section(&mut self, now_ms: u64) -> RespFrame {
-        self.expire_stale_keys(now_ms);
-        let mut per_db: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
-        for key in self.server.store.all_keys() {
-            let db = decode_db_key(&key).map(|(db, _)| db).unwrap_or(0);
-            let expires = self
-                .server
-                .store
-                .get_value_and_expiry(&key)
-                .and_then(|(_, expiry)| expiry)
-                .is_some();
-            let entry = per_db.entry(db).or_insert((0, 0));
-            entry.0 = entry.0.saturating_add(1);
-            if expires {
-                entry.1 = entry.1.saturating_add(1);
-            }
-        }
-
+    fn handle_info_keyspace_section(&mut self, _now_ms: u64) -> RespFrame {
         let mut info = String::from("# Keyspace\r\n");
-        for (db, (keys, expires)) in per_db {
+        for db in 0..NUM_DATABASES {
+            let keys = self.server.store.dbsize_in_db(db);
             if keys > 0 {
+                let expires = self.server.store.expires_in_db(db);
                 info.push_str(&format!(
                     "db{db}:keys={keys},expires={expires},avg_ttl=0\r\n"
                 ));
@@ -4909,6 +4926,16 @@ impl Runtime {
         let Ok(port) = port.parse::<u16>() else {
             return CommandError::InvalidInteger.to_resp();
         };
+        if matches!(
+            &self.server.replication_runtime_state.role,
+            ReplicationRoleState::Replica {
+                host: current_host,
+                port: current_port,
+                ..
+            } if current_host.eq_ignore_ascii_case(&host) && *current_port == port
+        ) {
+            return RespFrame::SimpleString("OK Already connected to specified master".to_string());
+        }
         self.server.replication_runtime_state.role = ReplicationRoleState::Replica {
             host,
             port,
@@ -6731,6 +6758,30 @@ mod tests {
                 RespFrame::BulkString(Some(b"master".to_vec())),
                 RespFrame::Integer(0),
                 RespFrame::Array(Some(Vec::new())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn replication_replicaof_same_master_is_idempotent() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 1),
+            RespFrame::SimpleString("OK Already connected to specified master".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ROLE"]), 2),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"slave".to_vec())),
+                RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                RespFrame::Integer(6380),
+                RespFrame::BulkString(Some(b"connect".to_vec())),
+                RespFrame::Integer(0),
             ]))
         );
     }
