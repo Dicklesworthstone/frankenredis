@@ -1572,14 +1572,16 @@ impl Runtime {
 
     #[must_use]
     pub fn replica_psync_request(&self) -> Option<(String, i64)> {
-        let ReplicationRoleState::Replica { state, .. } = &self.server.replication_runtime_state.role
+        let ReplicationRoleState::Replica { state, .. } =
+            &self.server.replication_runtime_state.role
         else {
             return None;
         };
         if *state == "reconnect" {
             return Some((
                 self.server.replication_runtime_state.backlog.replid.clone(),
-                i64::try_from(self.server.replication_ack_state.primary_offset.0).unwrap_or(i64::MAX),
+                i64::try_from(self.server.replication_ack_state.primary_offset.0)
+                    .unwrap_or(i64::MAX),
             ));
         }
         Some(("?".to_string(), -1))

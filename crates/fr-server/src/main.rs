@@ -119,6 +119,11 @@ struct ClientConnection {
     blocked: Option<BlockedState>,
 }
 
+struct ReplicaPrimaryConnection {
+    stream: StdTcpStream,
+    read_buf: Vec<u8>,
+}
+
 impl ClientConnection {
     fn new(stream: TcpStream, session: ClientSession) -> Self {
         Self {
@@ -297,6 +302,7 @@ fn main() -> ExitCode {
     let mut blocked_tokens: HashSet<Token> = HashSet::new();
     let mut closing_tokens: HashSet<Token> = HashSet::new();
     let mut write_tokens: HashSet<Token> = HashSet::new();
+    let mut replica_primary: Option<ReplicaPrimaryConnection> = None;
     let mut next_token: usize = 1;
     let tick_budget = TickBudget::default();
 
@@ -371,7 +377,7 @@ fn main() -> ExitCode {
         // Drive replica sync opportunistically in the main loop. The current
         // implementation is a one-shot handshake/apply pass; long-lived
         // streaming replication remains a follow-on slice.
-        maybe_run_replica_sync(&mut runtime, ts);
+        drive_replica_sync(&mut runtime, &mut replica_primary, ts);
 
         // Check blocked clients (BLPOP/BRPOP/BLMOVE) for available data
         // or timeout expiry.
@@ -861,12 +867,16 @@ fn read_frame_from_stream(
 fn read_available_stream_bytes(
     stream: &mut StdTcpStream,
     read_buf: &mut Vec<u8>,
-) -> io::Result<Vec<u8>> {
+) -> io::Result<(Vec<u8>, bool)> {
     let mut out = std::mem::take(read_buf);
     let mut chunk = [0u8; 8192];
+    let mut disconnected = false;
     loop {
         match stream.read(&mut chunk) {
-            Ok(0) => break,
+            Ok(0) => {
+                disconnected = true;
+                break;
+            }
             Ok(n) => out.extend_from_slice(&chunk[..n]),
             Err(ref err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 break;
@@ -875,7 +885,7 @@ fn read_available_stream_bytes(
             Err(err) => return Err(err),
         }
     }
-    Ok(out)
+    Ok((out, disconnected))
 }
 
 fn expect_simple_string(frame: RespFrame, expected: &str) -> io::Result<()> {
@@ -893,7 +903,7 @@ fn sync_replica_with_primary(
     host: &str,
     port: u16,
     now_ms: u64,
-) -> io::Result<()> {
+) -> io::Result<ReplicaPrimaryConnection> {
     let mut stream = StdTcpStream::connect((host, port))?;
     let _ = stream.set_nodelay(true);
     stream.set_read_timeout(Some(Duration::from_millis(50)))?;
@@ -924,7 +934,19 @@ fn sync_replica_with_primary(
         "OK",
     )?;
 
-    stream.write_all(&replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]).to_bytes())?;
+    let (requested_replid, requested_offset) =
+        runtime.replica_psync_request().ok_or_else(|| {
+            io::Error::new(ErrorKind::InvalidInput, "replica PSYNC request unavailable")
+        })?;
+    let requested_offset = requested_offset.to_string();
+    stream.write_all(
+        &replica_handshake_frame(&[
+            b"PSYNC",
+            requested_replid.as_bytes(),
+            requested_offset.as_bytes(),
+        ])
+        .to_bytes(),
+    )?;
     let reply = read_frame_from_stream(&mut stream, &mut read_buf, &parser_config)?;
     let RespFrame::SimpleString(reply_line) = reply else {
         return Err(io::Error::new(
@@ -944,25 +966,85 @@ fn sync_replica_with_primary(
             }
         }
     } else {
-        read_available_stream_bytes(&mut stream, &mut read_buf)?
+        read_available_stream_bytes(&mut stream, &mut read_buf)?.0
     };
 
     runtime
         .apply_replication_sync_payload(&reply_line, &payload, now_ms)
         .map_err(|err| io::Error::new(ErrorKind::InvalidData, format!("{err:?}")))?;
-    Ok(())
+    stream.set_read_timeout(None)?;
+    stream.set_write_timeout(None)?;
+    stream.set_nonblocking(true)?;
+    Ok(ReplicaPrimaryConnection { stream, read_buf })
 }
 
-fn maybe_run_replica_sync(runtime: &mut Runtime, now_ms: u64) {
+fn drain_replica_stream(
+    runtime: &mut Runtime,
+    connection: &mut ReplicaPrimaryConnection,
+    now_ms: u64,
+) -> io::Result<bool> {
+    let (payload, disconnected) =
+        read_available_stream_bytes(&mut connection.stream, &mut connection.read_buf)?;
+    connection.read_buf = payload;
+
+    let mut frame_index = 0_u64;
+    loop {
+        match fr_protocol::parse_frame_with_config(&connection.read_buf, &runtime.parser_config()) {
+            Ok(parsed) => {
+                let frame = parsed.frame;
+                connection.read_buf.drain(..parsed.consumed);
+                runtime.execute_frame(frame, now_ms.saturating_add(frame_index));
+                frame_index = frame_index.saturating_add(1);
+            }
+            Err(RespParseError::Incomplete) => break,
+            Err(err) => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("invalid replication delta from primary: {err}"),
+                ));
+            }
+        }
+    }
+
+    Ok(disconnected)
+}
+
+fn drive_replica_sync(
+    runtime: &mut Runtime,
+    replica_primary: &mut Option<ReplicaPrimaryConnection>,
+    now_ms: u64,
+) {
+    if let Some(connection) = replica_primary.as_mut() {
+        match drain_replica_stream(runtime, connection, now_ms) {
+            Ok(false) => {}
+            Ok(true) => {
+                *replica_primary = None;
+                runtime.set_replica_connection_state("reconnect");
+            }
+            Err(err) => {
+                *replica_primary = None;
+                runtime.set_replica_connection_state("reconnect");
+                eprintln!("warn: replica stream read failed: {err}");
+            }
+        }
+    }
+
     let Some((host, port)) = runtime.replica_sync_target() else {
+        *replica_primary = None;
         return;
     };
 
+    if replica_primary.is_some() {
+        return;
+    }
+
     runtime.set_replica_connection_state("sync");
     match sync_replica_with_primary(runtime, &host, port, now_ms) {
-        Ok(()) => {}
+        Ok(connection) => {
+            *replica_primary = Some(connection);
+        }
         Err(err) => {
-            runtime.set_replica_connection_state("connect");
+            runtime.set_replica_connection_state("reconnect");
             eprintln!("warn: replica sync with {host}:{port} failed: {err}");
         }
     }
@@ -1595,7 +1677,7 @@ fn handle_writable(
 #[cfg(test)]
 mod tests {
     use crate::{
-        InlineParseResult, maybe_run_replica_sync, parse_blocking_deadline, read_frame_from_stream,
+        InlineParseResult, drive_replica_sync, parse_blocking_deadline, read_frame_from_stream,
         replica_handshake_frame, replication_follow_up_bytes, should_try_inline_parsing,
         try_build_blocked_state,
     };
@@ -1851,6 +1933,7 @@ mod tests {
         });
 
         let mut replica = Runtime::default_strict();
+        let mut replica_primary = None;
         replica.set_server_port(6381);
         assert_eq!(
             replica.execute_frame(
@@ -1863,7 +1946,7 @@ mod tests {
             ),
             RespFrame::SimpleString("OK".to_string())
         );
-        maybe_run_replica_sync(&mut replica, 3);
+        drive_replica_sync(&mut replica, &mut replica_primary, 3);
 
         assert_eq!(
             replica.execute_frame(
@@ -1887,6 +1970,150 @@ mod tests {
                 RespFrame::BulkString(Some(b"connected".to_vec())),
                 RespFrame::Integer(0),
             ]))
+        );
+
+        server.join().expect("primary thread");
+    }
+
+    #[test]
+    fn replica_stream_reconnect_uses_partial_psync_after_disconnect() {
+        let replid = "00000000000000000000000000000000000000aa".to_string();
+
+        let mut primary = Runtime::default_strict();
+        primary.set_server_port(6380);
+        assert_eq!(
+            primary.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"SET".to_vec())),
+                    RespFrame::BulkString(Some(b"alpha".to_vec())),
+                    RespFrame::BulkString(Some(b"1".to_vec())),
+                ])),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let snapshot = primary.encoded_rdb_snapshot(1);
+
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn({
+            let replid = replid.clone();
+            move || {
+                let parser = ParserConfig::default();
+
+                let (mut stream1, _) = listener.accept().expect("accept first replica");
+                let mut read_buf = Vec::new();
+                let _ = read_frame_from_stream(&mut stream1, &mut read_buf, &parser).expect("ping");
+                stream1
+                    .write_all(&RespFrame::SimpleString("PONG".to_string()).to_bytes())
+                    .unwrap();
+                let _ = read_frame_from_stream(&mut stream1, &mut read_buf, &parser)
+                    .expect("replconf port");
+                stream1
+                    .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                    .unwrap();
+                let _ = read_frame_from_stream(&mut stream1, &mut read_buf, &parser)
+                    .expect("replconf capa");
+                stream1
+                    .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                    .unwrap();
+                let psync1 =
+                    read_frame_from_stream(&mut stream1, &mut read_buf, &parser).expect("psync1");
+                assert_eq!(psync1, replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]));
+                stream1
+                    .write_all(
+                        &RespFrame::SimpleString(format!("FULLRESYNC {replid} 1")).to_bytes(),
+                    )
+                    .unwrap();
+                stream1
+                    .write_all(&RespFrame::BulkString(Some(snapshot)).to_bytes())
+                    .unwrap();
+                stream1
+                    .write_all(&replica_handshake_frame(&[b"SET", b"beta", b"2"]).to_bytes())
+                    .unwrap();
+                drop(stream1);
+
+                let (mut stream2, _) = listener.accept().expect("accept reconnect replica");
+                let mut read_buf = Vec::new();
+                let _ =
+                    read_frame_from_stream(&mut stream2, &mut read_buf, &parser).expect("ping2");
+                stream2
+                    .write_all(&RespFrame::SimpleString("PONG".to_string()).to_bytes())
+                    .unwrap();
+                let _ = read_frame_from_stream(&mut stream2, &mut read_buf, &parser)
+                    .expect("replconf port2");
+                stream2
+                    .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                    .unwrap();
+                let _ = read_frame_from_stream(&mut stream2, &mut read_buf, &parser)
+                    .expect("replconf capa2");
+                stream2
+                    .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                    .unwrap();
+                let psync2 =
+                    read_frame_from_stream(&mut stream2, &mut read_buf, &parser).expect("psync2");
+                assert_eq!(
+                    psync2,
+                    replica_handshake_frame(&[b"PSYNC", replid.as_bytes(), b"2"])
+                );
+                stream2
+                    .write_all(&RespFrame::SimpleString("CONTINUE".to_string()).to_bytes())
+                    .unwrap();
+                stream2
+                    .write_all(&replica_handshake_frame(&[b"SET", b"gamma", b"3"]).to_bytes())
+                    .unwrap();
+            }
+        });
+
+        let mut replica = Runtime::default_strict();
+        let mut replica_primary = None;
+        replica.set_server_port(6381);
+        assert_eq!(
+            replica.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"REPLICAOF".to_vec())),
+                    RespFrame::BulkString(Some(addr.ip().to_string().into_bytes())),
+                    RespFrame::BulkString(Some(addr.port().to_string().into_bytes())),
+                ])),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        drive_replica_sync(&mut replica, &mut replica_primary, 1);
+        drive_replica_sync(&mut replica, &mut replica_primary, 2);
+        drive_replica_sync(&mut replica, &mut replica_primary, 3);
+        drive_replica_sync(&mut replica, &mut replica_primary, 4);
+
+        assert_eq!(
+            replica.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"GET".to_vec())),
+                    RespFrame::BulkString(Some(b"alpha".to_vec())),
+                ])),
+                5,
+            ),
+            RespFrame::BulkString(Some(b"1".to_vec()))
+        );
+        assert_eq!(
+            replica.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"GET".to_vec())),
+                    RespFrame::BulkString(Some(b"beta".to_vec())),
+                ])),
+                6,
+            ),
+            RespFrame::BulkString(Some(b"2".to_vec()))
+        );
+        assert_eq!(
+            replica.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"GET".to_vec())),
+                    RespFrame::BulkString(Some(b"gamma".to_vec())),
+                ])),
+                7,
+            ),
+            RespFrame::BulkString(Some(b"3".to_vec()))
         );
 
         server.join().expect("primary thread");
