@@ -6569,7 +6569,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
                 RespFrame::Integer(6380),
                 RespFrame::BulkString(Some(b"connected".to_vec())),
-                RespFrame::Integer(2),
+                RespFrame::Integer(3),
             ]))
         );
     }
