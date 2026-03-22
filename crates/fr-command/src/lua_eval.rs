@@ -145,7 +145,8 @@ impl LuaTable {
                 self.string_hash.remove(&s);
             } else {
                 self.other_keys.remove(&LuaHashKey(key.clone()));
-                self.other_hash.retain(|entry| !lua_raw_equal(&entry.0, &key));
+                self.other_hash
+                    .retain(|entry| !lua_raw_equal(&entry.0, &key));
             }
             return;
         }

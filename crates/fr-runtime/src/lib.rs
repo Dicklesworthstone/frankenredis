@@ -4471,10 +4471,10 @@ impl Runtime {
         if argv.len() != 2 {
             return Err(CommandError::WrongArity("KEYS"));
         }
-        let matched = self
-            .server
-            .store
-            .keys_matching_in_db(self.session.selected_db, &argv[1], now_ms);
+        let matched =
+            self.server
+                .store
+                .keys_matching_in_db(self.session.selected_db, &argv[1], now_ms);
         let frames = matched
             .into_iter()
             .map(|key| RespFrame::BulkString(Some(key)))
@@ -4569,7 +4569,10 @@ impl Runtime {
             }
         }
 
-        let logical_keys = self.server.store.keys_in_db(self.session.selected_db, now_ms);
+        let logical_keys = self
+            .server
+            .store
+            .keys_in_db(self.session.selected_db, now_ms);
         let mut filtered = Vec::new();
         for logical_key in logical_keys {
             if let Some(expected_pattern) = pattern

@@ -52,11 +52,10 @@ pub fn keyspace_events_parse(classes: &str) -> Option<u32> {
             _ => return None,
         }
     }
-    // If Keyspace or Keyevent is set, must have at least one type flag.
+    // Redis requires at least K or E to be set for notifications to fire.
+    // If event types are specified but neither K nor E is set, disable all.
     if flags != 0 && (flags & (NOTIFY_KEYSPACE | NOTIFY_KEYEVENT)) == 0 {
-        // If types are set but no K/E, default to both.
-        // Actually Redis requires K or E to be explicitly set.
-        // Empty string = disable all.
+        flags = 0;
     }
     Some(flags)
 }
@@ -3324,10 +3323,7 @@ impl Store {
                         added += 1;
                     }
                 }
-                self.internal_entries_insert(
-                    key.to_vec(),
-                    Entry::new(Value::Set(s), None, now_ms),
-                );
+                self.internal_entries_insert(key.to_vec(), Entry::new(Value::Set(s), None, now_ms));
                 self.dirty = self.dirty.saturating_add(added);
                 Ok(added)
             }
@@ -8246,11 +8242,10 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 #[cfg(test)]
 mod tests {
     use super::{
-        decode_db_key, encode_db_key, EvictionLoopFailure, EvictionLoopStatus,
- EvictionSafetyGateState, MaxmemoryPolicy,
+        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPolicy,
         MaxmemoryPressureLevel, PttlValue, ScoreBound, Store, StoreError, StreamAutoClaimOptions,
         StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
-        StreamGroupReadOptions, StreamPendingEntry, ValueType,
+        StreamGroupReadOptions, StreamPendingEntry, ValueType, decode_db_key, encode_db_key,
     };
 
     fn group_read_options(
@@ -8679,7 +8674,12 @@ mod tests {
             vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
         );
         // The malformed class does not match literal '[' prefixed keys.
-        assert!(!store.keys_matching_in_db(0, b"[abc", 0).iter().any(|k| k == b"[abc"));
+        assert!(
+            !store
+                .keys_matching_in_db(0, b"[abc", 0)
+                .iter()
+                .any(|k| k == b"[abc")
+        );
         // "[a-" is malformed too; with this key set Redis matches only 'a'.
         assert_eq!(store.keys_matching_in_db(0, b"[a-", 0), vec![b"a".to_vec()]);
     }
@@ -8699,7 +8699,10 @@ mod tests {
             store.keys_matching_in_db(0, b"[z-a]", 0),
             vec![b"a".to_vec(), b"b".to_vec(), b"m".to_vec(), b"z".to_vec()]
         );
-        assert_eq!(store.keys_matching_in_db(0, b"[\\-]", 0), vec![b"-".to_vec()]);
+        assert_eq!(
+            store.keys_matching_in_db(0, b"[\\-]", 0),
+            vec![b"-".to_vec()]
+        );
         assert_eq!(
             store.keys_matching_in_db(0, b"[a-]", 0),
             vec![b"]".to_vec(), b"a".to_vec()]

@@ -9334,7 +9334,7 @@ fn debug_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(0.0);
-        if secs > 0.0 {
+        if secs > 0.0 && secs.is_finite() {
             std::thread::sleep(std::time::Duration::from_secs_f64(secs));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
