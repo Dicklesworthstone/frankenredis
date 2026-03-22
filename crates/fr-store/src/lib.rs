@@ -4,6 +4,113 @@ use fr_expire::evaluate_expiry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
+// ── Keyspace notification flags (matching Redis server.h) ───────────
+pub const NOTIFY_KEYSPACE: u32 = 1 << 0; // K
+pub const NOTIFY_KEYEVENT: u32 = 1 << 1; // E
+pub const NOTIFY_GENERIC: u32 = 1 << 2; // g
+pub const NOTIFY_STRING: u32 = 1 << 3; // $
+pub const NOTIFY_LIST: u32 = 1 << 4; // l
+pub const NOTIFY_SET: u32 = 1 << 5; // s
+pub const NOTIFY_HASH: u32 = 1 << 6; // h
+pub const NOTIFY_ZSET: u32 = 1 << 7; // z
+pub const NOTIFY_EXPIRED: u32 = 1 << 8; // x
+pub const NOTIFY_EVICTED: u32 = 1 << 9; // e
+pub const NOTIFY_STREAM: u32 = 1 << 10; // t
+pub const NOTIFY_KEY_MISS: u32 = 1 << 11; // m
+pub const NOTIFY_NEW: u32 = 1 << 12; // n
+pub const NOTIFY_ALL: u32 = NOTIFY_GENERIC
+    | NOTIFY_STRING
+    | NOTIFY_LIST
+    | NOTIFY_SET
+    | NOTIFY_HASH
+    | NOTIFY_ZSET
+    | NOTIFY_EXPIRED
+    | NOTIFY_EVICTED
+    | NOTIFY_STREAM;
+
+/// Parse a notify-keyspace-events configuration string into flags.
+/// Returns None if the string contains invalid characters.
+#[must_use]
+pub fn keyspace_events_parse(classes: &str) -> Option<u32> {
+    let mut flags = 0u32;
+    for c in classes.chars() {
+        match c {
+            'A' => flags |= NOTIFY_ALL,
+            'g' => flags |= NOTIFY_GENERIC,
+            '$' => flags |= NOTIFY_STRING,
+            'l' => flags |= NOTIFY_LIST,
+            's' => flags |= NOTIFY_SET,
+            'h' => flags |= NOTIFY_HASH,
+            'z' => flags |= NOTIFY_ZSET,
+            'x' => flags |= NOTIFY_EXPIRED,
+            'e' => flags |= NOTIFY_EVICTED,
+            'K' => flags |= NOTIFY_KEYSPACE,
+            'E' => flags |= NOTIFY_KEYEVENT,
+            't' => flags |= NOTIFY_STREAM,
+            'm' => flags |= NOTIFY_KEY_MISS,
+            'n' => flags |= NOTIFY_NEW,
+            _ => return None,
+        }
+    }
+    // If Keyspace or Keyevent is set, must have at least one type flag.
+    if flags != 0 && (flags & (NOTIFY_KEYSPACE | NOTIFY_KEYEVENT)) == 0 {
+        // If types are set but no K/E, default to both.
+        // Actually Redis requires K or E to be explicitly set.
+        // Empty string = disable all.
+    }
+    Some(flags)
+}
+
+/// Convert notification flags back to a configuration string.
+#[must_use]
+pub fn keyspace_events_to_string(flags: u32) -> String {
+    let mut s = String::new();
+    if (flags & NOTIFY_ALL) == NOTIFY_ALL {
+        s.push('A');
+    } else {
+        if flags & NOTIFY_GENERIC != 0 {
+            s.push('g');
+        }
+        if flags & NOTIFY_STRING != 0 {
+            s.push('$');
+        }
+        if flags & NOTIFY_LIST != 0 {
+            s.push('l');
+        }
+        if flags & NOTIFY_SET != 0 {
+            s.push('s');
+        }
+        if flags & NOTIFY_HASH != 0 {
+            s.push('h');
+        }
+        if flags & NOTIFY_ZSET != 0 {
+            s.push('z');
+        }
+        if flags & NOTIFY_EXPIRED != 0 {
+            s.push('x');
+        }
+        if flags & NOTIFY_EVICTED != 0 {
+            s.push('e');
+        }
+        if flags & NOTIFY_STREAM != 0 {
+            s.push('t');
+        }
+        if flags & NOTIFY_NEW != 0 {
+            s.push('n');
+        }
+    }
+    if flags & NOTIFY_KEYSPACE != 0 {
+        s.push('K');
+    }
+    if flags & NOTIFY_KEYEVENT != 0 {
+        s.push('E');
+    }
+    if flags & NOTIFY_KEY_MISS != 0 {
+        s.push('m');
+    }
+    s
+}
+
 pub type StreamId = (u64, u64);
 pub type StreamField = (Vec<u8>, Vec<u8>);
 pub type StreamEntries = BTreeMap<StreamId, Vec<StreamField>>;
@@ -572,6 +679,13 @@ pub struct Store {
     /// Number of keys currently tracked in the expires set.
     pub expires_count: usize,
 
+    /// Keyspace notification flags (parsed from notify-keyspace-events config).
+    pub notify_keyspace_events: u32,
+
+    /// Pending keyspace notification messages (channel, message) to deliver
+    /// via the pub/sub system after command execution.
+    pub keyspace_notifications: Vec<(Vec<u8>, Vec<u8>)>,
+
     // ── Server-wide metadata and stats (updated by runtime, read by INFO) ──
     /// Unique 40-character hex run ID generated at startup.
     pub server_run_id: String,
@@ -640,6 +754,8 @@ impl Default for Store {
             dirty: 0,
             script_nesting_level: 0,
             expires_count: 0,
+            notify_keyspace_events: 0,
+            keyspace_notifications: Vec::new(),
             server_run_id: generate_run_id(),
             server_pid: std::process::id(),
             server_port: 6379,
@@ -6911,6 +7027,41 @@ impl Store {
     /// Drain all pending Pub/Sub messages.
     pub fn drain_pending_pubsub(&mut self) -> Vec<PubSubMessage> {
         self.pubsub_pending.drain(..).collect()
+    }
+
+    /// Queue a keyspace notification event for delivery via pub/sub.
+    /// `event_type` is the notification class (NOTIFY_STRING, NOTIFY_LIST, etc.).
+    /// `event` is the event name (e.g., "set", "del", "expire").
+    /// `key` is the affected key.
+    /// `db` is the database index.
+    pub fn notify_keyspace_event(&mut self, event_type: u32, event: &str, key: &[u8], db: usize) {
+        let flags = self.notify_keyspace_events;
+        if flags == 0 || (flags & event_type) == 0 {
+            return;
+        }
+
+        let event_bytes = event.as_bytes();
+
+        // __keyspace@<db>__:<key> → event name
+        if flags & NOTIFY_KEYSPACE != 0 {
+            let channel = format!("__keyspace@{db}__:");
+            let mut chan = channel.into_bytes();
+            chan.extend_from_slice(key);
+            self.keyspace_notifications
+                .push((chan, event_bytes.to_vec()));
+        }
+
+        // __keyevent@<db>__:<event> → key name
+        if flags & NOTIFY_KEYEVENT != 0 {
+            let channel = format!("__keyevent@{db}__:{event}");
+            self.keyspace_notifications
+                .push((channel.into_bytes(), key.to_vec()));
+        }
+    }
+
+    /// Drain pending keyspace notifications.
+    pub fn drain_keyspace_notifications(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        std::mem::take(&mut self.keyspace_notifications)
     }
 
     /// Return the number of subscribed channels.

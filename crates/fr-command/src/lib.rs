@@ -9296,8 +9296,19 @@ fn debug_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         return Err(CommandError::WrongArity("DEBUG"));
     }
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    if sub.eq_ignore_ascii_case("SLEEP")
-        || sub.eq_ignore_ascii_case("SET-ACTIVE-EXPIRE")
+    if sub.eq_ignore_ascii_case("SLEEP") {
+        if argv.len() != 3 {
+            return Err(CommandError::WrongArity("DEBUG"));
+        }
+        let secs: f64 = std::str::from_utf8(&argv[2])
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0.0);
+        if secs > 0.0 {
+            std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+        }
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("SET-ACTIVE-EXPIRE")
         || sub.eq_ignore_ascii_case("JMAP")
         || sub.eq_ignore_ascii_case("RELOAD")
         || sub.eq_ignore_ascii_case("OBJECT")

@@ -1597,6 +1597,26 @@ impl Runtime {
     }
 
     #[must_use]
+    pub fn replica_ack_frame(&self) -> Option<RespFrame> {
+        let ReplicationRoleState::Replica { .. } = &self.server.replication_runtime_state.role
+        else {
+            return None;
+        };
+        Some(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"REPLCONF".to_vec())),
+            RespFrame::BulkString(Some(b"ACK".to_vec())),
+            RespFrame::BulkString(Some(
+                self.server
+                    .replication_ack_state
+                    .primary_offset
+                    .0
+                    .to_string()
+                    .into_bytes(),
+            )),
+        ])))
+    }
+
+    #[must_use]
     pub fn tls_runtime_state(&self) -> &TlsRuntimeState {
         self.server.tls_runtime_state()
     }
@@ -2340,13 +2360,215 @@ impl Runtime {
                     self.capture_aof_record(&argv);
                     // Optimized blocking: track keys modified by write commands
                     // so the event loop only checks clients waiting on these keys.
-                    for key in fr_command::command_keys(&argv) {
-                        self.server.ready_keys.insert(key);
+                    let cmd_keys = fr_command::command_keys(&argv);
+                    for key in &cmd_keys {
+                        self.server.ready_keys.insert(key.clone());
+                    }
+                    // Keyspace notifications: publish events for modified keys.
+                    if self.server.store.notify_keyspace_events != 0 {
+                        let event = Self::command_to_keyspace_event(&argv);
+                        let event_type = Self::command_to_notify_type(&argv);
+                        let db = self.session.selected_db;
+                        for key in &cmd_keys {
+                            self.server
+                                .store
+                                .notify_keyspace_event(event_type, event, key, db);
+                        }
+                        // Deliver queued keyspace notifications via pub/sub
+                        self.deliver_keyspace_notifications();
                     }
                 }
                 reply
             }
             Err(err) => (err).to_resp(),
+        }
+    }
+
+    /// Map a command name to its keyspace notification event name.
+    #[allow(clippy::if_same_then_else)]
+    fn command_to_keyspace_event(argv: &[Vec<u8>]) -> &'static str {
+        let Some(cmd) = argv.first() else {
+            return "unknown";
+        };
+        // Match common commands to their Redis event names (lowercase).
+        if cmd.eq_ignore_ascii_case(b"SET")
+            || cmd.eq_ignore_ascii_case(b"SETEX")
+            || cmd.eq_ignore_ascii_case(b"PSETEX")
+            || cmd.eq_ignore_ascii_case(b"MSET")
+            || cmd.eq_ignore_ascii_case(b"MSETNX")
+            || cmd.eq_ignore_ascii_case(b"SETNX")
+            || cmd.eq_ignore_ascii_case(b"GETSET")
+            || cmd.eq_ignore_ascii_case(b"SETRANGE")
+        {
+            "set"
+        } else if cmd.eq_ignore_ascii_case(b"DEL") || cmd.eq_ignore_ascii_case(b"UNLINK") {
+            "del"
+        } else if cmd.eq_ignore_ascii_case(b"APPEND") {
+            "append"
+        } else if cmd.eq_ignore_ascii_case(b"INCR") || cmd.eq_ignore_ascii_case(b"INCRBY") {
+            "incrby"
+        } else if cmd.eq_ignore_ascii_case(b"DECR") || cmd.eq_ignore_ascii_case(b"DECRBY") {
+            "decrby"
+        } else if cmd.eq_ignore_ascii_case(b"INCRBYFLOAT") {
+            "incrbyfloat"
+        } else if cmd.eq_ignore_ascii_case(b"EXPIRE")
+            || cmd.eq_ignore_ascii_case(b"PEXPIRE")
+            || cmd.eq_ignore_ascii_case(b"EXPIREAT")
+            || cmd.eq_ignore_ascii_case(b"PEXPIREAT")
+        {
+            "expire"
+        } else if cmd.eq_ignore_ascii_case(b"PERSIST") {
+            "persist"
+        } else if cmd.eq_ignore_ascii_case(b"RENAME") {
+            "rename_from"
+        } else if cmd.eq_ignore_ascii_case(b"LPUSH") || cmd.eq_ignore_ascii_case(b"LPUSHX") {
+            "lpush"
+        } else if cmd.eq_ignore_ascii_case(b"RPUSH") || cmd.eq_ignore_ascii_case(b"RPUSHX") {
+            "rpush"
+        } else if cmd.eq_ignore_ascii_case(b"LPOP") {
+            "lpop"
+        } else if cmd.eq_ignore_ascii_case(b"RPOP") {
+            "rpop"
+        } else if cmd.eq_ignore_ascii_case(b"LSET") {
+            "lset"
+        } else if cmd.eq_ignore_ascii_case(b"LINSERT") {
+            "linsert"
+        } else if cmd.eq_ignore_ascii_case(b"LTRIM") {
+            "ltrim"
+        } else if cmd.eq_ignore_ascii_case(b"LREM") {
+            "lrem"
+        } else if cmd.eq_ignore_ascii_case(b"HSET")
+            || cmd.eq_ignore_ascii_case(b"HMSET")
+            || cmd.eq_ignore_ascii_case(b"HSETNX")
+        {
+            "hset"
+        } else if cmd.eq_ignore_ascii_case(b"HDEL") {
+            "hdel"
+        } else if cmd.eq_ignore_ascii_case(b"HINCRBY") {
+            "hincrby"
+        } else if cmd.eq_ignore_ascii_case(b"HINCRBYFLOAT") {
+            "hincrbyfloat"
+        } else if cmd.eq_ignore_ascii_case(b"SADD") {
+            "sadd"
+        } else if cmd.eq_ignore_ascii_case(b"SREM") {
+            "srem"
+        } else if cmd.eq_ignore_ascii_case(b"SPOP") {
+            "spop"
+        } else if cmd.eq_ignore_ascii_case(b"SMOVE") {
+            "smove"
+        } else if cmd.eq_ignore_ascii_case(b"ZADD") {
+            "zadd"
+        } else if cmd.eq_ignore_ascii_case(b"ZREM") {
+            "zrem"
+        } else if cmd.eq_ignore_ascii_case(b"ZINCRBY") {
+            "zincrby"
+        } else if cmd.eq_ignore_ascii_case(b"ZPOPMIN") {
+            "zpopmin"
+        } else if cmd.eq_ignore_ascii_case(b"ZPOPMAX") {
+            "zpopmax"
+        } else if cmd.eq_ignore_ascii_case(b"XADD") {
+            "xadd"
+        } else if cmd.eq_ignore_ascii_case(b"XDEL") {
+            "xdel"
+        } else if cmd.eq_ignore_ascii_case(b"XTRIM") {
+            "xtrim"
+        } else if cmd.eq_ignore_ascii_case(b"GETDEL") {
+            "getdel"
+        } else if cmd.eq_ignore_ascii_case(b"COPY") {
+            "copy_to"
+        } else if cmd.eq_ignore_ascii_case(b"RESTORE") {
+            "restore"
+        } else if cmd.eq_ignore_ascii_case(b"SETBIT") {
+            "setbit"
+        } else if cmd.eq_ignore_ascii_case(b"GETEX") {
+            "getex"
+        } else {
+            "generic"
+        }
+    }
+
+    /// Map a command to its notification type flag.
+    #[allow(clippy::if_same_then_else)]
+    fn command_to_notify_type(argv: &[Vec<u8>]) -> u32 {
+        let Some(cmd) = argv.first() else {
+            return fr_store::NOTIFY_GENERIC;
+        };
+        if cmd.eq_ignore_ascii_case(b"SET")
+            || cmd.eq_ignore_ascii_case(b"SETEX")
+            || cmd.eq_ignore_ascii_case(b"PSETEX")
+            || cmd.eq_ignore_ascii_case(b"MSET")
+            || cmd.eq_ignore_ascii_case(b"MSETNX")
+            || cmd.eq_ignore_ascii_case(b"SETNX")
+            || cmd.eq_ignore_ascii_case(b"GETSET")
+            || cmd.eq_ignore_ascii_case(b"SETRANGE")
+            || cmd.eq_ignore_ascii_case(b"APPEND")
+            || cmd.eq_ignore_ascii_case(b"INCR")
+            || cmd.eq_ignore_ascii_case(b"INCRBY")
+            || cmd.eq_ignore_ascii_case(b"DECR")
+            || cmd.eq_ignore_ascii_case(b"DECRBY")
+            || cmd.eq_ignore_ascii_case(b"INCRBYFLOAT")
+            || cmd.eq_ignore_ascii_case(b"GETDEL")
+            || cmd.eq_ignore_ascii_case(b"GETEX")
+            || cmd.eq_ignore_ascii_case(b"SETBIT")
+        {
+            fr_store::NOTIFY_STRING
+        } else if cmd.eq_ignore_ascii_case(b"LPUSH")
+            || cmd.eq_ignore_ascii_case(b"RPUSH")
+            || cmd.eq_ignore_ascii_case(b"LPUSHX")
+            || cmd.eq_ignore_ascii_case(b"RPUSHX")
+            || cmd.eq_ignore_ascii_case(b"LPOP")
+            || cmd.eq_ignore_ascii_case(b"RPOP")
+            || cmd.eq_ignore_ascii_case(b"LSET")
+            || cmd.eq_ignore_ascii_case(b"LINSERT")
+            || cmd.eq_ignore_ascii_case(b"LTRIM")
+            || cmd.eq_ignore_ascii_case(b"LREM")
+            || cmd.eq_ignore_ascii_case(b"LMOVE")
+            || cmd.eq_ignore_ascii_case(b"RPOPLPUSH")
+        {
+            fr_store::NOTIFY_LIST
+        } else if cmd.eq_ignore_ascii_case(b"SADD")
+            || cmd.eq_ignore_ascii_case(b"SREM")
+            || cmd.eq_ignore_ascii_case(b"SPOP")
+            || cmd.eq_ignore_ascii_case(b"SMOVE")
+            || cmd.eq_ignore_ascii_case(b"SINTERSTORE")
+            || cmd.eq_ignore_ascii_case(b"SUNIONSTORE")
+            || cmd.eq_ignore_ascii_case(b"SDIFFSTORE")
+        {
+            fr_store::NOTIFY_SET
+        } else if cmd.eq_ignore_ascii_case(b"HSET")
+            || cmd.eq_ignore_ascii_case(b"HMSET")
+            || cmd.eq_ignore_ascii_case(b"HSETNX")
+            || cmd.eq_ignore_ascii_case(b"HDEL")
+            || cmd.eq_ignore_ascii_case(b"HINCRBY")
+            || cmd.eq_ignore_ascii_case(b"HINCRBYFLOAT")
+        {
+            fr_store::NOTIFY_HASH
+        } else if cmd.eq_ignore_ascii_case(b"ZADD")
+            || cmd.eq_ignore_ascii_case(b"ZREM")
+            || cmd.eq_ignore_ascii_case(b"ZINCRBY")
+            || cmd.eq_ignore_ascii_case(b"ZPOPMIN")
+            || cmd.eq_ignore_ascii_case(b"ZPOPMAX")
+            || cmd.eq_ignore_ascii_case(b"ZRANGESTORE")
+            || cmd.eq_ignore_ascii_case(b"ZINTERSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZUNIONSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZDIFFSTORE")
+        {
+            fr_store::NOTIFY_ZSET
+        } else if cmd.eq_ignore_ascii_case(b"XADD")
+            || cmd.eq_ignore_ascii_case(b"XDEL")
+            || cmd.eq_ignore_ascii_case(b"XTRIM")
+        {
+            fr_store::NOTIFY_STREAM
+        } else {
+            fr_store::NOTIFY_GENERIC
+        }
+    }
+
+    /// Deliver queued keyspace notifications through the pub/sub system.
+    fn deliver_keyspace_notifications(&mut self) {
+        let notifications = self.server.store.drain_keyspace_notifications();
+        for (channel, message) in notifications {
+            self.pubsub_publish(&channel, &message);
         }
     }
 
@@ -3396,6 +3618,25 @@ impl Runtime {
                 continue;
             }
             // List encoding threshold — accepts negative values (-1 to -5 for byte limits).
+            // Keyspace notifications config
+            if parameter.eq_ignore_ascii_case("notify-keyspace-events") {
+                let value_str = std::str::from_utf8(&pair[1]).unwrap_or("");
+                match fr_store::keyspace_events_parse(value_str) {
+                    Some(flags) => {
+                        self.server.store.notify_keyspace_events = flags;
+                        self.server
+                            .config_overrides
+                            .insert("notify-keyspace-events".to_string(), value_str.to_string());
+                    }
+                    None => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'notify-keyspace-events'"
+                                .to_string(),
+                        );
+                    }
+                }
+                continue;
+            }
             if parameter.eq_ignore_ascii_case("list-max-listpack-size")
                 || parameter.eq_ignore_ascii_case("list-max-ziplist-size")
             {
