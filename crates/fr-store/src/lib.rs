@@ -1365,8 +1365,14 @@ impl Store {
         let old_value = bitfield_read(&bytes, bit_offset, bits, signed);
 
         // Ensure the byte array is large enough
-        let end_bit = bit_offset + u64::from(bits);
+        let end_bit = bit_offset.saturating_add(u64::from(bits));
         let needed_bytes = end_bit.div_ceil(8) as usize;
+        if needed_bytes > 512 * 1024 * 1024 {
+            return Err(StoreError::GenericError(
+                "ERR string exceeds maximum allowed size (512MB)".to_string(),
+            ));
+        }
+
         let old_len = bytes.len();
         if bytes.len() < needed_bytes {
             bytes.resize(needed_bytes, 0);
@@ -3415,7 +3421,42 @@ impl Store {
         for key in keys {
             self.drop_if_expired(key, now_ms);
         }
-        let mut result = match self.entries.get_mut(keys[0]) {
+
+        let mut min_card = usize::MAX;
+        let mut min_idx = 0;
+        let mut has_empty = false;
+
+        // First pass: typecheck and find the smallest set.
+        for (i, key) in keys.iter().enumerate() {
+            match self.entries.get(*key) {
+                Some(entry) => match &entry.value {
+                    Value::Set(s) => {
+                        if s.len() < min_card {
+                            min_card = s.len();
+                            min_idx = i;
+                        }
+                    }
+                    _ => return Err(StoreError::WrongType),
+                },
+                None => {
+                    has_empty = true;
+                }
+            }
+        }
+
+        if has_empty {
+            // Touch existing sets to emulate Redis behavior
+            for key in keys {
+                if let Some(entry) = self.entries.get_mut(*key) {
+                    if let Value::Set(_) = &entry.value {
+                        entry.touch(now_ms);
+                    }
+                }
+            }
+            return Ok(Vec::new());
+        }
+
+        let mut result = match self.entries.get_mut(keys[min_idx]) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
                     let res = s.clone();
@@ -3426,14 +3467,15 @@ impl Store {
             },
             None => return Ok(Vec::new()),
         };
-        for key in &keys[1..] {
+
+        for (i, key) in keys.iter().enumerate() {
+            if i == min_idx {
+                continue;
+            }
             if result.is_empty() {
-                // Keep touching remaining valid keys
                 if let Some(entry) = self.entries.get_mut(*key) {
                     if let Value::Set(_) = &entry.value {
                         entry.touch(now_ms);
-                    } else {
-                        return Err(StoreError::WrongType);
                     }
                 }
                 continue;
@@ -3444,7 +3486,7 @@ impl Store {
                         result.retain(|m| s.contains(m));
                         entry.touch(now_ms);
                     }
-                    _ => return Err(StoreError::WrongType),
+                    _ => {},
                 },
                 None => {
                     result.clear();
@@ -3468,7 +3510,40 @@ impl Store {
         for key in keys {
             self.drop_if_expired(key, now_ms);
         }
-        let mut result = match self.entries.get_mut(keys[0]) {
+
+        let mut min_card = usize::MAX;
+        let mut min_idx = 0;
+        let mut has_empty = false;
+
+        for (i, key) in keys.iter().enumerate() {
+            match self.entries.get(*key) {
+                Some(entry) => match &entry.value {
+                    Value::Set(s) => {
+                        if s.len() < min_card {
+                            min_card = s.len();
+                            min_idx = i;
+                        }
+                    }
+                    _ => return Err(StoreError::WrongType),
+                },
+                None => {
+                    has_empty = true;
+                }
+            }
+        }
+
+        if has_empty {
+            for key in keys {
+                if let Some(entry) = self.entries.get_mut(*key) {
+                    if let Value::Set(_) = &entry.value {
+                        entry.touch(now_ms);
+                    }
+                }
+            }
+            return Ok(0);
+        }
+
+        let mut result = match self.entries.get_mut(keys[min_idx]) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
                     let res = s.clone();
@@ -3479,13 +3554,15 @@ impl Store {
             },
             None => return Ok(0),
         };
-        for key in &keys[1..] {
+
+        for (i, key) in keys.iter().enumerate() {
+            if i == min_idx {
+                continue;
+            }
             if result.is_empty() {
                 if let Some(entry) = self.entries.get_mut(*key) {
                     if let Value::Set(_) = &entry.value {
                         entry.touch(now_ms);
-                    } else {
-                        return Err(StoreError::WrongType);
                     }
                 }
                 continue;
@@ -3786,7 +3863,7 @@ impl Store {
     ) -> Result<usize, StoreError> {
         let result = self.sinter(keys, now_ms)?;
         let count = result.len();
-        self.internal_entries_remove(destination);
+        let deleted = self.internal_entries_remove(destination).is_some();
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
@@ -3795,8 +3872,10 @@ impl Store {
                 destination.to_vec(),
                 Entry::new(Value::Set(set), None, now_ms),
             );
+            self.dirty = self.dirty.saturating_add(1);
+        } else if deleted {
+            self.dirty = self.dirty.saturating_add(1);
         }
-        self.dirty = self.dirty.saturating_add(1);
         Ok(count)
     }
 
@@ -3808,7 +3887,7 @@ impl Store {
     ) -> Result<usize, StoreError> {
         let result = self.sunion(keys, now_ms)?;
         let count = result.len();
-        self.internal_entries_remove(destination);
+        let deleted = self.internal_entries_remove(destination).is_some();
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
@@ -3817,8 +3896,10 @@ impl Store {
                 destination.to_vec(),
                 Entry::new(Value::Set(set), None, now_ms),
             );
+            self.dirty = self.dirty.saturating_add(1);
+        } else if deleted {
+            self.dirty = self.dirty.saturating_add(1);
         }
-        self.dirty = self.dirty.saturating_add(1);
         Ok(count)
     }
 
@@ -3830,7 +3911,7 @@ impl Store {
     ) -> Result<usize, StoreError> {
         let result = self.sdiff(keys, now_ms)?;
         let count = result.len();
-        self.internal_entries_remove(destination);
+        let deleted = self.internal_entries_remove(destination).is_some();
         self.stream_groups.remove(destination);
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
@@ -3839,8 +3920,10 @@ impl Store {
                 destination.to_vec(),
                 Entry::new(Value::Set(set), None, now_ms),
             );
+            self.dirty = self.dirty.saturating_add(1);
+        } else if deleted {
+            self.dirty = self.dirty.saturating_add(1);
         }
-        self.dirty = self.dirty.saturating_add(1);
         Ok(count)
     }
 
@@ -6182,17 +6265,23 @@ impl Store {
         }
 
         let count = combined.len();
-        let mut zs = SortedSet::new();
-        for (m, s) in combined {
-            zs.insert(m, s);
-        }
+        let deleted = self.internal_entries_remove(dest).is_some();
         self.stream_groups.remove(dest);
         self.stream_last_ids.remove(dest);
-        self.internal_entries_insert(
-            dest.to_vec(),
-            Entry::new(Value::SortedSet(zs), None, now_ms),
-        );
-        self.dirty = self.dirty.saturating_add(1);
+
+        if count > 0 {
+            let mut zs = SortedSet::new();
+            for (m, s) in combined {
+                zs.insert(m, s);
+            }
+            self.internal_entries_insert(
+                dest.to_vec(),
+                Entry::new(Value::SortedSet(zs), None, now_ms),
+            );
+            self.dirty = self.dirty.saturating_add(1);
+        } else if deleted {
+            self.dirty = self.dirty.saturating_add(1);
+        }
         Ok(count)
     }
 
@@ -6206,22 +6295,58 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         if keys.is_empty() {
+            let deleted = self.internal_entries_remove(dest).is_some();
             self.stream_groups.remove(dest);
             self.stream_last_ids.remove(dest);
-            self.internal_entries_insert(
-                dest.to_vec(),
-                Entry::new(Value::SortedSet(SortedSet::new()), None, now_ms),
-            );
-            self.dirty = self.dirty.saturating_add(1);
+            if deleted {
+                self.dirty = self.dirty.saturating_add(1);
+            }
             return Ok(0);
         }
 
-        // Start with members from the first key
-        self.drop_if_expired(keys[0], now_ms);
-        let mut result: HashMap<Vec<u8>, f64> = match self.entries.get_mut(keys[0]) {
+        let mut min_card = usize::MAX;
+        let mut min_idx = 0;
+        let mut has_empty = false;
+
+        for (i, &key) in keys.iter().enumerate() {
+            self.drop_if_expired(key, now_ms);
+            match self.entries.get(key) {
+                Some(entry) => match &entry.value {
+                    Value::SortedSet(zs) => {
+                        if zs.len() < min_card {
+                            min_card = zs.len();
+                            min_idx = i;
+                        }
+                    }
+                    _ => return Err(StoreError::WrongType),
+                },
+                None => {
+                    has_empty = true;
+                }
+            }
+        }
+
+        if has_empty {
+            for key in keys {
+                if let Some(entry) = self.entries.get_mut(*key) {
+                    if let Value::SortedSet(_) = &entry.value {
+                        entry.touch(now_ms);
+                    }
+                }
+            }
+            let deleted = self.internal_entries_remove(dest).is_some();
+            self.stream_groups.remove(dest);
+            self.stream_last_ids.remove(dest);
+            if deleted {
+                self.dirty = self.dirty.saturating_add(1);
+            }
+            return Ok(0);
+        }
+
+        let mut result: HashMap<Vec<u8>, f64> = match self.entries.get_mut(keys[min_idx]) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
-                    let w = weights.first().copied().unwrap_or(1.0);
+                    let w = weights.get(min_idx).copied().unwrap_or(1.0);
                     let res = zs.dict.iter().map(|(m, &s)| (m.clone(), s * w)).collect();
                     entry.touch(now_ms);
                     res
@@ -6231,10 +6356,19 @@ impl Store {
             None => HashMap::new(),
         };
 
-        // Intersect with remaining keys
-        for (i, &key) in keys.iter().enumerate().skip(1) {
-            self.drop_if_expired(key, now_ms);
+        for (i, &key) in keys.iter().enumerate() {
+            if i == min_idx {
+                continue;
+            }
             let weight = weights.get(i).copied().unwrap_or(1.0);
+            if result.is_empty() {
+                if let Some(entry) = self.entries.get_mut(key) {
+                    if let Value::SortedSet(_) = &entry.value {
+                        entry.touch(now_ms);
+                    }
+                }
+                continue;
+            }
             match self.entries.get_mut(key) {
                 Some(entry) => match &entry.value {
                     Value::SortedSet(zs) => {
@@ -6257,17 +6391,23 @@ impl Store {
         }
 
         let count = result.len();
-        let mut zs = SortedSet::new();
-        for (m, s) in result {
-            zs.insert(m, s);
-        }
+        let deleted = self.internal_entries_remove(dest).is_some();
         self.stream_groups.remove(dest);
         self.stream_last_ids.remove(dest);
-        self.internal_entries_insert(
-            dest.to_vec(),
-            Entry::new(Value::SortedSet(zs), None, now_ms),
-        );
-        self.dirty = self.dirty.saturating_add(1);
+
+        if count > 0 {
+            let mut zs = SortedSet::new();
+            for (m, s) in result {
+                zs.insert(m, s);
+            }
+            self.internal_entries_insert(
+                dest.to_vec(),
+                Entry::new(Value::SortedSet(zs), None, now_ms),
+            );
+            self.dirty = self.dirty.saturating_add(1);
+        } else if deleted {
+            self.dirty = self.dirty.saturating_add(1);
+        }
         Ok(count)
     }
 
@@ -6423,18 +6563,26 @@ impl Store {
             return (0, Vec::new());
         }
 
+        let mut processed = 0;
         for (key, entry) in self.entries.iter().skip(start) {
             pos += 1;
+            processed += 1;
             if evaluate_expiry(now_ms, entry.expires_at_ms).should_evict {
+                if processed >= batch_size {
+                    break;
+                }
                 continue;
             }
             if let Some(pat) = pattern
                 && !glob_match(pat, key)
             {
+                if processed >= batch_size {
+                    break;
+                }
                 continue;
             }
             result.push(key.clone());
-            if result.len() >= batch_size {
+            if processed >= batch_size {
                 break;
             }
         }
@@ -6467,15 +6615,20 @@ impl Store {
                         return Ok((0, Vec::new()));
                     }
 
+                    let mut processed = 0;
                     for (field, value) in h.iter().skip(start) {
                         pos += 1;
+                        processed += 1;
                         if let Some(pat) = pattern
                             && !glob_match(pat, field)
                         {
+                            if processed >= batch_size {
+                                break;
+                            }
                             continue;
                         }
                         result.push((field.clone(), value.clone()));
-                        if result.len() >= batch_size {
+                        if processed >= batch_size {
                             break;
                         }
                     }
@@ -6511,15 +6664,20 @@ impl Store {
                     let batch_size = count.max(1);
                     let mut result = Vec::new();
                     let mut pos = start;
+                    let mut processed = 0;
                     for member in s.iter().skip(start) {
                         pos += 1;
+                        processed += 1;
                         if let Some(pat) = pattern
                             && !glob_match(pat, member)
                         {
+                            if processed >= batch_size {
+                                break;
+                            }
                             continue;
                         }
                         result.push(member.clone());
-                        if result.len() >= batch_size {
+                        if processed >= batch_size {
                             break;
                         }
                     }
@@ -6556,16 +6714,21 @@ impl Store {
                     let batch_size = count.max(1);
                     let mut result = Vec::new();
                     let mut pos = start;
+                    let mut processed = 0;
 
                     for (member, score) in zs.iter_asc().skip(start) {
                         pos += 1;
+                        processed += 1;
                         if let Some(pat) = pattern
                             && !glob_match(pat, member)
                         {
+                            if processed >= batch_size {
+                                break;
+                            }
                             continue;
                         }
                         result.push((member.clone(), *score));
-                        if result.len() >= batch_size {
+                        if processed >= batch_size {
                             break;
                         }
                     }
@@ -8011,7 +8174,7 @@ fn bitfield_read(bytes: &[u8], bit_offset: u64, bits: u8, signed: bool) -> i64 {
     }
     let mut value: u64 = 0;
     for b in 0..u64::from(bits) {
-        let pos = bit_offset + b;
+        let pos = bit_offset.wrapping_add(b);
         let byte_idx = (pos / 8) as usize;
         let bit_idx = 7 - (pos % 8) as u8;
         let bit_val = if byte_idx < bytes.len() {
@@ -8037,7 +8200,7 @@ fn bitfield_read(bytes: &[u8], bit_offset: u64, bits: u8, signed: bool) -> i64 {
 fn bitfield_write(bytes: &mut [u8], bit_offset: u64, bits: u8, value: i64) {
     let value = value as u64;
     for b in 0..u64::from(bits) {
-        let pos = bit_offset + b;
+        let pos = bit_offset.wrapping_add(b);
         let byte_idx = (pos / 8) as usize;
         let bit_idx = 7 - (pos % 8) as u8;
         // Extract the bit from value (MSB of the field first)
