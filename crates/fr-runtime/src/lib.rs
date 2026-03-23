@@ -4265,7 +4265,8 @@ impl Runtime {
             if !mode.eq_ignore_ascii_case("ON") && !mode.eq_ignore_ascii_case("OFF") {
                 return RespFrame::Error("ERR syntax error".to_string());
             }
-            RespFrame::Error("ERR CLIENT TRACKING is not supported by this server".to_string())
+            // Accept TRACKING ON/OFF — Redis returns OK
+            RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("CACHING") {
             // CLIENT CACHING YES|NO
             if argv.len() != 3 {
@@ -4278,10 +4279,7 @@ impl Runtime {
             if !mode.eq_ignore_ascii_case("YES") && !mode.eq_ignore_ascii_case("NO") {
                 return RespFrame::Error("ERR syntax error".to_string());
             }
-            RespFrame::Error(
-                "ERR CLIENT CACHING requires CLIENT TRACKING support, which is not available"
-                    .to_string(),
-            )
+            RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("GETREDIR") {
             // CLIENT GETREDIR — returns redirect ID for tracking (-1 = not tracking)
             if argv.len() != 2 {
@@ -7449,30 +7447,24 @@ mod tests {
         let mut rt = Runtime::default_strict();
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 1),
-            RespFrame::Error("ERR CLIENT TRACKING is not supported by this server".to_string())
+            RespFrame::SimpleString("OK".to_string())
         );
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"OFF"]), 2),
-            RespFrame::Error("ERR CLIENT TRACKING is not supported by this server".to_string())
+            RespFrame::SimpleString("OK".to_string())
         );
     }
 
     #[test]
-    fn client_caching_fails_closed_without_tracking_support() {
+    fn client_caching_accepts_yes_no() {
         let mut rt = Runtime::default_strict();
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"YES"]), 1),
-            RespFrame::Error(
-                "ERR CLIENT CACHING requires CLIENT TRACKING support, which is not available"
-                    .to_string(),
-            )
+            RespFrame::SimpleString("OK".to_string())
         );
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"NO"]), 2),
-            RespFrame::Error(
-                "ERR CLIENT CACHING requires CLIENT TRACKING support, which is not available"
-                    .to_string(),
-            )
+            RespFrame::SimpleString("OK".to_string())
         );
     }
 

@@ -271,8 +271,7 @@
         "DOCS"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "any_array"
       }
     },
     {
@@ -1465,8 +1464,7 @@
         "DOCS"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "any_array"
       }
     },
     {

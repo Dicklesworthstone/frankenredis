@@ -111,6 +111,7 @@ pub enum ExpectedFrame {
     NullArray,
     AnyInteger,
     AnyBulk,
+    AnyArray,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -970,6 +971,7 @@ fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
         ExpectedFrame::NullArray => RespFrame::Array(None),
         ExpectedFrame::AnyInteger => RespFrame::Integer(0),
         ExpectedFrame::AnyBulk => RespFrame::BulkString(Some(Vec::new())),
+        ExpectedFrame::AnyArray => RespFrame::Array(Some(Vec::new())),
     }
 }
 
@@ -977,6 +979,9 @@ fn frame_matches_expected(actual: &RespFrame, expected: &ExpectedFrame) -> bool 
     match expected {
         ExpectedFrame::AnyInteger => matches!(actual, RespFrame::Integer(_)),
         ExpectedFrame::AnyBulk => matches!(actual, RespFrame::BulkString(Some(_))),
+        ExpectedFrame::AnyArray => {
+            matches!(actual, RespFrame::Array(Some(_)) | RespFrame::Sequence(_))
+        }
         ExpectedFrame::Array { value } => match actual {
             RespFrame::Array(Some(items)) => {
                 items.len() == value.len()
