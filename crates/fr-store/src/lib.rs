@@ -5911,6 +5911,88 @@ impl Store {
         Ok(())
     }
 
+    pub fn hll_debug_getreg(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::String(data) => {
+                    let registers = hll_parse_registers(data)?;
+                    entry.touch(now_ms);
+                    Ok(Some(registers))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn hll_debug_decode(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<String>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::String(data) => {
+                    hll_parse_registers(data)?;
+                    entry.touch(now_ms);
+                    Err(StoreError::GenericError(
+                        "HLL encoding is not sparse".to_string(),
+                    ))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn hll_debug_encoding(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<&'static str>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::String(data) => {
+                    hll_parse_registers(data)?;
+                    entry.touch(now_ms);
+                    Ok(Some("dense"))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn hll_debug_todense(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<bool>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::String(data) => {
+                    hll_parse_registers(data)?;
+                    entry.touch(now_ms);
+                    Ok(Some(false))
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn hll_selftest(&self) -> Result<(), StoreError> {
+        hll_run_selftest().map_err(StoreError::GenericError)
+    }
+
     fn drop_if_expired(&mut self, key: &[u8], now_ms: u64) {
         let should_evict = evaluate_expiry(
             now_ms,
@@ -8014,14 +8096,41 @@ const HLL_REGISTERS: usize = 1 << HLL_P; // 16384
 const HLL_MAGIC: &[u8] = b"HYLL";
 const HLL_DATA_SIZE: usize = HLL_MAGIC.len() + HLL_REGISTERS; // 16388
 
-/// FNV-1a 64-bit hash for HyperLogLog element hashing.
+/// MurmurHash64A-style hash for HyperLogLog element hashing.
+/// HyperLogLog accuracy depends on good bit dispersion; the earlier FNV-based
+/// implementation produced materially worse estimator error at moderate
+/// cardinalities.
 fn hll_hash(data: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for &byte in data {
-        h ^= u64::from(byte);
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    const M: u64 = 0xc6a4_a793_5bd1_e995;
+    const R: u32 = 47;
+
+    let len = data.len() as u64;
+    let mut h = 0xadc8_3b19_u64 ^ len.wrapping_mul(M);
+
+    let mut chunks = data.chunks_exact(8);
+    for chunk in &mut chunks {
+        let mut k = u64::from_le_bytes(chunk.try_into().expect("8-byte chunk"));
+        k = k.wrapping_mul(M);
+        k ^= k >> R;
+        k = k.wrapping_mul(M);
+
+        h ^= k;
+        h = h.wrapping_mul(M);
     }
-    h
+
+    let tail = chunks.remainder();
+    if !tail.is_empty() {
+        let mut remaining = 0_u64;
+        for (shift, byte) in tail.iter().enumerate() {
+            remaining |= u64::from(*byte) << (shift * 8);
+        }
+        h ^= remaining;
+        h = h.wrapping_mul(M);
+    }
+
+    h ^= h >> R;
+    h = h.wrapping_mul(M);
+    h ^ (h >> R)
 }
 
 /// Position of the leftmost 1-bit in a `(64 - HLL_P)`-bit value, counting from 1.
@@ -8071,6 +8180,67 @@ fn hll_estimate(registers: &[u8]) -> u64 {
     } else {
         estimate.round() as u64
     }
+}
+
+fn hll_add_to_registers(registers: &mut [u8], element: &[u8]) {
+    let hash = hll_hash(element);
+    let index = (hash as usize) & (HLL_REGISTERS - 1);
+    let w = hash >> HLL_P;
+    let count = hll_rho(w);
+    if count > registers[index] {
+        registers[index] = count;
+    }
+}
+
+fn hll_run_selftest() -> Result<(), String> {
+    const HLL_TEST_CYCLES: usize = 64;
+
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next_u64 = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        state
+    };
+
+    for _ in 0..HLL_TEST_CYCLES {
+        let mut expected = vec![0u8; HLL_REGISTERS];
+        for value in &mut expected {
+            *value = (next_u64() & 63) as u8;
+        }
+        let encoded = hll_encode(&expected);
+        let decoded = hll_parse_registers(&encoded)
+            .map_err(|_| "TESTFAILED encoded register payload did not round-trip".to_string())?;
+        if decoded != expected {
+            return Err("TESTFAILED register round-trip mismatch".to_string());
+        }
+    }
+
+    let mut registers = vec![0u8; HLL_REGISTERS];
+    let relerr = 1.04 / (HLL_REGISTERS as f64).sqrt();
+    let mut checkpoint = 1_u64;
+    let mut element = 0_u64;
+
+    while checkpoint <= 1_000_000 {
+        while element < checkpoint {
+            element += 1;
+            hll_add_to_registers(&mut registers, &element.to_le_bytes());
+        }
+        let estimate = hll_estimate(&registers);
+        let abserr = estimate.abs_diff(checkpoint);
+        let mut maxerr = (relerr * 6.0 * checkpoint as f64).ceil() as u64;
+        if checkpoint == 10 {
+            maxerr = 1;
+        }
+        if abserr > maxerr {
+            return Err(format!(
+                "TESTFAILED Too big error. card:{checkpoint} abserr:{abserr}"
+            ));
+        }
+        checkpoint *= 10;
+    }
+
+    Ok(())
 }
 
 /// Redis-compatible glob pattern matching.
@@ -10809,6 +10979,31 @@ mod tests {
             store.pfadd(b"k", &[b"a".to_vec()], 0),
             Err(StoreError::InvalidHllValue)
         );
+    }
+
+    #[test]
+    fn hll_debug_getreg_returns_full_register_vector() {
+        let mut store = Store::new();
+        store
+            .pfadd(b"hll", &[b"a".to_vec(), b"b".to_vec()], 0)
+            .unwrap();
+        let registers = store.hll_debug_getreg(b"hll", 0).unwrap().unwrap();
+        assert_eq!(registers.len(), 16_384);
+        assert!(registers.iter().any(|value| *value != 0));
+    }
+
+    #[test]
+    fn hll_debug_encoding_and_todense_report_dense_representation() {
+        let mut store = Store::new();
+        store.pfadd(b"hll", &[b"a".to_vec()], 0).unwrap();
+        assert_eq!(store.hll_debug_encoding(b"hll", 0).unwrap(), Some("dense"));
+        assert_eq!(store.hll_debug_todense(b"hll", 0).unwrap(), Some(false));
+    }
+
+    #[test]
+    fn hll_selftest_passes() {
+        let store = Store::new();
+        store.hll_selftest().unwrap();
     }
 
     #[test]
