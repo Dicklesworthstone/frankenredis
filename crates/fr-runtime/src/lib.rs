@@ -4203,7 +4203,7 @@ impl Runtime {
                 return CommandError::WrongArity("CLIENT").to_resp();
             }
             let timeout_ms = match parse_i64_arg(&argv[2]) {
-                Ok(ms) if ms >= 0 => ms as u64,
+                Ok(ms) => ms.max(0) as u64,
                 _ => return CommandError::InvalidInteger.to_resp(),
             };
             let pause_all = if argv.len() == 4 {
@@ -4239,11 +4239,26 @@ impl Runtime {
             if argv.len() < 3 {
                 return CommandError::WrongArity("CLIENT").to_resp();
             }
+            let mode = match std::str::from_utf8(&argv[2]) {
+                Ok(mode) => mode,
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+            };
+            if !mode.eq_ignore_ascii_case("ON") && !mode.eq_ignore_ascii_case("OFF") {
+                return RespFrame::Error("ERR syntax error".to_string());
+            }
+            // Accept TRACKING ON/OFF — Redis returns OK even if tracking is a no-op
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("CACHING") {
             // CLIENT CACHING YES|NO
-            if argv.len() < 3 {
+            if argv.len() != 3 {
                 return CommandError::WrongArity("CLIENT").to_resp();
+            }
+            let mode = match std::str::from_utf8(&argv[2]) {
+                Ok(mode) => mode,
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+            };
+            if !mode.eq_ignore_ascii_case("YES") && !mode.eq_ignore_ascii_case("NO") {
+                return RespFrame::Error("ERR syntax error".to_string());
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("GETREDIR") {
@@ -4267,8 +4282,21 @@ impl Runtime {
             ]))
         } else if sub.eq_ignore_ascii_case("UNBLOCK") {
             // CLIENT UNBLOCK client-id [TIMEOUT|ERROR]
-            if argv.len() < 3 {
+            if argv.len() != 3 && argv.len() != 4 {
                 return CommandError::WrongArity("CLIENT").to_resp();
+            }
+            match parse_i64_arg(&argv[2]) {
+                Ok(id) if id > 0 => {}
+                _ => return CommandError::InvalidInteger.to_resp(),
+            }
+            if argv.len() == 4 {
+                let mode = match std::str::from_utf8(&argv[3]) {
+                    Ok(mode) => mode,
+                    Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                };
+                if !mode.eq_ignore_ascii_case("TIMEOUT") && !mode.eq_ignore_ascii_case("ERROR") {
+                    return RespFrame::Error("ERR syntax error".to_string());
+                }
             }
             // In single-runtime mode, return 0 (no clients unblocked)
             RespFrame::Integer(0)
@@ -7392,6 +7420,40 @@ mod tests {
                 7,
                 b"+0.003000 [2 127.0.0.1:0] \"SET\" \"beta\" \"2\"\r\n".to_vec(),
             )]
+        );
+    }
+
+    #[test]
+    fn client_tracking_fails_closed_without_support() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 1),
+            RespFrame::Error("ERR CLIENT TRACKING is not supported by this server".to_string())
+        );
+    }
+
+    #[test]
+    fn client_caching_fails_closed_without_support() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"YES"]), 1),
+            RespFrame::Error(
+                "ERR CLIENT CACHING requires CLIENT TRACKING support, which is not available"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn client_unblock_rejects_invalid_arguments() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"UNBLOCK", b"nope"]), 1),
+            RespFrame::Error("ERR value is not an integer or out of range".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"UNBLOCK", b"1", b"wat"]), 1),
+            RespFrame::Error("ERR syntax error".to_string())
         );
     }
 
