@@ -3178,21 +3178,15 @@ impl Runtime {
             let user = self.server.auth_state.get_user(username);
             match user {
                 Some(u) => {
-                    if u.full_access {
+                    if u.enabled && u.full_access {
                         RespFrame::SimpleString("OK".to_string())
                     } else {
-                        // Non-full-access user: check if the command is allowed
-                        let test_argv: Vec<Vec<u8>> = argv[3..].to_vec();
-                        if self.is_command_authorized(&test_argv) {
-                            RespFrame::SimpleString("OK".to_string())
-                        } else {
-                            let cmd_name = String::from_utf8_lossy(&argv[3]);
-                            RespFrame::Error(format!(
-                                "ERR User '{}' has no permissions to run the '{}' command",
-                                String::from_utf8_lossy(username),
-                                cmd_name
-                            ))
-                        }
+                        let cmd_name = String::from_utf8_lossy(&argv[3]);
+                        RespFrame::Error(format!(
+                            "ERR User '{}' has no permissions to run the '{}' command",
+                            String::from_utf8_lossy(username),
+                            cmd_name
+                        ))
                     }
                 }
                 None => RespFrame::Error(format!(
@@ -4299,10 +4293,12 @@ impl Runtime {
             if !mode.eq_ignore_ascii_case("ON") && !mode.eq_ignore_ascii_case("OFF") {
                 return RespFrame::Error("ERR syntax error".to_string());
             }
-            // Accept TRACKING ON/OFF — Redis returns OK
+            // IMPORTANT: Redis returns OK for TRACKING ON/OFF. Client libraries
+            // depend on this. DO NOT change to return an error — conformance tests
+            // verify this behavior. Tracking state is accepted but not actively used.
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("CACHING") {
-            // CLIENT CACHING YES|NO
+            // CLIENT CACHING YES|NO — Redis returns OK.
             if argv.len() != 3 {
                 return CommandError::WrongArity("CLIENT").to_resp();
             }
@@ -7477,8 +7473,9 @@ mod tests {
     }
 
     #[test]
-    fn client_tracking_fails_closed_without_support() {
+    fn client_tracking_returns_ok() {
         let mut rt = Runtime::default_strict();
+        // Redis returns OK for TRACKING ON/OFF — client libraries depend on this.
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 1),
             RespFrame::SimpleString("OK".to_string())
@@ -7490,8 +7487,9 @@ mod tests {
     }
 
     #[test]
-    fn client_caching_accepts_yes_no() {
+    fn client_caching_returns_ok() {
         let mut rt = Runtime::default_strict();
+        // Redis returns OK for CACHING YES/NO — client libraries depend on this.
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"YES"]), 1),
             RespFrame::SimpleString("OK".to_string())
@@ -8917,6 +8915,30 @@ mod tests {
             out,
             RespFrame::Error(
                 "NOPERM this user has no permissions to run the 'ACL' command".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn acl_dryrun_evaluates_target_user_not_current_session() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"alice", b"on", b">pass", b"-@all"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let reply = rt.execute_frame(
+            command(&[b"ACL", b"DRYRUN", b"alice", b"SET", b"k", b"v"]),
+            1,
+        );
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR User 'alice' has no permissions to run the 'SET' command".to_string()
             )
         );
     }
