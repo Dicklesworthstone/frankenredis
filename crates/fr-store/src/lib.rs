@@ -3447,10 +3447,10 @@ impl Store {
         if has_empty {
             // Touch existing sets to emulate Redis behavior
             for key in keys {
-                if let Some(entry) = self.entries.get_mut(*key) {
-                    if let Value::Set(_) = &entry.value {
-                        entry.touch(now_ms);
-                    }
+                if let Some(entry) = self.entries.get_mut(*key)
+                    && let Value::Set(_) = &entry.value
+                {
+                    entry.touch(now_ms);
                 }
             }
             return Ok(Vec::new());
@@ -3473,21 +3473,20 @@ impl Store {
                 continue;
             }
             if result.is_empty() {
-                if let Some(entry) = self.entries.get_mut(*key) {
-                    if let Value::Set(_) = &entry.value {
-                        entry.touch(now_ms);
-                    }
+                if let Some(entry) = self.entries.get_mut(*key)
+                    && let Value::Set(_) = &entry.value
+                {
+                    entry.touch(now_ms);
                 }
                 continue;
             }
             match self.entries.get_mut(*key) {
-                Some(entry) => match &entry.value {
-                    Value::Set(s) => {
+                Some(entry) => {
+                    if let Value::Set(s) = &entry.value {
                         result.retain(|m| s.contains(m));
                         entry.touch(now_ms);
                     }
-                    _ => {},
-                },
+                }
                 None => {
                     result.clear();
                 }
@@ -3534,10 +3533,10 @@ impl Store {
 
         if has_empty {
             for key in keys {
-                if let Some(entry) = self.entries.get_mut(*key) {
-                    if let Value::Set(_) = &entry.value {
-                        entry.touch(now_ms);
-                    }
+                if let Some(entry) = self.entries.get_mut(*key)
+                    && let Value::Set(_) = &entry.value
+                {
+                    entry.touch(now_ms);
                 }
             }
             return Ok(0);
@@ -3560,10 +3559,10 @@ impl Store {
                 continue;
             }
             if result.is_empty() {
-                if let Some(entry) = self.entries.get_mut(*key) {
-                    if let Value::Set(_) = &entry.value {
-                        entry.touch(now_ms);
-                    }
+                if let Some(entry) = self.entries.get_mut(*key)
+                    && let Value::Set(_) = &entry.value
+                {
+                    entry.touch(now_ms);
                 }
                 continue;
             }
@@ -6328,10 +6327,10 @@ impl Store {
 
         if has_empty {
             for key in keys {
-                if let Some(entry) = self.entries.get_mut(*key) {
-                    if let Value::SortedSet(_) = &entry.value {
-                        entry.touch(now_ms);
-                    }
+                if let Some(entry) = self.entries.get_mut(*key)
+                    && let Value::SortedSet(_) = &entry.value
+                {
+                    entry.touch(now_ms);
                 }
             }
             let deleted = self.internal_entries_remove(dest).is_some();
@@ -6362,10 +6361,10 @@ impl Store {
             }
             let weight = weights.get(i).copied().unwrap_or(1.0);
             if result.is_empty() {
-                if let Some(entry) = self.entries.get_mut(key) {
-                    if let Value::SortedSet(_) = &entry.value {
-                        entry.touch(now_ms);
-                    }
+                if let Some(entry) = self.entries.get_mut(key)
+                    && let Value::SortedSet(_) = &entry.value
+                {
+                    entry.touch(now_ms);
                 }
                 continue;
             }

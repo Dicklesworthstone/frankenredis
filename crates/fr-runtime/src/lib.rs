@@ -3510,6 +3510,9 @@ impl Runtime {
         if sub.eq_ignore_ascii_case("SET") {
             return self.handle_config_set(argv);
         }
+        if sub.eq_ignore_ascii_case("HELP") {
+            return self.handle_config_help(argv);
+        }
         if sub.eq_ignore_ascii_case("RESETSTAT") {
             if argv.len() != 2 {
                 return CommandError::WrongSubcommandArity {
@@ -3537,6 +3540,37 @@ impl Runtime {
             subcommand: sub.to_string(),
         }
         .to_resp()
+    }
+
+    fn handle_config_help(&self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 2 {
+            return CommandError::WrongSubcommandArity {
+                command: "CONFIG",
+                subcommand: "HELP".to_string(),
+            }
+            .to_resp();
+        }
+        RespFrame::Array(Some(Self::config_help_lines()))
+    }
+
+    fn config_help_lines() -> Vec<RespFrame> {
+        fn bulk(text: &str) -> RespFrame {
+            RespFrame::BulkString(Some(text.as_bytes().to_vec()))
+        }
+
+        vec![
+            bulk("CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
+            bulk("GET <pattern> [<pattern> ...]"),
+            bulk("    Return configuration parameters matching the specified patterns."),
+            bulk("SET <parameter> <value> [<parameter> <value> ...]"),
+            bulk("    Set configuration parameters to the specified values."),
+            bulk("RESETSTAT"),
+            bulk("    Reset statistics reported by INFO."),
+            bulk("REWRITE"),
+            bulk("    Rewrite the configuration file with the current in-memory settings."),
+            bulk("HELP"),
+            bulk("    Print this help."),
+        ]
     }
 
     fn handle_config_get(&self, argv: &[Vec<u8>]) -> RespFrame {
@@ -8612,6 +8646,25 @@ mod tests {
                 RespFrame::BulkString(Some(b"loglevel".to_vec())),
                 RespFrame::BulkString(Some(b"warning".to_vec())),
             ]))
+        );
+    }
+
+    #[test]
+    fn config_help_is_supported_on_runtime_path() {
+        let mut rt = Runtime::default_strict();
+        let help = rt.execute_frame(command(&[b"CONFIG", b"HELP"]), 0);
+        assert_eq!(help, RespFrame::Array(Some(Runtime::config_help_lines())));
+    }
+
+    #[test]
+    fn config_help_rejects_extra_arguments_on_runtime_path() {
+        let mut rt = Runtime::default_strict();
+        let reply = rt.execute_frame(command(&[b"CONFIG", b"HELP", b"extra"]), 0);
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR wrong number of arguments for 'config|help' subcommand".to_string()
+            )
         );
     }
 

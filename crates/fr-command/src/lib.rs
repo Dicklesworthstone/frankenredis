@@ -8976,6 +8976,33 @@ fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
                 "ERR Invalid command specified, or key spec not found for '{cmd_name}'"
             ))),
         }
+    } else if sub.eq_ignore_ascii_case("HELP") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "COMMAND",
+                subcommand: "HELP".to_string(),
+            });
+        }
+        Ok(RespFrame::Array(Some(vec![
+            hello_bulk("(no subcommand)"),
+            hello_bulk("    Return details about all Redis commands."),
+            hello_bulk("COUNT"),
+            hello_bulk("    Return the total number of commands in this Redis server."),
+            hello_bulk("LIST"),
+            hello_bulk("    Return a list of all commands in this Redis server."),
+            hello_bulk("INFO [<command-name> ...]"),
+            hello_bulk("    Return details about multiple Redis commands."),
+            hello_bulk("    If no command names are given, documentation details for all"),
+            hello_bulk("    commands are returned."),
+            hello_bulk("DOCS [<command-name> ...]"),
+            hello_bulk("    Return documentation details about multiple Redis commands."),
+            hello_bulk("    If no command names are given, documentation details for all"),
+            hello_bulk("    commands are returned."),
+            hello_bulk("GETKEYS <full-command>"),
+            hello_bulk("    Return the keys from a full Redis command."),
+            hello_bulk("GETKEYSANDFLAGS <full-command>"),
+            hello_bulk("    Return the keys and the access flags from a full Redis command."),
+        ])))
     } else {
         Err(CommandError::UnknownSubcommand {
             command: "COMMAND",
@@ -23214,6 +23241,18 @@ mod tests {
             out,
             RespFrame::Error("ERR Invalid arguments for 'COMMAND GETKEYSANDFLAGS'".to_string())
         );
+    }
+
+    #[test]
+    fn command_help_lists_getkeysandflags() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"COMMAND".to_vec(), b"HELP".to_vec()], &mut store, 0).unwrap();
+        let RespFrame::Array(Some(items)) = out else {
+            panic!("expected help array");
+        };
+        assert!(items.contains(&RespFrame::BulkString(Some(
+            b"GETKEYSANDFLAGS <full-command>".to_vec()
+        ))));
     }
 
     // ── REPLICAOF / SLAVEOF tests ───────────────────────────────────
