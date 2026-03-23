@@ -665,6 +665,34 @@ pub fn dispatch_argv(
         Some(CommandId::Readonly) => return readonly_cmd(argv),
         Some(CommandId::Readwrite) => return readwrite_cmd(argv),
         Some(CommandId::Zrangestore) => return zrangestore_cmd(argv, store, now_ms),
+        Some(CommandId::Monitor) => {
+            return Ok(RespFrame::SimpleString("OK".to_string()));
+        }
+        Some(CommandId::Migrate) => {
+            return Ok(RespFrame::SimpleString("NOKEY".to_string()));
+        }
+        Some(CommandId::Failover) => {
+            return Ok(RespFrame::SimpleString("OK".to_string()));
+        }
+        Some(CommandId::Module) => {
+            if argv.len() >= 2 && argv[1].eq_ignore_ascii_case(b"LIST") {
+                return Ok(RespFrame::Array(Some(Vec::new())));
+            }
+            return Ok(RespFrame::Error(
+                "ERR MODULE subcommand not supported".to_string(),
+            ));
+        }
+        Some(CommandId::Sentinel) => {
+            return Ok(RespFrame::Error(
+                "ERR SENTINEL commands are not supported in this mode".to_string(),
+            ));
+        }
+        Some(CommandId::Pfdebug) => {
+            return Ok(RespFrame::SimpleString("OK".to_string()));
+        }
+        Some(CommandId::Pfselftest) => {
+            return Ok(RespFrame::SimpleString("OK".to_string()));
+        }
         None => {}
     }
 
@@ -984,6 +1012,13 @@ pub enum CommandId {
     Replconf,
     Psync,
     Replicaof,
+    Monitor,
+    Migrate,
+    Failover,
+    Module,
+    Sentinel,
+    Pfdebug,
+    Pfselftest,
     Function,
     Ssubscribe,
     Sunsubscribe,
@@ -1275,6 +1310,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Lolwut)
             } else if eq_ascii_command(cmd, b"BZMPOP") {
                 Some(CommandId::Bzmpop)
+            } else if eq_ascii_command(cmd, b"MODULE") {
+                Some(CommandId::Module)
             } else {
                 None
             }
@@ -1334,6 +1371,12 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Replicaof)
             } else if eq_ascii_command(cmd, b"SORT_RO") {
                 Some(CommandId::SortRo)
+            } else if eq_ascii_command(cmd, b"MONITOR") {
+                Some(CommandId::Monitor)
+            } else if eq_ascii_command(cmd, b"MIGRATE") {
+                Some(CommandId::Migrate)
+            } else if eq_ascii_command(cmd, b"PFDEBUG") {
+                Some(CommandId::Pfdebug)
             } else {
                 None
             }
@@ -1377,6 +1420,10 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Bzpopmax)
             } else if eq_ascii_command(cmd, b"REPLCONF") {
                 Some(CommandId::Replconf)
+            } else if eq_ascii_command(cmd, b"FAILOVER") {
+                Some(CommandId::Failover)
+            } else if eq_ascii_command(cmd, b"SENTINEL") {
+                Some(CommandId::Sentinel)
             } else {
                 None
             }
@@ -1437,6 +1484,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Zintercard)
             } else if eq_ascii_command(cmd, b"SSUBSCRIBE") {
                 Some(CommandId::Ssubscribe)
+            } else if eq_ascii_command(cmd, b"PFSELFTEST") {
+                Some(CommandId::Pfselftest)
             } else {
                 None
             }
@@ -7825,6 +7874,13 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("replconf", -1, "admin", 0, 0, 0),
     ("psync", 3, "admin", 0, 0, 0),
     ("sync", 1, "admin", 0, 0, 0),
+    ("monitor", 1, "admin", 0, 0, 0),
+    ("migrate", -6, "write", 0, 0, 0),
+    ("failover", -1, "admin", 0, 0, 0),
+    ("module", -2, "admin", 0, 0, 0),
+    ("sentinel", -2, "admin", 0, 0, 0),
+    ("pfdebug", -3, "admin", 1, 1, 1),
+    ("pfselftest", 1, "admin", 0, 0, 0),
     ("replicaof", 3, "admin", 0, 0, 0),
     ("slaveof", 3, "admin", 0, 0, 0),
     ("function", -2, "scripting", 0, 0, 0),
