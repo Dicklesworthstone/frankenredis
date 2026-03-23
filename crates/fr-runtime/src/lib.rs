@@ -6,7 +6,10 @@ use std::{
     time::Instant,
 };
 
-use fr_command::{CommandError, commands_in_acl_category, dispatch_argv, frame_to_argv};
+use fr_command::{
+    CommandError, MigrateKeySpec, commands_in_acl_category, dispatch_argv, execute_migrate,
+    frame_to_argv, parse_migrate_request,
+};
 use fr_config::{
     DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
     TlsCfgError, TlsConfig, TlsListenerTransition, TlsRuntimeState,
@@ -2375,7 +2378,14 @@ impl Runtime {
         let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
         let dirty_before = self.server.store.dirty;
         let start = Instant::now();
-        let result = self.execute_db_scoped_command(&argv, now_ms);
+        let handled_migrate = argv
+            .first()
+            .is_some_and(|cmd| eq_ascii_token(cmd, b"MIGRATE"));
+        let result = if handled_migrate {
+            self.handle_migrate_command(&argv, now_ms)
+        } else {
+            self.execute_db_scoped_command(&argv, now_ms)
+        };
         let elapsed_us = start.elapsed().as_micros() as u64;
         let dirty_after = self.server.store.dirty;
         self.record_slowlog(&argv, elapsed_us, now_ms);
@@ -2414,28 +2424,30 @@ impl Runtime {
             Ok(reply) => {
                 if dirty_after > dirty_before {
                     // Record AOF only for non-special commands (special ones record themselves)
-                    if special_command.is_none() {
+                    if special_command.is_none() && !handled_migrate {
                         self.capture_aof_record(&argv);
                     }
 
                     // Optimized blocking: track keys modified by write commands
                     // so the event loop only checks clients waiting on these keys.
-                    let cmd_keys = fr_command::command_keys(&argv);
-                    for key in &cmd_keys {
-                        self.server.ready_keys.insert(key.clone());
-                    }
-                    // Keyspace notifications: publish events for modified keys.
-                    if self.server.store.notify_keyspace_events != 0 {
-                        let event = Self::command_to_keyspace_event(&argv);
-                        let event_type = Self::command_to_notify_type(&argv);
-                        let db = self.session.selected_db;
+                    if !handled_migrate {
+                        let cmd_keys = fr_command::command_keys(&argv);
                         for key in &cmd_keys {
-                            self.server
-                                .store
-                                .notify_keyspace_event(event_type, event, key, db);
+                            self.server.ready_keys.insert(key.clone());
                         }
-                        // Deliver queued keyspace notifications via pub/sub
-                        self.deliver_keyspace_notifications();
+                        // Keyspace notifications: publish events for modified keys.
+                        if self.server.store.notify_keyspace_events != 0 {
+                            let event = Self::command_to_keyspace_event(&argv);
+                            let event_type = Self::command_to_notify_type(&argv);
+                            let db = self.session.selected_db;
+                            for key in &cmd_keys {
+                                self.server
+                                    .store
+                                    .notify_keyspace_event(event_type, event, key, db);
+                            }
+                            // Deliver queued keyspace notifications via pub/sub
+                            self.deliver_keyspace_notifications();
+                        }
                     }
                 }
                 reply
@@ -2909,6 +2921,47 @@ impl Runtime {
         let mut reply = dispatch_argv(&namespaced, &mut self.server.store, now_ms)?;
         self.strip_db_prefixes_from_frame(&mut reply);
         Ok(reply)
+    }
+
+    fn handle_migrate_command(
+        &mut self,
+        argv: &[Vec<u8>],
+        now_ms: u64,
+    ) -> Result<RespFrame, CommandError> {
+        let request = parse_migrate_request(argv)?;
+        let key_specs: Vec<MigrateKeySpec> = request
+            .keys
+            .iter()
+            .map(|key| MigrateKeySpec {
+                source_key: encode_db_key(self.session.selected_db, key),
+                target_key: key.clone(),
+            })
+            .collect();
+        let outcome = execute_migrate(&request, &key_specs, &mut self.server.store, now_ms)?;
+
+        if !outcome.deleted_keys.is_empty() {
+            let mut del_argv = vec![b"DEL".to_vec()];
+            del_argv.extend(outcome.deleted_keys.iter().cloned());
+            self.capture_aof_record(&del_argv);
+
+            for key in &outcome.deleted_keys {
+                self.server.ready_keys.insert(key.clone());
+            }
+
+            if self.server.store.notify_keyspace_events != 0 {
+                for key in &outcome.deleted_keys {
+                    self.server.store.notify_keyspace_event(
+                        fr_store::NOTIFY_GENERIC,
+                        "del",
+                        key,
+                        self.session.selected_db,
+                    );
+                }
+                self.deliver_keyspace_notifications();
+            }
+        }
+
+        Ok(outcome.reply)
     }
 
     fn handle_auth_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -6966,6 +7019,129 @@ mod tests {
             vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()]
         );
         assert_eq!(records[1].argv, vec![b"DEL".to_vec(), b"k".to_vec()]);
+    }
+
+    fn read_runtime_test_frame(
+        stream: &mut std::net::TcpStream,
+        read_buf: &mut Vec<u8>,
+    ) -> RespFrame {
+        let parser_config = fr_protocol::ParserConfig::default();
+        loop {
+            match fr_protocol::parse_frame_with_config(read_buf, &parser_config) {
+                Ok(parsed) => {
+                    read_buf.drain(..parsed.consumed);
+                    return parsed.frame;
+                }
+                Err(fr_protocol::RespParseError::Incomplete) => {}
+                Err(err) => panic!("failed to parse runtime test frame: {err:?}"),
+            }
+
+            let mut chunk = [0u8; 4096];
+            let n = std::io::Read::read(stream, &mut chunk).expect("read runtime test frame");
+            assert_ne!(
+                n, 0,
+                "connection closed before runtime test frame completed"
+            );
+            read_buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    fn runtime_test_frame_to_argv(frame: RespFrame) -> Vec<Vec<u8>> {
+        match frame {
+            RespFrame::Array(Some(items)) => items
+                .into_iter()
+                .map(|item| match item {
+                    RespFrame::BulkString(Some(bytes)) => bytes,
+                    other => panic!("expected bulk string, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected array frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn migrate_in_selected_db_propagates_as_del_not_migrate() {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind migrate runtime listener");
+        let addr = listener.local_addr().expect("runtime listener addr");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<Vec<u8>>>::new()));
+        let seen_clone = std::sync::Arc::clone(&seen);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept runtime migrate client");
+            let mut read_buf = Vec::new();
+            for _ in 0..2 {
+                let argv =
+                    runtime_test_frame_to_argv(read_runtime_test_frame(&mut stream, &mut read_buf));
+                seen_clone.lock().expect("lock seen").push(argv);
+                std::io::Write::write_all(
+                    &mut stream,
+                    &RespFrame::SimpleString("OK".to_string()).to_bytes(),
+                )
+                .expect("write runtime migrate reply");
+            }
+        });
+
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"db0"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"2"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"db2"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let reply = rt.execute_frame(
+            command(&[
+                b"MIGRATE",
+                addr.ip().to_string().as_bytes(),
+                addr.port().to_string().as_bytes(),
+                b"k",
+                b"9",
+                b"5000",
+            ]),
+            3,
+        );
+        assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 4),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"0"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 6),
+            RespFrame::BulkString(Some(b"db0".to_vec()))
+        );
+
+        let migrate_records: Vec<&AofRecord> = rt
+            .aof_records()
+            .iter()
+            .filter(|record| {
+                record
+                    .argv
+                    .first()
+                    .is_some_and(|cmd| cmd.eq_ignore_ascii_case(b"MIGRATE"))
+            })
+            .collect();
+        assert!(migrate_records.is_empty(), "MIGRATE must not enter the AOF");
+        assert_eq!(
+            rt.aof_records().last().expect("last aof record").argv,
+            vec![b"DEL".to_vec(), b"k".to_vec()]
+        );
+
+        server.join().expect("join runtime fake target");
+        let seen = seen.lock().expect("lock seen");
+        assert_eq!(seen[0], vec![b"SELECT".to_vec(), b"9".to_vec()]);
+        assert_eq!(seen[1][0], b"RESTORE".to_vec());
+        assert_eq!(seen[1][1], b"k".to_vec());
     }
 
     #[test]

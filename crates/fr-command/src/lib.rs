@@ -8,6 +8,9 @@ use fr_store::{
     StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
     StreamGroupReadOptions, StreamId, ValueType, crc16_slot, glob_match,
 };
+use std::io::{ErrorKind, Read, Write};
+use std::net::{TcpStream, ToSocketAddrs};
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandError {
@@ -35,6 +38,62 @@ pub enum CommandError {
 
 fn hello_bulk(s: &str) -> RespFrame {
     RespFrame::BulkString(Some(s.as_bytes().to_vec()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrateRequest {
+    pub host: String,
+    pub port: u16,
+    pub destination_db: i64,
+    pub timeout: Duration,
+    pub copy: bool,
+    pub replace: bool,
+    pub auth_username: Option<Vec<u8>>,
+    pub auth_password: Option<Vec<u8>>,
+    pub keys: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrateKeySpec {
+    pub source_key: Vec<u8>,
+    pub target_key: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrateOutcome {
+    pub reply: RespFrame,
+    pub deleted_keys: Vec<Vec<u8>>,
+}
+
+fn migrate_ioerr(action: &str) -> CommandError {
+    CommandError::Custom(format!(
+        "IOERR error or timeout {action} to target instance"
+    ))
+}
+
+fn migrate_connect_err() -> CommandError {
+    CommandError::Custom("IOERR error or timeout connecting to the client".to_string())
+}
+
+fn migrate_connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, CommandError> {
+    let addrs: Vec<_> = (host, port)
+        .to_socket_addrs()
+        .map_err(|_| migrate_connect_err())?
+        .collect();
+    if addrs.is_empty() {
+        return Err(migrate_connect_err());
+    }
+
+    let mut last_err = None;
+    for addr in addrs {
+        match TcpStream::connect_timeout(&addr, timeout) {
+            Ok(stream) => return Ok(stream),
+            Err(err) => last_err = Some(err),
+        }
+    }
+
+    let _ = last_err;
+    Err(migrate_connect_err())
 }
 
 /// Return the list of key names referenced by the command.
@@ -666,7 +725,7 @@ pub fn dispatch_argv(
         Some(CommandId::Readwrite) => return readwrite_cmd(argv),
         Some(CommandId::Zrangestore) => return zrangestore_cmd(argv, store, now_ms),
         Some(CommandId::Monitor) => return monitor_cmd(argv),
-        Some(CommandId::Migrate) => return migrate_cmd(argv),
+        Some(CommandId::Migrate) => return migrate_cmd(argv, store, now_ms),
         Some(CommandId::Failover) => return failover_cmd(argv),
         Some(CommandId::Module) => return module_cmd(argv),
         Some(CommandId::Sentinel) => return sentinel_cmd(argv),
@@ -6649,45 +6708,42 @@ fn monitor_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
 
-fn migrate_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
-    // MIGRATE host port key|"" destination-db timeout [COPY] [REPLACE]
-    //   [AUTH password] [AUTH2 username password] [KEYS key [key ...]]
+pub fn parse_migrate_request(argv: &[Vec<u8>]) -> Result<MigrateRequest, CommandError> {
     if argv.len() < 6 {
         return Err(CommandError::WrongArity("MIGRATE"));
     }
 
-    let host = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let host = std::str::from_utf8(&argv[1])
+        .map_err(|_| CommandError::InvalidUtf8Argument)?
+        .to_string();
     let port = std::str::from_utf8(&argv[2])
         .ok()
         .and_then(|s| s.parse::<u16>().ok())
         .ok_or(CommandError::InvalidInteger)?;
     let key_arg = &argv[3];
-    let _dest_db = parse_i64_arg(&argv[4])?;
+    let destination_db = parse_i64_arg(&argv[4])?;
     let timeout_ms = parse_i64_arg(&argv[5])?;
-    if timeout_ms < 0 {
-        return Err(CommandError::InvalidInteger);
-    }
-    let timeout = std::time::Duration::from_millis(if timeout_ms == 0 {
+    let timeout = Duration::from_millis(if timeout_ms <= 0 {
         1000
     } else {
         timeout_ms as u64
     });
 
-    let mut _copy = false;
-    let mut _replace = false;
+    let mut copy = false;
+    let mut replace = false;
     let mut auth_password: Option<Vec<u8>> = None;
-    let mut _auth_username: Option<Vec<u8>> = None;
+    let mut auth_username: Option<Vec<u8>> = None;
     let mut keys_mode = false;
-    let mut extra_keys: Vec<Vec<u8>> = Vec::new();
+    let mut extra_keys = Vec::new();
 
     let mut i = 6;
     while i < argv.len() {
         let arg = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if arg.eq_ignore_ascii_case("COPY") {
-            _copy = true;
+            copy = true;
             i += 1;
         } else if arg.eq_ignore_ascii_case("REPLACE") {
-            _replace = true;
+            replace = true;
             i += 1;
         } else if arg.eq_ignore_ascii_case("AUTH") {
             if i + 1 >= argv.len() {
@@ -6699,7 +6755,7 @@ fn migrate_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            _auth_username = Some(argv[i + 1].clone());
+            auth_username = Some(argv[i + 1].clone());
             auth_password = Some(argv[i + 2].clone());
             i += 3;
         } else if arg.eq_ignore_ascii_case("KEYS") {
@@ -6714,7 +6770,6 @@ fn migrate_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         }
     }
 
-    // Validate: KEYS option requires empty key arg
     if keys_mode && !key_arg.is_empty() {
         return Err(CommandError::Custom(
             "ERR When using MIGRATE KEYS option, the key argument must be set to the empty string"
@@ -6722,50 +6777,206 @@ fn migrate_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         ));
     }
 
-    // Build key list
-    let mut keys_to_migrate: Vec<Vec<u8>> = Vec::new();
+    let mut keys = Vec::new();
     if keys_mode {
-        keys_to_migrate = extra_keys;
+        keys = extra_keys;
     } else if !key_arg.is_empty() {
-        keys_to_migrate.push(key_arg.clone());
+        keys.push(key_arg.clone());
     }
 
-    if keys_to_migrate.is_empty() {
-        return Ok(RespFrame::SimpleString("NOKEY".to_string()));
-    }
-
-    // Attempt real TCP connection to target instance
-    let addr = format!("{host}:{port}");
-    let stream = match std::net::TcpStream::connect_timeout(
-        &addr.parse().map_err(|_| {
-            CommandError::Custom(
-                "IOERR error or timeout connecting to the specified instance".to_string(),
-            )
-        })?,
+    Ok(MigrateRequest {
+        host,
+        port,
+        destination_db,
         timeout,
-    ) {
-        Ok(s) => s,
-        Err(_) => {
-            return Err(CommandError::Custom(
-                "IOERR error or timeout connecting to the specified instance".to_string(),
-            ));
-        }
-    };
-    let _ = stream.set_read_timeout(Some(timeout));
-    let _ = stream.set_write_timeout(Some(timeout));
-    let _ = auth_password; // Would send AUTH to target
+        copy,
+        replace,
+        auth_username,
+        auth_password,
+        keys,
+    })
+}
 
-    // For a complete implementation, we would:
-    // 1. AUTH with the target if needed
-    // 2. SELECT the destination DB
-    // 3. For each key: DUMP locally, RESTORE on target
-    // 4. If not COPY: DEL locally
-    // Since we have an open socket, return IOERR for the actual transfer
-    // (keys exist but transfer protocol not yet wired to the store)
-    drop(stream);
-    Err(CommandError::Custom(
-        "IOERR error or timeout writing to target instance".to_string(),
+fn migrate_build_command(parts: &[&[u8]]) -> RespFrame {
+    RespFrame::Array(Some(
+        parts
+            .iter()
+            .map(|part| RespFrame::BulkString(Some((*part).to_vec())))
+            .collect(),
     ))
+}
+
+fn migrate_write_frame(stream: &mut TcpStream, frame: RespFrame) -> Result<(), CommandError> {
+    stream
+        .write_all(&frame.to_bytes())
+        .map_err(|_| migrate_ioerr("writing"))
+}
+
+fn migrate_read_frame(
+    stream: &mut TcpStream,
+    read_buf: &mut Vec<u8>,
+) -> Result<RespFrame, CommandError> {
+    let parser_config = fr_protocol::ParserConfig::default();
+    loop {
+        match fr_protocol::parse_frame_with_config(read_buf, &parser_config) {
+            Ok(parsed) => {
+                read_buf.drain(..parsed.consumed);
+                return Ok(parsed.frame);
+            }
+            Err(fr_protocol::RespParseError::Incomplete) => {}
+            Err(_) => return Err(migrate_ioerr("reading")),
+        }
+
+        let mut chunk = [0u8; 8192];
+        match stream.read(&mut chunk) {
+            Ok(0) => return Err(migrate_ioerr("reading")),
+            Ok(n) => read_buf.extend_from_slice(&chunk[..n]),
+            Err(ref err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Err(migrate_ioerr("reading"));
+            }
+            Err(ref err) if err.kind() == ErrorKind::Interrupted => continue,
+            Err(_) => return Err(migrate_ioerr("reading")),
+        }
+    }
+}
+
+pub fn execute_migrate(
+    request: &MigrateRequest,
+    keys: &[MigrateKeySpec],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<MigrateOutcome, CommandError> {
+    let mut payloads = Vec::new();
+    for key in keys {
+        let Some(payload) = store.dump_key(&key.source_key, now_ms) else {
+            continue;
+        };
+        let ttl_ms = match store.pttl(&key.source_key, now_ms) {
+            PttlValue::Remaining(ms) => ms.max(1) as u64,
+            _ => 0,
+        };
+        payloads.push((key, ttl_ms, payload));
+    }
+
+    if payloads.is_empty() {
+        return Ok(MigrateOutcome {
+            reply: RespFrame::SimpleString("NOKEY".to_string()),
+            deleted_keys: Vec::new(),
+        });
+    }
+
+    let mut stream = migrate_connect(&request.host, request.port, request.timeout)?;
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(request.timeout));
+    let _ = stream.set_write_timeout(Some(request.timeout));
+
+    if let Some(password) = request.auth_password.as_deref() {
+        if let Some(username) = request.auth_username.as_deref() {
+            migrate_write_frame(
+                &mut stream,
+                migrate_build_command(&[b"AUTH", username, password]),
+            )?;
+        } else {
+            migrate_write_frame(&mut stream, migrate_build_command(&[b"AUTH", password]))?;
+        }
+    }
+
+    let destination_db = request.destination_db.to_string();
+    migrate_write_frame(
+        &mut stream,
+        migrate_build_command(&[b"SELECT", destination_db.as_bytes()]),
+    )?;
+
+    for (key, ttl_ms, payload) in &payloads {
+        let ttl_string = ttl_ms.to_string();
+        if request.replace {
+            migrate_write_frame(
+                &mut stream,
+                migrate_build_command(&[
+                    b"RESTORE",
+                    key.target_key.as_slice(),
+                    ttl_string.as_bytes(),
+                    payload.as_slice(),
+                    b"REPLACE",
+                ]),
+            )?;
+        } else {
+            migrate_write_frame(
+                &mut stream,
+                migrate_build_command(&[
+                    b"RESTORE",
+                    key.target_key.as_slice(),
+                    ttl_string.as_bytes(),
+                    payload.as_slice(),
+                ]),
+            )?;
+        }
+    }
+
+    let mut read_buf = Vec::new();
+    let auth_reply = if request.auth_password.is_some() {
+        Some(migrate_read_frame(&mut stream, &mut read_buf)?)
+    } else {
+        None
+    };
+    let select_reply = migrate_read_frame(&mut stream, &mut read_buf)?;
+
+    let mut first_target_error = auth_reply.as_ref().and_then(|frame| match frame {
+        RespFrame::Error(err) => Some(err.clone()),
+        _ => None,
+    });
+    if first_target_error.is_none() {
+        first_target_error = match &select_reply {
+            RespFrame::Error(err) => Some(err.clone()),
+            _ => None,
+        };
+    }
+
+    let mut deleted_source_keys = Vec::new();
+    let mut deleted_target_keys = Vec::new();
+    for (key, _, _) in &payloads {
+        let reply = migrate_read_frame(&mut stream, &mut read_buf)?;
+        if let RespFrame::Error(err) = &reply {
+            if first_target_error.is_none() {
+                first_target_error = Some(err.clone());
+            }
+        } else if first_target_error.is_none() && !request.copy {
+            deleted_source_keys.push(key.source_key.clone());
+            deleted_target_keys.push(key.target_key.clone());
+        }
+    }
+
+    if !request.copy && !deleted_source_keys.is_empty() {
+        let _ = store.del(&deleted_source_keys, now_ms);
+    }
+
+    let reply = if let Some(err) = first_target_error {
+        RespFrame::Error(format!("Target instance replied with error: {err}"))
+    } else {
+        RespFrame::SimpleString("OK".to_string())
+    };
+
+    Ok(MigrateOutcome {
+        reply,
+        deleted_keys: deleted_target_keys,
+    })
+}
+
+fn migrate_cmd(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    let request = parse_migrate_request(argv)?;
+    let key_specs: Vec<MigrateKeySpec> = request
+        .keys
+        .iter()
+        .map(|key| MigrateKeySpec {
+            source_key: key.clone(),
+            target_key: key.clone(),
+        })
+        .collect();
+    Ok(execute_migrate(&request, &key_specs, store, now_ms)?.reply)
 }
 
 fn failover_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
@@ -11064,14 +11275,17 @@ fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
     use std::time::Instant;
 
     use fr_protocol::RespFrame;
     use fr_store::{Store, StoreError};
 
     use super::{
-        CommandError, CommandId, classify_command, dispatch_argv, drain_pubsub_messages,
-        eq_ascii_command, frame_to_argv, is_write_command, pubsub_message_to_frame,
+        CommandError, CommandId, MigrateKeySpec, classify_command, dispatch_argv,
+        drain_pubsub_messages, eq_ascii_command, execute_migrate, frame_to_argv, is_write_command,
+        parse_migrate_request, pubsub_message_to_frame,
     };
 
     fn classify_command_linear(cmd: &[u8]) -> Option<CommandId> {
@@ -24052,5 +24266,220 @@ mod tests {
         let mut store = Store::new();
         let out = dispatch_argv(&[b"PSYNC".to_vec(), b"?".to_vec()], &mut store, 0);
         assert!(out.is_err());
+    }
+
+    fn read_test_frame(stream: &mut TcpStream, read_buf: &mut Vec<u8>) -> RespFrame {
+        let parser_config = fr_protocol::ParserConfig::default();
+        loop {
+            match fr_protocol::parse_frame_with_config(read_buf, &parser_config) {
+                Ok(parsed) => {
+                    read_buf.drain(..parsed.consumed);
+                    return parsed.frame;
+                }
+                Err(fr_protocol::RespParseError::Incomplete) => {}
+                Err(err) => panic!("failed to parse test frame: {err:?}"),
+            }
+
+            let mut chunk = [0u8; 4096];
+            let n = stream.read(&mut chunk).expect("read test frame");
+            assert_ne!(n, 0, "connection closed before frame completed");
+            read_buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    fn frame_to_bulk_argv(frame: RespFrame) -> Vec<Vec<u8>> {
+        match frame {
+            RespFrame::Array(Some(items)) => items
+                .into_iter()
+                .map(|item| match item {
+                    RespFrame::BulkString(Some(bytes)) => bytes,
+                    other => panic!("expected bulk string, got {other:?}"),
+                })
+                .collect(),
+            other => panic!("expected array frame, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn migrate_partial_target_error_deletes_only_acknowledged_source_keys() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<Vec<u8>>>::new()));
+        let seen_clone = std::sync::Arc::clone(&seen);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept migrate client");
+            let mut read_buf = Vec::new();
+            let replies = [
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::Error("BUSYKEY Target key name already exists.".to_string()),
+            ];
+            for reply in replies {
+                let argv = frame_to_bulk_argv(read_test_frame(&mut stream, &mut read_buf));
+                seen_clone.lock().expect("lock seen").push(argv);
+                stream
+                    .write_all(&reply.to_bytes())
+                    .expect("write migrate reply");
+            }
+        });
+
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k1".to_vec(), b"v1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("seed key1");
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k2".to_vec(), b"v2".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("seed key2");
+
+        let request = parse_migrate_request(&[
+            b"MIGRATE".to_vec(),
+            addr.ip().to_string().into_bytes(),
+            addr.port().to_string().into_bytes(),
+            b"".to_vec(),
+            b"9".to_vec(),
+            b"5000".to_vec(),
+            b"KEYS".to_vec(),
+            b"k1".to_vec(),
+            b"k2".to_vec(),
+        ])
+        .expect("parse migrate");
+        let key_specs = vec![
+            MigrateKeySpec {
+                source_key: b"k1".to_vec(),
+                target_key: b"k1".to_vec(),
+            },
+            MigrateKeySpec {
+                source_key: b"k2".to_vec(),
+                target_key: b"k2".to_vec(),
+            },
+        ];
+
+        let outcome = execute_migrate(&request, &key_specs, &mut store, 0).expect("execute");
+        assert_eq!(
+            outcome.reply,
+            RespFrame::Error(
+                "Target instance replied with error: BUSYKEY Target key name already exists."
+                    .to_string()
+            )
+        );
+        assert_eq!(outcome.deleted_keys, vec![b"k1".to_vec()]);
+        assert!(!store.exists(b"k1", 0));
+        assert!(store.exists(b"k2", 0));
+
+        server.join().expect("join fake target");
+        let seen = seen.lock().expect("lock seen");
+        assert_eq!(seen.len(), 3);
+        assert_eq!(seen[0], vec![b"SELECT".to_vec(), b"9".to_vec()]);
+        assert_eq!(seen[1][0], b"RESTORE".to_vec());
+        assert_eq!(seen[1][1], b"k1".to_vec());
+        assert_eq!(seen[2][1], b"k2".to_vec());
+    }
+
+    #[test]
+    fn migrate_copy_preserves_source_and_forwards_positive_ttl() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<Vec<u8>>>::new()));
+        let seen_clone = std::sync::Arc::clone(&seen);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept migrate client");
+            let mut read_buf = Vec::new();
+            for _ in 0..2 {
+                let argv = frame_to_bulk_argv(read_test_frame(&mut stream, &mut read_buf));
+                seen_clone.lock().expect("lock seen").push(argv);
+                stream
+                    .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                    .expect("write migrate reply");
+            }
+        });
+
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"SET".to_vec(),
+                b"ttl-key".to_vec(),
+                b"value".to_vec(),
+                b"PX".to_vec(),
+                b"1500".to_vec(),
+            ],
+            &mut store,
+            100,
+        )
+        .expect("seed ttl key");
+
+        let reply = dispatch_argv(
+            &[
+                b"MIGRATE".to_vec(),
+                addr.ip().to_string().into_bytes(),
+                addr.port().to_string().into_bytes(),
+                b"ttl-key".to_vec(),
+                b"9".to_vec(),
+                b"5000".to_vec(),
+                b"COPY".to_vec(),
+            ],
+            &mut store,
+            200,
+        )
+        .expect("dispatch migrate");
+        assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+        assert!(store.exists(b"ttl-key", 200));
+
+        server.join().expect("join fake target");
+        let seen = seen.lock().expect("lock seen");
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1][0], b"RESTORE".to_vec());
+        let ttl = std::str::from_utf8(&seen[1][2])
+            .expect("ttl utf8")
+            .parse::<u64>()
+            .expect("ttl integer");
+        assert!(ttl > 0);
+    }
+
+    #[test]
+    fn migrate_accepts_hostname_targets() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept migrate client");
+            let mut read_buf = Vec::new();
+            for _ in 0..2 {
+                let _ = frame_to_bulk_argv(read_test_frame(&mut stream, &mut read_buf));
+                stream
+                    .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                    .expect("write migrate reply");
+            }
+        });
+
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"host-key".to_vec(), b"value".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("seed host key");
+
+        let reply = dispatch_argv(
+            &[
+                b"MIGRATE".to_vec(),
+                b"localhost".to_vec(),
+                addr.port().to_string().into_bytes(),
+                b"host-key".to_vec(),
+                b"9".to_vec(),
+                b"5000".to_vec(),
+                b"COPY".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("dispatch migrate");
+        assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+
+        server.join().expect("join fake target");
     }
 }
