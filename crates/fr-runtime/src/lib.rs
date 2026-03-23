@@ -1727,7 +1727,7 @@ impl Runtime {
             .entry(client_id)
             .or_default()
             .insert(channel);
-        self.pubsub_sub_count()
+        self.pubsub_sub_count(client_id)
     }
 
     /// Unsubscribe the current client from a channel. Returns total subscription count.
@@ -1745,8 +1745,10 @@ impl Runtime {
                 self.server.pubsub_client_channels.remove(&client_id);
             }
         }
-        self.server.store.unsubscribe(channel);
-        self.pubsub_sub_count()
+        if !self.server.pubsub_channel_subs.contains_key(channel) {
+            self.server.store.unsubscribe(channel);
+        }
+        self.pubsub_sub_count(client_id)
     }
 
     /// Subscribe the current client to a pattern. Returns total subscription count.
@@ -1763,7 +1765,7 @@ impl Runtime {
             .entry(client_id)
             .or_default()
             .insert(pattern);
-        self.pubsub_sub_count()
+        self.pubsub_sub_count(client_id)
     }
 
     /// Unsubscribe the current client from a pattern. Returns total subscription count.
@@ -1781,8 +1783,10 @@ impl Runtime {
                 self.server.pubsub_client_patterns.remove(&client_id);
             }
         }
-        self.server.store.punsubscribe(pattern);
-        self.pubsub_sub_count()
+        if !self.server.pubsub_pattern_subs.contains_key(pattern) {
+            self.server.store.punsubscribe(pattern);
+        }
+        self.pubsub_sub_count(client_id)
     }
 
     /// Subscribe the current client to a shard channel. Returns shard sub count.
@@ -1799,7 +1803,7 @@ impl Runtime {
             .entry(client_id)
             .or_default()
             .insert(channel);
-        self.server.store.subscribed_shard_channels.len()
+        self.pubsub_shard_sub_count(client_id)
     }
 
     /// Unsubscribe the current client from a shard channel. Returns shard sub count.
@@ -1817,8 +1821,10 @@ impl Runtime {
                 self.server.pubsub_client_shard_channels.remove(&client_id);
             }
         }
-        self.server.store.sunsubscribe(channel);
-        self.server.store.subscribed_shard_channels.len()
+        if !self.server.pubsub_shard_subs.contains_key(channel) {
+            self.server.store.sunsubscribe(channel);
+        }
+        self.pubsub_shard_sub_count(client_id)
     }
 
     /// Publish a message to a channel. Queues messages in each subscriber's
@@ -1890,6 +1896,7 @@ impl Runtime {
                     subs.remove(&client_id);
                     if subs.is_empty() {
                         self.server.pubsub_channel_subs.remove(&ch);
+                        self.server.store.unsubscribe(&ch);
                     }
                 }
             }
@@ -1900,6 +1907,7 @@ impl Runtime {
                     subs.remove(&client_id);
                     if subs.is_empty() {
                         self.server.pubsub_pattern_subs.remove(&pat);
+                        self.server.store.punsubscribe(&pat);
                     }
                 }
             }
@@ -1910,6 +1918,7 @@ impl Runtime {
                     subs.remove(&client_id);
                     if subs.is_empty() {
                         self.server.pubsub_shard_subs.remove(&ch);
+                        self.server.store.sunsubscribe(&ch);
                     }
                 }
             }
@@ -1917,15 +1926,29 @@ impl Runtime {
         self.server.pubsub_outbox.remove(&client_id);
     }
 
-    fn pubsub_sub_count(&self) -> usize {
-        self.server.store.subscribed_channels.len() + self.server.store.subscribed_patterns.len()
+    fn pubsub_sub_count(&self, client_id: u64) -> usize {
+        self.server
+            .pubsub_client_channels
+            .get(&client_id)
+            .map_or(0, HashSet::len)
+            + self
+                .server
+                .pubsub_client_patterns
+                .get(&client_id)
+                .map_or(0, HashSet::len)
+    }
+
+    fn pubsub_shard_sub_count(&self, client_id: u64) -> usize {
+        self.server
+            .pubsub_client_shard_channels
+            .get(&client_id)
+            .map_or(0, HashSet::len)
     }
 
     /// Returns true if the current client has any active pub/sub subscriptions.
     pub fn is_in_subscription_mode(&self) -> bool {
-        !self.server.store.subscribed_channels.is_empty()
-            || !self.server.store.subscribed_patterns.is_empty()
-            || !self.server.store.subscribed_shard_channels.is_empty()
+        self.pubsub_sub_count(self.session.client_id) > 0
+            || self.pubsub_shard_sub_count(self.session.client_id) > 0
     }
 
     pub fn configure_maxmemory_enforcement(
@@ -4111,9 +4134,6 @@ impl Runtime {
         }
         // Clear pub/sub subscriptions from the global registry before resetting.
         self.pubsub_cleanup_client(self.session.client_id);
-        self.server.store.subscribed_channels.clear();
-        self.server.store.subscribed_patterns.clear();
-        self.server.store.subscribed_shard_channels.clear();
         self.session.reset_connection_state(&self.server.auth_state);
         // Redis returns +RESET\r\n (a simple string "RESET")
         RespFrame::SimpleString("RESET".to_string())
@@ -4319,10 +4339,10 @@ impl Runtime {
             // Unsubscribe from all channels
             let mut channels: Vec<Vec<u8>> = self
                 .server
-                .store
-                .subscribed_channels
-                .iter()
-                .cloned()
+                .pubsub_client_channels
+                .get(&self.session.client_id)
+                .into_iter()
+                .flat_map(|channels| channels.iter().cloned())
                 .collect();
             channels.sort();
             if channels.is_empty() {
@@ -4384,10 +4404,10 @@ impl Runtime {
         if argv.len() < 2 {
             let mut patterns: Vec<Vec<u8>> = self
                 .server
-                .store
-                .subscribed_patterns
-                .iter()
-                .cloned()
+                .pubsub_client_patterns
+                .get(&self.session.client_id)
+                .into_iter()
+                .flat_map(|patterns| patterns.iter().cloned())
                 .collect();
             patterns.sort();
             if patterns.is_empty() {
@@ -4457,10 +4477,10 @@ impl Runtime {
         if argv.len() < 2 {
             let mut channels: Vec<Vec<u8>> = self
                 .server
-                .store
-                .subscribed_shard_channels
-                .iter()
-                .cloned()
+                .pubsub_client_shard_channels
+                .get(&self.session.client_id)
+                .into_iter()
+                .flat_map(|channels| channels.iter().cloned())
                 .collect();
             channels.sort();
             if channels.is_empty() {
@@ -6500,6 +6520,104 @@ mod tests {
             rt.execute_frame(command(&[b"GET", b"k"]), 3),
             RespFrame::Error("NOAUTH Authentication required.".to_string())
         );
+    }
+
+    #[test]
+    fn pubsub_subscription_mode_is_scoped_to_active_client() {
+        let mut rt = Runtime::default_strict();
+        let subscriber = rt.new_session();
+        let other_client = rt.new_session();
+
+        let previous = rt.swap_session(subscriber);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SUBSCRIBE", b"alpha"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"subscribe".to_vec())),
+                RespFrame::BulkString(Some(b"alpha".to_vec())),
+                RespFrame::Integer(1),
+            ]))
+        );
+        assert!(rt.is_in_subscription_mode());
+
+        let subscriber = rt.swap_session(other_client);
+        assert!(!rt.is_in_subscription_mode());
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 1),
+            RespFrame::BulkString(None)
+        );
+
+        let _other_client = rt.swap_session(subscriber);
+        let _ = rt.swap_session(previous);
+    }
+
+    #[test]
+    fn reset_only_clears_callers_pubsub_state() {
+        let mut rt = Runtime::default_strict();
+        let first_client = rt.new_session();
+        let second_client = rt.new_session();
+
+        let previous = rt.swap_session(first_client);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SUBSCRIBE", b"alpha"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"subscribe".to_vec())),
+                RespFrame::BulkString(Some(b"alpha".to_vec())),
+                RespFrame::Integer(1),
+            ]))
+        );
+
+        let first_client = rt.swap_session(second_client);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SUBSCRIBE", b"beta"]), 1),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"subscribe".to_vec())),
+                RespFrame::BulkString(Some(b"beta".to_vec())),
+                RespFrame::Integer(1),
+            ]))
+        );
+        assert!(
+            rt.server
+                .store
+                .subscribed_channels
+                .contains(b"alpha".as_slice())
+        );
+        assert!(
+            rt.server
+                .store
+                .subscribed_channels
+                .contains(b"beta".as_slice())
+        );
+
+        let second_client = rt.swap_session(first_client);
+        assert_eq!(
+            rt.execute_frame(command(&[b"RESET"]), 2),
+            RespFrame::SimpleString("RESET".to_string())
+        );
+        assert!(
+            !rt.server
+                .store
+                .subscribed_channels
+                .contains(b"alpha".as_slice())
+        );
+        assert!(
+            rt.server
+                .store
+                .subscribed_channels
+                .contains(b"beta".as_slice())
+        );
+
+        let _first_client = rt.swap_session(second_client);
+        assert!(rt.is_in_subscription_mode());
+        assert_eq!(
+            rt.execute_frame(command(&[b"UNSUBSCRIBE"]), 3),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
+                RespFrame::BulkString(Some(b"beta".to_vec())),
+                RespFrame::Integer(0),
+            ]))
+        );
+
+        let _ = rt.swap_session(previous);
     }
 
     #[test]
