@@ -665,6 +665,22 @@ fn process_buffered_frames(
                     conn.read_buf.drain(..consumed);
                     continue;
                 }
+                // CLIENT PAUSE gate: delay command processing while paused.
+                if let RespFrame::Array(Some(ref items)) = frame {
+                    let argv: Vec<Vec<u8>> = items
+                        .iter()
+                        .filter_map(|f| match f {
+                            RespFrame::BulkString(Some(b)) => Some(b.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    if runtime.is_command_paused(&argv, ts) && !is_client_pause_exempt(&argv) {
+                        // Don't process the command — leave it in the read buffer
+                        // and break to let the event loop tick. The command will
+                        // be retried on the next readable event after pause expires.
+                        break;
+                    }
+                }
                 let response = runtime.execute_frame(frame.clone(), ts);
                 let parsed_frame = frame;
 
@@ -1817,6 +1833,14 @@ fn check_subscription_mode_gate(frame: &RespFrame, _in_sub_mode: bool) -> Option
     )))
 }
 
+fn is_client_pause_exempt(argv: &[Vec<u8>]) -> bool {
+    matches!(
+        argv,
+        [cmd, sub, ..]
+            if cmd.eq_ignore_ascii_case(b"CLIENT") && sub.eq_ignore_ascii_case(b"UNPAUSE")
+    )
+}
+
 fn is_quit_frame(frame: &RespFrame) -> bool {
     if let RespFrame::Array(Some(items)) = frame
         && let Some(RespFrame::BulkString(Some(cmd))) = items.first()
@@ -2610,5 +2634,67 @@ mod tests {
             conn.replication_sent_offset,
             Some(runtime.replication_primary_offset())
         );
+    }
+
+    #[test]
+    fn client_unpause_bypasses_pause_gate() {
+        use crate::ClientConnection;
+        use fr_runtime::Runtime;
+        use mio::Token;
+        use std::collections::HashSet;
+        use std::net::{TcpListener, TcpStream};
+
+        let mut runtime = Runtime::default_strict();
+        let ts = 1_000;
+        let session = runtime.new_session();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let (mut server_stream, _server_addr) = listener.accept().unwrap();
+        server_stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(50)))
+            .unwrap();
+        let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session);
+
+        let pause = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"CLIENT".to_vec())),
+            RespFrame::BulkString(Some(b"PAUSE".to_vec())),
+            RespFrame::BulkString(Some(b"1000".to_vec())),
+            RespFrame::BulkString(Some(b"ALL".to_vec())),
+        ]));
+        let unpause = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"CLIENT".to_vec())),
+            RespFrame::BulkString(Some(b"UNPAUSE".to_vec())),
+        ]));
+
+        let unpause_bytes = unpause.to_bytes();
+
+        assert_eq!(
+            runtime.execute_frame(pause, ts),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(runtime.is_client_paused(ts + 1));
+
+        conn.read_buf.extend_from_slice(&unpause_bytes);
+
+        let mut blocked_tokens = HashSet::new();
+        let mut closing_tokens = HashSet::new();
+        let mut write_tokens = HashSet::new();
+        crate::process_buffered_frames(
+            Token(1),
+            &mut conn,
+            &mut runtime,
+            &mut blocked_tokens,
+            &mut closing_tokens,
+            &mut write_tokens,
+            ts + 1,
+        );
+
+        let mut response = [0_u8; 5];
+        server_stream.read_exact(&mut response).unwrap();
+        assert_eq!(response, *b"+OK\r\n");
+        assert!(conn.read_buf.is_empty());
+        assert!(!runtime.is_client_paused(ts + 1));
     }
 }

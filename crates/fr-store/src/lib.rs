@@ -1944,7 +1944,8 @@ impl Store {
                     self.stream_last_ids.remove(candidate.as_slice());
                     evicted_keys = evicted_keys.saturating_add(1);
                     // Emit evicted keyspace notification
-                    self.notify_keyspace_event(NOTIFY_EVICTED, "evicted", &candidate, 0);
+                    let db = decode_db_key(&candidate).map(|(db, _)| db).unwrap_or(0);
+                    self.notify_keyspace_event(NOTIFY_EVICTED, "evicted", &candidate, db);
                 }
             }
 
@@ -6004,7 +6005,8 @@ impl Store {
             self.stream_last_ids.remove(key);
             self.dirty = self.dirty.saturating_add(1);
             // Emit expired keyspace notification
-            self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", key, 0);
+            let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
+            self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", key, db);
         }
     }
 
@@ -8413,9 +8415,10 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 mod tests {
     use super::{
         EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPolicy,
-        MaxmemoryPressureLevel, PttlValue, ScoreBound, Store, StoreError, StreamAutoClaimOptions,
-        StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
-        StreamGroupReadOptions, StreamPendingEntry, ValueType, encode_db_key,
+        MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_KEYEVENT, PttlValue,
+        ScoreBound, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
+        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
+        StreamPendingEntry, ValueType, encode_db_key,
     };
 
     fn group_read_options(
@@ -8454,6 +8457,37 @@ mod tests {
         assert!(store.expire_seconds(b"k", 5, 1_000));
         assert_eq!(store.pttl(b"k", 1_000), PttlValue::Remaining(5_000));
         assert_eq!(store.pttl(b"k", 6_001), PttlValue::KeyMissing);
+    }
+
+    #[test]
+    fn expired_key_notifications_use_encoded_db_index() {
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_EXPIRED;
+        let key = encode_db_key(2, b"expiring");
+        store.set(key.clone(), b"v".to_vec(), Some(5), 100);
+
+        assert_eq!(store.get(&key, 106).unwrap(), None);
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(b"__keyevent@2__:expired".to_vec(), key,)]
+        );
+    }
+
+    #[test]
+    fn eviction_notifications_use_encoded_db_index() {
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_EVICTED;
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
+        let key = encode_db_key(3, b"victim");
+        store.set(key.clone(), b"abcdefgh".to_vec(), None, 0);
+
+        let result =
+            store.run_bounded_eviction_loop(0, 1, 0, 1, 1, EvictionSafetyGateState::default());
+        assert_eq!(result.evicted_keys, 1);
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(b"__keyevent@3__:evicted".to_vec(), key,)]
+        );
     }
 
     #[test]

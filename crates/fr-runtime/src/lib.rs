@@ -930,6 +930,10 @@ pub struct ServerState {
     pub monitor_clients: HashSet<u64>,
     /// Pending monitor output lines to deliver to monitor clients.
     pub monitor_output: Vec<(u64, Vec<u8>)>,
+    /// CLIENT PAUSE: deadline in ms when pause expires. 0 = not paused.
+    pub client_pause_deadline_ms: u64,
+    /// CLIENT PAUSE mode: true = ALL (block all commands), false = WRITE only.
+    pub client_pause_all: bool,
 }
 
 impl Default for ServerState {
@@ -976,6 +980,8 @@ impl Default for ServerState {
             ready_keys: HashSet::new(),
             monitor_clients: HashSet::new(),
             monitor_output: Vec::new(),
+            client_pause_deadline_ms: 0,
+            client_pause_all: false,
         }
     }
 }
@@ -2267,7 +2273,9 @@ impl Runtime {
         match special_command {
             Some(RuntimeSpecialCommand::Acl) => return self.handle_acl_command(&argv),
             Some(RuntimeSpecialCommand::Config) => return self.handle_config_command(&argv),
-            Some(RuntimeSpecialCommand::Client) => return self.handle_client_command(&argv),
+            Some(RuntimeSpecialCommand::Client) => {
+                return self.handle_client_command(&argv, now_ms);
+            }
             Some(RuntimeSpecialCommand::Role) => return self.handle_role_command(&argv),
             Some(RuntimeSpecialCommand::Replconf) => return self.handle_replconf_command(&argv),
             Some(RuntimeSpecialCommand::Psync) | Some(RuntimeSpecialCommand::Sync) => {
@@ -2732,6 +2740,33 @@ impl Runtime {
     /// Drain pending monitor output for delivery.
     pub fn drain_monitor_output(&mut self) -> Vec<(u64, Vec<u8>)> {
         std::mem::take(&mut self.server.monitor_output)
+    }
+
+    /// Check if clients are paused. Returns true if the pause is active.
+    /// If the deadline has passed, auto-unpause and return false.
+    pub fn is_client_paused(&mut self, now_ms: u64) -> bool {
+        if self.server.client_pause_deadline_ms == 0 {
+            return false;
+        }
+        if now_ms >= self.server.client_pause_deadline_ms {
+            self.server.client_pause_deadline_ms = 0;
+            self.server.client_pause_all = false;
+            return false;
+        }
+        true
+    }
+
+    /// Check if a specific command should be blocked by CLIENT PAUSE.
+    pub fn is_command_paused(&mut self, argv: &[Vec<u8>], now_ms: u64) -> bool {
+        if !self.is_client_paused(now_ms) {
+            return false;
+        }
+        if self.server.client_pause_all {
+            return true;
+        }
+        // WRITE mode: only block write commands
+        argv.first()
+            .is_some_and(|cmd| fr_command::is_write_command(cmd))
     }
 
     pub fn execute_bytes(&mut self, input: &[u8], now_ms: u64) -> Vec<u8> {
@@ -4010,7 +4045,7 @@ impl Runtime {
         RespFrame::SimpleString("OK".to_string())
     }
 
-    fn handle_client_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_client_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         if argv.len() < 2 {
             return CommandError::WrongArity("CLIENT").to_resp();
         }
@@ -4164,17 +4199,40 @@ impl Runtime {
             RespFrame::Integer(0)
         } else if sub.eq_ignore_ascii_case("PAUSE") {
             // CLIENT PAUSE timeout [WRITE|ALL]
-            if argv.len() < 3 {
+            if argv.len() < 3 || argv.len() > 4 {
                 return CommandError::WrongArity("CLIENT").to_resp();
             }
-            if parse_i64_arg(&argv[2]).is_err() {
-                return CommandError::InvalidInteger.to_resp();
+            let timeout_ms = match parse_i64_arg(&argv[2]) {
+                Ok(ms) if ms >= 0 => ms as u64,
+                _ => return CommandError::InvalidInteger.to_resp(),
+            };
+            let pause_all = if argv.len() == 4 {
+                let mode =
+                    std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument);
+                match mode {
+                    Ok(m) if m.eq_ignore_ascii_case("ALL") => true,
+                    Ok(m) if m.eq_ignore_ascii_case("WRITE") => false,
+                    _ => return RespFrame::Error("ERR syntax error".to_string()),
+                }
+            } else {
+                true // default is ALL
+            };
+            if timeout_ms == 0 {
+                // timeout 0 = unpause
+                self.server.client_pause_deadline_ms = 0;
+                self.server.client_pause_all = false;
+            } else {
+                // Use the runtime's logical clock so pause behavior stays deterministic.
+                self.server.client_pause_deadline_ms = now_ms.saturating_add(timeout_ms);
+                self.server.client_pause_all = pause_all;
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("UNPAUSE") {
             if argv.len() != 2 {
                 return CommandError::WrongArity("CLIENT").to_resp();
             }
+            self.server.client_pause_deadline_ms = 0;
+            self.server.client_pause_all = false;
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("TRACKING") {
             // CLIENT TRACKING ON|OFF [REDIRECT id] [PREFIX prefix ...] [BCAST] [OPTIN] [OPTOUT] [NOLOOP]
@@ -7335,6 +7393,35 @@ mod tests {
                 b"+0.003000 [2 127.0.0.1:0] \"SET\" \"beta\" \"2\"\r\n".to_vec(),
             )]
         );
+    }
+
+    #[test]
+    fn client_pause_uses_runtime_clock_for_expiry() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"50", b"ALL"]), 1_000),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.is_client_paused(1_049));
+        assert!(!rt.is_client_paused(1_050));
+    }
+
+    #[test]
+    fn client_unpause_clears_pause_state_immediately() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"100", b"ALL"]), 500),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.is_client_paused(550));
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"UNPAUSE"]), 551),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.is_client_paused(551));
     }
 
     #[test]
