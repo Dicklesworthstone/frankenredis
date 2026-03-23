@@ -2692,7 +2692,7 @@ mod tests {
         );
 
         let mut response = [0_u8; 5];
-        server_stream.read_exact(&mut response).unwrap();
+        std::io::Read::read_exact(&mut server_stream, &mut response).unwrap();
         assert_eq!(response, *b"+OK\r\n");
         assert!(conn.read_buf.is_empty());
         assert!(!runtime.is_client_paused(ts + 1));
