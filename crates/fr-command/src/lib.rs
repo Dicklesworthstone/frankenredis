@@ -6998,9 +6998,11 @@ fn failover_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
                 return Err(CommandError::SyntaxError);
             }
             _to_host = Some(&argv[i + 1]);
-            _to_port = std::str::from_utf8(&argv[i + 2])
-                .ok()
-                .and_then(|s| s.parse().ok());
+            let port = parse_i64_arg(&argv[i + 2])?;
+            let Ok(port) = u16::try_from(port) else {
+                return Err(CommandError::InvalidInteger);
+            };
+            _to_port = Some(port);
             i += 3;
             // Check for FORCE
             if i < argv.len() {
@@ -7045,7 +7047,13 @@ fn module_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         return Err(CommandError::WrongArity("MODULE"));
     }
 
-    if argv.len() == 2 && argv[1].eq_ignore_ascii_case(b"HELP") {
+    if argv[1].eq_ignore_ascii_case(b"HELP") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "MODULE",
+                subcommand: bytes_to_lossy_string(&argv[1]),
+            });
+        }
         return Ok(RespFrame::Array(Some(vec![
             hello_bulk("MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
             hello_bulk("LIST"),
@@ -7111,6 +7119,9 @@ fn sentinel_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     }
     let sub = std::str::from_utf8(&argv[1]).unwrap_or("");
     if sub.eq_ignore_ascii_case("HELP") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongArity("SENTINEL"));
+        }
         return Ok(RespFrame::Array(Some(vec![
             hello_bulk("SENTINEL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
             hello_bulk("CKQUORUM <master-name>"),
@@ -7137,10 +7148,16 @@ fn sentinel_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         ])));
     }
     if sub.eq_ignore_ascii_case("MYID") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongArity("SENTINEL"));
+        }
         // In non-sentinel mode, MYID returns an empty string
         return Ok(RespFrame::BulkString(Some(Vec::new())));
     }
     if sub.eq_ignore_ascii_case("MASTERS") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongArity("SENTINEL"));
+        }
         // No sentinel masters configured
         return Ok(RespFrame::Array(Some(Vec::new())));
     }
@@ -7150,7 +7167,7 @@ fn sentinel_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         || sub.eq_ignore_ascii_case("SENTINELS")
         || sub.eq_ignore_ascii_case("GET-MASTER-ADDR-BY-NAME")
     {
-        if argv.len() < 3 {
+        if argv.len() != 3 {
             return Err(CommandError::WrongArity("SENTINEL"));
         }
         return Err(CommandError::Custom(
@@ -7162,7 +7179,7 @@ fn sentinel_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         || sub.eq_ignore_ascii_case("RESET")
         || sub.eq_ignore_ascii_case("REMOVE")
     {
-        if argv.len() < 3 {
+        if argv.len() != 3 {
             return Err(CommandError::WrongArity("SENTINEL"));
         }
         return Err(CommandError::Custom(
@@ -7170,9 +7187,15 @@ fn sentinel_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         ));
     }
     if sub.eq_ignore_ascii_case("FLUSHCONFIG") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongArity("SENTINEL"));
+        }
         return Ok(RespFrame::SimpleString("OK".to_string()));
     }
     if sub.eq_ignore_ascii_case("PENDING-SCRIPTS") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongArity("SENTINEL"));
+        }
         return Ok(RespFrame::Array(Some(Vec::new())));
     }
     Err(CommandError::UnknownSubcommand {
@@ -9004,16 +9027,29 @@ fn client_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
                 subcommand: sub.to_string(),
             });
         }
-        Ok(RespFrame::SimpleString("OK".to_string()))
+        let mode = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if !mode.eq_ignore_ascii_case("ON") && !mode.eq_ignore_ascii_case("OFF") {
+            return Err(CommandError::SyntaxError);
+        }
+        Err(CommandError::Custom(
+            "ERR CLIENT TRACKING is not supported by this server".to_string(),
+        ))
     } else if sub.eq_ignore_ascii_case("CACHING") {
         // CLIENT CACHING YES|NO
-        if argv.len() < 3 {
+        if argv.len() != 3 {
             return Err(CommandError::WrongSubcommandArity {
                 command: "CLIENT",
                 subcommand: sub.to_string(),
             });
         }
-        Ok(RespFrame::SimpleString("OK".to_string()))
+        let mode = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if !mode.eq_ignore_ascii_case("YES") && !mode.eq_ignore_ascii_case("NO") {
+            return Err(CommandError::SyntaxError);
+        }
+        Err(CommandError::Custom(
+            "ERR CLIENT CACHING requires CLIENT TRACKING support, which is not available"
+                .to_string(),
+        ))
     } else {
         Err(CommandError::UnknownSubcommand {
             command: "CLIENT",
@@ -19616,6 +19652,99 @@ mod tests {
     }
 
     #[test]
+    fn module_help_rejects_extra_arguments() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"MODULE".to_vec(), b"HELP".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("extra module help args should fail");
+        assert_eq!(
+            err,
+            CommandError::WrongSubcommandArity {
+                command: "MODULE",
+                subcommand: "HELP".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn failover_invalid_target_port_reports_integer_error() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"FAILOVER".to_vec(),
+                b"TO".to_vec(),
+                b"127.0.0.1".to_vec(),
+                b"nope".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("invalid FAILOVER port should fail");
+        assert_eq!(err, CommandError::InvalidInteger);
+    }
+
+    #[test]
+    fn sentinel_master_rejects_extra_arguments() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"SENTINEL".to_vec(),
+                b"MASTER".to_vec(),
+                b"mymaster".to_vec(),
+                b"extra".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("extra sentinel args should fail");
+        assert_eq!(err, CommandError::WrongArity("SENTINEL"));
+    }
+
+    #[test]
+    fn sentinel_failover_rejects_extra_arguments() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"SENTINEL".to_vec(),
+                b"FAILOVER".to_vec(),
+                b"mymaster".to_vec(),
+                b"extra".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("extra sentinel args should fail");
+        assert_eq!(err, CommandError::WrongArity("SENTINEL"));
+    }
+
+    #[test]
+    fn sentinel_help_rejects_extra_arguments() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"SENTINEL".to_vec(), b"HELP".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("extra sentinel help args should fail");
+        assert_eq!(err, CommandError::WrongArity("SENTINEL"));
+    }
+
+    #[test]
+    fn sentinel_masters_rejects_extra_arguments() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"SENTINEL".to_vec(), b"MASTERS".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("extra sentinel args should fail");
+        assert_eq!(err, CommandError::WrongArity("SENTINEL"));
+    }
+
+    #[test]
     fn sintercard_basic() {
         let mut store = Store::new();
         dispatch_argv(
@@ -22986,27 +23115,48 @@ mod tests {
     }
 
     #[test]
-    fn client_tracking_returns_ok() {
+    fn client_tracking_fails_closed_without_support() {
         let mut store = Store::new();
-        let out = dispatch_argv(
+        let err = dispatch_argv(
             &[b"CLIENT".to_vec(), b"TRACKING".to_vec(), b"ON".to_vec()],
             &mut store,
             0,
         )
-        .unwrap();
-        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR CLIENT TRACKING is not supported by this server".to_string())
+        );
     }
 
     #[test]
-    fn client_caching_returns_ok() {
+    fn client_caching_fails_closed_without_support() {
         let mut store = Store::new();
-        let out = dispatch_argv(
+        let err = dispatch_argv(
             &[b"CLIENT".to_vec(), b"CACHING".to_vec(), b"YES".to_vec()],
             &mut store,
             0,
         )
-        .unwrap();
-        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR CLIENT CACHING requires CLIENT TRACKING support, which is not available"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn client_tracking_invalid_mode_is_syntax_error() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"TRACKING".to_vec(), b"MAYBE".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, CommandError::SyntaxError);
     }
 
     #[test]
