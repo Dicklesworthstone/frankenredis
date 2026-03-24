@@ -2299,13 +2299,9 @@ impl Runtime {
                     | Some(RuntimeSpecialCommand::Sunsubscribe)
             );
             if is_sub_cmd {
-                let cmd_str = argv
-                    .first()
-                    .and_then(|c| std::str::from_utf8(c).ok())
-                    .unwrap_or("");
-                return RespFrame::Error(format!(
-                    "ERR Command not allowed inside a transaction"
-                ));
+                return RespFrame::Error(
+                    "ERR Command not allowed inside a transaction".to_string(),
+                );
             }
             if !must_execute_now {
                 let cmd_bytes = match argv.first() {
@@ -3901,6 +3897,7 @@ impl Runtime {
         let mut next_hz: Option<u64> = None;
         let mut next_appendonly: Option<bool> = None;
         let mut next_keyspace_events: Option<u32> = None;
+        let mut next_list_max_listpack_size: Option<i64> = None;
         let mut next_rdb_path = self
             .server
             .rdb_path
@@ -4064,10 +4061,8 @@ impl Runtime {
                 match fr_store::keyspace_events_parse(value_str) {
                     Some(flags) => {
                         // Defer application to after all params are validated
-                        static_override_updates.push((
-                            "notify-keyspace-events".to_string(),
-                            value_str.to_string(),
-                        ));
+                        static_override_updates
+                            .push(("notify-keyspace-events".to_string(), value_str.to_string()));
                         // Store flags for deferred application
                         next_keyspace_events = Some(flags);
                     }
@@ -4092,7 +4087,7 @@ impl Runtime {
                         ));
                     }
                 };
-                self.server.store.list_max_listpack_size = parsed;
+                next_list_max_listpack_size = Some(parsed);
                 continue;
             }
             // Encoding threshold parameters — update Store fields for live effect.
@@ -4193,6 +4188,9 @@ impl Runtime {
         }
         if let Some(flags) = next_keyspace_events {
             self.server.store.notify_keyspace_events = flags;
+        }
+        if let Some(size) = next_list_max_listpack_size {
+            self.server.store.list_max_listpack_size = size;
         }
         if rdb_path_changed {
             self.server.rdb_path = Some(next_rdb_path);
