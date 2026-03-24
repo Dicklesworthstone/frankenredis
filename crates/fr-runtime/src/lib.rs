@@ -4112,7 +4112,9 @@ impl Runtime {
             }
             RespFrame::Integer(self.session.client_id as i64)
         } else if sub.eq_ignore_ascii_case("LIST") || sub.eq_ignore_ascii_case("INFO") {
-            // Build real client info line from tracked state
+            if sub.eq_ignore_ascii_case("INFO") && argv.len() != 2 {
+                return CommandError::WrongArity("CLIENT").to_resp();
+            }
             let name_str = self
                 .session
                 .client_name
@@ -4164,6 +4166,46 @@ impl Runtime {
                 self.session.resp_protocol_version,
                 flags,
             );
+            if sub.eq_ignore_ascii_case("LIST") {
+                let payload = if argv.len() == 2 {
+                    info_line.into_bytes()
+                } else if argv.len() == 4 && eq_ascii_token(&argv[2], b"TYPE") {
+                    let include_self = match std::str::from_utf8(&argv[3]) {
+                        Ok(kind) if kind.eq_ignore_ascii_case("NORMAL") => true,
+                        Ok(kind)
+                            if kind.eq_ignore_ascii_case("MASTER")
+                                || kind.eq_ignore_ascii_case("REPLICA")
+                                || kind.eq_ignore_ascii_case("PUBSUB") =>
+                        {
+                            false
+                        }
+                        Ok(kind) => {
+                            return RespFrame::Error(format!("ERR Unknown client type '{kind}'"));
+                        }
+                        Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                    };
+                    if include_self {
+                        info_line.into_bytes()
+                    } else {
+                        Vec::new()
+                    }
+                } else if argv.len() >= 4 && eq_ascii_token(&argv[2], b"ID") {
+                    let mut payload = Vec::new();
+                    for id_arg in &argv[3..] {
+                        let parsed_id = match parse_i64_arg(id_arg) {
+                            Ok(id) if id > 0 => id as u64,
+                            _ => return RespFrame::Error("ERR Invalid client ID".to_string()),
+                        };
+                        if parsed_id == client_id {
+                            payload.extend_from_slice(info_line.as_bytes());
+                        }
+                    }
+                    payload
+                } else {
+                    return RespFrame::Error("ERR syntax error".to_string());
+                };
+                return RespFrame::BulkString(Some(payload));
+            }
             RespFrame::BulkString(Some(info_line.into_bytes()))
         } else if sub.eq_ignore_ascii_case("NO-EVICT") {
             if argv.len() != 3 {
@@ -4293,12 +4335,9 @@ impl Runtime {
             if !mode.eq_ignore_ascii_case("ON") && !mode.eq_ignore_ascii_case("OFF") {
                 return RespFrame::Error("ERR syntax error".to_string());
             }
-            // IMPORTANT: Redis returns OK for TRACKING ON/OFF. Client libraries
-            // depend on this. DO NOT change to return an error — conformance tests
-            // verify this behavior. Tracking state is accepted but not actively used.
-            RespFrame::SimpleString("OK".to_string())
+            RespFrame::Error("ERR CLIENT TRACKING is not supported by this server".to_string())
         } else if sub.eq_ignore_ascii_case("CACHING") {
-            // CLIENT CACHING YES|NO — Redis returns OK.
+            // CLIENT CACHING YES|NO
             if argv.len() != 3 {
                 return CommandError::WrongArity("CLIENT").to_resp();
             }
@@ -4309,7 +4348,10 @@ impl Runtime {
             if !mode.eq_ignore_ascii_case("YES") && !mode.eq_ignore_ascii_case("NO") {
                 return RespFrame::Error("ERR syntax error".to_string());
             }
-            RespFrame::SimpleString("OK".to_string())
+            RespFrame::Error(
+                "ERR CLIENT CACHING requires CLIENT TRACKING support, which is not available"
+                    .to_string(),
+            )
         } else if sub.eq_ignore_ascii_case("GETREDIR") {
             // CLIENT GETREDIR — returns redirect ID for tracking (-1 = not tracking)
             if argv.len() != 2 {
@@ -4360,7 +4402,9 @@ impl Runtime {
                 RespFrame::BulkString(Some(b"ID".to_vec())),
                 RespFrame::BulkString(Some(b"INFO".to_vec())),
                 RespFrame::BulkString(Some(b"KILL <option> ...".to_vec())),
-                RespFrame::BulkString(Some(b"LIST [TYPE (NORMAL|MASTER|REPLICA|PUBSUB)]".to_vec())),
+                RespFrame::BulkString(Some(
+                    b"LIST [TYPE (NORMAL|MASTER|REPLICA|PUBSUB)] [ID <client-id> ...]".to_vec(),
+                )),
                 RespFrame::BulkString(Some(b"NO-EVICT (ON|OFF)".to_vec())),
                 RespFrame::BulkString(Some(b"NO-TOUCH (ON|OFF)".to_vec())),
                 RespFrame::BulkString(Some(b"PAUSE <timeout> [WRITE|ALL]".to_vec())),
@@ -7473,30 +7517,34 @@ mod tests {
     }
 
     #[test]
-    fn client_tracking_returns_ok() {
+    fn client_tracking_fails_closed_without_support() {
         let mut rt = Runtime::default_strict();
-        // Redis returns OK for TRACKING ON/OFF — client libraries depend on this.
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 1),
-            RespFrame::SimpleString("OK".to_string())
+            RespFrame::Error("ERR CLIENT TRACKING is not supported by this server".to_string())
         );
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"OFF"]), 2),
-            RespFrame::SimpleString("OK".to_string())
+            RespFrame::Error("ERR CLIENT TRACKING is not supported by this server".to_string())
         );
     }
 
     #[test]
-    fn client_caching_returns_ok() {
+    fn client_caching_fails_closed_without_tracking_support() {
         let mut rt = Runtime::default_strict();
-        // Redis returns OK for CACHING YES/NO — client libraries depend on this.
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"YES"]), 1),
-            RespFrame::SimpleString("OK".to_string())
+            RespFrame::Error(
+                "ERR CLIENT CACHING requires CLIENT TRACKING support, which is not available"
+                    .to_string(),
+            )
         );
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"NO"]), 2),
-            RespFrame::SimpleString("OK".to_string())
+            RespFrame::Error(
+                "ERR CLIENT CACHING requires CLIENT TRACKING support, which is not available"
+                    .to_string(),
+            )
         );
     }
 
@@ -7537,6 +7585,49 @@ mod tests {
         assert!(info.contains("sub=1"));
         assert!(info.contains("psub=1"));
         assert!(info.contains("ssub=1"));
+    }
+
+    #[test]
+    fn client_info_rejects_extra_arguments() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"INFO", b"extra"]), 1),
+            RespFrame::Error("ERR wrong number of arguments for 'client' command".to_string())
+        );
+    }
+
+    #[test]
+    fn client_list_applies_single_client_type_and_id_filters() {
+        let mut rt = Runtime::default_strict();
+
+        let list_all = rt.execute_frame(command(&[b"CLIENT", b"LIST"]), 1);
+        let list_normal = rt.execute_frame(command(&[b"CLIENT", b"LIST", b"TYPE", b"normal"]), 2);
+        let list_replica = rt.execute_frame(command(&[b"CLIENT", b"LIST", b"TYPE", b"replica"]), 3);
+        let list_id_match = rt.execute_frame(command(&[b"CLIENT", b"LIST", b"ID", b"1"]), 4);
+        let list_id_miss = rt.execute_frame(command(&[b"CLIENT", b"LIST", b"ID", b"99"]), 5);
+
+        assert_eq!(list_normal, list_all);
+        assert_eq!(list_replica, RespFrame::BulkString(Some(Vec::new())));
+        assert_eq!(list_id_match, list_all);
+        assert_eq!(list_id_miss, RespFrame::BulkString(Some(Vec::new())));
+    }
+
+    #[test]
+    fn client_list_rejects_invalid_filters() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"LIST", b"TYPE", b"bogus"]), 1),
+            RespFrame::Error("ERR Unknown client type 'bogus'".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"LIST", b"ID", b"nope"]), 2),
+            RespFrame::Error("ERR Invalid client ID".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"LIST", b"EXTRA"]), 3),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
     }
 
     #[test]
