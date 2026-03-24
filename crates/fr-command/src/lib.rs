@@ -9837,7 +9837,14 @@ fn save_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
 
 fn bgsave_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     if argv.len() > 2 {
-        return Err(CommandError::WrongArity("BGSAVE"));
+        return Err(CommandError::SyntaxError);
+    }
+    if argv.len() == 2 {
+        let option =
+            std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if !option.eq_ignore_ascii_case("SCHEDULE") {
+            return Err(CommandError::SyntaxError);
+        }
     }
     // Optional SCHEDULE argument — accepted but ignored
     Ok(RespFrame::SimpleString(
@@ -10610,8 +10617,29 @@ fn role_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
 }
 
 fn shutdown_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
-    if argv.len() > 2 {
-        return Err(CommandError::WrongArity("SHUTDOWN"));
+    let mut flags = 0u8;
+    let mut abort = false;
+    for arg in &argv[1..] {
+        let option = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if option.eq_ignore_ascii_case("NOSAVE") {
+            flags |= 0b0001;
+        } else if option.eq_ignore_ascii_case("SAVE") {
+            flags |= 0b0010;
+        } else if option.eq_ignore_ascii_case("NOW") {
+            flags |= 0b0100;
+        } else if option.eq_ignore_ascii_case("FORCE") {
+            flags |= 0b1000;
+        } else if option.eq_ignore_ascii_case("ABORT") {
+            abort = true;
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    }
+    if (flags & 0b0001 != 0 && flags & 0b0010 != 0) || (abort && flags != 0) {
+        return Err(CommandError::SyntaxError);
+    }
+    if abort {
+        return Ok(RespFrame::Error("ERR No shutdown in progress.".to_string()));
     }
     // Stub — in production this would trigger graceful shutdown
     Ok(RespFrame::SimpleString("OK".to_string()))
@@ -20568,6 +20596,28 @@ mod tests {
     }
 
     #[test]
+    fn bgsave_rejects_invalid_options_with_syntax_error() {
+        let mut store = Store::new();
+        let err = dispatch_argv(&[b"BGSAVE".to_vec(), b"NOW".to_vec()], &mut store, 0)
+            .expect_err("invalid option should fail");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+
+        let err = dispatch_argv(
+            &[b"BGSAVE".to_vec(), b"SCHEDULE".to_vec(), b"EXTRA".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("too many args should fail");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+    }
+
+    #[test]
     fn bgrewriteaof_returns_ok() {
         let mut store = Store::new();
         let out = dispatch_argv(&[b"BGREWRITEAOF".to_vec()], &mut store, 0).expect("bgrewriteaof");
@@ -21655,6 +21705,40 @@ mod tests {
         let mut store = Store::new();
         let out = dispatch_argv(&[b"SHUTDOWN".to_vec()], &mut store, 0).expect("shutdown");
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn shutdown_abort_and_illegal_flag_combinations_follow_redis_validation() {
+        let mut store = Store::new();
+
+        let out = dispatch_argv(&[b"SHUTDOWN".to_vec(), b"ABORT".to_vec()], &mut store, 0)
+            .expect("abort should return runtime-style error frame");
+        assert_eq!(
+            out,
+            RespFrame::Error("ERR No shutdown in progress.".to_string())
+        );
+
+        let err = dispatch_argv(
+            &[b"SHUTDOWN".to_vec(), b"ABORT".to_vec(), b"NOW".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("abort mixed with flags should fail");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+
+        let err = dispatch_argv(
+            &[b"SHUTDOWN".to_vec(), b"SAVE".to_vec(), b"NOSAVE".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("save and nosave together should fail");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
     }
 
     #[test]

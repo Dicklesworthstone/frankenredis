@@ -4571,7 +4571,16 @@ impl Runtime {
 
     fn handle_bgsave_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         if argv.len() > 2 {
-            return CommandError::WrongArity("BGSAVE").to_resp();
+            return CommandError::SyntaxError.to_resp();
+        }
+        if argv.len() == 2 {
+            let option = match std::str::from_utf8(&argv[1]) {
+                Ok(option) => option,
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+            };
+            if !option.eq_ignore_ascii_case("SCHEDULE") {
+                return CommandError::SyntaxError.to_resp();
+            }
         }
         // In a single-threaded context, BGSAVE behaves like SAVE.
         if let Err(reply) = self.persist_snapshot_to_disk(now_ms) {
@@ -4628,24 +4637,32 @@ impl Runtime {
     }
 
     fn handle_shutdown_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
-        if argv.len() > 3 {
-            return CommandError::WrongArity("SHUTDOWN").to_resp();
-        }
-        // Validate flags: NOSAVE, SAVE, NOW, FORCE
+        let mut flags = 0u8;
+        let mut abort = false;
         for arg in &argv[1..] {
-            let s = match std::str::from_utf8(arg) {
-                Ok(s) => s,
+            let option = match std::str::from_utf8(arg) {
+                Ok(option) => option,
                 Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
-            if !s.eq_ignore_ascii_case("NOSAVE")
-                && !s.eq_ignore_ascii_case("SAVE")
-                && !s.eq_ignore_ascii_case("NOW")
-                && !s.eq_ignore_ascii_case("FORCE")
-            {
-                return RespFrame::Error(format!(
-                    "ERR unrecognized option or bad number of args for SHUTDOWN: '{s}'"
-                ));
+            if option.eq_ignore_ascii_case("NOSAVE") {
+                flags |= 0b0001;
+            } else if option.eq_ignore_ascii_case("SAVE") {
+                flags |= 0b0010;
+            } else if option.eq_ignore_ascii_case("NOW") {
+                flags |= 0b0100;
+            } else if option.eq_ignore_ascii_case("FORCE") {
+                flags |= 0b1000;
+            } else if option.eq_ignore_ascii_case("ABORT") {
+                abort = true;
+            } else {
+                return CommandError::SyntaxError.to_resp();
             }
+        }
+        if (flags & 0b0001 != 0 && flags & 0b0010 != 0) || (abort && flags != 0) {
+            return CommandError::SyntaxError.to_resp();
+        }
+        if abort {
+            return RespFrame::Error("ERR No shutdown in progress.".to_string());
         }
         // In standalone mode, acknowledge but don't actually shut down
         RespFrame::SimpleString("OK".to_string())
@@ -7694,6 +7711,7 @@ mod tests {
     fn slowlog_get_uses_redis_default_count_and_minus_one_means_all() {
         let mut rt = Runtime::default_strict();
         rt.server.slowlog_max_len = 64;
+        rt.server.slowlog_log_slower_than_us = 0;
         for idx in 0..12u64 {
             let key = format!("k{idx}");
             rt.record_slowlog(
@@ -7726,16 +7744,20 @@ mod tests {
         );
         assert_eq!(
             rt.execute_frame(command(&[b"SLOWLOG", b"GET", b"1", b"extra"]), 2),
-            RespFrame::Error("ERR wrong number of arguments for 'SLOWLOG|get' command".to_string())
+            RespFrame::Error(
+                "ERR wrong number of arguments for 'slowlog|get' subcommand".to_string()
+            )
         );
         assert_eq!(
             rt.execute_frame(command(&[b"SLOWLOG", b"LEN", b"extra"]), 3),
-            RespFrame::Error("ERR wrong number of arguments for 'SLOWLOG|len' command".to_string())
+            RespFrame::Error(
+                "ERR wrong number of arguments for 'slowlog|len' subcommand".to_string()
+            )
         );
         assert_eq!(
             rt.execute_frame(command(&[b"SLOWLOG", b"RESET", b"extra"]), 4),
             RespFrame::Error(
-                "ERR wrong number of arguments for 'SLOWLOG|reset' command".to_string()
+                "ERR wrong number of arguments for 'slowlog|reset' subcommand".to_string()
             )
         );
     }
@@ -9008,6 +9030,36 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&rdb_path);
+    }
+
+    #[test]
+    fn bgsave_rejects_invalid_options_with_syntax_error() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGSAVE", b"NOW"]), 1),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGSAVE", b"SCHEDULE", b"EXTRA"]), 2),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+    }
+
+    #[test]
+    fn shutdown_abort_and_illegal_combinations_follow_redis_validation() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SHUTDOWN", b"ABORT"]), 1),
+            RespFrame::Error("ERR No shutdown in progress.".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SHUTDOWN", b"ABORT", b"NOW"]), 2),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SHUTDOWN", b"SAVE", b"NOSAVE"]), 3),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
     }
 
     #[test]
