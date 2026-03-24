@@ -3722,6 +3722,39 @@ impl Runtime {
                     .to_vec(),
             )));
         }
+        if Self::config_pattern_matches(pattern, "appendonly") {
+            entries.push(RespFrame::BulkString(Some(b"appendonly".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                if self.server.aof_path.is_some() {
+                    b"yes".to_vec()
+                } else {
+                    b"no".to_vec()
+                },
+            )));
+        }
+        if Self::config_pattern_matches(pattern, "appendfilename") {
+            entries.push(RespFrame::BulkString(Some(b"appendfilename".to_vec())));
+            let filename = self
+                .server
+                .aof_path
+                .as_ref()
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "appendonly.aof".to_string());
+            entries.push(RespFrame::BulkString(Some(filename.into_bytes())));
+        }
+        if Self::config_pattern_matches(pattern, "appenddirname") {
+            entries.push(RespFrame::BulkString(Some(b"appenddirname".to_vec())));
+            let dirname = self
+                .server
+                .aof_path
+                .as_ref()
+                .and_then(|path| path.parent())
+                .and_then(|path| path.file_name())
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "appendonlydir".to_string());
+            entries.push(RespFrame::BulkString(Some(dirname.into_bytes())));
+        }
         // Also emit ziplist aliases from Store (they alias the same live values).
         let ziplist_aliases: &[(&str, usize)] = &[
             (
@@ -3770,6 +3803,9 @@ impl Runtime {
                 || name == "list-max-ziplist-size"
                 || name == "list-max-listpack-entries"
                 || name == "list-max-listpack-value"
+                || name == "appendonly"
+                || name == "appendfilename"
+                || name == "appenddirname"
             {
                 continue;
             }
@@ -5281,10 +5317,16 @@ impl Runtime {
                     .iter()
                     .any(|section| section.eq_ignore_ascii_case(name))
         };
+        let is_persistence = section_requested("persistence");
         let is_replication = section_requested("replication");
         let is_keyspace = section_requested("keyspace");
 
         let mut info = Vec::new();
+        if is_persistence
+            && let RespFrame::BulkString(Some(bytes)) = self.handle_info_persistence_section()
+        {
+            info.extend_from_slice(&bytes);
+        }
         if is_replication
             && let RespFrame::BulkString(Some(bytes)) = self.handle_info_replication_section()
         {
@@ -5300,7 +5342,6 @@ impl Runtime {
             "server",
             "clients",
             "memory",
-            "persistence",
             "stats",
             "cpu",
             "modules",
@@ -5357,6 +5398,45 @@ impl Runtime {
                 ));
             }
         }
+        info.push_str("\r\n");
+        RespFrame::BulkString(Some(info.into_bytes()))
+    }
+
+    fn handle_info_persistence_section(&mut self) -> RespFrame {
+        let mut info = String::from("# Persistence\r\n");
+        info.push_str("loading:0\r\n");
+        info.push_str("async_loading:0\r\n");
+        info.push_str("current_cow_peak:0\r\n");
+        info.push_str("current_cow_size:0\r\n");
+        info.push_str("current_cow_size_age:0\r\n");
+        info.push_str("current_fork_perc:0.00\r\n");
+        info.push_str("current_save_keys_processed:0\r\n");
+        info.push_str("current_save_keys_total:0\r\n");
+        info.push_str(&format!(
+            "rdb_changes_since_last_save:{}\r\n",
+            self.server.store.dirty
+        ));
+        info.push_str("rdb_bgsave_in_progress:0\r\n");
+        info.push_str(&format!(
+            "rdb_last_save_time:{}\r\n",
+            self.server.store.last_save_time_sec
+        ));
+        info.push_str("rdb_last_bgsave_status:ok\r\n");
+        info.push_str("rdb_last_bgsave_time_sec:-1\r\n");
+        info.push_str("rdb_current_bgsave_time_sec:-1\r\n");
+        info.push_str("rdb_saves:0\r\n");
+        info.push_str("rdb_last_cow_size:0\r\n");
+        info.push_str(&format!(
+            "aof_enabled:{}\r\n",
+            usize::from(self.server.aof_path.is_some())
+        ));
+        info.push_str("aof_rewrite_in_progress:0\r\n");
+        info.push_str("aof_rewrite_scheduled:0\r\n");
+        info.push_str("aof_last_rewrite_time_sec:-1\r\n");
+        info.push_str("aof_current_rewrite_time_sec:-1\r\n");
+        info.push_str("aof_last_bgrewrite_status:ok\r\n");
+        info.push_str("aof_last_write_status:ok\r\n");
+        info.push_str("aof_last_cow_size:0\r\n");
         info.push_str("\r\n");
         RespFrame::BulkString(Some(info.into_bytes()))
     }
@@ -9222,6 +9302,34 @@ mod tests {
     }
 
     #[test]
+    fn config_get_reports_live_appendonly_path_state() {
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(std::path::PathBuf::from("/tmp/fr-test/real-appendonly.aof"));
+
+        let get = rt.execute_frame(
+            command(&[
+                b"CONFIG",
+                b"GET",
+                b"appendonly",
+                b"appendfilename",
+                b"appenddirname",
+            ]),
+            0,
+        );
+        assert_eq!(
+            get,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"appendonly".to_vec())),
+                RespFrame::BulkString(Some(b"yes".to_vec())),
+                RespFrame::BulkString(Some(b"appendfilename".to_vec())),
+                RespFrame::BulkString(Some(b"real-appendonly.aof".to_vec())),
+                RespFrame::BulkString(Some(b"appenddirname".to_vec())),
+                RespFrame::BulkString(Some(b"fr-test".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
     fn config_help_is_supported_on_runtime_path() {
         let mut rt = Runtime::default_strict();
         let help = rt.execute_frame(command(&[b"CONFIG", b"HELP"]), 0);
@@ -9397,6 +9505,19 @@ mod tests {
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("rdb_last_save_time:1700000005\r\n"), "{info}");
+    }
+
+    #[test]
+    fn live_info_persistence_reports_aof_enabled_when_configured() {
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
+
+        let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 0);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            panic!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("aof_enabled:1\r\n"), "{info}");
     }
 
     #[test]

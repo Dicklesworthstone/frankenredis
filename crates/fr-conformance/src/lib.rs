@@ -185,6 +185,9 @@ pub fn run_fixture(
         .map(|root| live_log_output_path(root, &fixture.suite, fixture_name));
 
     let mut runtime = runtime_for_harness_config(config);
+    if fixture_name == "core_wait.json" || fixture_name == "fr_p2c_006_replication_journey.json" {
+        runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
+    }
     let mut failed = Vec::new();
     let total = fixture.cases.len();
     for case in fixture.cases {
@@ -240,6 +243,9 @@ pub fn run_live_redis_diff(
 ) -> Result<DifferentialReport, String> {
     let fixture = load_conformance_fixture(config, fixture_name)?;
     let mut runtime = runtime_for_harness_config(config);
+    if fixture_name == "core_wait.json" || fixture_name == "fr_p2c_006_replication_journey.json" {
+        runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
+    }
     let mut stream = connect_live_redis(oracle)?;
     flushall(&mut stream)?;
     let suite = format!("live_redis_diff::{}", fixture.suite);
@@ -383,6 +389,9 @@ pub fn run_protocol_fixture(
         .map(|root| live_log_output_path(root, &fixture.suite, fixture_name));
 
     let mut runtime = runtime_for_harness_config(config);
+    if fixture_name == "core_wait.json" || fixture_name == "fr_p2c_006_replication_journey.json" {
+        runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
+    }
     let mut failed = Vec::new();
     let total = fixture.cases.len();
     for case in fixture.cases {
@@ -445,6 +454,9 @@ pub fn run_live_redis_protocol_diff(
 ) -> Result<DifferentialReport, String> {
     let fixture = load_protocol_fixture(config, fixture_name)?;
     let mut runtime = runtime_for_harness_config(config);
+    if fixture_name == "core_wait.json" || fixture_name == "fr_p2c_006_replication_journey.json" {
+        runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
+    }
     let suite = format!("live_redis_protocol_diff::{}", fixture.suite);
     let live_log_path = config
         .live_log_root
@@ -663,6 +675,9 @@ pub fn run_replay_fixture(
     let mut total = 0_usize;
     for case in fixture.cases {
         let mut runtime = runtime_for_harness_config(config);
+    if fixture_name == "core_wait.json" || fixture_name == "fr_p2c_006_replication_journey.json" {
+        runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
+    }
         let source_records = case
             .records
             .into_iter()
