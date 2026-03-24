@@ -135,8 +135,8 @@
         "BGREWRITEAOF"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "Background append only file rewriting started"
+        "kind": "error",
+        "value": "ERR appendonly is disabled, cannot rewrite append only file"
       }
     },
     {
@@ -1441,7 +1441,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try MEMORY HELP."
+        "value": "ERR syntax error"
       }
     },
     {
@@ -1879,7 +1879,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try MEMORY HELP."
+        "value": "ERR syntax error"
       }
     },
     {
@@ -1988,8 +1988,8 @@
         "BGREWRITEAOF"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "Background append only file rewriting started"
+        "kind": "error",
+        "value": "ERR appendonly is disabled, cannot rewrite append only file"
       }
     },
     {

@@ -4633,13 +4633,16 @@ impl Runtime {
         if argv.len() != 1 {
             return CommandError::WrongArity("BGREWRITEAOF").to_resp();
         }
+        let Some(path) = &self.server.aof_path else {
+            return RespFrame::Error(
+                "ERR appendonly is disabled, cannot rewrite append only file".to_string(),
+            );
+        };
         // Rewrite the AOF file with a snapshot of the current store state.
-        if let Some(path) = &self.server.aof_path {
-            let commands = self.server.store.to_aof_commands(now_ms);
-            let records = argv_to_aof_records(commands);
-            if let Err(_e) = write_aof_file(path, &records) {
-                return RespFrame::Error("ERR error rewriting AOF file".to_string());
-            }
+        let commands = self.server.store.to_aof_commands(now_ms);
+        let records = argv_to_aof_records(commands);
+        if let Err(_e) = write_aof_file(path, &records) {
+            return RespFrame::Error("ERR error rewriting AOF file".to_string());
         }
         RespFrame::SimpleString("Background append only file rewriting started".to_string())
     }
@@ -9360,6 +9363,17 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"BGSAVE", b"SCHEDULE", b"EXTRA"]), 2),
             RespFrame::Error("ERR syntax error".to_string())
+        );
+    }
+
+    #[test]
+    fn bgrewriteaof_errors_when_appendonly_is_disabled() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1),
+            RespFrame::Error(
+                "ERR appendonly is disabled, cannot rewrite append only file".to_string()
+            )
         );
     }
 
