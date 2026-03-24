@@ -5494,6 +5494,20 @@ impl Runtime {
         if !matches!(parse_i64_arg(&argv[3]), Ok(value) if value >= 0) {
             return CommandError::InvalidInteger.to_resp();
         }
+        if matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Replica { .. }
+        ) {
+            return RespFrame::Error(
+                "ERR WAITAOF cannot be used with replica instances. Please also note that writes to replicas are just local and are not propagated.".to_string(),
+            );
+        }
+        if required_local > 0 && self.server.aof_path.is_none() {
+            return RespFrame::Error(
+                "ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled."
+                    .to_string(),
+            );
+        }
 
         let required_local_offset = if required_local == 0 {
             ReplOffset(0)
@@ -7756,6 +7770,7 @@ mod tests {
     #[test]
     fn fr_p2c_006_u006_waitaof_requires_local_and_replica_thresholds() {
         let mut rt = Runtime::default_strict();
+        rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
         let _ = rt.execute_frame(command(&[b"SET", b"fr:p2c:006:aof", b"value"]), 0);
 
         rt.set_replication_ack_state_for_tests(1, 0, &[1, 0], &[1, 0]);
@@ -7799,6 +7814,37 @@ mod tests {
         assert_eq!(
             invalid_timeout,
             RespFrame::Error("ERR value is not an integer or out of range".to_string())
+        );
+    }
+
+    #[test]
+    fn waitaof_rejects_local_threshold_when_appendonly_is_disabled() {
+        let mut rt = Runtime::default_strict();
+
+        let out = rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"0"]), 0);
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn waitaof_rejects_replica_instances() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6379"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let out = rt.execute_frame(command(&[b"WAITAOF", b"0", b"0", b"0"]), 1);
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR WAITAOF cannot be used with replica instances. Please also note that writes to replicas are just local and are not propagated.".to_string()
+            )
         );
     }
 

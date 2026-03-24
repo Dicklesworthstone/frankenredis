@@ -5265,10 +5265,27 @@ fn generate_lolwut_art(version: u32) -> String {
 
 fn waitaof_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     // WAITAOF numlocal numreplicas timeout
-    if argv.len() < 4 {
+    if argv.len() != 4 {
         return Err(CommandError::WrongArity("WAITAOF"));
     }
-    // In standalone mode: local=0, replicas=0
+    let required_local = match parse_i64_arg(&argv[1]) {
+        Ok(value) if value >= 0 => value,
+        _ => return Err(CommandError::InvalidInteger),
+    };
+    let _required_replicas = match parse_i64_arg(&argv[2]) {
+        Ok(value) if value >= 0 => value,
+        _ => return Err(CommandError::InvalidInteger),
+    };
+    if !matches!(parse_i64_arg(&argv[3]), Ok(value) if value >= 0) {
+        return Err(CommandError::InvalidInteger);
+    }
+    if required_local > 0 {
+        return Ok(RespFrame::Error(
+            "ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled."
+                .to_string(),
+        ));
+    }
+    // In standalone mode with appendonly disabled: local=0, replicas=0.
     Ok(RespFrame::Array(Some(vec![
         RespFrame::Integer(0),
         RespFrame::Integer(0),
@@ -23307,6 +23324,57 @@ mod tests {
             out,
             RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0),]))
         );
+    }
+
+    #[test]
+    fn waitaof_rejects_disabled_local_fsync_and_invalid_arguments() {
+        let mut store = Store::new();
+
+        let disabled_local = dispatch_argv(
+            &[
+                b"WAITAOF".to_vec(),
+                b"1".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            disabled_local,
+            RespFrame::Error(
+                "ERR WAITAOF cannot be used when numlocal is set but appendonly is disabled."
+                    .to_string()
+            )
+        );
+
+        let wrong_arity = dispatch_argv(
+            &[
+                b"WAITAOF".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+                b"extra".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(wrong_arity, CommandError::WrongArity("WAITAOF"));
+
+        let invalid_timeout = dispatch_argv(
+            &[
+                b"WAITAOF".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(invalid_timeout, CommandError::InvalidInteger);
     }
 
     // ── CLUSTER tests ───────────────────────────────────────────────
