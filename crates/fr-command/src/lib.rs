@@ -9686,10 +9686,36 @@ fn slowlog_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     }
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if sub.eq_ignore_ascii_case("GET") {
+        if argv.len() > 3 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "SLOWLOG",
+                subcommand: "GET".to_string(),
+            });
+        }
+        if let Some(count_arg) = argv.get(2) {
+            let count = parse_i64_arg(count_arg)?;
+            if count < -1 {
+                return Err(CommandError::Custom(
+                    "ERR count should be greater than or equal to -1".to_string(),
+                ));
+            }
+        }
         Ok(RespFrame::Array(Some(Vec::new())))
     } else if sub.eq_ignore_ascii_case("LEN") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "SLOWLOG",
+                subcommand: "LEN".to_string(),
+            });
+        }
         Ok(RespFrame::Integer(0))
     } else if sub.eq_ignore_ascii_case("RESET") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "SLOWLOG",
+                subcommand: "RESET".to_string(),
+            });
+        }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("HELP") {
         if argv.len() != 2 {
@@ -23239,6 +23265,80 @@ mod tests {
             CommandError::WrongSubcommandArity {
                 command: "CLIENT",
                 subcommand: "NO-TOUCH".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn slowlog_get_accepts_minus_one_and_rejects_invalid_shapes() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"SLOWLOG".to_vec(), b"GET".to_vec(), b"-1".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Array(Some(Vec::new())));
+
+        let err = dispatch_argv(
+            &[b"SLOWLOG".to_vec(), b"GET".to_vec(), b"-2".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR count should be greater than or equal to -1".to_string())
+        );
+
+        let err = dispatch_argv(
+            &[
+                b"SLOWLOG".to_vec(),
+                b"GET".to_vec(),
+                b"1".to_vec(),
+                b"extra".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::WrongSubcommandArity {
+                command: "SLOWLOG",
+                subcommand: "GET".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn slowlog_len_and_reset_reject_extra_arguments() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"SLOWLOG".to_vec(), b"LEN".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::WrongSubcommandArity {
+                command: "SLOWLOG",
+                subcommand: "LEN".to_string(),
+            }
+        );
+
+        let err = dispatch_argv(
+            &[b"SLOWLOG".to_vec(), b"RESET".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::WrongSubcommandArity {
+                command: "SLOWLOG",
+                subcommand: "RESET".to_string(),
             }
         );
     }

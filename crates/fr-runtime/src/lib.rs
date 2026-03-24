@@ -4460,13 +4460,26 @@ impl Runtime {
             Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
         };
         if sub.eq_ignore_ascii_case("GET") {
-            let count = if argv.len() >= 3 {
+            if argv.len() > 3 {
+                return CommandError::WrongSubcommandArity {
+                    command: "SLOWLOG",
+                    subcommand: "GET".to_string(),
+                }
+                .to_resp();
+            }
+            let count = if argv.len() == 3 {
                 match parse_i64_arg(&argv[2]) {
+                    Ok(-1) => self.server.slowlog.len(),
                     Ok(c) if c >= 0 => c as usize,
-                    _ => return CommandError::InvalidInteger.to_resp(),
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR count should be greater than or equal to -1".to_string(),
+                        );
+                    }
+                    Err(_) => return CommandError::InvalidInteger.to_resp(),
                 }
             } else {
-                self.server.slowlog_max_len
+                10
             };
             let entries: Vec<RespFrame> = self
                 .server
@@ -4492,8 +4505,22 @@ impl Runtime {
                 .collect();
             RespFrame::Array(Some(entries))
         } else if sub.eq_ignore_ascii_case("LEN") {
+            if argv.len() != 2 {
+                return CommandError::WrongSubcommandArity {
+                    command: "SLOWLOG",
+                    subcommand: "LEN".to_string(),
+                }
+                .to_resp();
+            }
             RespFrame::Integer(self.server.slowlog.len() as i64)
         } else if sub.eq_ignore_ascii_case("RESET") {
+            if argv.len() != 2 {
+                return CommandError::WrongSubcommandArity {
+                    command: "SLOWLOG",
+                    subcommand: "RESET".to_string(),
+                }
+                .to_resp();
+            }
             self.server.reset_slowlog();
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("HELP") {
@@ -7660,6 +7687,56 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"HELP", b"extra"]), 2),
             RespFrame::Error("ERR wrong number of arguments for 'client' command".to_string())
+        );
+    }
+
+    #[test]
+    fn slowlog_get_uses_redis_default_count_and_minus_one_means_all() {
+        let mut rt = Runtime::default_strict();
+        rt.server.slowlog_max_len = 64;
+        for idx in 0..12u64 {
+            let key = format!("k{idx}");
+            rt.record_slowlog(
+                &[b"SET".to_vec(), key.into_bytes(), b"v".to_vec()],
+                50,
+                idx * 1000,
+            );
+        }
+
+        let default = rt.execute_frame(command(&[b"SLOWLOG", b"GET"]), 99);
+        let RespFrame::Array(Some(default_entries)) = default else {
+            panic!("expected default slowlog array");
+        };
+        assert_eq!(default_entries.len(), 10);
+
+        let all = rt.execute_frame(command(&[b"SLOWLOG", b"GET", b"-1"]), 100);
+        let RespFrame::Array(Some(all_entries)) = all else {
+            panic!("expected all slowlog array");
+        };
+        assert_eq!(all_entries.len(), 12);
+    }
+
+    #[test]
+    fn slowlog_rejects_invalid_shapes_and_negative_count_below_minus_one() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SLOWLOG", b"GET", b"-2"]), 1),
+            RespFrame::Error("ERR count should be greater than or equal to -1".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SLOWLOG", b"GET", b"1", b"extra"]), 2),
+            RespFrame::Error("ERR wrong number of arguments for 'SLOWLOG|get' command".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SLOWLOG", b"LEN", b"extra"]), 3),
+            RespFrame::Error("ERR wrong number of arguments for 'SLOWLOG|len' command".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SLOWLOG", b"RESET", b"extra"]), 4),
+            RespFrame::Error(
+                "ERR wrong number of arguments for 'SLOWLOG|reset' command".to_string()
+            )
         );
     }
 
