@@ -1957,9 +1957,12 @@ impl Store {
                     self.stream_groups.remove(candidate.as_slice());
                     self.stream_last_ids.remove(candidate.as_slice());
                     evicted_keys = evicted_keys.saturating_add(1);
-                    // Emit evicted keyspace notification
-                    let db = decode_db_key(&candidate).map(|(db, _)| db).unwrap_or(0);
-                    self.notify_keyspace_event(NOTIFY_EVICTED, "evicted", &candidate, db);
+                    // Emit evicted keyspace notification (use logical key)
+                    let (db, logical_key) = match decode_db_key(&candidate) {
+                        Some((db, lk)) => (db, lk.to_vec()),
+                        None => (0, candidate.clone()),
+                    };
+                    self.notify_keyspace_event(NOTIFY_EVICTED, "evicted", &logical_key, db);
                 }
             }
 
@@ -2039,6 +2042,12 @@ impl Store {
             )
             .should_evict;
             if should_evict {
+                // Emit expired notification before removal (use logical key)
+                let (db, logical_key) = match decode_db_key(key) {
+                    Some((db, lk)) => (db, lk.to_vec()),
+                    None => (0, key.clone()),
+                };
+                self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", &logical_key, db);
                 self.internal_entries_remove(key);
                 self.stream_groups.remove(key.as_slice());
                 self.stream_last_ids.remove(key.as_slice());
@@ -6115,9 +6124,12 @@ impl Store {
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
             self.dirty = self.dirty.saturating_add(1);
-            // Emit expired keyspace notification
-            let db = decode_db_key(key).map(|(db, _)| db).unwrap_or(0);
-            self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", key, db);
+            // Emit expired keyspace notification (use logical key, not physical)
+            let (db, logical_key) = match decode_db_key(key) {
+                Some((db, lk)) => (db, lk),
+                None => (0, &key[..]),
+            };
+            self.notify_keyspace_event(NOTIFY_EXPIRED, "expired", logical_key, db);
         }
     }
 
@@ -8659,9 +8671,10 @@ mod tests {
         store.set(key.clone(), b"v".to_vec(), Some(5), 100);
 
         assert_eq!(store.get(&key, 106).unwrap(), None);
+        // Notification should contain the LOGICAL key, not the physical encoded key
         assert_eq!(
             store.drain_keyspace_notifications(),
-            vec![(b"__keyevent@2__:expired".to_vec(), key,)]
+            vec![(b"__keyevent@2__:expired".to_vec(), b"expiring".to_vec())]
         );
     }
 
@@ -8676,9 +8689,10 @@ mod tests {
         let result =
             store.run_bounded_eviction_loop(0, 1, 0, 1, 1, EvictionSafetyGateState::default());
         assert_eq!(result.evicted_keys, 1);
+        // Notification should contain the LOGICAL key, not the physical encoded key
         assert_eq!(
             store.drain_keyspace_notifications(),
-            vec![(b"__keyevent@3__:evicted".to_vec(), key,)]
+            vec![(b"__keyevent@3__:evicted".to_vec(), b"victim".to_vec())]
         );
     }
 

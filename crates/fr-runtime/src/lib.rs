@@ -2486,10 +2486,33 @@ impl Runtime {
                             let event = Self::command_to_keyspace_event(&argv);
                             let event_type = Self::command_to_notify_type(&argv);
                             let db = self.session.selected_db;
-                            for key in &cmd_keys {
-                                self.server
-                                    .store
-                                    .notify_keyspace_event(event_type, event, key, db);
+                            let is_rename = argv
+                                .first()
+                                .map(|c| {
+                                    c.eq_ignore_ascii_case(b"RENAME")
+                                        || c.eq_ignore_ascii_case(b"RENAMENX")
+                                })
+                                .unwrap_or(false);
+                            if is_rename && cmd_keys.len() >= 2 {
+                                // RENAME emits rename_from on source, rename_to on dest
+                                self.server.store.notify_keyspace_event(
+                                    event_type,
+                                    "rename_from",
+                                    &cmd_keys[0],
+                                    db,
+                                );
+                                self.server.store.notify_keyspace_event(
+                                    event_type,
+                                    "rename_to",
+                                    &cmd_keys[1],
+                                    db,
+                                );
+                            } else {
+                                for key in &cmd_keys {
+                                    self.server
+                                        .store
+                                        .notify_keyspace_event(event_type, event, key, db);
+                                }
                             }
                             // Deliver queued keyspace notifications via pub/sub
                             self.deliver_keyspace_notifications();

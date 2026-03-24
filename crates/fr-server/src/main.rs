@@ -329,6 +329,7 @@ fn main() -> ExitCode {
     let mut blocked_tokens: HashSet<Token> = HashSet::new();
     let mut closing_tokens: HashSet<Token> = HashSet::new();
     let mut write_tokens: HashSet<Token> = HashSet::new();
+    let mut paused_tokens: HashSet<Token> = HashSet::new();
     let mut replica_sync = ReplicaSyncState::new();
     let mut next_token: usize = 1;
     let tick_budget = TickBudget::default();
@@ -382,6 +383,7 @@ fn main() -> ExitCode {
                             &mut blocked_tokens,
                             &mut closing_tokens,
                             &mut write_tokens,
+                            &mut paused_tokens,
                             ts,
                         );
                     }
@@ -416,6 +418,25 @@ fn main() -> ExitCode {
             &mut write_tokens,
             ts,
         );
+
+        // Re-process clients whose commands were deferred by CLIENT PAUSE.
+        // When the pause expires, we must re-trigger processing since mio won't
+        // generate a readable event for data already in the read buffer.
+        if !paused_tokens.is_empty() && !runtime.is_client_paused(ts) {
+            let tokens: Vec<Token> = paused_tokens.drain().collect();
+            for token in tokens {
+                if let Some(conn) = clients.get_mut(&token) {
+                    if !conn.read_buf.is_empty() && !conn.closing {
+                        // Re-register as readable to trigger processing on next tick
+                        let _ = poll.registry().reregister(
+                            &mut conn.stream,
+                            token,
+                            Interest::READABLE | Interest::WRITABLE,
+                        );
+                    }
+                }
+            }
+        }
 
         // Deliver pending replication writes to connected replicas.
         propagate_writes_to_replicas(&mut clients, &mut runtime, &mut write_tokens);
@@ -454,6 +475,7 @@ fn main() -> ExitCode {
                 blocked_tokens.remove(&token);
                 closing_tokens.remove(&token);
                 write_tokens.remove(&token);
+                paused_tokens.remove(&token);
                 client_id_to_token.remove(&conn.session.client_id);
                 // Clean up Pub/Sub subscriptions and stats for this client.
                 runtime.pubsub_cleanup_client(conn.session.client_id);
@@ -534,6 +556,7 @@ fn handle_readable(
     blocked_tokens: &mut HashSet<Token>,
     closing_tokens: &mut HashSet<Token>,
     write_tokens: &mut HashSet<Token>,
+    paused_tokens: &mut HashSet<Token>,
     ts: u64,
 ) {
     let Some(conn) = clients.get_mut(&token) else {
@@ -597,6 +620,7 @@ fn handle_readable(
         blocked_tokens,
         closing_tokens,
         write_tokens,
+        paused_tokens,
         ts,
     );
 
@@ -621,6 +645,7 @@ fn process_buffered_frames(
     blocked_tokens: &mut HashSet<Token>,
     closing_tokens: &mut HashSet<Token>,
     write_tokens: &mut HashSet<Token>,
+    paused_tokens: &mut HashSet<Token>,
     ts: u64,
 ) {
     loop {
@@ -675,9 +700,9 @@ fn process_buffered_frames(
                         })
                         .collect();
                     if runtime.is_command_paused(&argv, ts) && !is_client_pause_exempt(&argv) {
-                        // Don't process the command — leave it in the read buffer
-                        // and break to let the event loop tick. The command will
-                        // be retried on the next readable event after pause expires.
+                        // Don't process the command — leave it in the read buffer.
+                        // Track paused token so we can re-process when pause expires.
+                        paused_tokens.insert(token);
                         break;
                     }
                 }
@@ -1497,6 +1522,7 @@ fn check_blocked_clients(
             if !conn.read_buf.is_empty() {
                 let session = std::mem::take(&mut conn.session);
                 let prev = runtime.swap_session(session);
+                let mut dummy_paused = HashSet::new();
                 process_buffered_frames(
                     token,
                     conn,
@@ -1504,6 +1530,7 @@ fn check_blocked_clients(
                     blocked_tokens,
                     closing_tokens,
                     write_tokens,
+                    &mut dummy_paused,
                     ts,
                 );
                 let updated_session = runtime.swap_session(prev);
@@ -1528,6 +1555,7 @@ fn check_blocked_clients(
             // Process any commands the client pipelined while blocked.
             if !conn.read_buf.is_empty() {
                 // The session is already swapped in here.
+                let mut dummy_paused = HashSet::new();
                 process_buffered_frames(
                     token,
                     conn,
@@ -1535,6 +1563,7 @@ fn check_blocked_clients(
                     blocked_tokens,
                     closing_tokens,
                     write_tokens,
+                    &mut dummy_paused,
                     ts,
                 );
             }
@@ -2688,6 +2717,7 @@ mod tests {
         let mut blocked_tokens = HashSet::new();
         let mut closing_tokens = HashSet::new();
         let mut write_tokens = HashSet::new();
+        let mut paused_tokens = HashSet::new();
         crate::process_buffered_frames(
             Token(1),
             &mut conn,
@@ -2695,6 +2725,7 @@ mod tests {
             &mut blocked_tokens,
             &mut closing_tokens,
             &mut write_tokens,
+            &mut paused_tokens,
             ts + 1,
         );
 
