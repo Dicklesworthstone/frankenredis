@@ -2433,9 +2433,11 @@ impl<'a> LuaState<'a> {
                 let func = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let mut call_args_vec = args.get(1..).unwrap_or(&[]).to_vec();
                 match self.call_function(&func, &mut call_args_vec, env, &mut Vec::new()) {
-                    Ok(mut vals) => {
-                        vals.insert(0, LuaValue::Bool(true));
-                        Ok(vals)
+                    Ok(vals) => {
+                        let mut new_vals = Vec::with_capacity(vals.len() + 1);
+                        new_vals.push(LuaValue::Bool(true));
+                        new_vals.extend(vals);
+                        Ok(new_vals)
                     }
                     Err(msg) => Ok(vec![LuaValue::Bool(false), LuaValue::Str(msg.into_bytes())]),
                 }
@@ -2446,9 +2448,11 @@ impl<'a> LuaState<'a> {
                 let err_handler = args.get(1).cloned().unwrap_or(LuaValue::Nil);
                 let mut call_args_vec = args.get(2..).unwrap_or(&[]).to_vec();
                 match self.call_function(&func, &mut call_args_vec, env, &mut Vec::new()) {
-                    Ok(mut vals) => {
-                        vals.insert(0, LuaValue::Bool(true));
-                        Ok(vals)
+                    Ok(vals) => {
+                        let mut new_vals = Vec::with_capacity(vals.len() + 1);
+                        new_vals.push(LuaValue::Bool(true));
+                        new_vals.extend(vals);
+                        Ok(new_vals)
                     }
                     Err(msg) => {
                         // Call error handler with the error message

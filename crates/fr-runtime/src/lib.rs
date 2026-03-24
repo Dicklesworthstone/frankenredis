@@ -2274,9 +2274,62 @@ impl Runtime {
             return reply;
         }
 
-        // Dispatch runtime-special commands. These execute immediately even
-        // inside MULTI/EXEC because they require runtime state not available
-        // during EXEC replay (which only uses dispatch_argv → Store).
+        // When inside MULTI, queue commands that can be deferred to EXEC.
+        // Only transaction-control commands (MULTI/EXEC/DISCARD/WATCH/UNWATCH)
+        // and connection commands (QUIT/RESET) execute immediately.
+        if self.session.transaction_state.in_transaction {
+            let must_execute_now = matches!(
+                special_command,
+                Some(RuntimeSpecialCommand::Multi)
+                    | Some(RuntimeSpecialCommand::Exec)
+                    | Some(RuntimeSpecialCommand::Discard)
+                    | Some(RuntimeSpecialCommand::Watch)
+                    | Some(RuntimeSpecialCommand::Unwatch)
+                    | Some(RuntimeSpecialCommand::Quit)
+                    | Some(RuntimeSpecialCommand::Reset)
+            );
+            // Subscribe/Unsubscribe family is not allowed inside MULTI
+            let is_sub_cmd = matches!(
+                special_command,
+                Some(RuntimeSpecialCommand::Subscribe)
+                    | Some(RuntimeSpecialCommand::Unsubscribe)
+                    | Some(RuntimeSpecialCommand::Psubscribe)
+                    | Some(RuntimeSpecialCommand::Punsubscribe)
+                    | Some(RuntimeSpecialCommand::Ssubscribe)
+                    | Some(RuntimeSpecialCommand::Sunsubscribe)
+            );
+            if is_sub_cmd {
+                let cmd_str = argv
+                    .first()
+                    .and_then(|c| std::str::from_utf8(c).ok())
+                    .unwrap_or("");
+                return RespFrame::Error(format!(
+                    "ERR Command not allowed inside a transaction"
+                ));
+            }
+            if !must_execute_now {
+                let cmd_bytes = match argv.first() {
+                    Some(cmd) => cmd,
+                    None => {
+                        self.session.transaction_state.exec_abort = true;
+                        return CommandError::InvalidCommandFrame.to_resp();
+                    }
+                };
+                if !fr_command::is_known_command(cmd_bytes) {
+                    self.session.transaction_state.exec_abort = true;
+                    let cmd_str = std::str::from_utf8(cmd_bytes).unwrap_or("");
+                    return RespFrame::Error(format!(
+                        "ERR unknown command '{}'",
+                        fr_command::trim_and_cap_string(cmd_str, 128)
+                    ));
+                }
+                self.session.transaction_state.command_queue.push(argv);
+                return RespFrame::SimpleString("QUEUED".to_string());
+            }
+        }
+
+        // Dispatch runtime-special commands that execute outside of MULTI,
+        // or the subset that must execute immediately inside MULTI.
         match special_command {
             Some(RuntimeSpecialCommand::Acl) => return self.handle_acl_command(&argv),
             Some(RuntimeSpecialCommand::Config) => return self.handle_config_command(&argv),
@@ -2360,27 +2413,6 @@ impl Runtime {
                 return self.handle_swapdb_command(&argv);
             }
             _ => {}
-        }
-
-        // If inside a MULTI transaction, queue the command instead of executing it
-        if self.session.transaction_state.in_transaction {
-            let cmd_bytes = match argv.first() {
-                Some(cmd) => cmd,
-                None => {
-                    self.session.transaction_state.exec_abort = true;
-                    return CommandError::InvalidCommandFrame.to_resp();
-                }
-            };
-            if !fr_command::is_known_command(cmd_bytes) {
-                self.session.transaction_state.exec_abort = true;
-                let cmd_str = std::str::from_utf8(cmd_bytes).unwrap_or("");
-                return RespFrame::Error(format!(
-                    "ERR unknown command '{}'",
-                    fr_command::trim_and_cap_string(cmd_str, 128)
-                ));
-            }
-            self.session.transaction_state.command_queue.push(argv);
-            return RespFrame::SimpleString("QUEUED".to_string());
         }
 
         if let Some(reply) = self.enforce_maxmemory_before_dispatch(
@@ -3754,8 +3786,8 @@ impl Runtime {
                 .aof_config_path
                 .as_ref()
                 .and_then(|path| path.parent())
-                .and_then(|path| path.file_name())
-                .map(|name| name.to_string_lossy().into_owned())
+                .map(|path| path.to_string_lossy().into_owned())
+                .filter(|path| !path.is_empty())
                 .unwrap_or_else(|| "appendonlydir".to_string());
             entries.push(RespFrame::BulkString(Some(dirname.into_bytes())));
         }
@@ -3868,6 +3900,7 @@ impl Runtime {
         let mut next_slowlog_max_len: Option<usize> = None;
         let mut next_hz: Option<u64> = None;
         let mut next_appendonly: Option<bool> = None;
+        let mut next_keyspace_events: Option<u32> = None;
         let mut next_rdb_path = self
             .server
             .rdb_path
@@ -4030,10 +4063,13 @@ impl Runtime {
                 let value_str = std::str::from_utf8(&pair[1]).unwrap_or("");
                 match fr_store::keyspace_events_parse(value_str) {
                     Some(flags) => {
-                        self.server.store.notify_keyspace_events = flags;
-                        self.server
-                            .config_overrides
-                            .insert("notify-keyspace-events".to_string(), value_str.to_string());
+                        // Defer application to after all params are validated
+                        static_override_updates.push((
+                            "notify-keyspace-events".to_string(),
+                            value_str.to_string(),
+                        ));
+                        // Store flags for deferred application
+                        next_keyspace_events = Some(flags);
                     }
                     None => {
                         return RespFrame::Error(
@@ -4154,6 +4190,9 @@ impl Runtime {
         }
         if let Some(hz) = next_hz {
             self.server.hz = hz;
+        }
+        if let Some(flags) = next_keyspace_events {
+            self.server.store.notify_keyspace_events = flags;
         }
         if rdb_path_changed {
             self.server.rdb_path = Some(next_rdb_path);
@@ -9437,6 +9476,25 @@ mod tests {
                 RespFrame::BulkString(Some(b"real-appendonly.aof".to_vec())),
                 RespFrame::BulkString(Some(b"appenddirname".to_vec())),
                 RespFrame::BulkString(Some(b"fr-test".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn config_get_appenddirname_uses_dot_for_filename_only_aof_path() {
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(std::path::PathBuf::from("custom.aof"));
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"GET", b"appendfilename", b"appenddirname"]),
+                0,
+            ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"appendfilename".to_vec())),
+                RespFrame::BulkString(Some(b"custom.aof".to_vec())),
+                RespFrame::BulkString(Some(b"appenddirname".to_vec())),
+                RespFrame::BulkString(Some(b".".to_vec())),
             ]))
         );
     }
