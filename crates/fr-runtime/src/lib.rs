@@ -4054,6 +4054,27 @@ impl Runtime {
                     Ok(value) => value,
                     Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
                 };
+                let dir_path = std::path::Path::new(value_str);
+                match std::fs::metadata(dir_path) {
+                    Ok(metadata) if metadata.is_dir() => {}
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR CONFIG SET failed (possibly related to argument 'dir') - Not a directory"
+                                .to_string(),
+                        );
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                        return RespFrame::Error(
+                            "ERR CONFIG SET failed (possibly related to argument 'dir') - No such file or directory"
+                                .to_string(),
+                        );
+                    }
+                    Err(err) => {
+                        return RespFrame::Error(format!(
+                            "ERR CONFIG SET failed (possibly related to argument 'dir') - {err}"
+                        ));
+                    }
+                }
                 let filename = next_rdb_path
                     .file_name()
                     .map(|name| name.to_os_string())
@@ -9701,6 +9722,40 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&expected_path);
+    }
+
+    #[test]
+    fn config_set_dir_rejects_nonexistent_paths_without_mutating_live_target() {
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(std::path::PathBuf::from("original.rdb"));
+
+        let missing_dir =
+            std::env::temp_dir().join(format!("fr_runtime_missing_dir_{}", std::process::id()));
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"dir",
+                    missing_dir.to_string_lossy().as_bytes(),
+                ]),
+                0,
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'dir') - No such file or directory"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"dir", b"dbfilename"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"dir".to_vec())),
+                RespFrame::BulkString(Some(b".".to_vec())),
+                RespFrame::BulkString(Some(b"dbfilename".to_vec())),
+                RespFrame::BulkString(Some(b"original.rdb".to_vec())),
+            ]))
+        );
     }
 
     #[test]
