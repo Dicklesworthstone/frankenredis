@@ -3878,14 +3878,14 @@ impl Runtime {
                 .aof_config_path
                 .as_ref()
                 .and_then(|path| path.parent())
-                .and_then(|path| {
-                    if path.as_os_str().is_empty() {
-                        None
-                    } else {
-                        path.file_name()
-                    }
+                .map(|path| path.to_string_lossy().into_owned())
+                .filter(|path| !path.is_empty())
+                .or_else(|| {
+                    self.server
+                        .aof_config_path
+                        .as_ref()
+                        .map(|_| ".".to_string())
                 })
-                .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "appendonlydir".to_string());
             entries.push(RespFrame::BulkString(Some(dirname.into_bytes())));
         }

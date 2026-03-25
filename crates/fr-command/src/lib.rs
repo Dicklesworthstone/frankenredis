@@ -11489,7 +11489,11 @@ fn restore_cmd(
     }
     // When ABSTTL is set, ttl_ms is an absolute Unix timestamp; convert to relative
     let effective_ttl = if absttl && ttl_ms > 0 {
-        ttl_ms.saturating_sub(now_ms)
+        if ttl_ms <= now_ms {
+            1 // Already expired — set minimal TTL so key expires on next access
+        } else {
+            ttl_ms - now_ms
+        }
     } else {
         ttl_ms
     };
