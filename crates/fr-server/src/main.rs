@@ -32,8 +32,6 @@ const LISTENER: Token = Token(0);
 /// Maximum connected clients. Matches Redis default.
 const MAX_CLIENTS: usize = 10_000;
 
-/// Maximum write buffer size per client (1 MiB).
-const MAX_WRITE_BUFFER: usize = 1024 * 1024;
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
 
@@ -685,7 +683,7 @@ fn process_buffered_frames(
         }
 
         // Check write buffer limit before processing more frames.
-        if conn.write_buf.len() > MAX_WRITE_BUFFER {
+        if conn.write_buf.len() > runtime.server.output_buffer_limit {
             eprintln!("warn: client write buffer exceeded limit, disconnecting");
             conn.closing = true;
             closing_tokens.insert(token);

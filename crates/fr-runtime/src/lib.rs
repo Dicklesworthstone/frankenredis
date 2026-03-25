@@ -901,6 +901,8 @@ pub struct ServerState {
     pub repl_backlog_size: u64,
     /// Replication timeout in seconds (CONFIG SET repl-timeout). Default 60.
     pub repl_timeout_sec: u64,
+    /// Client output buffer hard limit (CONFIG SET client-output-buffer-limit). Default 256 MiB.
+    pub output_buffer_limit: usize,
     /// Client query buffer limit (CONFIG SET client-query-buffer-limit). Default 1 GiB.
     pub query_buffer_limit: usize,
     /// Maximum bulk string length in RESP protocol (CONFIG SET proto-max-bulk-len). Default 512 MiB.
@@ -986,6 +988,7 @@ impl Default for ServerState {
             max_clients: 10_000,
             repl_backlog_size: DEFAULT_REPL_BACKLOG_SIZE,
             repl_timeout_sec: 60,
+            output_buffer_limit: 256 * 1024 * 1024, // 256 MiB (reasonable default)
             query_buffer_limit: 1024 * 1024 * 1024, // 1 GiB (Redis default)
             proto_max_bulk_len: 512 * 1024 * 1024,  // 512 MiB (Redis default)
             shutdown_requested: false,
