@@ -7640,8 +7640,8 @@ impl Store {
         buf.extend_from_slice(&ttl_ms.to_le_bytes());
         // Append version byte
         buf.push(10); // RDB version
-        // Compute and append CRC16 over all preceding bytes
-        let crc = crc16(&buf);
+        // Compute and append CRC64 over all preceding bytes
+        let crc = fr_persist::crc64_redis(&buf);
         buf.extend_from_slice(&crc.to_le_bytes());
         Some(buf)
     }
@@ -7655,14 +7655,19 @@ impl Store {
         replace: bool,
         now_ms: u64,
     ) -> Result<(), StoreError> {
-        if payload.len() < 13 {
-            // Minimum: type(1) + length(1) + ttl(8) + version(1) + crc(2)
+        if payload.len() < 18 {
+            // Minimum: type(1) + length(1) + ttl(8) + version(1) + crc64(8) = 19,
+            // but allow some slack for empty payloads
             return Err(StoreError::InvalidDumpPayload);
         }
-        // Validate CRC16: last 2 bytes are CRC over everything before them
-        let crc_offset = payload.len() - 2;
-        let stored_crc = u16::from_le_bytes([payload[crc_offset], payload[crc_offset + 1]]);
-        let computed_crc = crc16(&payload[..crc_offset]);
+        // Validate CRC64: last 8 bytes are CRC over everything before them
+        let crc_offset = payload.len() - 8;
+        let stored_crc = u64::from_le_bytes(
+            payload[crc_offset..crc_offset + 8]
+                .try_into()
+                .map_err(|_| StoreError::InvalidDumpPayload)?,
+        );
+        let computed_crc = fr_persist::crc64_redis(&payload[..crc_offset]);
         if stored_crc != computed_crc {
             return Err(StoreError::InvalidDumpPayload);
         }
@@ -7673,12 +7678,14 @@ impl Store {
         }
         let type_byte = payload[0];
         let mut cursor = 1;
+        // Data boundary: exclude trailer (8-byte TTL + 1-byte version + 8-byte CRC64)
+        let data_end = payload.len().saturating_sub(17);
         let value = match type_byte {
             0 => {
                 // String
                 let (len, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
-                if cursor + len > payload.len().saturating_sub(11) {
+                if cursor + len > data_end {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 let v = payload[cursor..cursor + len].to_vec();
@@ -7692,7 +7699,7 @@ impl Store {
                 for _ in 0..count {
                     let (len, consumed) = decode_length(payload, cursor)?;
                     cursor += consumed;
-                    if cursor + len > payload.len() {
+                    if cursor + len > data_end {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                     list.push_back(payload[cursor..cursor + len].to_vec());
@@ -7708,7 +7715,7 @@ impl Store {
                 for _ in 0..count {
                     let (len, consumed) = decode_length(payload, cursor)?;
                     cursor += consumed;
-                    if cursor + len > payload.len() {
+                    if cursor + len > data_end {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                     set.insert(payload[cursor..cursor + len].to_vec());
@@ -7724,14 +7731,14 @@ impl Store {
                 for _ in 0..count {
                     let (flen, fc) = decode_length(payload, cursor)?;
                     cursor += fc;
-                    if cursor + flen > payload.len() {
+                    if cursor + flen > data_end {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                     let field = payload[cursor..cursor + flen].to_vec();
                     cursor += flen;
                     let (vlen, vc) = decode_length(payload, cursor)?;
                     cursor += vc;
-                    if cursor + vlen > payload.len() {
+                    if cursor + vlen > data_end {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                     let value = payload[cursor..cursor + vlen].to_vec();
@@ -7748,7 +7755,7 @@ impl Store {
                 for _ in 0..count {
                     let (mlen, mc) = decode_length(payload, cursor)?;
                     cursor += mc;
-                    if cursor + mlen + 8 > payload.len() {
+                    if cursor + mlen + 8 > data_end {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                     let member = payload[cursor..cursor + mlen].to_vec();
@@ -7769,7 +7776,7 @@ impl Store {
                 cursor += consumed;
                 let mut entries = BTreeMap::new();
                 for _ in 0..entry_count {
-                    if cursor + 16 > payload.len() {
+                    if cursor + 16 > data_end {
                         return Err(StoreError::InvalidDumpPayload);
                     }
                     let ms = u64::from_le_bytes(
@@ -7790,14 +7797,14 @@ impl Store {
                     for _ in 0..field_count {
                         let (fname_len, fnc) = decode_length(payload, cursor)?;
                         cursor += fnc;
-                        if cursor + fname_len > payload.len() {
+                        if cursor + fname_len > data_end {
                             return Err(StoreError::InvalidDumpPayload);
                         }
                         let fname = payload[cursor..cursor + fname_len].to_vec();
                         cursor += fname_len;
                         let (fval_len, fvc) = decode_length(payload, cursor)?;
                         cursor += fvc;
-                        if cursor + fval_len > payload.len() {
+                        if cursor + fval_len > data_end {
                             return Err(StoreError::InvalidDumpPayload);
                         }
                         let fval = payload[cursor..cursor + fval_len].to_vec();

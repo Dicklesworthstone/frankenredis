@@ -210,7 +210,7 @@ fn rdb_encode_string(buf: &mut Vec<u8>, data: &[u8]) {
     buf.extend_from_slice(data);
 }
 
-fn crc64_redis(data: &[u8]) -> u64 {
+pub fn crc64_redis(data: &[u8]) -> u64 {
     let mut crc = 0_u64;
     for &byte in data {
         crc ^= u64::from(byte);
