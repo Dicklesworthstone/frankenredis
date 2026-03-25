@@ -4621,32 +4621,42 @@ fn xpending(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
         ])));
     }
 
-    if argv.len() != 6 && argv.len() != 7 {
-        return Err(CommandError::WrongArity("XPENDING"));
-    }
+    // Extended form: XPENDING key group [[IDLE min-idle-time] start end count [consumer]]
+    // Without IDLE: 6 or 7 args. With IDLE: 8 or 9 args.
+    let mut min_idle_ms: u64 = 0;
+    let (start_idx, consumer_idx) =
+        if argv.len() >= 4 && eq_ascii_command(&argv[3], b"IDLE") {
+            // IDLE form: argv[3]=IDLE, argv[4]=min-idle-time, argv[5]=start, argv[6]=end, argv[7]=count, [argv[8]=consumer]
+            if argv.len() != 8 && argv.len() != 9 {
+                return Err(CommandError::WrongArity("XPENDING"));
+            }
+            min_idle_ms = parse_i64_arg(&argv[4]).map(|v| v.max(0) as u64)?;
+            (5, if argv.len() == 9 { Some(8) } else { None })
+        } else {
+            if argv.len() != 6 && argv.len() != 7 {
+                return Err(CommandError::WrongArity("XPENDING"));
+            }
+            (3, if argv.len() == 7 { Some(6) } else { None })
+        };
 
-    let start = match parse_stream_range_bound(&argv[3], true) {
+    let start = match parse_stream_range_bound(&argv[start_idx], true) {
         Ok(id) => id,
         Err(reply) => return Ok(reply),
     };
-    let end = match parse_stream_range_bound(&argv[4], false) {
+    let end = match parse_stream_range_bound(&argv[start_idx + 1], false) {
         Ok(id) => id,
         Err(reply) => return Ok(reply),
     };
 
-    let count_raw = parse_i64_arg(&argv[5])?;
+    let count_raw = parse_i64_arg(&argv[start_idx + 2])?;
     if count_raw < 0 {
         return Err(CommandError::InvalidInteger);
     }
     let count = usize::try_from(count_raw).unwrap_or(usize::MAX);
-    let consumer = if argv.len() == 7 {
-        Some(argv[6].as_slice())
-    } else {
-        None
-    };
+    let consumer = consumer_idx.map(|idx| argv[idx].as_slice());
 
     let Some(entries) =
-        store.xpending_entries(&argv[1], &argv[2], (start, end), count, consumer, now_ms)?
+        store.xpending_entries(&argv[1], &argv[2], (start, end), count, consumer, now_ms, min_idle_ms)?
     else {
         return Ok(xpending_nogroup_error(&argv[1], &argv[2]));
     };

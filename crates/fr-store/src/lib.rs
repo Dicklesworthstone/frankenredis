@@ -5350,6 +5350,7 @@ impl Store {
         count: usize,
         consumer: Option<&[u8]>,
         now_ms: u64,
+        min_idle_ms: u64,
     ) -> Result<Option<Vec<StreamPendingRecord>>, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get(key) {
@@ -5372,6 +5373,12 @@ impl Store {
                             && pending_entry.consumer.as_slice() != filter_consumer
                         {
                             continue;
+                        }
+                        if min_idle_ms > 0 {
+                            let idle = now_ms.saturating_sub(pending_entry.last_delivered_ms);
+                            if idle < min_idle_ms {
+                                continue;
+                            }
                         }
                         out.push((
                             *id,
@@ -10434,7 +10441,7 @@ mod tests {
         );
 
         let all_entries = store
-            .xpending_entries(b"s", b"g1", ((0, 0), (u64::MAX, u64::MAX)), 10, None, 30)
+            .xpending_entries(b"s", b"g1", ((0, 0), (u64::MAX, u64::MAX)), 10, None, 30, 0)
             .unwrap()
             .expect("pending entries");
         assert_eq!(
@@ -10454,6 +10461,7 @@ mod tests {
                 10,
                 Some(b"c2"),
                 30,
+                0,
             )
             .unwrap()
             .expect("filtered entries");
