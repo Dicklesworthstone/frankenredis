@@ -1215,6 +1215,8 @@ pub struct ClientSession {
     client_no_evict: bool,
     /// Flags: client no-touch mode.
     client_no_touch: bool,
+    /// Client peer address (set on connection accept).
+    pub peer_addr: Option<std::net::SocketAddr>,
 }
 
 impl Default for ClientSession {
@@ -1231,6 +1233,7 @@ impl Default for ClientSession {
             client_lib_ver: None,
             client_no_evict: false,
             client_no_touch: false,
+            peer_addr: None,
         }
     }
 }
@@ -4570,9 +4573,15 @@ impl Runtime {
                 .map_or(0, HashSet::len);
             let lib_name = self.session.client_lib_name.as_deref().unwrap_or("");
             let lib_ver = self.session.client_lib_ver.as_deref().unwrap_or("");
+            let peer = self
+                .session
+                .peer_addr
+                .map(|a| a.to_string())
+                .unwrap_or_else(|| "127.0.0.1:0".to_string());
             let info_line = format!(
-                "id={} addr=127.0.0.1:0 laddr=127.0.0.1:{} fd=0 name={} db={} sub={} psub={} ssub={} multi={} watch={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user={} lib-name={} lib-ver={} resp={} flags={}\r\n",
+                "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} db={} sub={} psub={} ssub={} multi={} watch={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user={} lib-name={} lib-ver={} resp={} flags={}\r\n",
                 client_id,
+                peer,
                 self.server.store.server_port,
                 name_str,
                 self.session.selected_db,

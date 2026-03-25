@@ -539,7 +539,7 @@ fn accept_connections(
         }
 
         match listener.accept() {
-            Ok((mut stream, _addr)) => {
+            Ok((mut stream, peer_addr)) => {
                 let token = Token(*next_token);
                 *next_token = next_token.wrapping_add(1);
                 // Avoid colliding with LISTENER token (0).
@@ -560,7 +560,8 @@ fn accept_connections(
                     continue;
                 }
 
-                let session = runtime.new_session();
+                let mut session = runtime.new_session();
+                session.peer_addr = Some(peer_addr);
                 let client_id = session.client_id;
                 clients.insert(token, ClientConnection::new(stream, session));
                 client_id_to_token.insert(client_id, token);
