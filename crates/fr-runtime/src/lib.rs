@@ -776,11 +776,11 @@ impl ReplicationRuntimeState {
         self.replicas.entry(client_id).or_default()
     }
 
-    fn update_backlog_window(&mut self, end_offset: ReplOffset) {
+    fn update_backlog_window(&mut self, end_offset: ReplOffset, backlog_size: u64) {
         let start = if end_offset.0 == 0 {
             ReplOffset(0)
-        } else if end_offset.0 >= DEFAULT_REPL_BACKLOG_SIZE {
-            ReplOffset(end_offset.0 - DEFAULT_REPL_BACKLOG_SIZE + 1)
+        } else if end_offset.0 >= backlog_size {
+            ReplOffset(end_offset.0 - backlog_size + 1)
         } else {
             ReplOffset(1)
         };
@@ -994,7 +994,7 @@ impl Default for ServerState {
             repl_timeout_sec: 60,
             output_buffer_limit: 256 * 1024 * 1024, // 256 MiB (reasonable default)
             query_buffer_limit: 1024 * 1024 * 1024, // 1 GiB (Redis default)
-            proto_max_bulk_len: 512_000_000, // Redis default (512 MB, not 512 MiB)
+            proto_max_bulk_len: 512_000_000,        // Redis default (512 MB, not 512 MiB)
             shutdown_requested: false,
             shutdown_nosave: false,
             command_time_budget_ms: 5000,
@@ -1191,8 +1191,10 @@ impl ServerState {
             .0
             .saturating_add(encoded_len);
         self.replication_ack_state.local_fsync_offset = self.replication_ack_state.primary_offset;
-        self.replication_runtime_state
-            .update_backlog_window(self.replication_ack_state.primary_offset);
+        self.replication_runtime_state.update_backlog_window(
+            self.replication_ack_state.primary_offset,
+            self.repl_backlog_size,
+        );
     }
 }
 
@@ -5981,7 +5983,8 @@ impl Runtime {
         info.push_str("second_repl_offset:-1\r\n");
         info.push_str(&format!("repl_backlog_active:{backlog_active}\r\n"));
         info.push_str(&format!(
-            "repl_backlog_size:{DEFAULT_REPL_BACKLOG_SIZE}\r\n"
+            "repl_backlog_size:{}\r\n",
+            self.server.repl_backlog_size
         ));
         info.push_str(&format!(
             "repl_backlog_first_byte_offset:{}\r\n",
@@ -8865,6 +8868,35 @@ mod tests {
         assert!(info.contains("# Replication\r\n"), "{info}");
         assert!(info.contains("# Server\r\n"), "{info}");
         assert!(info.contains("# Keyspace\r\n"), "{info}");
+    }
+
+    #[test]
+    fn config_set_repl_backlog_size_updates_live_replication_info_and_window() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"repl-backlog-size", b"1"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"key", b"value"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 2);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            panic!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("repl_backlog_size:1\r\n"), "{info}");
+
+        let primary_offset = rt.server.replication_ack_state.primary_offset.0;
+        assert!(
+            info.contains(&format!(
+                "repl_backlog_first_byte_offset:{primary_offset}\r\n"
+            )),
+            "{info}"
+        );
     }
 
     #[test]
