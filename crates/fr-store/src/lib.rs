@@ -711,6 +711,8 @@ pub struct Store {
     pub stat_connected_clients: u64,
     /// Server hz (event loop frequency), synced from runtime.
     pub server_hz: u64,
+    /// Replication backlog size, synced from runtime.
+    pub server_repl_backlog_size: u64,
     /// Maximum number of clients, synced from runtime.
     pub server_maxclients: u64,
 }
@@ -780,6 +782,7 @@ impl Default for Store {
             stat_total_connections_received: 0,
             stat_connected_clients: 0,
             server_hz: 10,
+            server_repl_backlog_size: 1_048_576,
             server_maxclients: 10000,
         }
     }

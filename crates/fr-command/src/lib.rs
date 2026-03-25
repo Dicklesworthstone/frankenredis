@@ -8280,7 +8280,10 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("master_repl_offset:0\r\n");
         info.push_str("second_repl_offset:-1\r\n");
         info.push_str("repl_backlog_active:0\r\n");
-        info.push_str("repl_backlog_size:1048576\r\n");
+        info.push_str(&format!(
+            "repl_backlog_size:{}\r\n",
+            store.server_repl_backlog_size
+        ));
         info.push_str("repl_backlog_first_byte_offset:0\r\n");
         info.push_str("repl_backlog_histlen:0\r\n");
         info.push_str("\r\n");

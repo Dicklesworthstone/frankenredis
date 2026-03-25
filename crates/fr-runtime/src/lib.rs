@@ -897,6 +897,10 @@ pub struct ServerState {
     hz: u64,
     /// Maximum number of connected clients (CONFIG SET maxclients).
     pub max_clients: usize,
+    /// Replication backlog size in bytes (CONFIG SET repl-backlog-size). Default 1 MiB.
+    pub repl_backlog_size: u64,
+    /// Replication timeout in seconds (CONFIG SET repl-timeout). Default 60.
+    pub repl_timeout_sec: u64,
     /// Client query buffer limit (CONFIG SET client-query-buffer-limit). Default 1 GiB.
     pub query_buffer_limit: usize,
     /// Maximum bulk string length in RESP protocol (CONFIG SET proto-max-bulk-len). Default 512 MiB.
@@ -980,6 +984,8 @@ impl Default for ServerState {
             last_active_expire_cycle: None,
             hz: 10,
             max_clients: 10_000,
+            repl_backlog_size: DEFAULT_REPL_BACKLOG_SIZE,
+            repl_timeout_sec: 60,
             query_buffer_limit: 1024 * 1024 * 1024, // 1 GiB (Redis default)
             proto_max_bulk_len: 512 * 1024 * 1024,  // 512 MiB (Redis default)
             shutdown_requested: false,
@@ -3716,6 +3722,20 @@ impl Runtime {
                 self.server.max_clients.to_string().into_bytes(),
             )));
         }
+        if Self::config_pattern_matches(pattern, "repl-backlog-size") {
+            entries.push(RespFrame::BulkString(Some(
+                b"repl-backlog-size".to_vec(),
+            )));
+            entries.push(RespFrame::BulkString(Some(
+                self.server.repl_backlog_size.to_string().into_bytes(),
+            )));
+        }
+        if Self::config_pattern_matches(pattern, "repl-timeout") {
+            entries.push(RespFrame::BulkString(Some(b"repl-timeout".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.server.repl_timeout_sec.to_string().into_bytes(),
+            )));
+        }
         if Self::config_pattern_matches(pattern, "maxmemory-samples") {
             entries.push(RespFrame::BulkString(Some(
                 b"maxmemory-samples".to_vec(),
@@ -3939,6 +3959,8 @@ impl Runtime {
                 || name == "busy-reply-threshold"
                 || name == "lua-time-limit"
                 || name == "maxmemory-samples"
+                || name == "repl-backlog-size"
+                || name == "repl-timeout"
             {
                 continue;
             }
@@ -4086,6 +4108,37 @@ impl Runtime {
                     Err(err) => return err.to_resp(),
                 };
                 next_maxclients = Some(parsed);
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("repl-backlog-size") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as u64,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'repl-backlog-size'".to_string(),
+                        );
+                    }
+                    Err(err) => return err.to_resp(),
+                };
+                self.server.repl_backlog_size = parsed;
+                self.server.store.server_repl_backlog_size = parsed;
+                static_override_updates
+                    .push(("repl-backlog-size".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("repl-timeout") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 1 => value as u64,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'repl-timeout'".to_string(),
+                        );
+                    }
+                    Err(err) => return err.to_resp(),
+                };
+                self.server.repl_timeout_sec = parsed;
+                static_override_updates
+                    .push(("repl-timeout".to_string(), parsed.to_string()));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("client-query-buffer-limit") {
