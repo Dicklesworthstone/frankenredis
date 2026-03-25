@@ -64,6 +64,8 @@ pub struct LuaFunc {
     pub params: Vec<String>,
     pub body: Vec<Stmt>,
     pub is_variadic: bool,
+    /// Captured lexical environment (upvalues) from function definition site.
+    pub captured_env: Option<Vec<HashMap<String, LuaValue>>>,
 }
 
 impl LuaTable {
@@ -1468,6 +1470,23 @@ impl Env {
         }
         false
     }
+
+    /// Snapshot all current scope locals for upvalue capture.
+    fn snapshot(&self) -> Vec<HashMap<String, LuaValue>> {
+        self.scopes.iter().map(|s| s.locals.clone()).collect()
+    }
+
+    /// Create an Env pre-loaded with captured upvalue scopes.
+    fn from_captured(captured: &[HashMap<String, LuaValue>]) -> Self {
+        Self {
+            scopes: captured
+                .iter()
+                .map(|locals| Scope {
+                    locals: locals.clone(),
+                })
+                .collect(),
+        }
+    }
 }
 
 impl<'a> LuaState<'a> {
@@ -1562,7 +1581,7 @@ impl<'a> LuaState<'a> {
         }
         globals.insert("table".to_string(), LuaValue::Table(table_lib));
 
-        // cjson stub (commonly used in Redis scripts)
+        // cjson library (commonly used in Redis scripts)
         let mut cjson_table = LuaTable::new();
         for name in &["encode", "decode"] {
             cjson_table.set(
@@ -1868,6 +1887,7 @@ impl<'a> LuaState<'a> {
                     params: params.clone(),
                     body: body.clone(),
                     is_variadic: *is_variadic,
+                    captured_env: Some(env.snapshot()),
                 });
                 if names.len() == 1 {
                     self.globals.insert(names[0].clone(), func);
@@ -1882,6 +1902,7 @@ impl<'a> LuaState<'a> {
                     params: params.clone(),
                     body: body.clone(),
                     is_variadic: *is_variadic,
+                    captured_env: Some(env.snapshot()),
                 });
                 env.set_local(name, func);
                 Ok(ControlFlow::None)
@@ -2144,6 +2165,7 @@ impl<'a> LuaState<'a> {
                 params: params.clone(),
                 body: body.clone(),
                 is_variadic: *is_variadic,
+                captured_env: Some(env.snapshot()),
             })),
         }
     }
@@ -2271,7 +2293,13 @@ impl<'a> LuaState<'a> {
         let result = match func {
             LuaValue::RustFunction(name) => self.call_builtin(name, args, env),
             LuaValue::Function(lua_func) => {
-                let mut new_env = Env::new();
+                // Start with captured upvalues (if any) for lexical scoping
+                let mut new_env = match &lua_func.captured_env {
+                    Some(captured) => Env::from_captured(captured),
+                    None => Env::new(),
+                };
+                // Push a new scope for function parameters/locals
+                new_env.push_scope();
                 for (i, param) in lua_func.params.iter().enumerate() {
                     let val = args.get(i).cloned().unwrap_or(LuaValue::Nil);
                     new_env.set_local(param, val);
