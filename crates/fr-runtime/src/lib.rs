@@ -994,7 +994,7 @@ impl Default for ServerState {
             repl_timeout_sec: 60,
             output_buffer_limit: 256 * 1024 * 1024, // 256 MiB (reasonable default)
             query_buffer_limit: 1024 * 1024 * 1024, // 1 GiB (Redis default)
-            proto_max_bulk_len: 512 * 1024 * 1024,  // 512 MiB (Redis default)
+            proto_max_bulk_len: 512_000_000, // Redis default (512 MB, not 512 MiB)
             shutdown_requested: false,
             shutdown_nosave: false,
             command_time_budget_ms: 5000,
@@ -2100,7 +2100,11 @@ impl Runtime {
     #[must_use]
     pub fn parser_config(&self) -> fr_protocol::ParserConfig {
         fr_protocol::ParserConfig {
-            max_bulk_len: self.policy.gate.max_bulk_len,
+            max_bulk_len: self
+                .policy
+                .gate
+                .max_bulk_len
+                .min(self.server.proto_max_bulk_len),
             max_array_len: self.policy.gate.max_array_len,
             max_recursion_depth: 128,
         }
@@ -2871,11 +2875,7 @@ impl Runtime {
         let input_digest = digest_bytes(input);
         let state_before = self.server.store.state_digest();
 
-        let parser_config = fr_protocol::ParserConfig {
-            max_bulk_len: self.policy.gate.max_bulk_len,
-            max_array_len: self.policy.gate.max_array_len,
-            max_recursion_depth: 128, // Default recursion limit
-        };
+        let parser_config = self.parser_config();
 
         match fr_protocol::parse_frame_with_config(input, &parser_config) {
             Ok(parsed) => self
@@ -3769,6 +3769,28 @@ impl Runtime {
                 self.server.command_time_budget_ms.to_string().into_bytes(),
             )));
         }
+        if Self::config_pattern_matches(pattern, "client-query-buffer-limit") {
+            entries.push(RespFrame::BulkString(Some(
+                b"client-query-buffer-limit".to_vec(),
+            )));
+            entries.push(RespFrame::BulkString(Some(
+                self.server.query_buffer_limit.to_string().into_bytes(),
+            )));
+        }
+        if Self::config_pattern_matches(pattern, "proto-max-bulk-len") {
+            entries.push(RespFrame::BulkString(Some(b"proto-max-bulk-len".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.server.proto_max_bulk_len.to_string().into_bytes(),
+            )));
+        }
+        if Self::config_pattern_matches(pattern, "client-output-buffer-limit") {
+            entries.push(RespFrame::BulkString(Some(
+                b"client-output-buffer-limit".to_vec(),
+            )));
+            entries.push(RespFrame::BulkString(Some(
+                self.server.output_buffer_limit.to_string().into_bytes(),
+            )));
+        }
         // Dynamic hz — override the static default
         if Self::config_pattern_matches(pattern, "hz") {
             entries.push(RespFrame::BulkString(Some(b"hz".to_vec())));
@@ -3975,6 +3997,9 @@ impl Runtime {
                 || name == "maxmemory-samples"
                 || name == "repl-backlog-size"
                 || name == "repl-timeout"
+                || name == "client-query-buffer-limit"
+                || name == "proto-max-bulk-len"
+                || name == "client-output-buffer-limit"
             {
                 continue;
             }
@@ -4012,6 +4037,7 @@ impl Runtime {
         let mut next_repl_timeout: Option<u64> = None;
         let mut next_query_buffer_limit: Option<usize> = None;
         let mut next_proto_max_bulk_len: Option<usize> = None;
+        let mut next_output_buffer_limit: Option<usize> = None;
         let mut next_maxmemory_samples: Option<usize> = None;
         let mut next_command_time_budget: Option<u64> = None;
         let mut next_appendonly: Option<bool> = None;
@@ -4187,6 +4213,22 @@ impl Runtime {
                 next_proto_max_bulk_len = Some(parsed);
                 static_override_updates
                     .push(("proto-max-bulk-len".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("client-output-buffer-limit") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as usize,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'client-output-buffer-limit'"
+                                .to_string(),
+                        );
+                    }
+                    Err(err) => return err.to_resp(),
+                };
+                next_output_buffer_limit = Some(parsed);
+                static_override_updates
+                    .push(("client-output-buffer-limit".to_string(), parsed.to_string()));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("maxmemory-samples") {
@@ -4445,6 +4487,9 @@ impl Runtime {
         }
         if let Some(proto_max_bulk_len) = next_proto_max_bulk_len {
             self.server.proto_max_bulk_len = proto_max_bulk_len;
+        }
+        if let Some(output_buffer_limit) = next_output_buffer_limit {
+            self.server.output_buffer_limit = output_buffer_limit;
         }
         if let Some(maxmemory_samples) = next_maxmemory_samples {
             self.server.maxmemory_eviction_sample_limit = maxmemory_samples;
@@ -5671,12 +5716,10 @@ impl Runtime {
             "ERR DB index is out of range",
             self.server.store.database_count,
         )
-        .map_err(|reply| {
-                match reply {
-                    RespFrame::Error(message) => CommandError::Custom(message),
-                    _ => CommandError::InvalidInteger,
-                }
-            })?;
+        .map_err(|reply| match reply {
+            RespFrame::Error(message) => CommandError::Custom(message),
+            _ => CommandError::InvalidInteger,
+        })?;
         if target_db == self.session.selected_db {
             return Ok(RespFrame::Integer(0));
         }
@@ -5723,7 +5766,7 @@ impl Runtime {
                     "ERR DB index is out of range",
                     self.server.store.database_count,
                 )
-                    .map_err(|reply| match reply {
+                .map_err(|reply| match reply {
                     RespFrame::Error(message) => CommandError::Custom(message),
                     _ => CommandError::InvalidInteger,
                 })?;
@@ -10161,6 +10204,51 @@ mod tests {
                 RespFrame::BulkString(Some(b"-2".to_vec())),
             ]))
         );
+    }
+
+    #[test]
+    fn config_set_proto_max_bulk_len_updates_live_parser_limit() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"proto-max-bulk-len", b"1"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let encoded = rt.execute_bytes(b"$2\r\nhi\r\n", 1);
+        let parsed = parse_frame(&encoded).expect("parse runtime error reply");
+        assert_eq!(
+            parsed.frame,
+            RespFrame::Error("ERR Protocol error: bulk length exceeds limit".to_string())
+        );
+    }
+
+    #[test]
+    fn config_set_client_output_buffer_limit_updates_live_runtime_state() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"client-output-buffer-limit", b"1024"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"GET", b"client-output-buffer-limit"]),
+                1
+            ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"client-output-buffer-limit".to_vec())),
+                RespFrame::BulkString(Some(b"1024".to_vec())),
+            ]))
+        );
+        assert_eq!(rt.server.output_buffer_limit, 1024);
     }
 
     // ── AOF persistence round-trip tests ────────────────────────────────
