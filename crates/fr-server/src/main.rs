@@ -498,6 +498,25 @@ fn main() -> ExitCode {
                 let _ = poll.registry().deregister(&mut conn.stream);
             }
         }
+
+        // Check for graceful shutdown request
+        if runtime.server.shutdown_requested {
+            if !runtime.server.shutdown_nosave {
+                // Attempt a final SAVE before exiting
+                let save_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let _ = runtime.execute_frame(
+                    fr_protocol::RespFrame::Array(Some(vec![fr_protocol::RespFrame::BulkString(
+                        Some(b"SAVE".to_vec()),
+                    )])),
+                    save_ts,
+                );
+            }
+            eprintln!("info: shutdown requested, exiting gracefully");
+            break;
+        }
     }
 }
 

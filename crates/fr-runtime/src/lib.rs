@@ -897,6 +897,10 @@ pub struct ServerState {
     hz: u64,
     /// Maximum number of connected clients (CONFIG SET maxclients).
     pub max_clients: usize,
+    /// Set to true when SHUTDOWN is requested. Server event loop checks this.
+    pub shutdown_requested: bool,
+    /// If true, skip the final SAVE on shutdown.
+    pub shutdown_nosave: bool,
     /// Command time budget in ms (CONFIG SET busy-reply-threshold / lua-time-limit).
     command_time_budget_ms: u64,
     /// Slow log: ring buffer of slow queries.
@@ -962,7 +966,7 @@ impl Default for ServerState {
             replication_ack_state: ReplicationAckState::default(),
             maxmemory_bytes: 0,
             maxmemory_not_counted_bytes: 0,
-            maxmemory_eviction_sample_limit: 16,
+            maxmemory_eviction_sample_limit: 5,
             maxmemory_eviction_max_cycles: 4,
             eviction_safety_gate: EvictionSafetyGateState::default(),
             last_eviction_loop: None,
@@ -972,6 +976,8 @@ impl Default for ServerState {
             last_active_expire_cycle: None,
             hz: 10,
             max_clients: 10_000,
+            shutdown_requested: false,
+            shutdown_nosave: false,
             command_time_budget_ms: 5000,
             slowlog: std::collections::VecDeque::new(),
             slowlog_next_id: 0,
@@ -3704,6 +3710,17 @@ impl Runtime {
                 self.server.max_clients.to_string().into_bytes(),
             )));
         }
+        if Self::config_pattern_matches(pattern, "maxmemory-samples") {
+            entries.push(RespFrame::BulkString(Some(
+                b"maxmemory-samples".to_vec(),
+            )));
+            entries.push(RespFrame::BulkString(Some(
+                self.server
+                    .maxmemory_eviction_sample_limit
+                    .to_string()
+                    .into_bytes(),
+            )));
+        }
         if Self::config_pattern_matches(pattern, "busy-reply-threshold") {
             entries.push(RespFrame::BulkString(Some(
                 b"busy-reply-threshold".to_vec(),
@@ -3915,6 +3932,7 @@ impl Runtime {
                 || name == "maxclients"
                 || name == "busy-reply-threshold"
                 || name == "lua-time-limit"
+                || name == "maxmemory-samples"
             {
                 continue;
             }
@@ -4062,6 +4080,21 @@ impl Runtime {
                     Err(err) => return err.to_resp(),
                 };
                 next_maxclients = Some(parsed);
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("maxmemory-samples") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 1 => value as usize,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'maxmemory-samples'".to_string(),
+                        );
+                    }
+                    Err(err) => return err.to_resp(),
+                };
+                self.server.maxmemory_eviction_sample_limit = parsed;
+                static_override_updates
+                    .push(("maxmemory-samples".to_string(), parsed.to_string()));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("busy-reply-threshold")
@@ -4961,9 +4994,16 @@ impl Runtime {
             return CommandError::SyntaxError.to_resp();
         }
         if abort {
+            if self.server.shutdown_requested {
+                self.server.shutdown_requested = false;
+                self.server.shutdown_nosave = false;
+                return RespFrame::SimpleString("OK".to_string());
+            }
             return RespFrame::Error("ERR No shutdown in progress.".to_string());
         }
-        // In standalone mode, acknowledge but don't actually shut down
+        // Signal the server event loop to initiate graceful shutdown
+        self.server.shutdown_requested = true;
+        self.server.shutdown_nosave = flags & 0b0001 != 0;
         RespFrame::SimpleString("OK".to_string())
     }
 
