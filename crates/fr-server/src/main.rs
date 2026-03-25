@@ -790,6 +790,13 @@ fn process_buffered_frames(
                     conn.write_buf.extend_from_slice(&frame.to_bytes());
                 }
 
+                if conn.write_buf.len() > runtime.server.output_buffer_limit {
+                    eprintln!("warn: client write buffer exceeded limit, disconnecting");
+                    conn.closing = true;
+                    closing_tokens.insert(token);
+                    break;
+                }
+
                 conn.read_buf.drain(..consumed);
             }
             Err(fr_protocol::RespParseError::Incomplete) => {
@@ -984,8 +991,7 @@ fn read_frame_from_stream(
 fn read_available_stream_bytes(
     stream: &mut StdTcpStream,
     read_buf: &mut Vec<u8>,
-) -> io::Result<(Vec<u8>, bool)> {
-    let mut out = std::mem::take(read_buf);
+) -> io::Result<bool> {
     let mut chunk = [0u8; 8192];
     let mut disconnected = false;
     loop {
@@ -994,7 +1000,7 @@ fn read_available_stream_bytes(
                 disconnected = true;
                 break;
             }
-            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Ok(n) => read_buf.extend_from_slice(&chunk[..n]),
             Err(ref err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 break;
             }
@@ -1002,7 +1008,7 @@ fn read_available_stream_bytes(
             Err(err) => return Err(err),
         }
     }
-    Ok((out, disconnected))
+    Ok(disconnected)
 }
 
 fn expect_simple_string(frame: RespFrame, expected: &str) -> io::Result<()> {
@@ -1085,7 +1091,8 @@ fn sync_replica_with_primary(
             }
         }
     } else {
-        read_available_stream_bytes(&mut stream, &mut read_buf)?.0
+        read_available_stream_bytes(&mut stream, &mut read_buf)?;
+        std::mem::take(&mut read_buf)
     };
 
     runtime
@@ -1168,9 +1175,8 @@ fn drain_replica_stream(
     connection: &mut ReplicaPrimaryConnection,
     now_ms: u64,
 ) -> io::Result<bool> {
-    let (payload, disconnected) =
+    let disconnected =
         read_available_stream_bytes(&mut connection.stream, &mut connection.read_buf)?;
-    connection.read_buf = payload;
 
     let mut frame_index = 0_u64;
     loop {
@@ -2793,5 +2799,43 @@ mod tests {
         assert_eq!(response, *b"+OK\r\n");
         assert!(conn.read_buf.is_empty());
         assert!(!runtime.is_client_paused(ts + 1));
+    }
+
+    #[test]
+    fn output_buffer_limit_is_enforced_after_appending_current_response() {
+        use crate::ClientConnection;
+        use fr_runtime::Runtime;
+        use mio::Token;
+        use std::collections::HashSet;
+        use std::net::{TcpListener, TcpStream};
+
+        let mut runtime = Runtime::default_strict();
+        runtime.server.output_buffer_limit = 0;
+        let session = runtime.new_session();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let (_server_stream, _server_addr) = listener.accept().unwrap();
+        let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session);
+        conn.read_buf.extend_from_slice(b"*1\r\n$4\r\nPING\r\n");
+
+        let mut blocked_tokens = HashSet::new();
+        let mut closing_tokens = HashSet::new();
+        let mut write_tokens = HashSet::new();
+        let mut paused_tokens = HashSet::new();
+        crate::process_buffered_frames(
+            Token(1),
+            &mut conn,
+            &mut runtime,
+            &mut blocked_tokens,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            1,
+        );
+
+        assert!(conn.closing);
+        assert!(closing_tokens.contains(&Token(1)));
     }
 }
