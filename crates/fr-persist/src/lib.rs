@@ -160,6 +160,7 @@ const RDB_TYPE_LIST: u8 = 1;
 const RDB_TYPE_SET: u8 = 2;
 const RDB_TYPE_ZSET_2: u8 = 5; // Binary LE double scores (our encoding)
 const RDB_TYPE_HASH: u8 = 4;
+const RDB_TYPE_STREAM: u8 = 15; // FrankenRedis stream encoding
 const RDB_CHECKSUM_LEN: usize = 8;
 const CRC64_REDIS_POLY: u64 = 0xAD93_D235_94C9_35A9;
 
@@ -172,6 +173,9 @@ pub struct RdbEntry {
     pub expire_ms: Option<u64>,
 }
 
+/// Stream entry: (ms, seq, fields).
+pub type StreamEntry = (u64, u64, Vec<(Vec<u8>, Vec<u8>)>);
+
 /// Value types supported in our RDB format.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RdbValue {
@@ -180,6 +184,8 @@ pub enum RdbValue {
     Set(Vec<Vec<u8>>),
     Hash(Vec<(Vec<u8>, Vec<u8>)>),
     SortedSet(Vec<(Vec<u8>, f64)>),
+    /// Stream: entries + optional last-generated-id watermark.
+    Stream(Vec<StreamEntry>, Option<(u64, u64)>),
 }
 
 /// Encode an RDB length using Redis's variable-length encoding.
@@ -319,6 +325,23 @@ pub fn encode_rdb(entries: &[RdbEntry], aux: &[(&str, &str)]) -> Vec<u8> {
                     rdb_encode_string(&mut buf, member);
                     // ZSET2 encoding: 8-byte LE double
                     buf.extend_from_slice(&score.to_le_bytes());
+                }
+            }
+            RdbValue::Stream(stream_entries, watermark) => {
+                buf.push(RDB_TYPE_STREAM);
+                rdb_encode_string(&mut buf, &entry.key);
+                let (wm_ms, wm_seq) = watermark.unwrap_or((0, 0));
+                buf.extend_from_slice(&wm_ms.to_le_bytes());
+                buf.extend_from_slice(&wm_seq.to_le_bytes());
+                rdb_encode_length(&mut buf, stream_entries.len());
+                for (ms, seq, fields) in stream_entries {
+                    buf.extend_from_slice(&ms.to_le_bytes());
+                    buf.extend_from_slice(&seq.to_le_bytes());
+                    rdb_encode_length(&mut buf, fields.len());
+                    for (fname, fval) in fields {
+                        rdb_encode_string(&mut buf, fname);
+                        rdb_encode_string(&mut buf, fval);
+                    }
                 }
             }
         }
@@ -531,7 +554,7 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
                 cursor += 1;
             }
             type_byte @ (RDB_TYPE_STRING | RDB_TYPE_LIST | RDB_TYPE_SET | RDB_TYPE_HASH
-            | RDB_TYPE_ZSET_2) => {
+            | RDB_TYPE_ZSET_2 | RDB_TYPE_STREAM) => {
                 let (key, consumed) =
                     rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                 cursor += consumed;
@@ -606,6 +629,65 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
                             members.push((m, score));
                         }
                         RdbValue::SortedSet(members)
+                    }
+                    RDB_TYPE_STREAM => {
+                        // Decode watermark (16 bytes)
+                        if cursor + 16 > data.len() {
+                            return Err(PersistError::InvalidFrame);
+                        }
+                        let wm_ms = u64::from_le_bytes(
+                            data[cursor..cursor + 8]
+                                .try_into()
+                                .map_err(|_| PersistError::InvalidFrame)?,
+                        );
+                        cursor += 8;
+                        let wm_seq = u64::from_le_bytes(
+                            data[cursor..cursor + 8]
+                                .try_into()
+                                .map_err(|_| PersistError::InvalidFrame)?,
+                        );
+                        cursor += 8;
+                        let watermark = if wm_ms == 0 && wm_seq == 0 {
+                            None
+                        } else {
+                            Some((wm_ms, wm_seq))
+                        };
+                        let (count, consumed) = rdb_decode_length(&data[cursor..])
+                            .ok_or(PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        let mut stream_entries = Vec::with_capacity(count);
+                        for _ in 0..count {
+                            if cursor + 16 > data.len() {
+                                return Err(PersistError::InvalidFrame);
+                            }
+                            let ms = u64::from_le_bytes(
+                                data[cursor..cursor + 8]
+                                    .try_into()
+                                    .map_err(|_| PersistError::InvalidFrame)?,
+                            );
+                            cursor += 8;
+                            let seq = u64::from_le_bytes(
+                                data[cursor..cursor + 8]
+                                    .try_into()
+                                    .map_err(|_| PersistError::InvalidFrame)?,
+                            );
+                            cursor += 8;
+                            let (field_count, fc) = rdb_decode_length(&data[cursor..])
+                                .ok_or(PersistError::InvalidFrame)?;
+                            cursor += fc;
+                            let mut fields = Vec::with_capacity(field_count);
+                            for _ in 0..field_count {
+                                let (fname, c1) = rdb_decode_string(&data[cursor..])
+                                    .ok_or(PersistError::InvalidFrame)?;
+                                cursor += c1;
+                                let (fval, c2) = rdb_decode_string(&data[cursor..])
+                                    .ok_or(PersistError::InvalidFrame)?;
+                                cursor += c2;
+                                fields.push((fname, fval));
+                            }
+                            stream_entries.push((ms, seq, fields));
+                        }
+                        RdbValue::Stream(stream_entries, watermark)
                     }
                     _ => return Err(PersistError::InvalidFrame),
                 };

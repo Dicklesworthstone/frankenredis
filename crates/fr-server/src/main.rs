@@ -193,6 +193,7 @@ fn main() -> ExitCode {
 
     let mut port = DEFAULT_PORT;
     let mut mode_str = "hardened";
+    let mut bind_addr = "127.0.0.1".to_string();
     let mut aof_path: Option<String> = None;
     let mut rdb_path: Option<String> = None;
     let mut i = 1;
@@ -211,6 +212,14 @@ fn main() -> ExitCode {
                         return ExitCode::from(1);
                     }
                 };
+            }
+            "--bind" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --bind requires an address");
+                    return ExitCode::from(1);
+                }
+                bind_addr = args[i].clone();
             }
             "--mode" => {
                 i += 1;
@@ -293,7 +302,13 @@ fn main() -> ExitCode {
         eprintln!("RDB: snapshot path configured at {path} (SAVE/BGSAVE will write here)");
     }
 
-    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
+    let addr: SocketAddr = match format!("{bind_addr}:{port}").parse() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: invalid bind address '{bind_addr}:{port}': {e}");
+            return ExitCode::from(1);
+        }
+    };
     let mut listener = match TcpListener::bind(addr) {
         Ok(l) => l,
         Err(e) => {

@@ -705,6 +705,10 @@ pub struct Store {
     pub stat_total_connections_received: u64,
     /// Number of currently connected clients.
     pub stat_connected_clients: u64,
+    /// Server hz (event loop frequency), synced from runtime.
+    pub server_hz: u64,
+    /// Maximum number of clients, synced from runtime.
+    pub server_maxclients: u64,
 }
 
 const DB_NAMESPACE_PREFIX: &[u8] = b"\0frdb\0";
@@ -771,6 +775,8 @@ impl Default for Store {
             stat_total_commands_processed: 0,
             stat_total_connections_received: 0,
             stat_connected_clients: 0,
+            server_hz: 10,
+            server_maxclients: 10000,
         }
     }
 }
@@ -7887,7 +7893,7 @@ impl Store {
                     // (e.g., entries were deleted, or XSETID was explicitly called).
                     if let Some(&watermark) = self.stream_last_ids.get(&physical_key) {
                         let max_entry_id = entries.keys().last().copied();
-                        if max_entry_id.map_or(true, |max| watermark > max) {
+                        if max_entry_id.is_none_or(|max| watermark > max) {
                             let (ms, seq) = watermark;
                             let id = format!("{ms}-{seq}");
                             commands.push(vec![

@@ -1526,7 +1526,7 @@ impl Runtime {
         let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
         encode_rdb(
             &entries,
-            &[("redis-ver", "7.0.0"), ("frankenredis", "true")],
+            &[("redis-ver", "7.2.0"), ("frankenredis", "true")],
         )
     }
 
@@ -3805,15 +3805,9 @@ impl Runtime {
                 .aof_config_path
                 .as_ref()
                 .and_then(|path| path.parent())
-                .and_then(|path| {
-                    if path.as_os_str().is_empty() {
-                        None
-                    } else {
-                        path.file_name()
-                    }
-                })
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "appendonlydir".to_string());
+                .map(|path| path.to_string_lossy().into_owned())
+                .filter(|path| !path.is_empty())
+                .unwrap_or_else(|| ".".to_string());
             entries.push(RespFrame::BulkString(Some(dirname.into_bytes())));
         }
         if Self::config_pattern_matches(pattern, "dbfilename") {
@@ -4234,6 +4228,7 @@ impl Runtime {
         }
         if let Some(hz) = next_hz {
             self.server.hz = hz;
+            self.server.store.server_hz = hz;
         }
         if let Some(flags) = next_keyspace_events {
             self.server.store.notify_keyspace_events = flags;
@@ -4381,8 +4376,9 @@ impl Runtime {
             let lib_name = self.session.client_lib_name.as_deref().unwrap_or("");
             let lib_ver = self.session.client_lib_ver.as_deref().unwrap_or("");
             let info_line = format!(
-                "id={} addr=127.0.0.1:0 laddr=127.0.0.1:6379 fd=0 name={} db={} sub={} psub={} ssub={} multi={} watch={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user={} lib-name={} lib-ver={} resp={} flags={}\r\n",
+                "id={} addr=127.0.0.1:0 laddr=127.0.0.1:{} fd=0 name={} db={} sub={} psub={} ssub={} multi={} watch={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user={} lib-name={} lib-ver={} resp={} flags={}\r\n",
                 client_id,
+                self.server.store.server_port,
                 name_str,
                 self.session.selected_db,
                 channel_subs,
@@ -4836,7 +4832,7 @@ impl Runtime {
 
         if let Some(path) = &self.server.rdb_path {
             let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
-            let aux = [("redis-ver", "7.0.0"), ("frankenredis", "true")];
+            let aux = [("redis-ver", "7.2.0"), ("frankenredis", "true")];
             if write_rdb_file(path, &entries, &aux).is_err() {
                 return Err(RespFrame::Error(
                     "ERR error saving RDB snapshot to disk".to_string(),
@@ -6464,7 +6460,21 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
                     zs.iter_asc().map(|(m, s)| (m.clone(), *s)).collect();
                 RdbValue::SortedSet(members)
             }
-            Value::Stream(_) => continue, // Streams not yet supported in RDB
+            Value::Stream(entries_map) => {
+                let stream_entries: Vec<fr_persist::StreamEntry> = entries_map
+                    .iter()
+                    .map(|((ms, seq), fields)| {
+                        let field_pairs: Vec<(Vec<u8>, Vec<u8>)> =
+                            fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                        (*ms, *seq, field_pairs)
+                    })
+                    .collect();
+                let watermark = store
+                    .stream_last_ids
+                    .get(&key)
+                    .copied();
+                RdbValue::Stream(stream_entries, watermark)
+            }
         };
         entries.push(RdbEntry {
             db,
@@ -6533,6 +6543,23 @@ fn apply_rdb_entries_to_store(
                 store
                     .zadd(&key, &zset_members, now_ms)
                     .map_err(|_| PersistError::InvalidFrame)?;
+                if let Some(expires_at_ms) = entry.expire_ms {
+                    store.expire_at_milliseconds(
+                        &key,
+                        i64::try_from(expires_at_ms).unwrap_or(i64::MAX),
+                        now_ms,
+                    );
+                }
+            }
+            RdbValue::Stream(stream_entries, watermark) => {
+                for (ms, seq, fields) in stream_entries {
+                    let field_pairs: Vec<(Vec<u8>, Vec<u8>)> =
+                        fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    let _ = store.xadd(&key, (*ms, *seq), &field_pairs, now_ms);
+                }
+                if let Some((wm_ms, wm_seq)) = watermark {
+                    let _ = store.xsetid(&key, (*wm_ms, *wm_seq), now_ms);
+                }
                 if let Some(expires_at_ms) = entry.expire_ms {
                     store.expire_at_milliseconds(
                         &key,
@@ -9519,7 +9546,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"appendfilename".to_vec())),
                 RespFrame::BulkString(Some(b"real-appendonly.aof".to_vec())),
                 RespFrame::BulkString(Some(b"appenddirname".to_vec())),
-                RespFrame::BulkString(Some(b"fr-test".to_vec())),
+                RespFrame::BulkString(Some(b"/tmp/fr-test".to_vec())),
             ]))
         );
     }
@@ -9538,7 +9565,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"appendfilename".to_vec())),
                 RespFrame::BulkString(Some(b"custom.aof".to_vec())),
                 RespFrame::BulkString(Some(b"appenddirname".to_vec())),
-                RespFrame::BulkString(Some(b"appendonlydir".to_vec())),
+                RespFrame::BulkString(Some(b".".to_vec())),
             ]))
         );
     }
@@ -9673,7 +9700,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"appendfilename".to_vec())),
                 RespFrame::BulkString(Some(b"custom.aof".to_vec())),
                 RespFrame::BulkString(Some(b"appenddirname".to_vec())),
-                RespFrame::BulkString(Some(b"fr-preserve".to_vec())),
+                RespFrame::BulkString(Some(b"/tmp/fr-preserve".to_vec())),
             ]))
         );
     }

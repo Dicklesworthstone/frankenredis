@@ -8095,10 +8095,13 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         let uptime_s = now_ms / 1000;
         info.push_str(&format!("uptime_in_seconds:{uptime_s}\r\n"));
         info.push_str(&format!("uptime_in_days:{}\r\n", uptime_s / 86400));
-        info.push_str("hz:10\r\n");
-        info.push_str("configured_hz:10\r\n");
+        info.push_str(&format!("hz:{}\r\n", store.server_hz));
+        info.push_str(&format!("configured_hz:{}\r\n", store.server_hz));
         info.push_str("lru_clock:0\r\n");
-        info.push_str("executable:/usr/local/bin/frankenredis\r\n");
+        let exe = std::env::current_exe()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "/usr/local/bin/frankenredis".to_string());
+        info.push_str(&format!("executable:{exe}\r\n"));
         info.push_str("config_file:\r\n");
         info.push_str("\r\n");
     }
@@ -8109,7 +8112,7 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("# Clients\r\n");
         info.push_str(&format!("connected_clients:{connected}\r\n"));
         info.push_str("cluster_connections:0\r\n");
-        info.push_str("maxclients:10000\r\n");
+        info.push_str(&format!("maxclients:{}\r\n", store.server_maxclients));
         info.push_str("client_recent_max_input_buffer:0\r\n");
         info.push_str("client_recent_max_output_buffer:0\r\n");
         info.push_str(&format!(

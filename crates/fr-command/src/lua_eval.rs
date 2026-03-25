@@ -2670,7 +2670,9 @@ impl<'a> LuaState<'a> {
                     }
                 }
                 // Return the mutated table (args[0]), not a stale clone
-                Ok(vec![args.into_iter().next().unwrap_or(LuaValue::Nil)])
+                let mut result = LuaValue::Nil;
+                std::mem::swap(&mut args[0], &mut result);
+                Ok(vec![result])
             }
             "setmetatable" => {
                 // Return first argument (table) — metatables not supported
