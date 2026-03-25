@@ -1433,7 +1433,7 @@
       }
     },
     {
-      "name": "memory_unknown_subcommand",
+      "name": "memory_unknown_subcmd",
       "now_ms": 24000,
       "argv": [
         "MEMORY",
@@ -1441,7 +1441,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR syntax error"
+        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try MEMORY HELP."
       }
     },
     {
@@ -1871,7 +1871,7 @@
       }
     },
     {
-      "name": "memory_unknown_subcommand",
+      "name": "memory_unknown_subcmd",
       "now_ms": 100,
       "argv": [
         "MEMORY",
@@ -1879,7 +1879,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR syntax error"
+        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try MEMORY HELP."
       }
     },
     {

@@ -2402,12 +2402,13 @@ fn sismember(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 }
 
 fn parse_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
-    let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let text = std::str::from_utf8(arg)
+        .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
     let val = text
         .parse::<f64>()
-        .map_err(|_| CommandError::Store(StoreError::ValueNotFloat))?;
+        .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
     if val.is_nan() {
-        return Err(CommandError::Store(StoreError::ValueNotFloat));
+        return Err(CommandError::Store(fr_store::StoreError::ValueNotFloat));
     }
     Ok(val)
 }
@@ -5965,7 +5966,8 @@ fn spublish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comman
 }
 
 fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
-    let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let text = std::str::from_utf8(arg)
+        .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
     if text.eq_ignore_ascii_case("-inf") {
         Ok(ScoreBound::Inclusive(f64::NEG_INFINITY))
     } else if text.eq_ignore_ascii_case("+inf") || text.eq_ignore_ascii_case("inf") {
@@ -5973,17 +5975,17 @@ fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
     } else if let Some(rest) = text.strip_prefix('(') {
         let val = rest
             .parse::<f64>()
-            .map_err(|_| CommandError::InvalidInteger)?;
+            .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
         if val.is_nan() {
-            return Err(CommandError::InvalidInteger);
+            return Err(CommandError::Store(fr_store::StoreError::ValueNotFloat));
         }
         Ok(ScoreBound::Exclusive(val))
     } else {
         let val = text
             .parse::<f64>()
-            .map_err(|_| CommandError::InvalidInteger)?;
+            .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
         if val.is_nan() {
-            return Err(CommandError::InvalidInteger);
+            return Err(CommandError::Store(fr_store::StoreError::ValueNotFloat));
         }
         Ok(ScoreBound::Inclusive(val))
     }
@@ -7261,7 +7263,7 @@ fn bytes_to_lossy_string(bytes: &[u8]) -> String {
 }
 
 fn parse_i64_arg(arg: &[u8]) -> Result<i64, CommandError> {
-    let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidInteger)?;
     text.parse::<i64>()
         .map_err(|_| CommandError::InvalidInteger)
 }
@@ -7283,7 +7285,7 @@ fn parse_set_expire_arg(arg: &[u8]) -> Result<u64, CommandError> {
 }
 
 fn parse_u64_arg(arg: &[u8]) -> Result<u64, CommandError> {
-    let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidInteger)?;
     text.parse::<u64>()
         .map_err(|_| CommandError::InvalidInteger)
 }
@@ -7291,7 +7293,7 @@ fn parse_u64_arg(arg: &[u8]) -> Result<u64, CommandError> {
 /// Parse a LIMIT count that can be negative (Redis uses -1 to mean "unlimited").
 /// Returns None for negative values, Some(n) for non-negative.
 fn parse_limit_count_arg(arg: &[u8]) -> Result<Option<usize>, CommandError> {
-    let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidInteger)?;
     let val: i64 = text.parse().map_err(|_| CommandError::InvalidInteger)?;
     if val < 0 {
         Ok(None)
@@ -9853,7 +9855,7 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             }
             // Parse the samples count to validate it, but we ignore it
             let samples = parse_i64_arg(&argv[4])?;
-            if samples < 0 {
+            if samples <= 0 {
                 return Err(CommandError::SyntaxError);
             }
         }
@@ -9915,7 +9917,11 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             RespFrame::BulkString(Some(b"HELP - Return subcommand help summary.".to_vec())),
         ])))
     } else {
-        Err(CommandError::SyntaxError)
+        let sub_str = std::str::from_utf8(&argv[1]).unwrap_or("?");
+        Ok(RespFrame::Error(format!(
+            "ERR Unknown subcommand or wrong number of arguments for '{}'. Try MEMORY HELP.",
+            sub_str.to_ascii_lowercase()
+        )))
     }
 }
 
@@ -11235,7 +11241,7 @@ fn blmove(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 
 fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // BLMPOP timeout numkeys key [key ...] LEFT|RIGHT [COUNT count]
-    if argv.len() < 4 {
+    if argv.len() < 5 {
         return Err(CommandError::WrongArity("BLMPOP"));
     }
     let _timeout = parse_blocking_timeout(&argv[1])?;
@@ -11314,7 +11320,9 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 
 /// Parse and validate a blocking command timeout. Returns an error for negative values.
 fn parse_blocking_timeout(arg: &[u8]) -> Result<f64, CommandError> {
-    let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let text = std::str::from_utf8(arg).map_err(|_| {
+        CommandError::Custom("ERR timeout is not a float or out of range".to_string())
+    })?;
     let timeout: f64 = text.parse().map_err(|_| {
         CommandError::Custom("ERR timeout is not a float or out of range".to_string())
     })?;
@@ -11375,7 +11383,7 @@ fn bzpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
 
 fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // BZMPOP timeout numkeys key [key ...] MIN|MAX [COUNT count]
-    if argv.len() < 4 {
+    if argv.len() < 5 {
         return Err(CommandError::WrongArity("BZMPOP"));
     }
     let _timeout = parse_blocking_timeout(&argv[1])?;
@@ -20725,13 +20733,19 @@ mod tests {
             vec![b"MEMORY".to_vec(), b"PURGE".to_vec(), b"extra".to_vec()],
             vec![b"MEMORY".to_vec(), b"STATS".to_vec(), b"extra".to_vec()],
             vec![b"MEMORY".to_vec(), b"HELP".to_vec(), b"extra".to_vec()],
-            vec![b"MEMORY".to_vec(), b"BOGUS".to_vec()],
             vec![
                 b"MEMORY".to_vec(),
                 b"USAGE".to_vec(),
                 b"k".to_vec(),
                 b"SAMPLES".to_vec(),
                 b"-1".to_vec(),
+            ],
+            vec![
+                b"MEMORY".to_vec(),
+                b"USAGE".to_vec(),
+                b"k".to_vec(),
+                b"SAMPLES".to_vec(),
+                b"0".to_vec(),
             ],
             vec![
                 b"MEMORY".to_vec(),
@@ -20750,6 +20764,15 @@ mod tests {
             let err = dispatch_argv(&argv, &mut store, 0).expect_err("memory syntax error");
             assert_eq!(err, CommandError::SyntaxError, "argv={argv:?}");
         }
+
+        // MEMORY with unknown subcommand returns an error frame (not CommandError)
+        let bogus = dispatch_argv(
+            &[b"MEMORY".to_vec(), b"BOGUS".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("memory bogus");
+        assert!(matches!(bogus, RespFrame::Error(_)));
     }
 
     #[test]
