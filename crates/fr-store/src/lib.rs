@@ -7500,7 +7500,7 @@ impl Store {
 
     /// Drain all pending Pub/Sub messages.
     pub fn drain_pending_pubsub(&mut self) -> Vec<PubSubMessage> {
-        self.pubsub_pending.drain(..).collect()
+        std::mem::take(&mut self.pubsub_pending)
     }
 
     /// Queue a keyspace notification event for delivery via pub/sub.

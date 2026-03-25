@@ -683,8 +683,10 @@ fn process_buffered_frames(
     paused_tokens: &mut HashSet<Token>,
     ts: u64,
 ) {
+    let mut consumed_total = 0;
+
     loop {
-        if conn.read_buf.is_empty() || conn.closing {
+        if consumed_total >= conn.read_buf.len() || conn.closing {
             break;
         }
 
@@ -696,22 +698,24 @@ fn process_buffered_frames(
             break;
         }
 
+        let unparsed = &conn.read_buf[consumed_total..];
+
         // Try inline command parsing only for true non-RESP input. RESP uses
         // multiple leading prefixes; treating every non-array prefix as inline
         // can misclassify protocol frames and break parsing.
         let parse_result =
-            if !conn.read_buf.is_empty() && should_try_inline_parsing(conn.read_buf[0]) {
-                match try_parse_inline(&conn.read_buf) {
+            if !unparsed.is_empty() && should_try_inline_parsing(unparsed[0]) {
+                match try_parse_inline(unparsed) {
                     Ok(InlineParseResult::EmptyLine(consumed)) => {
                         // Silently consume empty lines (Redis behavior).
-                        conn.read_buf.drain(..consumed);
+                        consumed_total += consumed;
                         continue;
                     }
                     Ok(InlineParseResult::Command(frame, consumed)) => Ok((frame, consumed)),
                     Err(e) => Err(e),
                 }
             } else {
-                fr_protocol::parse_frame_with_config(&conn.read_buf, &runtime.parser_config())
+                fr_protocol::parse_frame_with_config(unparsed, &runtime.parser_config())
                     .map(|p| (p.frame, p.consumed))
             };
 
@@ -722,7 +726,7 @@ fn process_buffered_frames(
                     && let Some(reject) = check_subscription_mode_gate(&frame, true)
                 {
                     conn.write_buf.extend_from_slice(&reject.to_bytes());
-                    conn.read_buf.drain(..consumed);
+                    consumed_total += consumed;
                     continue;
                 }
                 // CLIENT PAUSE gate: delay command processing while paused.
@@ -750,7 +754,7 @@ fn process_buffered_frames(
                     write_tokens.insert(token);
                     conn.closing = true;
                     closing_tokens.insert(token);
-                    conn.read_buf.drain(..consumed);
+                    consumed_total += consumed;
                     break;
                 }
 
@@ -768,7 +772,7 @@ fn process_buffered_frames(
                     } else {
                         conn.blocked = Some(blocked);
                         blocked_tokens.insert(token);
-                        conn.read_buf.drain(..consumed);
+                        consumed_total += consumed;
                         break; // Stop processing — client is now blocked.
                     }
                 } else {
@@ -790,14 +794,14 @@ fn process_buffered_frames(
                     conn.write_buf.extend_from_slice(&frame.to_bytes());
                 }
 
+                consumed_total += consumed;
+
                 if conn.write_buf.len() > runtime.server.output_buffer_limit {
                     eprintln!("warn: client write buffer exceeded limit, disconnecting");
                     conn.closing = true;
                     closing_tokens.insert(token);
                     break;
                 }
-
-                conn.read_buf.drain(..consumed);
             }
             Err(fr_protocol::RespParseError::Incomplete) => {
                 // Need more data.
@@ -812,6 +816,10 @@ fn process_buffered_frames(
                 break;
             }
         }
+    }
+
+    if consumed_total > 0 {
+        conn.read_buf.drain(..consumed_total);
     }
 
     // Eagerly try to flush.
@@ -951,6 +959,7 @@ fn read_frame_from_stream(
     stream: &mut StdTcpStream,
     read_buf: &mut Vec<u8>,
     parser_config: &ParserConfig,
+    query_buffer_limit: usize,
 ) -> io::Result<RespFrame> {
     loop {
         match fr_protocol::parse_frame_with_config(read_buf, parser_config) {
@@ -975,7 +984,18 @@ fn read_frame_from_stream(
                     "primary closed replication stream",
                 ));
             }
-            Ok(n) => read_buf.extend_from_slice(&chunk[..n]),
+            Ok(n) => match validate_read_path(read_buf.len(), n, query_buffer_limit, false) {
+                Ok(_) => read_buf.extend_from_slice(&chunk[..n]),
+                Err(err) => {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "replication read exceeded query buffer limit ({})",
+                            err.reason_code()
+                        ),
+                    ));
+                }
+            },
             Err(ref err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 return Err(io::Error::new(
                     ErrorKind::TimedOut,
@@ -991,6 +1011,7 @@ fn read_frame_from_stream(
 fn read_available_stream_bytes(
     stream: &mut StdTcpStream,
     read_buf: &mut Vec<u8>,
+    query_buffer_limit: usize,
 ) -> io::Result<bool> {
     let mut chunk = [0u8; 8192];
     let mut disconnected = false;
@@ -1000,7 +1021,18 @@ fn read_available_stream_bytes(
                 disconnected = true;
                 break;
             }
-            Ok(n) => read_buf.extend_from_slice(&chunk[..n]),
+            Ok(n) => match validate_read_path(read_buf.len(), n, query_buffer_limit, false) {
+                Ok(_) => read_buf.extend_from_slice(&chunk[..n]),
+                Err(err) => {
+                    return Err(io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "replication read exceeded query buffer limit ({})",
+                            err.reason_code()
+                        ),
+                    ));
+                }
+            },
             Err(ref err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 break;
             }
@@ -1043,7 +1075,12 @@ fn sync_replica_with_primary(
 
     stream.write_all(&replica_handshake_frame(&[b"PING"]).to_bytes())?;
     expect_simple_string(
-        read_frame_from_stream(&mut stream, &mut read_buf, &parser_config)?,
+        read_frame_from_stream(
+            &mut stream,
+            &mut read_buf,
+            &parser_config,
+            runtime.server.query_buffer_limit,
+        )?,
         "PONG",
     )?;
 
@@ -1053,13 +1090,23 @@ fn sync_replica_with_primary(
             .to_bytes(),
     )?;
     expect_simple_string(
-        read_frame_from_stream(&mut stream, &mut read_buf, &parser_config)?,
+        read_frame_from_stream(
+            &mut stream,
+            &mut read_buf,
+            &parser_config,
+            runtime.server.query_buffer_limit,
+        )?,
         "OK",
     )?;
 
     stream.write_all(&replica_handshake_frame(&[b"REPLCONF", b"capa", b"psync2"]).to_bytes())?;
     expect_simple_string(
-        read_frame_from_stream(&mut stream, &mut read_buf, &parser_config)?,
+        read_frame_from_stream(
+            &mut stream,
+            &mut read_buf,
+            &parser_config,
+            runtime.server.query_buffer_limit,
+        )?,
         "OK",
     )?;
 
@@ -1072,7 +1119,12 @@ fn sync_replica_with_primary(
         ])
         .to_bytes(),
     )?;
-    let reply = read_frame_from_stream(&mut stream, &mut read_buf, &parser_config)?;
+    let reply = read_frame_from_stream(
+        &mut stream,
+        &mut read_buf,
+        &parser_config,
+        runtime.server.query_buffer_limit,
+    )?;
     let RespFrame::SimpleString(reply_line) = reply else {
         return Err(io::Error::new(
             ErrorKind::InvalidData,
@@ -1081,7 +1133,12 @@ fn sync_replica_with_primary(
     };
 
     let payload = if reply_line.starts_with("FULLRESYNC ") {
-        match read_frame_from_stream(&mut stream, &mut read_buf, &parser_config)? {
+        match read_frame_from_stream(
+            &mut stream,
+            &mut read_buf,
+            &parser_config,
+            runtime.server.query_buffer_limit,
+        )? {
             RespFrame::BulkString(Some(snapshot)) => snapshot,
             other => {
                 return Err(io::Error::new(
@@ -1091,7 +1148,11 @@ fn sync_replica_with_primary(
             }
         }
     } else {
-        read_available_stream_bytes(&mut stream, &mut read_buf)?;
+        read_available_stream_bytes(
+            &mut stream,
+            &mut read_buf,
+            runtime.server.query_buffer_limit,
+        )?;
         std::mem::take(&mut read_buf)
     };
 
@@ -1175,8 +1236,11 @@ fn drain_replica_stream(
     connection: &mut ReplicaPrimaryConnection,
     now_ms: u64,
 ) -> io::Result<bool> {
-    let disconnected =
-        read_available_stream_bytes(&mut connection.stream, &mut connection.read_buf)?;
+    let disconnected = read_available_stream_bytes(
+        &mut connection.stream,
+        &mut connection.read_buf,
+        runtime.server.query_buffer_limit,
+    )?;
 
     let mut frame_index = 0_u64;
     loop {
@@ -1963,16 +2027,17 @@ fn handle_writable(
 #[cfg(test)]
 mod tests {
     use crate::{
-        InlineParseResult, REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS, ReplicaSyncState,
-        drive_replica_sync, parse_blocking_deadline, read_frame_from_stream,
-        replica_handshake_frame, replica_handshake_read_timeout, replication_follow_up_bytes,
-        should_try_inline_parsing, try_build_blocked_state,
+        InlineParseResult, REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS,
+        ReplicaPrimaryConnection, ReplicaSyncState, drain_replica_stream, drive_replica_sync,
+        parse_blocking_deadline, read_frame_from_stream, replica_handshake_frame,
+        replica_handshake_read_timeout, replication_follow_up_bytes, should_try_inline_parsing,
+        try_build_blocked_state,
     };
     use fr_config::RuntimePolicy;
     use fr_protocol::{ParserConfig, RespFrame};
     use fr_runtime::Runtime;
-    use std::io::Write;
-    use std::net::TcpListener as StdTcpListener;
+    use std::io::{ErrorKind, Write};
+    use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
     use std::thread;
 
     #[test]
@@ -2200,15 +2265,16 @@ mod tests {
             let parser = ParserConfig::default();
             let mut read_buf = Vec::new();
 
-            let ping =
-                read_frame_from_stream(&mut stream, &mut read_buf, &parser).expect("read ping");
+            let ping = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                .expect("read ping");
             assert_eq!(ping, replica_handshake_frame(&[b"PING"]));
             stream
                 .write_all(&RespFrame::SimpleString("PONG".to_string()).to_bytes())
                 .unwrap();
 
             let replconf_port =
-                read_frame_from_stream(&mut stream, &mut read_buf, &parser).expect("replconf");
+                read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                    .expect("replconf");
             match replconf_port {
                 RespFrame::Array(Some(items)) => {
                     assert_eq!(items[0], RespFrame::BulkString(Some(b"REPLCONF".to_vec())));
@@ -2224,7 +2290,8 @@ mod tests {
                 .unwrap();
 
             let replconf_capa =
-                read_frame_from_stream(&mut stream, &mut read_buf, &parser).expect("capa");
+                read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                    .expect("capa");
             assert_eq!(
                 replconf_capa,
                 replica_handshake_frame(&[b"REPLCONF", b"capa", b"psync2"])
@@ -2233,7 +2300,8 @@ mod tests {
                 .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
                 .unwrap();
 
-            let psync = read_frame_from_stream(&mut stream, &mut read_buf, &parser).expect("psync");
+            let psync = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                .expect("psync");
             assert_eq!(psync, replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]));
             stream
                 .write_all(
@@ -2329,22 +2397,24 @@ mod tests {
 
                 let (mut stream1, _) = listener.accept().expect("accept first replica");
                 let mut read_buf = Vec::new();
-                let _ = read_frame_from_stream(&mut stream1, &mut read_buf, &parser).expect("ping");
+                let _ = read_frame_from_stream(&mut stream1, &mut read_buf, &parser, usize::MAX)
+                    .expect("ping");
                 stream1
                     .write_all(&RespFrame::SimpleString("PONG".to_string()).to_bytes())
                     .unwrap();
-                let _ = read_frame_from_stream(&mut stream1, &mut read_buf, &parser)
+                let _ = read_frame_from_stream(&mut stream1, &mut read_buf, &parser, usize::MAX)
                     .expect("replconf port");
                 stream1
                     .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
                     .unwrap();
-                let _ = read_frame_from_stream(&mut stream1, &mut read_buf, &parser)
+                let _ = read_frame_from_stream(&mut stream1, &mut read_buf, &parser, usize::MAX)
                     .expect("replconf capa");
                 stream1
                     .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
                     .unwrap();
                 let psync1 =
-                    read_frame_from_stream(&mut stream1, &mut read_buf, &parser).expect("psync1");
+                    read_frame_from_stream(&mut stream1, &mut read_buf, &parser, usize::MAX)
+                        .expect("psync1");
                 assert_eq!(psync1, replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]));
                 stream1
                     .write_all(
@@ -2364,23 +2434,24 @@ mod tests {
 
                 let (mut stream2, _) = listener.accept().expect("accept reconnect replica");
                 let mut read_buf = Vec::new();
-                let _ =
-                    read_frame_from_stream(&mut stream2, &mut read_buf, &parser).expect("ping2");
+                let _ = read_frame_from_stream(&mut stream2, &mut read_buf, &parser, usize::MAX)
+                    .expect("ping2");
                 stream2
                     .write_all(&RespFrame::SimpleString("PONG".to_string()).to_bytes())
                     .unwrap();
-                let _ = read_frame_from_stream(&mut stream2, &mut read_buf, &parser)
+                let _ = read_frame_from_stream(&mut stream2, &mut read_buf, &parser, usize::MAX)
                     .expect("replconf port2");
                 stream2
                     .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
                     .unwrap();
-                let _ = read_frame_from_stream(&mut stream2, &mut read_buf, &parser)
+                let _ = read_frame_from_stream(&mut stream2, &mut read_buf, &parser, usize::MAX)
                     .expect("replconf capa2");
                 stream2
                     .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
                     .unwrap();
                 let psync2 =
-                    read_frame_from_stream(&mut stream2, &mut read_buf, &parser).expect("psync2");
+                    read_frame_from_stream(&mut stream2, &mut read_buf, &parser, usize::MAX)
+                        .expect("psync2");
                 assert_eq!(
                     psync2,
                     replica_handshake_frame(&[
@@ -2493,22 +2564,23 @@ mod tests {
                     .set_read_timeout(Some(std::time::Duration::from_millis(500)))
                     .expect("set read timeout");
                 let mut read_buf = Vec::new();
-                let _ = read_frame_from_stream(&mut stream, &mut read_buf, &parser).expect("ping");
+                let _ = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                    .expect("ping");
                 stream
                     .write_all(&RespFrame::SimpleString("PONG".to_string()).to_bytes())
                     .unwrap();
-                let _ = read_frame_from_stream(&mut stream, &mut read_buf, &parser)
+                let _ = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
                     .expect("replconf port");
                 stream
                     .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
                     .unwrap();
-                let _ = read_frame_from_stream(&mut stream, &mut read_buf, &parser)
+                let _ = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
                     .expect("replconf capa");
                 stream
                     .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
                     .unwrap();
-                let psync =
-                    read_frame_from_stream(&mut stream, &mut read_buf, &parser).expect("psync");
+                let psync = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                    .expect("psync");
                 assert_eq!(psync, replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]));
                 stream
                     .write_all(
@@ -2525,8 +2597,9 @@ mod tests {
                     .write_all(&replica_handshake_frame(&[b"REPLCONF", b"GETACK", b"*"]).to_bytes())
                     .unwrap();
 
-                let immediate_ack = read_frame_from_stream(&mut stream, &mut read_buf, &parser)
-                    .expect("getack reply");
+                let immediate_ack =
+                    read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                        .expect("getack reply");
                 assert_eq!(
                     immediate_ack,
                     replica_handshake_frame(&[
@@ -2536,8 +2609,9 @@ mod tests {
                     ])
                 );
 
-                let periodic_ack = read_frame_from_stream(&mut stream, &mut read_buf, &parser)
-                    .expect("periodic ack");
+                let periodic_ack =
+                    read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                        .expect("periodic ack");
                 assert_eq!(
                     periodic_ack,
                     replica_handshake_frame(&[
@@ -2570,6 +2644,44 @@ mod tests {
             &mut replica_sync,
             1 + REPLICA_ACK_INTERVAL_MS + 1,
         );
+
+        server.join().expect("primary thread");
+    }
+
+    #[test]
+    fn replica_stream_read_path_enforces_query_buffer_limit() {
+        use std::net::TcpListener as StdTcpListener;
+
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept replica");
+            stream
+                .write_all(b"*2\r\n$3\r\nSET\r\n$5\r\nalpha")
+                .expect("write oversized partial frame");
+        });
+
+        let mut runtime = Runtime::default_strict();
+        runtime.server.query_buffer_limit = 8;
+        let stream = StdTcpStream::connect(addr).expect("connect primary");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(50)))
+            .expect("set replica stream read timeout");
+        let mut connection = ReplicaPrimaryConnection {
+            stream,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
+            next_ack_ms: 0,
+        };
+
+        let err = drain_replica_stream(&mut runtime, &mut connection, 1).expect_err("must fail");
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains("eventloop.read.querybuf_limit_exceeded"),
+            "{err}"
+        );
+        assert!(connection.read_buf.is_empty());
 
         server.join().expect("primary thread");
     }
