@@ -897,6 +897,10 @@ pub struct ServerState {
     hz: u64,
     /// Maximum number of connected clients (CONFIG SET maxclients).
     pub max_clients: usize,
+    /// Client query buffer limit (CONFIG SET client-query-buffer-limit). Default 1 GiB.
+    pub query_buffer_limit: usize,
+    /// Maximum bulk string length in RESP protocol (CONFIG SET proto-max-bulk-len). Default 512 MiB.
+    pub proto_max_bulk_len: usize,
     /// Set to true when SHUTDOWN is requested. Server event loop checks this.
     pub shutdown_requested: bool,
     /// If true, skip the final SAVE on shutdown.
@@ -976,6 +980,8 @@ impl Default for ServerState {
             last_active_expire_cycle: None,
             hz: 10,
             max_clients: 10_000,
+            query_buffer_limit: 1024 * 1024 * 1024, // 1 GiB (Redis default)
+            proto_max_bulk_len: 512 * 1024 * 1024,  // 512 MiB (Redis default)
             shutdown_requested: false,
             shutdown_nosave: false,
             command_time_budget_ms: 5000,
@@ -4080,6 +4086,39 @@ impl Runtime {
                     Err(err) => return err.to_resp(),
                 };
                 next_maxclients = Some(parsed);
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("client-query-buffer-limit") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as usize,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'client-query-buffer-limit'"
+                                .to_string(),
+                        );
+                    }
+                    Err(err) => return err.to_resp(),
+                };
+                self.server.query_buffer_limit = parsed;
+                static_override_updates.push((
+                    "client-query-buffer-limit".to_string(),
+                    parsed.to_string(),
+                ));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("proto-max-bulk-len") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as usize,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'proto-max-bulk-len'".to_string(),
+                        );
+                    }
+                    Err(err) => return err.to_resp(),
+                };
+                self.server.proto_max_bulk_len = parsed;
+                static_override_updates
+                    .push(("proto-max-bulk-len".to_string(), parsed.to_string()));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("maxmemory-samples") {

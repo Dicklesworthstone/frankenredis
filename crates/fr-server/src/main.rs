@@ -32,9 +32,6 @@ const LISTENER: Token = Token(0);
 /// Maximum connected clients. Matches Redis default.
 const MAX_CLIENTS: usize = 10_000;
 
-/// Per-client query buffer limit (1 MiB). Matches Redis proto-max-bulk-len default.
-const QUERY_BUFFER_LIMIT: usize = 1024 * 1024;
-
 /// Maximum write buffer size per client (1 MiB).
 const MAX_WRITE_BUFFER: usize = 1024 * 1024;
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
@@ -609,7 +606,7 @@ fn handle_readable(
             }
             Ok(n) => {
                 // Use fr-eventloop's read path validation.
-                match validate_read_path(conn.read_buf.len(), n, QUERY_BUFFER_LIMIT, false) {
+                match validate_read_path(conn.read_buf.len(), n, runtime.server.query_buffer_limit, false) {
                     Ok(_) => {
                         conn.read_buf.extend_from_slice(&buf[..n]);
                     }
@@ -625,7 +622,7 @@ fn handle_readable(
             Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) => {
                 // Use fr-eventloop's fatal read error path.
-                if let Err(rpe) = validate_read_path(0, 0, QUERY_BUFFER_LIMIT, true) {
+                if let Err(rpe) = validate_read_path(0, 0, runtime.server.query_buffer_limit, true) {
                     eprintln!("warn: client read error ({}): {}", rpe.reason_code(), e);
                 }
                 conn.closing = true;
