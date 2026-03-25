@@ -603,7 +603,12 @@ fn handle_readable(
             }
             Ok(n) => {
                 // Use fr-eventloop's read path validation.
-                match validate_read_path(conn.read_buf.len(), n, runtime.server.query_buffer_limit, false) {
+                match validate_read_path(
+                    conn.read_buf.len(),
+                    n,
+                    runtime.server.query_buffer_limit,
+                    false,
+                ) {
                     Ok(_) => {
                         conn.read_buf.extend_from_slice(&buf[..n]);
                     }
@@ -619,7 +624,8 @@ fn handle_readable(
             Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
             Err(e) => {
                 // Use fr-eventloop's fatal read error path.
-                if let Err(rpe) = validate_read_path(0, 0, runtime.server.query_buffer_limit, true) {
+                if let Err(rpe) = validate_read_path(0, 0, runtime.server.query_buffer_limit, true)
+                {
                     eprintln!("warn: client read error ({}): {}", rpe.reason_code(), e);
                 }
                 conn.closing = true;
@@ -1009,6 +1015,10 @@ fn expect_simple_string(frame: RespFrame, expected: &str) -> io::Result<()> {
     }
 }
 
+fn replica_handshake_read_timeout(runtime: &Runtime) -> Duration {
+    Duration::from_secs(runtime.server.repl_timeout_sec.max(1))
+}
+
 fn sync_replica_with_primary(
     runtime: &mut Runtime,
     host: &str,
@@ -1019,7 +1029,7 @@ fn sync_replica_with_primary(
 ) -> io::Result<ReplicaPrimaryConnection> {
     let mut stream = StdTcpStream::connect((host, port))?;
     let _ = stream.set_nodelay(true);
-    stream.set_read_timeout(Some(Duration::from_millis(50)))?;
+    stream.set_read_timeout(Some(replica_handshake_read_timeout(runtime)))?;
     stream.set_write_timeout(Some(Duration::from_millis(500)))?;
 
     let parser_config = runtime.parser_config();
@@ -1949,8 +1959,8 @@ mod tests {
     use crate::{
         InlineParseResult, REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS, ReplicaSyncState,
         drive_replica_sync, parse_blocking_deadline, read_frame_from_stream,
-        replica_handshake_frame, replication_follow_up_bytes, should_try_inline_parsing,
-        try_build_blocked_state,
+        replica_handshake_frame, replica_handshake_read_timeout, replication_follow_up_bytes,
+        should_try_inline_parsing, try_build_blocked_state,
     };
     use fr_config::RuntimePolicy;
     use fr_protocol::{ParserConfig, RespFrame};
@@ -1963,6 +1973,26 @@ mod tests {
     fn server_bootstrap_creates_runtime() {
         let _strict = Runtime::new(RuntimePolicy::default());
         let _hardened = Runtime::new(RuntimePolicy::hardened());
+    }
+
+    #[test]
+    fn replica_handshake_timeout_uses_runtime_repl_timeout() {
+        let mut runtime = Runtime::new(RuntimePolicy::hardened());
+        assert_eq!(replica_handshake_read_timeout(&runtime).as_secs(), 60);
+
+        assert_eq!(
+            runtime.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"CONFIG".to_vec())),
+                    RespFrame::BulkString(Some(b"SET".to_vec())),
+                    RespFrame::BulkString(Some(b"repl-timeout".to_vec())),
+                    RespFrame::BulkString(Some(b"7".to_vec())),
+                ])),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(replica_handshake_read_timeout(&runtime).as_secs(), 7);
     }
 
     #[test]
