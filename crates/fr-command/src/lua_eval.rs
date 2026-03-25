@@ -2658,9 +2658,9 @@ impl<'a> LuaState<'a> {
             }
             "rawset" => {
                 // rawset(table, key, value) — set and return table
-                let table = args.first().cloned().unwrap_or(LuaValue::Nil);
-                if !matches!(table, LuaValue::Table(_)) {
-                    return Err(lua_bad_table_arg("rawset", 1, &table));
+                if !matches!(args.first(), Some(LuaValue::Table(_))) {
+                    let v = args.first().cloned().unwrap_or(LuaValue::Nil);
+                    return Err(lua_bad_table_arg("rawset", 1, &v));
                 }
                 if args.len() >= 3 {
                     let key = args[1].clone();
@@ -2669,7 +2669,8 @@ impl<'a> LuaState<'a> {
                         t.set(key, val);
                     }
                 }
-                Ok(vec![table])
+                // Return the mutated table (args[0]), not a stale clone
+                Ok(vec![args.into_iter().next().unwrap_or(LuaValue::Nil)])
             }
             "setmetatable" => {
                 // Return first argument (table) — metatables not supported
@@ -2759,8 +2760,8 @@ impl<'a> LuaState<'a> {
                                 "bad argument #1 to 'random' (interval is empty)".to_string()
                             );
                         }
-                        let range = (n - m + 1) as u64;
-                        let val = (r % range) + m as u64;
+                        let range = (n as i128 - m as i128 + 1) as u64;
+                        let val = m as i128 + (r % range) as i128;
                         Ok(vec![LuaValue::Number(val as f64)])
                     }
                 }
@@ -2954,9 +2955,15 @@ impl<'a> LuaState<'a> {
             }
             "string.char" => {
                 let mut result = Vec::new();
-                for a in args {
-                    let n = a.to_number().ok_or("bad argument to 'string.char'")? as u8;
-                    result.push(n);
+                for (i, a) in args.iter().enumerate() {
+                    let n = a.to_number().ok_or("bad argument to 'string.char'")? as i64;
+                    if !(0..=255).contains(&n) {
+                        return Err(format!(
+                            "bad argument #{} to 'char' (invalid value)",
+                            i + 1
+                        ));
+                    }
+                    result.push(n as u8);
                 }
                 Ok(vec![LuaValue::Str(result)])
             }

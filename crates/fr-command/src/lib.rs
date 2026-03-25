@@ -11454,11 +11454,31 @@ fn restore_cmd(
     let key = &argv[1];
     let ttl_ms: u64 = parse_i64_arg(&argv[2]).map(|v| v.max(0) as u64)?;
     let payload = &argv[3];
-    // Check for REPLACE flag
-    let replace = argv[4..]
-        .iter()
-        .any(|a| std::str::from_utf8(a).is_ok_and(|s| s.eq_ignore_ascii_case("REPLACE")));
-    match store.restore_key(key, ttl_ms, payload, replace, now_ms) {
+    // Parse options: REPLACE, ABSTTL, IDLETIME, FREQ
+    let mut replace = false;
+    let mut absttl = false;
+    let mut i = 4;
+    while i < argv.len() {
+        let opt = std::str::from_utf8(&argv[i]).unwrap_or("");
+        if opt.eq_ignore_ascii_case("REPLACE") {
+            replace = true;
+            i += 1;
+        } else if opt.eq_ignore_ascii_case("ABSTTL") {
+            absttl = true;
+            i += 1;
+        } else if opt.eq_ignore_ascii_case("IDLETIME") || opt.eq_ignore_ascii_case("FREQ") {
+            i += 2; // skip the value argument
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    }
+    // When ABSTTL is set, ttl_ms is an absolute Unix timestamp; convert to relative
+    let effective_ttl = if absttl && ttl_ms > 0 {
+        ttl_ms.saturating_sub(now_ms)
+    } else {
+        ttl_ms
+    };
+    match store.restore_key(key, effective_ttl, payload, replace, now_ms) {
         Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
         Err(StoreError::BusyKey) => Ok(RespFrame::Error(
             "BUSYKEY Target key name already exists.".to_string(),
@@ -11678,7 +11698,7 @@ fn sort_ro_cmd(
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
-        return Err(CommandError::WrongArity("SORT"));
+        return Err(CommandError::WrongArity("SORT_RO"));
     }
     // SORT_RO rejects the STORE option
     for arg in &argv[2..] {
