@@ -8008,6 +8008,7 @@ impl Store {
 }
 
 /// CRC16-CCITT (poly 0x1021) for DUMP payload integrity.
+#[allow(dead_code)]
 fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
     for &byte in data {
