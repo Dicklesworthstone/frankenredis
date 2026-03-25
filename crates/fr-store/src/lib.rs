@@ -118,7 +118,8 @@ pub type StreamField = (Vec<u8>, Vec<u8>);
 pub type StreamEntries = BTreeMap<StreamId, Vec<StreamField>>;
 pub type StreamRecord = (StreamId, Vec<StreamField>);
 pub type StreamInfoBounds = (usize, Option<StreamRecord>, Option<StreamRecord>);
-pub type StreamConsumerInfo = Vec<u8>;
+/// (name, pending_count, idle_ms)
+pub type StreamConsumerInfo = (Vec<u8>, usize, u64);
 pub type StreamPendingEntries = BTreeMap<StreamId, StreamPendingEntry>;
 pub type StreamPendingSummaryConsumer = (Vec<u8>, usize);
 pub type StreamPendingSummary = (
@@ -5818,7 +5819,31 @@ impl Store {
                     let Some(group_state) = groups.get(group) else {
                         return Ok(None);
                     };
-                    Ok(Some(group_state.consumers.iter().cloned().collect()))
+                    let mut result: Vec<StreamConsumerInfo> = Vec::new();
+                    for consumer_name in &group_state.consumers {
+                        // Count pending entries for this consumer
+                        let pending_count = group_state
+                            .pending
+                            .values()
+                            .filter(|pe| pe.consumer == *consumer_name)
+                            .count();
+                        // Compute idle time: time since last delivery to this consumer
+                        let last_delivery = group_state
+                            .pending
+                            .values()
+                            .filter(|pe| pe.consumer == *consumer_name)
+                            .map(|pe| pe.last_delivered_ms)
+                            .max()
+                            .unwrap_or(0);
+                        let idle_ms = if last_delivery > 0 {
+                            now_ms.saturating_sub(last_delivery)
+                        } else {
+                            0
+                        };
+                        result.push((consumer_name.clone(), pending_count, idle_ms));
+                    }
+                    result.sort_by(|a, b| a.0.cmp(&b.0));
+                    Ok(Some(result))
                 }
                 _ => Err(StoreError::WrongType),
             },

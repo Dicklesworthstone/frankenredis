@@ -4161,16 +4161,17 @@ fn stream_group_info_to_frame(
     ]))
 }
 
-fn stream_consumer_info_to_frame(name: Vec<u8>) -> RespFrame {
+fn stream_consumer_info_to_frame(info: (Vec<u8>, usize, u64)) -> RespFrame {
+    let (name, pending_count, idle_ms) = info;
     RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(b"name".to_vec())),
         RespFrame::BulkString(Some(name)),
         RespFrame::BulkString(Some(b"pending".to_vec())),
-        RespFrame::Integer(0),
+        RespFrame::Integer(i64::try_from(pending_count).unwrap_or(i64::MAX)),
         RespFrame::BulkString(Some(b"idle".to_vec())),
-        RespFrame::Integer(0),
+        RespFrame::Integer(i64::try_from(idle_ms).unwrap_or(i64::MAX)),
         RespFrame::BulkString(Some(b"inactive".to_vec())),
-        RespFrame::Integer(0),
+        RespFrame::Integer(i64::try_from(idle_ms).unwrap_or(i64::MAX)),
     ]))
 }
 
