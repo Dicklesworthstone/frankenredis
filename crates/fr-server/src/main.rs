@@ -703,21 +703,20 @@ fn process_buffered_frames(
         // Try inline command parsing only for true non-RESP input. RESP uses
         // multiple leading prefixes; treating every non-array prefix as inline
         // can misclassify protocol frames and break parsing.
-        let parse_result =
-            if !unparsed.is_empty() && should_try_inline_parsing(unparsed[0]) {
-                match try_parse_inline(unparsed) {
-                    Ok(InlineParseResult::EmptyLine(consumed)) => {
-                        // Silently consume empty lines (Redis behavior).
-                        consumed_total += consumed;
-                        continue;
-                    }
-                    Ok(InlineParseResult::Command(frame, consumed)) => Ok((frame, consumed)),
-                    Err(e) => Err(e),
+        let parse_result = if !unparsed.is_empty() && should_try_inline_parsing(unparsed[0]) {
+            match try_parse_inline(unparsed) {
+                Ok(InlineParseResult::EmptyLine(consumed)) => {
+                    // Silently consume empty lines (Redis behavior).
+                    consumed_total += consumed;
+                    continue;
                 }
-            } else {
-                fr_protocol::parse_frame_with_config(unparsed, &runtime.parser_config())
-                    .map(|p| (p.frame, p.consumed))
-            };
+                Ok(InlineParseResult::Command(frame, consumed)) => Ok((frame, consumed)),
+                Err(e) => Err(e),
+            }
+        } else {
+            fr_protocol::parse_frame_with_config(unparsed, &runtime.parser_config())
+                .map(|p| (p.frame, p.consumed))
+        };
 
         match parse_result {
             Ok((frame, consumed)) => {
@@ -1231,6 +1230,19 @@ fn queue_replica_periodic_ack(
     connection.next_ack_ms = now_ms.saturating_add(REPLICA_ACK_INTERVAL_MS);
 }
 
+fn validate_replica_write_buffer_limit(
+    connection: &ReplicaPrimaryConnection,
+    output_buffer_limit: usize,
+) -> io::Result<()> {
+    if connection.write_buf.len() > output_buffer_limit {
+        return Err(io::Error::new(
+            ErrorKind::InvalidData,
+            "replica write buffer exceeded output buffer limit",
+        ));
+    }
+    Ok(())
+}
+
 fn drain_replica_stream(
     runtime: &mut Runtime,
     connection: &mut ReplicaPrimaryConnection,
@@ -1243,15 +1255,25 @@ fn drain_replica_stream(
     )?;
 
     let mut frame_index = 0_u64;
+    let mut consumed_total = 0;
     loop {
-        match fr_protocol::parse_frame_with_config(&connection.read_buf, &runtime.parser_config()) {
+        if consumed_total >= connection.read_buf.len() {
+            break;
+        }
+
+        let unparsed = &connection.read_buf[consumed_total..];
+        match fr_protocol::parse_frame_with_config(unparsed, &runtime.parser_config()) {
             Ok(parsed) => {
                 let frame = parsed.frame;
-                connection.read_buf.drain(..parsed.consumed);
+                consumed_total += parsed.consumed;
                 let response =
                     runtime.execute_frame(frame.clone(), now_ms.saturating_add(frame_index));
                 if let Some(follow_up) = replication_stream_follow_up_bytes(&frame, &response) {
                     connection.write_buf.extend_from_slice(&follow_up);
+                    validate_replica_write_buffer_limit(
+                        connection,
+                        runtime.server.output_buffer_limit,
+                    )?;
                 }
                 frame_index = frame_index.saturating_add(1);
             }
@@ -1265,12 +1287,24 @@ fn drain_replica_stream(
         }
     }
 
+    if consumed_total > 0 {
+        connection.read_buf.drain(..consumed_total);
+    }
+
     Ok(disconnected)
 }
 
 fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState, now_ms: u64) {
     if let Some(connection) = replica_sync.connection.as_mut() {
         queue_replica_periodic_ack(runtime, connection, now_ms);
+        if let Err(err) =
+            validate_replica_write_buffer_limit(connection, runtime.server.output_buffer_limit)
+        {
+            replica_sync.schedule_retry(now_ms);
+            runtime.set_replica_connection_state("reconnect");
+            eprintln!("warn: replica stream write failed: {err}");
+            return;
+        }
         if let Err(err) = flush_replica_primary_writes(connection) {
             replica_sync.schedule_retry(now_ms);
             runtime.set_replica_connection_state("reconnect");
@@ -2682,6 +2716,44 @@ mod tests {
             "{err}"
         );
         assert!(connection.read_buf.is_empty());
+
+        server.join().expect("primary thread");
+    }
+
+    #[test]
+    fn replica_stream_write_path_enforces_output_buffer_limit() {
+        use std::net::TcpListener as StdTcpListener;
+
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept replica");
+            stream
+                .write_all(&replica_handshake_frame(&[b"REPLCONF", b"GETACK", b"*"]).to_bytes())
+                .expect("write getack");
+        });
+
+        let mut runtime = Runtime::default_strict();
+        runtime.server.output_buffer_limit = 0;
+        let stream = StdTcpStream::connect(addr).expect("connect primary");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_millis(50)))
+            .expect("set replica stream read timeout");
+        let mut connection = ReplicaPrimaryConnection {
+            stream,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
+            next_ack_ms: 0,
+        };
+
+        let err = drain_replica_stream(&mut runtime, &mut connection, 1).expect_err("must fail");
+        assert_eq!(err.kind(), ErrorKind::InvalidData);
+        assert!(
+            err.to_string()
+                .contains("replica write buffer exceeded output buffer limit"),
+            "{err}"
+        );
+        assert!(!connection.write_buf.is_empty());
 
         server.join().expect("primary thread");
     }
