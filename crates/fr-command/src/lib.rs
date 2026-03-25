@@ -10275,8 +10275,12 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("ZDIFF"));
     }
-    let numkeys = parse_i64_arg(&argv[1])? as usize;
-    if numkeys == 0 || argv.len() < 2 + numkeys {
+    let numkeys_val = parse_i64_arg(&argv[1])?;
+    if numkeys_val <= 0 {
+        return Err(CommandError::InvalidInteger);
+    }
+    let numkeys = numkeys_val as usize;
+    if argv.len() < 2 + numkeys {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
     let withscores =
@@ -10313,8 +10317,12 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         return Err(CommandError::WrongArity("ZDIFFSTORE"));
     }
     let dest = &argv[1];
-    let numkeys = parse_i64_arg(&argv[2])? as usize;
-    if numkeys == 0 || argv.len() < 3 + numkeys {
+    let numkeys_val = parse_i64_arg(&argv[2])?;
+    if numkeys_val <= 0 {
+        return Err(CommandError::InvalidInteger);
+    }
+    let numkeys = numkeys_val as usize;
+    if argv.len() < 3 + numkeys {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
     let keys: Vec<&[u8]> = (0..numkeys).map(|i| argv[3 + i].as_slice()).collect();
@@ -10342,8 +10350,12 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("ZINTER"));
     }
-    let numkeys = parse_i64_arg(&argv[1])? as usize;
-    if numkeys == 0 || argv.len() < 2 + numkeys {
+    let numkeys_val = parse_i64_arg(&argv[1])?;
+    if numkeys_val <= 0 {
+        return Err(CommandError::InvalidInteger);
+    }
+    let numkeys = numkeys_val as usize;
+    if argv.len() < 2 + numkeys {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
     let keys: Vec<&[u8]> = (0..numkeys).map(|i| argv[2 + i].as_slice()).collect();
@@ -10399,8 +10411,12 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("ZUNION"));
     }
-    let numkeys = parse_i64_arg(&argv[1])? as usize;
-    if numkeys == 0 || argv.len() < 2 + numkeys {
+    let numkeys_val = parse_i64_arg(&argv[1])?;
+    if numkeys_val <= 0 {
+        return Err(CommandError::InvalidInteger);
+    }
+    let numkeys = numkeys_val as usize;
+    if argv.len() < 2 + numkeys {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
     let keys: Vec<&[u8]> = (0..numkeys).map(|i| argv[2 + i].as_slice()).collect();
@@ -11252,12 +11268,13 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             if idx >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
-            count = parse_i64_arg(&argv[idx])? as usize;
-            if count == 0 {
+            let count_val = parse_i64_arg(&argv[idx])?;
+            if count_val <= 0 {
                 return Ok(RespFrame::Error(
                     "ERR COUNT value of 0 is not allowed".to_string(),
                 ));
             }
+            count = count_val as usize;
         } else {
             return Ok(RespFrame::Error("ERR syntax error".to_string()));
         }
@@ -11391,12 +11408,13 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             if idx >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
-            count = parse_i64_arg(&argv[idx])? as usize;
-            if count == 0 {
+            let count_val = parse_i64_arg(&argv[idx])?;
+            if count_val <= 0 {
                 return Ok(RespFrame::Error(
                     "ERR COUNT value of 0 is not allowed".to_string(),
                 ));
             }
+            count = count_val as usize;
         } else {
             return Ok(RespFrame::Error("ERR syntax error".to_string()));
         }
