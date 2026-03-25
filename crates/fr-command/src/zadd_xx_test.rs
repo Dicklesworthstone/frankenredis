@@ -9,5 +9,5 @@ fn zadd_xx_missing_key() {
         &mut store,
         0,
     ).unwrap();
-    assert_eq!(store.exists(b"myzset", 0), false);
+    assert!(!store.exists(b"myzset", 0));
 }

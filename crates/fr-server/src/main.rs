@@ -432,15 +432,16 @@ fn main() -> ExitCode {
         if !paused_tokens.is_empty() && !runtime.is_client_paused(ts) {
             let tokens: Vec<Token> = paused_tokens.drain().collect();
             for token in tokens {
-                if let Some(conn) = clients.get_mut(&token) {
-                    if !conn.read_buf.is_empty() && !conn.closing {
-                        // Re-register as readable to trigger processing on next tick
-                        let _ = poll.registry().reregister(
-                            &mut conn.stream,
-                            token,
-                            Interest::READABLE | Interest::WRITABLE,
-                        );
-                    }
+                if let Some(conn) = clients.get_mut(&token)
+                    && !conn.read_buf.is_empty()
+                    && !conn.closing
+                {
+                    // Re-register as readable to trigger processing on next tick
+                    let _ = poll.registry().reregister(
+                        &mut conn.stream,
+                        token,
+                        Interest::READABLE | Interest::WRITABLE,
+                    );
                 }
             }
         }
@@ -665,6 +666,7 @@ fn handle_readable(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_buffered_frames(
     token: Token,
     conn: &mut ClientConnection,
