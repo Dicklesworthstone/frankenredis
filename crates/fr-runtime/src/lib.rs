@@ -6422,10 +6422,10 @@ impl Runtime {
                 &self.session.transaction_state.watched_keys
             {
                 let current_fp = self.server.store.key_fingerprint(key, now_ms);
-                let current_mod = self.server.store.key_modification_count(key, now_ms);
-                // Detect changes: fingerprint differs OR modification count advanced
+                let current_dirty = self.server.store.dirty;
+                // Detect changes: fingerprint differs OR global dirty counter advanced
                 // (the latter catches ABA where value is restored to original)
-                if current_fp != *original_fp || current_mod != *original_mod_count {
+                if current_fp != *original_fp || current_dirty != *original_mod_count {
                     dirty = true;
                     break;
                 }
@@ -6529,7 +6529,7 @@ impl Runtime {
         for key in &argv[1..] {
             let physical = encode_db_key(self.session.selected_db, key);
             let fp = self.server.store.key_fingerprint(&physical, now_ms);
-            let mod_count = self.server.store.key_modification_count(&physical, now_ms);
+            let mod_count = self.server.store.dirty;
             self.session
                 .transaction_state
                 .watched_keys

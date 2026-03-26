@@ -468,8 +468,6 @@ struct Entry {
     expires_at_ms: Option<u64>,
     /// Last access timestamp in milliseconds (for OBJECT IDLETIME / LRU).
     last_access_ms: u64,
-    /// Monotonic modification counter (bumped on every write, used by WATCH).
-    modification_count: u64,
 }
 
 impl Entry {
@@ -478,13 +476,11 @@ impl Entry {
             value,
             expires_at_ms,
             last_access_ms: now_ms,
-            modification_count: 0,
         }
     }
 
     fn touch(&mut self, now_ms: u64) {
         self.last_access_ms = now_ms;
-        self.modification_count = self.modification_count.wrapping_add(1);
     }
 }
 
@@ -6998,21 +6994,6 @@ impl Store {
         let expiry_bytes = entry.expires_at_ms.unwrap_or(0).to_le_bytes();
         hash = fnv1a_update(hash, &expiry_bytes);
         hash
-    }
-
-    /// Return the modification counter for a key (0 if key doesn't exist or is expired).
-    pub fn key_modification_count(&self, key: &[u8], now_ms: u64) -> u64 {
-        match self.entries.get(key) {
-            Some(entry) => {
-                if let Some(exp) = entry.expires_at_ms
-                    && now_ms >= exp
-                {
-                    return 0;
-                }
-                entry.modification_count
-            }
-            None => 0,
-        }
     }
 
     #[must_use]
