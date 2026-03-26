@@ -6745,7 +6745,7 @@ impl Store {
                     }
 
                     let next = if pos >= total_fields { 0 } else { pos as u64 };
-                    entry.touch(now_ms);
+                    // SCAN-family commands are read-only: do NOT touch LRU
                     Ok((next, result))
                 }
                 _ => Err(StoreError::WrongType),
@@ -6794,7 +6794,7 @@ impl Store {
                     }
 
                     let next = if pos >= s.len() { 0 } else { pos as u64 };
-                    entry.touch(now_ms);
+                    // SCAN-family commands are read-only: do NOT touch LRU
                     Ok((next, result))
                 }
                 _ => Err(StoreError::WrongType),
@@ -6845,7 +6845,7 @@ impl Store {
                     }
 
                     let next = if pos >= zs.len() { 0 } else { pos as u64 };
-                    entry.touch(now_ms);
+                    // SCAN-family commands are read-only: do NOT touch LRU
                     Ok((next, result))
                 }
                 _ => Err(StoreError::WrongType),
