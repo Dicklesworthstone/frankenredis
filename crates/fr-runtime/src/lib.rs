@@ -4602,8 +4602,8 @@ impl Runtime {
             if argv.len() != 3 {
                 return CommandError::WrongArity("CLIENT").to_resp();
             }
-            // Redis validates: name must not contain spaces
-            if argv[2].contains(&b' ') {
+            // Redis validates: name must not contain spaces or control chars (< 0x20)
+            if argv[2].iter().any(|&b| b <= b' ') {
                 return RespFrame::Error(
                     "ERR Client names cannot contain spaces, newlines or special characters."
                         .to_string(),
@@ -4694,10 +4694,28 @@ impl Runtime {
                 let payload = if argv.len() == 2 {
                     info_line.into_bytes()
                 } else if argv.len() == 4 && eq_ascii_token(&argv[2], b"TYPE") {
+                    let client_id = self.session.client_id;
+                    let has_subs = self
+                        .server
+                        .pubsub_channel_subs
+                        .values()
+                        .any(|clients| clients.contains(&client_id))
+                        || self
+                            .server
+                            .pubsub_pattern_subs
+                            .values()
+                            .any(|clients| clients.contains(&client_id))
+                        || self
+                            .server
+                            .pubsub_shard_subs
+                            .values()
+                            .any(|clients| clients.contains(&client_id));
+                    let client_type = if has_subs { "pubsub" } else { "normal" };
                     let include_self = match std::str::from_utf8(&argv[3]) {
-                        Ok(kind) if kind.eq_ignore_ascii_case("NORMAL") => true,
+                        Ok(kind) if kind.eq_ignore_ascii_case(client_type) => true,
                         Ok(kind)
-                            if kind.eq_ignore_ascii_case("MASTER")
+                            if kind.eq_ignore_ascii_case("NORMAL")
+                                || kind.eq_ignore_ascii_case("MASTER")
                                 || kind.eq_ignore_ascii_case("REPLICA")
                                 || kind.eq_ignore_ascii_case("PUBSUB") =>
                         {
@@ -4778,7 +4796,7 @@ impl Runtime {
             };
             if attr.eq_ignore_ascii_case("LIB-NAME") || attr.eq_ignore_ascii_case("lib-name") {
                 // Redis validates: lib-name must not contain spaces or newlines
-                if val.contains(' ') || val.contains('\n') {
+                if val.bytes().any(|b| b <= b' ') {
                     return RespFrame::Error(
                         "ERR lib-name can only contain characters that are allowed in CLIENT SETNAME"
                             .to_string(),
@@ -4786,7 +4804,7 @@ impl Runtime {
                 }
                 self.session.client_lib_name = if val.is_empty() { None } else { Some(val) };
             } else if attr.eq_ignore_ascii_case("LIB-VER") || attr.eq_ignore_ascii_case("lib-ver") {
-                if val.contains(' ') || val.contains('\n') {
+                if val.bytes().any(|b| b <= b' ') {
                     return RespFrame::Error(
                         "ERR lib-ver can only contain characters that are allowed in CLIENT SETNAME"
                             .to_string(),
