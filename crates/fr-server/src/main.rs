@@ -158,18 +158,32 @@ impl ClientConnection {
     /// Try to flush the write buffer. Returns true if the buffer is fully
     /// drained (or was already empty).
     fn try_flush(&mut self) -> io::Result<bool> {
-        while !self.write_buf.is_empty() {
-            match self.stream.write(&self.write_buf) {
-                Ok(0) => return Err(io::Error::new(ErrorKind::WriteZero, "write zero")),
-                Ok(n) => {
-                    self.write_buf.drain(..n);
+        let mut total_written = 0;
+        let mut result = Ok(true);
+        while total_written < self.write_buf.len() {
+            match self.stream.write(&self.write_buf[total_written..]) {
+                Ok(0) => {
+                    result = Err(io::Error::new(ErrorKind::WriteZero, "write zero"));
+                    break;
                 }
-                Err(ref e) if e.kind() == ErrorKind::WouldBlock => return Ok(false),
+                Ok(n) => {
+                    total_written += n;
+                }
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                    result = Ok(false);
+                    break;
+                }
                 Err(ref e) if e.kind() == ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
+                Err(e) => {
+                    result = Err(e);
+                    break;
+                }
             }
         }
-        Ok(true)
+        if total_written > 0 {
+            self.write_buf.drain(..total_written);
+        }
+        result
     }
 }
 
@@ -1170,25 +1184,34 @@ fn sync_replica_with_primary(
 }
 
 fn flush_replica_primary_writes(connection: &mut ReplicaPrimaryConnection) -> io::Result<()> {
-    while !connection.write_buf.is_empty() {
-        match connection.stream.write(&connection.write_buf) {
+    let mut total_written = 0;
+    let mut result = Ok(());
+    while total_written < connection.write_buf.len() {
+        match connection.stream.write(&connection.write_buf[total_written..]) {
             Ok(0) => {
-                return Err(io::Error::new(
+                result = Err(io::Error::new(
                     ErrorKind::WriteZero,
                     "replica write zero on primary stream",
                 ));
+                break;
             }
             Ok(written) => {
-                connection.write_buf.drain(..written);
+                total_written += written;
             }
             Err(ref err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
                 break;
             }
             Err(ref err) if err.kind() == ErrorKind::Interrupted => continue,
-            Err(err) => return Err(err),
+            Err(err) => {
+                result = Err(err);
+                break;
+            }
         }
     }
-    Ok(())
+    if total_written > 0 {
+        connection.write_buf.drain(..total_written);
+    }
+    result
 }
 
 fn replication_stream_follow_up_bytes(frame: &RespFrame, response: &RespFrame) -> Option<Vec<u8>> {
@@ -1300,12 +1323,14 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
         if let Err(err) =
             validate_replica_write_buffer_limit(connection, runtime.server.output_buffer_limit)
         {
+            replica_sync.connection = None;
             replica_sync.schedule_retry(now_ms);
             runtime.set_replica_connection_state("reconnect");
             eprintln!("warn: replica stream write failed: {err}");
             return;
         }
         if let Err(err) = flush_replica_primary_writes(connection) {
+            replica_sync.connection = None;
             replica_sync.schedule_retry(now_ms);
             runtime.set_replica_connection_state("reconnect");
             eprintln!("warn: replica stream write failed: {err}");
@@ -1314,6 +1339,7 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
         match drain_replica_stream(runtime, connection, now_ms) {
             Ok(false) => {
                 if let Err(err) = flush_replica_primary_writes(connection) {
+                    replica_sync.connection = None;
                     replica_sync.schedule_retry(now_ms);
                     runtime.set_replica_connection_state("reconnect");
                     eprintln!("warn: replica stream write failed: {err}");
@@ -1321,10 +1347,12 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
                 }
             }
             Ok(true) => {
+                replica_sync.connection = None;
                 replica_sync.schedule_retry(now_ms);
                 runtime.set_replica_connection_state("reconnect");
             }
             Err(err) => {
+                replica_sync.connection = None;
                 replica_sync.schedule_retry(now_ms);
                 runtime.set_replica_connection_state("reconnect");
                 eprintln!("warn: replica stream read failed: {err}");
@@ -2680,6 +2708,59 @@ mod tests {
         );
 
         server.join().expect("primary thread");
+    }
+
+    #[test]
+    fn replica_sync_clears_failed_connection_and_schedules_retry() {
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
+        let addr = listener.local_addr().expect("local addr");
+
+        let mut runtime = Runtime::default_strict();
+        runtime.set_server_port(6381);
+        assert_eq!(
+            runtime.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"REPLICAOF".to_vec())),
+                    RespFrame::BulkString(Some(addr.ip().to_string().into_bytes())),
+                    RespFrame::BulkString(Some(addr.port().to_string().into_bytes())),
+                ])),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let stream = StdTcpStream::connect(addr).expect("connect primary");
+        let (server_stream, _) = listener.accept().expect("accept replica");
+        drop(server_stream);
+        stream
+            .set_nonblocking(true)
+            .expect("set replica stream nonblocking");
+
+        let mut replica_sync = ReplicaSyncState::new();
+        replica_sync.connection = Some(ReplicaPrimaryConnection {
+            stream,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
+            next_ack_ms: 0,
+        });
+
+        drive_replica_sync(&mut runtime, &mut replica_sync, 10);
+
+        assert!(replica_sync.connection.is_none());
+        assert!(replica_sync.retry_after_ms >= 10 + REPLICA_RECONNECT_BACKOFF_MS);
+        assert_eq!(
+            runtime.execute_frame(
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"ROLE".to_vec()))])),
+                11,
+            ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"slave".to_vec())),
+                RespFrame::BulkString(Some(addr.ip().to_string().into_bytes())),
+                RespFrame::Integer(i64::from(addr.port())),
+                RespFrame::BulkString(Some(b"reconnect".to_vec())),
+                RespFrame::Integer(0),
+            ]))
+        );
     }
 
     #[test]
