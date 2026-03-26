@@ -305,8 +305,10 @@ impl AuthState {
             } else if rule_str.eq_ignore_ascii_case("nopass") {
                 user.passwords.clear();
             } else if rule_str.eq_ignore_ascii_case("resetpass") {
+                // resetpass clears all passwords but does NOT disable the user.
+                // The user becomes unauthenticatable (no passwords, no nopass)
+                // but remains "on" — use "off" to explicitly disable.
                 user.passwords.clear();
-                user.enabled = false;
             } else if rule_str.eq_ignore_ascii_case("allcommands")
                 || rule_str == "+@all"
                 || rule_str.eq_ignore_ascii_case("allkeys")
@@ -2059,9 +2061,9 @@ impl Runtime {
     fn is_command_authorized(&self, argv: &[Vec<u8>]) -> bool {
         let username = self.session.current_user_name();
         let Some(user) = self.server.auth_state.get_user(username) else {
-            // User was deleted while session is still active — Redis allows
-            // existing connections to continue operating until re-authentication.
-            return true;
+            // User was deleted while session is still active — deny access
+            // until re-authentication. Redis terminates such connections.
+            return false;
         };
 
         if user.full_access {
@@ -3278,7 +3280,7 @@ impl Runtime {
             let user = self.server.auth_state.get_user(username);
             match user {
                 Some(u) => {
-                    if u.enabled && u.full_access {
+                    if u.full_access {
                         RespFrame::SimpleString("OK".to_string())
                     } else {
                         let cmd_name = String::from_utf8_lossy(&argv[3]);

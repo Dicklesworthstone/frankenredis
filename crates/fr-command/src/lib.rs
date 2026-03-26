@@ -8548,7 +8548,7 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("bgsave", -1, "admin", 0, 0, 0),
     ("bgrewriteaof", 1, "admin", 0, 0, 0),
     ("lastsave", 1, "fast", 0, 0, 0),
-    ("swapdb", 3, "write fast", 0, 0, 0),
+    ("swapdb", 3, "write fast admin dangerous", 0, 0, 0),
     ("object", -2, "readonly", 2, 2, 1),
     ("memory", -2, "readonly", 0, 0, 0),
     ("slowlog", -2, "admin", 0, 0, 0),
