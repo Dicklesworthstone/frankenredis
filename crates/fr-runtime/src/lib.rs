@@ -823,7 +823,8 @@ impl ReplicationRuntimeState {
 struct TransactionState {
     in_transaction: bool,
     command_queue: Vec<Vec<Vec<u8>>>,
-    watched_keys: Vec<(Vec<u8>, u64)>,
+    /// (key, fingerprint, dirty_counter_at_watch_time)
+    watched_keys: Vec<(Vec<u8>, u64, u64)>,
     watch_dirty: bool,
     exec_abort: bool,
 }
@@ -6412,9 +6413,14 @@ impl Runtime {
         // Check watched keys: if any were modified, abort the transaction
         let watch_failed = self.session.transaction_state.watch_dirty || {
             let mut dirty = false;
-            for (key, original_fp) in &self.session.transaction_state.watched_keys {
+            for (key, original_fp, original_mod_count) in
+                &self.session.transaction_state.watched_keys
+            {
                 let current_fp = self.server.store.key_fingerprint(key, now_ms);
-                if current_fp != *original_fp {
+                let current_mod = self.server.store.key_modification_count(key, now_ms);
+                // Detect changes: fingerprint differs OR modification count advanced
+                // (the latter catches ABA where value is restored to original)
+                if current_fp != *original_fp || current_mod != *original_mod_count {
                     dirty = true;
                     break;
                 }
@@ -6518,10 +6524,11 @@ impl Runtime {
         for key in &argv[1..] {
             let physical = encode_db_key(self.session.selected_db, key);
             let fp = self.server.store.key_fingerprint(&physical, now_ms);
+            let mod_count = self.server.store.key_modification_count(&physical, now_ms);
             self.session
                 .transaction_state
                 .watched_keys
-                .push((physical, fp));
+                .push((physical, fp, mod_count));
         }
         RespFrame::SimpleString("OK".to_string())
     }
