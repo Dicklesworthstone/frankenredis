@@ -11877,12 +11877,12 @@ mod tests {
             min_idle_time_ms: 0,
             idle_ms: None,
             time_ms: None,
-            retrycount: None,
+            retry_count: None,
             force: true,
             justid: false,
-            lastid: None,
+            last_id: None,
         };
-        let _ = store.xclaim(b"s", b"g", b"new_consumer", &[(1, 0)], &opts, 200);
+        let _ = store.xclaim(b"s", b"g", b"new_consumer", &[(1, 0)], opts, 200);
         assert!(
             store.dirty > before,
             "XCLAIM must increment dirty for AOF"
