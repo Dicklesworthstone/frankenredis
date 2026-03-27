@@ -255,7 +255,7 @@ fn read_line(input: &[u8], start: usize) -> Result<(&[u8], usize), RespParseErro
     if start >= input.len() {
         return Err(RespParseError::Incomplete);
     }
-    let max_line_end = start + MAX_LINE_LENGTH;
+    let max_line_end = start.saturating_add(MAX_LINE_LENGTH);
     let mut i = start;
     while i + 1 < input.len() {
         if input[i] == b'\r' && input[i + 1] == b'\n' {
