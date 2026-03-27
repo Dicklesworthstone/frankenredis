@@ -841,6 +841,11 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
             | CommandId::Zmpop
             | CommandId::Xreadgroup
             | CommandId::Geosearchstore
+            | CommandId::Move
+            | CommandId::Georadius
+            | CommandId::Georadiusbymember
+            | CommandId::Swapdb
+            | CommandId::Migrate
     )
 }
 
