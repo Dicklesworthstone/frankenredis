@@ -1921,7 +1921,7 @@
       "now_ms": 100,
       "argv": [
         "GEORADIUS_RO",
-        "mygeo",
+        "geo",
         "13.361389",
         "38.115556",
         "200",
@@ -1941,7 +1941,7 @@
       "now_ms": 100,
       "argv": [
         "GEORADIUSBYMEMBER_RO",
-        "mygeo",
+        "geo",
         "Palermo",
         "200",
         "km",
@@ -1960,7 +1960,7 @@
       "now_ms": 100,
       "argv": [
         "GEORADIUS_RO",
-        "mygeo",
+        "geo",
         "13.361389",
         "38.115556",
         "-1",
