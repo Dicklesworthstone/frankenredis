@@ -18,8 +18,8 @@
 - Phase 1 complete: bootstrap docs and workspace skeleton.
 - Phase 2 in progress: extraction docs exist; deep subsystem extraction still incomplete.
 - Phase 3 in progress: architecture synthesized; strict/hardened mode split defined.
-- Phase 4 started: first executable vertical slice landed (`RESP -> router -> store -> runtime -> conformance`).
-- Phase 5 started: fixture-driven conformance and baseline artifacts are wired.
+- Phase 4 in progress: the executable path is now a broader implemented/tested baseline (`RESP -> router -> store -> persistence/replication hooks -> conformance`), not just the first vertical slice.
+- Phase 5 in progress: fixture-driven conformance, replay/protocol-negative coverage, and checked-in optimization/proof artifacts are live, with broader oracle-depth expansion still pending.
 
 ## 3. Full-Parity Objective (Non-Negotiable)
 
@@ -54,7 +54,7 @@ Exit criteria:
 
 ### M2 - Core Semantic Parity
 
-- Expand runtime command set from bootstrap toward full command-family parity.
+- Expand the already broad runtime command set toward full command-family parity and long-tail compatibility closure.
 - Add fixture families per command cluster.
 - Add drift taxonomy and severity gates.
 
