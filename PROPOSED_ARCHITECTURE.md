@@ -13,17 +13,17 @@
 
 `RESP decode -> command routing -> store mutation/read -> persistence hooks -> replication hooks -> reply encode`
 
-The current codebase already has a first executable vertical slice for this path.
+The current codebase already has an implemented/tested baseline for this path, with persistence, replication, and conformance coverage beyond the initial vertical slice.
 
 ## 3. Workspace Crate Responsibilities
 
 - `fr-protocol`: RESP frame types, parser, encoder, and parse error model.
 - `fr-command`: arity/option validation and command execution mapping.
 - `fr-store`: in-memory keyspace core and TTL-aware semantics.
-- `fr-runtime`: strict/hardened gatekeeping and evidence ledger hooks.
-- `fr-conformance`: fixture runner and differential-report shape.
-- `fr-persist`: AOF record shape and replay-frame contract scaffolding.
-- `fr-repl`: replication state and offset progression scaffolding.
+- `fr-runtime`: strict/hardened gatekeeping, runtime command orchestration, active-expire scheduling, and evidence ledger hooks.
+- `fr-conformance`: fixture runners, differential reporting, packet suites, and replay/protocol-negative validation.
+- `fr-persist`: AOF framing/replay, rewrite serialization, and RDB snapshot encode/decode baseline.
+- `fr-repl`: replication state, offset progression, PSYNC/SYNC negotiation, backlog handling, and resync baseline.
 - `fr-expire`: expiry decision primitives and return-code policy.
 - `fr-eventloop`: tick-budget and backlog scheduling primitives.
 - `fr-config`: mode and compatibility gate policy model.
