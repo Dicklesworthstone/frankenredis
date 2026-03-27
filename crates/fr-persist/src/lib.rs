@@ -458,7 +458,12 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
         // This prevents 'leaking' an expiry to the next key if something unexpected happens.
         let is_type_byte = matches!(
             opcode,
-            RDB_TYPE_STRING | RDB_TYPE_LIST | RDB_TYPE_SET | RDB_TYPE_HASH | RDB_TYPE_ZSET_2
+            RDB_TYPE_STRING
+                | RDB_TYPE_LIST
+                | RDB_TYPE_SET
+                | RDB_TYPE_HASH
+                | RDB_TYPE_ZSET_2
+                | RDB_TYPE_STREAM
         );
         let is_expiry_opcode = matches!(opcode, RDB_OPCODE_EXPIRETIME_MS | 0xFD);
         let is_eviction_opcode = matches!(opcode, 0xF8 | 0xF9);
@@ -1060,6 +1065,111 @@ mod tests {
         assert_eq!(err, PersistError::InvalidFrame);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn rdb_round_trip_stream() {
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"mystream".to_vec(),
+            value: RdbValue::Stream(
+                vec![
+                    (
+                        1000,
+                        0,
+                        vec![
+                            (b"name".to_vec(), b"Alice".to_vec()),
+                            (b"age".to_vec(), b"30".to_vec()),
+                        ],
+                    ),
+                    (1001, 0, vec![(b"name".to_vec(), b"Bob".to_vec())]),
+                ],
+                Some((1001, 0)),
+            ),
+            expire_ms: None,
+        }];
+        let encoded = encode_rdb(&entries, &[]);
+        let (decoded, _) = decode_rdb(&encoded).expect("decode");
+        assert_eq!(decoded, entries);
+    }
+
+    #[test]
+    fn rdb_round_trip_stream_no_watermark() {
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"emptystream".to_vec(),
+            value: RdbValue::Stream(vec![], None),
+            expire_ms: None,
+        }];
+        let encoded = encode_rdb(&entries, &[]);
+        let (decoded, _) = decode_rdb(&encoded).expect("decode");
+        assert_eq!(decoded, entries);
+    }
+
+    #[test]
+    fn rdb_round_trip_stream_with_expiry() {
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"tempstream".to_vec(),
+            value: RdbValue::Stream(
+                vec![(5000, 1, vec![(b"field".to_vec(), b"value".to_vec())])],
+                Some((5000, 1)),
+            ),
+            expire_ms: Some(9_999_999),
+        }];
+        let encoded = encode_rdb(&entries, &[]);
+        let (decoded, _) = decode_rdb(&encoded).expect("decode");
+        assert_eq!(decoded, entries);
+    }
+
+    #[test]
+    fn rdb_round_trip_all_types_together() {
+        // Entries sorted by key alphabetically (encode_rdb sorts within each db).
+        let entries = vec![
+            RdbEntry {
+                db: 0,
+                key: b"hsh".to_vec(),
+                value: RdbValue::Hash(vec![(b"f".to_vec(), b"v".to_vec())]),
+                expire_ms: None,
+            },
+            RdbEntry {
+                db: 0,
+                key: b"lst".to_vec(),
+                value: RdbValue::List(vec![b"a".to_vec(), b"b".to_vec()]),
+                expire_ms: None,
+            },
+            RdbEntry {
+                db: 0,
+                key: b"st".to_vec(),
+                value: RdbValue::Set(vec![b"x".to_vec(), b"y".to_vec()]),
+                expire_ms: None,
+            },
+            RdbEntry {
+                db: 0,
+                key: b"str".to_vec(),
+                value: RdbValue::String(b"hello".to_vec()),
+                expire_ms: None,
+            },
+            RdbEntry {
+                db: 0,
+                key: b"strm".to_vec(),
+                value: RdbValue::Stream(
+                    vec![(100, 0, vec![(b"k".to_vec(), b"v".to_vec())])],
+                    Some((100, 0)),
+                ),
+                expire_ms: Some(1_000_000),
+            },
+            RdbEntry {
+                db: 0,
+                key: b"zst".to_vec(),
+                value: RdbValue::SortedSet(vec![(b"m".to_vec(), 2.5)]),
+                expire_ms: None,
+            },
+        ];
+        let encoded = encode_rdb(&entries, &[("redis-ver", "7.2.0")]);
+        let (decoded, aux) = decode_rdb(&encoded).expect("decode");
+        assert_eq!(decoded, entries);
+        assert_eq!(aux.get("redis-ver").map(String::as_str), Some("7.2.0"));
     }
 
     #[test]

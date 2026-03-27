@@ -10608,6 +10608,152 @@ mod tests {
     }
 
     #[test]
+    fn save_and_load_aof_round_trip_with_streams_and_ttl() {
+        let dir = std::env::temp_dir().join("fr_runtime_aof_stream_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let aof_path = dir.join("test_stream.aof");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(aof_path.clone());
+
+        // Add a stream
+        rt.execute_frame(
+            command(&[b"XADD", b"mystream", b"1-0", b"name", b"Alice"]),
+            100,
+        );
+        rt.execute_frame(
+            command(&[b"XADD", b"mystream", b"2-0", b"name", b"Bob"]),
+            100,
+        );
+
+        // Add a key with TTL
+        rt.execute_frame(
+            command(&[b"SET", b"ttl_key", b"expiring", b"PX", b"60000"]),
+            100,
+        );
+
+        // SAVE to persist
+        let save_result = rt.execute_frame(command(&[b"SAVE"]), 100);
+        assert_eq!(save_result, RespFrame::SimpleString("OK".to_string()));
+        assert!(aof_path.exists());
+
+        // Load into fresh runtime
+        let mut rt2 = Runtime::default_strict();
+        rt2.set_aof_path(aof_path.clone());
+        let loaded = rt2.load_aof(100).expect("load should succeed");
+        assert!(loaded > 0);
+
+        // Verify stream was restored
+        let xlen = rt2.execute_frame(command(&[b"XLEN", b"mystream"]), 100);
+        assert_eq!(xlen, RespFrame::Integer(2));
+
+        // Verify TTL key exists and has TTL
+        let get_ttl = rt2.execute_frame(command(&[b"GET", b"ttl_key"]), 100);
+        assert_eq!(get_ttl, RespFrame::BulkString(Some(b"expiring".to_vec())));
+        let pttl = rt2.execute_frame(command(&[b"PTTL", b"ttl_key"]), 100);
+        // TTL should be positive (key not expired)
+        if let RespFrame::Integer(ms) = pttl {
+            assert!(ms > 0, "TTL key should have positive PTTL, got {ms}");
+        } else {
+            panic!("Expected integer from PTTL, got: {pttl:?}");
+        }
+
+        let _ = std::fs::remove_file(&aof_path);
+    }
+
+    #[test]
+    fn save_and_load_aof_round_trip_multi_db() {
+        let dir = std::env::temp_dir().join("fr_runtime_aof_multidb_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let aof_path = dir.join("test_multidb.aof");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(aof_path.clone());
+
+        // DB 0: string
+        rt.execute_frame(command(&[b"SET", b"db0:key", b"zero"]), 100);
+
+        // DB 1: hash
+        rt.execute_frame(command(&[b"SELECT", b"1"]), 100);
+        rt.execute_frame(
+            command(&[b"HSET", b"db1:hash", b"f1", b"v1", b"f2", b"v2"]),
+            100,
+        );
+
+        // DB 2: list
+        rt.execute_frame(command(&[b"SELECT", b"2"]), 100);
+        rt.execute_frame(command(&[b"RPUSH", b"db2:list", b"a", b"b", b"c"]), 100);
+
+        // DB 3: set
+        rt.execute_frame(command(&[b"SELECT", b"3"]), 100);
+        rt.execute_frame(command(&[b"SADD", b"db3:set", b"x", b"y", b"z"]), 100);
+
+        // DB 4: sorted set
+        rt.execute_frame(command(&[b"SELECT", b"4"]), 100);
+        rt.execute_frame(
+            command(&[b"ZADD", b"db4:zset", b"1", b"a", b"2", b"b"]),
+            100,
+        );
+
+        // SAVE
+        rt.execute_frame(command(&[b"SELECT", b"0"]), 100);
+        assert_eq!(
+            rt.execute_frame(command(&[b"SAVE"]), 100),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Load into fresh runtime
+        let mut rt2 = Runtime::default_strict();
+        rt2.set_aof_path(aof_path.clone());
+        let loaded = rt2.load_aof(100).expect("load should succeed");
+        assert!(loaded > 0);
+
+        // Verify DB 0
+        assert_eq!(
+            rt2.execute_frame(command(&[b"GET", b"db0:key"]), 100),
+            RespFrame::BulkString(Some(b"zero".to_vec()))
+        );
+
+        // Verify DB 1
+        rt2.execute_frame(command(&[b"SELECT", b"1"]), 100);
+        assert_eq!(
+            rt2.execute_frame(command(&[b"HGET", b"db1:hash", b"f1"]), 100),
+            RespFrame::BulkString(Some(b"v1".to_vec()))
+        );
+        assert_eq!(
+            rt2.execute_frame(command(&[b"HLEN", b"db1:hash"]), 100),
+            RespFrame::Integer(2)
+        );
+
+        // Verify DB 2
+        rt2.execute_frame(command(&[b"SELECT", b"2"]), 100);
+        assert_eq!(
+            rt2.execute_frame(command(&[b"LLEN", b"db2:list"]), 100),
+            RespFrame::Integer(3)
+        );
+
+        // Verify DB 3
+        rt2.execute_frame(command(&[b"SELECT", b"3"]), 100);
+        assert_eq!(
+            rt2.execute_frame(command(&[b"SCARD", b"db3:set"]), 100),
+            RespFrame::Integer(3)
+        );
+
+        // Verify DB 4
+        rt2.execute_frame(command(&[b"SELECT", b"4"]), 100);
+        assert_eq!(
+            rt2.execute_frame(command(&[b"ZCARD", b"db4:zset"]), 100),
+            RespFrame::Integer(2)
+        );
+        assert_eq!(
+            rt2.execute_frame(command(&[b"ZSCORE", b"db4:zset", b"b"]), 100),
+            RespFrame::BulkString(Some(b"2".to_vec()))
+        );
+
+        let _ = std::fs::remove_file(&aof_path);
+    }
+
+    #[test]
     fn bgsave_writes_rdb_snapshot_when_path_is_configured() {
         let dir = std::env::temp_dir().join("fr_runtime_rdb_test");
         let _ = std::fs::create_dir_all(&dir);

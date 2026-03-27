@@ -218,6 +218,70 @@
         { "key": "gx:key", "expect": "data", "at_ms": 17005 },
         { "key": "gx:key", "expect": "data", "at_ms": 18000 }
       ]
+    },
+    {
+      "name": "incrbyfloat_replay",
+      "now_ms": 18000,
+      "records": [
+        ["SET", "fl:key", "10.5"],
+        ["INCRBYFLOAT", "fl:key", "2.3"],
+        ["INCRBYFLOAT", "fl:key", "-1"]
+      ],
+      "assertions": [
+        { "key": "fl:key", "expect": "11.8" }
+      ]
+    },
+    {
+      "name": "copy_and_unlink_replay",
+      "now_ms": 19000,
+      "records": [
+        ["SET", "cp:src", "original"],
+        ["COPY", "cp:src", "cp:dst"],
+        ["UNLINK", "cp:src"]
+      ],
+      "assertions": [
+        { "key": "cp:src", "expect": null },
+        { "key": "cp:dst", "expect": "original" }
+      ]
+    },
+    {
+      "name": "set_keepttl_replay",
+      "now_ms": 20000,
+      "records": [
+        ["SET", "kt:key", "v1", "PX", "50"],
+        ["SET", "kt:key", "v2", "KEEPTTL"]
+      ],
+      "assertions": [
+        { "key": "kt:key", "expect": "v2", "at_ms": 20030 },
+        { "key": "kt:key", "expect": null, "at_ms": 20060 }
+      ]
+    },
+    {
+      "name": "set_get_option_replay",
+      "now_ms": 21000,
+      "records": [
+        ["SET", "sg:key", "first"],
+        ["SET", "sg:key", "second", "GET"]
+      ],
+      "assertions": [
+        { "key": "sg:key", "expect": "second" }
+      ]
+    },
+    {
+      "name": "pexpireat_and_expireat_replay",
+      "now_ms": 22000,
+      "records": [
+        ["SET", "pea:key", "data"],
+        ["PEXPIREAT", "pea:key", "22010"],
+        ["SET", "ea:key", "data2"],
+        ["EXPIREAT", "ea:key", "23"]
+      ],
+      "assertions": [
+        { "key": "pea:key", "expect": "data", "at_ms": 22005 },
+        { "key": "pea:key", "expect": null, "at_ms": 22015 },
+        { "key": "ea:key", "expect": "data2", "at_ms": 22999 },
+        { "key": "ea:key", "expect": null, "at_ms": 23001 }
+      ]
     }
   ]
 }

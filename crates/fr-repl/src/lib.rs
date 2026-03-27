@@ -539,4 +539,127 @@ mod tests {
         assert_eq!(satisfied.acked_replicas, 2);
         assert!(satisfied.satisfied);
     }
+
+    #[test]
+    fn backlog_window_zero_width_accepts_exact_offset() {
+        let backlog = BacklogWindow {
+            replid: "r".to_string(),
+            start_offset: ReplOffset(50),
+            end_offset: ReplOffset(50),
+        };
+        // Exact match on zero-width window should succeed.
+        assert_eq!(
+            decide_psync(&backlog, "r", ReplOffset(50)),
+            PsyncDecision::Continue {
+                requested_offset: ReplOffset(50)
+            }
+        );
+        // One before and one after should fail.
+        assert!(matches!(
+            decide_psync(&backlog, "r", ReplOffset(49)),
+            PsyncDecision::FullResync { .. }
+        ));
+        assert!(matches!(
+            decide_psync(&backlog, "r", ReplOffset(51)),
+            PsyncDecision::FullResync { .. }
+        ));
+    }
+
+    #[test]
+    fn backlog_window_at_offset_zero() {
+        let backlog = BacklogWindow {
+            replid: "r".to_string(),
+            start_offset: ReplOffset(0),
+            end_offset: ReplOffset(10),
+        };
+        assert_eq!(
+            decide_psync(&backlog, "r", ReplOffset(0)),
+            PsyncDecision::Continue {
+                requested_offset: ReplOffset(0)
+            }
+        );
+        assert_eq!(
+            decide_psync(&backlog, "r", ReplOffset(10)),
+            PsyncDecision::Continue {
+                requested_offset: ReplOffset(10)
+            }
+        );
+    }
+
+    #[test]
+    fn backlog_window_rotate_replaces_all_fields() {
+        let mut backlog = BacklogWindow {
+            replid: "old".to_string(),
+            start_offset: ReplOffset(0),
+            end_offset: ReplOffset(100),
+        };
+        backlog.rotate("new".to_string(), ReplOffset(200), ReplOffset(300));
+        assert_eq!(backlog.replid, "new");
+        assert_eq!(backlog.start_offset, ReplOffset(200));
+        assert_eq!(backlog.end_offset, ReplOffset(300));
+        // Old offsets should no longer be accepted.
+        assert!(matches!(
+            decide_psync(&backlog, "new", ReplOffset(100)),
+            PsyncDecision::FullResync { .. }
+        ));
+        // New offsets should work.
+        assert_eq!(
+            decide_psync(&backlog, "new", ReplOffset(250)),
+            PsyncDecision::Continue {
+                requested_offset: ReplOffset(250)
+            }
+        );
+    }
+
+    #[test]
+    fn wait_with_no_replicas_never_satisfied() {
+        let outcome = evaluate_wait(
+            &[],
+            WaitThreshold {
+                required_offset: ReplOffset(1),
+                required_replicas: 1,
+            },
+        );
+        assert_eq!(outcome.acked_replicas, 0);
+        assert!(!outcome.satisfied);
+    }
+
+    #[test]
+    fn wait_with_zero_required_replicas_always_satisfied() {
+        let outcome = evaluate_wait(
+            &[],
+            WaitThreshold {
+                required_offset: ReplOffset(100),
+                required_replicas: 0,
+            },
+        );
+        assert_eq!(outcome.acked_replicas, 0);
+        assert!(outcome.satisfied);
+    }
+
+    #[test]
+    fn repl_progress_saturating_add_handles_overflow() {
+        let mut repl = ReplProgress::default();
+        repl.append_primary_bytes(u64::MAX);
+        assert_eq!(repl.primary_offset, ReplOffset(u64::MAX));
+        // Should not overflow.
+        repl.append_primary_bytes(1);
+        assert_eq!(repl.primary_offset, ReplOffset(u64::MAX));
+    }
+
+    #[test]
+    fn psync_with_question_mark_replid_triggers_fullresync() {
+        let backlog = BacklogWindow {
+            replid: "abc123".to_string(),
+            start_offset: ReplOffset(0),
+            end_offset: ReplOffset(100),
+        };
+        // "?" is the initial PSYNC replid for first sync.
+        assert!(matches!(
+            decide_psync(&backlog, "?", ReplOffset(0)),
+            PsyncDecision::FullResync {
+                rejection: PsyncRejection::ReplidMismatch
+            }
+        ));
+    }
 }

@@ -1582,6 +1582,264 @@
         "kind": "bulk",
         "value": null
       }
+    },
+
+    {
+      "name": "acl_percmd_setup_restricted_user",
+      "now_ms": 200,
+      "argv": ["ACL", "SETUSER", "restricted", "on", ">secret", "-@all", "+get", "+set", "+auth", "+ping"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_percmd_seed_key_before_auth",
+      "now_ms": 201,
+      "argv": ["SET", "acl:test:key", "hello"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_percmd_auth_as_restricted",
+      "now_ms": 202,
+      "argv": ["AUTH", "restricted", "secret"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_percmd_get_allowed",
+      "now_ms": 203,
+      "argv": ["GET", "acl:test:key"],
+      "expect": { "kind": "bulk", "value": "hello" }
+    },
+    {
+      "name": "acl_percmd_set_allowed",
+      "now_ms": 204,
+      "argv": ["SET", "acl:test:key", "updated"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_percmd_del_denied",
+      "now_ms": 205,
+      "argv": ["DEL", "acl:test:key"],
+      "expect": { "kind": "error", "value": "NOPERM this user has no permissions to run the 'DEL' command" },
+      "expect_threat": {
+        "threat_class": "auth_policy_confusion",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "auth.noperm_gate_violation"
+      }
+    },
+    {
+      "name": "acl_percmd_incr_denied",
+      "now_ms": 206,
+      "argv": ["INCR", "acl:test:counter"],
+      "expect": { "kind": "error", "value": "NOPERM this user has no permissions to run the 'INCR' command" },
+      "expect_threat": {
+        "threat_class": "auth_policy_confusion",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "auth.noperm_gate_violation"
+      }
+    },
+    {
+      "name": "acl_percmd_keys_denied",
+      "now_ms": 207,
+      "argv": ["KEYS", "*"],
+      "expect": { "kind": "error", "value": "NOPERM this user has no permissions to run the 'KEYS' command" },
+      "expect_threat": {
+        "threat_class": "auth_policy_confusion",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "auth.noperm_gate_violation"
+      }
+    },
+    {
+      "name": "acl_percmd_ping_allowed",
+      "now_ms": 208,
+      "argv": ["PING"],
+      "expect": { "kind": "simple", "value": "PONG" }
+    },
+    {
+      "name": "acl_percmd_reauth_default",
+      "now_ms": 209,
+      "argv": ["AUTH", "default", ""],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+
+    {
+      "name": "acl_category_setup_readonly_user",
+      "now_ms": 300,
+      "argv": ["ACL", "SETUSER", "reader", "on", ">rpass", "-@all", "+@read", "+@connection"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_category_seed_key",
+      "now_ms": 301,
+      "argv": ["SET", "acl:cat:key", "catval"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_category_auth_reader",
+      "now_ms": 302,
+      "argv": ["AUTH", "reader", "rpass"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_category_get_allowed_via_read",
+      "now_ms": 303,
+      "argv": ["GET", "acl:cat:key"],
+      "expect": { "kind": "bulk", "value": "catval" }
+    },
+    {
+      "name": "acl_category_set_denied_write_only",
+      "now_ms": 304,
+      "argv": ["SET", "acl:cat:key", "new"],
+      "expect": { "kind": "error", "value": "NOPERM this user has no permissions to run the 'SET' command" },
+      "expect_threat": {
+        "threat_class": "auth_policy_confusion",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "auth.noperm_gate_violation"
+      }
+    },
+    {
+      "name": "acl_category_reauth_default2",
+      "now_ms": 305,
+      "argv": ["AUTH", "default", ""],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+
+    {
+      "name": "acl_deny_override_setup",
+      "now_ms": 400,
+      "argv": ["ACL", "SETUSER", "nodanger", "on", ">ndpass", "+@all", "-flushdb", "-flushall"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_deny_override_auth",
+      "now_ms": 401,
+      "argv": ["AUTH", "nodanger", "ndpass"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_deny_override_set_allowed",
+      "now_ms": 402,
+      "argv": ["SET", "acl:deny:k", "v"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_deny_override_get_allowed",
+      "now_ms": 403,
+      "argv": ["GET", "acl:deny:k"],
+      "expect": { "kind": "bulk", "value": "v" }
+    },
+    {
+      "name": "acl_deny_override_flushdb_denied",
+      "now_ms": 404,
+      "argv": ["FLUSHDB"],
+      "expect": { "kind": "error", "value": "NOPERM this user has no permissions to run the 'FLUSHDB' command" },
+      "expect_threat": {
+        "threat_class": "auth_policy_confusion",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "auth.noperm_gate_violation"
+      }
+    },
+    {
+      "name": "acl_deny_override_flushall_denied",
+      "now_ms": 405,
+      "argv": ["FLUSHALL"],
+      "expect": { "kind": "error", "value": "NOPERM this user has no permissions to run the 'FLUSHALL' command" },
+      "expect_threat": {
+        "threat_class": "auth_policy_confusion",
+        "severity": "s0",
+        "decision_action": "fail_closed",
+        "reason_code": "auth.noperm_gate_violation"
+      }
+    },
+    {
+      "name": "acl_deny_override_del_allowed",
+      "now_ms": 406,
+      "argv": ["DEL", "acl:deny:k"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "acl_deny_override_reauth_default3",
+      "now_ms": 407,
+      "argv": ["AUTH", "default", ""],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+
+    {
+      "name": "acl_dryrun_allowed_cmd",
+      "now_ms": 500,
+      "argv": ["ACL", "DRYRUN", "restricted", "GET", "k"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_dryrun_denied_cmd",
+      "now_ms": 501,
+      "argv": ["ACL", "DRYRUN", "restricted", "DEL", "k"],
+      "expect": { "kind": "error", "value": "ERR User 'restricted' has no permissions to run the 'DEL' command" }
+    },
+    {
+      "name": "acl_dryrun_nonexistent_user",
+      "now_ms": 502,
+      "argv": ["ACL", "DRYRUN", "ghost", "GET", "k"],
+      "expect": { "kind": "error", "value": "ERR User 'ghost' not found" }
+    },
+    {
+      "name": "acl_dryrun_category_deny",
+      "now_ms": 503,
+      "argv": ["ACL", "DRYRUN", "reader", "SET", "k", "v"],
+      "expect": { "kind": "error", "value": "ERR User 'reader' has no permissions to run the 'SET' command" }
+    },
+    {
+      "name": "acl_dryrun_explicit_deny_override",
+      "now_ms": 504,
+      "argv": ["ACL", "DRYRUN", "nodanger", "FLUSHDB"],
+      "expect": { "kind": "error", "value": "ERR User 'nodanger' has no permissions to run the 'FLUSHDB' command" }
+    },
+
+    {
+      "name": "acl_reset_rule_setup",
+      "now_ms": 600,
+      "argv": ["ACL", "SETUSER", "resetme", "on", ">rpass2", "+@all"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_reset_rule_apply",
+      "now_ms": 601,
+      "argv": ["ACL", "SETUSER", "resetme", "reset"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_reset_rule_dryrun_denied",
+      "now_ms": 602,
+      "argv": ["ACL", "DRYRUN", "resetme", "GET", "k"],
+      "expect": { "kind": "error", "value": "ERR User 'resetme' has no permissions to run the 'GET' command" }
+    },
+
+    {
+      "name": "acl_allcommands_reset_granular",
+      "now_ms": 700,
+      "argv": ["ACL", "SETUSER", "granreset", "on", ">grpass", "-@all", "+get"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_allcommands_before_dryrun_del_denied",
+      "now_ms": 701,
+      "argv": ["ACL", "DRYRUN", "granreset", "DEL", "k"],
+      "expect": { "kind": "error", "value": "ERR User 'granreset' has no permissions to run the 'DEL' command" }
+    },
+    {
+      "name": "acl_allcommands_apply",
+      "now_ms": 702,
+      "argv": ["ACL", "SETUSER", "granreset", "allcommands"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "acl_allcommands_after_dryrun_del_allowed",
+      "now_ms": 703,
+      "argv": ["ACL", "DRYRUN", "granreset", "DEL", "k"],
+      "expect": { "kind": "simple", "value": "OK" }
     }
   ]
 }
