@@ -6092,7 +6092,7 @@ impl Store {
             let expires_at = self.entries.get(key).and_then(|e| e.expires_at_ms);
             let data = hll_encode(&registers);
             let mut entry = Entry::new(Value::String(data), expires_at, now_ms);
-            entry.touch(now_ms);
+            entry.touch_write(now_ms);
             self.internal_entries_insert(key.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         }
