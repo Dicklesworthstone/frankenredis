@@ -2760,7 +2760,7 @@ impl Store {
                         self.stream_groups.remove(key);
                         self.stream_last_ids.remove(key);
                     } else if val.is_some() {
-                        entry.touch(now_ms);
+                        entry.touch_write(now_ms);
                     }
                     Ok(val)
                 }
@@ -2784,7 +2784,7 @@ impl Store {
                         self.stream_groups.remove(key);
                         self.stream_last_ids.remove(key);
                     } else if val.is_some() {
-                        entry.touch(now_ms);
+                        entry.touch_write(now_ms);
                     }
                     Ok(val)
                 }
