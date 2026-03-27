@@ -680,7 +680,7 @@ Legal/IP note:
 ### 22.2 Performance-proof readiness assessment
 
 Current performance/proof anchors:
-- baseline artifacts in `README.md`: `baselines/round1_conformance_baseline.json`, `baselines/round2_protocol_negative_baseline.json` (+ strace companions),
+- checked-in top-level optimization artifacts in `README.md`: `artifacts/optimization/phase2c-gate/baseline_hyperfine.json`, `artifacts/optimization/phase2c-gate/after_hyperfine_multi.json` (+ strace companions),
 - optimization evidence pack present at `artifacts/optimization/phase2c-gate/round_dir_scan_mask/` (`baseline_hyperfine.json`, `after_hyperfine.json`, `optimization_report.md`, `isomorphism_check.txt`, `env.json`, `manifest.json`, `repro.lock`).
 
 Primary readiness notes:

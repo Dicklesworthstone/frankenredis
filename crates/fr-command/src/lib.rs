@@ -11931,7 +11931,7 @@ mod tests {
     use fr_store::{Store, StoreError};
 
     use super::{
-        CommandError, CommandId, MigrateKeySpec, classify_command, dispatch_argv,
+        COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec, classify_command, dispatch_argv,
         drain_pubsub_messages, eq_ascii_command, execute_migrate, frame_to_argv, is_write_command,
         parse_migrate_request, pubsub_message_to_frame,
     };

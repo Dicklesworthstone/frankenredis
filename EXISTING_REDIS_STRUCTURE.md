@@ -32,13 +32,13 @@
 
 | Domain | Status | Notes |
 |---|---|---|
-| Protocol framing | partial | first parser scaffold in Rust done; malformed corpus still incomplete |
-| Command table semantics | partial | bootstrap set implemented (`PING/ECHO/SET/GET/DEL/INCR/EXPIRE/PTTL`) |
-| Data structure parity | partial | string path only in runtime slice |
-| TTL/expiry edge cases | partial | baseline codes and lazy expiry in place |
-| Persistence replay | partial | AOF frame contract scaffolded, full replay not yet landed |
-| Replication behavior | partial | state/offset scaffolding only |
-| ACL/config semantics | not_started | reserved for M3+ |
+| Protocol framing | partial | RESP parser/encoder is live with protocol-negative coverage; remaining work is long-tail malformed corpus and legacy-oracle hardening |
+| Command table semantics | partial | broad command surface is implemented across core data types, transactions, scripting, client/server control, and cluster/replication entry points; remaining work is parity hardening, not bootstrap bring-up |
+| Data structure parity | partial | strings, hashes, lists, sets, sorted sets, HyperLogLog, geo, and streams are all implemented; remaining work is long-tail compatibility closure |
+| TTL/expiry edge cases | partial | lazy expiry, TTL-family observability, and runtime fast/slow active-expire cycles are in place; remaining work is wider eviction-policy and edge-behavior depth |
+| Persistence replay | partial | AOF replay, rewrite serialization, SAVE/BGSAVE/BGREWRITEAOF wiring, and RDB encode/decode baseline are landed; remaining work is broader recovery-ordering parity |
+| Replication behavior | partial | PSYNC/SYNC negotiation, FULLRESYNC snapshot apply, backlog replay, reconnect flow, and offset accounting are landed; remaining work is wider oracle coverage and edge semantics |
+| ACL/config semantics | partial | AUTH, ACL lifecycle commands, and broad CONFIG GET/SET coverage are live with conformance fixtures; remaining work is long-tail parameter/policy expansion |
 
 ## 5. Extraction Sequencing Boundary (No Permanent Exclusions)
 
@@ -523,10 +523,10 @@ Targeted replay/diff probes:
 - `rch exec -- cargo test -p fr-conformance -- --nocapture live_redis_protocol_negative_matches_runtime`
 
 Existing baseline artifact anchors:
-- `baselines/round1_conformance_baseline.json`
-- `baselines/round2_protocol_negative_baseline.json`
-- `baselines/round1_conformance_strace.txt`
-- `baselines/round2_protocol_negative_strace.txt`
+- `artifacts/optimization/phase2c-gate/baseline_hyperfine.json`
+- `artifacts/optimization/phase2c-gate/baseline_strace.txt`
+- `artifacts/optimization/phase2c-gate/after_hyperfine_multi.json`
+- `artifacts/optimization/phase2c-gate/after_multi_strace.txt`
 
 ## 19. DOC-PASS-06 Concurrency/Lifecycle Semantics and Ordering Guarantees
 

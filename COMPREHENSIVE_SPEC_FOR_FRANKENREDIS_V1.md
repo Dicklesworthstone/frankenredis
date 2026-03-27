@@ -385,24 +385,25 @@ Rule of use:
 - Rust crate boundaries live in PROPOSED_ARCHITECTURE.md.
 - Delivery readiness is tracked in FEATURE_PARITY.md.
 
-## 22. Current Implementation Snapshot (2026-02-13)
+## 22. Current Implementation Snapshot (2026-03-27)
 
-Completed bootstrap vertical slice:
+Implemented/tested baseline:
 
-- `fr-protocol`: RESP frame model + parser/encoder.
-- `fr-command`: deterministic bootstrap command set (`PING`, `ECHO`, `SET`, `GET`, `DEL`, `INCR`, `EXPIRE`, `PTTL`).
-- `fr-store`: key/value + TTL behavior with Redis-compatible `PTTL` sentinel values.
-- `fr-runtime`: strict-mode compatibility gate and evidence ledger emission surface.
-- `fr-conformance`: fixture-driven differential harness with stateful sequence execution.
-- `fr-persist`: AOF record frame mapping scaffold.
-- `fr-repl`: replication state/offset scaffold.
+- `fr-protocol`: RESP frame model plus parser/encoder with protocol-negative coverage.
+- `fr-command`: broad Redis command surface across strings, hashes, lists, sets, sorted sets, geo, streams, pub/sub, transactions, scripting, server/connection, and keyspace paths.
+- `fr-store`: multi-type in-memory engine with TTL semantics, stream group state, pub/sub delivery staging, and DB-scoped keyspace behavior.
+- `fr-runtime`: strict/hardened compatibility gate, runtime command handling for ACL/CONFIG/persistence/replication paths, active-expire scheduling, and evidence ledger emission.
+- `fr-conformance`: fixture-driven differential harness with core command families, replay coverage, protocol-negative suites, smoke tests, and FR-P2C packet-family suites.
+- `fr-persist`: AOF framing plus replay, rewrite serialization, and RDB snapshot encode/decode baseline.
+- `fr-repl`: PSYNC/SYNC negotiation, backlog/offset accounting, FULLRESYNC snapshot apply, and partial replay baseline.
 
-Artifacts produced in this iteration:
+Checked-in proof and benchmark artifacts currently present:
 
-- `baselines/round1_conformance_baseline.json`
-- `baselines/round1_conformance_strace.txt`
+- `artifacts/optimization/phase2c-gate/baseline_hyperfine.json`
+- `artifacts/optimization/phase2c-gate/baseline_strace.txt`
+- `artifacts/optimization/ISOMORPHISM_PROOF_ROUND1.md`
+- `artifacts/phase2c/schema/topology_lock_v1.json`
 - `golden_outputs/core_strings.json`
-- `golden_checksums.txt`
 
 Extended conformance coverage in this batch:
 
