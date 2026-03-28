@@ -724,6 +724,12 @@ fn process_buffered_frames(
                     consumed_total += consumed;
                     continue;
                 }
+                Ok(InlineParseResult::ProtocolError(err_frame, consumed)) => {
+                    // Send the error directly to the client without executing.
+                    conn.write_buf.extend_from_slice(&err_frame.to_bytes());
+                    consumed_total += consumed;
+                    continue;
+                }
                 Ok(InlineParseResult::Command(frame, consumed)) => Ok((frame, consumed)),
                 Err(e) => Err(e),
             }
@@ -847,6 +853,8 @@ fn process_buffered_frames(
 enum InlineParseResult {
     Command(RespFrame, usize),
     EmptyLine(usize),
+    /// Protocol error (e.g., unbalanced quotes) — send error reply directly.
+    ProtocolError(RespFrame, usize),
 }
 
 fn should_try_inline_parsing(first_byte: u8) -> bool {
@@ -884,7 +892,14 @@ fn try_parse_inline(buf: &[u8]) -> Result<InlineParseResult, fr_protocol::RespPa
     let line = &buf[..line_end];
 
     // Split on whitespace, respecting double-quoted strings.
-    let argv = split_inline_args(line);
+    let argv = match split_inline_args(line) {
+        Ok(v) => v,
+        Err(msg) => {
+            // Unbalanced quotes — return protocol error directly (matching Redis behavior).
+            let err_frame = RespFrame::Error(msg.to_string());
+            return Ok(InlineParseResult::ProtocolError(err_frame, consumed));
+        }
+    };
     if argv.is_empty() {
         // Empty line (bare \r\n) — consume it silently (Redis behavior).
         return Ok(InlineParseResult::EmptyLine(consumed));
@@ -899,7 +914,8 @@ fn try_parse_inline(buf: &[u8]) -> Result<InlineParseResult, fr_protocol::RespPa
 }
 
 /// Split inline command arguments, supporting double-quoted strings.
-fn split_inline_args(line: &[u8]) -> Vec<Vec<u8>> {
+/// Returns Err if quotes are unbalanced (matching Redis behavior).
+fn split_inline_args(line: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
     let mut args = Vec::new();
     let mut i = 0;
     while i < line.len() {
@@ -933,9 +949,10 @@ fn split_inline_args(line: &[u8]) -> Vec<Vec<u8>> {
                 }
                 i += 1;
             }
-            if i < line.len() {
-                i += 1; // Skip closing quote.
+            if i >= line.len() {
+                return Err("ERR Protocol error: unbalanced quotes in request");
             }
+            i += 1; // Skip closing quote.
             args.push(arg);
         } else if line[i] == b'\'' {
             // Single-quoted argument (no escape processing).
@@ -944,10 +961,11 @@ fn split_inline_args(line: &[u8]) -> Vec<Vec<u8>> {
             while i < line.len() && line[i] != b'\'' {
                 i += 1;
             }
-            args.push(line[start..i].to_vec());
-            if i < line.len() {
-                i += 1;
+            if i >= line.len() {
+                return Err("ERR Protocol error: unbalanced quotes in request");
             }
+            args.push(line[start..i].to_vec());
+            i += 1;
         } else {
             // Unquoted argument.
             let start = i;
@@ -957,7 +975,7 @@ fn split_inline_args(line: &[u8]) -> Vec<Vec<u8>> {
             args.push(line[start..i].to_vec());
         }
     }
-    args
+    Ok(args)
 }
 
 fn replica_handshake_frame(args: &[&[u8]]) -> RespFrame {
@@ -2860,11 +2878,40 @@ mod tests {
 
     #[test]
     fn inline_quoted_strings() {
-        let args = crate::split_inline_args(b"SET key \"hello world\"");
+        let args = crate::split_inline_args(b"SET key \"hello world\"").expect("parse quoted");
         assert_eq!(args.len(), 3);
         assert_eq!(args[0], b"SET");
         assert_eq!(args[1], b"key");
         assert_eq!(args[2], b"hello world");
+    }
+
+    #[test]
+    fn inline_unbalanced_double_quotes_rejected() {
+        let result = crate::split_inline_args(b"SET key \"unclosed");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "ERR Protocol error: unbalanced quotes in request"
+        );
+    }
+
+    #[test]
+    fn inline_unbalanced_single_quotes_rejected() {
+        let result = crate::split_inline_args(b"SET key 'unclosed");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn inline_unbalanced_quotes_via_try_parse() {
+        let result =
+            crate::try_parse_inline(b"SET key \"unclosed\r\n").expect("should parse ok");
+        match result {
+            InlineParseResult::ProtocolError(frame, consumed) => {
+                assert_eq!(consumed, 19);
+                assert!(matches!(frame, RespFrame::Error(ref e) if e.contains("unbalanced")));
+            }
+            _ => panic!("expected ProtocolError"),
+        }
     }
 
     #[test]
@@ -2878,7 +2925,9 @@ mod tests {
         let result = crate::try_parse_inline(b"\r\n").expect("blank line should parse");
         match result {
             InlineParseResult::EmptyLine(consumed) => assert_eq!(consumed, 2),
-            InlineParseResult::Command(_, _) => panic!("blank line should not become a command"),
+            InlineParseResult::Command(_, _) | InlineParseResult::ProtocolError(_, _) => {
+                panic!("blank line should not become a command or error")
+            }
         }
     }
 
