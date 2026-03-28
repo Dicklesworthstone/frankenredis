@@ -2565,6 +2565,7 @@ fn parse_geo_f64(arg: &[u8]) -> Result<f64, RespFrame> {
     let text = std::str::from_utf8(arg)
         .map_err(|_| RespFrame::Error("ERR value is not a valid float".to_string()))?;
     let val = text
+        .trim()
         .parse::<f64>()
         .map_err(|_| RespFrame::Error("ERR value is not a valid float".to_string()))?;
     if val.is_nan() {
