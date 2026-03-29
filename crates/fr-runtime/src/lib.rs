@@ -2562,6 +2562,15 @@ impl Runtime {
                         fr_command::trim_and_cap_string(cmd_str, 128)
                     ));
                 }
+                // Validate arity before queueing (Redis rejects wrong arity
+                // immediately and sets EXECABORT).
+                if let Err(cmd_name) = fr_command::check_command_arity(cmd_bytes, argv.len()) {
+                    self.session.transaction_state.exec_abort = true;
+                    return RespFrame::Error(format!(
+                        "ERR wrong number of arguments for '{}' command",
+                        cmd_name
+                    ));
+                }
                 self.session.transaction_state.command_queue.push(argv);
                 return RespFrame::SimpleString("QUEUED".to_string());
             }
@@ -10048,6 +10057,46 @@ mod tests {
         rt.execute_frame(command(&[b"SET", b"k", b"new"]), 4);
         let result = rt.execute_frame(command(&[b"EXEC"]), 5);
         assert_eq!(result, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn multi_rejects_wrong_arity_immediately() {
+        let mut rt = Runtime::default_strict();
+        // MULTI
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // GET with wrong arity (too many args) should return error, not QUEUED
+        let reply = rt.execute_frame(command(&[b"GET", b"k1", b"k2"]), 1);
+        assert!(
+            matches!(&reply, RespFrame::Error(e) if e.contains("wrong number of arguments")),
+            "Wrong arity inside MULTI should return error immediately, got: {reply:?}"
+        );
+        // EXEC should return EXECABORT since the transaction is tainted
+        let exec = rt.execute_frame(command(&[b"EXEC"]), 2);
+        assert!(
+            matches!(&exec, RespFrame::Error(e) if e.contains("EXECABORT")),
+            "EXEC after arity error should return EXECABORT, got: {exec:?}"
+        );
+    }
+
+    #[test]
+    fn multi_queues_valid_commands_after_arity_rejection() {
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        rt.execute_frame(command(&[b"MULTI"]), 1);
+        // Valid command should queue
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 2),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        // EXEC should succeed with result array
+        let exec = rt.execute_frame(command(&[b"EXEC"]), 3);
+        assert_eq!(
+            exec,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"v".to_vec()))]))
+        );
     }
 
     #[test]

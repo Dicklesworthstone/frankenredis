@@ -680,7 +680,7 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
                             let (field_count, fc) = rdb_decode_length(&data[cursor..])
                                 .ok_or(PersistError::InvalidFrame)?;
                             cursor += fc;
-                            let mut fields = Vec::with_capacity(field_count);
+                            let mut fields = Vec::with_capacity(field_count.min(1024));
                             for _ in 0..field_count {
                                 let (fname, c1) = rdb_decode_string(&data[cursor..])
                                     .ok_or(PersistError::InvalidFrame)?;

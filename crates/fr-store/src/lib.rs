@@ -7214,22 +7214,31 @@ impl Store {
             }
 
             MaxmemoryPolicy::AllkeysRandom => {
-                // Deterministic "random" — pick first key in sorted order.
-                let mut keys: Vec<&Vec<u8>> = self.entries.keys().collect();
-                keys.sort();
-                keys.first().map(|k| (*k).clone())
+                let n = self.entries.len();
+                if n == 0 {
+                    return None;
+                }
+                let rand_val = self.next_rand();
+                let idx = rand_val as usize % n;
+                self.entries.keys().nth(idx).cloned()
             }
 
             MaxmemoryPolicy::VolatileRandom => {
-                // Deterministic "random" — pick first volatile key in sorted order.
-                let mut keys: Vec<&Vec<u8>> = self
+                let n = self
                     .entries
+                    .values()
+                    .filter(|e| e.expires_at_ms.is_some())
+                    .count();
+                if n == 0 {
+                    return None;
+                }
+                let rand_val = self.next_rand();
+                let idx = rand_val as usize % n;
+                self.entries
                     .iter()
                     .filter(|(_, e)| e.expires_at_ms.is_some())
-                    .map(|(k, _)| k)
-                    .collect();
-                keys.sort();
-                keys.first().map(|k| (*k).clone())
+                    .nth(idx)
+                    .map(|(k, _)| k.clone())
             }
         }
     }

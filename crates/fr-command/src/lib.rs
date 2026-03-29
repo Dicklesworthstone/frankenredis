@@ -6036,13 +6036,15 @@ fn spublish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comman
 
 fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
     let text = std::str::from_utf8(arg)
-        .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
+        .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?
+        .trim();
     if text.eq_ignore_ascii_case("-inf") {
         Ok(ScoreBound::Inclusive(f64::NEG_INFINITY))
     } else if text.eq_ignore_ascii_case("+inf") || text.eq_ignore_ascii_case("inf") {
         Ok(ScoreBound::Inclusive(f64::INFINITY))
     } else if let Some(rest) = text.strip_prefix('(') {
         let val = rest
+            .trim()
             .parse::<f64>()
             .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
         if val.is_nan() {
@@ -8009,6 +8011,7 @@ fn parse_zstore_args(
             for _ in 0..numkeys {
                 let w = std::str::from_utf8(&argv[i])
                     .map_err(|_| CommandError::InvalidInteger)?
+                    .trim()
                     .parse::<f64>()
                     .map_err(|_| CommandError::InvalidInteger)?;
                 if w.is_nan() {
@@ -8651,6 +8654,34 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("sort_ro", -2, "readonly fast", 1, 1, 1),
     ("zrangestore", -5, "write denyoom", 1, 2, 1),
 ];
+
+/// Check if the argument count (including command name) satisfies the command's arity.
+/// Returns Ok(()) if valid, Err(command_name) if arity mismatch.
+pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str> {
+    let name_str = match std::str::from_utf8(name) {
+        Ok(s) => s,
+        Err(_) => return Err(""),
+    };
+    let Some(&(cmd_name, arity, ..)) = COMMAND_TABLE
+        .iter()
+        .find(|&&(n, ..)| n.eq_ignore_ascii_case(name_str))
+    else {
+        return Err(""); // Unknown command — caller handles separately
+    };
+    let argc = argc as i64;
+    if arity > 0 {
+        // Exact arity required.
+        if argc != arity {
+            return Err(cmd_name);
+        }
+    } else {
+        // Minimum arity (abs value).
+        if argc < -arity {
+            return Err(cmd_name);
+        }
+    }
+    Ok(())
+}
 
 /// Return the flags string for a given command name.
 #[must_use]
