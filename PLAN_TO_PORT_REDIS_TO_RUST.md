@@ -15,7 +15,7 @@
 
 ## 2. Current Phase
 
-- Phase 1 complete: bootstrap docs and workspace skeleton.
+- Phase 1 complete: foundational docs and workspace/crate baseline are already landed.
 - Phase 2 in progress: extraction docs exist; deep subsystem extraction still incomplete.
 - Phase 3 in progress: architecture synthesized; strict/hardened mode split defined.
 - Phase 4 in progress: the executable path is now a broader implemented/tested baseline (`RESP -> router -> store -> persistence/replication hooks -> conformance`), not just the first vertical slice.

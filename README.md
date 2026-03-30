@@ -32,7 +32,7 @@ This project uses four pervasive disciplines:
   - broad command surface across strings, hashes, lists, sets, sorted sets, streams, geo, pub/sub, and server control paths
   - in-memory store + TTL semantics
   - replication sync baseline: `PSYNC`/`SYNC` negotiation, full-resync snapshot apply, partial backlog replay, replica reconnect flow, and live replication offset reporting
-  - strict/hardened compatibility gate + evidence ledger scaffold
+  - strict/hardened compatibility gate + runtime evidence/structured-log baseline
   - fixture-driven conformance harness (`core_*` families + phase2c packet suites)
 - checked-in optimization and proof artifacts currently include:
   - `artifacts/optimization/phase2c-gate/baseline_hyperfine.json`

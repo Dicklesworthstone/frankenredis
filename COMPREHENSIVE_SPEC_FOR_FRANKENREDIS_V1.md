@@ -166,7 +166,7 @@ Required artifacts:
 
 ### M0 — Bootstrap
 
-- workspace skeleton
+- workspace/crate baseline already landed
 - CI and quality gate wiring
 
 Exit:
@@ -233,7 +233,7 @@ Mitigations:
 
 ## 13. Immediate Execution Checklist
 
-1. Create workspace and crate skeleton.
+1. Treat workspace/crate structure as completed baseline and iterate on the live implementation surface.
 2. Implement smallest high-value end-to-end path as sequencing, without shrinking full-parity objective.
 3. Stand up differential conformance harness against legacy oracle.
 4. Add benchmark baseline generation and regression gating.
@@ -349,13 +349,13 @@ Canonical envelope schema:
 
 ## 20. 90-Day Execution Plan
 
-Weeks 1-2:
-- scaffold workspace and crate boundaries
-- lock protocol + command conformance schema
+Weeks 1-2 (completed baseline):
+- workspace and crate boundaries are already landed
+- protocol + command conformance schema baseline is already locked in
 
-Weeks 3-5:
-- implement fr-types/fr-resp/fr-command/fr-store minimal vertical slice
-- land first strict-mode differential conformance run
+Weeks 3-5 (completed baseline):
+- executable RESP/command/store baseline is already in place and expanded well beyond the original minimal vertical slice
+- first strict-mode differential/conformance baseline is already landed
 
 Weeks 6-8:
 - implement AOF/RDB + replication first wave

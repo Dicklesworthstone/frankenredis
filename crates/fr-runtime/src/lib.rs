@@ -5437,8 +5437,10 @@ impl Runtime {
                 RespFrame::Integer(count as i64),
             ])));
         }
-        if replies.len() == 1 {
-            replies.into_iter().next().expect("single reply")
+        if replies.len() == 1
+            && let Some(frame) = replies.pop()
+        {
+            frame
         } else {
             RespFrame::Sequence(replies)
         }
@@ -6637,10 +6639,9 @@ impl Runtime {
                 &self.session.transaction_state.watched_keys
             {
                 let current_fp = self.server.store.key_fingerprint(key, now_ms);
-                let current_dirty = self.server.store.dirty;
-                // Detect changes: fingerprint differs OR global dirty counter advanced
-                // (the latter catches ABA where value is restored to original)
+                let current_dirty = self.server.store.key_modification_count(key, now_ms);
                 if current_fp != *original_fp || current_dirty != *original_mod_count {
+                    println!("WATCH FAILED: key={:?}, current_fp={}, original_fp={}, current_dirty={}, original_mod_count={}", key, current_fp, original_fp, current_dirty, original_mod_count);
                     dirty = true;
                     break;
                 }
@@ -6744,7 +6745,7 @@ impl Runtime {
         for key in &argv[1..] {
             let physical = encode_db_key(self.session.selected_db, key);
             let fp = self.server.store.key_fingerprint(&physical, now_ms);
-            let mod_count = self.server.store.dirty;
+            let mod_count = self.server.store.key_modification_count(&physical, now_ms);
             self.session
                 .transaction_state
                 .watched_keys
