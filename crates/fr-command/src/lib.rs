@@ -10181,10 +10181,10 @@ fn unsubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Com
                 RespFrame::Integer(remaining as i64),
             ])));
         }
-        if replies.len() == 1 {
-            if let Some(frame) = replies.pop() {
-                return Ok(frame);
-            }
+        if replies.len() == 1
+            && let Some(frame) = replies.pop()
+        {
+            return Ok(frame);
         }
         return Ok(RespFrame::Sequence(replies));
     }
@@ -10252,10 +10252,10 @@ fn punsubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Co
                 RespFrame::Integer(remaining as i64),
             ])));
         }
-        if replies.len() == 1 {
-            if let Some(frame) = replies.pop() {
-                return Ok(frame);
-            }
+        if replies.len() == 1
+            && let Some(frame) = replies.pop()
+        {
+            return Ok(frame);
         }
         return Ok(RespFrame::Sequence(replies));
     }

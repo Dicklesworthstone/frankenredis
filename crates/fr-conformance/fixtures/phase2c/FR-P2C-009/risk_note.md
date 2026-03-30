@@ -142,9 +142,9 @@ Required artifacts:
 
 ## Residual risks
 
-- Current Rust code has no TLS connection type/runtime handshake implementation; risk controls remain contractual until implementation beads land.
-- TLS listener/config rewrite parity depends on future runtime/config persistence surfaces not yet implemented.
-- Handshake state-machine parity requires event-loop integration work that is currently absent in Rust baseline.
+- Current Rust baseline already includes TLS config validation, runtime apply planning/state transitions, bounded listener-state updates, and deterministic rewrite output; the remaining gap is broader TLS connection-type and handshake/I/O parity beyond that config/apply surface.
+- TLS listener/config rewrite parity is implemented for the current config/runtime surface, while broader live listener and persistence-linked parity still depends on future runtime integration work.
+- Handshake state-machine parity still requires deeper runtime/event-loop/TLS-I/O integration beyond the current config/apply and evidence-emission baseline.
 
 ## Implemented packet-009 final parity + durability artifacts (bd-2wb.20.9)
 
