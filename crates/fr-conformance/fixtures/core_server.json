@@ -1500,6 +1500,18 @@
       }
     },
     {
+      "name": "slowlog_reset_before_threshold_test",
+      "now_ms": 24999,
+      "argv": [
+        "SLOWLOG",
+        "RESET"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
       "name": "slowlog_config_set_threshold_zero",
       "now_ms": 25000,
       "argv": [

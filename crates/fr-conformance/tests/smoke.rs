@@ -1,7 +1,8 @@
 use std::path::Path;
 
 use fr_conformance::{
-    HarnessConfig, run_fixture, run_protocol_fixture, run_replay_fixture, run_smoke,
+    HarnessConfig, run_fixture, run_protocol_fixture, run_replay_fixture,
+    run_replication_handshake_fixture, run_smoke,
 };
 
 #[test]
@@ -32,6 +33,12 @@ fn smoke_report_is_stable() {
         run_fixture(&cfg, "fr_p2c_004_acl_journey.json").expect("packet-004 auth/acl fixture");
     assert_eq!(auth_acl.total, auth_acl.passed);
     assert!(auth_acl.failed.is_empty());
+
+    let repl_handshake =
+        run_replication_handshake_fixture(&cfg, "fr_p2c_006_replication_handshake.json")
+            .expect("replication handshake fixture");
+    assert_eq!(repl_handshake.total, repl_handshake.passed);
+    assert!(repl_handshake.failed.is_empty());
 
     let protocol = run_protocol_fixture(&cfg, "protocol_negative.json").expect("protocol fixture");
     assert_eq!(protocol.total, protocol.passed);
@@ -86,6 +93,15 @@ fn fr_p2c_005_e2e_contract_smoke() {
 fn fr_p2c_006_e2e_contract_smoke() {
     let cfg = HarnessConfig::default_paths();
     let diff = run_fixture(&cfg, "fr_p2c_006_replication_journey.json").expect("packet fixture");
+    assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
+    assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn fr_p2c_006_replication_handshake_e2e_contract_smoke() {
+    let cfg = HarnessConfig::default_paths();
+    let diff = run_replication_handshake_fixture(&cfg, "fr_p2c_006_replication_handshake.json")
+        .expect("packet fixture");
     assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
     assert!(diff.failed.is_empty());
 }

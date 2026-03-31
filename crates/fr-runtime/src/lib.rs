@@ -6633,21 +6633,25 @@ impl Runtime {
         }
 
         // Check watched keys: if any were modified, abort the transaction
-        let watch_failed = self.session.transaction_state.watch_dirty || {
-            let mut dirty = false;
-            for (key, original_fp, original_mod_count) in
-                &self.session.transaction_state.watched_keys
-            {
-                let current_fp = self.server.store.key_fingerprint(key, now_ms);
-                let current_dirty = self.server.store.key_modification_count(key, now_ms);
-                if current_fp != *original_fp || current_dirty != *original_mod_count {
-                    println!("WATCH FAILED: key={:?}, current_fp={}, original_fp={}, current_dirty={}, original_mod_count={}", key, current_fp, original_fp, current_dirty, original_mod_count);
-                    dirty = true;
-                    break;
+        let watch_failed = self.session.transaction_state.watch_dirty
+            || {
+                let mut dirty = false;
+                for (key, original_fp, original_mod_count) in
+                    &self.session.transaction_state.watched_keys
+                {
+                    let current_fp = self.server.store.key_fingerprint(key, now_ms);
+                    let current_dirty = self.server.store.key_modification_count(key, now_ms);
+                    if current_fp != *original_fp || current_dirty != *original_mod_count {
+                        println!(
+                            "WATCH FAILED: key={:?}, current_fp={}, original_fp={}, current_dirty={}, original_mod_count={}",
+                            key, current_fp, original_fp, current_dirty, original_mod_count
+                        );
+                        dirty = true;
+                        break;
+                    }
                 }
-            }
-            dirty
-        };
+                dirty
+            };
         self.session.transaction_state.watched_keys.clear();
         self.session.transaction_state.watch_dirty = false;
 
@@ -11460,4 +11464,5 @@ mod tests {
             "GET should be denied after reset, got: {reply:?}"
         );
     }
+
 }
