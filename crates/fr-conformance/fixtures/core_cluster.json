@@ -262,15 +262,31 @@
         "value": [
           {
             "kind": "bulk",
-            "value": "CLUSTER HELP"
+            "value": "CLUSTER INFO"
           },
           {
             "kind": "bulk",
-            "value": "CLUSTER subcommand dispatch scaffold (FR-P2C-007 D1)."
+            "value": "CLUSTER MYID"
           },
           {
             "kind": "bulk",
-            "value": "Supported subcommands in this stage: HELP, INFO, MYID, SLOTS, SHARDS, NODES, KEYSLOT, GETKEYSINSLOT, COUNTKEYSINSLOT, RESET."
+            "value": "CLUSTER KEYSLOT <key>"
+          },
+          {
+            "kind": "bulk",
+            "value": "CLUSTER SLOTS"
+          },
+          {
+            "kind": "bulk",
+            "value": "CLUSTER SHARDS"
+          },
+          {
+            "kind": "bulk",
+            "value": "CLUSTER NODES"
+          },
+          {
+            "kind": "bulk",
+            "value": "CLUSTER RESET"
           }
         ]
       }

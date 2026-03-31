@@ -3131,13 +3131,13 @@ mod tests {
         assert_eq!(
             help,
             RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"CLUSTER HELP".to_vec())),
-                RespFrame::BulkString(Some(
-                    b"CLUSTER subcommand dispatch scaffold (FR-P2C-007 D1).".to_vec(),
-                )),
-                RespFrame::BulkString(Some(
-                    b"Supported subcommands in this stage: HELP, INFO, MYID, SLOTS, SHARDS, NODES, KEYSLOT, GETKEYSINSLOT, COUNTKEYSINSLOT, RESET.".to_vec(),
-                )),
+                RespFrame::BulkString(Some(b"CLUSTER INFO".to_vec())),
+                RespFrame::BulkString(Some(b"CLUSTER MYID".to_vec())),
+                RespFrame::BulkString(Some(b"CLUSTER KEYSLOT <key>".to_vec())),
+                RespFrame::BulkString(Some(b"CLUSTER SLOTS".to_vec())),
+                RespFrame::BulkString(Some(b"CLUSTER SHARDS".to_vec())),
+                RespFrame::BulkString(Some(b"CLUSTER NODES".to_vec())),
+                RespFrame::BulkString(Some(b"CLUSTER RESET".to_vec())),
             ]))
         );
 

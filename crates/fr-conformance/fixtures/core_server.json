@@ -1547,7 +1547,7 @@
       ],
       "expect": {
         "kind": "integer",
-        "value": 1
+        "value": 2
       }
     },
     {
@@ -1572,7 +1572,7 @@
       ],
       "expect": {
         "kind": "integer",
-        "value": 2
+        "value": 4
       }
     },
     {
@@ -1596,7 +1596,7 @@
       ],
       "expect": {
         "kind": "integer",
-        "value": 0
+        "value": 1
       }
     },
     {

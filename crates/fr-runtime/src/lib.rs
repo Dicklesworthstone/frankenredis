@@ -2467,8 +2467,20 @@ impl Runtime {
         let command_name = &command_name_lossy;
 
         match special_command {
-            Some(RuntimeSpecialCommand::Auth) => return self.handle_auth_command(&argv),
-            Some(RuntimeSpecialCommand::Hello) => return self.handle_hello_command(&argv),
+            Some(RuntimeSpecialCommand::Auth) => {
+                let start = Instant::now();
+                let reply = self.handle_auth_command(&argv);
+                let elapsed_us = start.elapsed().as_micros() as u64;
+                self.record_slowlog(&argv, elapsed_us, now_ms);
+                return reply;
+            }
+            Some(RuntimeSpecialCommand::Hello) => {
+                let start = Instant::now();
+                let reply = self.handle_hello_command(&argv);
+                let elapsed_us = start.elapsed().as_micros() as u64;
+                self.record_slowlog(&argv, elapsed_us, now_ms);
+                return reply;
+            }
             _ => {}
         }
 
