@@ -5464,6 +5464,8 @@ fn cluster_cmd(
             RespFrame::BulkString(Some(b"CLUSTER INFO".to_vec())),
             RespFrame::BulkString(Some(b"CLUSTER MYID".to_vec())),
             RespFrame::BulkString(Some(b"CLUSTER KEYSLOT <key>".to_vec())),
+            RespFrame::BulkString(Some(b"CLUSTER GETKEYSINSLOT <slot> <count>".to_vec())),
+            RespFrame::BulkString(Some(b"CLUSTER COUNTKEYSINSLOT <slot>".to_vec())),
             RespFrame::BulkString(Some(b"CLUSTER SLOTS".to_vec())),
             RespFrame::BulkString(Some(b"CLUSTER SHARDS".to_vec())),
             RespFrame::BulkString(Some(b"CLUSTER NODES".to_vec())),
@@ -23705,6 +23707,21 @@ mod tests {
         .unwrap();
         // {user} -> hash "user" -> slot 5474
         assert_eq!(out, RespFrame::Integer(5474));
+    }
+
+    #[test]
+    fn cluster_help_lists_getkeysinslot_and_countkeysinslot() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"CLUSTER".to_vec(), b"HELP".to_vec()], &mut store, 0).unwrap();
+        let RespFrame::Array(Some(items)) = out else {
+            panic!("expected array");
+        };
+        assert!(items.contains(&RespFrame::BulkString(Some(
+            b"CLUSTER GETKEYSINSLOT <slot> <count>".to_vec()
+        ))));
+        assert!(items.contains(&RespFrame::BulkString(Some(
+            b"CLUSTER COUNTKEYSINSLOT <slot>".to_vec()
+        ))));
     }
 
     // ── CLIENT KILL/PAUSE/UNPAUSE tests ─────────────────────────────

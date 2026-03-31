@@ -2600,20 +2600,15 @@ impl Runtime {
                     Some(self.handle_client_command(&argv, now_ms))
                 }
                 Some(RuntimeSpecialCommand::Role) => Some(self.handle_role_command(&argv)),
-                Some(RuntimeSpecialCommand::Replconf) => {
-                    Some(self.handle_replconf_command(&argv))
-                }
+                Some(RuntimeSpecialCommand::Replconf) => Some(self.handle_replconf_command(&argv)),
                 Some(RuntimeSpecialCommand::Psync) | Some(RuntimeSpecialCommand::Sync) => {
                     Some(self.handle_psync_command(&argv))
                 }
-                Some(RuntimeSpecialCommand::Replicaof)
-                | Some(RuntimeSpecialCommand::Slaveof) => {
+                Some(RuntimeSpecialCommand::Replicaof) | Some(RuntimeSpecialCommand::Slaveof) => {
                     Some(self.handle_replicaof_command(&argv))
                 }
                 Some(RuntimeSpecialCommand::Asking) => Some(self.handle_asking_command(&argv)),
-                Some(RuntimeSpecialCommand::Readonly) => {
-                    Some(self.handle_readonly_command(&argv))
-                }
+                Some(RuntimeSpecialCommand::Readonly) => Some(self.handle_readonly_command(&argv)),
                 Some(RuntimeSpecialCommand::Readwrite) => {
                     Some(self.handle_readwrite_command(&argv))
                 }
@@ -2623,12 +2618,9 @@ impl Runtime {
                 Some(RuntimeSpecialCommand::Wait) => Some(self.handle_wait_command(&argv)),
                 Some(RuntimeSpecialCommand::Waitaof) => Some(self.handle_waitaof_command(&argv)),
                 Some(RuntimeSpecialCommand::Multi) => Some(self.handle_multi_command()),
-                Some(RuntimeSpecialCommand::Exec) => Some(self.handle_exec_command(
-                    now_ms,
-                    packet_id,
-                    &input_digest,
-                    &state_before,
-                )),
+                Some(RuntimeSpecialCommand::Exec) => {
+                    Some(self.handle_exec_command(now_ms, packet_id, &input_digest, &state_before))
+                }
                 Some(RuntimeSpecialCommand::Discard) => Some(self.handle_discard_command()),
                 Some(RuntimeSpecialCommand::Watch) => {
                     Some(self.handle_watch_command(&argv, now_ms))
@@ -2638,24 +2630,16 @@ impl Runtime {
                     Some(RespFrame::SimpleString("OK".to_string()))
                 }
                 Some(RuntimeSpecialCommand::Reset) => Some(self.handle_reset_command(&argv)),
-                Some(RuntimeSpecialCommand::Slowlog) => {
-                    Some(self.handle_slowlog_command(&argv))
-                }
-                Some(RuntimeSpecialCommand::Save) => {
-                    Some(self.handle_save_command(&argv, now_ms))
-                }
+                Some(RuntimeSpecialCommand::Slowlog) => Some(self.handle_slowlog_command(&argv)),
+                Some(RuntimeSpecialCommand::Save) => Some(self.handle_save_command(&argv, now_ms)),
                 Some(RuntimeSpecialCommand::Bgsave) => {
                     Some(self.handle_bgsave_command(&argv, now_ms))
                 }
-                Some(RuntimeSpecialCommand::Lastsave) => {
-                    Some(self.handle_lastsave_command(&argv))
-                }
+                Some(RuntimeSpecialCommand::Lastsave) => Some(self.handle_lastsave_command(&argv)),
                 Some(RuntimeSpecialCommand::Bgrewriteaof) => {
                     Some(self.handle_bgrewriteaof_command(&argv, now_ms))
                 }
-                Some(RuntimeSpecialCommand::Shutdown) => {
-                    Some(self.handle_shutdown_command(&argv))
-                }
+                Some(RuntimeSpecialCommand::Shutdown) => Some(self.handle_shutdown_command(&argv)),
                 Some(RuntimeSpecialCommand::Pubsub) => Some(self.handle_pubsub_command(&argv)),
                 Some(RuntimeSpecialCommand::Subscribe) => {
                     Some(self.handle_subscribe_command(&argv))
@@ -2669,22 +2653,16 @@ impl Runtime {
                 Some(RuntimeSpecialCommand::Punsubscribe) => {
                     Some(self.handle_punsubscribe_command(&argv))
                 }
-                Some(RuntimeSpecialCommand::Publish) => {
-                    Some(self.handle_publish_command(&argv))
-                }
+                Some(RuntimeSpecialCommand::Publish) => Some(self.handle_publish_command(&argv)),
                 Some(RuntimeSpecialCommand::Ssubscribe) => {
                     Some(self.handle_ssubscribe_command(&argv))
                 }
                 Some(RuntimeSpecialCommand::Sunsubscribe) => {
                     Some(self.handle_sunsubscribe_command(&argv))
                 }
-                Some(RuntimeSpecialCommand::Spublish) => {
-                    Some(self.handle_spublish_command(&argv))
-                }
+                Some(RuntimeSpecialCommand::Spublish) => Some(self.handle_spublish_command(&argv)),
                 Some(RuntimeSpecialCommand::Select) => Some(self.handle_select_command(&argv)),
-                Some(RuntimeSpecialCommand::Swapdb) => {
-                    Some(self.handle_swapdb_command(&argv))
-                }
+                Some(RuntimeSpecialCommand::Swapdb) => Some(self.handle_swapdb_command(&argv)),
                 _ => None,
             };
             if let Some(reply) = special_reply {
@@ -6281,6 +6259,8 @@ impl Runtime {
                 hello_bulk("CLUSTER INFO"),
                 hello_bulk("CLUSTER MYID"),
                 hello_bulk("CLUSTER KEYSLOT <key>"),
+                hello_bulk("CLUSTER GETKEYSINSLOT <slot> <count>"),
+                hello_bulk("CLUSTER COUNTKEYSINSLOT <slot>"),
                 hello_bulk("CLUSTER SLOTS"),
                 hello_bulk("CLUSTER SHARDS"),
                 hello_bulk("CLUSTER NODES"),
@@ -9617,6 +9597,8 @@ mod tests {
                 RespFrame::BulkString(Some(b"CLUSTER INFO".to_vec())),
                 RespFrame::BulkString(Some(b"CLUSTER MYID".to_vec())),
                 RespFrame::BulkString(Some(b"CLUSTER KEYSLOT <key>".to_vec())),
+                RespFrame::BulkString(Some(b"CLUSTER GETKEYSINSLOT <slot> <count>".to_vec())),
+                RespFrame::BulkString(Some(b"CLUSTER COUNTKEYSINSLOT <slot>".to_vec())),
                 RespFrame::BulkString(Some(b"CLUSTER SLOTS".to_vec())),
                 RespFrame::BulkString(Some(b"CLUSTER SHARDS".to_vec())),
                 RespFrame::BulkString(Some(b"CLUSTER NODES".to_vec())),
