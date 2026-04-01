@@ -575,7 +575,7 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
                         let (count, c) =
                             rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += c;
-                        let mut items = Vec::with_capacity(count);
+                        let mut items = Vec::with_capacity(count.min(1024));
                         for _ in 0..count {
                             let (item, c) = rdb_decode_string(&data[cursor..])
                                 .ok_or(PersistError::InvalidFrame)?;
@@ -588,7 +588,7 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
                         let (count, c) =
                             rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += c;
-                        let mut members = Vec::with_capacity(count);
+                        let mut members = Vec::with_capacity(count.min(1024));
                         for _ in 0..count {
                             let (m, c) = rdb_decode_string(&data[cursor..])
                                 .ok_or(PersistError::InvalidFrame)?;
@@ -601,7 +601,7 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
                         let (count, c) =
                             rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += c;
-                        let mut fields = Vec::with_capacity(count);
+                        let mut fields = Vec::with_capacity(count.min(1024));
                         for _ in 0..count {
                             let (f, c1) = rdb_decode_string(&data[cursor..])
                                 .ok_or(PersistError::InvalidFrame)?;
@@ -617,7 +617,7 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
                         let (count, c) =
                             rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += c;
-                        let mut members = Vec::with_capacity(count);
+                        let mut members = Vec::with_capacity(count.min(1024));
                         for _ in 0..count {
                             let (m, c) = rdb_decode_string(&data[cursor..])
                                 .ok_or(PersistError::InvalidFrame)?;
@@ -660,7 +660,7 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
                         let (count, consumed) =
                             rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                         cursor += consumed;
-                        let mut stream_entries = Vec::with_capacity(count);
+                        let mut stream_entries = Vec::with_capacity(count.min(1024));
                         for _ in 0..count {
                             if cursor + 16 > data.len() {
                                 return Err(PersistError::InvalidFrame);

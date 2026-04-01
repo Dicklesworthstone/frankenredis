@@ -1784,6 +1784,10 @@ impl<'a> LuaState<'a> {
             }
             Stmt::While(cond, body) => {
                 loop {
+                    self.iterations += 1;
+                    if self.iterations > MAX_ITERATIONS {
+                        return Err("script exceeded maximum iteration count".to_string());
+                    }
                     let cv = self.eval_expr(cond, env, varargs)?;
                     if !cv.is_truthy() {
                         break;
@@ -1798,6 +1802,10 @@ impl<'a> LuaState<'a> {
             }
             Stmt::Repeat(body, cond) => {
                 loop {
+                    self.iterations += 1;
+                    if self.iterations > MAX_ITERATIONS {
+                        return Err("script exceeded maximum iteration count".to_string());
+                    }
                     env.push_scope();
                     let cf = self.exec_stmts(body, env, varargs)?;
                     let cv = self.eval_expr(cond, env, varargs)?;
@@ -1834,6 +1842,10 @@ impl<'a> LuaState<'a> {
                 }
                 let mut i = s;
                 loop {
+                    self.iterations += 1;
+                    if self.iterations > MAX_ITERATIONS {
+                        return Err("script exceeded maximum iteration count".to_string());
+                    }
                     if (st > 0.0 && i > e) || (st < 0.0 && i < e) {
                         break;
                     }
@@ -1857,6 +1869,10 @@ impl<'a> LuaState<'a> {
                 let mut control = iter_vals.get(2).cloned().unwrap_or(LuaValue::Nil);
 
                 loop {
+                    self.iterations += 1;
+                    if self.iterations > MAX_ITERATIONS {
+                        return Err("script exceeded maximum iteration count".to_string());
+                    }
                     let mut iter_args = vec![state.clone(), control.clone()];
                     let results = self.call_function(&iter_fn, &mut iter_args, env, varargs)?;
                     // Update state from mutated args (needed for stateful iterators like gmatch)
@@ -4446,8 +4462,24 @@ mod tests {
         let result = eval_script(b"return select(-1, 'a', 'b', 'c')", &[], &[], &mut store, 0);
 
         assert!(matches!(result, Ok(RespFrame::BulkString(Some(ref bytes))) if bytes == b"c"));
-    }
+        }
 
+        #[test]
+        fn empty_while_loop_hits_iteration_limit() {
+        let mut store = Store::new();
+        let result = eval_script(
+            b"while true do end",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        match result {
+            Ok(RespFrame::Error(msg)) => assert!(msg.contains("iteration count")),
+            other => panic!("expected iteration count error, got {other:?}"),
+        }
+        }
+        }
     #[test]
     fn empty_while_loop_hits_iteration_limit() {
         let mut store = Store::new();
