@@ -105,6 +105,12 @@ const ACL_UNKNOWN_SUBCOMMAND_ERROR: &str =
 const DEFAULT_ACLLOG_MAX_LEN: i64 = 128;
 const DEFAULT_REPL_BACKLOG_SIZE: u64 = 1_048_576;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientUnblockMode {
+    Timeout,
+    Error,
+}
+
 /// Static configuration parameters returned by CONFIG GET.
 /// These represent sensible defaults for a standalone FrankenRedis instance.
 const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
@@ -1184,6 +1190,10 @@ pub struct ServerState {
     pub client_pause_deadline_ms: u64,
     /// CLIENT PAUSE mode: true = ALL (block all commands), false = WRITE only.
     pub client_pause_all: bool,
+    /// Client IDs currently blocked in the standalone server event loop.
+    pub blocked_client_ids: HashSet<u64>,
+    /// Pending CLIENT UNBLOCK requests to be applied by the standalone server.
+    pending_client_unblocks: Vec<(u64, ClientUnblockMode)>,
 }
 
 impl Default for ServerState {
@@ -1242,6 +1252,8 @@ impl Default for ServerState {
             monitor_output: Vec::new(),
             client_pause_deadline_ms: 0,
             client_pause_all: false,
+            blocked_client_ids: HashSet::new(),
+            pending_client_unblocks: Vec::new(),
         }
     }
 }
@@ -3027,6 +3039,18 @@ impl Runtime {
         self.server.monitor_clients.remove(&client_id);
     }
 
+    pub fn mark_client_blocked(&mut self, client_id: u64) {
+        self.server.blocked_client_ids.insert(client_id);
+    }
+
+    pub fn mark_client_unblocked(&mut self, client_id: u64) {
+        self.server.blocked_client_ids.remove(&client_id);
+    }
+
+    pub fn drain_pending_client_unblocks(&mut self) -> Vec<(u64, ClientUnblockMode)> {
+        std::mem::take(&mut self.server.pending_client_unblocks)
+    }
+
     /// Feed a command to all monitor clients, formatted as Redis does.
     pub fn feed_monitors(&mut self, argv: &[Vec<u8>], now_ms: u64, db: usize) {
         if self.server.monitor_clients.is_empty() {
@@ -3269,6 +3293,9 @@ impl Runtime {
         }
         if eq_ascii_token(command, b"INFO") {
             return self.handle_info_command(argv, now_ms);
+        }
+        if eq_ascii_token(command, b"CLIENT") {
+            return Ok(self.handle_client_command(argv, now_ms));
         }
         let namespaced = self.namespace_argv_for_selected_db(argv);
         let mut reply = dispatch_argv(&namespaced, &mut self.server.store, now_ms)?;
@@ -5137,21 +5164,36 @@ impl Runtime {
             if argv.len() != 3 && argv.len() != 4 {
                 return CommandError::WrongArity("CLIENT").to_resp();
             }
-            match parse_i64_arg(&argv[2]) {
-                Ok(id) if id > 0 => {}
+            let target_id = match parse_i64_arg(&argv[2]) {
+                Ok(id) if id > 0 => id as u64,
                 _ => return CommandError::InvalidInteger.to_resp(),
-            }
-            if argv.len() == 4 {
+            };
+            let mode = if argv.len() == 4 {
                 let mode = match std::str::from_utf8(&argv[3]) {
                     Ok(mode) => mode,
                     Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
                 };
-                if !mode.eq_ignore_ascii_case("TIMEOUT") && !mode.eq_ignore_ascii_case("ERROR") {
+                if mode.eq_ignore_ascii_case("TIMEOUT") {
+                    ClientUnblockMode::Timeout
+                } else if mode.eq_ignore_ascii_case("ERROR") {
+                    ClientUnblockMode::Error
+                } else {
                     return RespFrame::Error("ERR syntax error".to_string());
                 }
+            } else {
+                ClientUnblockMode::Timeout
+            };
+            let already_pending = self
+                .server
+                .pending_client_unblocks
+                .iter()
+                .any(|(pending_id, _)| *pending_id == target_id);
+            if self.server.blocked_client_ids.contains(&target_id) && !already_pending {
+                self.server.pending_client_unblocks.push((target_id, mode));
+                RespFrame::Integer(1)
+            } else {
+                RespFrame::Integer(0)
             }
-            // In single-runtime mode, return 0 (no clients unblocked)
-            RespFrame::Integer(0)
         } else if sub.eq_ignore_ascii_case("HELP") {
             if argv.len() != 2 {
                 return CommandError::WrongArity("CLIENT").to_resp();
@@ -7194,8 +7236,8 @@ mod tests {
     use fr_protocol::{RespFrame, parse_frame};
 
     use super::{
-        ClientSession, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER, Runtime,
-        ServerState, classify_cluster_subcommand, classify_cluster_subcommand_linear,
+        ClientSession, ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
+        Runtime, ServerState, classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
         store_to_rdb_entries,
     };
@@ -8956,6 +8998,63 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"UNBLOCK", b"1", b"wat"]), 1),
             RespFrame::Error("ERR syntax error".to_string())
+        );
+    }
+
+    #[test]
+    fn client_unblock_queues_request_for_blocked_client() {
+        let mut rt = Runtime::default_strict();
+        rt.mark_client_blocked(42);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"UNBLOCK", b"42", b"ERROR"]), 1),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.drain_pending_client_unblocks(),
+            vec![(42, ClientUnblockMode::Error)]
+        );
+    }
+
+    #[test]
+    fn client_unblock_deduplicates_pending_requests() {
+        let mut rt = Runtime::default_strict();
+        rt.mark_client_blocked(42);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"UNBLOCK", b"42", b"ERROR"]), 1),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"UNBLOCK", b"42", b"TIMEOUT"]), 2),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
+            rt.drain_pending_client_unblocks(),
+            vec![(42, ClientUnblockMode::Error)]
+        );
+    }
+
+    #[test]
+    fn exec_uses_runtime_client_unblock_path() {
+        let mut rt = Runtime::default_strict();
+        rt.mark_client_blocked(9);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"UNBLOCK", b"9"]), 2),
+            RespFrame::SimpleString("QUEUED".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 3),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1)]))
+        );
+        assert_eq!(
+            rt.drain_pending_client_unblocks(),
+            vec![(9, ClientUnblockMode::Timeout)]
         );
     }
 

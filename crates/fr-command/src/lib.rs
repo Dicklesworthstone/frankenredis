@@ -2417,6 +2417,7 @@ fn parse_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
     let text = std::str::from_utf8(arg)
         .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
     let val = text
+        .trim()
         .parse::<f64>()
         .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
     if val.is_nan() {
@@ -7338,7 +7339,8 @@ fn bytes_to_lossy_string(bytes: &[u8]) -> String {
 
 fn parse_i64_arg(arg: &[u8]) -> Result<i64, CommandError> {
     let text = std::str::from_utf8(arg).map_err(|_| CommandError::InvalidInteger)?;
-    text.parse::<i64>()
+    text.trim()
+        .parse::<i64>()
         .map_err(|_| CommandError::InvalidInteger)
 }
 
@@ -10848,11 +10850,26 @@ fn debug_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
             std::thread::sleep(std::time::Duration::from_secs_f64(secs));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
-    } else if sub.eq_ignore_ascii_case("SET-ACTIVE-EXPIRE")
-        || sub.eq_ignore_ascii_case("JMAP")
-        || sub.eq_ignore_ascii_case("RELOAD")
-        || sub.eq_ignore_ascii_case("OBJECT")
-    {
+    } else if sub.eq_ignore_ascii_case("SET-ACTIVE-EXPIRE") {
+        if argv.len() != 3 {
+            return Err(CommandError::WrongArity("DEBUG"));
+        }
+        let value = parse_i64_arg(&argv[2])?;
+        if value != 0 && value != 1 {
+            return Err(CommandError::SyntaxError);
+        }
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("JMAP") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongArity("DEBUG"));
+        }
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("RELOAD") {
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("OBJECT") {
+        if argv.len() != 3 {
+            return Err(CommandError::WrongArity("DEBUG"));
+        }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else {
         Err(CommandError::UnknownSubcommand {
@@ -10923,12 +10940,45 @@ fn latency_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         return Err(CommandError::WrongArity("LATENCY"));
     }
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    if sub.eq_ignore_ascii_case("LATEST") || sub.eq_ignore_ascii_case("HISTORY") {
+    if sub.eq_ignore_ascii_case("LATEST") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "LATENCY",
+                subcommand: "LATEST".to_string(),
+            });
+        }
+        Ok(RespFrame::Array(Some(Vec::new())))
+    } else if sub.eq_ignore_ascii_case("HISTORY") {
+        if argv.len() != 3 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "LATENCY",
+                subcommand: "HISTORY".to_string(),
+            });
+        }
         Ok(RespFrame::Array(Some(Vec::new())))
     } else if sub.eq_ignore_ascii_case("RESET") {
-        Ok(RespFrame::SimpleString("OK".to_string()))
+        Ok(RespFrame::Integer(0))
     } else if sub.eq_ignore_ascii_case("GRAPH") {
-        Ok(RespFrame::BulkString(None))
+        if argv.len() != 3 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "LATENCY",
+                subcommand: "GRAPH".to_string(),
+            });
+        }
+        let event = String::from_utf8_lossy(&argv[2]);
+        Ok(RespFrame::Error(format!(
+            "No samples available for event '{event}'"
+        )))
+    } else if sub.eq_ignore_ascii_case("DOCTOR") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "LATENCY",
+                subcommand: "DOCTOR".to_string(),
+            });
+        }
+        Ok(RespFrame::BulkString(Some(
+            b"I have no latency information to analyze.".to_vec(),
+        )))
     } else if sub.eq_ignore_ascii_case("HELP") {
         if argv.len() != 2 {
             return Err(CommandError::WrongSubcommandArity {
@@ -10942,6 +10992,9 @@ fn latency_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
             )),
             RespFrame::BulkString(Some(
                 b"LATEST - Return the latest latency samples.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"DOCTOR - Return a human readable latency analysis report.".to_vec(),
             )),
             RespFrame::BulkString(Some(
                 b"HISTORY <event> - Return latency history for an event.".to_vec(),

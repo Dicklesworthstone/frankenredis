@@ -8518,7 +8518,9 @@ fn hll_hash(data: &[u8]) -> u64 {
 
     let mut chunks = data.chunks_exact(8);
     for chunk in &mut chunks {
-        let mut k = u64::from_le_bytes(chunk.try_into().expect("8-byte chunk"));
+        let mut k_bytes = [0u8; 8];
+        k_bytes.copy_from_slice(chunk);
+        let mut k = u64::from_le_bytes(k_bytes);
         k = k.wrapping_mul(M);
         k ^= k >> R;
         k = k.wrapping_mul(M);
