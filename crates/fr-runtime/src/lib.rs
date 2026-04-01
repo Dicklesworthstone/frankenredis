@@ -6657,10 +6657,6 @@ impl Runtime {
                     let current_fp = self.server.store.key_fingerprint(key, now_ms);
                     let current_dirty = self.server.store.key_modification_count(key, now_ms);
                     if current_fp != *original_fp || current_dirty != *original_mod_count {
-                        println!(
-                            "WATCH FAILED: key={:?}, current_fp={}, original_fp={}, current_dirty={}, original_mod_count={}",
-                            key, current_fp, original_fp, current_dirty, original_mod_count
-                        );
                         dirty = true;
                         break;
                     }
@@ -10826,6 +10822,79 @@ mod tests {
     }
 
     #[test]
+    fn save_and_load_aof_round_trip_preserves_move_and_swapdb_multi_db_state() {
+        let dir = std::env::temp_dir().join("fr_runtime_aof_move_swapdb_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let aof_path = dir.join("test_move_swapdb.aof");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(aof_path.clone());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"move_me", b"zero"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MOVE", b"move_me", b"2"]), 1),
+            RespFrame::Integer(1)
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"swap_key", b"db0"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"2"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"swap_key", b"db2"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SWAPDB", b"0", b"2"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"0"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SAVE"]), 7),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let mut rt2 = Runtime::default_strict();
+        rt2.set_aof_path(aof_path.clone());
+        let loaded = rt2.load_aof(100).expect("load should succeed");
+        assert!(loaded > 0);
+
+        assert_eq!(
+            rt2.execute_frame(command(&[b"GET", b"move_me"]), 100),
+            RespFrame::BulkString(Some(b"zero".to_vec()))
+        );
+        assert_eq!(
+            rt2.execute_frame(command(&[b"GET", b"swap_key"]), 101),
+            RespFrame::BulkString(Some(b"db2".to_vec()))
+        );
+
+        assert_eq!(
+            rt2.execute_frame(command(&[b"SELECT", b"2"]), 102),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt2.execute_frame(command(&[b"GET", b"move_me"]), 103),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            rt2.execute_frame(command(&[b"GET", b"swap_key"]), 104),
+            RespFrame::BulkString(Some(b"db0".to_vec()))
+        );
+
+        let _ = std::fs::remove_file(&aof_path);
+    }
+
+    #[test]
     fn bgsave_writes_rdb_snapshot_when_path_is_configured() {
         let dir = std::env::temp_dir().join("fr_runtime_rdb_test");
         let _ = std::fs::create_dir_all(&dir);
@@ -10853,6 +10922,97 @@ mod tests {
                     && entry.value == fr_persist::RdbValue::String(b"value".to_vec())
             }),
             "RDB snapshot should contain the persisted key"
+        );
+
+        let _ = std::fs::remove_file(&rdb_path);
+    }
+
+    #[test]
+    fn bgsave_rdb_snapshot_preserves_move_and_swapdb_multi_db_state() {
+        let dir = std::env::temp_dir().join("fr_runtime_rdb_move_swapdb_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let rdb_path = dir.join("test_move_swapdb.rdb");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(rdb_path.clone());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"move_me", b"zero"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MOVE", b"move_me", b"2"]), 1),
+            RespFrame::Integer(1)
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"swap_key", b"db0"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"2"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"swap_key", b"db2"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SWAPDB", b"0", b"2"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGSAVE"]), 6),
+            RespFrame::SimpleString("Background saving started".to_string())
+        );
+        assert!(
+            rdb_path.exists(),
+            "BGSAVE should write the configured RDB file"
+        );
+
+        let (entries, aux) = fr_persist::read_rdb_file(&rdb_path).expect("read rdb");
+        assert_eq!(aux.get("frankenredis"), Some(&"true".to_string()));
+        assert!(entries.iter().any(|entry| {
+            entry.db == 0
+                && entry.key == b"move_me"
+                && entry.value == fr_persist::RdbValue::String(b"zero".to_vec())
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.db == 0
+                && entry.key == b"swap_key"
+                && entry.value == fr_persist::RdbValue::String(b"db2".to_vec())
+        }));
+        assert!(entries.iter().any(|entry| {
+            entry.db == 2
+                && entry.key == b"swap_key"
+                && entry.value == fr_persist::RdbValue::String(b"db0".to_vec())
+        }));
+        assert!(!entries.iter().any(|entry| entry.db == 2 && entry.key == b"move_me"));
+
+        let mut restored = Runtime::default_strict();
+        super::apply_rdb_entries_to_store(&mut restored.server.store, &entries, 6)
+            .expect("apply rdb entries");
+
+        assert_eq!(
+            restored.execute_frame(command(&[b"GET", b"move_me"]), 7),
+            RespFrame::BulkString(Some(b"zero".to_vec()))
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"GET", b"swap_key"]), 8),
+            RespFrame::BulkString(Some(b"db2".to_vec()))
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"SELECT", b"2"]), 9),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"GET", b"move_me"]), 10),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"GET", b"swap_key"]), 11),
+            RespFrame::BulkString(Some(b"db0".to_vec()))
         );
 
         let _ = std::fs::remove_file(&rdb_path);
@@ -10909,6 +11069,87 @@ mod tests {
                 "ERR appendonly is disabled, cannot rewrite append only file".to_string()
             )
         );
+    }
+
+    #[test]
+    fn bgrewriteaof_rewrites_multi_db_move_and_swapdb_state() {
+        let dir = std::env::temp_dir().join("fr_runtime_bgrewriteaof_move_swapdb_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let aof_path = dir.join("rewrite_move_swapdb.aof");
+        let stale_records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"stale".to_vec(), b"old".to_vec()],
+        }];
+        write_aof_file(&aof_path, &stale_records).expect("seed stale aof");
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(aof_path.clone());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"move_me", b"zero"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MOVE", b"move_me", b"2"]), 1),
+            RespFrame::Integer(1)
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"swap_key", b"db0"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"2"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"swap_key", b"db2"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SWAPDB", b"0", b"2"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"0"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 7),
+            RespFrame::SimpleString("Background append only file rewriting started".to_string())
+        );
+
+        let mut restored = Runtime::default_strict();
+        restored.set_aof_path(aof_path.clone());
+        let loaded = restored.load_aof(100).expect("load rewritten aof");
+        assert!(loaded > 0, "rewritten AOF should contain snapshot records");
+
+        assert_eq!(
+            restored.execute_frame(command(&[b"GET", b"stale"]), 101),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"GET", b"move_me"]), 102),
+            RespFrame::BulkString(Some(b"zero".to_vec()))
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"GET", b"swap_key"]), 103),
+            RespFrame::BulkString(Some(b"db2".to_vec()))
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"SELECT", b"2"]), 104),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"GET", b"move_me"]), 105),
+            RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            restored.execute_frame(command(&[b"GET", b"swap_key"]), 106),
+            RespFrame::BulkString(Some(b"db0".to_vec()))
+        );
+
+        let _ = std::fs::remove_file(&aof_path);
     }
 
     #[test]

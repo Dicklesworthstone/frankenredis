@@ -274,6 +274,14 @@
           },
           {
             "kind": "bulk",
+            "value": "CLUSTER GETKEYSINSLOT <slot> <count>"
+          },
+          {
+            "kind": "bulk",
+            "value": "CLUSTER COUNTKEYSINSLOT <slot>"
+          },
+          {
+            "kind": "bulk",
             "value": "CLUSTER SLOTS"
           },
           {

@@ -282,6 +282,40 @@
         { "key": "ea:key", "expect": "data2", "at_ms": 22999 },
         { "key": "ea:key", "expect": null, "at_ms": 23001 }
       ]
+    },
+    {
+      "name": "move_and_swapdb_replay_db0_view",
+      "now_ms": 23000,
+      "records": [
+        ["SET", "move:key", "db0-value"],
+        ["MOVE", "move:key", "2"],
+        ["SET", "swap:key", "db0-swap"],
+        ["SELECT", "2"],
+        ["SET", "swap:key", "db2-swap"],
+        ["SWAPDB", "0", "2"],
+        ["SELECT", "0"]
+      ],
+      "assertions": [
+        { "key": "move:key", "expect": "db0-value", "at_ms": 23000 },
+        { "key": "swap:key", "expect": "db2-swap", "at_ms": 23000 }
+      ]
+    },
+    {
+      "name": "move_and_swapdb_replay_db2_view",
+      "now_ms": 24000,
+      "records": [
+        ["SET", "move:key", "db0-value"],
+        ["MOVE", "move:key", "2"],
+        ["SET", "swap:key", "db0-swap"],
+        ["SELECT", "2"],
+        ["SET", "swap:key", "db2-swap"],
+        ["SWAPDB", "0", "2"],
+        ["SELECT", "2"]
+      ],
+      "assertions": [
+        { "key": "move:key", "expect": null, "at_ms": 24000 },
+        { "key": "swap:key", "expect": "db0-swap", "at_ms": 24000 }
+      ]
     }
   ]
 }

@@ -3134,6 +3134,8 @@ mod tests {
                 RespFrame::BulkString(Some(b"CLUSTER INFO".to_vec())),
                 RespFrame::BulkString(Some(b"CLUSTER MYID".to_vec())),
                 RespFrame::BulkString(Some(b"CLUSTER KEYSLOT <key>".to_vec())),
+                RespFrame::BulkString(Some(b"CLUSTER GETKEYSINSLOT <slot> <count>".to_vec())),
+                RespFrame::BulkString(Some(b"CLUSTER COUNTKEYSINSLOT <slot>".to_vec())),
                 RespFrame::BulkString(Some(b"CLUSTER SLOTS".to_vec())),
                 RespFrame::BulkString(Some(b"CLUSTER SHARDS".to_vec())),
                 RespFrame::BulkString(Some(b"CLUSTER NODES".to_vec())),

@@ -1962,6 +1962,105 @@
       }
     },
     {
+      "name": "swapdb_stateful_select_db0",
+      "now_ms": 850,
+      "argv": [
+        "SELECT",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "swapdb_stateful_seed_db0",
+      "now_ms": 851,
+      "argv": [
+        "SET",
+        "swapdb_stateful_key",
+        "db0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "swapdb_stateful_select_db1",
+      "now_ms": 852,
+      "argv": [
+        "SELECT",
+        "1"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "swapdb_stateful_seed_db1",
+      "now_ms": 853,
+      "argv": [
+        "SET",
+        "swapdb_stateful_key",
+        "db1"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "swapdb_stateful_execute",
+      "now_ms": 854,
+      "argv": [
+        "SWAPDB",
+        "0",
+        "1"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "swapdb_stateful_verify_db1",
+      "now_ms": 855,
+      "argv": [
+        "GET",
+        "swapdb_stateful_key"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "db0"
+      }
+    },
+    {
+      "name": "swapdb_stateful_select_back_to_db0",
+      "now_ms": 856,
+      "argv": [
+        "SELECT",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "swapdb_stateful_verify_db0",
+      "now_ms": 857,
+      "argv": [
+        "GET",
+        "swapdb_stateful_key"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "db1"
+      }
+    },
+    {
       "name": "connection_cleanup",
       "now_ms": 900,
       "argv": [

@@ -3222,6 +3222,92 @@
         "kind": "integer",
         "value": 1
       }
+    },
+    {
+      "name": "move_stateful_select_db0",
+      "now_ms": 61000,
+      "argv": [
+        "SELECT",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "move_stateful_seed_source",
+      "now_ms": 61001,
+      "argv": [
+        "SET",
+        "move_stateful_key",
+        "server-value"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "move_stateful_execute",
+      "now_ms": 61002,
+      "argv": [
+        "MOVE",
+        "move_stateful_key",
+        "1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "move_stateful_source_missing_after_move",
+      "now_ms": 61003,
+      "argv": [
+        "GET",
+        "move_stateful_key"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
+    },
+    {
+      "name": "move_stateful_select_db1",
+      "now_ms": 61004,
+      "argv": [
+        "SELECT",
+        "1"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "move_stateful_destination_has_value",
+      "now_ms": 61005,
+      "argv": [
+        "GET",
+        "move_stateful_key"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "server-value"
+      }
+    },
+    {
+      "name": "move_stateful_cleanup_destination",
+      "now_ms": 61006,
+      "argv": [
+        "DEL",
+        "move_stateful_key"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     }
   ]
 }

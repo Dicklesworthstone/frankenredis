@@ -11066,9 +11066,9 @@ fn bitfield_cmd(
                 .bitfield_get(key, bit_offset, bits, signed, now_ms)
                 .map_err(CommandError::Store)?;
 
-            let new_val = current.wrapping_add(increment);
+            let (new_val, i64_overflowed) = current.overflowing_add(increment);
             let (clamped, overflowed) =
-                bitfield_clamp_with_overflow(new_val, bits, signed, overflow_mode);
+                bitfield_clamp_with_overflow(new_val, i64_overflowed, bits, signed, overflow_mode);
 
             if overflowed && overflow_mode == BitfieldOverflow::Fail {
                 results.push(RespFrame::BulkString(None));
@@ -11215,12 +11215,13 @@ fn bitfield_sign_extend(value: i64, bits: u8) -> i64 {
 
 /// Clamp a value to the range of the specified type encoding.
 fn bitfield_clamp(value: i64, bits: u8, signed: bool, overflow: BitfieldOverflow) -> i64 {
-    bitfield_clamp_with_overflow(value, bits, signed, overflow).0
+    bitfield_clamp_with_overflow(value, false, bits, signed, overflow).0
 }
 
 /// Clamp a value and report whether overflow occurred.
 fn bitfield_clamp_with_overflow(
     value: i64,
+    i64_overflowed: bool,
     bits: u8,
     signed: bool,
     overflow: BitfieldOverflow,
@@ -11236,7 +11237,7 @@ fn bitfield_clamp_with_overflow(
         } else {
             (1i64 << (bits - 1)) - 1
         };
-        if value >= min && value <= max {
+        if !i64_overflowed && value >= min && value <= max {
             return (value, false);
         }
         match overflow {
@@ -11255,8 +11256,15 @@ fn bitfield_clamp_with_overflow(
                 }
             }
             BitfieldOverflow::Sat => {
-                let clamped = value.clamp(min, max);
-                (clamped, true)
+                if i64_overflowed {
+                    // If it overflowed i64 addition, value wrapped around.
+                    // If value is negative, it overflowed past MAX. If positive, past MIN.
+                    let clamped = if value < 0 { i64::MAX } else { i64::MIN };
+                    (clamped, true)
+                } else {
+                    let clamped = value.clamp(min, max);
+                    (clamped, true)
+                }
             }
             BitfieldOverflow::Fail => (value, true),
         }
@@ -11268,7 +11276,7 @@ fn bitfield_clamp_with_overflow(
         };
         let uval = value as u64;
         // Check if value fits in the unsigned range
-        if value >= 0 && uval <= max {
+        if !i64_overflowed && value >= 0 && uval <= max {
             return (value, false);
         }
         match overflow {
@@ -11277,7 +11285,10 @@ fn bitfield_clamp_with_overflow(
                 (wrapped as i64, true)
             }
             BitfieldOverflow::Sat => {
-                if value < 0 {
+                if i64_overflowed {
+                    // For unsigned, an i64 overflow means it went way past the max of u63.
+                    (max as i64, true)
+                } else if value < 0 {
                     (0, true)
                 } else {
                     (max as i64, true)

@@ -2938,8 +2938,18 @@ impl<'a> LuaState<'a> {
                     .first()
                     .map(|a| a.to_display_string())
                     .unwrap_or_default();
-                let n = args.get(1).and_then(|v| v.to_number()).unwrap_or(0.0) as usize;
-                let mut result = Vec::with_capacity(s.len() * n);
+                let n_val = args.get(1).and_then(|v| v.to_number()).unwrap_or(0.0);
+                if n_val < 0.0 {
+                    return Ok(vec![LuaValue::Str(Vec::new())]);
+                }
+                let n = n_val as usize;
+                
+                let target_len = s.len().checked_mul(n).ok_or("string length overflow")?;
+                if target_len > 512 * 1024 * 1024 {
+                    return Err("string length overflow".to_string());
+                }
+
+                let mut result = Vec::with_capacity(target_len);
                 for _ in 0..n {
                     result.extend_from_slice(&s);
                 }
@@ -4013,10 +4023,13 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
 
 /// Pad a string to a given width, respecting left-align and pad character.
 fn lua_fmt_pad(s: &str, width: Option<usize>, left_align: bool, pad: char) -> String {
-    let w = match width {
+    let mut w = match width {
         Some(w) if w > s.len() => w,
         _ => return s.to_string(),
     };
+    if w > 512 * 1024 * 1024 {
+        w = 512 * 1024 * 1024;
+    }
     let padding = w - s.len();
     if left_align {
         format!("{s}{}", " ".repeat(padding))
@@ -4433,8 +4446,19 @@ mod tests {
         let result = eval_script(b"return select(-1, 'a', 'b', 'c')", &[], &[], &mut store, 0);
 
         assert!(matches!(result, Ok(RespFrame::BulkString(Some(ref bytes))) if bytes == b"c"));
-    }
+        }
 
+        #[test]
+        fn empty_while_loop_hits_iteration_limit() {
+        let mut store = Store::new();
+        let result = eval_script(b"while true do end", &[], &[], &mut store, 0);
+        match result {
+            Ok(RespFrame::Error(msg)) => assert!(msg.contains("iteration count"), "Unexpected error: {}", msg),
+            Err(e) => assert!(e.contains("iteration count"), "Unexpected string error: {}", e),
+            other => panic!("Expected iteration limit error, got {:?}", other),
+        }
+        }
+        }
     #[test]
     fn select_zero_index_errors() {
         let mut store = Store::new();
