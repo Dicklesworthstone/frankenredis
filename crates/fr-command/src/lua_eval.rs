@@ -5,7 +5,9 @@
 // while, repeat/until, tables, function calls/definitions, redis.call/pcall,
 // KEYS/ARGV, and standard library functions.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use fr_protocol::RespFrame;
 use fr_store::Store;
@@ -65,7 +67,7 @@ pub struct LuaFunc {
     pub body: Vec<Stmt>,
     pub is_variadic: bool,
     /// Captured lexical environment (upvalues) from function definition site.
-    pub captured_env: Option<Vec<HashMap<String, LuaValue>>>,
+    pub captured_env: Option<Vec<HashMap<String, Rc<RefCell<LuaValue>>>>>,
     /// For `local function f(x) ... end`, stores the name so the function
     /// can be injected into its own call scope for self-recursion.
     pub self_name: Option<String>,
@@ -1417,7 +1419,7 @@ pub struct LuaState<'a> {
 }
 
 struct Scope {
-    locals: HashMap<String, LuaValue>,
+    locals: HashMap<String, Rc<RefCell<LuaValue>>>,
 }
 
 impl Scope {
@@ -1451,14 +1453,16 @@ impl Env {
 
     fn set_local(&mut self, name: &str, value: LuaValue) {
         if let Some(scope) = self.scopes.last_mut() {
-            scope.locals.insert(name.to_string(), value);
+            scope
+                .locals
+                .insert(name.to_string(), Rc::new(RefCell::new(value)));
         }
     }
 
-    fn get_local(&self, name: &str) -> Option<&LuaValue> {
+    fn get_local(&self, name: &str) -> Option<LuaValue> {
         for scope in self.scopes.iter().rev() {
-            if let Some(val) = scope.locals.get(name) {
-                return Some(val);
+            if let Some(value) = scope.locals.get(name) {
+                return Some(value.borrow().clone());
             }
         }
         None
@@ -1466,8 +1470,8 @@ impl Env {
 
     fn set_existing_local(&mut self, name: &str, value: LuaValue) -> bool {
         for scope in self.scopes.iter_mut().rev() {
-            if scope.locals.contains_key(name) {
-                scope.locals.insert(name.to_string(), value);
+            if let Some(existing) = scope.locals.get(name) {
+                *existing.borrow_mut() = value;
                 return true;
             }
         }
@@ -1475,12 +1479,12 @@ impl Env {
     }
 
     /// Snapshot all current scope locals for upvalue capture.
-    fn snapshot(&self) -> Vec<HashMap<String, LuaValue>> {
+    fn snapshot(&self) -> Vec<HashMap<String, Rc<RefCell<LuaValue>>>> {
         self.scopes.iter().map(|s| s.locals.clone()).collect()
     }
 
     /// Create an Env pre-loaded with captured upvalue scopes.
-    fn from_captured(captured: &[HashMap<String, LuaValue>]) -> Self {
+    fn from_captured(captured: &[HashMap<String, Rc<RefCell<LuaValue>>>]) -> Self {
         Self {
             scopes: captured
                 .iter()

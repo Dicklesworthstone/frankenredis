@@ -1509,8 +1509,8 @@
         "RESET"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "integer",
+        "value": 0
       }
     },
     {

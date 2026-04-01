@@ -951,7 +951,8 @@
       "now_ms": 17001,
       "argv": [
         "LATENCY",
-        "HISTORY"
+        "HISTORY",
+        "command"
       ],
       "expect": {
         "kind": "array",
@@ -966,20 +967,21 @@
         "RESET"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "integer",
+        "value": 0
       }
     },
     {
-      "name": "latency_graph_null",
+      "name": "latency_graph_no_samples",
       "now_ms": 17003,
       "argv": [
         "LATENCY",
-        "GRAPH"
+        "GRAPH",
+        "command"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": null
+        "kind": "error",
+        "value": "No samples available for event 'command'"
       }
     },
     {
@@ -1366,6 +1368,10 @@
           {
             "kind": "bulk",
             "value": "LATEST - Return the latest latency samples."
+          },
+          {
+            "kind": "bulk",
+            "value": "DOCTOR - Return a human readable latency analysis report."
           },
           {
             "kind": "bulk",
@@ -2307,8 +2313,8 @@
         "RESET"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "integer",
+        "value": 0
       }
     },
     {

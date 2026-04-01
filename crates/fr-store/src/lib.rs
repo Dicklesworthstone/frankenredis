@@ -1803,7 +1803,7 @@ impl Store {
             .range(prefix.clone()..)
             .take_while(|(k, _)| k.starts_with(&prefix))
             .filter_map(|(k, _)| {
-                let (_, logical) = decode_db_key(k).expect("well-formed DB key");
+                let (_, logical) = decode_db_key(k)?;
                 if glob_match(pattern, logical) {
                     Some(logical.to_vec())
                 } else {
