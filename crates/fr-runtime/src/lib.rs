@@ -6648,21 +6648,20 @@ impl Runtime {
         }
 
         // Check watched keys: if any were modified, abort the transaction
-        let watch_failed = self.session.transaction_state.watch_dirty
-            || {
-                let mut dirty = false;
-                for (key, original_fp, original_mod_count) in
-                    &self.session.transaction_state.watched_keys
-                {
-                    let current_fp = self.server.store.key_fingerprint(key, now_ms);
-                    let current_dirty = self.server.store.key_modification_count(key, now_ms);
-                    if current_fp != *original_fp || current_dirty != *original_mod_count {
-                        dirty = true;
-                        break;
-                    }
+        let watch_failed = self.session.transaction_state.watch_dirty || {
+            let mut dirty = false;
+            for (key, original_fp, original_mod_count) in
+                &self.session.transaction_state.watched_keys
+            {
+                let current_fp = self.server.store.key_fingerprint(key, now_ms);
+                let current_dirty = self.server.store.key_modification_count(key, now_ms);
+                if current_fp != *original_fp || current_dirty != *original_mod_count {
+                    dirty = true;
+                    break;
                 }
-                dirty
-            };
+            }
+            dirty
+        };
         self.session.transaction_state.watched_keys.clear();
         self.session.transaction_state.watch_dirty = false;
 
@@ -10988,7 +10987,11 @@ mod tests {
                 && entry.key == b"swap_key"
                 && entry.value == fr_persist::RdbValue::String(b"db0".to_vec())
         }));
-        assert!(!entries.iter().any(|entry| entry.db == 2 && entry.key == b"move_me"));
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.db == 2 && entry.key == b"move_me")
+        );
 
         let mut restored = Runtime::default_strict();
         super::apply_rdb_entries_to_store(&mut restored.server.store, &entries, 6)
