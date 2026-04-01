@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-mod lua_eval;
+pub mod lua_eval;
 pub use lua_eval::eval_script;
 
 use fr_protocol::RespFrame;

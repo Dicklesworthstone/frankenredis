@@ -66,6 +66,9 @@ pub struct LuaFunc {
     pub is_variadic: bool,
     /// Captured lexical environment (upvalues) from function definition site.
     pub captured_env: Option<Vec<HashMap<String, LuaValue>>>,
+    /// For `local function f(x) ... end`, stores the name so the function
+    /// can be injected into its own call scope for self-recursion.
+    pub self_name: Option<String>,
 }
 
 impl LuaTable {
@@ -1904,6 +1907,7 @@ impl<'a> LuaState<'a> {
                     body: body.clone(),
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
+                    self_name: None,
                 });
                 if names.len() == 1 {
                     self.globals.insert(names[0].clone(), func);
@@ -1919,6 +1923,7 @@ impl<'a> LuaState<'a> {
                     body: body.clone(),
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
+                    self_name: Some(name.clone()),
                 });
                 env.set_local(name, func);
                 Ok(ControlFlow::None)
@@ -2182,6 +2187,7 @@ impl<'a> LuaState<'a> {
                 body: body.clone(),
                 is_variadic: *is_variadic,
                 captured_env: Some(env.snapshot()),
+                self_name: None,
             })),
         }
     }
@@ -2316,6 +2322,11 @@ impl<'a> LuaState<'a> {
                 };
                 // Push a new scope for function parameters/locals
                 new_env.push_scope();
+                // For `local function f(x) ... end`, inject the function
+                // into its own scope so self-recursion works.
+                if let Some(name) = &lua_func.self_name {
+                    new_env.set_local(name, func.clone());
+                }
                 for (i, param) in lua_func.params.iter().enumerate() {
                     let val = args.get(i).cloned().unwrap_or(LuaValue::Nil);
                     new_env.set_local(param, val);
