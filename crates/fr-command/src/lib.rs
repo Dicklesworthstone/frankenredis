@@ -8141,7 +8141,8 @@ fn format_bytes_human(bytes: usize) -> String {
 }
 
 fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    let keyspace_size = store.dbsize(now_ms);
+    // Trigger lazy expiry for the dbsize side effect (cleans expired keys).
+    let _ = store.dbsize(now_ms);
     let sections: Vec<&str> = argv[1..]
         .iter()
         .map(|arg| std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument))
@@ -8320,9 +8321,18 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("total_keys_evicted:0\r\n");
         info.push_str("keyspace_hits:0\r\n");
         info.push_str("keyspace_misses:0\r\n");
-        info.push_str("pubsub_channels:0\r\n");
-        info.push_str("pubsub_patterns:0\r\n");
-        info.push_str("pubsub_shardchannels:0\r\n");
+        info.push_str(&format!(
+            "pubsub_channels:{}\r\n",
+            store.subscribed_channels.len()
+        ));
+        info.push_str(&format!(
+            "pubsub_patterns:{}\r\n",
+            store.subscribed_patterns.len()
+        ));
+        info.push_str(&format!(
+            "pubsub_shardchannels:{}\r\n",
+            store.subscribed_shard_channels.len()
+        ));
         info.push_str("latest_fork_usec:0\r\n");
         info.push_str("total_forks:0\r\n");
         info.push_str("migrate_cached_sockets:0\r\n");
@@ -8399,14 +8409,17 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("\r\n");
     }
 
-    // Keyspace section
+    // Keyspace section — report per-database stats like Redis
     if section_requested("keyspace") {
         info.push_str("# Keyspace\r\n");
-        if keyspace_size > 0 {
-            let expires = store.count_expiring_keys();
-            info.push_str(&format!(
-                "db0:keys={keyspace_size},expires={expires},avg_ttl=0\r\n"
-            ));
+        for db in 0..store.database_count {
+            let keys = store.dbsize_in_db(db);
+            if keys > 0 {
+                let expires = store.expires_in_db(db);
+                info.push_str(&format!(
+                    "db{db}:keys={keys},expires={expires},avg_ttl=0\r\n"
+                ));
+            }
         }
         info.push_str("\r\n");
     }
@@ -10270,8 +10283,12 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         if argv.len() != 2 {
             return Err(CommandError::SyntaxError);
         }
+        let used = store.estimate_memory_usage_bytes();
         Ok(RespFrame::BulkString(Some(
-            b"peak.allocated:0\r\ntotal.allocated:0\r\nstartup.allocated:0\r\nreplication.backlog:0\r\nclients.slaves:0\r\nclients.normal:0\r\naof.buffer:0\r\n".to_vec(),
+            format!(
+                "peak.allocated:{used}\r\ntotal.allocated:{used}\r\nstartup.allocated:0\r\nreplication.backlog:0\r\nclients.slaves:0\r\nclients.normal:0\r\naof.buffer:0\r\n"
+            )
+            .into_bytes(),
         )))
     } else if sub.eq_ignore_ascii_case("HELP") {
         if argv.len() != 2 {
@@ -10735,7 +10752,7 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         }
     }
     let count = result.len();
-    store.store_sorted_set(dest, result);
+    store.store_sorted_set(dest, result, now_ms);
     Ok(RespFrame::Integer(count as i64))
 }
 

@@ -7150,15 +7150,22 @@ impl Store {
         format!("{hash:016x}")
     }
 
-    pub fn store_sorted_set(&mut self, dest: &[u8], members: HashMap<Vec<u8>, f64>) {
+    pub fn store_sorted_set(&mut self, dest: &[u8], members: HashMap<Vec<u8>, f64>, now_ms: u64) {
+        self.internal_entries_remove(dest);
+        self.stream_groups.remove(dest);
+        self.stream_last_ids.remove(dest);
+        
+        if members.is_empty() {
+            self.dirty = self.dirty.saturating_add(1);
+            return;
+        }
+        
         let mut zs = SortedSet::new();
         for (m, s) in members {
             zs.insert(m, s);
         }
-        self.stream_groups.remove(dest);
-        self.stream_last_ids.remove(dest);
-        self.entries
-            .insert(dest.to_vec(), Entry::new(Value::SortedSet(zs), None, 0));
+        self.internal_entries_insert(dest.to_vec(), Entry::new(Value::SortedSet(zs), None, now_ms));
+        self.dirty = self.dirty.saturating_add(1);
     }
 
     pub fn memory_usage_for_key(&mut self, key: &[u8], now_ms: u64) -> Option<usize> {
@@ -7938,6 +7945,9 @@ impl Store {
         } else {
             None
         };
+        self.internal_entries_remove(key);
+        self.stream_groups.remove(key);
+        self.stream_last_ids.remove(key);
         self.internal_entries_insert(key.to_vec(), Entry::new(value, expires_at_ms, now_ms));
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
@@ -9241,6 +9251,28 @@ mod tests {
             .rename(b"missing", b"new", 0)
             .expect_err("should fail");
         assert_eq!(err, StoreError::KeyNotFound);
+    }
+
+    #[test]
+    fn rename_stream_groups_cleaned_on_overwrite() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        store
+            .xgroup_create(b"s", b"g1", (0, 0), false, 0)
+            .unwrap();
+        assert!(store.stream_groups.contains_key(b"s".as_slice()));
+
+        // Overwrite the stream key with a string via RENAME.
+        store.set(b"k".to_vec(), b"string".to_vec(), None, 0);
+        store.rename(b"k", b"s", 0).unwrap();
+
+        // Stream groups for "s" should be cleaned up since it's no longer a stream.
+        assert!(
+            !store.stream_groups.contains_key(b"s".as_slice()),
+            "stream groups should be removed when key is overwritten"
+        );
     }
 
     #[test]
@@ -11495,6 +11527,24 @@ mod tests {
         // After popping all members, the key should be removed
         assert!(!store.exists(b"s", 0));
         assert_eq!(store.spop(b"s", 0).unwrap(), None);
+    }
+
+    #[test]
+    fn dump_restore_stream_leak() {
+        let mut store = Store::new();
+        // Create a stream and a group
+        store.xadd(b"s", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 0).unwrap();
+        store.xgroup_create(b"s", b"g1", (0, 0), false, 0).unwrap();
+        
+        // Create a string and dump it
+        store.set(b"k".to_vec(), b"string".to_vec(), None, 0);
+        let payload = store.dump_key(b"k", 0).unwrap();
+        
+        // Restore string over the stream
+        store.restore_key(b"s", 0, &payload, true, 0).unwrap();
+        
+        assert!(!store.stream_groups.contains_key(b"s".as_slice()), "Leaked groups!");
+        assert!(!store.stream_last_ids.contains_key(b"s".as_slice()), "Leaked last_ids!");
     }
 
     #[test]

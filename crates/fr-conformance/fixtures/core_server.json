@@ -1347,8 +1347,7 @@
         "STATS"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": "peak.allocated:0\r\ntotal.allocated:0\r\nstartup.allocated:0\r\nreplication.backlog:0\r\nclients.slaves:0\r\nclients.normal:0\r\naof.buffer:0\r\n"
+        "kind": "any_bulk"
       }
     },
     {

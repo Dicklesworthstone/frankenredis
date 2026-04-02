@@ -249,6 +249,13 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("hide-user-data-from-log", "no"),
 ];
 
+fn canonical_static_config_param(parameter: &str) -> Option<&'static str> {
+    CONFIG_STATIC_PARAMS
+        .iter()
+        .find(|&&(name, _)| name.eq_ignore_ascii_case(parameter))
+        .map(|&(name, _)| name)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AclUser {
     passwords: Vec<Vec<u8>>,
@@ -293,7 +300,17 @@ impl AclUser {
         if self.nopass {
             return true;
         }
-        self.passwords.iter().any(|p| p.as_slice() == password)
+        self.passwords.iter().any(|p| {
+            let p_slice = p.as_slice();
+            if p_slice.len() != password.len() {
+                return false;
+            }
+            let mut diff = 0;
+            for (a, b) in p_slice.iter().zip(password.iter()) {
+                diff |= a ^ b;
+            }
+            diff == 0
+        })
     }
 
     /// Check if a specific command is allowed for this user.
@@ -4684,19 +4701,9 @@ impl Runtime {
             }
             // Accept known CONFIG parameters and store the overridden value so
             // CONFIG GET returns the SET value rather than the compiled-in default.
-            let is_known_param = CONFIG_STATIC_PARAMS
-                .iter()
-                .any(|&(name, _)| name.eq_ignore_ascii_case(parameter));
-            if is_known_param {
-                // Safety: is_known_param guarantees the find will succeed, but
-                // use expect() to make intent explicit if invariant breaks.
-                let canonical = CONFIG_STATIC_PARAMS
-                    .iter()
-                    .find(|&&(name, _)| name.eq_ignore_ascii_case(parameter))
-                    .map(|&(name, _)| name.to_string())
-                    .expect("is_known_param was true but find returned None");
+            if let Some(canonical) = canonical_static_config_param(parameter) {
                 let value = String::from_utf8_lossy(&pair[1]).to_string();
-                static_override_updates.push((canonical, value));
+                static_override_updates.push((canonical.to_string(), value));
                 continue;
             }
             return RespFrame::Error(format!("ERR Unsupported CONFIG parameter '{parameter}'"));
@@ -7237,9 +7244,9 @@ mod tests {
 
     use super::{
         ClientSession, ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
-        Runtime, ServerState, classify_cluster_subcommand, classify_cluster_subcommand_linear,
-        classify_runtime_special_command, classify_runtime_special_command_linear,
-        store_to_rdb_entries,
+        Runtime, ServerState, canonical_static_config_param, classify_cluster_subcommand,
+        classify_cluster_subcommand_linear, classify_runtime_special_command,
+        classify_runtime_special_command_linear, store_to_rdb_entries,
     };
 
     fn command(parts: &[&[u8]]) -> RespFrame {
@@ -10280,6 +10287,13 @@ mod tests {
                 RespFrame::BulkString(Some(b"warning".to_vec())),
             ]))
         );
+    }
+
+    #[test]
+    fn canonical_static_config_param_lookup_is_case_insensitive() {
+        assert_eq!(canonical_static_config_param("appendonly"), Some("appendonly"));
+        assert_eq!(canonical_static_config_param("APPENDONLY"), Some("appendonly"));
+        assert_eq!(canonical_static_config_param("does-not-exist"), None);
     }
 
     #[test]
