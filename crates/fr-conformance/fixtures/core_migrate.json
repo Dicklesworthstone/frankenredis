@@ -1,0 +1,113 @@
+{
+  "suite": "core_migrate",
+  "cases": [
+    {
+      "name": "migrate_wrong_arity_no_args",
+      "now_ms": 0,
+      "argv": ["MIGRATE"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'migrate' command"
+      }
+    },
+    {
+      "name": "migrate_wrong_arity_too_few",
+      "now_ms": 1,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'migrate' command"
+      }
+    },
+    {
+      "name": "migrate_wrong_arity_five_args",
+      "now_ms": 2,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "0"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'migrate' command"
+      }
+    },
+    {
+      "name": "migrate_invalid_port",
+      "now_ms": 3,
+      "argv": ["MIGRATE", "127.0.0.1", "notaport", "key", "0", "1000"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "migrate_invalid_db",
+      "now_ms": 4,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "notadb", "1000"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "migrate_invalid_timeout",
+      "now_ms": 5,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "0", "notatimeout"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "migrate_unknown_option_syntax_error",
+      "now_ms": 6,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "0", "1000", "BOGUS"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "migrate_auth_missing_password_syntax_error",
+      "now_ms": 7,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "0", "1000", "AUTH"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "migrate_auth2_missing_args_syntax_error",
+      "now_ms": 8,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "0", "1000", "AUTH2", "user"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "migrate_keys_with_nonempty_key_error",
+      "now_ms": 9,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "mykey", "0", "1000", "KEYS", "k1", "k2"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR When using MIGRATE KEYS option, the key argument must be set to the empty string"
+      }
+    },
+    {
+      "name": "migrate_nokey_nonexistent_key",
+      "now_ms": 10,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "nonexistent", "0", "1000"],
+      "expect": {
+        "kind": "simple",
+        "value": "NOKEY"
+      }
+    },
+    {
+      "name": "migrate_nokey_empty_keys_list",
+      "now_ms": 11,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "", "0", "1000", "KEYS"],
+      "expect": {
+        "kind": "simple",
+        "value": "NOKEY"
+      }
+    }
+  ]
+}

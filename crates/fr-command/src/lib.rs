@@ -5490,10 +5490,29 @@ fn replconf_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     }
     let sub = std::str::from_utf8(&argv[1]).unwrap_or("");
     if sub.eq_ignore_ascii_case("ACK") {
+        if argv.len() != 3 {
+            return Err(CommandError::WrongArity("REPLCONF"));
+        }
+        let offset = parse_i64_arg(&argv[2])?;
+        if offset < 0 {
+            return Err(CommandError::InvalidInteger);
+        }
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("FACK") {
+        if argv.len() != 3 {
+            return Err(CommandError::WrongArity("REPLCONF"));
+        }
+        let offset = parse_i64_arg(&argv[2])?;
+        if offset < 0 {
+            return Err(CommandError::InvalidInteger);
+        }
         // REPLCONF ACK <offset> — replica acknowledges replication offset
         // In standalone mode, accept but no-op (no active replication)
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("GETACK") {
+        if argv.len() != 3 || !argv[2].eq_ignore_ascii_case(b"*") {
+            return Err(CommandError::WrongArity("REPLCONF"));
+        }
         // REPLCONF GETACK * — master requests ACK from replica
         // Return REPLCONF ACK 0 (we report offset 0 as standalone)
         Ok(RespFrame::Array(Some(vec![
@@ -9516,6 +9535,12 @@ fn config_cmd(
         config_apply_store_sets(&argv[2..], store)?;
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("RESETSTAT") || sub.eq_ignore_ascii_case("REWRITE") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "CONFIG",
+                subcommand: sub.to_string(),
+            });
+        }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("HELP") {
         if argv.len() != 2 {
@@ -9785,14 +9810,81 @@ fn client_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     }
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if sub.eq_ignore_ascii_case("SETNAME") {
+        if argv.len() != 3 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "CLIENT",
+                subcommand: sub.to_string(),
+            });
+        }
+        if argv[2].iter().any(|&b| b <= b' ') {
+            return Err(CommandError::Custom(
+                "ERR Client names cannot contain spaces, newlines or special characters."
+                    .to_string(),
+            ));
+        }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("GETNAME") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "CLIENT",
+                subcommand: sub.to_string(),
+            });
+        }
         Ok(RespFrame::BulkString(None))
     } else if sub.eq_ignore_ascii_case("ID") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "CLIENT",
+                subcommand: sub.to_string(),
+            });
+        }
         Ok(RespFrame::Integer(1))
     } else if sub.eq_ignore_ascii_case("LIST") || sub.eq_ignore_ascii_case("INFO") {
+        if sub.eq_ignore_ascii_case("INFO") && argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "CLIENT",
+                subcommand: sub.to_string(),
+            });
+        }
+        let info_line =
+            b"id=1 addr=127.0.0.1:0 laddr=127.0.0.1:6379 fd=0 name= db=0 sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|list user=default lib-name= lib-ver= resp=2 flags=N\r\n".to_vec();
+        if sub.eq_ignore_ascii_case("LIST") {
+            let payload = if argv.len() == 2 {
+                info_line
+            } else if argv.len() == 4 && argv[2].eq_ignore_ascii_case(b"TYPE") {
+                let kind =
+                    std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+                if kind.eq_ignore_ascii_case("NORMAL") {
+                    info_line
+                } else if kind.eq_ignore_ascii_case("MASTER")
+                    || kind.eq_ignore_ascii_case("REPLICA")
+                    || kind.eq_ignore_ascii_case("PUBSUB")
+                {
+                    Vec::new()
+                } else {
+                    return Err(CommandError::Custom(format!(
+                        "ERR Unknown client type '{kind}'"
+                    )));
+                }
+            } else if argv.len() >= 4 && argv[2].eq_ignore_ascii_case(b"ID") {
+                let mut payload = Vec::new();
+                for id_arg in &argv[3..] {
+                    let parsed_id = parse_i64_arg(id_arg)?;
+                    if parsed_id <= 0 {
+                        return Err(CommandError::Custom("ERR Invalid client ID".to_string()));
+                    }
+                    if parsed_id == 1 {
+                        payload.extend_from_slice(&info_line);
+                    }
+                }
+                payload
+            } else {
+                return Err(CommandError::SyntaxError);
+            };
+            return Ok(RespFrame::BulkString(Some(payload)));
+        }
         Ok(RespFrame::BulkString(Some(
-            b"id=1 addr=127.0.0.1:0 fd=0 name= db=0\r\n".to_vec(),
+            b"id=1 addr=127.0.0.1:0 laddr=127.0.0.1:6379 fd=0 name= db=0 sub=0 psub=0 ssub=0 multi=-1 watch=0 qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|info user=default lib-name= lib-ver= resp=2 flags=N\r\n".to_vec(),
         )))
     } else if sub.eq_ignore_ascii_case("NO-EVICT") || sub.eq_ignore_ascii_case("NO-TOUCH") {
         if argv.len() != 3 {
@@ -9803,7 +9895,38 @@ fn client_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         }
         let mode = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if !mode.eq_ignore_ascii_case("ON") && !mode.eq_ignore_ascii_case("OFF") {
-            return Err(CommandError::SyntaxError);
+            return Err(CommandError::Custom(
+                "ERR argument must be 'on' or 'off'".to_string(),
+            ));
+        }
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("SETINFO") {
+        if argv.len() != 4 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "CLIENT",
+                subcommand: sub.to_string(),
+            });
+        }
+        let attr = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        let val = std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if attr.eq_ignore_ascii_case("LIB-NAME") {
+            if val.bytes().any(|b| b <= b' ') {
+                return Err(CommandError::Custom(
+                    "ERR lib-name can only contain characters that are allowed in CLIENT SETNAME"
+                        .to_string(),
+                ));
+            }
+        } else if attr.eq_ignore_ascii_case("LIB-VER") {
+            if val.bytes().any(|b| b <= b' ') {
+                return Err(CommandError::Custom(
+                    "ERR lib-ver can only contain characters that are allowed in CLIENT SETNAME"
+                        .to_string(),
+                ));
+            }
+        } else {
+            return Err(CommandError::Custom(format!(
+                "ERR Unrecognized option '{attr}' for CLIENT SETINFO"
+            )));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("REPLY") {
@@ -9876,6 +9999,80 @@ fn client_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
             return Err(CommandError::SyntaxError);
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("GETREDIR") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "CLIENT",
+                subcommand: sub.to_string(),
+            });
+        }
+        Ok(RespFrame::Integer(-1))
+    } else if sub.eq_ignore_ascii_case("TRACKINGINFO") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "CLIENT",
+                subcommand: sub.to_string(),
+            });
+        }
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"flags".to_vec())),
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"off".to_vec()))])),
+            RespFrame::BulkString(Some(b"redirect".to_vec())),
+            RespFrame::Integer(-1),
+            RespFrame::BulkString(Some(b"prefixes".to_vec())),
+            RespFrame::Array(Some(Vec::new())),
+        ])))
+    } else if sub.eq_ignore_ascii_case("UNBLOCK") {
+        if argv.len() != 3 && argv.len() != 4 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "CLIENT",
+                subcommand: sub.to_string(),
+            });
+        }
+        let target_id = parse_i64_arg(&argv[2])?;
+        if target_id <= 0 {
+            return Err(CommandError::InvalidInteger);
+        }
+        if let Some(mode_arg) = argv.get(3) {
+            let mode =
+                std::str::from_utf8(mode_arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            if !mode.eq_ignore_ascii_case("TIMEOUT") && !mode.eq_ignore_ascii_case("ERROR") {
+                return Err(CommandError::SyntaxError);
+            }
+        }
+        Ok(RespFrame::Integer(0))
+    } else if sub.eq_ignore_ascii_case("HELP") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "CLIENT",
+                subcommand: sub.to_string(),
+            });
+        }
+        Ok(RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(
+                b"CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"CACHING (YES|NO)".to_vec())),
+            RespFrame::BulkString(Some(b"GETNAME".to_vec())),
+            RespFrame::BulkString(Some(b"GETREDIR".to_vec())),
+            RespFrame::BulkString(Some(b"ID".to_vec())),
+            RespFrame::BulkString(Some(b"INFO".to_vec())),
+            RespFrame::BulkString(Some(b"KILL <option> ...".to_vec())),
+            RespFrame::BulkString(Some(
+                b"LIST [TYPE (NORMAL|MASTER|REPLICA|PUBSUB)] [ID <client-id> ...]".to_vec(),
+            )),
+            RespFrame::BulkString(Some(b"NO-EVICT (ON|OFF)".to_vec())),
+            RespFrame::BulkString(Some(b"NO-TOUCH (ON|OFF)".to_vec())),
+            RespFrame::BulkString(Some(b"PAUSE <timeout> [WRITE|ALL]".to_vec())),
+            RespFrame::BulkString(Some(b"REPLY (ON|OFF|SKIP)".to_vec())),
+            RespFrame::BulkString(Some(b"SETINFO <option> <value>".to_vec())),
+            RespFrame::BulkString(Some(b"SETNAME <connection-name>".to_vec())),
+            RespFrame::BulkString(Some(b"TRACKING (ON|OFF) ...".to_vec())),
+            RespFrame::BulkString(Some(b"TRACKINGINFO".to_vec())),
+            RespFrame::BulkString(Some(b"UNBLOCK <client-id> [TIMEOUT|ERROR]".to_vec())),
+            RespFrame::BulkString(Some(b"UNPAUSE".to_vec())),
+            RespFrame::BulkString(Some(b"HELP".to_vec())),
+        ])))
     } else {
         Err(CommandError::UnknownSubcommand {
             command: "CLIENT",
@@ -10693,12 +10890,15 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         argv.len() > 2 + numkeys && argv[2 + numkeys].eq_ignore_ascii_case(b"WITHSCORES");
     let keys: Vec<&[u8]> = (0..numkeys).map(|i| argv[2 + i].as_slice()).collect();
     // Compute difference: members in first set not in any other
-    let first_members = store.zrange_withscores(keys[0], 0, -1, now_ms)?;
+    let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
     let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
     for (member, score) in first_members {
         let mut in_other = false;
         for &key in &keys[1..] {
-            if store.zscore(key, &member, now_ms)?.is_some() {
+            if store
+                .zget_score_or_set_member(key, &member, now_ms)?
+                .is_some()
+            {
                 in_other = true;
                 break;
             }
@@ -10732,12 +10932,15 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
     let keys: Vec<&[u8]> = (0..numkeys).map(|i| argv[3 + i].as_slice()).collect();
-    let first_members = store.zrange_withscores(keys[0], 0, -1, now_ms)?;
+    let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
     let mut result: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
     for (member, score) in first_members {
         let mut in_other = false;
         for &key in &keys[1..] {
-            if store.zscore(key, &member, now_ms)?.is_some() {
+            if store
+                .zget_score_or_set_member(key, &member, now_ms)?
+                .is_some()
+            {
                 in_other = true;
                 break;
             }
@@ -10780,14 +10983,14 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     let filtered: Vec<Vec<u8>> = argv[..args_end].to_vec();
     let (weights, aggregate) = parse_zstore_args(&filtered, 2 + numkeys, numkeys)?;
     let withscores = withscores_pos.is_some();
-    let first_members = store.zrange_withscores(keys[0], 0, -1, now_ms)?;
+    let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
     let mut result: Vec<(Vec<u8>, f64)> = Vec::new();
     let w0 = weights.first().copied().unwrap_or(1.0);
     for (member, score) in first_members {
         let mut combined = score * w0;
         let mut in_all = true;
         for (i, &key) in keys[1..].iter().enumerate() {
-            match store.zscore(key, &member, now_ms)? {
+            match store.zget_score_or_set_member(key, &member, now_ms)? {
                 Some(s) => {
                     let w = weights.get(i + 1).copied().unwrap_or(1.0);
                     combined = aggregate_scores_for_cmd(combined, s * w, &aggregate);
@@ -10840,7 +11043,7 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     let mut combined: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
     for (i, &key) in keys.iter().enumerate() {
         let w = weights.get(i).copied().unwrap_or(1.0);
-        let members = store.zrange_withscores(key, 0, -1, now_ms)?;
+        let members = store.zget_members_with_scores(key, now_ms)?;
         for (member, score) in members {
             let weighted = score * w;
             use std::collections::hash_map::Entry as HEntry;
@@ -10902,12 +11105,15 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if keys.is_empty() {
         return Ok(RespFrame::Integer(0));
     }
-    let first_members = store.zrange_withscores(keys[0], 0, -1, now_ms)?;
+    let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
     let mut count: u64 = 0;
     for (member, _) in first_members {
         let mut in_all = true;
         for &key in &keys[1..] {
-            if store.zscore(key, &member, now_ms)?.is_none() {
+            if store
+                .zget_score_or_set_member(key, &member, now_ms)?
+                .is_none()
+            {
                 in_all = false;
                 break;
             }
@@ -24178,7 +24384,10 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert_eq!(err, CommandError::SyntaxError);
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR argument must be 'on' or 'off'".to_string())
+        );
 
         let err = dispatch_argv(
             &[
@@ -24270,6 +24479,42 @@ mod tests {
             CommandError::WrongSubcommandArity {
                 command: "SLOWLOG",
                 subcommand: "RESET".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn config_resetstat_rejects_extra_arguments() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"CONFIG".to_vec(), b"RESETSTAT".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::WrongSubcommandArity {
+                command: "CONFIG",
+                subcommand: "RESETSTAT".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn config_rewrite_rejects_extra_arguments() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"CONFIG".to_vec(), b"REWRITE".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::WrongSubcommandArity {
+                command: "CONFIG",
+                subcommand: "REWRITE".to_string(),
             }
         );
     }
@@ -24740,6 +24985,310 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, CommandError::SyntaxError);
+    }
+
+    #[test]
+    fn client_getredir_returns_minus_one() {
+        let mut store = Store::new();
+        let out =
+            dispatch_argv(&[b"CLIENT".to_vec(), b"GETREDIR".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(out, RespFrame::Integer(-1));
+    }
+
+    #[test]
+    fn client_trackinginfo_returns_runtime_shape() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"TRACKINGINFO".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"off".to_vec()))])),
+                RespFrame::BulkString(Some(b"redirect".to_vec())),
+                RespFrame::Integer(-1),
+                RespFrame::BulkString(Some(b"prefixes".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn client_setname_validates_arity_and_characters() {
+        let mut store = Store::new();
+        let err =
+            dispatch_argv(&[b"CLIENT".to_vec(), b"SETNAME".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::WrongSubcommandArity {
+                command: "CLIENT",
+                subcommand: "SETNAME".to_string(),
+            }
+        );
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"SETNAME".to_vec(),
+                b"bad name".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR Client names cannot contain spaces, newlines or special characters."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn client_getname_and_id_reject_extra_arguments() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"GETNAME".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::WrongSubcommandArity {
+                command: "CLIENT",
+                subcommand: "GETNAME".to_string(),
+            }
+        );
+
+        let err = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"ID".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::WrongSubcommandArity {
+                command: "CLIENT",
+                subcommand: "ID".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn client_setinfo_matches_runtime_contract() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"SETINFO".to_vec(),
+                b"LIB-NAME".to_vec(),
+                b"redis-py".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"SETINFO".to_vec(),
+                b"lib-ver".to_vec(),
+                b"5.0.1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"SETINFO".to_vec(),
+                b"UNKNOWN".to_vec(),
+                b"value".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR Unrecognized option 'UNKNOWN' for CLIENT SETINFO".to_string()
+            )
+        );
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"SETINFO".to_vec(),
+                b"LIB-NAME".to_vec(),
+                b"has space".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR lib-name can only contain characters that are allowed in CLIENT SETNAME"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn client_help_matches_runtime_shape() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"CLIENT".to_vec(), b"HELP".to_vec()], &mut store, 0).unwrap();
+        let RespFrame::Array(Some(items)) = out else {
+            panic!("expected array");
+        };
+        assert!(items.contains(&RespFrame::BulkString(Some(
+            b"SETINFO <option> <value>".to_vec()
+        ))));
+        assert!(items.contains(&RespFrame::BulkString(Some(
+            b"UNBLOCK <client-id> [TIMEOUT|ERROR]".to_vec()
+        ))));
+        assert!(items.contains(&RespFrame::BulkString(Some(b"HELP".to_vec()))));
+    }
+
+    #[test]
+    fn client_unblock_validates_id_and_mode() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"UNBLOCK".to_vec(), b"42".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"UNBLOCK".to_vec(),
+                b"42".to_vec(),
+                b"ERROR".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(0));
+
+        let err = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"UNBLOCK".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, CommandError::InvalidInteger);
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"UNBLOCK".to_vec(),
+                b"42".to_vec(),
+                b"WAT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, CommandError::SyntaxError);
+    }
+
+    #[test]
+    fn client_list_supports_type_and_id_filters() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"TYPE".to_vec(),
+                b"NORMAL".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::BulkString(Some(payload)) = out else {
+            panic!("expected bulk string");
+        };
+        assert!(String::from_utf8_lossy(&payload).contains("id=1 "));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"TYPE".to_vec(),
+                b"REPLICA".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(Vec::new())));
+
+        let out = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"ID".to_vec(),
+                b"1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::BulkString(Some(payload)) = out else {
+            panic!("expected bulk string");
+        };
+        assert!(String::from_utf8_lossy(&payload).contains("id=1 "));
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"TYPE".to_vec(),
+                b"BOGUS".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Unknown client type 'BOGUS'".to_string())
+        );
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"LIST".to_vec(),
+                b"ID".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Invalid client ID".to_string())
+        );
     }
 
     #[test]
@@ -25916,6 +26465,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn replconf_ack_fack_and_getack_validate_shape() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"REPLCONF".to_vec(), b"FACK".to_vec(), b"100".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+
+        let err =
+            dispatch_argv(&[b"REPLCONF".to_vec(), b"ACK".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(err, CommandError::WrongArity("REPLCONF"));
+
+        let err = dispatch_argv(
+            &[b"REPLCONF".to_vec(), b"ACK".to_vec(), b"-1".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, CommandError::InvalidInteger);
+
+        let err = dispatch_argv(
+            &[
+                b"REPLCONF".to_vec(),
+                b"GETACK".to_vec(),
+                b"not-star".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, CommandError::WrongArity("REPLCONF"));
     }
 
     #[test]

@@ -1,0 +1,246 @@
+{
+  "suite": "core_module_sentinel",
+  "cases": [
+    {
+      "name": "monitor_returns_ok",
+      "now_ms": 0,
+      "argv": ["MONITOR"],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "monitor_wrong_arity",
+      "now_ms": 1,
+      "argv": ["MONITOR", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'monitor' command"
+      }
+    },
+    {
+      "name": "module_wrong_arity",
+      "now_ms": 10,
+      "argv": ["MODULE"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'module' command"
+      }
+    },
+    {
+      "name": "module_list_returns_empty",
+      "now_ms": 11,
+      "argv": ["MODULE", "LIST"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "module_help_returns_array",
+      "now_ms": 12,
+      "argv": ["MODULE", "HELP"],
+      "expect": {
+        "kind": "any_array"
+      }
+    },
+    {
+      "name": "module_load_errors",
+      "now_ms": 13,
+      "argv": ["MODULE", "LOAD", "/nonexistent/path"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error loading the extension. Please check the server logs."
+      }
+    },
+    {
+      "name": "module_loadex_errors",
+      "now_ms": 14,
+      "argv": ["MODULE", "LOADEX", "/nonexistent/path"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error loading the extension. Please check the server logs."
+      }
+    },
+    {
+      "name": "module_unload_not_found",
+      "now_ms": 15,
+      "argv": ["MODULE", "UNLOAD", "mymodule"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error unloading module: no such module with that name"
+      }
+    },
+    {
+      "name": "module_unknown_subcommand",
+      "now_ms": 16,
+      "argv": ["MODULE", "BOGUS"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown subcommand or wrong number of arguments for 'bogus'. Try MODULE HELP."
+      }
+    },
+    {
+      "name": "module_load_missing_path",
+      "now_ms": 17,
+      "argv": ["MODULE", "LOAD"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'module|load' subcommand"
+      }
+    },
+    {
+      "name": "failover_no_replicas",
+      "now_ms": 20,
+      "argv": ["FAILOVER"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR FAILOVER requires connected replicas."
+      }
+    },
+    {
+      "name": "failover_abort_no_failover_in_progress",
+      "now_ms": 21,
+      "argv": ["FAILOVER", "ABORT"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR No failover in progress."
+      }
+    },
+    {
+      "name": "failover_to_syntax_error",
+      "now_ms": 22,
+      "argv": ["FAILOVER", "TO"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "failover_timeout_zero",
+      "now_ms": 23,
+      "argv": ["FAILOVER", "TIMEOUT", "0"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR FAILOVER timeout must be greater than 0"
+      }
+    },
+    {
+      "name": "failover_unknown_option",
+      "now_ms": 24,
+      "argv": ["FAILOVER", "BOGUS"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "failover_timeout_missing_value",
+      "now_ms": 25,
+      "argv": ["FAILOVER", "TIMEOUT"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "sentinel_wrong_arity",
+      "now_ms": 30,
+      "argv": ["SENTINEL"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'sentinel' command"
+      }
+    },
+    {
+      "name": "sentinel_help_returns_array",
+      "now_ms": 31,
+      "argv": ["SENTINEL", "HELP"],
+      "expect": {
+        "kind": "any_array"
+      }
+    },
+    {
+      "name": "sentinel_myid_returns_empty_bulk",
+      "now_ms": 32,
+      "argv": ["SENTINEL", "MYID"],
+      "expect": {
+        "kind": "bulk",
+        "value": ""
+      }
+    },
+    {
+      "name": "sentinel_masters_returns_empty_array",
+      "now_ms": 33,
+      "argv": ["SENTINEL", "MASTERS"],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "sentinel_master_no_such_master",
+      "now_ms": 34,
+      "argv": ["SENTINEL", "MASTER", "mymaster"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR No such master with that name"
+      }
+    },
+    {
+      "name": "sentinel_replicas_no_such_master",
+      "now_ms": 35,
+      "argv": ["SENTINEL", "REPLICAS", "mymaster"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR No such master with that name"
+      }
+    },
+    {
+      "name": "sentinel_get_master_addr_no_such_master",
+      "now_ms": 36,
+      "argv": ["SENTINEL", "GET-MASTER-ADDR-BY-NAME", "mymaster"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR No such master with that name"
+      }
+    },
+    {
+      "name": "sentinel_ckquorum_no_such_master",
+      "now_ms": 37,
+      "argv": ["SENTINEL", "CKQUORUM", "mymaster"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR No such master with that name"
+      }
+    },
+    {
+      "name": "sentinel_failover_no_such_master",
+      "now_ms": 38,
+      "argv": ["SENTINEL", "FAILOVER", "mymaster"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR No such master with that name"
+      }
+    },
+    {
+      "name": "sentinel_reset_no_such_master",
+      "now_ms": 39,
+      "argv": ["SENTINEL", "RESET", "mymaster"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR No such master with that name"
+      }
+    },
+    {
+      "name": "sentinel_remove_no_such_master",
+      "now_ms": 40,
+      "argv": ["SENTINEL", "REMOVE", "mymaster"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR No such master with that name"
+      }
+    }
+  ]
+}

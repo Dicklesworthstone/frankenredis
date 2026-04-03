@@ -951,12 +951,13 @@ fn split_inline_args(line: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
                 if line[i] == b'\\' && i + 1 < line.len() {
                     // Handle escape sequences.
                     i += 1;
-                    if line[i] == b'x' && i + 2 < line.len() {
-                        if let Some(byte) = parse_hex_escape(line[i + 1], line[i + 2]) {
-                            arg.push(byte);
-                            i += 3;
-                            continue;
-                        }
+                    if line[i] == b'x'
+                        && i + 2 < line.len()
+                        && let Some(byte) = parse_hex_escape(line[i + 1], line[i + 2])
+                    {
+                        arg.push(byte);
+                        i += 3;
+                        continue;
                     }
                     match line[i] {
                         b'n' => arg.push(b'\n'),

@@ -1,0 +1,246 @@
+{
+  "suite": "core_pfdebug",
+  "cases": [
+    {
+      "name": "pfselftest_returns_ok",
+      "now_ms": 0,
+      "argv": ["PFSELFTEST"],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "pfselftest_wrong_arity",
+      "now_ms": 1,
+      "argv": ["PFSELFTEST", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'pfselftest' command"
+      }
+    },
+    {
+      "name": "pfdebug_missing_key_getreg_error",
+      "now_ms": 2,
+      "argv": ["PFDEBUG", "GETREG", "nonexistent"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR The specified key does not exist"
+      }
+    },
+    {
+      "name": "pfdebug_missing_key_encoding_error",
+      "now_ms": 3,
+      "argv": ["PFDEBUG", "ENCODING", "nonexistent"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR The specified key does not exist"
+      }
+    },
+    {
+      "name": "pfdebug_missing_key_todense_error",
+      "now_ms": 4,
+      "argv": ["PFDEBUG", "TODENSE", "nonexistent"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR The specified key does not exist"
+      }
+    },
+    {
+      "name": "pfdebug_missing_key_decode_error",
+      "now_ms": 5,
+      "argv": ["PFDEBUG", "DECODE", "nonexistent"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR The specified key does not exist"
+      }
+    },
+    {
+      "name": "pfdebug_unknown_subcommand_error",
+      "now_ms": 6,
+      "argv": ["PFDEBUG", "BOGUS", "key"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown PFDEBUG subcommand 'BOGUS'"
+      }
+    },
+    {
+      "name": "pfdebug_wrong_arity_no_args",
+      "now_ms": 7,
+      "argv": ["PFDEBUG"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'pfdebug' command"
+      }
+    },
+    {
+      "name": "pfdebug_wrong_arity_too_many",
+      "now_ms": 8,
+      "argv": ["PFDEBUG", "ENCODING", "key", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'pfdebug' command"
+      }
+    },
+    {
+      "name": "pfdebug_setup_hll",
+      "now_ms": 10,
+      "argv": ["PFADD", "hll1", "alpha", "bravo", "charlie"],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pfdebug_encoding_returns_dense",
+      "now_ms": 11,
+      "argv": ["PFDEBUG", "ENCODING", "hll1"],
+      "expect": {
+        "kind": "simple",
+        "value": "dense"
+      }
+    },
+    {
+      "name": "pfdebug_getreg_returns_register_array",
+      "now_ms": 12,
+      "argv": ["PFDEBUG", "GETREG", "hll1"],
+      "expect": {
+        "kind": "any_array"
+      }
+    },
+    {
+      "name": "pfdebug_todense_already_dense_returns_0",
+      "now_ms": 13,
+      "argv": ["PFDEBUG", "TODENSE", "hll1"],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "pfdebug_decode_on_dense_errors",
+      "now_ms": 14,
+      "argv": ["PFDEBUG", "DECODE", "hll1"],
+      "expect": {
+        "kind": "error",
+        "value": "HLL encoding is not sparse"
+      }
+    },
+    {
+      "name": "pfdebug_wrongtype_list_setup",
+      "now_ms": 20,
+      "argv": ["LPUSH", "listkey", "val"],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pfdebug_encoding_wrongtype_list",
+      "now_ms": 21,
+      "argv": ["PFDEBUG", "ENCODING", "listkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfdebug_getreg_wrongtype_list",
+      "now_ms": 22,
+      "argv": ["PFDEBUG", "GETREG", "listkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfdebug_todense_wrongtype_list",
+      "now_ms": 23,
+      "argv": ["PFDEBUG", "TODENSE", "listkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfdebug_decode_wrongtype_list",
+      "now_ms": 24,
+      "argv": ["PFDEBUG", "DECODE", "listkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfdebug_invalid_hll_setup",
+      "now_ms": 25,
+      "argv": ["SET", "strkey", "not-a-valid-hll"],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "pfdebug_encoding_invalid_hll_string",
+      "now_ms": 26,
+      "argv": ["PFDEBUG", "ENCODING", "strkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Key is not a valid HyperLogLog string value."
+      }
+    },
+    {
+      "name": "pfdebug_getreg_invalid_hll_string",
+      "now_ms": 27,
+      "argv": ["PFDEBUG", "GETREG", "strkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Key is not a valid HyperLogLog string value."
+      }
+    },
+    {
+      "name": "pfdebug_case_insensitive_subcommand",
+      "now_ms": 30,
+      "argv": ["PFDEBUG", "encoding", "hll1"],
+      "expect": {
+        "kind": "simple",
+        "value": "dense"
+      }
+    },
+    {
+      "name": "pfdebug_setup_empty_hll",
+      "now_ms": 40,
+      "argv": ["PFADD", "hll_empty"],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pfdebug_encoding_empty_hll",
+      "now_ms": 41,
+      "argv": ["PFDEBUG", "ENCODING", "hll_empty"],
+      "expect": {
+        "kind": "simple",
+        "value": "dense"
+      }
+    },
+    {
+      "name": "pfdebug_todense_empty_hll",
+      "now_ms": 42,
+      "argv": ["PFDEBUG", "TODENSE", "hll_empty"],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "pfdebug_getreg_empty_hll_all_zeros",
+      "now_ms": 43,
+      "argv": ["PFDEBUG", "GETREG", "hll_empty"],
+      "expect": {
+        "kind": "any_array"
+      }
+    }
+  ]
+}

@@ -724,6 +724,10 @@ pub struct Store {
     pub stat_total_connections_received: u64,
     /// Number of currently connected clients.
     pub stat_connected_clients: u64,
+    /// Number of successful key lookups performed through store read/query APIs.
+    pub stat_keyspace_hits: u64,
+    /// Number of missing-key lookups performed through store read/query APIs.
+    pub stat_keyspace_misses: u64,
     /// Server hz (event loop frequency), synced from runtime.
     pub server_hz: u64,
     /// Replication backlog size, synced from runtime.
@@ -797,6 +801,8 @@ impl Default for Store {
             stat_total_commands_processed: 0,
             stat_total_connections_received: 0,
             stat_connected_clients: 0,
+            stat_keyspace_hits: 0,
+            stat_keyspace_misses: 0,
             server_hz: 10,
             server_repl_backlog_size: 1_048_576,
             server_maxclients: 10000,
@@ -858,6 +864,17 @@ impl Store {
         self.last_save_time_sec = now_ms / 1000;
     }
 
+    fn record_keyspace_lookup(&mut self, key: &[u8], now_ms: u64) -> bool {
+        self.drop_if_expired(key, now_ms);
+        let hit = self.entries.contains_key(key);
+        if hit {
+            self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
+        } else {
+            self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
+        }
+        hit
+    }
+
     fn list_fits_legacy_listpack_size(&self, list: &VecDeque<Vec<u8>>) -> bool {
         if self.list_max_listpack_size >= 0 {
             return list.len() <= self.list_max_listpack_size as usize;
@@ -877,7 +894,9 @@ impl Store {
     /// Get a string value. Returns `None` if the key doesn't exist.
     /// Returns `Err(WrongType)` if the key holds a non-string value.
     pub fn get(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => {
@@ -934,7 +953,9 @@ impl Store {
     }
 
     pub fn exists(&mut self, key: &[u8], now_ms: u64) -> bool {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return false;
+        }
         if let Some(entry) = self.entries.get_mut(key) {
             entry.touch(now_ms);
             true
@@ -1018,6 +1039,11 @@ impl Store {
         }
 
         if i128::from(when_ms) <= i128::from(now_ms) {
+            let (db, logical_key) = match decode_db_key(key) {
+                Some((db, lk)) => (db, lk.to_vec()),
+                None => (0, key.to_vec()),
+            };
+            self.notify_keyspace_event(NOTIFY_GENERIC, "del", &logical_key, db);
             self.internal_entries_remove(key);
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
@@ -1085,7 +1111,9 @@ impl Store {
     }
 
     pub fn strlen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(0);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => {
@@ -1104,7 +1132,10 @@ impl Store {
     pub fn mget(&mut self, keys: &[&[u8]], now_ms: u64) -> Vec<Option<Vec<u8>>> {
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
-            self.drop_if_expired(key, now_ms);
+            if !self.record_keyspace_lookup(key, now_ms) {
+                results.push(None);
+                continue;
+            }
             let val = match self.entries.get_mut(*key) {
                 Some(entry) => match &entry.value {
                     Value::String(v) => {
@@ -1202,7 +1233,9 @@ impl Store {
     }
 
     pub fn getdel(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::String(_) => {}
@@ -1229,7 +1262,9 @@ impl Store {
         end: i64,
         now_ms: u64,
     ) -> Result<Vec<u8>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => {
@@ -1341,7 +1376,9 @@ impl Store {
     }
 
     pub fn getbit(&mut self, key: &[u8], offset: usize, now_ms: u64) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(false);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => {
@@ -1372,7 +1409,9 @@ impl Store {
         signed: bool,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(bitfield_read(&[], bit_offset, bits, signed));
+        }
         let bytes = match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => v.as_slice(),
@@ -1443,7 +1482,9 @@ impl Store {
         end: Option<i64>,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(0);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => {
@@ -1482,16 +1523,15 @@ impl Store {
         end: Option<i64>,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return if bit { Ok(-1) } else { Ok(0) };
+        }
         let bytes = match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => v.as_slice(),
                 _ => return Err(StoreError::WrongType),
             },
-            None => {
-                // Missing key: BITPOS 0 returns 0, BITPOS 1 returns -1
-                return if bit { Ok(-1) } else { Ok(0) };
-            }
+            None => return if bit { Ok(-1) } else { Ok(0) },
         };
         if bytes.is_empty() {
             return if bit { Ok(-1) } else { Ok(0) };
@@ -2349,7 +2389,9 @@ impl Store {
         field: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(m) => {
@@ -2393,7 +2435,9 @@ impl Store {
     }
 
     pub fn hexists(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(false);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(m) => {
@@ -2408,7 +2452,9 @@ impl Store {
     }
 
     pub fn hlen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(0);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(m) => {
@@ -2428,7 +2474,9 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(m) => {
@@ -2444,7 +2492,9 @@ impl Store {
     }
 
     pub fn hkeys(&mut self, key: &[u8], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(m) => {
@@ -2459,7 +2509,9 @@ impl Store {
     }
 
     pub fn hvals(&mut self, key: &[u8], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(m) => {
@@ -2479,7 +2531,9 @@ impl Store {
         fields: &[&[u8]],
         now_ms: u64,
     ) -> Result<Vec<Option<Vec<u8>>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(fields.iter().map(|_| None).collect());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(m) => {
@@ -2542,7 +2596,9 @@ impl Store {
     }
 
     pub fn hstrlen(&mut self, key: &[u8], field: &[u8], now_ms: u64) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(0);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(m) => {
@@ -2801,7 +2857,9 @@ impl Store {
     }
 
     pub fn llen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(0);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::List(l) => {
@@ -2822,7 +2880,9 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::List(l) => {
@@ -2850,7 +2910,9 @@ impl Store {
         index: i64,
         now_ms: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::List(l) => {
@@ -2902,7 +2964,9 @@ impl Store {
         element: &[u8],
         now_ms: u64,
     ) -> Result<Option<usize>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::List(l) => {
@@ -3431,7 +3495,9 @@ impl Store {
     }
 
     pub fn smembers(&mut self, key: &[u8], now_ms: u64) -> Result<Vec<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
@@ -3446,7 +3512,9 @@ impl Store {
     }
 
     pub fn scard(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(0);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
@@ -3466,7 +3534,9 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<bool, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(false);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
@@ -3719,7 +3789,9 @@ impl Store {
     }
 
     pub fn spop(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         let rand_val = self.next_rand();
         let mut should_remove_key = false;
         let member = match self.entries.get_mut(key) {
@@ -3774,7 +3846,9 @@ impl Store {
     }
 
     pub fn srandmember(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         let rand_val = self.next_rand();
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
@@ -4102,6 +4176,61 @@ impl Store {
         Ok(removed)
     }
 
+    pub fn zget_score_or_set_member(
+        &mut self,
+        key: &[u8],
+        member: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<f64>, StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
+        match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => {
+                    let result = zs.get_score(member);
+                    entry.touch(now_ms);
+                    Ok(result)
+                }
+                Value::Set(s) => {
+                    let result = if s.contains(member) { Some(1.0) } else { None };
+                    entry.touch(now_ms);
+                    Ok(result)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
+        }
+    }
+
+    pub fn zget_members_with_scores(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
+        match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::SortedSet(zs) => {
+                    let result = zs.iter_asc().map(|(m, s)| (m.clone(), *s)).collect();
+                    entry.touch(now_ms);
+                    Ok(result)
+                }
+                Value::Set(s) => {
+                    let mut members: Vec<_> = s.iter().cloned().collect();
+                    members.sort();
+                    let result = members.into_iter().map(|m| (m, 1.0)).collect();
+                    entry.touch(now_ms);
+                    Ok(result)
+                }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(Vec::new()),
+        }
+    }
+
     /// Get the score of a member. Returns None if member or key doesn't exist.
     pub fn zscore(
         &mut self,
@@ -4109,7 +4238,9 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<Option<f64>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
@@ -4125,7 +4256,9 @@ impl Store {
 
     /// Return cardinality of sorted set.
     pub fn zcard(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(0);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
@@ -4146,7 +4279,9 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<Option<usize>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
@@ -4173,7 +4308,9 @@ impl Store {
         member: &[u8],
         now_ms: u64,
     ) -> Result<Option<usize>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
@@ -4201,7 +4338,9 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
@@ -4237,7 +4376,9 @@ impl Store {
         stop: i64,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
@@ -4273,7 +4414,9 @@ impl Store {
         max: ScoreBound,
         now_ms: u64,
     ) -> Result<Vec<Vec<u8>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
@@ -4308,7 +4451,9 @@ impl Store {
         max: ScoreBound,
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
@@ -4355,7 +4500,9 @@ impl Store {
         max: ScoreBound,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(0);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
@@ -5091,7 +5238,9 @@ impl Store {
     }
 
     pub fn xlen(&mut self, key: &[u8], now_ms: u64) -> Result<usize, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(0);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(entries) => {
@@ -5113,7 +5262,9 @@ impl Store {
         count: Option<usize>,
         now_ms: u64,
     ) -> Result<Vec<StreamRecord>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(entries) => {
@@ -5146,7 +5297,9 @@ impl Store {
         count: Option<usize>,
         now_ms: u64,
     ) -> Result<Vec<StreamRecord>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(entries) => {
@@ -5276,7 +5429,9 @@ impl Store {
         count: Option<usize>,
         now_ms: u64,
     ) -> Result<Vec<StreamRecord>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(entries) => {
@@ -5308,7 +5463,9 @@ impl Store {
         options: StreamGroupReadOptions,
         now_ms: u64,
     ) -> Result<Option<Vec<StreamRecord>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         let StreamGroupReadOptions {
             cursor,
             noack,
@@ -5406,7 +5563,9 @@ impl Store {
         group: &[u8],
         now_ms: u64,
     ) -> Result<Option<StreamPendingSummary>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => {
@@ -5448,7 +5607,9 @@ impl Store {
         now_ms: u64,
         min_idle_ms: u64,
     ) -> Result<Option<Vec<StreamPendingRecord>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => {
@@ -5503,7 +5664,9 @@ impl Store {
         options: StreamClaimOptions,
         now_ms: u64,
     ) -> Result<Option<StreamClaimReply>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
 
         let stream_records = match self.entries.get(key) {
             Some(entry) => match &entry.value {
@@ -5610,7 +5773,9 @@ impl Store {
         options: StreamAutoClaimOptions,
         now_ms: u64,
     ) -> Result<Option<StreamAutoClaimReply>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
 
         let (stream_records, pending_snapshot) = match self.entries.get(key) {
             Some(entry) => match &entry.value {
@@ -5725,7 +5890,9 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<StreamInfoBounds>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(entries) => {
@@ -5851,7 +6018,9 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<StreamGroupInfo>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(None);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => {
@@ -5915,7 +6084,9 @@ impl Store {
         group: &[u8],
         now_ms: u64,
     ) -> Result<Option<Vec<StreamConsumerInfo>>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Err(StoreError::KeyNotFound);
+        }
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::Stream(_) => {
@@ -6430,20 +6601,30 @@ impl Store {
             self.drop_if_expired(key, now_ms);
             let weight = weights.get(i).copied().unwrap_or(1.0);
             if let Some(entry) = self.entries.get_mut(key) {
+                let mut add_member = |member: &Vec<u8>, score: f64| {
+                    let weighted = score * weight;
+                    use std::collections::hash_map::Entry as HEntry;
+                    match combined.entry(member.clone()) {
+                        HEntry::Vacant(e) => {
+                            e.insert(weighted);
+                        }
+                        HEntry::Occupied(mut e) => {
+                            let current = e.get_mut();
+                            *current = aggregate_scores(*current, weighted, aggregate);
+                        }
+                    }
+                };
+
                 match &entry.value {
                     Value::SortedSet(zs) => {
                         for (member, &score) in zs.iter() {
-                            let weighted = score * weight;
-                            use std::collections::hash_map::Entry as HEntry;
-                            match combined.entry(member.clone()) {
-                                HEntry::Vacant(e) => {
-                                    e.insert(weighted);
-                                }
-                                HEntry::Occupied(mut e) => {
-                                    let current = e.get_mut();
-                                    *current = aggregate_scores(*current, weighted, aggregate);
-                                }
-                            }
+                            add_member(member, score);
+                        }
+                        entry.touch(now_ms);
+                    }
+                    Value::Set(s) => {
+                        for member in s.iter() {
+                            add_member(member, 1.0);
                         }
                         entry.touch(now_ms);
                     }
@@ -6506,6 +6687,12 @@ impl Store {
                             min_idx = i;
                         }
                     }
+                    Value::Set(s) => {
+                        if s.len() < min_card {
+                            min_card = s.len();
+                            min_idx = i;
+                        }
+                    }
                     _ => return Err(StoreError::WrongType),
                 },
                 None => {
@@ -6517,7 +6704,7 @@ impl Store {
         if has_empty {
             for key in keys {
                 if let Some(entry) = self.entries.get_mut(*key)
-                    && let Value::SortedSet(_) = &entry.value
+                    && matches!(entry.value, Value::SortedSet(_) | Value::Set(_))
                 {
                     entry.touch(now_ms);
                 }
@@ -6532,15 +6719,18 @@ impl Store {
         }
 
         let mut result: HashMap<Vec<u8>, f64> = match self.entries.get_mut(keys[min_idx]) {
-            Some(entry) => match &entry.value {
-                Value::SortedSet(zs) => {
-                    let w = weights.get(min_idx).copied().unwrap_or(1.0);
-                    let res = zs.dict.iter().map(|(m, &s)| (m.clone(), s * w)).collect();
-                    entry.touch(now_ms);
-                    res
-                }
-                _ => return Err(StoreError::WrongType),
-            },
+            Some(entry) => {
+                let w = weights.get(min_idx).copied().unwrap_or(1.0);
+                let res = match &entry.value {
+                    Value::SortedSet(zs) => {
+                        zs.dict.iter().map(|(m, &s)| (m.clone(), s * w)).collect()
+                    }
+                    Value::Set(s) => s.iter().map(|m| (m.clone(), 1.0 * w)).collect(),
+                    _ => return Err(StoreError::WrongType),
+                };
+                entry.touch(now_ms);
+                res
+            }
             None => HashMap::new(),
         };
 
@@ -6551,7 +6741,7 @@ impl Store {
             let weight = weights.get(i).copied().unwrap_or(1.0);
             if result.is_empty() {
                 if let Some(entry) = self.entries.get_mut(key)
-                    && let Value::SortedSet(_) = &entry.value
+                    && matches!(entry.value, Value::SortedSet(_) | Value::Set(_))
                 {
                     entry.touch(now_ms);
                 }
@@ -6563,6 +6753,17 @@ impl Store {
                         result.retain(|member, score| {
                             if let Some(&other_score) = zs.dict.get(member) {
                                 *score = aggregate_scores(*score, other_score * weight, aggregate);
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                        entry.touch(now_ms);
+                    }
+                    Value::Set(s) => {
+                        result.retain(|member, score| {
+                            if s.contains(member) {
+                                *score = aggregate_scores(*score, 1.0 * weight, aggregate);
                                 true
                             } else {
                                 false
@@ -6606,7 +6807,9 @@ impl Store {
         members: &[&[u8]],
         now_ms: u64,
     ) -> Result<Vec<bool>, StoreError> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(vec![false; members.len()]);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
@@ -8862,6 +9065,51 @@ mod tests {
         assert_eq!(store.get(b"k", 100).unwrap(), Some(b"v".to_vec()));
         assert_eq!(store.del(&[b"k".to_vec()], 100), 1);
         assert_eq!(store.get(b"k", 100).unwrap(), None);
+    }
+
+    #[test]
+    fn keyspace_hit_and_miss_counters_follow_store_lookup_paths() {
+        let mut store = Store::new();
+        store.set(b"s".to_vec(), b"v".to_vec(), None, 0);
+        store
+            .hset(b"h", b"field".to_vec(), b"value".to_vec(), 0)
+            .expect("hset");
+        store.rpush(b"list", &[b"item".to_vec()], 0).expect("rpush");
+        store.sadd(b"set", &[b"member".to_vec()], 0).expect("sadd");
+        store
+            .zadd(b"zset", &[(1.0, b"member".to_vec())], 0)
+            .expect("zadd");
+        store
+            .xadd(b"stream", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .expect("xadd");
+
+        assert_eq!(store.get(b"s", 0).unwrap(), Some(b"v".to_vec()));
+        assert!(store.exists(b"s", 0));
+        assert_eq!(store.get(b"missing", 0).expect("missing string read"), None);
+        assert_eq!(
+            store.hget(b"h", b"field", 0).expect("existing hash field"),
+            Some(b"value".to_vec())
+        );
+        assert_eq!(
+            store.lindex(b"list", 0, 0).expect("list lookup"),
+            Some(b"item".to_vec())
+        );
+        assert!(store.sismember(b"set", b"member", 0).expect("set lookup"));
+        assert_eq!(
+            store.zscore(b"zset", b"member", 0).expect("zset lookup"),
+            Some(1.0)
+        );
+        assert_eq!(store.xlen(b"stream", 0).expect("stream lookup"), 1);
+        assert_eq!(
+            store
+                .smembers(b"missing-set", 0)
+                .expect("missing set lookup"),
+            Vec::<Vec<u8>>::new()
+        );
+        assert_eq!(store.xlen(b"missing-stream", 0).expect("missing stream"), 0);
+
+        assert_eq!(store.stat_keyspace_hits, 7);
+        assert_eq!(store.stat_keyspace_misses, 3);
     }
 
     #[test]
