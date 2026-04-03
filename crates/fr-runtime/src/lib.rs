@@ -1427,6 +1427,32 @@ impl ServerState {
         }
     }
 
+    fn record_latency_sample(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
+        let threshold_ms = self.store.latency_tracker.threshold_ms;
+        if threshold_ms == 0 {
+            return;
+        }
+
+        let duration_ms = duration_us.div_ceil(1000);
+        if duration_ms <= threshold_ms {
+            return;
+        }
+
+        let event = argv
+            .first()
+            .and_then(|command| fr_command::get_command_flags(command))
+            .map(|flags| {
+                if flags.split_whitespace().any(|flag| flag == "fast") {
+                    "fast-command"
+                } else {
+                    "command"
+                }
+            })
+            .unwrap_or("command");
+        self.store
+            .record_latency_sample(event, duration_ms, now_ms / 1000);
+    }
+
     fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
         if !Runtime::command_advances_replication_offset(argv) {
             return;
@@ -2501,6 +2527,7 @@ impl Runtime {
                 let reply = self.handle_auth_command(&argv);
                 let elapsed_us = start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
+                self.server.record_latency_sample(&argv, elapsed_us, now_ms);
                 return reply;
             }
             Some(RuntimeSpecialCommand::Hello) => {
@@ -2508,6 +2535,7 @@ impl Runtime {
                 let reply = self.handle_hello_command(&argv);
                 let elapsed_us = start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
+                self.server.record_latency_sample(&argv, elapsed_us, now_ms);
                 return reply;
             }
             _ => {}
@@ -2697,6 +2725,7 @@ impl Runtime {
             if let Some(reply) = special_reply {
                 let elapsed_us = special_start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
+                self.server.record_latency_sample(&argv, elapsed_us, now_ms);
                 return reply;
             }
         }
@@ -2725,6 +2754,7 @@ impl Runtime {
         let elapsed_us = start.elapsed().as_micros() as u64;
         let dirty_after = self.server.store.dirty;
         self.record_slowlog(&argv, elapsed_us, now_ms);
+        self.server.record_latency_sample(&argv, elapsed_us, now_ms);
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
             self.record_threat_event(ThreatEventInput {
@@ -4299,6 +4329,7 @@ impl Runtime {
         let mut next_maxmemory_policy: Option<MaxmemoryPolicy> = None;
         let mut next_slowlog_slower_than: Option<i64> = None;
         let mut next_slowlog_max_len: Option<usize> = None;
+        let mut next_latency_monitor_threshold: Option<u64> = None;
         let mut next_hz: Option<u64> = None;
         let mut next_maxclients: Option<usize> = None;
         let mut next_repl_backlog_size: Option<u64> = None;
@@ -4398,6 +4429,22 @@ impl Runtime {
                     Err(err) => return err.to_resp(),
                 };
                 next_slowlog_max_len = Some(parsed);
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("latency-monitor-threshold") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as u64,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'latency-monitor-threshold'"
+                                .to_string(),
+                        );
+                    }
+                    Err(err) => return err.to_resp(),
+                };
+                next_latency_monitor_threshold = Some(parsed);
+                static_override_updates
+                    .push(("latency-monitor-threshold".to_string(), parsed.to_string()));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("hz") {
@@ -4729,6 +4776,9 @@ impl Runtime {
             while self.server.slowlog.len() > self.server.slowlog_max_len {
                 self.server.slowlog.pop_front();
             }
+        }
+        if let Some(threshold_ms) = next_latency_monitor_threshold {
+            self.server.store.latency_tracker.threshold_ms = threshold_ms;
         }
         if let Some(hz) = next_hz {
             self.server.hz = hz;
@@ -6741,6 +6791,7 @@ impl Runtime {
             let elapsed_us = start.elapsed().as_micros() as u64;
             let dirty_after = self.server.store.dirty;
             self.record_slowlog(argv, elapsed_us, now_ms);
+            self.server.record_latency_sample(argv, elapsed_us, now_ms);
 
             match result {
                 Ok(mut reply) => {
@@ -8992,6 +9043,65 @@ mod tests {
             RespFrame::Error(
                 "ERR wrong number of arguments for 'slowlog|reset' subcommand".to_string()
             )
+        );
+    }
+
+    #[test]
+    fn config_set_latency_monitor_threshold_updates_live_tracker_and_get() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(rt.server.store.latency_tracker.threshold_ms, 0);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"latency-monitor-threshold", b"7",]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.server.store.latency_tracker.threshold_ms, 7);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"GET", b"latency-monitor-threshold"]),
+                2
+            ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"latency-monitor-threshold".to_vec())),
+                RespFrame::BulkString(Some(b"7".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn runtime_latency_recording_respects_threshold() {
+        let mut rt = Runtime::default_strict();
+
+        rt.server.store.latency_tracker.threshold_ms = 1;
+
+        rt.server
+            .record_latency_sample(&[b"PING".to_vec()], 1_000, 5_000);
+        assert!(rt.server.store.latency_history("fast-command").is_empty());
+
+        rt.server
+            .record_latency_sample(&[b"PING".to_vec()], 1_001, 6_000);
+        assert_eq!(
+            rt.server.store.latency_history("fast-command"),
+            vec![fr_store::LatencySample {
+                timestamp_sec: 6,
+                duration_ms: 2,
+            }]
+        );
+
+        rt.server.record_latency_sample(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            2_500,
+            7_000,
+        );
+        assert_eq!(
+            rt.server.store.latency_history("command"),
+            vec![fr_store::LatencySample {
+                timestamp_sec: 7,
+                duration_ms: 3,
+            }]
         );
     }
 

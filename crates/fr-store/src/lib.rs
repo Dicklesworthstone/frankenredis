@@ -626,6 +626,70 @@ pub enum EvictionLoopFailure {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LatencySample {
+    pub timestamp_sec: u64,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LatencyTracker {
+    events: HashMap<String, VecDeque<LatencySample>>,
+    pub threshold_ms: u64,
+}
+
+impl LatencyTracker {
+    const MAX_SAMPLES_PER_EVENT: usize = 160;
+
+    pub fn record_sample(&mut self, event: &str, duration_ms: u64, now_sec: u64) {
+        let samples = self.events.entry(event.to_string()).or_default();
+        samples.push_back(LatencySample {
+            timestamp_sec: now_sec,
+            duration_ms,
+        });
+        while samples.len() > Self::MAX_SAMPLES_PER_EVENT {
+            samples.pop_front();
+        }
+    }
+
+    #[must_use]
+    pub fn latest(&self) -> Vec<(String, LatencySample)> {
+        let mut latest: Vec<(String, LatencySample)> = self
+            .events
+            .iter()
+            .filter_map(|(event, samples)| {
+                samples
+                    .back()
+                    .copied()
+                    .map(|sample| (event.clone(), sample))
+            })
+            .collect();
+        latest.sort_by(|left, right| left.0.cmp(&right.0));
+        latest
+    }
+
+    #[must_use]
+    pub fn history(&self, event: &str) -> Vec<LatencySample> {
+        self.events
+            .get(event)
+            .map(|samples| samples.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn reset(&mut self, events: &[&str]) -> usize {
+        if events.is_empty() {
+            let count = self.events.len();
+            self.events.clear();
+            return count;
+        }
+
+        events
+            .iter()
+            .filter(|event| self.events.remove(**event).is_some())
+            .count()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EvictionLoopResult {
     pub status: EvictionLoopStatus,
     pub failure: Option<EvictionLoopFailure>,
@@ -728,6 +792,8 @@ pub struct Store {
     pub stat_keyspace_hits: u64,
     /// Number of missing-key lookups performed through store read/query APIs.
     pub stat_keyspace_misses: u64,
+    /// Store-owned latency monitor state shared between runtime recording and command reads.
+    pub latency_tracker: LatencyTracker,
     /// Server hz (event loop frequency), synced from runtime.
     pub server_hz: u64,
     /// Replication backlog size, synced from runtime.
@@ -803,6 +869,7 @@ impl Default for Store {
             stat_connected_clients: 0,
             stat_keyspace_hits: 0,
             stat_keyspace_misses: 0,
+            latency_tracker: LatencyTracker::default(),
             server_hz: 10,
             server_repl_backlog_size: 1_048_576,
             server_maxclients: 10000,
@@ -873,6 +940,25 @@ impl Store {
             self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
         }
         hit
+    }
+
+    pub fn record_latency_sample(&mut self, event: &str, duration_ms: u64, now_sec: u64) {
+        self.latency_tracker
+            .record_sample(event, duration_ms, now_sec);
+    }
+
+    #[must_use]
+    pub fn latency_latest(&self) -> Vec<(String, LatencySample)> {
+        self.latency_tracker.latest()
+    }
+
+    #[must_use]
+    pub fn latency_history(&self, event: &str) -> Vec<LatencySample> {
+        self.latency_tracker.history(event)
+    }
+
+    pub fn latency_reset(&mut self, events: &[&str]) -> usize {
+        self.latency_tracker.reset(events)
     }
 
     fn list_fits_legacy_listpack_size(&self, list: &VecDeque<Vec<u8>>) -> bool {
@@ -9039,9 +9125,9 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 #[cfg(test)]
 mod tests {
     use super::{
-        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPolicy,
-        MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_KEYEVENT, PttlValue,
-        ScoreBound, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
+        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, LatencySample,
+        MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_KEYEVENT,
+        PttlValue, ScoreBound, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
         StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
         StreamPendingEntry, ValueType, encode_db_key,
     };
@@ -9110,6 +9196,78 @@ mod tests {
 
         assert_eq!(store.stat_keyspace_hits, 7);
         assert_eq!(store.stat_keyspace_misses, 3);
+    }
+
+    #[test]
+    fn latency_tracker_records_latest_history_and_reset() {
+        let mut store = Store::new();
+
+        store.record_latency_sample("command", 5, 10);
+        store.record_latency_sample("command", 8, 12);
+        store.record_latency_sample("fast-command", 2, 11);
+
+        assert_eq!(
+            store.latency_latest(),
+            vec![
+                (
+                    "command".to_string(),
+                    LatencySample {
+                        timestamp_sec: 12,
+                        duration_ms: 8,
+                    },
+                ),
+                (
+                    "fast-command".to_string(),
+                    LatencySample {
+                        timestamp_sec: 11,
+                        duration_ms: 2,
+                    },
+                ),
+            ]
+        );
+        assert_eq!(
+            store.latency_history("command"),
+            vec![
+                LatencySample {
+                    timestamp_sec: 10,
+                    duration_ms: 5,
+                },
+                LatencySample {
+                    timestamp_sec: 12,
+                    duration_ms: 8,
+                },
+            ]
+        );
+        assert_eq!(store.latency_reset(&["command"]), 1);
+        assert!(store.latency_history("command").is_empty());
+        assert_eq!(store.latency_reset(&[]), 1);
+        assert!(store.latency_latest().is_empty());
+    }
+
+    #[test]
+    fn latency_tracker_keeps_only_latest_160_samples_per_event() {
+        let mut store = Store::new();
+
+        for idx in 0..161u64 {
+            store.record_latency_sample("command", idx, idx);
+        }
+
+        let history = store.latency_history("command");
+        assert_eq!(history.len(), 160);
+        assert_eq!(
+            history.first(),
+            Some(&LatencySample {
+                timestamp_sec: 1,
+                duration_ms: 1,
+            })
+        );
+        assert_eq!(
+            history.last(),
+            Some(&LatencySample {
+                timestamp_sec: 160,
+                duration_ms: 160,
+            })
+        );
     }
 
     #[test]
