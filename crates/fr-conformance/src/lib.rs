@@ -188,6 +188,9 @@ pub fn run_fixture(
     if fixture_name == "core_wait.json" || fixture_name == "fr_p2c_006_replication_journey.json" {
         runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
     }
+    if fixture_name == "core_acl.json" {
+        runtime.set_acl_file_path(std::env::temp_dir().join("fr_acl_fixture_dummy.conf"));
+    }
     let mut failed = Vec::new();
     let total = fixture.cases.len();
     for case in fixture.cases {
@@ -391,6 +394,9 @@ pub fn run_protocol_fixture(
     let mut runtime = runtime_for_harness_config(config);
     if fixture_name == "core_wait.json" || fixture_name == "fr_p2c_006_replication_journey.json" {
         runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
+    }
+    if fixture_name == "core_acl.json" {
+        runtime.set_acl_file_path(std::env::temp_dir().join("fr_acl_fixture_dummy.conf"));
     }
     let mut failed = Vec::new();
     let total = fixture.cases.len();
@@ -3112,6 +3118,8 @@ mod tests {
         let expected_log_get = RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"acllog-max-len".to_vec())),
             RespFrame::BulkString(Some(b"256".to_vec())),
+            RespFrame::BulkString(Some(b"aclfile".to_vec())),
+            RespFrame::BulkString(Some(Vec::new())),
         ]));
         assert_eq!(strict_log_get, expected_log_get);
         assert_eq!(strict_log_get, hardened_log_get);

@@ -647,7 +647,7 @@ pub fn dispatch_argv(
         Some(CommandId::Lcs) => return lcs(argv, store, now_ms),
         Some(CommandId::Lmpop) => return lmpop(argv, store, now_ms),
         Some(CommandId::Zmpop) => return zmpop(argv, store, now_ms),
-        Some(CommandId::Slowlog) => return slowlog_cmd(argv),
+        Some(CommandId::Slowlog) => return slowlog_cmd(argv, store),
         Some(CommandId::Save) => return save_cmd(argv, store, now_ms),
         Some(CommandId::Bgsave) => return bgsave_cmd(argv, store, now_ms),
         Some(CommandId::Bgrewriteaof) => return bgrewriteaof_cmd(argv),
@@ -10380,7 +10380,7 @@ fn wait_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     Ok(RespFrame::Integer(0))
 }
 
-fn slowlog_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn slowlog_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SLOWLOG"));
     }
@@ -10400,7 +10400,36 @@ fn slowlog_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
                 ));
             }
         }
-        Ok(RespFrame::Array(Some(Vec::new())))
+        let count = if let Some(count_arg) = argv.get(2) {
+            let count = parse_i64_arg(count_arg)?;
+            if count == -1 {
+                store.slowlog_len()
+            } else {
+                count as usize
+            }
+        } else {
+            10
+        };
+        let entries = store
+            .get_slowlog(count)
+            .into_iter()
+            .map(|entry| {
+                let argv_frames: Vec<RespFrame> = entry
+                    .argv
+                    .into_iter()
+                    .map(|arg| RespFrame::BulkString(Some(arg)))
+                    .collect();
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(entry.id as i64),
+                    RespFrame::Integer(entry.timestamp_sec as i64),
+                    RespFrame::Integer(entry.duration_us as i64),
+                    RespFrame::Array(Some(argv_frames)),
+                    RespFrame::BulkString(Some(b"".to_vec())),
+                    RespFrame::BulkString(Some(b"".to_vec())),
+                ]))
+            })
+            .collect();
+        Ok(RespFrame::Array(Some(entries)))
     } else if sub.eq_ignore_ascii_case("LEN") {
         if argv.len() != 2 {
             return Err(CommandError::WrongSubcommandArity {
@@ -10408,7 +10437,7 @@ fn slowlog_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
                 subcommand: "LEN".to_string(),
             });
         }
-        Ok(RespFrame::Integer(0))
+        Ok(RespFrame::Integer(store.slowlog_len() as i64))
     } else if sub.eq_ignore_ascii_case("RESET") {
         if argv.len() != 2 {
             return Err(CommandError::WrongSubcommandArity {
@@ -10416,6 +10445,7 @@ fn slowlog_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
                 subcommand: "RESET".to_string(),
             });
         }
+        store.reset_slowlog();
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("HELP") {
         if argv.len() != 2 {
@@ -24712,6 +24742,42 @@ mod tests {
                 subcommand: "RESET".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn slowlog_dispatch_uses_store_backed_entries() {
+        let mut store = Store::new();
+        store.slowlog_log_slower_than_us = 0;
+        store.record_slowlog(&[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()], 42, 2_000);
+
+        let len = dispatch_argv(&[b"SLOWLOG".to_vec(), b"LEN".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(len, RespFrame::Integer(1));
+
+        let get = dispatch_argv(&[b"SLOWLOG".to_vec(), b"GET".to_vec()], &mut store, 0).unwrap();
+        let RespFrame::Array(Some(entries)) = get else {
+            panic!("expected SLOWLOG GET to return an array");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0],
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(0),
+                RespFrame::Integer(2),
+                RespFrame::Integer(42),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"SET".to_vec())),
+                    RespFrame::BulkString(Some(b"k".to_vec())),
+                    RespFrame::BulkString(Some(b"v".to_vec())),
+                ])),
+                RespFrame::BulkString(Some(b"".to_vec())),
+                RespFrame::BulkString(Some(b"".to_vec())),
+            ]))
+        );
+
+        let reset =
+            dispatch_argv(&[b"SLOWLOG".to_vec(), b"RESET".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(reset, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(store.slowlog_len(), 0);
     }
 
     #[test]

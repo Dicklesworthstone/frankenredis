@@ -146,6 +146,15 @@ pub enum PubSubMessage {
     SMessage { channel: Vec<u8>, data: Vec<u8> },
 }
 
+/// A single SLOWLOG entry recording a command that exceeded the threshold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlowlogEntry {
+    pub id: u64,
+    pub timestamp_sec: u64,
+    pub duration_us: u64,
+    pub argv: Vec<Vec<u8>>,
+}
+
 /// Score bound for sorted set range queries (ZRANGEBYSCORE, ZCOUNT, etc.).
 /// Supports inclusive (default), exclusive (`(` prefix), and infinity (`-inf`/`+inf`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -804,6 +813,14 @@ pub struct Store {
     pub stat_expired_stale_perc: u64,
     /// Cumulative CPU time spent in active-expire cycles.
     pub stat_expire_cycle_cpu_milliseconds: u64,
+    /// Slow log ring buffer shared by runtime and command dispatch paths.
+    pub slowlog: VecDeque<SlowlogEntry>,
+    /// Next slow log entry ID.
+    pub slowlog_id_counter: u64,
+    /// Slow log threshold in microseconds (slowlog-log-slower-than config).
+    pub slowlog_log_slower_than_us: i64,
+    /// Slow log maximum length.
+    pub slowlog_max_len: usize,
     /// Store-owned latency monitor state shared between runtime recording and command reads.
     pub latency_tracker: LatencyTracker,
     /// Server hz (event loop frequency), synced from runtime.
@@ -889,6 +906,10 @@ impl Default for Store {
             stat_evicted_keys: 0,
             stat_expired_stale_perc: 0,
             stat_expire_cycle_cpu_milliseconds: 0,
+            slowlog: VecDeque::new(),
+            slowlog_id_counter: 0,
+            slowlog_log_slower_than_us: 10_000,
+            slowlog_max_len: 128,
             latency_tracker: LatencyTracker::default(),
             server_hz: 10,
             server_repl_backlog_size: 1_048_576,
@@ -980,6 +1001,41 @@ impl Store {
 
     pub fn latency_reset(&mut self, events: &[&str]) -> usize {
         self.latency_tracker.reset(events)
+    }
+
+    pub fn reset_slowlog(&mut self) {
+        self.slowlog.clear();
+        self.slowlog_id_counter = 0;
+    }
+
+    pub fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
+        if self.slowlog_log_slower_than_us < 0 {
+            return;
+        }
+        if (duration_us as i64) < self.slowlog_log_slower_than_us {
+            return;
+        }
+        let entry = SlowlogEntry {
+            id: self.slowlog_id_counter,
+            timestamp_sec: now_ms / 1000,
+            duration_us,
+            argv: argv.to_vec(),
+        };
+        self.slowlog_id_counter = self.slowlog_id_counter.saturating_add(1);
+        self.slowlog.push_back(entry);
+        while self.slowlog.len() > self.slowlog_max_len {
+            self.slowlog.pop_front();
+        }
+    }
+
+    #[must_use]
+    pub fn get_slowlog(&self, count: usize) -> Vec<SlowlogEntry> {
+        self.slowlog.iter().rev().take(count).cloned().collect()
+    }
+
+    #[must_use]
+    pub fn slowlog_len(&self) -> usize {
+        self.slowlog.len()
     }
 
     fn list_fits_legacy_listpack_size(&self, list: &VecDeque<Vec<u8>>) -> bool {
@@ -9292,6 +9348,36 @@ mod tests {
                 duration_ms: 160,
             })
         );
+    }
+
+    #[test]
+    fn slowlog_records_reads_and_resets_entries() {
+        let mut store = Store::new();
+        store.slowlog_log_slower_than_us = 50;
+        store.slowlog_max_len = 2;
+
+        store.record_slowlog(&[b"PING".to_vec()], 49, 1_000);
+        assert_eq!(store.slowlog_len(), 0);
+
+        store.record_slowlog(&[b"SET".to_vec(), b"a".to_vec(), b"1".to_vec()], 50, 2_000);
+        store.record_slowlog(&[b"SET".to_vec(), b"b".to_vec(), b"2".to_vec()], 60, 3_000);
+        store.record_slowlog(&[b"SET".to_vec(), b"c".to_vec(), b"3".to_vec()], 70, 4_000);
+
+        let entries = store.get_slowlog(10);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].id, 2);
+        assert_eq!(entries[0].timestamp_sec, 4);
+        assert_eq!(entries[0].duration_us, 70);
+        assert_eq!(
+            entries[0].argv,
+            vec![b"SET".to_vec(), b"c".to_vec(), b"3".to_vec()]
+        );
+        assert_eq!(entries[1].id, 1);
+
+        store.reset_slowlog();
+        assert_eq!(store.slowlog_len(), 0);
+        assert!(store.get_slowlog(1).is_empty());
+        assert_eq!(store.slowlog_id_counter, 0);
     }
 
     #[test]

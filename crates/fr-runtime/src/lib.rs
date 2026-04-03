@@ -419,7 +419,11 @@ impl AclUser {
 
     fn acl_save_line(&self, username: &[u8]) -> String {
         let username_str = String::from_utf8_lossy(username);
-        let mut parts = vec!["user".to_string(), username_str.into_owned(), "reset".to_string()];
+        let mut parts = vec![
+            "user".to_string(),
+            username_str.into_owned(),
+            "reset".to_string(),
+        ];
         parts.push(if self.enabled {
             "on".to_string()
         } else {
@@ -440,7 +444,11 @@ impl AclUser {
         if self.all_channels {
             parts.push("&*".to_string());
         }
-        parts.extend(self.commands_string().split_whitespace().map(str::to_string));
+        parts.extend(
+            self.commands_string()
+                .split_whitespace()
+                .map(str::to_string),
+        );
         parts.join(" ")
     }
 }
@@ -1128,15 +1136,6 @@ struct TransactionState {
     exec_abort: bool,
 }
 
-/// A single slow log entry recording a command that exceeded the threshold.
-#[derive(Debug, Clone)]
-struct SlowlogEntry {
-    id: u64,
-    timestamp_sec: u64,
-    duration_us: u64,
-    argv: Vec<Vec<u8>>,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvidenceEvent {
     pub ts_utc: String,
@@ -1217,14 +1216,6 @@ pub struct ServerState {
     pub shutdown_nosave: bool,
     /// Command time budget in ms (CONFIG SET busy-reply-threshold / lua-time-limit).
     command_time_budget_ms: u64,
-    /// Slow log: ring buffer of slow queries.
-    slowlog: std::collections::VecDeque<SlowlogEntry>,
-    /// Slow log entry ID counter.
-    slowlog_next_id: u64,
-    /// Slow log threshold in microseconds (slowlog-log-slower-than config).
-    slowlog_log_slower_than_us: i64,
-    /// Slow log maximum length.
-    slowlog_max_len: usize,
     /// Last successful save timestamp (seconds since epoch).
     last_save_time_sec: u64,
     /// Path for AOF persistence file (used by SAVE/BGSAVE).
@@ -1305,10 +1296,6 @@ impl Default for ServerState {
             shutdown_requested: false,
             shutdown_nosave: false,
             command_time_budget_ms: 5000,
-            slowlog: std::collections::VecDeque::new(),
-            slowlog_next_id: 0,
-            slowlog_log_slower_than_us: 10_000,
-            slowlog_max_len: 128,
             last_save_time_sec: 0,
             aof_path: None,
             aof_config_path: None,
@@ -1474,31 +1461,6 @@ impl ServerState {
             self.replication_runtime_state.replica_ack_offsets();
         self.replication_ack_state.replica_fsync_offsets =
             self.replication_runtime_state.replica_fsync_offsets();
-    }
-
-    fn reset_slowlog(&mut self) {
-        self.slowlog.clear();
-        self.slowlog_next_id = 0;
-    }
-
-    fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
-        if self.slowlog_log_slower_than_us < 0 {
-            return;
-        }
-        if (duration_us as i64) < self.slowlog_log_slower_than_us {
-            return;
-        }
-        let entry = SlowlogEntry {
-            id: self.slowlog_next_id,
-            timestamp_sec: now_ms / 1000,
-            duration_us,
-            argv: argv.to_vec(),
-        };
-        self.slowlog_next_id += 1;
-        self.slowlog.push_back(entry);
-        while self.slowlog.len() > self.slowlog_max_len {
-            self.slowlog.pop_front();
-        }
     }
 
     fn record_latency_sample(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
@@ -4056,7 +4018,7 @@ impl Runtime {
                 .to_resp();
             }
             // Reset tracked statistics: slowlog, command counters, connection counters
-            self.server.reset_slowlog();
+            self.server.store.reset_slowlog();
             self.server.store.stat_total_commands_processed = 0;
             self.server.store.stat_total_connections_received = 0;
             self.server.store.stat_expired_keys = 0;
@@ -4166,6 +4128,7 @@ impl Runtime {
             )));
             entries.push(RespFrame::BulkString(Some(
                 self.server
+                    .store
                     .slowlog_log_slower_than_us
                     .to_string()
                     .into_bytes(),
@@ -4174,7 +4137,7 @@ impl Runtime {
         if Self::config_pattern_matches(pattern, "slowlog-max-len") {
             entries.push(RespFrame::BulkString(Some(b"slowlog-max-len".to_vec())));
             entries.push(RespFrame::BulkString(Some(
-                self.server.slowlog_max_len.to_string().into_bytes(),
+                self.server.store.slowlog_max_len.to_string().into_bytes(),
             )));
         }
         if Self::config_pattern_matches(pattern, "maxclients") {
@@ -4509,6 +4472,7 @@ impl Runtime {
             .rdb_path
             .clone()
             .unwrap_or_else(|| std::path::PathBuf::from(".").join("dump.rdb"));
+        let mut next_acl_file_path = self.server.acl_file_path.clone();
         let mut rdb_path_changed = false;
         let mut encoding_threshold_updates: Vec<(&str, usize)> = Vec::new();
         let mut static_override_updates: Vec<(String, String)> = Vec::new();
@@ -4820,6 +4784,18 @@ impl Runtime {
                 rdb_path_changed = true;
                 continue;
             }
+            if parameter.eq_ignore_ascii_case("aclfile") {
+                let value_str = match std::str::from_utf8(&pair[1]) {
+                    Ok(value) => value,
+                    Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                };
+                next_acl_file_path = if value_str.is_empty() {
+                    None
+                } else {
+                    Some(std::path::PathBuf::from(value_str))
+                };
+                continue;
+            }
             // List encoding threshold — accepts negative values (-1 to -5 for byte limits).
             // Keyspace notifications config
             if parameter.eq_ignore_ascii_case("notify-keyspace-events") {
@@ -4931,13 +4907,12 @@ impl Runtime {
             self.server.store.maxmemory_policy = maxmemory_policy;
         }
         if let Some(threshold) = next_slowlog_slower_than {
-            self.server.slowlog_log_slower_than_us = threshold;
+            self.server.store.slowlog_log_slower_than_us = threshold;
         }
         if let Some(max_len) = next_slowlog_max_len {
-            self.server.slowlog_max_len = max_len;
-            // Trim existing entries if the new max is smaller.
-            while self.server.slowlog.len() > self.server.slowlog_max_len {
-                self.server.slowlog.pop_front();
+            self.server.store.slowlog_max_len = max_len;
+            while self.server.store.slowlog.len() > self.server.store.slowlog_max_len {
+                self.server.store.slowlog.pop_front();
             }
         }
         if let Some(threshold_ms) = next_latency_monitor_threshold {
@@ -4979,6 +4954,7 @@ impl Runtime {
         if rdb_path_changed {
             self.server.rdb_path = Some(next_rdb_path);
         }
+        self.server.acl_file_path = next_acl_file_path;
         if let Some(appendonly) = next_appendonly {
             if appendonly {
                 let configured_path = self.server.aof_config_path.clone().unwrap_or_else(|| {
@@ -5481,7 +5457,7 @@ impl Runtime {
             }
             let count = if argv.len() == 3 {
                 match parse_i64_arg(&argv[2]) {
-                    Ok(-1) => self.server.slowlog.len(),
+                    Ok(-1) => self.server.store.slowlog_len(),
                     Ok(c) if c >= 0 => c as usize,
                     Ok(_) => {
                         return RespFrame::Error(
@@ -5495,15 +5471,14 @@ impl Runtime {
             };
             let entries: Vec<RespFrame> = self
                 .server
-                .slowlog
-                .iter()
-                .rev()
-                .take(count)
+                .store
+                .get_slowlog(count)
+                .into_iter()
                 .map(|entry| {
                     let argv_frames: Vec<RespFrame> = entry
                         .argv
-                        .iter()
-                        .map(|a| RespFrame::BulkString(Some(a.clone())))
+                        .into_iter()
+                        .map(|a| RespFrame::BulkString(Some(a)))
                         .collect();
                     RespFrame::Array(Some(vec![
                         RespFrame::Integer(entry.id as i64),
@@ -5524,7 +5499,7 @@ impl Runtime {
                 }
                 .to_resp();
             }
-            RespFrame::Integer(self.server.slowlog.len() as i64)
+            RespFrame::Integer(self.server.store.slowlog_len() as i64)
         } else if sub.eq_ignore_ascii_case("RESET") {
             if argv.len() != 2 {
                 return CommandError::WrongSubcommandArity {
@@ -5533,7 +5508,7 @@ impl Runtime {
                 }
                 .to_resp();
             }
-            self.server.reset_slowlog();
+            self.server.store.reset_slowlog();
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("HELP") {
             if argv.len() != 2 {
@@ -5567,7 +5542,7 @@ impl Runtime {
 
     /// Record a command execution in the slow log if it exceeded the threshold.
     fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
-        self.server.record_slowlog(argv, duration_us, now_ms);
+        self.server.store.record_slowlog(argv, duration_us, now_ms);
     }
 
     fn handle_save_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
@@ -8665,6 +8640,8 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"acllog-max-len".to_vec())),
                 RespFrame::BulkString(Some(b"256".to_vec())),
+                RespFrame::BulkString(Some(b"aclfile".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
             ]))
         );
 
@@ -9183,8 +9160,8 @@ mod tests {
     #[test]
     fn slowlog_get_uses_redis_default_count_and_minus_one_means_all() {
         let mut rt = Runtime::default_strict();
-        rt.server.slowlog_max_len = 64;
-        rt.server.slowlog_log_slower_than_us = 0;
+        rt.server.store.slowlog_max_len = 64;
+        rt.server.store.slowlog_log_slower_than_us = 0;
         for idx in 0..12u64 {
             let key = format!("k{idx}");
             rt.record_slowlog(
@@ -10213,6 +10190,19 @@ mod tests {
         }
     }
 
+    fn unique_temp_path(prefix: &str, extension: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "{prefix}_{}_{}.{}",
+            std::process::id(),
+            unique,
+            extension
+        ))
+    }
+
     #[test]
     fn fr_p2c_009_u010_runtime_apply_updates_tls_state() {
         let mut runtime = Runtime::default_strict();
@@ -10712,6 +10702,44 @@ mod tests {
                 RespFrame::BulkString(Some(b".".to_vec())),
                 RespFrame::BulkString(Some(b"dbfilename".to_vec())),
                 RespFrame::BulkString(Some(b"custom.rdb".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn config_set_aclfile_round_trips_live_value() {
+        let mut rt = Runtime::default_strict();
+        let aclfile_path = unique_temp_path("fr_runtime_aclfile_config", "acl");
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"aclfile",
+                    aclfile_path.to_string_lossy().as_bytes(),
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"aclfile"]), 1),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"aclfile".to_vec())),
+                RespFrame::BulkString(Some(aclfile_path.to_string_lossy().as_bytes().to_vec())),
+            ]))
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"aclfile", b""]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"aclfile"]), 3),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"aclfile".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
             ]))
         );
     }
@@ -12175,6 +12203,115 @@ mod tests {
                 b"DRYRUN <username> <command> [<arg> ...]".to_vec()
             ))),
             "ACL HELP should list DRYRUN"
+        );
+    }
+
+    #[test]
+    fn acl_save_and_load_round_trip_persists_users() {
+        let mut rt = Runtime::default_strict();
+        let acl_path = unique_temp_path("fr_runtime_acl_roundtrip", "acl");
+        rt.set_acl_file_path(acl_path.clone());
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"alice", b"on", b">pass", b"-@all", b"+get", b"~*", b"&*"
+                ]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SAVE"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let saved = std::fs::read_to_string(&acl_path).expect("ACL SAVE should write acl file");
+        assert!(
+            saved.contains("user alice reset on >pass ~* &* +get"),
+            "saved ACL file should contain serialized alice rules, got: {saved}"
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"DELUSER", b"alice"]), 2),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"bob", b"on", b">pass", b"+@all"]),
+                3
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"LOAD"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let users = rt.execute_frame(command(&[b"ACL", b"USERS"]), 5);
+        let RespFrame::Array(Some(entries)) = users else {
+            panic!("expected ACL USERS to return an array");
+        };
+        assert!(
+            entries.contains(&RespFrame::BulkString(Some(b"default".to_vec()))),
+            "default user should remain present after ACL LOAD"
+        );
+        assert!(
+            entries.contains(&RespFrame::BulkString(Some(b"alice".to_vec()))),
+            "alice should be restored from saved ACL file"
+        );
+        assert!(
+            !entries.contains(&RespFrame::BulkString(Some(b"bob".to_vec()))),
+            "bob should not survive ACL LOAD rollback to saved state"
+        );
+
+        let _ = std::fs::remove_file(&acl_path);
+    }
+
+    #[test]
+    fn acl_load_invalid_file_preserves_previous_state() {
+        let mut rt = Runtime::default_strict();
+        let acl_path = unique_temp_path("fr_runtime_acl_invalid", "acl");
+        rt.set_acl_file_path(acl_path.clone());
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"alice", b"on", b">pass", b"-@all", b"+get", b"~*", b"&*"
+                ]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let before = rt.execute_frame(command(&[b"ACL", b"LIST"]), 1);
+        std::fs::write(&acl_path, "totally invalid acl contents\n").expect("should write acl");
+
+        let reply = rt.execute_frame(command(&[b"ACL", b"LOAD"]), 2);
+        assert!(
+            matches!(reply, RespFrame::Error(ref err) if err == "ERR /ACL file contains invalid format"),
+            "ACL LOAD should fail on invalid file, got: {reply:?}"
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"LIST"]), 3),
+            before,
+            "failed ACL LOAD must preserve prior auth state"
+        );
+
+        let _ = std::fs::remove_file(&acl_path);
+    }
+
+    #[test]
+    fn acl_save_and_load_require_configured_aclfile() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SAVE"]), 0),
+            RespFrame::Error("ERR There is no configured ACL file".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"LOAD"]), 1),
+            RespFrame::Error("ERR There is no configured ACL file".to_string())
         );
     }
 }

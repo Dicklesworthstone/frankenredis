@@ -1958,6 +1958,9 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                         .collect(),
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
+                if matches!(response, RespFrame::Error(_)) {
+                    return Some(response);
+                }
                 if response != RespFrame::BulkString(None) {
                     return Some(RespFrame::Array(Some(vec![
                         RespFrame::BulkString(Some(key.clone())),
@@ -1997,6 +2000,9 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                         .collect(),
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
+                if matches!(response, RespFrame::Error(_)) {
+                    return Some(response);
+                }
                 if response != RespFrame::Array(None)
                     && let RespFrame::Array(Some(mut items)) = response
                     && items.len() == 2
