@@ -880,6 +880,8 @@ pub struct Store {
     pub active_expire_enabled: bool,
     /// Set by DEBUG RELOAD; runtime consumes it after command dispatch.
     pub debug_reload_requested: bool,
+    /// Set by BGREWRITEAOF in delegated dispatch paths; runtime consumes it after dispatch.
+    pub bgrewriteaof_requested: bool,
 }
 
 const DB_NAMESPACE_PREFIX: &[u8] = b"\0frdb\0";
@@ -968,6 +970,7 @@ impl Default for Store {
             dispatch_client_ctx: DispatchClientContext::default(),
             active_expire_enabled: true,
             debug_reload_requested: false,
+            bgrewriteaof_requested: false,
         }
     }
 }
@@ -7686,6 +7689,15 @@ impl Store {
         std::mem::take(&mut self.debug_reload_requested)
     }
 
+    pub fn request_bgrewriteaof(&mut self) {
+        self.bgrewriteaof_requested = true;
+    }
+
+    #[must_use]
+    pub fn take_bgrewriteaof_requested(&mut self) -> bool {
+        std::mem::take(&mut self.bgrewriteaof_requested)
+    }
+
     pub fn estimate_memory_usage_bytes(&self) -> usize {
         self.entries
             .iter()
@@ -8842,13 +8854,68 @@ fn aggregate_scores(a: f64, b: f64, aggregate: &[u8]) -> f64 {
 }
 
 fn parse_i64(bytes: &[u8]) -> Result<i64, StoreError> {
-    let text = std::str::from_utf8(bytes).map_err(|_| StoreError::ValueNotInteger)?;
-    text.parse::<i64>().map_err(|_| StoreError::ValueNotInteger)
+    let slen = bytes.len();
+    if slen == 0 || slen > 20 {
+        return Err(StoreError::ValueNotInteger);
+    }
+    if slen == 1 && bytes[0] == b'0' {
+        return Ok(0);
+    }
+
+    let mut p = 0;
+    let negative = bytes[0] == b'-';
+    if negative {
+        p += 1;
+        if p == slen {
+            return Err(StoreError::ValueNotInteger);
+        }
+    }
+
+    if bytes[p] >= b'1' && bytes[p] <= b'9' {
+        let mut v: u64 = (bytes[p] - b'0') as u64;
+        p += 1;
+        while p < slen {
+            let b = bytes[p];
+            if b.is_ascii_digit() {
+                if v > (u64::MAX / 10) {
+                    return Err(StoreError::ValueNotInteger);
+                }
+                v *= 10;
+                let digit = (b - b'0') as u64;
+                if v > (u64::MAX - digit) {
+                    return Err(StoreError::ValueNotInteger);
+                }
+                v += digit;
+                p += 1;
+            } else {
+                return Err(StoreError::ValueNotInteger);
+            }
+        }
+
+        if negative {
+            let limit = (i64::MIN as u64).wrapping_neg();
+            if v > limit {
+                return Err(StoreError::ValueNotInteger);
+            }
+            return Ok(v.wrapping_neg() as i64);
+        } else {
+            if v > i64::MAX as u64 {
+                return Err(StoreError::ValueNotInteger);
+            }
+            return Ok(v as i64);
+        }
+    }
+
+    Err(StoreError::ValueNotInteger)
 }
 
 fn parse_f64(bytes: &[u8]) -> Result<f64, StoreError> {
     let text = std::str::from_utf8(bytes).map_err(|_| StoreError::ValueNotFloat)?;
-    text.parse::<f64>().map_err(|_| StoreError::ValueNotFloat)
+    let val = text.parse::<f64>().map_err(|_| StoreError::ValueNotFloat)?;
+    if val.is_nan() {
+        return Err(StoreError::ValueNotFloat);
+    }
+    Ok(val)
 }
 
 fn fnv1a_update(mut hash: u64, bytes: &[u8]) -> u64 {
