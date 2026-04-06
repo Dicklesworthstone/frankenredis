@@ -2136,6 +2136,26 @@ impl Runtime {
         self.server.store.record_ops_sec_sample(elapsed_ms);
     }
 
+    /// Track a rejected connection (maxclients exceeded).
+    pub fn track_rejected_connection(&mut self) {
+        self.server.store.stat_rejected_connections += 1;
+    }
+
+    /// Track a full resync event (PSYNC FULLRESYNC).
+    pub fn track_sync_full(&mut self) {
+        self.server.store.stat_sync_full += 1;
+    }
+
+    /// Track a successful partial resync (PSYNC CONTINUE).
+    pub fn track_sync_partial_ok(&mut self) {
+        self.server.store.stat_sync_partial_ok += 1;
+    }
+
+    /// Track a failed partial resync attempt (fell back to full resync).
+    pub fn track_sync_partial_err(&mut self) {
+        self.server.store.stat_sync_partial_err += 1;
+    }
+
     /// Track a client disconnection for INFO stats.
     pub fn track_connection_closed(&mut self) {
         self.server.store.stat_connected_clients =
@@ -7032,8 +7052,15 @@ impl Runtime {
         };
 
         let response = if continued_offset.is_some() {
+            self.server.store.stat_sync_partial_ok += 1;
             RespFrame::SimpleString("CONTINUE".to_string())
         } else {
+            // Track whether this was a failed partial attempt or a fresh full sync.
+            if requested_replid != "?" && requested_offset >= 0 {
+                // Client attempted partial resync but we couldn't satisfy it.
+                self.server.store.stat_sync_partial_err += 1;
+            }
+            self.server.store.stat_sync_full += 1;
             RespFrame::SimpleString(format!(
                 "FULLRESYNC {} {}",
                 backlog.replid, primary_offset.0

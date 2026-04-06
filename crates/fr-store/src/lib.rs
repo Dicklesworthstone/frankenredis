@@ -894,6 +894,14 @@ pub struct Store {
     pub debug_reload_requested: bool,
     /// Set by BGREWRITEAOF in delegated dispatch paths; runtime consumes it after dispatch.
     pub bgrewriteaof_requested: bool,
+    /// Connections rejected due to maxclients limit.
+    pub stat_rejected_connections: u64,
+    /// Full resyncs completed (PSYNC FULLRESYNC).
+    pub stat_sync_full: u64,
+    /// Partial resyncs accepted (PSYNC CONTINUE).
+    pub stat_sync_partial_ok: u64,
+    /// Partial resyncs rejected (fell back to full resync).
+    pub stat_sync_partial_err: u64,
     /// Total bytes received from client connections (non-replication).
     pub stat_total_net_input_bytes: u64,
     /// Total bytes sent to client connections (non-replication).
@@ -1007,6 +1015,10 @@ impl Default for Store {
             active_expire_enabled: true,
             debug_reload_requested: false,
             bgrewriteaof_requested: false,
+            stat_rejected_connections: 0,
+            stat_sync_full: 0,
+            stat_sync_partial_ok: 0,
+            stat_sync_partial_err: 0,
             stat_total_net_input_bytes: 0,
             stat_total_net_output_bytes: 0,
             ops_sec_samples: [0; 16],

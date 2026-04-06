@@ -8416,10 +8416,19 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         ));
         info.push_str("instantaneous_input_repl_kbps:0.00\r\n");
         info.push_str("instantaneous_output_repl_kbps:0.00\r\n");
-        info.push_str("rejected_connections:0\r\n");
-        info.push_str("sync_full:0\r\n");
-        info.push_str("sync_partial_ok:0\r\n");
-        info.push_str("sync_partial_err:0\r\n");
+        info.push_str(&format!(
+            "rejected_connections:{}\r\n",
+            store.stat_rejected_connections
+        ));
+        info.push_str(&format!("sync_full:{}\r\n", store.stat_sync_full));
+        info.push_str(&format!(
+            "sync_partial_ok:{}\r\n",
+            store.stat_sync_partial_ok
+        ));
+        info.push_str(&format!(
+            "sync_partial_err:{}\r\n",
+            store.stat_sync_partial_err
+        ));
         info.push_str(&format!("expired_keys:{}\r\n", store.stat_expired_keys));
         info.push_str(&format!(
             "expired_stale_perc:{:.2}\r\n",

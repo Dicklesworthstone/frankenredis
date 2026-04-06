@@ -574,6 +574,7 @@ fn accept_connections(
                     e.reason_code(),
                     clients.len()
                 );
+                runtime.track_rejected_connection();
                 drop(stream);
             }
             break;
