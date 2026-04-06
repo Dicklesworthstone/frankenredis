@@ -185,7 +185,6 @@ impl ClientConnection {
         }
         result
     }
-
 }
 
 fn now_ms() -> u64 {
@@ -1534,11 +1533,21 @@ fn parse_blocking_deadline(timeout_bytes: &[u8], now_ms: u64) -> Option<u64> {
     if !timeout_secs.is_finite() || timeout_secs < 0.0 {
         return None;
     }
-    Some(if timeout_secs == 0.0 {
-        u64::MAX
-    } else {
-        now_ms.saturating_add((timeout_secs * 1000.0) as u64)
-    })
+    if timeout_secs == 0.0 {
+        return Some(u64::MAX);
+    }
+
+    let timeout_ms = timeout_secs * 1000.0;
+    if !timeout_ms.is_finite() {
+        return None;
+    }
+
+    let delta_ms = timeout_ms.ceil();
+    if delta_ms > u64::MAX as f64 {
+        return None;
+    }
+
+    now_ms.checked_add(delta_ms as u64)
 }
 
 /// Extract the BLOCK timeout from XREAD/XREADGROUP args and compute a deadline.
@@ -2146,7 +2155,9 @@ fn deliver_monitor_output(
         }
         conn.write_buf.extend_from_slice(&line);
         if conn.write_buf.len() > runtime.server.output_buffer_limit {
-            eprintln!("warn: client write buffer exceeded limit during monitor delivery, disconnecting");
+            eprintln!(
+                "warn: client write buffer exceeded limit during monitor delivery, disconnecting"
+            );
             conn.closing = true;
             closing_tokens.insert(token);
             continue;
@@ -2197,7 +2208,9 @@ fn deliver_pubsub_messages(
         }
 
         if conn.write_buf.len() > runtime.server.output_buffer_limit {
-            eprintln!("warn: client write buffer exceeded limit during pubsub delivery, disconnecting");
+            eprintln!(
+                "warn: client write buffer exceeded limit during pubsub delivery, disconnecting"
+            );
             conn.closing = true;
             closing_tokens.insert(token);
             continue;
@@ -3132,6 +3145,17 @@ mod tests {
     }
 
     #[test]
+    fn parse_blocking_deadline_rounds_positive_fractional_values_up() {
+        assert_eq!(parse_blocking_deadline(b"0.0001", 123), Some(124));
+        assert_eq!(parse_blocking_deadline(b"1.0001", 123), Some(1124));
+    }
+
+    #[test]
+    fn parse_blocking_deadline_rejects_out_of_range_values() {
+        assert_eq!(parse_blocking_deadline(b"1e100", 123), None);
+    }
+
+    #[test]
     fn blocking_state_builder_rejects_nonfinite_blpop_timeout() {
         let frame = RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"BLPOP".to_vec())),
@@ -3139,6 +3163,17 @@ mod tests {
             RespFrame::BulkString(Some(b"inf".to_vec())),
         ]));
         assert!(try_build_blocked_state(&frame, 1_000).is_none());
+    }
+
+    #[test]
+    fn blocking_state_builder_rounds_fractional_blpop_timeout_up() {
+        let frame = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"BLPOP".to_vec())),
+            RespFrame::BulkString(Some(b"queue".to_vec())),
+            RespFrame::BulkString(Some(b"0.0001".to_vec())),
+        ]));
+        let blocked = try_build_blocked_state(&frame, 1_000).expect("must block");
+        assert_eq!(blocked.deadline_ms, 1_001);
     }
 
     #[test]

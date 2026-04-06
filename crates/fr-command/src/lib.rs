@@ -8386,17 +8386,24 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         ));
         info.push_str(&format!(
             "rdb_last_bgsave_time_sec:{}\r\n",
-            store.stat_rdb_last_bgsave_time_sec.map_or(-1, |ts| ts as i64)
+            store
+                .stat_rdb_last_bgsave_time_sec
+                .map_or(-1, |ts| ts as i64)
         ));
         info.push_str("rdb_current_bgsave_time_sec:-1\r\n");
         info.push_str(&format!("rdb_saves:{}\r\n", store.stat_rdb_saves));
         info.push_str("rdb_last_cow_size:0\r\n");
-        info.push_str(&format!("aof_enabled:{}\r\n", usize::from(store.aof_enabled)));
+        info.push_str(&format!(
+            "aof_enabled:{}\r\n",
+            usize::from(store.aof_enabled)
+        ));
         info.push_str("aof_rewrite_in_progress:0\r\n");
         info.push_str("aof_rewrite_scheduled:0\r\n");
         info.push_str(&format!(
             "aof_last_rewrite_time_sec:{}\r\n",
-            store.stat_aof_last_rewrite_time_sec.map_or(-1, |ts| ts as i64)
+            store
+                .stat_aof_last_rewrite_time_sec
+                .map_or(-1, |ts| ts as i64)
         ));
         info.push_str("aof_current_rewrite_time_sec:-1\r\n");
         info.push_str(&format!(
@@ -12270,7 +12277,7 @@ fn blpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Err(CommandError::WrongArity("BLPOP"));
     }
     // Last arg is timeout — validated but not used (we try once immediately)
-    let _timeout = parse_blocking_timeout(&argv[argv.len() - 1])?;
+    let _deadline_ms = parse_blocking_deadline_seconds(&argv[argv.len() - 1], now_ms)?;
     for key in &argv[1..argv.len() - 1] {
         match store.lpop(key, now_ms) {
             Ok(Some(val)) => {
@@ -12292,7 +12299,7 @@ fn brpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("BRPOP"));
     }
-    let _timeout = parse_blocking_timeout(&argv[argv.len() - 1])?;
+    let _deadline_ms = parse_blocking_deadline_seconds(&argv[argv.len() - 1], now_ms)?;
     for key in &argv[1..argv.len() - 1] {
         match store.rpop(key, now_ms) {
             Ok(Some(val)) => {
@@ -12313,7 +12320,7 @@ fn blmove(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 6 {
         return Err(CommandError::WrongArity("BLMOVE"));
     }
-    let _timeout = parse_blocking_timeout(&argv[5])?;
+    let _deadline_ms = parse_blocking_deadline_seconds(&argv[5], now_ms)?;
     if !argv[3].eq_ignore_ascii_case(b"LEFT") && !argv[3].eq_ignore_ascii_case(b"RIGHT") {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
@@ -12332,7 +12339,7 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 5 {
         return Err(CommandError::WrongArity("BLMPOP"));
     }
-    let _timeout = parse_blocking_timeout(&argv[1])?;
+    let _deadline_ms = parse_blocking_deadline_seconds(&argv[1], now_ms)?;
     let numkeys_val = parse_i64_arg(&argv[2])?;
     if numkeys_val <= 0 {
         return Ok(RespFrame::Error(
@@ -12406,6 +12413,33 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     Ok(RespFrame::Array(None))
 }
 
+fn blocking_timeout_out_of_range_error() -> CommandError {
+    CommandError::Custom("ERR timeout is out of range".to_string())
+}
+
+/// Parse and validate a seconds-based blocking timeout, returning the absolute
+/// deadline in milliseconds using Redis' ceil-to-next-millisecond semantics.
+fn parse_blocking_deadline_seconds(arg: &[u8], now_ms: u64) -> Result<u64, CommandError> {
+    let timeout = parse_blocking_timeout(arg)?;
+    if timeout == 0.0 {
+        return Ok(u64::MAX);
+    }
+
+    let timeout_ms = timeout * 1000.0;
+    if !timeout_ms.is_finite() {
+        return Err(blocking_timeout_out_of_range_error());
+    }
+
+    let delta_ms = timeout_ms.ceil();
+    if delta_ms > u64::MAX as f64 {
+        return Err(blocking_timeout_out_of_range_error());
+    }
+
+    now_ms
+        .checked_add(delta_ms as u64)
+        .ok_or_else(blocking_timeout_out_of_range_error)
+}
+
 /// Parse and validate a blocking command timeout. Returns an error for negative values.
 fn parse_blocking_timeout(arg: &[u8]) -> Result<f64, CommandError> {
     let text = std::str::from_utf8(arg).map_err(|_| {
@@ -12430,7 +12464,7 @@ fn bzpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("BZPOPMIN"));
     }
-    let _timeout = parse_blocking_timeout(&argv[argv.len() - 1])?;
+    let _deadline_ms = parse_blocking_deadline_seconds(&argv[argv.len() - 1], now_ms)?;
     for key in &argv[1..argv.len() - 1] {
         match store.zpopmin(key, now_ms) {
             Ok(Some((member, score))) => {
@@ -12452,7 +12486,7 @@ fn bzpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("BZPOPMAX"));
     }
-    let _timeout = parse_blocking_timeout(&argv[argv.len() - 1])?;
+    let _deadline_ms = parse_blocking_deadline_seconds(&argv[argv.len() - 1], now_ms)?;
     for key in &argv[1..argv.len() - 1] {
         match store.zpopmax(key, now_ms) {
             Ok(Some((member, score))) => {
@@ -12474,7 +12508,7 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 5 {
         return Err(CommandError::WrongArity("BZMPOP"));
     }
-    let _timeout = parse_blocking_timeout(&argv[1])?;
+    let _deadline_ms = parse_blocking_deadline_seconds(&argv[1], now_ms)?;
     let numkeys_val = parse_i64_arg(&argv[2])?;
     if numkeys_val <= 0 {
         return Ok(RespFrame::Error(
@@ -20347,12 +20381,7 @@ mod tests {
         );
 
         // Original value unchanged after rejected increments.
-        let val = dispatch_argv(
-            &[b"GET".to_vec(), b"k".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("get");
+        let val = dispatch_argv(&[b"GET".to_vec(), b"k".to_vec()], &mut store, 0).expect("get");
         assert_eq!(val, RespFrame::BulkString(Some(b"0".to_vec())));
     }
 
@@ -22094,7 +22123,10 @@ mod tests {
         let info = String::from_utf8(bytes).expect("utf8 info");
         assert!(info.contains("rdb_last_save_time:1700000007\r\n"), "{info}");
         assert!(info.contains("rdb_last_bgsave_status:ok\r\n"), "{info}");
-        assert!(info.contains("rdb_last_bgsave_time_sec:1700000007\r\n"), "{info}");
+        assert!(
+            info.contains("rdb_last_bgsave_time_sec:1700000007\r\n"),
+            "{info}"
+        );
         assert!(info.contains("rdb_saves:2\r\n"), "{info}");
         assert!(info.contains("aof_last_bgrewrite_status:err\r\n"), "{info}");
         assert!(info.contains("aof_last_write_status:err\r\n"), "{info}");
@@ -22504,6 +22536,34 @@ mod tests {
             );
             assert!(result.is_err(), "timeout {timeout:?} must be rejected");
         }
+    }
+
+    #[test]
+    fn blocking_seconds_deadline_rounds_submillisecond_waits_up() {
+        assert_eq!(
+            crate::parse_blocking_deadline_seconds(b"0.0001", 123),
+            Ok(124)
+        );
+        assert_eq!(
+            crate::parse_blocking_deadline_seconds(b"1.0001", 123),
+            Ok(1124)
+        );
+    }
+
+    #[test]
+    fn blpop_out_of_range_timeout_rejected() {
+        let mut store = Store::new();
+        let result = dispatch_argv(
+            &[b"BLPOP".to_vec(), b"key".to_vec(), b"1e100".to_vec()],
+            &mut store,
+            0,
+        );
+        assert_eq!(
+            result,
+            Err(CommandError::Custom(
+                "ERR timeout is out of range".to_string()
+            ))
+        );
     }
 
     #[test]
@@ -25337,10 +25397,7 @@ mod tests {
         assert!(info.contains("total_net_input_bytes:12345\r\n"), "{info}");
         assert!(info.contains("total_net_output_bytes:67890\r\n"), "{info}");
         // With only 1 of 16 samples filled, ops/sec = 5000/16 = 312
-        assert!(
-            info.contains("instantaneous_ops_per_sec:312\r\n"),
-            "{info}"
-        );
+        assert!(info.contains("instantaneous_ops_per_sec:312\r\n"), "{info}");
     }
 
     #[test]
