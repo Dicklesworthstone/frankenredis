@@ -394,6 +394,11 @@ fn rdb_decode_length(data: &[u8]) -> Option<(usize, usize)> {
 
 /// Decode an RDB string. Returns `(bytes, consumed)` or `None`.
 fn lzf_decompress(input: &[u8], expected_len: usize) -> Option<Vec<u8>> {
+    // Redis max string size is 512MB (536_870_912 bytes).
+    // Reject anything larger to prevent OOM via malicious RDB headers.
+    if expected_len > 536_870_912 {
+        return None;
+    }
     let mut output = Vec::with_capacity(expected_len);
     let mut cursor = 0usize;
 
@@ -479,7 +484,7 @@ fn rdb_decode_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
         }
     } else {
         let (len, hdr) = rdb_decode_length(data)?;
-        let end = hdr + len;
+        let end = hdr.checked_add(len)?;
         if data.len() < end {
             return None;
         }

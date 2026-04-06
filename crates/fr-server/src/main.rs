@@ -1001,17 +1001,23 @@ fn split_inline_args(line: &[u8]) -> Result<Vec<Vec<u8>>, &'static str> {
             i += 1; // Skip closing quote.
             args.push(arg);
         } else if line[i] == b'\'' {
-            // Single-quoted argument (no escape processing).
+            // Single-quoted argument. Supports escaping only single quotes.
             i += 1;
-            let start = i;
+            let mut arg = Vec::new();
             while i < line.len() && line[i] != b'\'' {
+                if line[i] == b'\\' && i + 1 < line.len() && line[i + 1] == b'\'' {
+                    i += 1;
+                    arg.push(b'\'');
+                } else {
+                    arg.push(line[i]);
+                }
                 i += 1;
             }
             if i >= line.len() {
                 return Err("ERR Protocol error: unbalanced quotes in request");
             }
-            args.push(line[start..i].to_vec());
-            i += 1;
+            args.push(arg);
+            i += 1; // Skip closing quote.
         } else {
             // Unquoted argument.
             let start = i;
