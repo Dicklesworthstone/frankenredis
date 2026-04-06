@@ -8376,7 +8376,14 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             "rdb_last_save_time:{}\r\n",
             store.last_save_time_sec
         ));
-        info.push_str("rdb_last_bgsave_status:ok\r\n");
+        info.push_str(&format!(
+            "rdb_last_bgsave_status:{}\r\n",
+            if store.stat_rdb_last_bgsave_ok {
+                "ok"
+            } else {
+                "err"
+            }
+        ));
         info.push_str(&format!(
             "rdb_last_bgsave_time_sec:{}\r\n",
             store.stat_rdb_last_bgsave_time_sec.map_or(-1, |ts| ts as i64)
@@ -8384,7 +8391,7 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("rdb_current_bgsave_time_sec:-1\r\n");
         info.push_str(&format!("rdb_saves:{}\r\n", store.stat_rdb_saves));
         info.push_str("rdb_last_cow_size:0\r\n");
-        info.push_str("aof_enabled:0\r\n");
+        info.push_str(&format!("aof_enabled:{}\r\n", usize::from(store.aof_enabled)));
         info.push_str("aof_rewrite_in_progress:0\r\n");
         info.push_str("aof_rewrite_scheduled:0\r\n");
         info.push_str(&format!(
@@ -8392,8 +8399,22 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             store.stat_aof_last_rewrite_time_sec.map_or(-1, |ts| ts as i64)
         ));
         info.push_str("aof_current_rewrite_time_sec:-1\r\n");
-        info.push_str("aof_last_bgrewrite_status:ok\r\n");
-        info.push_str("aof_last_write_status:ok\r\n");
+        info.push_str(&format!(
+            "aof_last_bgrewrite_status:{}\r\n",
+            if store.stat_aof_last_bgrewrite_ok {
+                "ok"
+            } else {
+                "err"
+            }
+        ));
+        info.push_str(&format!(
+            "aof_last_write_status:{}\r\n",
+            if store.stat_aof_last_write_ok {
+                "ok"
+            } else {
+                "err"
+            }
+        ));
         info.push_str("aof_last_cow_size:0\r\n");
         info.push_str("\r\n");
     }
@@ -8494,7 +8515,10 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("tracking_total_keys:0\r\n");
         info.push_str("tracking_total_items:0\r\n");
         info.push_str("tracking_total_prefixes:0\r\n");
-        info.push_str("unexpected_error_replies:0\r\n");
+        info.push_str(&format!(
+            "unexpected_error_replies:{}\r\n",
+            store.stat_unexpected_error_replies
+        ));
         info.push_str(&format!(
             "total_error_replies:{}\r\n",
             store.stat_total_error_replies
@@ -10769,6 +10793,7 @@ fn bgsave_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         }
     }
     store.record_save(now_ms, true);
+    store.record_bgsave_status(true);
     // Optional SCHEDULE argument — accepted but ignored
     Ok(RespFrame::SimpleString(
         "Background saving started".to_string(),
@@ -22058,6 +22083,8 @@ mod tests {
         let mut store = Store::new();
         dispatch_argv(&[b"SAVE".to_vec()], &mut store, 1_700_000_005_000).expect("save");
         dispatch_argv(&[b"BGSAVE".to_vec()], &mut store, 1_700_000_007_000).expect("bgsave");
+        store.record_aof_bgrewrite_status(false);
+        store.record_aof_write_status(false);
 
         let out = dispatch_argv(&[b"INFO".to_vec(), b"persistence".to_vec()], &mut store, 0)
             .expect("info persistence");
@@ -22066,9 +22093,26 @@ mod tests {
         };
         let info = String::from_utf8(bytes).expect("utf8 info");
         assert!(info.contains("rdb_last_save_time:1700000007\r\n"), "{info}");
+        assert!(info.contains("rdb_last_bgsave_status:ok\r\n"), "{info}");
         assert!(info.contains("rdb_last_bgsave_time_sec:1700000007\r\n"), "{info}");
         assert!(info.contains("rdb_saves:2\r\n"), "{info}");
+        assert!(info.contains("aof_last_bgrewrite_status:err\r\n"), "{info}");
+        assert!(info.contains("aof_last_write_status:err\r\n"), "{info}");
         assert!(info.contains("aof_last_rewrite_time_sec:-1\r\n"), "{info}");
+    }
+
+    #[test]
+    fn info_persistence_reports_aof_enabled_from_store_state() {
+        let mut store = Store::new();
+        store.set_aof_enabled(true);
+
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"persistence".to_vec()], &mut store, 0)
+            .expect("info persistence");
+        let RespFrame::BulkString(Some(bytes)) = out else {
+            panic!("expected bulk string");
+        };
+        let info = String::from_utf8(bytes).expect("utf8 info");
+        assert!(info.contains("aof_enabled:1\r\n"), "{info}");
     }
 
     #[test]
@@ -25215,6 +25259,7 @@ mod tests {
         let mut store = Store::new();
         store.stat_total_commands_processed = 12;
         store.stat_total_connections_received = 2;
+        store.stat_unexpected_error_replies = 4;
         store.stat_total_error_replies = 9;
         store.stat_total_reads_processed = 13;
         store.stat_total_writes_processed = 7;
@@ -25229,6 +25274,7 @@ mod tests {
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
         assert_eq!(store.stat_total_commands_processed, 0);
         assert_eq!(store.stat_total_connections_received, 0);
+        assert_eq!(store.stat_unexpected_error_replies, 0);
         assert_eq!(store.stat_total_error_replies, 0);
         assert_eq!(store.stat_total_reads_processed, 0);
         assert_eq!(store.stat_total_writes_processed, 0);
@@ -25248,6 +25294,7 @@ mod tests {
         store.stat_expire_cycle_cpu_milliseconds = 7;
         store.stat_keyspace_hits = 11;
         store.stat_keyspace_misses = 4;
+        store.stat_unexpected_error_replies = 2;
         store.stat_total_error_replies = 9;
         store.stat_total_reads_processed = 13;
         store.stat_total_writes_processed = 7;
@@ -25266,6 +25313,7 @@ mod tests {
         assert!(info.contains("total_keys_evicted:2\r\n"));
         assert!(info.contains("keyspace_hits:11\r\n"));
         assert!(info.contains("keyspace_misses:4\r\n"));
+        assert!(info.contains("unexpected_error_replies:2\r\n"));
         assert!(info.contains("total_error_replies:9\r\n"));
         assert!(info.contains("total_reads_processed:13\r\n"));
         assert!(info.contains("total_writes_processed:7\r\n"));

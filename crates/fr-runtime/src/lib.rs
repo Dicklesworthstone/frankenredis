@@ -1344,6 +1344,7 @@ impl ServerState {
     pub fn set_aof_path(&mut self, path: std::path::PathBuf) {
         self.aof_config_path = Some(path.clone());
         self.aof_path = Some(path);
+        self.store.set_aof_enabled(true);
     }
 
     pub fn set_rdb_path(&mut self, path: std::path::PathBuf) {
@@ -1652,6 +1653,7 @@ pub struct Runtime {
     policy: RuntimePolicy,
     pub server: ServerState,
     session: ClientSession,
+    execution_source: ExecutionSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1675,6 +1677,19 @@ struct ThreatEventInput<'a> {
     output: &'a RespFrame,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionSource {
+    Client,
+    AofLoad,
+    ReplicationReplay,
+}
+
+impl ExecutionSource {
+    fn counts_as_unexpected_error_reply(self) -> bool {
+        matches!(self, Self::AofLoad | Self::ReplicationReplay)
+    }
+}
+
 const MAX_COMMAND_ARITY: usize = 1024 * 1024;
 
 impl Runtime {
@@ -1686,6 +1701,7 @@ impl Runtime {
             policy,
             server,
             session,
+            execution_source: ExecutionSource::Client,
         }
     }
 
@@ -1726,7 +1742,7 @@ impl Runtime {
         };
         let records = fr_persist::read_aof_file(&path)?;
         let count = records.len();
-        let original_store = std::mem::replace(&mut self.server.store, Store::new());
+        let mut original_store = std::mem::replace(&mut self.server.store, Store::new());
         let original_records = std::mem::take(&mut self.server.aof_records);
         let original_aof_db = self.server.aof_selected_db;
         let original_db = self.session.selected_db;
@@ -1735,8 +1751,16 @@ impl Runtime {
         self.session.selected_db = 0;
         for (index, record) in records.iter().enumerate() {
             let replay_now_ms = now_ms.saturating_add(index as u64);
-            let reply = self.execute_frame(record.to_resp_frame(), replay_now_ms);
+            let reply = self.with_execution_source(ExecutionSource::AofLoad, |runtime| {
+                runtime.execute_frame(record.to_resp_frame(), replay_now_ms)
+            });
             if matches!(reply, RespFrame::Error(_)) {
+                original_store.stat_total_error_replies = original_store
+                    .stat_total_error_replies
+                    .saturating_add(self.server.store.stat_total_error_replies);
+                original_store.stat_unexpected_error_replies = original_store
+                    .stat_unexpected_error_replies
+                    .saturating_add(self.server.store.stat_unexpected_error_replies);
                 self.server.store = original_store;
                 self.server.aof_records = original_records;
                 self.server.aof_selected_db = original_aof_db;
@@ -1966,10 +1990,21 @@ impl Runtime {
 
     #[must_use]
     pub fn replay_aof_records(&mut self, records: &[AofRecord], now_ms: u64) -> Vec<RespFrame> {
+        self.replay_records_with_source(records, now_ms, ExecutionSource::AofLoad)
+    }
+
+    fn replay_records_with_source(
+        &mut self,
+        records: &[AofRecord],
+        now_ms: u64,
+        source: ExecutionSource,
+    ) -> Vec<RespFrame> {
         let mut replies = Vec::with_capacity(records.len());
         for (index, record) in records.iter().enumerate() {
             let replay_now_ms = now_ms.saturating_add(index as u64);
-            let reply = self.execute_frame(record.to_resp_frame(), replay_now_ms);
+            let reply = self.with_execution_source(source, |runtime| {
+                runtime.execute_frame(record.to_resp_frame(), replay_now_ms)
+            });
             replies.push(reply);
         }
         replies
@@ -1983,7 +2018,12 @@ impl Runtime {
     ) -> Result<(), PersistError> {
         match parse_psync_reply(reply_line).map_err(|_| PersistError::InvalidFrame)? {
             PsyncReply::Continue => {
-                self.replay_aof_stream(payload, now_ms)?;
+                let records = decode_aof_stream(payload)?;
+                self.replay_records_with_source(
+                    &records,
+                    now_ms,
+                    ExecutionSource::ReplicationReplay,
+                );
             }
             PsyncReply::FullResync { replid, offset } => {
                 let (entries, _aux) = decode_rdb(payload)?;
@@ -2610,10 +2650,24 @@ impl Runtime {
             self.execute_frame_internal(frame, now_ms, packet_id, input_digest, state_before);
         if matches!(reply, RespFrame::Error(_)) {
             self.server.store.stat_total_error_replies += 1;
+            if self.execution_source.counts_as_unexpected_error_reply() {
+                self.server.store.stat_unexpected_error_replies += 1;
+            }
         }
         self.server.store.stat_total_reads_processed += processed_counts.0;
         self.server.store.stat_total_writes_processed += processed_counts.1;
         reply
+    }
+
+    fn with_execution_source<T>(
+        &mut self,
+        source: ExecutionSource,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let previous = std::mem::replace(&mut self.execution_source, source);
+        let output = f(self);
+        self.execution_source = previous;
+        output
     }
 
     fn execute_frame_internal(
@@ -5170,6 +5224,7 @@ impl Runtime {
             } else {
                 self.server.aof_path = None;
             }
+            self.server.store.set_aof_enabled(appendonly);
         }
         if let Some(list_max_listpack_size) = next_list_max_listpack_size {
             self.server.store.list_max_listpack_size = list_max_listpack_size;
@@ -5777,9 +5832,11 @@ impl Runtime {
         }
         // In a single-threaded context, BGSAVE behaves like SAVE.
         if let Err(reply) = self.persist_snapshot_to_disk(now_ms) {
+            self.server.store.record_bgsave_status(false);
             return reply;
         }
         self.server.store.record_save(now_ms, true);
+        self.server.store.record_bgsave_status(true);
         self.server.last_save_time_sec = self.server.store.last_save_time_sec;
         RespFrame::SimpleString("Background saving started".to_string())
     }
@@ -5789,10 +5846,12 @@ impl Runtime {
             let commands = self.server.store.to_aof_commands(now_ms);
             let records = argv_to_aof_records(commands);
             if write_aof_file(path, &records).is_err() {
+                self.server.store.record_aof_write_status(false);
                 return Err(RespFrame::Error(
                     "ERR error saving dataset to disk".to_string(),
                 ));
             }
+            self.server.store.record_aof_write_status(true);
         }
 
         if let Some(path) = &self.server.rdb_path {
@@ -5835,9 +5894,11 @@ impl Runtime {
         let commands = self.server.store.to_aof_commands(now_ms);
         let records = argv_to_aof_records(commands);
         if let Err(_e) = write_aof_file(path, &records) {
+            self.server.store.record_aof_bgrewrite_status(false);
             return RespFrame::Error("ERR error rewriting AOF file".to_string());
         }
         self.server.store.record_aof_rewrite(now_ms);
+        self.server.store.record_aof_bgrewrite_status(true);
         RespFrame::SimpleString("Background append only file rewriting started".to_string())
     }
 
@@ -6605,7 +6666,14 @@ impl Runtime {
             "rdb_last_save_time:{}\r\n",
             self.server.store.last_save_time_sec
         ));
-        info.push_str("rdb_last_bgsave_status:ok\r\n");
+        info.push_str(&format!(
+            "rdb_last_bgsave_status:{}\r\n",
+            if self.server.store.stat_rdb_last_bgsave_ok {
+                "ok"
+            } else {
+                "err"
+            }
+        ));
         info.push_str(&format!(
             "rdb_last_bgsave_time_sec:{}\r\n",
             self.server
@@ -6633,8 +6701,22 @@ impl Runtime {
                 .map_or(-1, |ts| ts as i64)
         ));
         info.push_str("aof_current_rewrite_time_sec:-1\r\n");
-        info.push_str("aof_last_bgrewrite_status:ok\r\n");
-        info.push_str("aof_last_write_status:ok\r\n");
+        info.push_str(&format!(
+            "aof_last_bgrewrite_status:{}\r\n",
+            if self.server.store.stat_aof_last_bgrewrite_ok {
+                "ok"
+            } else {
+                "err"
+            }
+        ));
+        info.push_str(&format!(
+            "aof_last_write_status:{}\r\n",
+            if self.server.store.stat_aof_last_write_ok {
+                "ok"
+            } else {
+                "err"
+            }
+        ));
         info.push_str("aof_last_cow_size:0\r\n");
         info.push_str("\r\n");
         RespFrame::BulkString(Some(info.into_bytes()))
@@ -8192,6 +8274,7 @@ mod tests {
         let mut rt = Runtime::default_strict();
         rt.server.store.stat_total_commands_processed = 9;
         rt.server.store.stat_total_connections_received = 4;
+        rt.server.store.stat_unexpected_error_replies = 2;
         rt.server.store.stat_total_error_replies = 5;
         rt.server.store.stat_total_reads_processed = 6;
         rt.server.store.stat_total_writes_processed = 7;
@@ -8215,6 +8298,7 @@ mod tests {
         );
         assert_eq!(rt.server.store.stat_total_commands_processed, 0);
         assert_eq!(rt.server.store.stat_total_connections_received, 0);
+        assert_eq!(rt.server.store.stat_unexpected_error_replies, 0);
         assert_eq!(rt.server.store.stat_total_error_replies, 0);
         assert_eq!(rt.server.store.stat_total_reads_processed, 0);
         assert_eq!(rt.server.store.stat_total_writes_processed, 0);
@@ -8255,6 +8339,43 @@ mod tests {
             RespFrame::Error("ERR syntax error".to_string())
         );
         assert_eq!(rt.server.store.stat_total_error_replies, 2);
+        assert_eq!(rt.server.store.stat_unexpected_error_replies, 0);
+    }
+
+    #[test]
+    fn unexpected_error_replies_count_aof_load_and_replication_replay_errors() {
+        let mut rt = Runtime::default_strict();
+
+        let replayed = rt
+            .replay_aof_stream(b"*2\r\n$4\r\nNOPE\r\n$3\r\nbad\r\n", 0)
+            .expect("decodeable replay stream should execute");
+        assert_eq!(replayed.len(), 1);
+        let Some(RespFrame::Error(message)) = replayed.first() else {
+            panic!("expected replayed error reply");
+        };
+        assert!(
+            message.starts_with("ERR unknown command 'NOPE'"),
+            "{message}"
+        );
+        assert_eq!(rt.server.store.stat_unexpected_error_replies, 1);
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
+
+        rt.apply_replication_sync_payload(
+            "CONTINUE",
+            b"*2\r\n$4\r\nNOPE\r\n$3\r\nbad\r\n",
+            1,
+        )
+        .expect("replication payload should decode");
+        assert_eq!(rt.server.store.stat_unexpected_error_replies, 2);
+        assert_eq!(rt.server.store.stat_total_error_replies, 2);
+
+        let info = rt.execute_frame(command(&[b"INFO", b"stats"]), 2);
+        let RespFrame::BulkString(Some(bytes)) = info else {
+            panic!("expected INFO stats bulk string");
+        };
+        let info = String::from_utf8(bytes).expect("utf8");
+        assert!(info.contains("unexpected_error_replies:2\r\n"), "{info}");
+        assert!(info.contains("total_error_replies:2\r\n"), "{info}");
     }
 
     #[test]
@@ -11904,7 +12025,10 @@ mod tests {
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("rdb_last_save_time:1700000005\r\n"), "{info}");
         assert!(info.contains("rdb_saves:1\r\n"), "{info}");
+        assert!(info.contains("rdb_last_bgsave_status:ok\r\n"), "{info}");
         assert!(info.contains("rdb_last_bgsave_time_sec:-1\r\n"), "{info}");
+        assert!(info.contains("aof_last_bgrewrite_status:ok\r\n"), "{info}");
+        assert!(info.contains("aof_last_write_status:ok\r\n"), "{info}");
     }
 
     #[test]
@@ -11942,6 +12066,46 @@ mod tests {
                 "ERR appendonly is disabled, cannot rewrite append only file".to_string()
             )
         );
+    }
+
+    #[test]
+    fn bgsave_failure_updates_info_persistence_status() {
+        let dir = std::env::temp_dir().join("fr_runtime_bgsave_failure_status_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(dir.clone());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGSAVE"]), 1),
+            RespFrame::Error("ERR error saving RDB snapshot to disk".to_string())
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 2);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            panic!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("rdb_last_bgsave_status:err\r\n"), "{info}");
+    }
+
+    #[test]
+    fn save_failure_updates_aof_last_write_status() {
+        let dir = std::env::temp_dir().join("fr_runtime_save_failure_status_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(dir.clone());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SAVE"]), 1),
+            RespFrame::Error("ERR error saving dataset to disk".to_string())
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 2);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            panic!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("aof_last_write_status:err\r\n"), "{info}");
     }
 
     #[test]
@@ -12028,8 +12192,29 @@ mod tests {
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("aof_last_rewrite_time_sec:0\r\n"), "{info}");
+        assert!(info.contains("aof_last_bgrewrite_status:ok\r\n"), "{info}");
 
         let _ = std::fs::remove_file(&aof_path);
+    }
+
+    #[test]
+    fn bgrewriteaof_failure_updates_info_persistence_status() {
+        let dir = std::env::temp_dir().join("fr_runtime_bgrewrite_failure_status_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(dir.clone());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 1),
+            RespFrame::Error("ERR error rewriting AOF file".to_string())
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 2);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            panic!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("aof_last_bgrewrite_status:err\r\n"), "{info}");
     }
 
     #[test]
@@ -12230,6 +12415,8 @@ mod tests {
         assert_eq!(keep, RespFrame::BulkString(Some(b"safe".to_vec())));
         let good = rt.execute_frame(command(&[b"GET", b"good"]), 100);
         assert_eq!(good, RespFrame::BulkString(None));
+        assert_eq!(rt.server.store.stat_unexpected_error_replies, 1);
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
 
         let _ = std::fs::remove_file(&aof_path);
     }

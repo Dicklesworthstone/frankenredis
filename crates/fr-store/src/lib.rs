@@ -819,6 +819,14 @@ pub struct Store {
     pub stat_rdb_last_bgsave_time_sec: Option<u64>,
     /// Unix timestamp of the last successful AOF rewrite, if any.
     pub stat_aof_last_rewrite_time_sec: Option<u64>,
+    /// Status of the last BGSAVE attempt reported via INFO persistence.
+    pub stat_rdb_last_bgsave_ok: bool,
+    /// Status of the last BGREWRITEAOF attempt reported via INFO persistence.
+    pub stat_aof_last_bgrewrite_ok: bool,
+    /// Status of the last AOF snapshot write reported via INFO persistence.
+    pub stat_aof_last_write_ok: bool,
+    /// Whether appendonly is currently enabled for live INFO/config reporting.
+    pub aof_enabled: bool,
 
     /// Current recursion depth of Lua script execution.
     pub script_nesting_level: usize,
@@ -854,6 +862,8 @@ pub struct Store {
     pub stat_keyspace_hits: u64,
     /// Number of missing-key lookups performed through store read/query APIs.
     pub stat_keyspace_misses: u64,
+    /// Total number of unexpected error replies emitted during internal replay paths.
+    pub stat_unexpected_error_replies: u64,
     /// Total number of RESP error replies emitted to clients.
     pub stat_total_error_replies: u64,
     /// Total number of client-visible readonly commands processed.
@@ -983,6 +993,10 @@ impl Default for Store {
             stat_rdb_saves: 0,
             stat_rdb_last_bgsave_time_sec: None,
             stat_aof_last_rewrite_time_sec: None,
+            stat_rdb_last_bgsave_ok: true,
+            stat_aof_last_bgrewrite_ok: true,
+            stat_aof_last_write_ok: true,
+            aof_enabled: false,
             script_nesting_level: 0,
             expires_count: 0,
             notify_keyspace_events: 0,
@@ -997,6 +1011,7 @@ impl Default for Store {
             stat_tracking_clients: 0,
             stat_keyspace_hits: 0,
             stat_keyspace_misses: 0,
+            stat_unexpected_error_replies: 0,
             stat_total_error_replies: 0,
             stat_total_reads_processed: 0,
             stat_total_writes_processed: 0,
@@ -1101,6 +1116,22 @@ impl Store {
         self.stat_aof_last_rewrite_time_sec = Some(now_ms / 1000);
     }
 
+    pub fn record_bgsave_status(&mut self, ok: bool) {
+        self.stat_rdb_last_bgsave_ok = ok;
+    }
+
+    pub fn record_aof_bgrewrite_status(&mut self, ok: bool) {
+        self.stat_aof_last_bgrewrite_ok = ok;
+    }
+
+    pub fn record_aof_write_status(&mut self, ok: bool) {
+        self.stat_aof_last_write_ok = ok;
+    }
+
+    pub fn set_aof_enabled(&mut self, enabled: bool) {
+        self.aof_enabled = enabled;
+    }
+
     /// Record a periodic sample for ops/sec and throughput calculations.
     /// Call this once per server-hz tick (e.g. every 100ms at 10hz).
     /// `elapsed_ms` is the wall-clock time since the last sample (typically ~100ms).
@@ -1164,6 +1195,7 @@ impl Store {
         self.reset_slowlog();
         self.stat_total_commands_processed = 0;
         self.stat_total_connections_received = 0;
+        self.stat_unexpected_error_replies = 0;
         self.stat_total_error_replies = 0;
         self.stat_total_reads_processed = 0;
         self.stat_total_writes_processed = 0;
@@ -1304,7 +1336,7 @@ impl Store {
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
         self.internal_entries_insert(key, Entry::new(Value::String(value), expires_at_ms, now_ms));
-        self.dirty += 1;
+        self.dirty = self.dirty.saturating_add(1);
     }
 
     /// SET variant that takes an absolute expiry timestamp (for EXAT/PXAT/KEEPTTL).
@@ -1318,7 +1350,7 @@ impl Store {
         self.stream_groups.remove(key.as_slice());
         self.stream_last_ids.remove(key.as_slice());
         self.internal_entries_insert(key, Entry::new(Value::String(value), expires_at_ms, now_ms));
-        self.dirty += 1;
+        self.dirty = self.dirty.saturating_add(1);
     }
 
     /// Returns the current absolute expiry timestamp for a key, if any.
@@ -1371,7 +1403,7 @@ impl Store {
                 now_ms,
             ),
         );
-        self.dirty += 1;
+        self.dirty = self.dirty.saturating_add(1);
         Ok(next)
     }
 
@@ -1400,7 +1432,7 @@ impl Store {
             self.internal_entries_remove(key);
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
-            self.dirty += 1;
+            self.dirty = self.dirty.saturating_add(1);
             return true;
         }
 
@@ -1415,7 +1447,7 @@ impl Store {
                 }
             }
             entry.expires_at_ms = Some(expires_at_ms);
-            self.dirty += 1;
+            self.dirty = self.dirty.saturating_add(1);
             self.notify_keyspace_event(NOTIFY_GENERIC, "expire", &logical_key, db);
         }
         true
@@ -1436,7 +1468,7 @@ impl Store {
             self.internal_entries_remove(key);
             self.stream_groups.remove(key);
             self.stream_last_ids.remove(key);
-            self.dirty += 1;
+            self.dirty = self.dirty.saturating_add(1);
             return true;
         }
 
@@ -1450,7 +1482,7 @@ impl Store {
                 }
             }
             entry.expires_at_ms = Some(expires_at_ms);
-            self.dirty += 1;
+            self.dirty = self.dirty.saturating_add(1);
         }
         true
     }
@@ -1483,7 +1515,7 @@ impl Store {
                     v.extend_from_slice(value);
                     let len = v.len();
                     entry.touch_write(now_ms);
-                    self.dirty += 1;
+                    self.dirty = self.dirty.saturating_add(1);
                     Ok(len)
                 }
                 _ => Err(StoreError::WrongType),
@@ -1494,7 +1526,7 @@ impl Store {
                 key.to_vec(),
                 Entry::new(Value::String(value.to_vec()), None, now_ms),
             );
-            self.dirty += 1;
+            self.dirty = self.dirty.saturating_add(1);
             Ok(len)
         }
     }
@@ -1547,7 +1579,7 @@ impl Store {
             return false;
         }
         self.internal_entries_insert(key, Entry::new(Value::String(value), None, now_ms));
-        self.dirty += 1;
+        self.dirty = self.dirty.saturating_add(1);
         true
     }
 
@@ -1566,7 +1598,7 @@ impl Store {
             None => None,
         };
         self.internal_entries_insert(key, Entry::new(Value::String(value), None, now_ms));
-        self.dirty += 1;
+        self.dirty = self.dirty.saturating_add(1);
         Ok(old)
     }
 
@@ -1590,7 +1622,7 @@ impl Store {
                 now_ms,
             ),
         );
-        self.dirty += 1;
+        self.dirty = self.dirty.saturating_add(1);
         Ok(next)
     }
 
@@ -1615,7 +1647,7 @@ impl Store {
                 now_ms,
             ),
         );
-        self.dirty += 1;
+        self.dirty = self.dirty.saturating_add(1);
         Ok(next)
     }
 
@@ -1635,7 +1667,7 @@ impl Store {
         };
         self.stream_groups.remove(key);
         self.stream_last_ids.remove(key);
-        self.dirty += 1;
+        self.dirty = self.dirty.saturating_add(1);
         match entry.value {
             Value::String(v) => Ok(Some(v)),
             _ => Err(StoreError::WrongType),
@@ -1696,7 +1728,7 @@ impl Store {
                     _ => return Err(StoreError::WrongType),
                 };
                 entry.touch_write(now_ms);
-                self.dirty += 1;
+                self.dirty = self.dirty.saturating_add(1);
                 Ok(len)
             }
             None => {
@@ -1707,7 +1739,7 @@ impl Store {
                     key.to_vec(),
                     Entry::new(Value::String(current), None, now_ms),
                 );
-                self.dirty += 1;
+                self.dirty = self.dirty.saturating_add(1);
                 Ok(new_len)
             }
         }
@@ -1787,7 +1819,7 @@ impl Store {
     /// `bit_offset` is the starting bit position (MSB-first, bit 0 = MSB of byte 0).
     /// `bits` is the field width (1-64).
     /// `signed` indicates whether to sign-extend the result.
-    /// Auto-creates the key as empty string if it doesn't exist.
+    /// If the key does not exist, it behaves as if reading from an infinite stream of zero bytes.
     pub fn bitfield_get(
         &mut self,
         key: &[u8],
@@ -1882,7 +1914,7 @@ impl Store {
                         None => 0,
                     };
                     let e = match end {
-                        Some(e) if e < 0 => len + e,
+                        Some(e) if e < 0 => (len + e).max(0),
                         Some(e) => e,
                         None => len - 1,
                     };
@@ -1931,7 +1963,7 @@ impl Store {
             None => 0,
         };
         let e = match end {
-            Some(e) if e < 0 => len + e,
+            Some(e) if e < 0 => (len + e).max(0),
             Some(e) => e,
             None => len - 1,
         };
@@ -2550,7 +2582,7 @@ impl Store {
         self.expires_count = 0;
         self.db_key_counts.fill(0);
         self.db_expires_counts.fill(0);
-        self.dirty += 1;
+        self.dirty = self.dirty.saturating_add(1);
     }
 
     pub fn flush_prefix(&mut self, prefix: &[u8]) -> u64 {
@@ -3573,7 +3605,7 @@ impl Store {
                             self.stream_groups.remove(key);
                             self.stream_last_ids.remove(key);
                         } else {
-                            entry.touch(now_ms);
+                            entry.touch_write(now_ms);
                         }
                     }
                     Ok(removed)
@@ -3614,7 +3646,7 @@ impl Store {
                 Value::List(l) => {
                     let val = l.pop_back();
                     if val.is_some() && !l.is_empty() {
-                        entry.touch(now_ms);
+                        entry.touch_write(now_ms);
                     }
                     val
                 }
@@ -3648,7 +3680,7 @@ impl Store {
             Some(entry) => match &mut entry.value {
                 Value::List(l) => {
                     l.push_front(val.clone());
-                    entry.touch(now_ms);
+                    entry.touch_write(now_ms);
                 }
                 _ => return Err(StoreError::WrongType),
             },
@@ -3698,7 +3730,7 @@ impl Store {
                         self.stream_groups.remove(key);
                         self.stream_last_ids.remove(key);
                     } else if removed > 0 {
-                        entry.touch(now_ms);
+                        entry.touch_write(now_ms);
                     }
                     if removed > 0 {
                         self.dirty = self.dirty.saturating_add(removed as u64);
@@ -3789,7 +3821,7 @@ impl Store {
                         l.pop_back()
                     };
                     if val.is_some() && !l.is_empty() {
-                        entry.touch(now_ms);
+                        entry.touch_write(now_ms);
                     }
                     val
                 }
@@ -3826,7 +3858,7 @@ impl Store {
                     } else {
                         l.push_back(val.clone());
                     }
-                    entry.touch(now_ms);
+                    entry.touch_write(now_ms);
                 }
                 _ => return Err(StoreError::WrongType),
             },
@@ -3865,7 +3897,7 @@ impl Store {
                             added += 1;
                         }
                     }
-                    entry.touch(now_ms);
+                    entry.touch_write(now_ms);
                     self.dirty = self.dirty.saturating_add(added);
                     Ok(added)
                 }
@@ -3902,7 +3934,7 @@ impl Store {
                         self.stream_groups.remove(key);
                         self.stream_last_ids.remove(key);
                     } else if removed > 0 {
-                        entry.touch(now_ms);
+                        entry.touch_write(now_ms);
                     }
                     self.dirty = self.dirty.saturating_add(removed);
                     Ok(removed)
@@ -4233,7 +4265,7 @@ impl Store {
                     _ => Err(StoreError::WrongType),
                 };
                 if result.is_ok() {
-                    entry.touch(now_ms);
+                    entry.touch_write(now_ms);
                 }
                 result
             }
@@ -5036,7 +5068,7 @@ impl Store {
                 self.stream_groups.remove(key);
                 self.stream_last_ids.remove(key);
             } else {
-                entry.touch(now_ms);
+                entry.touch_write(now_ms);
             }
         }
         Ok(result)
@@ -5064,7 +5096,7 @@ impl Store {
                 self.stream_groups.remove(key);
                 self.stream_last_ids.remove(key);
             } else {
-                entry.touch(now_ms);
+                entry.touch_write(now_ms);
             }
         }
         Ok(result)
@@ -5093,7 +5125,7 @@ impl Store {
         }
         let is_empty = zs.is_empty();
         if !result.is_empty() {
-            entry.touch(now_ms);
+            entry.touch_write(now_ms);
             if is_empty {
                 self.internal_entries_remove(key);
                 self.stream_groups.remove(key);
@@ -5126,7 +5158,7 @@ impl Store {
         }
         let is_empty = zs.is_empty();
         if !result.is_empty() {
-            entry.touch(now_ms);
+            entry.touch_write(now_ms);
             if is_empty {
                 self.internal_entries_remove(key);
                 self.stream_groups.remove(key);
@@ -5813,7 +5845,7 @@ impl Store {
                         }
                     }
                     if to_remove > 0 {
-                        entry.touch(now_ms);
+                        entry.touch_write(now_ms);
                         self.dirty = self.dirty.saturating_add(to_remove as u64);
                     }
                     Ok(to_remove)
@@ -6809,7 +6841,7 @@ impl Store {
 
         let data = hll_encode(&merged);
         let mut entry = Entry::new(Value::String(data), existing_ttl, now_ms);
-        entry.touch(now_ms);
+        entry.touch_write(now_ms);
         self.internal_entries_insert(dest.to_vec(), entry);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
@@ -8119,7 +8151,7 @@ impl Store {
         pos += 4;
 
         for _ in 0..count {
-            if pos + 4 > data.len() {
+            if data.len() - pos < 4 {
                 return Err(StoreError::GenericError(
                     "ERR Invalid dump data".to_string(),
                 ));
@@ -8128,7 +8160,7 @@ impl Store {
                 u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
                     as usize;
             pos += 4;
-            if pos + name_len > data.len() {
+            if data.len() - pos < name_len {
                 return Err(StoreError::GenericError(
                     "ERR Invalid dump data".to_string(),
                 ));
@@ -8136,7 +8168,7 @@ impl Store {
             let name = String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
             pos += name_len;
 
-            if pos + 4 > data.len() {
+            if data.len() - pos < 4 {
                 return Err(StoreError::GenericError(
                     "ERR Invalid dump data".to_string(),
                 ));
@@ -8145,7 +8177,7 @@ impl Store {
                 u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
                     as usize;
             pos += 4;
-            if pos + code_len > data.len() {
+            if data.len() - pos < code_len {
                 return Err(StoreError::GenericError(
                     "ERR Invalid dump data".to_string(),
                 ));
@@ -8153,7 +8185,7 @@ impl Store {
             let code = data[pos..pos + code_len].to_vec();
             pos += code_len;
 
-            if pos + 4 > data.len() {
+            if data.len() - pos < 4 {
                 return Err(StoreError::GenericError(
                     "ERR Invalid dump data".to_string(),
                 ));
@@ -8162,7 +8194,7 @@ impl Store {
                 u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
                     as usize;
             pos += 4;
-            if pos + engine_len > data.len() {
+            if data.len() - pos < engine_len {
                 return Err(StoreError::GenericError(
                     "ERR Invalid dump data".to_string(),
                 ));

@@ -349,6 +349,19 @@
       }
     },
     {
+      "name": "psync_rejects_invalid_offset",
+      "now_ms": 0,
+      "argv": [
+        "PSYNC",
+        "?",
+        "nope"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
       "name": "replicaof_no_one",
       "now_ms": 0,
       "argv": [
@@ -427,6 +440,126 @@
       }
     },
     {
+      "name": "replicaof_enters_replica_connect_state",
+      "now_ms": 0,
+      "argv": [
+        "REPLICAOF",
+        "127.0.0.1",
+        "6380"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "role_reports_replica_connect_state",
+      "now_ms": 0,
+      "argv": [
+        "ROLE"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "slave"
+          },
+          {
+            "kind": "bulk",
+            "value": "127.0.0.1"
+          },
+          {
+            "kind": "integer",
+            "value": 6380
+          },
+          {
+            "kind": "bulk",
+            "value": "connect"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "replicaof_same_master_is_idempotent",
+      "now_ms": 0,
+      "argv": [
+        "REPLICAOF",
+        "127.0.0.1",
+        "6380"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK Already connected to specified master"
+      }
+    },
+    {
+      "name": "waitaof_rejects_replica_instances",
+      "now_ms": 0,
+      "argv": [
+        "WAITAOF",
+        "0",
+        "0",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR WAITAOF cannot be used with replica instances. Please also note that writes to replicas are just local and are not propagated."
+      }
+    },
+    {
+      "name": "replicaof_no_one_promotes_back_to_master",
+      "now_ms": 0,
+      "argv": [
+        "REPLICAOF",
+        "NO",
+        "ONE"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "role_reports_master_after_promotion",
+      "now_ms": 0,
+      "argv": [
+        "ROLE"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "master"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "array",
+            "value": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "sync_alias_triggers_fullresync",
+      "now_ms": 0,
+      "argv": [
+        "SYNC"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "FULLRESYNC 0000000000000000000000000000000000000001 0"
+      }
+    },
+    {
       "name": "slaveof_no_one",
       "now_ms": 0,
       "argv": [
@@ -436,7 +569,7 @@
       ],
       "expect": {
         "kind": "simple",
-        "value": "OK"
+        "value": "OK Already a master"
       }
     },
     {
