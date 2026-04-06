@@ -296,17 +296,17 @@ enum MemberPart {
 }
 
 impl MemberPart {
-    fn unwrap_actual(&self) -> &Vec<u8> {
+    fn as_actual(&self) -> Option<&Vec<u8>> {
         match self {
-            MemberPart::Actual(v) => v,
-            _ => panic!("expected actual member in stored sorted set"),
+            MemberPart::Actual(v) => Some(v),
+            MemberPart::Min | MemberPart::Max => None,
         }
     }
 
-    fn into_actual(self) -> Vec<u8> {
+    fn into_actual(self) -> Option<Vec<u8>> {
         match self {
-            MemberPart::Actual(v) => v,
-            _ => panic!("expected actual member in stored sorted set"),
+            MemberPart::Actual(v) => Some(v),
+            MemberPart::Min | MemberPart::Max => None,
         }
     }
 }
@@ -409,32 +409,38 @@ impl SortedSet {
     pub fn iter_asc(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
         self.ordered
             .keys()
-            .map(|sm| (sm.member.unwrap_actual(), &sm.score))
+            .filter_map(|sm| sm.member.as_actual().map(|member| (member, &sm.score)))
     }
 
     fn iter_desc(&self) -> impl Iterator<Item = (&Vec<u8>, &f64)> {
         self.ordered
             .keys()
             .rev()
-            .map(|sm| (sm.member.unwrap_actual(), &sm.score))
+            .filter_map(|sm| sm.member.as_actual().map(|member| (member, &sm.score)))
     }
 
     fn pop_min(&mut self) -> Option<(Vec<u8>, f64)> {
-        let sm = self.ordered.first_key_value()?.0.clone();
-        self.ordered.remove(&sm);
-        let score = sm.score;
-        let member = sm.member.into_actual();
-        self.dict.remove(&member);
-        Some((member, score))
+        while let Some(sm) = self.ordered.first_key_value().map(|(sm, _)| sm.clone()) {
+            self.ordered.remove(&sm);
+            if let Some(member) = sm.member.into_actual() {
+                let score = sm.score;
+                self.dict.remove(&member);
+                return Some((member, score));
+            }
+        }
+        None
     }
 
     fn pop_max(&mut self) -> Option<(Vec<u8>, f64)> {
-        let sm = self.ordered.last_key_value()?.0.clone();
-        self.ordered.remove(&sm);
-        let score = sm.score;
-        let member = sm.member.into_actual();
-        self.dict.remove(&member);
-        Some((member, score))
+        while let Some(sm) = self.ordered.last_key_value().map(|(sm, _)| sm.clone()) {
+            self.ordered.remove(&sm);
+            if let Some(member) = sm.member.into_actual() {
+                let score = sm.score;
+                self.dict.remove(&member);
+                return Some((member, score));
+            }
+        }
+        None
     }
 
     /// Iterate over (member, score) pairs in hash-map order (unordered).
@@ -4893,7 +4899,7 @@ impl Store {
                     let result: Vec<Vec<u8>> = zs
                         .ordered
                         .range((lower, upper))
-                        .map(|(sm, _)| sm.member.unwrap_actual().clone())
+                        .filter_map(|(sm, _)| sm.member.as_actual().cloned())
                         .collect();
                     entry.touch(now_ms);
                     Ok(result)
@@ -4930,7 +4936,11 @@ impl Store {
                     let result: Vec<(Vec<u8>, f64)> = zs
                         .ordered
                         .range((lower, upper))
-                        .map(|(sm, _)| (sm.member.unwrap_actual().clone(), sm.score))
+                        .filter_map(|(sm, _)| {
+                            sm.member
+                                .as_actual()
+                                .map(|member| (member.clone(), sm.score))
+                        })
                         .collect();
                     entry.touch(now_ms);
                     Ok(result)
@@ -4975,7 +4985,11 @@ impl Store {
                         ScoreBound::Inclusive(s) => Included(ScoreMember::max_for_score(s)),
                         ScoreBound::Exclusive(s) => Excluded(ScoreMember::min_for_score(s)),
                     };
-                    let result = zs.ordered.range((lower, upper)).count();
+                    let result = zs
+                        .ordered
+                        .range((lower, upper))
+                        .filter(|(sm, _)| sm.member.as_actual().is_some())
+                        .count();
                     entry.touch(now_ms);
                     Ok(result)
                 }
@@ -5264,7 +5278,7 @@ impl Store {
                         .ordered
                         .range((lower, upper))
                         .rev()
-                        .map(|(sm, _)| sm.member.unwrap_actual().clone())
+                        .filter_map(|(sm, _)| sm.member.as_actual().cloned())
                         .collect();
                     entry.touch(now_ms);
                     Ok(result)
@@ -5318,7 +5332,11 @@ impl Store {
                         .ordered
                         .range((lower, upper))
                         .rev()
-                        .map(|(sm, _)| (sm.member.unwrap_actual().clone(), sm.score))
+                        .filter_map(|(sm, _)| {
+                            sm.member
+                                .as_actual()
+                                .map(|member| (member.clone(), sm.score))
+                        })
                         .collect();
                     entry.touch(now_ms);
                     Ok(result)
@@ -5456,7 +5474,7 @@ impl Store {
                     let to_remove: Vec<Vec<u8>> = zs
                         .ordered
                         .range((lower, upper))
-                        .map(|(sm, _)| sm.member.unwrap_actual().clone())
+                        .filter_map(|(sm, _)| sm.member.as_actual().cloned())
                         .collect();
                     let removed_count = to_remove.len();
                     for m in &to_remove {
@@ -9635,9 +9653,9 @@ mod tests {
     use super::{
         EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, LatencySample,
         MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_KEYEVENT,
-        PttlValue, ScoreBound, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
-        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
-        StreamPendingEntry, ValueType, encode_db_key,
+        PttlValue, ScoreBound, ScoreMember, Store, StoreError, StreamAutoClaimOptions,
+        StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
+        StreamGroupReadOptions, StreamPendingEntry, Value, ValueType, encode_db_key,
     };
 
     fn group_read_options(
@@ -10952,6 +10970,87 @@ mod tests {
     }
 
     #[test]
+    fn zset_score_range_paths_ignore_corrupted_sentinel_entries() {
+        let mut store = Store::new();
+        store
+            .zadd(
+                b"z",
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                    (4.0, b"d".to_vec()),
+                ],
+                0,
+            )
+            .unwrap();
+
+        let entry = store.entries.get_mut(b"z".as_slice()).expect("zset entry");
+        assert!(matches!(entry.value, Value::SortedSet(_)));
+        let zs = match &mut entry.value {
+            Value::SortedSet(zs) => zs,
+            _ => return,
+        };
+        zs.ordered.insert(ScoreMember::min_for_score(2.0), ());
+        zs.ordered.insert(ScoreMember::max_for_score(3.0), ());
+
+        let range = store
+            .zrangebyscore(
+                b"z",
+                ScoreBound::Inclusive(2.0),
+                ScoreBound::Inclusive(3.0),
+                0,
+            )
+            .unwrap();
+        assert_eq!(range, vec![b"b".to_vec(), b"c".to_vec()]);
+
+        let with_scores = store
+            .zrangebyscore_withscores(
+                b"z",
+                ScoreBound::Inclusive(2.0),
+                ScoreBound::Inclusive(3.0),
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            with_scores,
+            vec![(b"b".to_vec(), 2.0), (b"c".to_vec(), 3.0)]
+        );
+
+        let rev_with_scores = store
+            .zrevrangebyscore_withscores(b"z", 3.0, 2.0, 0)
+            .unwrap();
+        assert_eq!(
+            rev_with_scores,
+            vec![(b"c".to_vec(), 3.0), (b"b".to_vec(), 2.0)]
+        );
+
+        let count = store
+            .zcount(
+                b"z",
+                ScoreBound::Inclusive(2.0),
+                ScoreBound::Inclusive(3.0),
+                0,
+            )
+            .unwrap();
+        assert_eq!(count, 2);
+
+        let removed = store
+            .zremrangebyscore(
+                b"z",
+                ScoreBound::Inclusive(2.0),
+                ScoreBound::Inclusive(3.0),
+                0,
+            )
+            .unwrap();
+        assert_eq!(removed, 2);
+        assert_eq!(
+            store.zrange(b"z", 0, -1, 0).unwrap(),
+            vec![b"a".to_vec(), b"d".to_vec()]
+        );
+    }
+
+    #[test]
     fn zincrby_creates_and_increments() {
         let mut store = Store::new();
         let score = store.zincrby(b"z", b"m".to_vec(), 5.0, 0).unwrap();
@@ -10987,6 +11086,58 @@ mod tests {
         let max = store.zpopmax(b"z", 0).unwrap();
         assert_eq!(max, Some((b"c".to_vec(), 3.0)));
         assert_eq!(store.zcard(b"z", 0).unwrap(), 1);
+    }
+
+    #[test]
+    fn zset_iter_and_pop_paths_discard_corrupted_sentinel_entries() {
+        let mut store = Store::new();
+        store
+            .zadd(
+                b"z",
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
+                0,
+            )
+            .unwrap();
+
+        let entry = store.entries.get_mut(b"z".as_slice()).expect("zset entry");
+        assert!(matches!(entry.value, Value::SortedSet(_)));
+        let zs = match &mut entry.value {
+            Value::SortedSet(zs) => zs,
+            _ => return,
+        };
+        zs.ordered.insert(ScoreMember::min_for_score(0.0), ());
+        zs.ordered.insert(ScoreMember::max_for_score(10.0), ());
+
+        assert_eq!(
+            store.zrange(b"z", 0, -1, 0).unwrap(),
+            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+        assert_eq!(
+            store.zrevrange(b"z", 0, -1, 0).unwrap(),
+            vec![b"c".to_vec(), b"b".to_vec(), b"a".to_vec()]
+        );
+
+        let min = store.zpopmin(b"z", 0).unwrap();
+        assert_eq!(min, Some((b"a".to_vec(), 1.0)));
+        let max = store.zpopmax(b"z", 0).unwrap();
+        assert_eq!(max, Some((b"c".to_vec(), 3.0)));
+
+        let entry = store
+            .entries
+            .get(b"z".as_slice())
+            .expect("remaining zset entry");
+        assert!(matches!(entry.value, Value::SortedSet(_)));
+        let zs = match &entry.value {
+            Value::SortedSet(zs) => zs,
+            _ => return,
+        };
+        assert!(!zs.ordered.contains_key(&ScoreMember::min_for_score(0.0)));
+        assert!(!zs.ordered.contains_key(&ScoreMember::max_for_score(10.0)));
+        assert_eq!(store.zrange(b"z", 0, -1, 0).unwrap(), vec![b"b".to_vec()]);
     }
 
     #[test]
