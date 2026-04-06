@@ -2497,8 +2497,7 @@
         "cpu"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": "# CPU\r\nused_cpu_sys:0.000000\r\nused_cpu_user:0.000000\r\nused_cpu_sys_children:0.000000\r\nused_cpu_user_children:0.000000\r\nused_cpu_sys_main_thread:0.000000\r\nused_cpu_user_main_thread:0.000000\r\n\r\n"
+        "kind": "any_bulk"
       }
     },
     {

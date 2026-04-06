@@ -520,6 +520,7 @@ fn main() -> ExitCode {
                 runtime.pubsub_cleanup_client(conn.session.client_id);
                 runtime.track_connection_closed();
                 let _ = poll.registry().deregister(&mut conn.stream);
+                let _ = conn.stream.shutdown(std::net::Shutdown::Both);
             }
         }
 
@@ -1940,7 +1941,7 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
                 if matches!(response, RespFrame::Error(_)) {
-                    return Some(response);
+                    continue;
                 }
                 if response != RespFrame::BulkString(None) {
                     // Got data — return [key, value] array.
@@ -1962,7 +1963,7 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
                 if matches!(response, RespFrame::Error(_)) {
-                    return Some(response);
+                    continue;
                 }
                 if response != RespFrame::BulkString(None) {
                     return Some(RespFrame::Array(Some(vec![
@@ -1983,7 +1984,7 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
                 if matches!(response, RespFrame::Error(_)) {
-                    return Some(response);
+                    continue;
                 }
                 // ZPOPMAX returns [member, score]. BZPOPMAX needs [key, member, score]
                 if response != RespFrame::Array(None)
@@ -2007,7 +2008,7 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
                 if matches!(response, RespFrame::Error(_)) {
-                    return Some(response);
+                    continue;
                 }
                 if response != RespFrame::Array(None)
                     && let RespFrame::Array(Some(mut items)) = response
@@ -2068,7 +2069,9 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
             ));
             let response = runtime.execute_frame(frame, now_ms);
             // XREAD/XREADGROUP returns Array(None) when no data is available.
-            if response != RespFrame::Array(None) {
+            if matches!(response, RespFrame::Error(_)) {
+                None
+            } else if response != RespFrame::Array(None) {
                 Some(response)
             } else {
                 None
