@@ -8444,10 +8444,19 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("tracking_total_items:0\r\n");
         info.push_str("tracking_total_prefixes:0\r\n");
         info.push_str("unexpected_error_replies:0\r\n");
-        info.push_str("total_error_replies:0\r\n");
+        info.push_str(&format!(
+            "total_error_replies:{}\r\n",
+            store.stat_total_error_replies
+        ));
         info.push_str("dump_payload_sanitizations:0\r\n");
-        info.push_str("total_reads_processed:0\r\n");
-        info.push_str("total_writes_processed:0\r\n");
+        info.push_str(&format!(
+            "total_reads_processed:{}\r\n",
+            store.stat_total_reads_processed
+        ));
+        info.push_str(&format!(
+            "total_writes_processed:{}\r\n",
+            store.stat_total_writes_processed
+        ));
         info.push_str("io_threaded_reads_processed:0\r\n");
         info.push_str("io_threaded_writes_processed:0\r\n");
         info.push_str("reply_buffer_shrinks:0\r\n");
@@ -25118,6 +25127,9 @@ mod tests {
         store.stat_expire_cycle_cpu_milliseconds = 7;
         store.stat_keyspace_hits = 11;
         store.stat_keyspace_misses = 4;
+        store.stat_total_error_replies = 9;
+        store.stat_total_reads_processed = 13;
+        store.stat_total_writes_processed = 7;
 
         let out = dispatch_argv(&[b"INFO".to_vec(), b"stats".to_vec()], &mut store, 0)
             .expect("info stats");
@@ -25133,6 +25145,9 @@ mod tests {
         assert!(info.contains("total_keys_evicted:2\r\n"));
         assert!(info.contains("keyspace_hits:11\r\n"));
         assert!(info.contains("keyspace_misses:4\r\n"));
+        assert!(info.contains("total_error_replies:9\r\n"));
+        assert!(info.contains("total_reads_processed:13\r\n"));
+        assert!(info.contains("total_writes_processed:7\r\n"));
     }
 
     #[test]

@@ -105,6 +105,26 @@ const ACL_UNKNOWN_SUBCOMMAND_ERROR: &str =
 const DEFAULT_ACLLOG_MAX_LEN: i64 = 128;
 const DEFAULT_REPL_BACKLOG_SIZE: u64 = 1_048_576;
 
+fn processed_command_counts(argv: &[Vec<u8>]) -> (u64, u64) {
+    let Some(command) = argv.first() else {
+        return (0, 0);
+    };
+    let Some(flags) = fr_command::get_command_flags(command) else {
+        return (0, 0);
+    };
+
+    let mut read_count = 0;
+    let mut write_count = 0;
+    for flag in flags.split_whitespace() {
+        if flag == "write" {
+            write_count = 1;
+        } else if flag == "readonly" && write_count == 0 {
+            read_count = 1;
+        }
+    }
+    (read_count, write_count)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientUnblockMode {
     Timeout,
@@ -2544,10 +2564,21 @@ impl Runtime {
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
         self.server.store.stat_total_commands_processed += 1;
         self.refresh_store_runtime_info_context();
+        let processed_counts = frame_to_argv(&frame)
+            .ok()
+            .map(|argv| processed_command_counts(&argv))
+            .unwrap_or((0, 0));
         let packet_id = next_packet_id();
         let input_digest = digest_bytes(&frame.to_bytes());
         let state_before = self.server.store.state_digest();
-        self.execute_frame_internal(frame, now_ms, packet_id, input_digest, state_before)
+        let reply =
+            self.execute_frame_internal(frame, now_ms, packet_id, input_digest, state_before);
+        if matches!(reply, RespFrame::Error(_)) {
+            self.server.store.stat_total_error_replies += 1;
+        }
+        self.server.store.stat_total_reads_processed += processed_counts.0;
+        self.server.store.stat_total_writes_processed += processed_counts.1;
+        reply
     }
 
     fn execute_frame_internal(
@@ -4167,6 +4198,9 @@ impl Runtime {
             self.server.store.reset_slowlog();
             self.server.store.stat_total_commands_processed = 0;
             self.server.store.stat_total_connections_received = 0;
+            self.server.store.stat_total_error_replies = 0;
+            self.server.store.stat_total_reads_processed = 0;
+            self.server.store.stat_total_writes_processed = 0;
             self.server.store.stat_expired_keys = 0;
             self.server.store.stat_evicted_keys = 0;
             self.server.store.stat_expired_stale_perc = 0;
@@ -8110,6 +8144,9 @@ mod tests {
         let mut rt = Runtime::default_strict();
         rt.server.store.stat_total_commands_processed = 9;
         rt.server.store.stat_total_connections_received = 4;
+        rt.server.store.stat_total_error_replies = 5;
+        rt.server.store.stat_total_reads_processed = 6;
+        rt.server.store.stat_total_writes_processed = 7;
         rt.server.store.stat_expired_keys = 3;
         rt.server.store.stat_evicted_keys = 2;
         rt.server.store.stat_expired_stale_perc = 50;
@@ -8121,10 +8158,73 @@ mod tests {
         );
         assert_eq!(rt.server.store.stat_total_commands_processed, 0);
         assert_eq!(rt.server.store.stat_total_connections_received, 0);
+        assert_eq!(rt.server.store.stat_total_error_replies, 0);
+        assert_eq!(rt.server.store.stat_total_reads_processed, 0);
+        assert_eq!(rt.server.store.stat_total_writes_processed, 0);
         assert_eq!(rt.server.store.stat_expired_keys, 0);
         assert_eq!(rt.server.store.stat_evicted_keys, 0);
         assert_eq!(rt.server.store.stat_expired_stale_perc, 0);
         assert_eq!(rt.server.store.stat_expire_cycle_cpu_milliseconds, 0);
+    }
+
+    #[test]
+    fn total_error_replies_counts_runtime_and_delegated_errors() {
+        let mut rt = Runtime::default_strict();
+        rt.set_requirepass(Some(b"secret".to_vec()));
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 0),
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"secret"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.server.store.stat_total_error_replies, 1);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"v", b"NX", b"XX"]), 2),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+        assert_eq!(rt.server.store.stat_total_error_replies, 2);
+    }
+
+    #[test]
+    fn total_reads_and_writes_processed_counts_classified_commands() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.server.store.stat_total_reads_processed, 0);
+        assert_eq!(rt.server.store.stat_total_writes_processed, 1);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 1),
+            RespFrame::BulkString(Some(b"v".to_vec()))
+        );
+        assert_eq!(rt.server.store.stat_total_reads_processed, 1);
+        assert_eq!(rt.server.store.stat_total_writes_processed, 1);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 2),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+        assert_eq!(rt.server.store.stat_total_reads_processed, 1);
+        assert_eq!(rt.server.store.stat_total_writes_processed, 1);
+
+        let info = rt.execute_frame(command(&[b"INFO", b"stats"]), 3);
+        let RespFrame::BulkString(Some(bytes)) = info else {
+            panic!("expected INFO stats bulk string");
+        };
+        let info = String::from_utf8(bytes).expect("utf8");
+        assert!(info.contains("total_reads_processed:1\r\n"));
+        assert!(info.contains("total_writes_processed:1\r\n"));
+        assert_eq!(rt.server.store.stat_total_reads_processed, 1);
+        assert_eq!(rt.server.store.stat_total_writes_processed, 1);
     }
 
     #[test]

@@ -848,6 +848,12 @@ pub struct Store {
     pub stat_keyspace_hits: u64,
     /// Number of missing-key lookups performed through store read/query APIs.
     pub stat_keyspace_misses: u64,
+    /// Total number of RESP error replies emitted to clients.
+    pub stat_total_error_replies: u64,
+    /// Total number of client-visible readonly commands processed.
+    pub stat_total_reads_processed: u64,
+    /// Total number of client-visible write commands processed.
+    pub stat_total_writes_processed: u64,
     /// Total keys removed due to expiration (lazy or active).
     pub stat_expired_keys: u64,
     /// Total keys removed due to maxmemory eviction.
@@ -954,6 +960,9 @@ impl Default for Store {
             stat_tracking_clients: 0,
             stat_keyspace_hits: 0,
             stat_keyspace_misses: 0,
+            stat_total_error_replies: 0,
+            stat_total_reads_processed: 0,
+            stat_total_writes_processed: 0,
             stat_expired_keys: 0,
             stat_evicted_keys: 0,
             stat_expired_stale_perc: 0,
@@ -1444,9 +1453,7 @@ impl Store {
             None => (0.0_f64, None),
         };
         let next = current + delta;
-        // Redis allows infinity results from INCRBYFLOAT/HINCRBYFLOAT.
-        // Only NaN is rejected (e.g., inf + (-inf) = NaN).
-        if next.is_nan() {
+        if next.is_nan() || next.is_infinite() {
             return Err(StoreError::IncrFloatNaN);
         }
         self.internal_entries_insert(
@@ -2879,7 +2886,7 @@ impl Store {
             let res = match current_res {
                 Ok(current) => {
                     let next = current + delta;
-                    if next.is_nan() {
+                    if next.is_nan() || next.is_infinite() {
                         Err(StoreError::IncrFloatNaN)
                     } else {
                         m.insert(field.to_vec(), next.to_string().into_bytes());
