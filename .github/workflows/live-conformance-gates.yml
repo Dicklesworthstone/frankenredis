@@ -5,6 +5,13 @@ on:
     branches:
       - main
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_benchmark_gate:
+        description: Run the benchmark regression gate (best on a stable runner)
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   live-conformance-gates:
@@ -69,6 +76,17 @@ jobs:
           set -euo pipefail
           cargo run -p fr-conformance --bin phase2c_schema_gate -- --optimization-gate \
             | tee "${FORENSICS_ROOT}/${LIVE_RUN_ID}/optimization_gate_stdout.log"
+
+      - name: G6 - Run Benchmark Regression Gate
+        if: github.event_name == 'workflow_dispatch' && inputs.run_benchmark_gate
+        env:
+          FR_BENCH_BUILD_RUNNER: local
+          FR_BENCH_THROUGHPUT_DROP_PCT: "15"
+          FR_BENCH_P99_REGRESSION_PCT: "10"
+        run: |
+          ./scripts/benchmark_gate.sh \
+            --out-dir artifacts/benchmark \
+            --run-id "ci-${GITHUB_RUN_ID}"
 
       - name: G7 - Run User Workflow Corpus Gate
         run: |
@@ -201,4 +219,12 @@ jobs:
         with:
           name: failure-forensics-${{ env.LIVE_RUN_ID }}
           path: ${{ env.FORENSICS_ROOT }}/${{ env.LIVE_RUN_ID }}
+          if-no-files-found: warn
+
+      - name: Upload Benchmark Regression Bundle
+        if: always() && github.event_name == 'workflow_dispatch' && inputs.run_benchmark_gate
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-regression-${{ github.run_id }}
+          path: artifacts/benchmark/ci-${{ github.run_id }}
           if-no-files-found: warn

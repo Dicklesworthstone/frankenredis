@@ -117,6 +117,9 @@ rch exec -- cargo test -p fr-conformance -- --nocapture
 rch exec -- cargo run -p fr-conformance --bin phase2c_schema_gate -- --optimization-gate
 rch exec -- cargo bench
 
+# The benchmark gate runs locally and offloads only its release build step via rch.
+./scripts/benchmark_gate.sh
+
 # If rch is unavailable, run the same commands with plain cargo.
 ```
 
@@ -135,3 +138,13 @@ MIT License (with OpenAI/Anthropic Rider). See `LICENSE`.
 ```bash
 ./scripts/benchmark_round2.sh
 ```
+
+## Benchmark Regression Gate
+
+```bash
+./scripts/benchmark_gate.sh
+```
+
+Use `FR_BENCH_THROUGHPUT_DROP_PCT` and `FR_BENCH_P99_REGRESSION_PCT` to tune
+the failure thresholds. Each run writes raw benchmark reports, per-workload
+comparisons, and an aggregate gate report under `artifacts/benchmark/<run-id>/`.
