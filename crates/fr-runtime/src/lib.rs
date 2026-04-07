@@ -6728,37 +6728,52 @@ impl Runtime {
         let connected_replicas = self.server.replication_runtime_state.replicas.len();
         let backlog_active = usize::from(connected_replicas > 0);
         let backlog_histlen = self.server.replication_runtime_state.backlog_histlen();
-        let role = match self.server.replication_runtime_state.role {
+        let role = match &self.server.replication_runtime_state.role {
             ReplicationRoleState::Master => "master",
             ReplicationRoleState::Replica { .. } => "slave",
         };
+        let primary_offset =
+            i64::try_from(self.server.replication_ack_state.primary_offset.0).unwrap_or(i64::MAX);
 
         let mut info = String::from("# Replication\r\n");
         info.push_str(&format!("role:{role}\r\n"));
 
-        if matches!(
-            self.server.replication_runtime_state.role,
-            ReplicationRoleState::Master
-        ) {
-            for (i, replica) in self
-                .server
-                .replication_runtime_state
-                .replicas
-                .values()
-                .enumerate()
-            {
-                let ip = replica.ip_address.as_deref().unwrap_or("127.0.0.1");
-                let port = replica.listening_port;
-                let state = "online"; // We only track registered replicas
-                let offset = replica.ack_offset.0;
-                let lag = self
+        match &self.server.replication_runtime_state.role {
+            ReplicationRoleState::Master => {
+                for (i, replica) in self
                     .server
-                    .replication_ack_state
-                    .primary_offset
-                    .0
-                    .saturating_sub(offset);
+                    .replication_runtime_state
+                    .replicas
+                    .values()
+                    .enumerate()
+                {
+                    let ip = replica.ip_address.as_deref().unwrap_or("127.0.0.1");
+                    let port = replica.listening_port;
+                    let state = "online"; // We only track registered replicas
+                    let offset = replica.ack_offset.0;
+                    let lag = self
+                        .server
+                        .replication_ack_state
+                        .primary_offset
+                        .0
+                        .saturating_sub(offset);
+                    info.push_str(&format!(
+                        "slave{i}:ip={ip},port={port},state={state},offset={offset},lag={lag}\r\n"
+                    ));
+                }
+            }
+            ReplicationRoleState::Replica { host, port, state } => {
+                let master_link_status = if *state == "connected" { "up" } else { "down" };
+                let master_last_io_seconds_ago = if *state == "connected" { 0 } else { -1 };
+                let master_sync_in_progress = i64::from(*state == "sync");
                 info.push_str(&format!(
-                    "slave{i}:ip={ip},port={port},state={state},offset={offset},lag={lag}\r\n"
+                    "master_host:{host}\r\n\
+master_port:{port}\r\n\
+master_link_status:{master_link_status}\r\n\
+master_last_io_seconds_ago:{master_last_io_seconds_ago}\r\n\
+master_sync_in_progress:{master_sync_in_progress}\r\n\
+slave_read_repl_offset:{primary_offset}\r\n\
+slave_repl_offset:{primary_offset}\r\n"
                 ));
             }
         }
@@ -6767,10 +6782,7 @@ impl Runtime {
         info.push_str("master_failover_state:no-failover\r\n");
         info.push_str(&format!("master_replid:{}\r\n", backlog.replid));
         info.push_str("master_replid2:0000000000000000000000000000000000000000\r\n");
-        info.push_str(&format!(
-            "master_repl_offset:{}\r\n",
-            self.server.replication_ack_state.primary_offset.0
-        ));
+        info.push_str(&format!("master_repl_offset:{primary_offset}\r\n"));
         info.push_str("second_repl_offset:-1\r\n");
         info.push_str(&format!("repl_backlog_active:{backlog_active}\r\n"));
         info.push_str(&format!(
@@ -10139,6 +10151,60 @@ mod tests {
                 "repl_backlog_first_byte_offset:{primary_offset}\r\n"
             )),
             "{info}"
+        );
+    }
+
+    #[test]
+    fn replication_info_reports_replica_link_fields() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 1);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            panic!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("role:slave\r\n"), "{info}");
+        assert!(info.contains("master_host:127.0.0.1\r\n"), "{info}");
+        assert!(info.contains("master_port:6380\r\n"), "{info}");
+        assert!(info.contains("master_link_status:down\r\n"), "{info}");
+        assert!(info.contains("master_last_io_seconds_ago:-1\r\n"), "{info}");
+        assert!(info.contains("master_sync_in_progress:0\r\n"), "{info}");
+        assert!(info.contains("slave_read_repl_offset:0\r\n"), "{info}");
+        assert!(info.contains("slave_repl_offset:0\r\n"), "{info}");
+
+        rt.set_replica_connection_state("sync");
+        let sync_info = rt.execute_frame(command(&[b"INFO", b"replication"]), 2);
+        let RespFrame::BulkString(Some(sync_info_bytes)) = sync_info else {
+            panic!("expected bulk INFO response");
+        };
+        let sync_info = String::from_utf8(sync_info_bytes).expect("utf8 info");
+        assert!(
+            sync_info.contains("master_link_status:down\r\n"),
+            "{sync_info}"
+        );
+        assert!(
+            sync_info.contains("master_sync_in_progress:1\r\n"),
+            "{sync_info}"
+        );
+
+        rt.set_replica_connection_state("connected");
+        let connected_info = rt.execute_frame(command(&[b"INFO", b"replication"]), 3);
+        let RespFrame::BulkString(Some(connected_info_bytes)) = connected_info else {
+            panic!("expected bulk INFO response");
+        };
+        let connected_info = String::from_utf8(connected_info_bytes).expect("utf8 info");
+        assert!(
+            connected_info.contains("master_link_status:up\r\n"),
+            "{connected_info}"
+        );
+        assert!(
+            connected_info.contains("master_last_io_seconds_ago:0\r\n"),
+            "{connected_info}"
         );
     }
 

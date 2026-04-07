@@ -235,18 +235,32 @@ fn rdb_encode_string(buf: &mut Vec<u8>, data: &[u8]) {
 }
 
 pub fn crc64_redis(data: &[u8]) -> u64 {
+    fn reflect(mut data: u64, bit_len: usize) -> u64 {
+        let mut reflected = data & 1;
+        for _ in 1..bit_len {
+            data >>= 1;
+            reflected = (reflected << 1) | (data & 1);
+        }
+        reflected
+    }
+
     let mut crc = 0_u64;
     for &byte in data {
-        crc ^= u64::from(byte);
-        for _ in 0..8 {
-            let lsb = crc & 1;
-            crc >>= 1;
-            if lsb != 0 {
+        let mut mask = 0x01_u8;
+        while mask != 0 {
+            let mut bit_set = (crc & 0x8000_0000_0000_0000) != 0;
+            if (byte & mask) != 0 {
+                bit_set = !bit_set;
+            }
+            crc <<= 1;
+            if bit_set {
                 crc ^= CRC64_REDIS_POLY;
             }
+            mask = mask.wrapping_shl(1);
         }
+        crc &= u64::MAX;
     }
-    crc
+    reflect(crc, 64)
 }
 
 fn sync_parent_dir(path: &Path) -> Result<(), PersistError> {
@@ -1241,6 +1255,11 @@ mod tests {
                 expire_ms: None,
             }]
         );
+    }
+
+    #[test]
+    fn crc64_matches_redis_reference_vector() {
+        assert_eq!(crc64_redis(b"123456789"), 0xe9c6_d914_c4b8_d9ca);
     }
 
     #[test]

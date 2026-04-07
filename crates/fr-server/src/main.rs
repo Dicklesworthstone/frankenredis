@@ -199,12 +199,13 @@ fn server_help_text() -> String {
         "frankenredis — FrankenRedis server\n\n\
 USAGE: frankenredis [OPTIONS]\n\n\
 OPTIONS:\n\
-  --bind <ADDR>   Listen address (default: 127.0.0.1)\n\
-  --port <PORT>   Listen port (default: {DEFAULT_PORT})\n\
-  --mode <MODE>   Runtime mode: strict or hardened (default: hardened)\n\
-  --aof <PATH>    AOF persistence file path (enables persistence)\n\
-  --rdb <PATH>    RDB snapshot file path (enables SAVE/BGSAVE snapshots)\n\
-  --help          Show this help\n"
+  --bind <ADDR>              Listen address (default: 127.0.0.1)\n\
+  --port <PORT>              Listen port (default: {DEFAULT_PORT})\n\
+  --mode <MODE>              Runtime mode: strict or hardened (default: hardened)\n\
+  --aof <PATH>               AOF persistence file path (enables persistence)\n\
+  --rdb <PATH>               RDB snapshot file path (enables SAVE/BGSAVE snapshots)\n\
+  --replicaof <HOST> <PORT>  Configure this server as a replica of the given primary\n\
+  --help                     Show this help\n"
     )
 }
 
@@ -216,6 +217,7 @@ fn main() -> ExitCode {
     let mut bind_addr = "127.0.0.1".to_string();
     let mut aof_path: Option<String> = None;
     let mut rdb_path: Option<String> = None;
+    let mut replicaof: Option<(String, u16)> = None;
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -271,6 +273,27 @@ fn main() -> ExitCode {
                 }
                 rdb_path = Some(args[i].clone());
             }
+            "--replicaof" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --replicaof requires a host and port");
+                    return ExitCode::from(1);
+                }
+                let host = args[i].clone();
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --replicaof requires a host and port");
+                    return ExitCode::from(1);
+                }
+                let replica_port = match args[i].parse() {
+                    Ok(port) => port,
+                    Err(_) => {
+                        eprintln!("error: invalid replicaof port number: {}", args[i]);
+                        return ExitCode::from(1);
+                    }
+                };
+                replicaof = Some((host, replica_port));
+            }
             "--help" | "-h" => {
                 print!("{}", server_help_text());
                 return ExitCode::SUCCESS;
@@ -290,6 +313,29 @@ fn main() -> ExitCode {
     };
     let mut runtime = Runtime::new(policy);
     runtime.set_server_port(port);
+    if let Some((host, primary_port)) = replicaof {
+        let response = runtime.execute_frame(
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"REPLICAOF".to_vec())),
+                RespFrame::BulkString(Some(host.clone().into_bytes())),
+                RespFrame::BulkString(Some(primary_port.to_string().into_bytes())),
+            ])),
+            now_ms(),
+        );
+        match response {
+            RespFrame::SimpleString(ref line) if line.starts_with("OK") => {
+                eprintln!("Replication: configured primary {host}:{primary_port}");
+            }
+            RespFrame::Error(err) => {
+                eprintln!("error: failed to configure replica mode: {err}");
+                return ExitCode::from(1);
+            }
+            other => {
+                eprintln!("error: unexpected REPLICAOF response during startup: {other:?}");
+                return ExitCode::from(1);
+            }
+        }
+    }
 
     // Configure and load AOF persistence if requested.
     if let Some(path) = &aof_path {
@@ -1051,6 +1097,72 @@ fn replica_handshake_frame(args: &[&[u8]]) -> RespFrame {
     ))
 }
 
+fn encode_replication_snapshot(snapshot: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(snapshot.len().saturating_add(32));
+    out.extend_from_slice(b"$");
+    out.extend_from_slice(snapshot.len().to_string().as_bytes());
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(snapshot);
+    out
+}
+
+#[cfg(test)]
+fn encode_eof_marked_replication_snapshot(snapshot: &[u8], eof_mark: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(
+        snapshot
+            .len()
+            .saturating_add(eof_mark.len().saturating_mul(2))
+            .saturating_add(8),
+    );
+    out.extend_from_slice(b"$EOF:");
+    out.extend_from_slice(eof_mark);
+    out.extend_from_slice(b"\r\n");
+    out.extend_from_slice(snapshot);
+    out.extend_from_slice(eof_mark);
+    out
+}
+
+fn find_crlf(input: &[u8]) -> Option<usize> {
+    input.windows(2).position(|window| window == b"\r\n")
+}
+
+fn read_more_replication_bytes(
+    stream: &mut StdTcpStream,
+    read_buf: &mut Vec<u8>,
+    query_buffer_limit: usize,
+) -> io::Result<()> {
+    let mut chunk = [0u8; 8192];
+    match stream.read(&mut chunk) {
+        Ok(0) => Err(io::Error::new(
+            ErrorKind::UnexpectedEof,
+            "primary closed replication stream",
+        )),
+        Ok(n) => match validate_read_path(read_buf.len(), n, query_buffer_limit, false) {
+            Ok(_) => {
+                read_buf.extend_from_slice(&chunk[..n]);
+                Ok(())
+            }
+            Err(err) => Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "replication read exceeded query buffer limit ({})",
+                    err.reason_code()
+                ),
+            )),
+        },
+        Err(ref err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+            Err(io::Error::new(
+                ErrorKind::TimedOut,
+                "timed out waiting for replication frame",
+            ))
+        }
+        Err(ref err) if err.kind() == ErrorKind::Interrupted => {
+            read_more_replication_bytes(stream, read_buf, query_buffer_limit)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 fn read_frame_from_stream(
     stream: &mut StdTcpStream,
     read_buf: &mut Vec<u8>,
@@ -1071,36 +1183,66 @@ fn read_frame_from_stream(
                 ));
             }
         }
+        read_more_replication_bytes(stream, read_buf, query_buffer_limit)?;
+    }
+}
 
-        let mut chunk = [0u8; 8192];
-        match stream.read(&mut chunk) {
-            Ok(0) => {
+fn read_replication_snapshot_from_stream(
+    stream: &mut StdTcpStream,
+    read_buf: &mut Vec<u8>,
+    query_buffer_limit: usize,
+) -> io::Result<Vec<u8>> {
+    loop {
+        if let Some(preamble_end) = find_crlf(read_buf) {
+            let preamble = read_buf[..preamble_end].to_vec();
+            if !preamble.starts_with(b"$") {
                 return Err(io::Error::new(
-                    ErrorKind::UnexpectedEof,
-                    "primary closed replication stream",
+                    ErrorKind::InvalidData,
+                    "primary did not send replication snapshot preamble",
                 ));
             }
-            Ok(n) => match validate_read_path(read_buf.len(), n, query_buffer_limit, false) {
-                Ok(_) => read_buf.extend_from_slice(&chunk[..n]),
-                Err(err) => {
+
+            read_buf.drain(..preamble_end + 2);
+
+            if let Some(eof_mark) = preamble.strip_prefix(b"$EOF:") {
+                if eof_mark.len() < 40 {
                     return Err(io::Error::new(
                         ErrorKind::InvalidData,
-                        format!(
-                            "replication read exceeded query buffer limit ({})",
-                            err.reason_code()
-                        ),
+                        "primary sent invalid EOF snapshot marker",
                     ));
                 }
-            },
-            Err(ref err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-                return Err(io::Error::new(
-                    ErrorKind::TimedOut,
-                    "timed out waiting for replication frame",
-                ));
+                let eof_mark = eof_mark[..40].to_vec();
+                loop {
+                    if let Some(marker_index) = read_buf
+                        .windows(eof_mark.len())
+                        .position(|window| window == eof_mark.as_slice())
+                    {
+                        let snapshot = read_buf[..marker_index].to_vec();
+                        read_buf.drain(..marker_index + eof_mark.len());
+                        return Ok(snapshot);
+                    }
+                    read_more_replication_bytes(stream, read_buf, query_buffer_limit)?;
+                }
             }
-            Err(ref err) if err.kind() == ErrorKind::Interrupted => continue,
-            Err(err) => return Err(err),
+
+            let data_len = std::str::from_utf8(&preamble[1..])
+                .ok()
+                .and_then(|text| text.parse::<usize>().ok())
+                .ok_or_else(|| {
+                    io::Error::new(
+                        ErrorKind::InvalidData,
+                        "primary sent invalid replication snapshot length",
+                    )
+                })?;
+
+            while read_buf.len() < data_len {
+                read_more_replication_bytes(stream, read_buf, query_buffer_limit)?;
+            }
+            let snapshot = read_buf[..data_len].to_vec();
+            read_buf.drain(..data_len);
+            return Ok(snapshot);
         }
+        read_more_replication_bytes(stream, read_buf, query_buffer_limit)?;
     }
 }
 
@@ -1229,20 +1371,11 @@ fn sync_replica_with_primary(
     };
 
     let payload = if reply_line.starts_with("FULLRESYNC ") {
-        match read_frame_from_stream(
+        read_replication_snapshot_from_stream(
             &mut stream,
             &mut read_buf,
-            &parser_config,
             runtime.server.query_buffer_limit,
-        )? {
-            RespFrame::BulkString(Some(snapshot)) => snapshot,
-            other => {
-                return Err(io::Error::new(
-                    ErrorKind::InvalidData,
-                    format!("primary did not send RDB snapshot: {other:?}"),
-                ));
-            }
-        }
+        )?
     } else {
         read_available_stream_bytes(
             &mut stream,
@@ -1377,6 +1510,9 @@ fn drain_replica_stream(
                 consumed_total += parsed.consumed;
                 let response =
                     runtime.execute_frame(frame.clone(), now_ms.saturating_add(frame_index));
+                if let RespFrame::Error(message) = &response {
+                    eprintln!("warn: replica replay command failed for frame {frame:?}: {message}");
+                }
                 if let Some(follow_up) = replication_stream_follow_up_bytes(&frame, &response) {
                     connection.write_buf.extend_from_slice(&follow_up);
                     validate_replica_write_buffer_limit(
@@ -1446,6 +1582,10 @@ fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState
         }
     }
 
+    if replica_sync.connection.is_some() {
+        return;
+    }
+
     let Some((host, port)) = runtime.replica_sync_target() else {
         replica_sync.connection = None;
         replica_sync.retry_after_ms = 0;
@@ -1496,7 +1636,8 @@ pub(crate) fn replication_follow_up_bytes(
         return None;
     };
     if line.starts_with("FULLRESYNC ") {
-        return Some(RespFrame::BulkString(Some(runtime.encoded_rdb_snapshot(now_ms))).to_bytes());
+        let snapshot = runtime.encoded_rdb_snapshot(now_ms);
+        return Some(encode_replication_snapshot(snapshot.as_slice()));
     }
     if line == "CONTINUE" {
         let offset = psync_requested_offset(frame)?;
@@ -2303,7 +2444,8 @@ mod tests {
         CheckBlockedClientsContext, InlineParseResult, PendingClientUnblocksContext,
         REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS, ReplicaPrimaryConnection,
         ReplicaSyncState, apply_pending_client_unblocks, check_blocked_clients,
-        drain_replica_stream, drive_replica_sync, parse_blocking_deadline,
+        drain_replica_stream, drive_replica_sync, encode_eof_marked_replication_snapshot,
+        encode_replication_snapshot, find_crlf, parse_blocking_deadline,
         parse_xread_block_deadline, read_frame_from_stream, replica_handshake_frame,
         replica_handshake_read_timeout, replication_follow_up_bytes, server_help_text,
         should_try_inline_parsing, try_build_blocked_state,
@@ -2363,6 +2505,7 @@ mod tests {
         assert!(help.contains("--mode <MODE>"));
         assert!(help.contains("--aof <PATH>"));
         assert!(help.contains("--rdb <PATH>"));
+        assert!(help.contains("--replicaof <HOST> <PORT>"));
         assert!(help.contains("--help"));
     }
 
@@ -2417,10 +2560,15 @@ mod tests {
 
         let follow_up = replication_follow_up_bytes(&mut runtime, &frame, &response, 2)
             .expect("psync should emit snapshot");
-        let parsed = fr_protocol::parse_frame(&follow_up).expect("parse bulk snapshot");
-        let RespFrame::BulkString(Some(snapshot)) = parsed.frame else {
-            panic!("expected bulk snapshot");
-        };
+        let preamble_end = find_crlf(&follow_up).expect("snapshot preamble terminator");
+        let preamble = std::str::from_utf8(&follow_up[..preamble_end]).expect("utf8 preamble");
+        let snapshot_len = preamble
+            .strip_prefix('$')
+            .expect("snapshot preamble")
+            .parse::<usize>()
+            .expect("snapshot length");
+        let snapshot = &follow_up[preamble_end + 2..];
+        assert_eq!(snapshot.len(), snapshot_len);
         assert!(!snapshot.is_empty(), "snapshot should not be empty");
         assert!(
             snapshot.starts_with(b"REDIS"),
@@ -2600,7 +2748,7 @@ mod tests {
                 )
                 .unwrap();
             stream
-                .write_all(&RespFrame::BulkString(Some(snapshot)).to_bytes())
+                .write_all(&encode_replication_snapshot(snapshot.as_slice()))
                 .unwrap();
         });
 
@@ -2642,6 +2790,197 @@ mod tests {
                 RespFrame::BulkString(Some(b"connected".to_vec())),
                 RespFrame::Integer(0),
             ]))
+        );
+
+        server.join().expect("primary thread");
+    }
+
+    #[test]
+    fn replica_sync_helper_accepts_eof_marked_snapshot_from_primary_socket() {
+        let mut primary = Runtime::default_strict();
+        primary.set_server_port(6380);
+        assert_eq!(
+            primary.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"SET".to_vec())),
+                    RespFrame::BulkString(Some(b"alpha".to_vec())),
+                    RespFrame::BulkString(Some(b"1".to_vec())),
+                ])),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let snapshot = primary.encoded_rdb_snapshot(2);
+        let eof_mark = b"0123456789abcdef0123456789abcdef01234567";
+
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept replica");
+            let parser = ParserConfig::default();
+            let mut read_buf = Vec::new();
+
+            let ping = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                .expect("read ping");
+            assert_eq!(ping, replica_handshake_frame(&[b"PING"]));
+            stream
+                .write_all(&RespFrame::SimpleString("PONG".to_string()).to_bytes())
+                .unwrap();
+
+            let replconf_port =
+                read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                    .expect("replconf");
+            match replconf_port {
+                RespFrame::Array(Some(items)) => {
+                    assert_eq!(items[0], RespFrame::BulkString(Some(b"REPLCONF".to_vec())));
+                    assert_eq!(
+                        items[1],
+                        RespFrame::BulkString(Some(b"listening-port".to_vec()))
+                    );
+                }
+                other => panic!("unexpected replconf frame: {other:?}"),
+            }
+            stream
+                .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                .unwrap();
+
+            let replconf_capa =
+                read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                    .expect("capa");
+            assert_eq!(
+                replconf_capa,
+                replica_handshake_frame(&[b"REPLCONF", b"capa", b"psync2"])
+            );
+            stream
+                .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                .unwrap();
+
+            let psync = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                .expect("psync");
+            assert_eq!(psync, replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]));
+            stream
+                .write_all(
+                    &RespFrame::SimpleString(
+                        "FULLRESYNC 0000000000000000000000000000000000000000 0".to_string(),
+                    )
+                    .to_bytes(),
+                )
+                .unwrap();
+            stream
+                .write_all(&encode_eof_marked_replication_snapshot(
+                    snapshot.as_slice(),
+                    eof_mark,
+                ))
+                .unwrap();
+        });
+
+        let mut replica = Runtime::default_strict();
+        let mut replica_sync = ReplicaSyncState::new();
+        replica.set_server_port(6381);
+        assert_eq!(
+            replica.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"REPLICAOF".to_vec())),
+                    RespFrame::BulkString(Some(addr.ip().to_string().into_bytes())),
+                    RespFrame::BulkString(Some(addr.port().to_string().into_bytes())),
+                ])),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        drive_replica_sync(&mut replica, &mut replica_sync, 3);
+
+        assert_eq!(
+            replica.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"GET".to_vec())),
+                    RespFrame::BulkString(Some(b"alpha".to_vec())),
+                ])),
+                4,
+            ),
+            RespFrame::BulkString(Some(b"1".to_vec()))
+        );
+
+        server.join().expect("primary thread");
+    }
+
+    #[test]
+    fn replica_stream_applies_select_prefixed_delta_commands() {
+        let mut primary = Runtime::default_strict();
+        primary.set_server_port(6380);
+        let snapshot = primary.encoded_rdb_snapshot(1);
+
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            let parser = ParserConfig::default();
+            let (mut stream, _) = listener.accept().expect("accept replica");
+            let mut read_buf = Vec::new();
+
+            let _ = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                .expect("ping");
+            stream
+                .write_all(&RespFrame::SimpleString("PONG".to_string()).to_bytes())
+                .unwrap();
+            let _ = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                .expect("replconf port");
+            stream
+                .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                .unwrap();
+            let _ = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                .expect("replconf capa");
+            stream
+                .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                .unwrap();
+            let psync = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                .expect("psync");
+            assert_eq!(psync, replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]));
+            stream
+                .write_all(
+                    &RespFrame::SimpleString(
+                        "FULLRESYNC 0000000000000000000000000000000000000000 0".to_string(),
+                    )
+                    .to_bytes(),
+                )
+                .unwrap();
+            stream
+                .write_all(&encode_replication_snapshot(snapshot.as_slice()))
+                .unwrap();
+            stream
+                .write_all(&replica_handshake_frame(&[b"SELECT", b"0"]).to_bytes())
+                .unwrap();
+            stream
+                .write_all(&replica_handshake_frame(&[b"SET", b"alpha", b"1"]).to_bytes())
+                .unwrap();
+        });
+
+        let mut replica = Runtime::default_strict();
+        let mut replica_sync = ReplicaSyncState::new();
+        replica.set_server_port(6381);
+        assert_eq!(
+            replica.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"REPLICAOF".to_vec())),
+                    RespFrame::BulkString(Some(addr.ip().to_string().into_bytes())),
+                    RespFrame::BulkString(Some(addr.port().to_string().into_bytes())),
+                ])),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        drive_replica_sync(&mut replica, &mut replica_sync, 1);
+        drive_replica_sync(&mut replica, &mut replica_sync, 2);
+
+        assert_eq!(
+            replica.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"GET".to_vec())),
+                    RespFrame::BulkString(Some(b"alpha".to_vec())),
+                ])),
+                3,
+            ),
+            RespFrame::BulkString(Some(b"1".to_vec()))
         );
 
         server.join().expect("primary thread");
@@ -2713,7 +3052,7 @@ mod tests {
                     )
                     .unwrap();
                 stream1
-                    .write_all(&RespFrame::BulkString(Some(snapshot)).to_bytes())
+                    .write_all(&encode_replication_snapshot(snapshot.as_slice()))
                     .unwrap();
                 stream1
                     .write_all(&replica_handshake_frame(&[b"SET", b"beta", b"2"]).to_bytes())
@@ -2879,7 +3218,7 @@ mod tests {
                     )
                     .unwrap();
                 stream
-                    .write_all(&RespFrame::BulkString(Some(snapshot)).to_bytes())
+                    .write_all(&encode_replication_snapshot(snapshot.as_slice()))
                     .unwrap();
                 stream
                     .write_all(&replica_handshake_frame(&[b"REPLCONF", b"GETACK", b"*"]).to_bytes())
