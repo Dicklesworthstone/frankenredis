@@ -39,6 +39,8 @@ pub struct LuaTableInner {
     pub other_hash: Vec<(LuaValue, LuaValue)>,
     /// Set of keys in `other_hash` for fast O(1) existence checks.
     pub other_keys: HashSet<LuaHashKey>,
+    /// Optional metatable for Lua 5.1 metamethods.
+    pub metatable: Option<LuaTable>,
 }
 
 #[derive(Clone, Debug)]
@@ -86,11 +88,37 @@ impl LuaTable {
                 string_hash: HashMap::new(),
                 other_hash: Vec::new(),
                 other_keys: HashSet::new(),
+                metatable: None,
             })),
         }
     }
     fn get(&self, key: &LuaValue) -> LuaValue {
         self.inner.borrow().get(key)
+    }
+    /// Get with __index metamethod fallback. Returns the value if found in
+    /// the table, otherwise consults the metatable's __index entry.
+    fn get_with_index(&self, key: &LuaValue) -> LuaValue {
+        self.get_with_index_depth(key, 16)
+    }
+
+    fn get_with_index_depth(&self, key: &LuaValue, depth: u8) -> LuaValue {
+        let val = self.get(key);
+        if !matches!(val, LuaValue::Nil) || depth == 0 {
+            return val;
+        }
+        // Extract the __index handler while the borrow is scoped, so we can
+        // safely recurse without holding the RefCell borrow.
+        let index_handler = {
+            let inner = self.inner.borrow();
+            let Some(mt) = &inner.metatable else {
+                return LuaValue::Nil;
+            };
+            mt.get(&LuaValue::Str(b"__index".to_vec()))
+        };
+        match &index_handler {
+            LuaValue::Table(fallback) => fallback.get_with_index_depth(key, depth - 1),
+            _ => LuaValue::Nil,
+        }
     }
     fn set(&self, key: LuaValue, value: LuaValue) {
         self.inner.borrow_mut().set(key, value)
@@ -151,6 +179,9 @@ impl LuaTableInner {
                 if idx >= 1 && *n == idx as f64 {
                     if idx <= self.array.len() {
                         self.array[idx - 1] = value;
+                        while let Some(LuaValue::Nil) = self.array.last() {
+                            self.array.pop();
+                        }
                         return;
                     } else if idx == self.array.len() + 1 {
                         if !matches!(value, LuaValue::Nil) {
@@ -1719,6 +1750,17 @@ impl<'a> LuaState<'a> {
         );
         self.globals
             .insert("os".to_string(), LuaValue::Table(os_table));
+
+        // Coroutine stubs — Redis does not support coroutines in EVAL scripts.
+        let coroutine_table = LuaTable::new();
+        for name in &["create", "resume", "yield", "status", "wrap", "running"] {
+            coroutine_table.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::RustFunction(format!("coroutine.{name}")),
+            );
+        }
+        self.globals
+            .insert("coroutine".to_string(), LuaValue::Table(coroutine_table));
     }
 
     pub fn execute(&mut self, source: &[u8]) -> Result<LuaValue, String> {
@@ -2140,14 +2182,16 @@ impl<'a> LuaState<'a> {
                 let table = self.eval_expr(table_expr, env, varargs)?;
                 let key = self.eval_expr(key_expr, env, varargs)?;
                 match &table {
-                    LuaValue::Table(t) => Ok(t.get(&key)),
+                    LuaValue::Table(t) => Ok(t.get_with_index(&key)),
                     _ => Err(format!("attempt to index a {} value", table.type_name())),
                 }
             }
             Expr::Field(table_expr, field) => {
                 let table = self.eval_expr(table_expr, env, varargs)?;
                 match &table {
-                    LuaValue::Table(t) => Ok(t.get(&LuaValue::Str(field.as_bytes().to_vec()))),
+                    LuaValue::Table(t) => {
+                        Ok(t.get_with_index(&LuaValue::Str(field.as_bytes().to_vec())))
+                    }
                     _ => Err(format!("attempt to index a {} value", table.type_name())),
                 }
             }
@@ -2174,7 +2218,9 @@ impl<'a> LuaState<'a> {
             Expr::MethodCall(obj_expr, method, args) => {
                 let obj = self.eval_expr(obj_expr, env, varargs)?;
                 let func = match &obj {
-                    LuaValue::Table(t) => t.get(&LuaValue::Str(method.as_bytes().to_vec())),
+                    LuaValue::Table(t) => {
+                        t.get_with_index(&LuaValue::Str(method.as_bytes().to_vec()))
+                    }
                     _ => {
                         return Err(format!(
                             "attempt to call method on a {} value",
@@ -2767,10 +2813,39 @@ impl<'a> LuaState<'a> {
                 Ok(vec![args[0].clone()])
             }
             "setmetatable" => {
-                // Return first argument (table) — metatables not supported
-                Ok(vec![args.first().cloned().unwrap_or(LuaValue::Nil)])
+                let table = args.first().cloned().unwrap_or(LuaValue::Nil);
+                let LuaValue::Table(t) = &table else {
+                    return Err("bad argument #1 to 'setmetatable' (table expected)".to_string());
+                };
+                let mt_arg = args.get(1).cloned().unwrap_or(LuaValue::Nil);
+                match mt_arg {
+                    LuaValue::Table(mt) => {
+                        t.inner.borrow_mut().metatable = Some(mt);
+                    }
+                    LuaValue::Nil => {
+                        t.inner.borrow_mut().metatable = None;
+                    }
+                    _ => {
+                        return Err(
+                            "bad argument #2 to 'setmetatable' (nil or table expected)".to_string(),
+                        );
+                    }
+                }
+                Ok(vec![table])
             }
-            "getmetatable" => Ok(vec![LuaValue::Nil]),
+            "getmetatable" => {
+                let val = args.first().cloned().unwrap_or(LuaValue::Nil);
+                match &val {
+                    LuaValue::Table(t) => {
+                        let inner = t.inner.borrow();
+                        match &inner.metatable {
+                            Some(mt) => Ok(vec![LuaValue::Table(mt.clone())]),
+                            None => Ok(vec![LuaValue::Nil]),
+                        }
+                    }
+                    _ => Ok(vec![LuaValue::Nil]),
+                }
+            }
             "rawlen" => {
                 let val = args.first().cloned().unwrap_or(LuaValue::Nil);
                 match &val {
@@ -2961,6 +3036,15 @@ impl<'a> LuaState<'a> {
                 // Redis Lua provides this for basic timing
                 Ok(vec![LuaValue::Number(0.0)])
             }
+            // ── Coroutine stubs (not supported, matches Redis) ──────────
+            "coroutine.create"
+            | "coroutine.resume"
+            | "coroutine.yield"
+            | "coroutine.status"
+            | "coroutine.wrap"
+            | "coroutine.running" => {
+                Err("attempt to call a nil value".to_string())
+            }
             // ── String library ──────────────────────────────────────────
             "string.len" => {
                 let s = args
@@ -3047,13 +3131,20 @@ impl<'a> LuaState<'a> {
                     .first()
                     .map(|a| a.to_display_string())
                     .unwrap_or_default();
-                let i = args.get(1).and_then(|v| v.to_number()).unwrap_or(1.0) as usize;
-                let j = args.get(2).and_then(|v| v.to_number()).unwrap_or(i as f64) as usize;
+                let len = s.len() as i64;
+                let mut i = args.get(1).and_then(|v| v.to_number()).unwrap_or(1.0) as i64;
+                let mut j = args.get(2).and_then(|v| v.to_number()).unwrap_or(i as f64) as i64;
+                if i < 0 {
+                    i = len + i + 1;
+                }
+                if j < 0 {
+                    j = len + j + 1;
+                }
                 let mut results = Vec::new();
-                for idx in i..=j {
-                    if idx >= 1 && idx <= s.len() {
-                        results.push(LuaValue::Number(s[idx - 1] as f64));
-                    }
+                let start = i.max(1);
+                let end = j.min(len);
+                for idx in start..=end {
+                    results.push(LuaValue::Number(s[(idx - 1) as usize] as f64));
                 }
                 Ok(results)
             }
@@ -4746,5 +4837,89 @@ mod tests {
             Ok(LuaValue::Str(bytes)) => assert_eq!(bytes, vec![0x08, 0x0C, 0x01]),
             other => panic!("unexpected decode result: {other:?}"),
         }
+    }
+
+    #[test]
+    fn coroutine_stubs_return_error() {
+        let mut store = Store::new();
+        for func in &["create", "resume", "yield", "status", "wrap", "running"] {
+            let script = format!("return coroutine.{func}()").into_bytes();
+            let result = eval_script(&script, &[], &[], &mut store, 0);
+            assert!(
+                result.is_err(),
+                "coroutine.{func}() should return an error, got: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn coroutine_table_is_accessible() {
+        let mut store = Store::new();
+        let result = eval_script(b"return type(coroutine)", &[], &[], &mut store, 0);
+        assert_eq!(
+            result,
+            Ok(RespFrame::BulkString(Some(b"table".to_vec())))
+        );
+    }
+
+    #[test]
+    fn setmetatable_and_getmetatable_work() {
+        let mut store = Store::new();
+        let script = b"local t = {}; local mt = {x=42}; setmetatable(t, mt); return getmetatable(t).x";
+        let result = eval_script(script, &[], &[], &mut store, 0);
+        assert_eq!(result, Ok(RespFrame::Integer(42)));
+    }
+
+    #[test]
+    fn metatable_index_fallback() {
+        let mut store = Store::new();
+        let script = b"local base = {greeting = 'hello'}; local t = {}; setmetatable(t, {__index = base}); return t.greeting";
+        let result = eval_script(script, &[], &[], &mut store, 0);
+        assert_eq!(
+            result,
+            Ok(RespFrame::BulkString(Some(b"hello".to_vec())))
+        );
+    }
+
+    #[test]
+    fn metatable_index_chain() {
+        let mut store = Store::new();
+        let script = b"local a = {x=1}; local b = {}; setmetatable(b, {__index=a}); local c = {}; setmetatable(c, {__index=b}); return c.x";
+        let result = eval_script(script, &[], &[], &mut store, 0);
+        assert_eq!(result, Ok(RespFrame::Integer(1)));
+    }
+
+    #[test]
+    fn metatable_index_does_not_override_existing() {
+        let mut store = Store::new();
+        let script = b"local base = {x=1}; local t = {x=2}; setmetatable(t, {__index=base}); return t.x";
+        let result = eval_script(script, &[], &[], &mut store, 0);
+        assert_eq!(result, Ok(RespFrame::Integer(2)));
+    }
+
+    #[test]
+    fn setmetatable_nil_removes_metatable() {
+        let mut store = Store::new();
+        let script = b"local t = {}; setmetatable(t, {__index={x=1}}); setmetatable(t, nil); return t.x";
+        let result = eval_script(script, &[], &[], &mut store, 0);
+        assert_eq!(result, Ok(RespFrame::BulkString(None)));
+    }
+
+    #[test]
+    fn string_rep_huge_does_not_loop_forever() {
+        let mut store = Store::new();
+        // This should error out quickly rather than looping forever.
+        let script = b"return string.rep('', math.huge)";
+        let result = eval_script(script, &[], &[], &mut store, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn math_random_does_not_panic_on_max_range() {
+        let mut store = Store::new();
+        // This should not panic with a modulo by zero.
+        let script = b"return math.random(-9223372036854775808, 9223372036854775807)";
+        let result = eval_script(script, &[], &[], &mut store, 0);
+        assert!(result.is_ok());
     }
 }
