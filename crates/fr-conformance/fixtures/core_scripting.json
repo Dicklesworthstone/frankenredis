@@ -3625,6 +3625,34 @@
         "kind": "integer",
         "value": 4
       }
+    },
+    {
+      "name": "eval_redis_call_xread_block_rejected_from_scripts",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return redis.call('XREAD', 'BLOCK', '0', 'STREAMS', KEYS[1], '$')",
+        "1",
+        "script-stream"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error running script: XREAD command is not allowed with BLOCK option from scripts"
+      }
+    },
+    {
+      "name": "eval_redis_call_xreadgroup_block_rejected_from_scripts",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return redis.call('XREADGROUP', 'GROUP', 'g1', 'c1', 'BLOCK', '0', 'STREAMS', KEYS[1], '>')",
+        "1",
+        "script-stream"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Error running script: XREADGROUP command is not allowed with BLOCK option from scripts"
+      }
     }
   ]
 }

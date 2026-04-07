@@ -4265,6 +4265,11 @@ fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             if idx + 1 >= argv.len() {
                 return Err(CommandError::WrongArity("XREAD"));
             }
+            if store.script_nesting_level >= 1 {
+                return Err(CommandError::Custom(
+                    "XREAD command is not allowed with BLOCK option from scripts".to_string(),
+                ));
+            }
             // Validate the timeout but ignore it (non-blocking only)
             let _deadline_ms = parse_blocking_deadline_milliseconds(&argv[idx + 1], now_ms)?;
             idx += 2;
@@ -4350,6 +4355,11 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         if eq_ascii_command(&argv[idx], b"BLOCK") {
             if idx + 1 >= argv.len() {
                 return Err(CommandError::WrongArity("XREADGROUP"));
+            }
+            if store.script_nesting_level >= 1 {
+                return Err(CommandError::Custom(
+                    "XREADGROUP command is not allowed with BLOCK option from scripts".to_string(),
+                ));
             }
             // Validate the timeout but ignore it (non-blocking only)
             let _deadline_ms = parse_blocking_deadline_milliseconds(&argv[idx + 1], now_ms)?;
@@ -18096,6 +18106,32 @@ mod tests {
     }
 
     #[test]
+    fn xread_block_rejected_from_scripts() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let result = dispatch_argv(
+            &[
+                b"XREAD".to_vec(),
+                b"BLOCK".to_vec(),
+                b"0".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b"$".to_vec(),
+            ],
+            &mut store,
+            0,
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Custom(
+                "XREAD command is not allowed with BLOCK option from scripts".to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn xreadgroup_validation_nogroup_and_wrongtype() {
         let mut store = Store::new();
         dispatch_argv(
@@ -18277,6 +18313,35 @@ mod tests {
             parse_blocking_deadline_milliseconds(b"1", u64::MAX),
             Err(CommandError::Custom(
                 "ERR timeout is out of range".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn xreadgroup_block_rejected_from_scripts() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let result = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g1".to_vec(),
+                b"c1".to_vec(),
+                b"BLOCK".to_vec(),
+                b"0".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        );
+
+        assert_eq!(
+            result,
+            Err(CommandError::Custom(
+                "XREADGROUP command is not allowed with BLOCK option from scripts".to_string()
             ))
         );
     }
