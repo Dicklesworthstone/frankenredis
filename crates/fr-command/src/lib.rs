@@ -8,6 +8,7 @@ use fr_store::{
     MaxmemoryPolicy, PttlValue, PubSubMessage, ScoreBound, Store, StoreError,
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
     StreamGroupReadCursor, StreamGroupReadOptions, StreamId, ValueType, crc16_slot, glob_match,
+    read_rss_bytes,
 };
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -8318,8 +8319,9 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     if section_requested("memory") {
         let used_memory = store.estimate_memory_usage_bytes();
         let used_memory_human = format_bytes_human(used_memory);
-        // Read real RSS from /proc/self/status on Linux; fall back to used_memory.
+        // Refresh the RSS sample so INFO remains accurate even outside the server main loop.
         let used_memory_rss = read_rss_bytes().unwrap_or(used_memory);
+        store.observe_memory_sample(used_memory_rss);
         let used_memory_rss_human = format_bytes_human(used_memory_rss);
         let policy_str = store.maxmemory_policy.as_config_str();
         let frag_ratio = if used_memory > 0 {
@@ -8328,14 +8330,10 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             1.0
         };
 
-        // Update peak memory high-water mark.
-        if used_memory > store.stat_used_memory_peak {
-            store.stat_used_memory_peak = used_memory;
-        }
         let peak = store.stat_used_memory_peak;
         let peak_human = format_bytes_human(peak);
         let peak_perc = if peak > 0 {
-            (used_memory as f64 / peak as f64) * 100.0
+            (used_memory_rss as f64 / peak as f64) * 100.0
         } else {
             100.0
         };
@@ -10860,28 +10858,6 @@ fn read_cpu_times() -> (f64, f64) {
     #[cfg(not(target_os = "linux"))]
     {
         (0.0, 0.0)
-    }
-}
-
-/// Read the resident set size (RSS) from `/proc/self/status` on Linux.
-/// Returns `None` on non-Linux or if parsing fails.
-fn read_rss_bytes() -> Option<usize> {
-    #[cfg(target_os = "linux")]
-    {
-        let status = std::fs::read_to_string("/proc/self/status").ok()?;
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("VmRSS:") {
-                // Format: "VmRSS:    12345 kB"
-                let kb_str = rest.trim().strip_suffix("kB")?.trim();
-                let kb: usize = kb_str.parse().ok()?;
-                return Some(kb * 1024);
-            }
-        }
-        None
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
     }
 }
 

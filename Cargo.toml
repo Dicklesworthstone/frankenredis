@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/fr-bench",
   "crates/fr-eventloop",
   "crates/fr-protocol",
   "crates/fr-command",

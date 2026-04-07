@@ -914,7 +914,9 @@ pub struct Store {
     pub debug_reload_requested: bool,
     /// Set by BGREWRITEAOF in delegated dispatch paths; runtime consumes it after dispatch.
     pub bgrewriteaof_requested: bool,
-    /// Peak memory usage high-water mark (bytes).
+    /// Most recent sampled resident set size (RSS) in bytes.
+    pub stat_used_memory_rss: usize,
+    /// Peak sampled memory high-water mark (RSS when available, logical fallback).
     pub stat_used_memory_peak: usize,
     /// Connections rejected due to maxclients limit.
     pub stat_rejected_connections: u64,
@@ -969,6 +971,26 @@ pub fn decode_db_key(key: &[u8]) -> Option<(usize, &[u8])> {
     let db_bytes: [u8; 8] = key[DB_NAMESPACE_PREFIX.len()..prefix_len].try_into().ok()?;
     let db = usize::try_from(u64::from_be_bytes(db_bytes)).ok()?;
     Some((db, &key[prefix_len..]))
+}
+
+#[must_use]
+pub fn read_rss_bytes() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        let status = std::fs::read_to_string("/proc/self/status").ok()?;
+        for line in status.lines() {
+            if let Some(rest) = line.strip_prefix("VmRSS:") {
+                let kb_str = rest.trim().strip_suffix("kB")?.trim();
+                let kb: usize = kb_str.parse().ok()?;
+                return Some(kb * 1024);
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 impl Default for Store {
@@ -1044,6 +1066,7 @@ impl Default for Store {
             active_expire_enabled: true,
             debug_reload_requested: false,
             bgrewriteaof_requested: false,
+            stat_used_memory_rss: 0,
             stat_used_memory_peak: 0,
             stat_rejected_connections: 0,
             stat_sync_full: 0,
@@ -1144,7 +1167,12 @@ impl Store {
         self.aof_enabled = enabled;
     }
 
-    /// Record a periodic sample for ops/sec and throughput calculations.
+    pub fn observe_memory_sample(&mut self, used_memory_rss: usize) {
+        self.stat_used_memory_rss = used_memory_rss;
+        self.stat_used_memory_peak = self.stat_used_memory_peak.max(used_memory_rss);
+    }
+
+    /// Record a periodic sample for ops/sec, throughput, and RSS high-water calculations.
     /// Call this once per server-hz tick (e.g. every 100ms at 10hz).
     /// `elapsed_ms` is the wall-clock time since the last sample (typically ~100ms).
     pub fn record_ops_sec_sample(&mut self, elapsed_ms: u64) {
@@ -1178,6 +1206,10 @@ impl Store {
         };
         self.net_input_last_sample_bytes = self.stat_total_net_input_bytes;
         self.net_output_last_sample_bytes = self.stat_total_net_output_bytes;
+
+        let used_memory = self.estimate_memory_usage_bytes();
+        let used_memory_rss = read_rss_bytes().unwrap_or(used_memory);
+        self.observe_memory_sample(used_memory_rss);
 
         self.ops_sec_idx = (self.ops_sec_idx + 1) % 16;
     }
@@ -1221,6 +1253,7 @@ impl Store {
         self.stat_sync_full = 0;
         self.stat_sync_partial_ok = 0;
         self.stat_sync_partial_err = 0;
+        self.stat_used_memory_rss = 0;
         self.stat_used_memory_peak = 0;
         self.stat_total_net_input_bytes = 0;
         self.stat_total_net_output_bytes = 0;
@@ -13187,15 +13220,30 @@ mod tests {
     }
 
     #[test]
+    fn periodic_sampling_updates_rss_and_peak_memory_stats() {
+        let mut store = Store::new();
+        store.set(b"rss".to_vec(), b"value".to_vec(), None, 0);
+
+        store.record_ops_sec_sample(100);
+
+        assert!(store.stat_used_memory_rss > 0);
+        assert_eq!(store.stat_used_memory_peak, store.stat_used_memory_rss);
+    }
+
+    #[test]
     fn reset_info_stats_clears_network_counters() {
         let mut store = Store::new();
         store.stat_total_net_input_bytes = 1000;
         store.stat_total_net_output_bytes = 2000;
+        store.stat_used_memory_rss = 3000;
+        store.stat_used_memory_peak = 4000;
         store.stat_total_commands_processed = 500;
         store.record_ops_sec_sample(100);
         store.reset_info_stats();
         assert_eq!(store.stat_total_net_input_bytes, 0);
         assert_eq!(store.stat_total_net_output_bytes, 0);
+        assert_eq!(store.stat_used_memory_rss, 0);
+        assert_eq!(store.stat_used_memory_peak, 0);
         assert_eq!(store.instantaneous_ops_per_sec(), 0);
         assert_eq!(store.instantaneous_input_kbps(), 0.0);
     }
