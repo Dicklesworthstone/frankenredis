@@ -14,7 +14,8 @@ crates/*/.git.nested_backup/
 
 # Generated artifacts and benchmark outputs
 artifacts/
-baselines/
+baselines/*
+!baselines/*.json
 golden_outputs/
 golden_checksums.txt
 
