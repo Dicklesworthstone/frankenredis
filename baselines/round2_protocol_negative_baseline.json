@@ -1,0 +1,24 @@
+{
+  "results": [
+    {
+      "command": "cargo test -p fr-conformance tests::conformance_protocol_fixture_passes -- --exact --nocapture",
+      "mean": 0.07284512425999999,
+      "stddev": 0.0032897227683991843,
+      "median": 0.07230869626,
+      "user": 0.04563419999999999,
+      "system": 0.06810943333333333,
+      "min": 0.06985658226,
+      "max": 0.07637009426,
+      "times": [
+        0.06985658226,
+        0.07230869626,
+        0.07637009426
+      ],
+      "exit_codes": [
+        0,
+        0,
+        0
+      ]
+    }
+  ]
+}
