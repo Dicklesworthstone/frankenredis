@@ -543,7 +543,7 @@ fn main() -> ExitCode {
         }
 
         // Deliver pending replication writes to connected replicas.
-        propagate_writes_to_replicas(&mut clients, &mut runtime, &mut write_tokens);
+        propagate_writes_to_replicas(&mut clients, &mut runtime, &mut poll, &mut write_tokens);
 
         // Deliver pending Pub/Sub messages to subscribed clients.
         deliver_pubsub_messages(
@@ -2125,7 +2125,7 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
                 if matches!(response, RespFrame::Error(_)) {
-                    continue;
+                    return Some(response);
                 }
                 if response != RespFrame::BulkString(None) {
                     // Got data — return [key, value] array.
@@ -2147,7 +2147,7 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
                 if matches!(response, RespFrame::Error(_)) {
-                    continue;
+                    return Some(response);
                 }
                 if response != RespFrame::BulkString(None) {
                     return Some(RespFrame::Array(Some(vec![
@@ -2192,7 +2192,7 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
                 ));
                 let response = runtime.execute_frame(frame, now_ms);
                 if matches!(response, RespFrame::Error(_)) {
-                    continue;
+                    return Some(response);
                 }
                 if response != RespFrame::Array(None)
                     && let RespFrame::Array(Some(mut items)) = response
@@ -2267,6 +2267,7 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
 fn propagate_writes_to_replicas(
     clients: &mut HashMap<Token, ClientConnection>,
     runtime: &mut Runtime,
+    poll: &mut Poll,
     write_tokens: &mut HashSet<Token>,
 ) {
     let primary_offset = runtime.replication_primary_offset();
@@ -2278,6 +2279,11 @@ fn propagate_writes_to_replicas(
             if !bytes.is_empty() {
                 conn.write_buf.extend_from_slice(&bytes);
                 write_tokens.insert(token);
+                let _ = poll.registry().reregister(
+                    &mut conn.stream,
+                    token,
+                    Interest::READABLE | Interest::WRITABLE,
+                );
             }
             conn.replication_sent_offset = Some(primary_offset);
         }
@@ -3643,8 +3649,9 @@ mod tests {
         let token = Token(1);
         clients.insert(token, replica_conn);
         let mut write_tokens = HashSet::new();
+        let mut poll = mio::Poll::new().unwrap();
 
-        propagate_writes_to_replicas(&mut clients, &mut runtime, &mut write_tokens);
+        propagate_writes_to_replicas(&mut clients, &mut runtime, &mut poll, &mut write_tokens);
 
         // 5. Verify replica received the write.
         let conn = clients.get(&token).unwrap();
