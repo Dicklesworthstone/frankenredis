@@ -2745,6 +2745,9 @@ impl<'a> LuaState<'a> {
                     args.get(2),
                     t.inner.borrow().array.len() as i64,
                 )? as usize;
+                if start <= end && end.saturating_sub(start) >= 8000 {
+                    return Err("too many results to unpack".to_string());
+                }
                 let mut results = Vec::new();
                 for i in start..=end {
                     if i >= 1 && i <= t.inner.borrow().array.len() {
@@ -2929,7 +2932,7 @@ impl<'a> LuaState<'a> {
                                 "bad argument #1 to 'random' (interval is empty)".to_string()
                             );
                         }
-                        let range = (n as i128 - m as i128 + 1);
+                        let range = n as i128 - m as i128 + 1;
                         let val = m as i128 + (r as i128 % range);
                         Ok(vec![LuaValue::Number(val as f64)])
                     }
