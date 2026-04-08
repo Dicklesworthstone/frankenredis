@@ -2929,8 +2929,8 @@ impl<'a> LuaState<'a> {
                                 "bad argument #1 to 'random' (interval is empty)".to_string()
                             );
                         }
-                        let range = (n as i128 - m as i128 + 1) as u64;
-                        let val = m as i128 + (r % range) as i128;
+                        let range = (n as i128 - m as i128 + 1);
+                        let val = m as i128 + (r as i128 % range);
                         Ok(vec![LuaValue::Number(val as f64)])
                     }
                 }
@@ -3091,6 +3091,9 @@ impl<'a> LuaState<'a> {
                 if n_val < 0.0 {
                     return Ok(vec![LuaValue::Str(Vec::new())]);
                 }
+                if n_val > 512.0 * 1024.0 * 1024.0 {
+                    return Err("string length overflow".to_string());
+                }
                 let n = n_val as usize;
 
                 let target_len = s.len().checked_mul(n).ok_or("string length overflow")?;
@@ -3183,6 +3186,7 @@ impl<'a> LuaState<'a> {
                 } else {
                     (init_raw as usize).saturating_sub(1)
                 };
+                let init = init.min(s.len());
                 let plain = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
                 if plain {
                     // Plain substring search
@@ -3335,7 +3339,14 @@ impl<'a> LuaState<'a> {
                         // Append replacement
                         result.extend_from_slice(&lua_gsub_replace(&s, &m, &repl));
                         count += 1;
-                        pos = if m.end == m.start { m.end + 1 } else { m.end };
+                        if m.end == m.start {
+                            if m.end < s.len() {
+                                result.push(s[m.end]);
+                            }
+                            pos = m.end + 1;
+                        } else {
+                            pos = m.end;
+                        }
                     } else {
                         break;
                     }
