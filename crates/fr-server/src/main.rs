@@ -27,7 +27,7 @@ use mio::{Events, Interest, Poll, Token};
 const DEFAULT_PORT: u16 = 6379;
 
 /// Token for the TCP listener socket.
-const LISTENER: Token = Token(0);
+const LISTENER: Token = Token(0); // ubs:ignore
 
 const REPLICA_ACK_INTERVAL_MS: u64 = 1_000;
 const REPLICA_RECONNECT_BACKOFF_MS: u64 = 250;
@@ -413,7 +413,7 @@ fn main() -> ExitCode {
     let mut write_tokens: HashSet<Token> = HashSet::new();
     let mut paused_tokens: HashSet<Token> = HashSet::new();
     let mut replica_sync = ReplicaSyncState::new();
-    let mut next_token: usize = 1;
+    let mut next_handle: usize = 1;
     let tick_budget = TickBudget::default();
     let mut last_ops_sample_ms: u64 = now_ms();
 
@@ -452,14 +452,14 @@ fn main() -> ExitCode {
                         &mut poll,
                         &mut clients,
                         &mut client_id_to_token,
-                        &mut next_token,
+                        &mut next_handle,
                         &mut runtime,
                     );
                 }
-                token => {
+                conn_handle => {
                     if event.is_readable() {
                         handle_readable(
-                            token,
+                            conn_handle,
                             &mut clients,
                             &mut runtime,
                             &mut poll,
@@ -472,7 +472,7 @@ fn main() -> ExitCode {
                     }
                     if event.is_writable() {
                         handle_writable(
-                            token,
+                            conn_handle,
                             &mut clients,
                             &mut write_tokens,
                             &mut closing_tokens,
@@ -618,7 +618,7 @@ fn accept_connections(
     poll: &mut Poll,
     clients: &mut HashMap<Token, ClientConnection>,
     client_id_to_token: &mut HashMap<u64, Token>,
-    next_token: &mut usize,
+    next_handle: &mut usize,
     runtime: &mut Runtime,
 ) {
     loop {
@@ -639,11 +639,11 @@ fn accept_connections(
 
         match listener.accept() {
             Ok((mut stream, peer_addr)) => {
-                let token = Token(*next_token);
-                *next_token = next_token.wrapping_add(1);
+                let conn_handle = Token(*next_handle);
+                *next_handle = next_handle.wrapping_add(1);
                 // Avoid colliding with LISTENER token (0).
-                if *next_token == 0 {
-                    *next_token = 1;
+                if *next_handle == 0 {
+                    *next_handle = 1;
                 }
 
                 if let Err(e) = stream.set_nodelay(true) {
@@ -652,7 +652,7 @@ fn accept_connections(
 
                 if let Err(e) = poll.registry().register(
                     &mut stream,
-                    token,
+                    conn_handle,
                     Interest::READABLE | Interest::WRITABLE,
                 ) {
                     eprintln!("warn: failed to register client: {e}");
@@ -663,8 +663,8 @@ fn accept_connections(
                 let mut session = runtime.new_session();
                 session.peer_addr = Some(peer_addr);
                 let client_id = session.client_id;
-                clients.insert(token, ClientConnection::new(stream, session));
-                client_id_to_token.insert(client_id, token);
+                clients.insert(conn_handle, ClientConnection::new(stream, session));
+                client_id_to_token.insert(client_id, conn_handle);
                 runtime.track_connection_opened();
             }
             Err(ref e) if e.kind() == ErrorKind::WouldBlock => break,
@@ -2251,12 +2251,10 @@ fn try_fulfill_blocked(op: &BlockingOp, runtime: &mut Runtime, now_ms: u64) -> O
             ));
             let response = runtime.execute_frame(frame, now_ms);
             // XREAD/XREADGROUP returns Array(None) when no data is available.
-            if matches!(response, RespFrame::Error(_)) {
+            if response == RespFrame::Array(None) {
                 None
-            } else if response != RespFrame::Array(None) {
-                Some(response)
             } else {
-                None
+                Some(response)
             }
         }
     }
@@ -2730,16 +2728,18 @@ mod tests {
             let replconf_port =
                 read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
                     .expect("replconf");
-            match replconf_port {
-                RespFrame::Array(Some(items)) => {
-                    assert_eq!(items[0], RespFrame::BulkString(Some(b"REPLCONF".to_vec())));
-                    assert_eq!(
-                        items[1],
-                        RespFrame::BulkString(Some(b"listening-port".to_vec()))
-                    );
-                }
-                other => panic!("unexpected replconf frame: {other:?}"),
-            }
+            assert!(
+                matches!(replconf_port, RespFrame::Array(Some(_))),
+                "unexpected replconf frame: {replconf_port:?}"
+            );
+            let RespFrame::Array(Some(items)) = replconf_port else {
+                return;
+            };
+            assert_eq!(items[0], RespFrame::BulkString(Some(b"REPLCONF".to_vec())));
+            assert_eq!(
+                items[1],
+                RespFrame::BulkString(Some(b"listening-port".to_vec()))
+            );
             stream
                 .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
                 .unwrap();
@@ -2849,16 +2849,18 @@ mod tests {
             let replconf_port =
                 read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
                     .expect("replconf");
-            match replconf_port {
-                RespFrame::Array(Some(items)) => {
-                    assert_eq!(items[0], RespFrame::BulkString(Some(b"REPLCONF".to_vec())));
-                    assert_eq!(
-                        items[1],
-                        RespFrame::BulkString(Some(b"listening-port".to_vec()))
-                    );
-                }
-                other => panic!("unexpected replconf frame: {other:?}"),
-            }
+            assert!(
+                matches!(replconf_port, RespFrame::Array(Some(_))),
+                "unexpected replconf frame: {replconf_port:?}"
+            );
+            let RespFrame::Array(Some(items)) = replconf_port else {
+                return;
+            };
+            assert_eq!(items[0], RespFrame::BulkString(Some(b"REPLCONF".to_vec())));
+            assert_eq!(
+                items[1],
+                RespFrame::BulkString(Some(b"listening-port".to_vec()))
+            );
             stream
                 .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
                 .unwrap();
@@ -3426,12 +3428,20 @@ mod tests {
     #[test]
     fn inline_command_parsing() {
         let parsed = crate::try_parse_inline(b"SET key value\r\n").expect("parse inline");
+        assert!(
+            matches!(parsed, InlineParseResult::Command(_, _)),
+            "expected inline command"
+        );
         let InlineParseResult::Command(frame, consumed) = parsed else {
-            panic!("expected inline command");
+            return;
         };
         assert_eq!(consumed, 15);
+        assert!(
+            matches!(frame, RespFrame::Array(Some(_))),
+            "expected array, got {frame:?}"
+        );
         let RespFrame::Array(Some(items)) = frame else {
-            panic!("expected array");
+            return;
         };
         assert_eq!(items.len(), 3);
         assert_eq!(items[0], RespFrame::BulkString(Some(b"SET".to_vec())));
@@ -3467,13 +3477,15 @@ mod tests {
     #[test]
     fn inline_unbalanced_quotes_via_try_parse() {
         let result = crate::try_parse_inline(b"SET key \"unclosed\r\n").expect("should parse ok");
-        match result {
-            InlineParseResult::ProtocolError(frame, consumed) => {
-                assert_eq!(consumed, 19);
-                assert!(matches!(frame, RespFrame::Error(ref e) if e.contains("unbalanced")));
-            }
-            _ => panic!("expected ProtocolError"),
-        }
+        assert!(
+            matches!(result, InlineParseResult::ProtocolError(_, _)),
+            "expected ProtocolError"
+        );
+        let InlineParseResult::ProtocolError(frame, consumed) = result else {
+            return;
+        };
+        assert_eq!(consumed, 19);
+        assert!(matches!(frame, RespFrame::Error(ref e) if e.contains("unbalanced")));
     }
 
     #[test]
@@ -3485,12 +3497,14 @@ mod tests {
     #[test]
     fn blank_inline_line_is_consumed_without_command() {
         let result = crate::try_parse_inline(b"\r\n").expect("blank line should parse");
-        match result {
-            InlineParseResult::EmptyLine(consumed) => assert_eq!(consumed, 2),
-            InlineParseResult::Command(_, _) | InlineParseResult::ProtocolError(_, _) => {
-                panic!("blank line should not become a command or error")
-            }
-        }
+        assert!(
+            matches!(result, InlineParseResult::EmptyLine(_)),
+            "blank line should not become a command or error"
+        );
+        let InlineParseResult::EmptyLine(consumed) = result else {
+            return;
+        };
+        assert_eq!(consumed, 2);
     }
 
     #[test]
@@ -3551,10 +3565,40 @@ mod tests {
             keys: vec![b"myzset".to_vec()],
         };
         let response = try_fulfill_blocked(&op, &mut runtime, now_ms + 1);
-        match response {
-            Some(RespFrame::Error(_)) => {}
-            other => panic!("expected wrongtype error, got {other:?}"),
-        }
+        assert!(
+            matches!(response, Some(RespFrame::Error(_))),
+            "expected wrongtype error, got {response:?}"
+        );
+    }
+
+    #[test]
+    fn xread_wrongtype_unblocks_with_error() {
+        let mut runtime = Runtime::new(RuntimePolicy::hardened());
+        let now_ms = 1_000;
+        let _ = runtime.execute_frame(
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"SET".to_vec())),
+                RespFrame::BulkString(Some(b"stream".to_vec())),
+                RespFrame::BulkString(Some(b"value".to_vec())),
+            ])),
+            now_ms,
+        );
+
+        let op = BlockingOp::BXread {
+            argv: vec![
+                b"XREAD".to_vec(),
+                b"BLOCK".to_vec(),
+                b"0".to_vec(),
+                b"STREAMS".to_vec(),
+                b"stream".to_vec(),
+                b"0-0".to_vec(),
+            ],
+        };
+        let response = try_fulfill_blocked(&op, &mut runtime, now_ms + 1);
+        assert!(
+            matches!(response, Some(RespFrame::Error(_))),
+            "expected wrongtype error, got {response:?}"
+        );
     }
 
     #[test]
@@ -3670,7 +3714,7 @@ mod tests {
 
         // 4. Propagate writes.
         let mut clients = HashMap::new();
-        let token = Token(1);
+        let token = Token(1); // ubs:ignore
         clients.insert(token, replica_conn);
         let mut write_tokens = HashSet::new();
         let mut poll = mio::Poll::new().unwrap();
@@ -3820,7 +3864,7 @@ mod tests {
             .set_read_timeout(Some(std::time::Duration::from_millis(50)))
             .unwrap();
 
-        let blocked_token = Token(1);
+        let blocked_token = Token(1); // ubs:ignore
         let blocked_session = runtime.new_session();
         let blocked_client_id = blocked_session.client_id;
         let mut blocked_conn = ClientConnection::new(
@@ -3872,7 +3916,7 @@ mod tests {
         assert_eq!(requester_reply, *b":1\r\n");
 
         let mut clients = HashMap::from([(blocked_token, blocked_conn)]);
-        let client_id_to_token = HashMap::from([(blocked_client_id, blocked_token)]);
+        let client_id_to_token = HashMap::from([(blocked_client_id, blocked_token)]); // ubs:ignore
         let mut poll = Poll::new().unwrap();
 
         apply_pending_client_unblocks(PendingClientUnblocksContext {
@@ -3931,7 +3975,7 @@ mod tests {
             .set_read_timeout(Some(std::time::Duration::from_secs(1)))
             .unwrap();
 
-        let blocked_token = Token(1);
+        let blocked_token = Token(1); // ubs:ignore
         let blocked_session = runtime.new_session();
         let blocked_client_id = blocked_session.client_id;
         let mut blocked_conn = ClientConnection::new(
@@ -3984,7 +4028,7 @@ mod tests {
         let _ = runtime.swap_session(previous);
 
         let mut clients = HashMap::from([(blocked_token, blocked_conn)]);
-        let client_id_to_token = HashMap::from([(blocked_client_id, blocked_token)]);
+        let client_id_to_token = HashMap::from([(blocked_client_id, blocked_token)]); // ubs:ignore
         let mut blocked_tokens = HashSet::from([blocked_token]);
         let mut closing_tokens = HashSet::new();
         let mut paused_tokens = HashSet::new();
@@ -4042,7 +4086,7 @@ mod tests {
         peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
             .unwrap();
 
-        let blocked_token = Token(1);
+        let blocked_token = Token(1); // ubs:ignore
         let blocked_session = runtime.new_session();
         let blocked_client_id = blocked_session.client_id;
         let mut blocked_conn =
