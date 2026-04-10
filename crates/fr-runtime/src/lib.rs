@@ -2704,15 +2704,18 @@ impl Runtime {
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
         self.server.store.stat_total_commands_processed += 1;
         self.refresh_store_runtime_info_context();
-        let processed_counts = frame_to_argv(&frame)
+        // Parse once, reuse for both stats and execution (eliminates double parse).
+        let argv_result = frame_to_argv(&frame);
+        let processed_counts = argv_result
+            .as_ref()
             .ok()
-            .map(|argv| processed_command_counts(&argv))
+            .map(|argv| processed_command_counts(argv))
             .unwrap_or((0, 0));
         let packet_id = next_packet_id();
         // No eager digest computation here. Threat events compute their own
         // digests on demand inside record_threat_event, so the success path
         // pays nothing for the evidence ledger.
-        let reply = self.execute_frame_internal(frame, now_ms, packet_id);
+        let reply = self.execute_frame_internal(frame, argv_result, now_ms, packet_id);
         if matches!(reply, RespFrame::Error(_)) {
             self.server.store.stat_total_error_replies += 1;
             if self.execution_source.counts_as_unexpected_error_reply() {
@@ -2738,6 +2741,7 @@ impl Runtime {
     fn execute_frame_internal(
         &mut self,
         frame: RespFrame,
+        argv_result: Result<Vec<Vec<u8>>, CommandError>,
         now_ms: u64,
         packet_id: u64,
     ) -> RespFrame {
@@ -2745,7 +2749,8 @@ impl Runtime {
             return reply;
         }
 
-        let argv = match frame_to_argv(&frame) {
+        // Use pre-parsed argv if available, avoiding duplicate parsing.
+        let argv = match argv_result {
             Ok(argv) => {
                 if argv.len() > MAX_COMMAND_ARITY {
                     let reply = RespFrame::Error(format!(
@@ -3438,9 +3443,11 @@ impl Runtime {
         let parser_config = self.parser_config();
 
         match fr_protocol::parse_frame_with_config(input, &parser_config) {
-            Ok(parsed) => self
-                .execute_frame_internal(parsed.frame, now_ms, packet_id)
-                .to_bytes(),
+            Ok(parsed) => {
+                let argv_result = frame_to_argv(&parsed.frame);
+                self.execute_frame_internal(parsed.frame, argv_result, now_ms, packet_id)
+                    .to_bytes()
+            }
             Err(err) => {
                 let reason = err.to_string();
                 let reply = protocol_error_to_resp(err);
