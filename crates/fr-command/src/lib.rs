@@ -10609,7 +10609,7 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
                 subcommand: sub.to_string(),
             });
         }
-        if store.exists(&argv[2], now_ms) {
+        if store.exists_no_touch(&argv[2], now_ms) {
             Ok(RespFrame::Integer(1))
         } else {
             Ok(RespFrame::Error("ERR no such key".to_string()))
@@ -10633,7 +10633,7 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
                 subcommand: sub.to_string(),
             });
         }
-        if store.exists(&argv[2], now_ms) {
+        if store.exists_no_touch(&argv[2], now_ms) {
             Ok(RespFrame::Integer(0))
         } else {
             Ok(RespFrame::Error("ERR no such key".to_string()))

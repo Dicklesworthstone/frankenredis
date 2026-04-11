@@ -1465,6 +1465,10 @@ impl Store {
         }
     }
 
+    pub fn exists_no_touch(&mut self, key: &[u8], now_ms: u64) -> bool {
+        self.record_keyspace_lookup(key, now_ms)
+    }
+
     pub fn incr(&mut self, key: &[u8], now_ms: u64) -> Result<i64, StoreError> {
         self.drop_if_expired(key, now_ms);
         let (current, expires_at_ms) = match self.entries.get(key) {
@@ -9952,6 +9956,28 @@ mod tests {
 
         assert_eq!(store.stat_keyspace_hits, 7);
         assert_eq!(store.stat_keyspace_misses, 3);
+    }
+
+    #[test]
+    fn exists_no_touch_updates_stats_without_lru() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 100);
+        store.reset_info_stats();
+
+        assert!(store.exists_no_touch(b"k", 200));
+        assert_eq!(store.stat_keyspace_hits, 1);
+        assert_eq!(store.stat_keyspace_misses, 0);
+        assert_eq!(
+            store
+                .entries
+                .get(b"k".as_ref())
+                .expect("exists entry")
+                .last_access_ms,
+            100
+        );
+
+        assert!(!store.exists_no_touch(b"missing", 200));
+        assert_eq!(store.stat_keyspace_misses, 1);
     }
 
     #[test]
