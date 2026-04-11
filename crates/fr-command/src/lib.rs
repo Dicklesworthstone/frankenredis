@@ -7475,6 +7475,38 @@ fn parse_u64_arg(arg: &[u8]) -> Result<u64, CommandError> {
     Ok(val as u64)
 }
 
+/// Parse an unsigned integer token with strict (non-canonical) rejection and full u64 range.
+fn parse_u64_full_arg(arg: &[u8]) -> Result<u64, CommandError> {
+    let slen = arg.len();
+    if slen == 0 || slen > 20 {
+        return Err(CommandError::InvalidInteger);
+    }
+    if slen == 1 && arg[0] == b'0' {
+        return Ok(0);
+    }
+    if arg[0] < b'1' || arg[0] > b'9' {
+        return Err(CommandError::InvalidInteger);
+    }
+
+    let mut v: u64 = (arg[0] - b'0') as u64;
+    for &b in &arg[1..] {
+        if !b.is_ascii_digit() {
+            return Err(CommandError::InvalidInteger);
+        }
+        if v > (u64::MAX / 10) {
+            return Err(CommandError::InvalidInteger);
+        }
+        v *= 10;
+        let digit = (b - b'0') as u64;
+        if v > (u64::MAX - digit) {
+            return Err(CommandError::InvalidInteger);
+        }
+        v += digit;
+    }
+
+    Ok(v)
+}
+
 /// Parse a LIMIT count that can be negative (Redis uses -1 to mean "unlimited").
 /// Returns None for negative values, Some(n) for non-negative.
 fn parse_limit_count_arg(arg: &[u8]) -> Result<Option<usize>, CommandError> {
@@ -10502,10 +10534,7 @@ fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SCAN"));
     }
-    let cursor = std::str::from_utf8(&argv[1])
-        .map_err(|_| CommandError::InvalidInteger)?
-        .parse::<u64>()
-        .map_err(|_| CommandError::InvalidInteger)?;
+    let cursor = parse_u64_full_arg(&argv[1])?;
 
     let (pattern, count, type_filter) = parse_scan_args(argv, 2)?;
     let (next_cursor, keys) = store.scan(cursor, pattern.as_deref(), count, now_ms);
@@ -10539,10 +10568,7 @@ fn hscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Err(CommandError::WrongArity("HSCAN"));
     }
     let key = &argv[1];
-    let cursor = std::str::from_utf8(&argv[2])
-        .map_err(|_| CommandError::InvalidInteger)?
-        .parse::<u64>()
-        .map_err(|_| CommandError::InvalidInteger)?;
+    let cursor = parse_u64_full_arg(&argv[2])?;
 
     let (pattern, count, _type_filter) = parse_scan_args(argv, 3)?;
     let (next_cursor, pairs) = store
@@ -10565,10 +10591,7 @@ fn sscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Err(CommandError::WrongArity("SSCAN"));
     }
     let key = &argv[1];
-    let cursor = std::str::from_utf8(&argv[2])
-        .map_err(|_| CommandError::InvalidInteger)?
-        .parse::<u64>()
-        .map_err(|_| CommandError::InvalidInteger)?;
+    let cursor = parse_u64_full_arg(&argv[2])?;
 
     let (pattern, count, _type_filter) = parse_scan_args(argv, 3)?;
     let (next_cursor, members) = store
@@ -10590,10 +10613,7 @@ fn zscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Err(CommandError::WrongArity("ZSCAN"));
     }
     let key = &argv[1];
-    let cursor = std::str::from_utf8(&argv[2])
-        .map_err(|_| CommandError::InvalidInteger)?
-        .parse::<u64>()
-        .map_err(|_| CommandError::InvalidInteger)?;
+    let cursor = parse_u64_full_arg(&argv[2])?;
 
     let (pattern, count, _type_filter) = parse_scan_args(argv, 3)?;
     let (next_cursor, pairs) = store
@@ -28278,6 +28298,16 @@ mod tests {
             0,
         )
         .unwrap_err();
+        assert_eq!(err, CommandError::InvalidInteger);
+    }
+
+    #[test]
+    fn scan_cursor_rejects_noncanonical_integer() {
+        let mut store = Store::new();
+        let err = dispatch_argv(&[b"SCAN".to_vec(), b"+1".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(err, CommandError::InvalidInteger);
+
+        let err = dispatch_argv(&[b"SCAN".to_vec(), b"01".to_vec()], &mut store, 0).unwrap_err();
         assert_eq!(err, CommandError::InvalidInteger);
     }
 
