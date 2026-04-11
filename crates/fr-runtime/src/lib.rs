@@ -1087,6 +1087,9 @@ impl ReplicationRuntimeState {
     }
 
     fn backlog_histlen(&self) -> u64 {
+        if self.backlog.start_offset.0 > self.backlog.end_offset.0 {
+            return 0;
+        }
         self.backlog
             .end_offset
             .0
@@ -10199,6 +10202,28 @@ mod tests {
             )),
             "{info}"
         );
+    }
+
+    #[test]
+    fn repl_backlog_histlen_is_zero_when_backlog_disabled() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"repl-backlog-size", b"0"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"key", b"value"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 2);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            unreachable!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("repl_backlog_size:0\r\n"), "{info}");
+        assert!(info.contains("repl_backlog_histlen:0\r\n"), "{info}");
     }
 
     #[test]
