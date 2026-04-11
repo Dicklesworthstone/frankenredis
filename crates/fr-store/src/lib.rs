@@ -2125,8 +2125,7 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return None;
         }
-        let entry = self.entries.get_mut(key)?;
-        entry.touch(now_ms);
+        let entry = self.entries.get(key)?;
         Some(match &entry.value {
             Value::String(_) => ValueType::String,
             Value::Hash(_) => ValueType::Hash,
@@ -2149,7 +2148,7 @@ impl Store {
             return None;
         }
         let entry = self.entries.get(key)?;
-        let encoding = match &entry.value {
+        Some(match &entry.value {
             Value::String(v) => {
                 // Redis returns "int" for strings that are the canonical
                 // representation of an i64 (round-trip: parse then format must match)
@@ -2214,16 +2213,14 @@ impl Store {
                 }
             }
             Value::Stream(_) => "stream",
-        };
-        if let Some(entry) = self.entries.get_mut(key) {
-            entry.touch(now_ms);
-        }
-        Some(encoding)
+        })
     }
 
     /// Return idle time in seconds for a key (time since last access).
     pub fn object_idletime(&mut self, key: &[u8], now_ms: u64) -> Option<u64> {
-        self.drop_if_expired(key, now_ms);
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return None;
+        }
         self.entries.get(key).map(|entry| {
             let idle_ms = now_ms.saturating_sub(entry.last_access_ms);
             idle_ms / 1000
@@ -10551,7 +10548,7 @@ mod tests {
     }
 
     #[test]
-    fn type_and_encoding_update_keyspace_stats_and_lru() {
+    fn type_and_encoding_update_keyspace_stats_without_touching_lru() {
         let mut store = Store::new();
         store.set(b"k".to_vec(), b"v".to_vec(), None, 100);
         store.reset_info_stats();
@@ -10565,7 +10562,7 @@ mod tests {
                 .get(b"k".as_ref())
                 .expect("type entry")
                 .last_access_ms,
-            200
+            100
         );
 
         assert_eq!(store.object_encoding(b"k", 250), Some("embstr"));
@@ -10576,10 +10573,32 @@ mod tests {
                 .get(b"k".as_ref())
                 .expect("encoding entry")
                 .last_access_ms,
-            250
+            100
         );
 
         assert_eq!(store.key_type(b"missing", 300), None);
+        assert_eq!(store.stat_keyspace_misses, 1);
+    }
+
+    #[test]
+    fn object_idletime_updates_keyspace_stats_without_touching_lru() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 100);
+        store.reset_info_stats();
+
+        assert_eq!(store.object_idletime(b"k", 2_100), Some(2));
+        assert_eq!(store.stat_keyspace_hits, 1);
+        assert_eq!(store.stat_keyspace_misses, 0);
+        assert_eq!(
+            store
+                .entries
+                .get(b"k".as_ref())
+                .expect("idletime entry")
+                .last_access_ms,
+            100
+        );
+
+        assert_eq!(store.object_idletime(b"missing", 2_100), None);
         assert_eq!(store.stat_keyspace_misses, 1);
     }
 
