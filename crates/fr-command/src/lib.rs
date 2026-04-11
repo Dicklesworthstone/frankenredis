@@ -10036,33 +10036,31 @@ fn config_apply_store_sets(pairs: &[Vec<u8>], store: &mut Store) -> Result<(), C
 
         match lower.as_str() {
             "hash-max-listpack-entries" | "hash-max-ziplist-entries" => {
-                store.hash_max_listpack_entries = parse_config_usize(val)?;
+                store.hash_max_listpack_entries = parse_config_usize(lower.as_str(), val)?;
             }
             "hash-max-listpack-value" | "hash-max-ziplist-value" => {
-                store.hash_max_listpack_value = parse_config_usize(val)?;
+                store.hash_max_listpack_value = parse_config_usize(lower.as_str(), val)?;
             }
             "list-max-listpack-entries" => {
-                store.list_max_listpack_entries = parse_config_usize(val)?;
+                store.list_max_listpack_entries = parse_config_usize(lower.as_str(), val)?;
             }
             "list-max-listpack-value" => {
-                store.list_max_listpack_value = parse_config_usize(val)?;
+                store.list_max_listpack_value = parse_config_usize(lower.as_str(), val)?;
             }
             "list-max-listpack-size" | "list-max-ziplist-size" => {
-                store.list_max_listpack_size = val
-                    .parse::<i64>()
-                    .map_err(|_| CommandError::InvalidInteger)?;
+                store.list_max_listpack_size = parse_config_i64(lower.as_str(), val)?;
             }
             "set-max-intset-entries" => {
-                store.set_max_intset_entries = parse_config_usize(val)?;
+                store.set_max_intset_entries = parse_config_usize(lower.as_str(), val)?;
             }
             "set-max-listpack-entries" => {
-                store.set_max_listpack_entries = parse_config_usize(val)?;
+                store.set_max_listpack_entries = parse_config_usize(lower.as_str(), val)?;
             }
             "zset-max-listpack-entries" | "zset-max-ziplist-entries" => {
-                store.zset_max_listpack_entries = parse_config_usize(val)?;
+                store.zset_max_listpack_entries = parse_config_usize(lower.as_str(), val)?;
             }
             "zset-max-listpack-value" | "zset-max-ziplist-value" => {
-                store.zset_max_listpack_value = parse_config_usize(val)?;
+                store.zset_max_listpack_value = parse_config_usize(lower.as_str(), val)?;
             }
             "maxmemory-policy" => {
                 store.maxmemory_policy =
@@ -10082,9 +10080,28 @@ fn config_apply_store_sets(pairs: &[Vec<u8>], store: &mut Store) -> Result<(), C
     Ok(())
 }
 
-fn parse_config_usize(val: &str) -> Result<usize, CommandError> {
-    val.parse::<usize>()
-        .map_err(|_| CommandError::InvalidInteger)
+fn parse_config_parse_error(name: &str) -> CommandError {
+    CommandError::Custom(format!(
+        "ERR CONFIG SET failed (possibly related to argument '{name}') - argument couldn't be parsed into an integer"
+    ))
+}
+
+fn parse_config_range_error(name: &str) -> CommandError {
+    CommandError::Custom(format!(
+        "ERR CONFIG SET failed (possibly related to argument '{name}') - argument must be between 0 and 9223372036854775807 inclusive"
+    ))
+}
+
+fn parse_config_i64(name: &str, val: &str) -> Result<i64, CommandError> {
+    parse_i64_arg(val.as_bytes()).map_err(|_| parse_config_parse_error(name))
+}
+
+fn parse_config_usize(name: &str, val: &str) -> Result<usize, CommandError> {
+    let parsed = parse_i64_arg(val.as_bytes()).map_err(|_| parse_config_parse_error(name))?;
+    if parsed < 0 {
+        return Err(parse_config_range_error(name));
+    }
+    usize::try_from(parsed).map_err(|_| parse_config_range_error(name))
 }
 
 fn client_info_line(store: &Store, sub: &str) -> Vec<u8> {
@@ -28260,6 +28277,47 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, CommandError::InvalidInteger);
+    }
+
+    #[test]
+    fn config_set_rejects_noncanonical_and_negative_integers() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"CONFIG".to_vec(),
+                b"SET".to_vec(),
+                b"list-max-ziplist-size".to_vec(),
+                b"+1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR CONFIG SET failed (possibly related to argument 'list-max-ziplist-size') - argument couldn't be parsed into an integer".to_string()
+            )
+        );
+
+        let err = dispatch_argv(
+            &[
+                b"CONFIG".to_vec(),
+                b"SET".to_vec(),
+                b"hash-max-ziplist-entries".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR CONFIG SET failed (possibly related to argument 'hash-max-ziplist-entries') - argument must be between 0 and 9223372036854775807 inclusive"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
