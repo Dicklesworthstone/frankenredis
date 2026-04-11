@@ -1114,11 +1114,12 @@ fn replica_handshake_frame(args: &[&[u8]]) -> RespFrame {
 }
 
 fn encode_replication_snapshot(snapshot: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(snapshot.len().saturating_add(32));
+    let mut out = Vec::with_capacity(snapshot.len().saturating_add(34));
     out.extend_from_slice(b"$");
     out.extend_from_slice(snapshot.len().to_string().as_bytes());
     out.extend_from_slice(b"\r\n");
     out.extend_from_slice(snapshot);
+    out.extend_from_slice(b"\r\n");
     out
 }
 
@@ -2518,8 +2519,8 @@ mod tests {
         parse_blocking_deadline, parse_xread_block_deadline, read_frame_from_stream,
         read_replication_snapshot_from_stream, replica_handshake_frame,
         replica_handshake_read_timeout, replication_follow_up_bytes, server_help_text,
-        should_try_inline_parsing, sync_replica_with_primary,
-        try_build_blocked_state, try_fulfill_blocked,
+        should_try_inline_parsing, sync_replica_with_primary, try_build_blocked_state,
+        try_fulfill_blocked,
     };
     use fr_config::RuntimePolicy;
     use fr_protocol::{ParserConfig, RespFrame};
@@ -2638,8 +2639,15 @@ mod tests {
             .expect("snapshot preamble")
             .parse::<usize>()
             .expect("snapshot length");
-        let snapshot = &follow_up[preamble_end + 2..];
-        assert_eq!(snapshot.len(), snapshot_len);
+        let snapshot_start = preamble_end + 2;
+        let snapshot_end = snapshot_start.saturating_add(snapshot_len);
+        assert!(
+            follow_up.len() >= snapshot_end,
+            "snapshot payload shorter than preamble length"
+        );
+        let snapshot = &follow_up[snapshot_start..snapshot_end];
+        let trailing = &follow_up[snapshot_end..];
+        assert_eq!(trailing, b"\r\n");
         assert!(!snapshot.is_empty(), "snapshot should not be empty");
         assert!(
             snapshot.starts_with(b"REDIS"),
