@@ -2967,7 +2967,9 @@ impl Runtime {
             return reply;
         }
 
-        // Active expiry is driven by the server tick; command paths rely on lazy expiry.
+        // Command paths run a fast active-expire cycle to keep short-lived keys
+        // from lingering between server ticks.
+        let _ = self.run_active_expire_cycle(now_ms, ActiveExpireCycleKind::Fast);
         let dirty_before = self.server.store.dirty;
         let start = Instant::now();
         let handled_migrate = argv
@@ -8416,7 +8418,7 @@ mod tests {
             .expect("decodeable replay stream should execute");
         assert_eq!(replayed.len(), 1);
         let Some(RespFrame::Error(message)) = replayed.first() else {
-            panic!("expected replayed error reply");
+            unreachable!("expected replayed error reply");
         };
         assert!(
             message.starts_with("ERR unknown command 'NOPE'"),
@@ -8432,7 +8434,7 @@ mod tests {
 
         let info = rt.execute_frame(command(&[b"INFO", b"stats"]), 2);
         let RespFrame::BulkString(Some(bytes)) = info else {
-            panic!("expected INFO stats bulk string");
+            unreachable!("expected INFO stats bulk string");
         };
         let info = String::from_utf8(bytes).expect("utf8");
         assert!(info.contains("unexpected_error_replies:2\r\n"), "{info}");
@@ -8466,7 +8468,7 @@ mod tests {
 
         let info = rt.execute_frame(command(&[b"INFO", b"stats"]), 3);
         let RespFrame::BulkString(Some(bytes)) = info else {
-            panic!("expected INFO stats bulk string");
+            unreachable!("expected INFO stats bulk string");
         };
         let info = String::from_utf8(bytes).expect("utf8");
         assert!(info.contains("total_reads_processed:1\r\n"));
@@ -8625,16 +8627,15 @@ mod tests {
         let mut rt = Runtime::default_strict();
         rt.add_user(b"alice".to_vec(), b"secret2".to_vec());
 
-        let missing_password = rt.execute_frame(command(&[b"HELLO", b"3", b"AUTH", b"alice"]), 0);
+        let missing_pass = rt.execute_frame(command(&[b"HELLO", b"3", b"AUTH", b"alice"]), 0);
         assert_eq!(
-            missing_password,
+            missing_pass,
             RespFrame::Error("ERR syntax error".to_string())
         );
 
-        let missing_username_and_password =
-            rt.execute_frame(command(&[b"HELLO", b"3", b"AUTH"]), 0);
+        let missing_user_and_pass = rt.execute_frame(command(&[b"HELLO", b"3", b"AUTH"]), 0);
         assert_eq!(
-            missing_username_and_password,
+            missing_user_and_pass,
             RespFrame::Error("ERR syntax error".to_string())
         );
     }
@@ -8668,7 +8669,7 @@ mod tests {
         let client_list = rt.execute_frame(command(&[b"CLIENT", b"LIST"]), 1);
         let info = match client_list {
             RespFrame::BulkString(Some(info)) => String::from_utf8(info).expect("client info utf8"),
-            other => panic!("unexpected client list response: {other:?}"),
+            other => unreachable!("unexpected client list response: {other:?}"),
         };
         assert!(info.contains("name=alpha"));
         assert!(info.contains("db=5"));
@@ -8790,12 +8791,10 @@ mod tests {
     fn pubsub_multi_subscribe_encodes_as_resp_sequence() {
         let mut rt = Runtime::default_strict();
         let reply = rt.execute_frame(command(&[b"SUBSCRIBE", b"alpha", b"beta"]), 0);
-        match &reply {
-            RespFrame::Sequence(items) => {
-                assert_eq!(items.len(), 2);
-            }
-            other => panic!("expected RESP sequence, got {other:?}"),
-        }
+        let RespFrame::Sequence(items) = &reply else {
+            unreachable!("expected RESP sequence, got {reply:?}");
+        };
+        assert_eq!(items.len(), 2);
         assert_eq!(
             reply.to_bytes(),
             b"*3\r\n$9\r\nsubscribe\r\n$5\r\nalpha\r\n:1\r\n*3\r\n$9\r\nsubscribe\r\n$4\r\nbeta\r\n:2\r\n"
@@ -8903,7 +8902,7 @@ mod tests {
         let mut rt = Runtime::default_strict();
         let help = rt.execute_frame(command(&[b"PUBSUB", b"HELP"]), 0);
         let RespFrame::Array(Some(lines)) = help else {
-            panic!("expected pubsub help array");
+            unreachable!("expected pubsub help array");
         };
         assert!(lines.len() >= 6);
 
@@ -9274,7 +9273,7 @@ mod tests {
                     return parsed.frame;
                 }
                 Err(fr_protocol::RespParseError::Incomplete) => {}
-                Err(err) => panic!("failed to parse runtime test frame: {err:?}"),
+                Err(err) => unreachable!("failed to parse runtime test frame: {err:?}"),
             }
 
             let mut chunk = [0u8; 4096];
@@ -9293,10 +9292,10 @@ mod tests {
                 .into_iter()
                 .map(|item| match item {
                     RespFrame::BulkString(Some(bytes)) => bytes,
-                    other => panic!("expected bulk string, got {other:?}"),
+                    other => unreachable!("expected bulk string, got {other:?}"),
                 })
                 .collect(),
-            other => panic!("expected array frame, got {other:?}"),
+            other => unreachable!("expected array frame, got {other:?}"),
         }
     }
 
@@ -9672,7 +9671,7 @@ mod tests {
         let client_info = rt.execute_frame(command(&[b"CLIENT", b"INFO"]), 4);
         let info = match client_info {
             RespFrame::BulkString(Some(info)) => String::from_utf8(info).expect("client info utf8"),
-            other => panic!("unexpected client info response: {other:?}"),
+            other => unreachable!("unexpected client info response: {other:?}"),
         };
         assert!(info.contains("sub=1"));
         assert!(info.contains("psub=1"));
@@ -9695,7 +9694,7 @@ mod tests {
         let id_frame = rt.execute_frame(command(&[b"CLIENT", b"ID"]), 0);
         let client_id = match id_frame {
             RespFrame::Integer(n) => n.to_string(),
-            _ => panic!("CLIENT ID should return integer"),
+            other => unreachable!("CLIENT ID should return integer, got {other:?}"),
         };
         let id_bytes = client_id.as_bytes().to_vec();
 
@@ -9759,14 +9758,14 @@ mod tests {
 
         let default = rt.execute_frame(command(&[b"SLOWLOG", b"GET"]), 99);
         let RespFrame::Array(Some(default_entries)) = default else {
-            panic!("expected default slowlog array");
+            unreachable!("expected default slowlog array");
         };
         assert_eq!(default_entries.len(), 10);
 
         // The first SLOWLOG GET above was also recorded (threshold=0), so 12+1=13
         let all = rt.execute_frame(command(&[b"SLOWLOG", b"GET", b"-1"]), 100);
         let RespFrame::Array(Some(all_entries)) = all else {
-            panic!("expected all slowlog array");
+            unreachable!("expected all slowlog array");
         };
         assert_eq!(all_entries.len(), 13);
     }
@@ -10101,7 +10100,7 @@ mod tests {
 
         let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 1);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
-            panic!("expected bulk INFO response");
+            unreachable!("expected bulk INFO response");
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains(&format!("master_repl_offset:{expected_offset}\r\n")));
@@ -10123,7 +10122,7 @@ mod tests {
             1,
         );
         let RespFrame::BulkString(Some(info_bytes)) = info else {
-            panic!("expected bulk INFO response");
+            unreachable!("expected bulk INFO response");
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("# Replication\r\n"), "{info}");
@@ -10146,7 +10145,7 @@ mod tests {
 
         let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 2);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
-            panic!("expected bulk INFO response");
+            unreachable!("expected bulk INFO response");
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("repl_backlog_size:1\r\n"), "{info}");
@@ -10171,7 +10170,7 @@ mod tests {
 
         let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 1);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
-            panic!("expected bulk INFO response");
+            unreachable!("expected bulk INFO response");
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("role:slave\r\n"), "{info}");
@@ -10186,7 +10185,7 @@ mod tests {
         rt.set_replica_connection_state("sync");
         let sync_info = rt.execute_frame(command(&[b"INFO", b"replication"]), 2);
         let RespFrame::BulkString(Some(sync_info_bytes)) = sync_info else {
-            panic!("expected bulk INFO response");
+            unreachable!("expected bulk INFO response");
         };
         let sync_info = String::from_utf8(sync_info_bytes).expect("utf8 info");
         assert!(
@@ -10201,7 +10200,7 @@ mod tests {
         rt.set_replica_connection_state("connected");
         let connected_info = rt.execute_frame(command(&[b"INFO", b"replication"]), 3);
         let RespFrame::BulkString(Some(connected_info_bytes)) = connected_info else {
-            panic!("expected bulk INFO response");
+            unreachable!("expected bulk INFO response");
         };
         let connected_info = String::from_utf8(connected_info_bytes).expect("utf8 info");
         assert!(
@@ -10258,7 +10257,7 @@ mod tests {
         );
         let reply = match primary.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 3) {
             RespFrame::SimpleString(line) => line,
-            other => panic!("expected fullresync, got {other:?}"),
+            other => unreachable!("expected fullresync, got {other:?}"),
         };
         let snapshot = primary.encoded_rdb_snapshot(3);
         let fullresync_offset = primary.replication_primary_offset().0;
@@ -10313,7 +10312,7 @@ mod tests {
         );
         let fullresync = match primary.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 1) {
             RespFrame::SimpleString(line) => line,
-            other => panic!("expected fullresync, got {other:?}"),
+            other => unreachable!("expected fullresync, got {other:?}"),
         };
         let snapshot = primary.encoded_rdb_snapshot(1);
         let fullresync_offset = primary.replication_primary_offset().0;
@@ -10471,7 +10470,7 @@ mod tests {
                     Err(CommandError::InvalidUtf8Argument) => {
                         linear_invalid_utf8 = linear_invalid_utf8.saturating_add(1)
                     }
-                    Err(err) => panic!("unexpected linear classifier error: {err:?}"),
+                    Err(err) => unreachable!("unexpected linear classifier error: {err:?}"),
                 }
             }
         }
@@ -10494,7 +10493,7 @@ mod tests {
                     Err(CommandError::InvalidUtf8Argument) => {
                         optimized_invalid_utf8 = optimized_invalid_utf8.saturating_add(1)
                     }
-                    Err(err) => panic!("unexpected optimized classifier error: {err:?}"),
+                    Err(err) => unreachable!("unexpected optimized classifier error: {err:?}"),
                 }
             }
         }
@@ -11192,7 +11191,7 @@ mod tests {
 
         let out = rt.execute_frame(command(&[b"INFO", b"clients"]), 0);
         let RespFrame::BulkString(Some(bytes)) = out else {
-            panic!("expected bulk string");
+            unreachable!("expected bulk string");
         };
         let info = String::from_utf8(bytes).expect("utf8");
         assert!(info.contains("blocked_clients:2\r\n"));
@@ -11826,7 +11825,7 @@ mod tests {
         if let RespFrame::Integer(ms) = pttl {
             assert!(ms > 0, "TTL key should have positive PTTL, got {ms}");
         } else {
-            panic!("Expected integer from PTTL, got: {pttl:?}");
+            unreachable!("Expected integer from PTTL, got: {pttl:?}");
         }
 
         let _ = std::fs::remove_file(&aof_path);
@@ -12135,7 +12134,7 @@ mod tests {
 
         let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 1_700_000_099_000);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
-            panic!("expected bulk INFO response");
+            unreachable!("expected bulk INFO response");
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("rdb_last_save_time:1700000005\r\n"), "{info}");
@@ -12153,7 +12152,7 @@ mod tests {
 
         let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 0);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
-            panic!("expected bulk INFO response");
+            unreachable!("expected bulk INFO response");
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("aof_enabled:1\r\n"), "{info}");
@@ -12197,7 +12196,7 @@ mod tests {
 
         let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 2);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
-            panic!("expected bulk INFO response");
+            unreachable!("expected bulk INFO response");
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("rdb_last_bgsave_status:err\r\n"), "{info}");
@@ -12217,7 +12216,7 @@ mod tests {
 
         let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 2);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
-            panic!("expected bulk INFO response");
+            unreachable!("expected bulk INFO response");
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("aof_last_write_status:err\r\n"), "{info}");
@@ -12303,7 +12302,7 @@ mod tests {
 
         let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 8);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
-            panic!("expected bulk INFO response");
+            unreachable!("expected bulk INFO response");
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("aof_last_rewrite_time_sec:0\r\n"), "{info}");
@@ -12326,7 +12325,7 @@ mod tests {
 
         let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 2);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
-            panic!("expected bulk INFO response");
+            unreachable!("expected bulk INFO response");
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("aof_last_bgrewrite_status:err\r\n"), "{info}");
@@ -12842,7 +12841,7 @@ mod tests {
                 "Should have found commands field in GETUSER reply"
             );
         } else {
-            panic!("Expected array reply from GETUSER, got: {reply:?}");
+            unreachable!("Expected array reply from GETUSER, got: {reply:?}");
         }
     }
 
@@ -12877,7 +12876,7 @@ mod tests {
                 );
             }
         } else {
-            panic!("Expected array reply from ACL LIST, got: {reply:?}");
+            unreachable!("Expected array reply from ACL LIST, got: {reply:?}");
         }
     }
 
@@ -13019,7 +13018,7 @@ mod tests {
         let mut rt = Runtime::default_strict();
         let reply = rt.execute_frame(command(&[b"ACL", b"HELP"]), 0);
         let RespFrame::Array(Some(items)) = reply else {
-            panic!("expected ACL HELP to return an array");
+            unreachable!("expected ACL HELP to return an array");
         };
         assert!(
             items.contains(&RespFrame::BulkString(Some(
@@ -13073,7 +13072,7 @@ mod tests {
 
         let users = rt.execute_frame(command(&[b"ACL", b"USERS"]), 5);
         let RespFrame::Array(Some(entries)) = users else {
-            panic!("expected ACL USERS to return an array");
+            unreachable!("expected ACL USERS to return an array");
         };
         assert!(
             entries.contains(&RespFrame::BulkString(Some(b"default".to_vec()))),
