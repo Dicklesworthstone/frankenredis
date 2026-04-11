@@ -2294,7 +2294,8 @@ fn lpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         return Err(CommandError::WrongArity("LPOP"));
     }
     if argv.len() == 3 {
-        let count = parse_u64_arg(&argv[2])? as usize;
+        let count =
+            usize::try_from(parse_u64_arg(&argv[2])?).map_err(|_| CommandError::InvalidInteger)?;
         let values = match store.lpop_count(&argv[1], count, now_ms)? {
             None => return Ok(RespFrame::BulkString(None)),
             Some(values) => values,
@@ -2314,7 +2315,8 @@ fn rpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         return Err(CommandError::WrongArity("RPOP"));
     }
     if argv.len() == 3 {
-        let count = parse_u64_arg(&argv[2])? as usize;
+        let count =
+            usize::try_from(parse_u64_arg(&argv[2])?).map_err(|_| CommandError::InvalidInteger)?;
         let values = match store.rpop_count(&argv[1], count, now_ms)? {
             None => return Ok(RespFrame::BulkString(None)),
             Some(values) => values,
@@ -2839,7 +2841,10 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            limit_offset = Some(parse_u64_arg(&argv[i + 1])? as usize);
+            limit_offset = Some(
+                usize::try_from(parse_u64_arg(&argv[i + 1])?)
+                    .map_err(|_| CommandError::InvalidInteger)?,
+            );
             limit_count = parse_limit_count_arg(&argv[i + 2])?;
             i += 3;
         } else {
@@ -2996,7 +3001,10 @@ fn parse_zrangebyscore_opts(
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            limit_offset = Some(parse_u64_arg(&argv[i + 1])? as usize);
+            limit_offset = Some(
+                usize::try_from(parse_u64_arg(&argv[i + 1])?)
+                    .map_err(|_| CommandError::InvalidInteger)?,
+            );
             limit_count = parse_limit_count_arg(&argv[i + 2])?;
             i += 3;
         } else {
@@ -3055,7 +3063,8 @@ fn zpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         return Err(CommandError::WrongArity("ZPOPMIN"));
     }
     if argv.len() == 3 {
-        let count = parse_u64_arg(&argv[2])? as usize;
+        let count =
+            usize::try_from(parse_u64_arg(&argv[2])?).map_err(|_| CommandError::InvalidInteger)?;
         let pairs = store.zpopmin_count(&argv[1], count, now_ms)?;
         let mut frames = Vec::with_capacity(pairs.len() * 2);
         for (member, score) in pairs {
@@ -3078,7 +3087,8 @@ fn zpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         return Err(CommandError::WrongArity("ZPOPMAX"));
     }
     if argv.len() == 3 {
-        let count = parse_u64_arg(&argv[2])? as usize;
+        let count =
+            usize::try_from(parse_u64_arg(&argv[2])?).map_err(|_| CommandError::InvalidInteger)?;
         let pairs = store.zpopmax_count(&argv[1], count, now_ms)?;
         let mut frames = Vec::with_capacity(pairs.len() * 2);
         for (member, score) in pairs {
@@ -3345,7 +3355,7 @@ fn parse_geo_search_flags(
             if n <= 0 {
                 return Err(CommandError::SyntaxError);
             }
-            count = Some(n as usize);
+            count = Some(usize::try_from(n).map_err(|_| CommandError::InvalidInteger)?);
         } else if eq_ascii_command(&argv[i], b"ANY") {
             any = true;
         } else if eq_ascii_command(&argv[i], b"ASC") {
@@ -4037,7 +4047,7 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
                     "ERR The MAXLEN argument must be >= 0.".to_string(),
                 ));
             }
-            trim_maxlen = Some(n as usize);
+            trim_maxlen = Some(usize::try_from(n).map_err(|_| CommandError::InvalidInteger)?);
             idx += 1;
         } else if eq_ascii_command(&argv[idx], b"MINID") {
             idx += 1;
@@ -5071,7 +5081,7 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         if n < 0 {
             return Err(CommandError::InvalidInteger);
         }
-        n as usize
+        usize::try_from(n).map_err(|_| CommandError::InvalidInteger)?
     } else {
         10 // Redis default COUNT for FULL is 10
     };
@@ -5478,7 +5488,12 @@ fn cluster_cmd(
             return Err(CommandError::WrongArity("CLUSTER"));
         }
         let slot: u16 = parse_i64_arg(&argv[2]).map(|v| v.clamp(0, 16383) as u16)?;
-        let count: usize = parse_i64_arg(&argv[3]).map(|v| v.max(0) as usize)?;
+        let count_val = parse_i64_arg(&argv[3])?;
+        let count = if count_val <= 0 {
+            0
+        } else {
+            usize::try_from(count_val).map_err(|_| CommandError::InvalidInteger)?
+        };
         let keys = store.keys_in_slot(slot, count, now_ms);
         let frames = keys
             .into_iter()
@@ -5654,7 +5669,10 @@ fn zrangestore_cmd(
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            limit_offset = Some(parse_u64_arg(&argv[i + 1])? as usize);
+            limit_offset = Some(
+                usize::try_from(parse_u64_arg(&argv[i + 1])?)
+                    .map_err(|_| CommandError::InvalidInteger)?,
+            );
             limit_count = parse_limit_count_arg(&argv[i + 2])?;
             i += 3;
         } else {
@@ -6180,13 +6198,14 @@ fn setrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     if offset < 0 {
         return Err(CommandError::InvalidInteger);
     }
-    let offset_usize = offset as usize;
+    let offset_u64 = u64::try_from(offset).map_err(|_| CommandError::InvalidInteger)?;
     let added_len = argv[3].len();
-    if offset_usize.saturating_add(added_len) > 536_870_912 {
+    if offset_u64.saturating_add(added_len as u64) > 536_870_912 {
         return Ok(RespFrame::Error(
             "ERR string exceeds maximum allowed size (512MB)".to_string(),
         ));
     }
+    let offset_usize = usize::try_from(offset_u64).map_err(|_| CommandError::InvalidInteger)?;
     let new_len = store.setrange(&argv[1], offset_usize, &argv[3], now_ms)?;
     Ok(RespFrame::Integer(
         i64::try_from(new_len).unwrap_or(i64::MAX),
@@ -6252,7 +6271,8 @@ fn spop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         return Err(CommandError::WrongArity("SPOP"));
     }
     if argv.len() == 3 {
-        let count = parse_u64_arg(&argv[2])? as usize;
+        let count =
+            usize::try_from(parse_u64_arg(&argv[2])?).map_err(|_| CommandError::InvalidInteger)?;
         let members = store.spop_count(&argv[1], count, now_ms)?;
         let arr = members
             .into_iter()
@@ -6601,7 +6621,7 @@ fn lpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             if m < 0 {
                 return Ok(RespFrame::Error("ERR MAXLEN can't be negative".to_string()));
             }
-            maxlen = m as usize;
+            maxlen = usize::try_from(m).map_err(|_| CommandError::InvalidInteger)?;
         } else {
             return Err(CommandError::SyntaxError);
         }
@@ -7725,7 +7745,7 @@ fn sintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             "ERR numkeys can't be non-positive value".to_string(),
         ));
     }
-    let numkeys = numkeys_val as usize;
+    let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     let keys_end = 2 + numkeys;
     if keys_end > argv.len() {
         return Err(CommandError::SyntaxError);
@@ -7783,7 +7803,7 @@ fn lcs(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             if val < 0 {
                 return Err(CommandError::SyntaxError);
             }
-            min_match_len = val as usize;
+            min_match_len = usize::try_from(val).map_err(|_| CommandError::InvalidInteger)?;
             i += 1;
         } else if argv[i].eq_ignore_ascii_case(b"WITHMATCHLEN") {
             with_match_len = true;
@@ -7973,7 +7993,7 @@ fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             "ERR numkeys can't be non-positive value".to_string(),
         ));
     }
-    let numkeys = numkeys_val as usize;
+    let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     let keys_end = 2 + numkeys;
     if keys_end >= argv.len() {
         return Err(CommandError::SyntaxError);
@@ -7998,7 +8018,7 @@ fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             if val <= 0 {
                 return Err(CommandError::SyntaxError);
             }
-            count = val as usize;
+            count = usize::try_from(val).map_err(|_| CommandError::InvalidInteger)?;
         } else {
             return Err(CommandError::SyntaxError);
         }
@@ -8045,7 +8065,7 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             "ERR numkeys can't be non-positive value".to_string(),
         ));
     }
-    let numkeys = numkeys_val as usize;
+    let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     let keys_end = 2 + numkeys;
     if keys_end >= argv.len() {
         return Err(CommandError::SyntaxError);
@@ -8070,7 +8090,7 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             if val <= 0 {
                 return Err(CommandError::SyntaxError);
             }
-            count = val as usize;
+            count = usize::try_from(val).map_err(|_| CommandError::InvalidInteger)?;
         } else {
             return Err(CommandError::SyntaxError);
         }
@@ -10515,7 +10535,7 @@ fn parse_scan_args(
             if c <= 0 {
                 return Err(CommandError::InvalidInteger);
             }
-            count = c as usize;
+            count = usize::try_from(c).map_err(|_| CommandError::InvalidInteger)?;
             i += 2;
         } else if kw.eq_ignore_ascii_case("TYPE") {
             if i + 1 >= argv.len() {
@@ -10750,7 +10770,7 @@ fn slowlog_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
             if count == -1 {
                 store.slowlog_len()
             } else {
-                count as usize
+                usize::try_from(count).map_err(|_| CommandError::InvalidInteger)?
             }
         } else {
             10
@@ -11313,7 +11333,7 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if numkeys_val <= 0 {
         return Err(CommandError::InvalidInteger);
     }
-    let numkeys = numkeys_val as usize;
+    let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 2 + numkeys {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
@@ -11358,7 +11378,7 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if numkeys_val <= 0 {
         return Err(CommandError::InvalidInteger);
     }
-    let numkeys = numkeys_val as usize;
+    let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 3 + numkeys {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
@@ -11394,7 +11414,7 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if numkeys_val <= 0 {
         return Err(CommandError::InvalidInteger);
     }
-    let numkeys = numkeys_val as usize;
+    let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 2 + numkeys {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
@@ -11455,7 +11475,7 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if numkeys_val <= 0 {
         return Err(CommandError::InvalidInteger);
     }
-    let numkeys = numkeys_val as usize;
+    let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 2 + numkeys {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
@@ -11512,7 +11532,7 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             "ERR numkeys can't be non-positive value".to_string(),
         ));
     }
-    let numkeys = numkeys_val as usize;
+    let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 2 + numkeys {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
@@ -11572,7 +11592,7 @@ fn parse_eval_args(argv: &[Vec<u8>]) -> Result<(usize, &[Vec<u8>], &[Vec<u8>]), 
             "ERR Number of keys can't be negative".to_string(),
         ));
     }
-    let numkeys = numkeys_i64 as usize;
+    let numkeys = usize::try_from(numkeys_i64).map_err(|_| CommandError::InvalidInteger)?;
     let total_after = argv.len() - 3;
     if numkeys > total_after {
         return Err(CommandError::Custom(
@@ -12462,7 +12482,7 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             "ERR numkeys can't be non-positive value".to_string(),
         ));
     }
-    let numkeys = numkeys_val as usize;
+    let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 3 + numkeys + 1 {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
@@ -12491,7 +12511,7 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                     "ERR COUNT value of 0 is not allowed".to_string(),
                 ));
             }
-            count = count_val as usize;
+            count = usize::try_from(count_val).map_err(|_| CommandError::InvalidInteger)?;
         } else {
             return Ok(RespFrame::Error("ERR syntax error".to_string()));
         }
@@ -12651,7 +12671,7 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             "ERR numkeys can't be non-positive value".to_string(),
         ));
     }
-    let numkeys = numkeys_val as usize;
+    let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 3 + numkeys + 1 {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
@@ -12680,7 +12700,7 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                     "ERR COUNT value of 0 is not allowed".to_string(),
                 ));
             }
-            count = count_val as usize;
+            count = usize::try_from(count_val).map_err(|_| CommandError::InvalidInteger)?;
         } else {
             return Ok(RespFrame::Error("ERR syntax error".to_string()));
         }
@@ -12939,11 +12959,17 @@ fn sort_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
 
     // ── Apply LIMIT ──────────────────────────────────────────────────
     let total = elements.len();
-    let start = (limit_offset.max(0) as usize).min(total);
+    let start = if limit_offset <= 0 {
+        0
+    } else {
+        usize::try_from(limit_offset).map_err(|_| CommandError::InvalidInteger)?
+    };
+    let start = start.min(total);
     let count = if limit_count < 0 {
         total.saturating_sub(start)
     } else {
-        (limit_count as usize).min(total.saturating_sub(start))
+        let count = usize::try_from(limit_count).map_err(|_| CommandError::InvalidInteger)?;
+        count.min(total.saturating_sub(start))
     };
     let sliced: Vec<Vec<u8>> = elements.into_iter().skip(start).take(count).collect();
 
