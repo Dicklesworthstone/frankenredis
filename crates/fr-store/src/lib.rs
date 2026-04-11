@@ -9375,9 +9375,6 @@ fn parse_i64(bytes: &[u8]) -> Result<i64, StoreError> {
         if p == slen {
             return Err(StoreError::ValueNotInteger);
         }
-        if slen == 2 && bytes[1] == b'0' {
-            return Ok(0);
-        }
     }
 
     if bytes[p] >= b'1' && bytes[p] <= b'9' {
@@ -10180,6 +10177,13 @@ mod tests {
         assert_eq!(store.incr(b"n", 0).expect("incr"), 1);
         assert_eq!(store.incr(b"n", 0).expect("incr"), 2);
         assert_eq!(store.get(b"n", 0).unwrap(), Some(b"2".to_vec()));
+    }
+
+    #[test]
+    fn incr_rejects_minus_zero_string() {
+        let mut store = Store::new();
+        store.set(b"n".to_vec(), b"-0".to_vec(), None, 0);
+        assert_eq!(store.incr(b"n", 0), Err(StoreError::ValueNotInteger));
     }
 
     #[test]

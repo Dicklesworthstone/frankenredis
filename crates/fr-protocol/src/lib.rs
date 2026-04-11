@@ -165,10 +165,7 @@ fn parse_frame_internal(
         }
         b':' => {
             let (line, consumed) = read_line(input, next)?;
-            let text = std::str::from_utf8(line).map_err(|_| RespParseError::InvalidUtf8)?;
-            let n = text
-                .parse::<i64>()
-                .map_err(|_| RespParseError::InvalidInteger)?;
+            let n = parse_i64_strict(line)?;
             Ok((RespFrame::Integer(n), consumed))
         }
         b'$' => parse_bulk(input, next, config),
@@ -186,14 +183,8 @@ fn parse_bulk(
     config: &ParserConfig,
 ) -> Result<(RespFrame, usize), RespParseError> {
     let (line, consumed) = read_line(input, start)?;
-    let text = std::str::from_utf8(line).map_err(|_| RespParseError::InvalidUtf8)?;
-    let len = text
-        .parse::<i64>()
-        .map_err(|_| RespParseError::InvalidBulkLength)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
     if len == -1 {
-        if text != "-1" {
-            return Err(RespParseError::InvalidBulkLength);
-        }
         return Ok((RespFrame::BulkString(None), consumed));
     }
     if len < -1 {
@@ -224,14 +215,8 @@ fn parse_array(
     config: &ParserConfig,
 ) -> Result<(RespFrame, usize), RespParseError> {
     let (line, mut cursor) = read_line(input, start)?;
-    let text = std::str::from_utf8(line).map_err(|_| RespParseError::InvalidUtf8)?;
-    let len = text
-        .parse::<i64>()
-        .map_err(|_| RespParseError::InvalidMultibulkLength)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
     if len == -1 {
-        if text != "-1" {
-            return Err(RespParseError::InvalidMultibulkLength);
-        }
         return Ok((RespFrame::Array(None), cursor));
     }
     if len < -1 {
@@ -251,6 +236,62 @@ fn parse_array(
 }
 
 const MAX_LINE_LENGTH: usize = 64 * 1024; // 64 KiB
+
+fn parse_i64_strict(input: &[u8]) -> Result<i64, RespParseError> {
+    let slen = input.len();
+    if slen == 0 || slen > 20 {
+        return Err(RespParseError::InvalidInteger);
+    }
+    if slen == 1 && input[0] == b'0' {
+        return Ok(0);
+    }
+
+    let mut p = 0;
+    let negative = input[0] == b'-';
+    if negative {
+        p += 1;
+        if p == slen {
+            return Err(RespParseError::InvalidInteger);
+        }
+    }
+
+    if input[p] >= b'1' && input[p] <= b'9' {
+        let mut v: u64 = (input[p] - b'0') as u64;
+        p += 1;
+        while p < slen {
+            let b = input[p];
+            if b.is_ascii_digit() {
+                if v > (u64::MAX / 10) {
+                    return Err(RespParseError::InvalidInteger);
+                }
+                v *= 10;
+                let digit = (b - b'0') as u64;
+                if v > (u64::MAX - digit) {
+                    return Err(RespParseError::InvalidInteger);
+                }
+                v += digit;
+                p += 1;
+            } else {
+                return Err(RespParseError::InvalidInteger);
+            }
+        }
+
+        if negative {
+            let limit = (i64::MIN as u64).wrapping_neg();
+            if v > limit {
+                return Err(RespParseError::InvalidInteger);
+            }
+            return Ok(v.wrapping_neg() as i64);
+        } else {
+            if v > i64::MAX as u64 {
+                return Err(RespParseError::InvalidInteger);
+            }
+            return Ok(v as i64);
+        }
+    }
+
+    Err(RespParseError::InvalidInteger)
+}
 
 fn read_line(input: &[u8], start: usize) -> Result<(&[u8], usize), RespParseError> {
     if start >= input.len() {
@@ -426,6 +467,54 @@ mod tests {
             "parity_ok",
         );
         event.assert_schema_contract();
+    }
+
+    #[test]
+    fn resp_integer_rejects_noncanonical_tokens() {
+        assert!(matches!(
+            parse_frame(b":+1\r\n"),
+            Err(RespParseError::InvalidInteger)
+        ));
+        assert!(matches!(
+            parse_frame(b":01\r\n"),
+            Err(RespParseError::InvalidInteger)
+        ));
+        assert!(matches!(
+            parse_frame(b":-0\r\n"),
+            Err(RespParseError::InvalidInteger)
+        ));
+    }
+
+    #[test]
+    fn resp_bulk_len_rejects_noncanonical_tokens() {
+        assert!(matches!(
+            parse_frame(b"$+1\r\nx\r\n"),
+            Err(RespParseError::InvalidBulkLength)
+        ));
+        assert!(matches!(
+            parse_frame(b"$01\r\nx\r\n"),
+            Err(RespParseError::InvalidBulkLength)
+        ));
+        assert!(matches!(
+            parse_frame(b"$-0\r\n"),
+            Err(RespParseError::InvalidBulkLength)
+        ));
+    }
+
+    #[test]
+    fn resp_array_len_rejects_noncanonical_tokens() {
+        assert!(matches!(
+            parse_frame(b"*+1\r\n$1\r\na\r\n"),
+            Err(RespParseError::InvalidMultibulkLength)
+        ));
+        assert!(matches!(
+            parse_frame(b"*01\r\n$1\r\na\r\n"),
+            Err(RespParseError::InvalidMultibulkLength)
+        ));
+        assert!(matches!(
+            parse_frame(b"*-0\r\n"),
+            Err(RespParseError::InvalidMultibulkLength)
+        ));
     }
 
     #[test]
