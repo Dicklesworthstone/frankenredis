@@ -1569,17 +1569,14 @@ impl Store {
 
     #[must_use]
     pub fn pttl(&mut self, key: &[u8], now_ms: u64) -> PttlValue {
-        self.drop_if_expired(key, now_ms);
-        let Some(entry) = self.entries.get(key) else {
+        if !self.record_keyspace_lookup(key, now_ms) {
             return PttlValue::KeyMissing;
         };
-        let decision = evaluate_expiry(now_ms, entry.expires_at_ms);
-        if decision.should_evict {
-            self.internal_entries_remove(key);
-            self.stream_groups.remove(key);
-            self.stream_last_ids.remove(key);
+        let Some(entry) = self.entries.get_mut(key) else {
             return PttlValue::KeyMissing;
-        }
+        };
+        entry.touch(now_ms);
+        let decision = evaluate_expiry(now_ms, entry.expires_at_ms);
         if decision.remaining_ms == -1 {
             PttlValue::NoExpiry
         } else {
@@ -10122,6 +10119,25 @@ mod tests {
     }
 
     #[test]
+    fn pttl_updates_keyspace_stats_and_lru() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), Some(5_000), 1_000);
+        store.reset_info_stats();
+
+        assert_eq!(store.pttl(b"k", 2_000), PttlValue::Remaining(4_000));
+        assert_eq!(store.stat_keyspace_hits, 1);
+        assert_eq!(store.stat_keyspace_misses, 0);
+        assert_eq!(
+            store
+                .entries
+                .get(b"k".as_ref())
+                .expect("pttl entry")
+                .last_access_ms,
+            2_000
+        );
+    }
+
+    #[test]
     fn expiretime_value_reports_state() {
         let mut store = Store::new();
         assert_eq!(
@@ -10141,6 +10157,23 @@ mod tests {
         assert_eq!(
             store.expiretime_value(b"k", 6_001),
             ExpireTimeValue::KeyMissing
+        );
+    }
+
+    #[test]
+    fn pttl_expiry_triggers_stats_and_notifications() {
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_EXPIRED;
+        store.set(b"pttl-exp".to_vec(), b"v".to_vec(), Some(5), 0);
+        store.reset_info_stats();
+
+        assert_eq!(store.pttl(b"pttl-exp", 6), PttlValue::KeyMissing);
+        assert_eq!(store.stat_expired_keys, 1);
+        assert_eq!(store.stat_keyspace_hits, 0);
+        assert_eq!(store.stat_keyspace_misses, 1);
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(b"__keyevent@0__:expired".to_vec(), b"pttl-exp".to_vec())]
         );
     }
 
