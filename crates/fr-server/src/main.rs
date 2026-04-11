@@ -1301,6 +1301,37 @@ fn read_available_stream_bytes(
     Ok(disconnected)
 }
 
+fn consume_complete_replication_prefix(
+    read_buf: &mut Vec<u8>,
+    parser_config: &ParserConfig,
+) -> io::Result<Vec<u8>> {
+    let mut consumed_total = 0usize;
+    loop {
+        if consumed_total >= read_buf.len() {
+            break;
+        }
+        let unparsed = &read_buf[consumed_total..];
+        match fr_protocol::parse_frame_with_config(unparsed, parser_config) {
+            Ok(parsed) => {
+                consumed_total = consumed_total.saturating_add(parsed.consumed);
+            }
+            Err(RespParseError::Incomplete) => break,
+            Err(err) => {
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("invalid replication backlog from primary: {err}"),
+                ));
+            }
+        }
+    }
+    if consumed_total == 0 {
+        return Ok(Vec::new());
+    }
+    let payload = read_buf[..consumed_total].to_vec();
+    read_buf.drain(..consumed_total);
+    Ok(payload)
+}
+
 fn expect_simple_string(frame: RespFrame, expected: &str) -> io::Result<()> {
     match frame {
         RespFrame::SimpleString(line) if line.eq_ignore_ascii_case(expected) => Ok(()),
@@ -1408,7 +1439,7 @@ fn sync_replica_with_primary(
                 "primary closed replication stream during sync",
             ));
         }
-        std::mem::take(&mut read_buf)
+        consume_complete_replication_prefix(&mut read_buf, &parser_config)?
     };
 
     runtime
@@ -2476,12 +2507,12 @@ mod tests {
         BlockingOp, CheckBlockedClientsContext, InlineParseResult, PendingClientUnblocksContext,
         REPLICA_ACK_INTERVAL_MS, REPLICA_RECONNECT_BACKOFF_MS, ReplicaPrimaryConnection,
         ReplicaSyncState, apply_pending_client_unblocks, check_blocked_clients,
-        drain_replica_stream, drive_replica_sync, encode_eof_marked_replication_snapshot,
-        encode_replication_snapshot, find_crlf, parse_blocking_deadline,
-        parse_xread_block_deadline, read_frame_from_stream, replica_handshake_frame,
-        replica_handshake_read_timeout, replication_follow_up_bytes, server_help_text,
-        should_try_inline_parsing, sync_replica_with_primary, try_build_blocked_state,
-        try_fulfill_blocked,
+        consume_complete_replication_prefix, drain_replica_stream, drive_replica_sync,
+        encode_eof_marked_replication_snapshot, encode_replication_snapshot, find_crlf,
+        parse_blocking_deadline, parse_xread_block_deadline, read_frame_from_stream,
+        replica_handshake_frame, replica_handshake_read_timeout, replication_follow_up_bytes,
+        server_help_text, should_try_inline_parsing, sync_replica_with_primary,
+        try_build_blocked_state, try_fulfill_blocked,
     };
     use fr_config::RuntimePolicy;
     use fr_protocol::{ParserConfig, RespFrame};
@@ -2939,6 +2970,27 @@ mod tests {
         );
 
         server.join().expect("primary thread");
+    }
+
+    #[test]
+    fn replication_prefix_parser_stops_on_incomplete_frame() {
+        let frame1 = RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"PING".to_vec()))]));
+        let frame2 = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"SET".to_vec())),
+            RespFrame::BulkString(Some(b"k".to_vec())),
+            RespFrame::BulkString(Some(b"v".to_vec())),
+        ]));
+        let frame1_bytes = frame1.to_bytes();
+        let frame2_bytes = frame2.to_bytes();
+        let split_at = frame2_bytes.len().saturating_sub(2);
+        let mut read_buf = Vec::new();
+        read_buf.extend_from_slice(&frame1_bytes);
+        read_buf.extend_from_slice(&frame2_bytes[..split_at]);
+
+        let payload = consume_complete_replication_prefix(&mut read_buf, &ParserConfig::default())
+            .expect("prefix parse");
+        assert_eq!(payload, frame1_bytes);
+        assert_eq!(read_buf, frame2_bytes[split_at..]);
     }
 
     #[test]
