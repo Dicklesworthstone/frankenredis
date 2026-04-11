@@ -1397,11 +1397,17 @@ fn sync_replica_with_primary(
             runtime.server.query_buffer_limit,
         )?
     } else {
-        read_available_stream_bytes(
+        let disconnected = read_available_stream_bytes(
             &mut stream,
             &mut read_buf,
             runtime.server.query_buffer_limit,
         )?;
+        if disconnected {
+            return Err(io::Error::new(
+                ErrorKind::UnexpectedEof,
+                "primary closed replication stream during sync",
+            ));
+        }
         std::mem::take(&mut read_buf)
     };
 
@@ -2474,7 +2480,8 @@ mod tests {
         encode_replication_snapshot, find_crlf, parse_blocking_deadline,
         parse_xread_block_deadline, read_frame_from_stream, replica_handshake_frame,
         replica_handshake_read_timeout, replication_follow_up_bytes, server_help_text,
-        should_try_inline_parsing, try_build_blocked_state, try_fulfill_blocked,
+        should_try_inline_parsing, sync_replica_with_primary, try_build_blocked_state,
+        try_fulfill_blocked,
     };
     use fr_config::RuntimePolicy;
     use fr_protocol::{ParserConfig, RespFrame};
@@ -2929,6 +2936,64 @@ mod tests {
                 4,
             ),
             RespFrame::BulkString(Some(b"1".to_vec()))
+        );
+
+        server.join().expect("primary thread");
+    }
+
+    #[test]
+    fn replica_sync_helper_rejects_continue_when_primary_disconnects() {
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind primary socket");
+        let addr = listener.local_addr().expect("local addr");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept replica");
+            let parser = ParserConfig::default();
+            let mut read_buf = Vec::new();
+
+            let ping = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                .expect("read ping");
+            assert_eq!(ping, replica_handshake_frame(&[b"PING"]));
+            stream
+                .write_all(&RespFrame::SimpleString("PONG".to_string()).to_bytes())
+                .unwrap();
+
+            let replconf_port =
+                read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                    .expect("replconf");
+            assert!(
+                matches!(replconf_port, RespFrame::Array(Some(_))),
+                "unexpected replconf frame: {replconf_port:?}"
+            );
+            stream
+                .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                .unwrap();
+
+            let replconf_capa =
+                read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                    .expect("capa");
+            assert_eq!(
+                replconf_capa,
+                replica_handshake_frame(&[b"REPLCONF", b"capa", b"psync2"])
+            );
+            stream
+                .write_all(&RespFrame::SimpleString("OK".to_string()).to_bytes())
+                .unwrap();
+
+            let psync = read_frame_from_stream(&mut stream, &mut read_buf, &parser, usize::MAX)
+                .expect("psync");
+            assert_eq!(psync, replica_handshake_frame(&[b"PSYNC", b"?", b"-1"]));
+            stream
+                .write_all(&RespFrame::SimpleString("CONTINUE".to_string()).to_bytes())
+                .unwrap();
+        });
+
+        let mut replica = Runtime::default_strict();
+        replica.set_server_port(6381);
+        let host = addr.ip().to_string();
+        let result = sync_replica_with_primary(&mut replica, &host, addr.port(), "?", -1, 1);
+        assert!(
+            result.is_err(),
+            "expected sync to fail after primary disconnects"
         );
 
         server.join().expect("primary thread");
