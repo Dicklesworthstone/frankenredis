@@ -7397,9 +7397,6 @@ fn parse_i64_arg(arg: &[u8]) -> Result<i64, CommandError> {
         if p == slen {
             return Err(CommandError::InvalidInteger);
         }
-        if slen == 2 && arg[1] == b'0' {
-            return Ok(0);
-        }
     }
 
     if arg[p] >= b'1' && arg[p] <= b'9' {
@@ -14585,7 +14582,15 @@ mod tests {
 
     #[test]
     fn expire_invalid_integer_argument_errors_invalid_integer_property() {
-        let invalid_values = ["", "not-a-number", "1.5", "+-2", "999999999999999999999"];
+        let invalid_values = [
+            "",
+            "not-a-number",
+            "1.5",
+            "+1",
+            "+-2",
+            "-0",
+            "999999999999999999999",
+        ];
         for invalid in invalid_values {
             let mut store = Store::new();
             dispatch_argv(
