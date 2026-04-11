@@ -12514,8 +12514,7 @@ fn parse_blocking_deadline_seconds(arg: &[u8], now_ms: u64) -> Result<u64, Comma
 /// Parse and validate a millisecond blocking timeout, returning the absolute
 /// deadline in milliseconds using Redis' integer-only semantics.
 fn parse_blocking_deadline_milliseconds(arg: &[u8], now_ms: u64) -> Result<u64, CommandError> {
-    let text = std::str::from_utf8(arg).map_err(|_| blocking_timeout_integer_error())?;
-    let timeout_ms: i64 = text.parse().map_err(|_| blocking_timeout_integer_error())?;
+    let timeout_ms = parse_i64_arg(arg).map_err(|_| blocking_timeout_integer_error())?;
     if timeout_ms < 0 {
         return Err(CommandError::Custom("ERR timeout is negative".to_string()));
     }
@@ -18370,6 +18369,18 @@ mod tests {
         assert_eq!(parse_blocking_deadline_milliseconds(b"5", 123), Ok(128));
         assert_eq!(
             parse_blocking_deadline_milliseconds(b"1.5", 123),
+            Err(CommandError::Custom(
+                "ERR timeout is not an integer or out of range".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_blocking_deadline_milliseconds(b"+1", 123),
+            Err(CommandError::Custom(
+                "ERR timeout is not an integer or out of range".to_string()
+            ))
+        );
+        assert_eq!(
+            parse_blocking_deadline_milliseconds(b"001", 123),
             Err(CommandError::Custom(
                 "ERR timeout is not an integer or out of range".to_string()
             ))
