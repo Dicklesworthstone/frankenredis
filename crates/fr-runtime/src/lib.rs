@@ -3436,6 +3436,11 @@ impl Runtime {
             self.server.last_eviction_loop = None;
             return None;
         }
+        // Redis only enforces maxmemory on write-ish commands. Reads should not
+        // trigger eviction loops or overwrite the last eviction result.
+        if !Self::command_advances_replication_offset(argv) {
+            return None;
+        }
 
         let loop_result = self.server.store.run_bounded_eviction_loop(
             now_ms,
@@ -11218,6 +11223,17 @@ mod tests {
                 RespFrame::BulkString(Some(b"1073741824".to_vec())),
             ]))
         );
+    }
+
+    #[test]
+    fn maxmemory_enforcement_skips_reads() {
+        let mut rt = Runtime::default_strict();
+        rt.configure_maxmemory_enforcement(64, 0, 5, 4);
+        assert!(rt.last_eviction_loop_result().is_none());
+
+        let reply = rt.execute_frame(command(&[b"GET", b"missing"]), 0);
+        assert_eq!(reply, RespFrame::BulkString(None));
+        assert!(rt.last_eviction_loop_result().is_none());
     }
 
     #[test]
