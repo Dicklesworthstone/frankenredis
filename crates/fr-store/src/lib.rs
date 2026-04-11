@@ -1430,6 +1430,9 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return ExpireTimeValue::KeyMissing;
         }
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.touch(now_ms);
+        }
         match self.entries.get(key).and_then(|entry| entry.expires_at_ms) {
             Some(expires_at_ms) => ExpireTimeValue::ExpiresAt(expires_at_ms),
             None => ExpireTimeValue::NoExpiry,
@@ -1884,19 +1887,25 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(false);
         }
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => {
-                    let byte_idx = offset / 8;
-                    let bit_idx = 7 - (offset % 8);
-                    if byte_idx >= v.len() {
-                        Ok(false)
-                    } else {
-                        Ok((v[byte_idx] >> bit_idx) & 1 == 1)
-                    }
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                let is_string = matches!(&entry.value, Value::String(_));
+                if is_string {
+                    entry.touch(now_ms);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::String(v) => {
+                        let byte_idx = offset / 8;
+                        let bit_idx = 7 - (offset % 8);
+                        if byte_idx >= v.len() {
+                            Ok(false)
+                        } else {
+                            Ok((v[byte_idx] >> bit_idx) & 1 == 1)
+                        }
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(false),
         }
     }
@@ -1917,11 +1926,17 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(bitfield_read(&[], bit_offset, bits, signed));
         }
-        let bytes = match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => v.as_slice(),
-                _ => return Err(StoreError::WrongType),
-            },
+        let bytes = match self.entries.get_mut(key) {
+            Some(entry) => {
+                let is_string = matches!(&entry.value, Value::String(_));
+                if is_string {
+                    entry.touch(now_ms);
+                }
+                match &entry.value {
+                    Value::String(v) => v.as_slice(),
+                    _ => return Err(StoreError::WrongType),
+                }
+            }
             None => &[],
         };
         Ok(bitfield_read(bytes, bit_offset, bits, signed))
@@ -1990,32 +2005,38 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
-        match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => {
-                    let len = v.len() as i64;
-                    let s = match start {
-                        Some(s) if s < 0 => (len + s).max(0) as usize,
-                        Some(s) => s as usize,
-                        None => 0,
-                    };
-                    let e = match end {
-                        Some(e) if e < 0 => (len + e).max(0),
-                        Some(e) => e,
-                        None => len - 1,
-                    };
-                    if s as i64 > e || len == 0 || s >= v.len() {
-                        return Ok(0);
-                    }
-                    let end_idx_excl = (e.min(len - 1) as usize).min(v.len() - 1) + 1;
-                    let count = v[s..end_idx_excl]
-                        .iter()
-                        .map(|b| b.count_ones() as usize)
-                        .sum();
-                    Ok(count)
+        match self.entries.get_mut(key) {
+            Some(entry) => {
+                let is_string = matches!(&entry.value, Value::String(_));
+                if is_string {
+                    entry.touch(now_ms);
                 }
-                _ => Err(StoreError::WrongType),
-            },
+                match &entry.value {
+                    Value::String(v) => {
+                        let len = v.len() as i64;
+                        let s = match start {
+                            Some(s) if s < 0 => (len + s).max(0) as usize,
+                            Some(s) => s as usize,
+                            None => 0,
+                        };
+                        let e = match end {
+                            Some(e) if e < 0 => (len + e).max(0),
+                            Some(e) => e,
+                            None => len - 1,
+                        };
+                        if s as i64 > e || len == 0 || s >= v.len() {
+                            return Ok(0);
+                        }
+                        let end_idx_excl = (e.min(len - 1) as usize).min(v.len() - 1) + 1;
+                        let count = v[s..end_idx_excl]
+                            .iter()
+                            .map(|b| b.count_ones() as usize)
+                            .sum();
+                        Ok(count)
+                    }
+                    _ => Err(StoreError::WrongType),
+                }
+            }
             None => Ok(0),
         }
     }
@@ -2031,11 +2052,17 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return if bit { Ok(-1) } else { Ok(0) };
         }
-        let bytes = match self.entries.get(key) {
-            Some(entry) => match &entry.value {
-                Value::String(v) => v.as_slice(),
-                _ => return Err(StoreError::WrongType),
-            },
+        let bytes = match self.entries.get_mut(key) {
+            Some(entry) => {
+                let is_string = matches!(&entry.value, Value::String(_));
+                if is_string {
+                    entry.touch(now_ms);
+                }
+                match &entry.value {
+                    Value::String(v) => v.as_slice(),
+                    _ => return Err(StoreError::WrongType),
+                }
+            }
             None => return if bit { Ok(-1) } else { Ok(0) },
         };
         if bytes.is_empty() {
@@ -3350,36 +3377,30 @@ impl Store {
     ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
-            Some(entry) => {
-                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
-                match &mut entry.value {
-                    Value::List(l) => {
-                        let mut result = Vec::new();
-                        for _ in 0..count {
-                            match l.pop_front() {
-                                Some(v) => result.push(v),
-                                None => break,
-                            }
+            Some(entry) => match &mut entry.value {
+                Value::List(l) => {
+                    let mut result = Vec::new();
+                    for _ in 0..count {
+                        match l.pop_front() {
+                            Some(v) => result.push(v),
+                            None => break,
                         }
-                        if !result.is_empty() {
-                            self.dirty = self.dirty.saturating_add(result.len() as u64);
-                        }
-                        if l.is_empty() {
-                            self.internal_entries_remove(key);
-                            self.stream_groups.remove(key);
-                            self.stream_last_ids.remove(key);
-                        } else if !result.is_empty() {
-                            entry.touch_write(now_ms);
-                        }
-                        Ok(Some(result))
                     }
-                    _ => Err(StoreError::WrongType),
+                    if !result.is_empty() {
+                        self.dirty = self.dirty.saturating_add(result.len() as u64);
+                    }
+                    if l.is_empty() {
+                        self.internal_entries_remove(key);
+                        self.stream_groups.remove(key);
+                        self.stream_last_ids.remove(key);
+                    } else if !result.is_empty() {
+                        entry.touch_write(now_ms);
+                    }
+                    Ok(Some(result))
                 }
-            }
-            None => {
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
-                Ok(None)
-            }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
         }
     }
 
@@ -3415,36 +3436,30 @@ impl Store {
     ) -> Result<Option<Vec<Vec<u8>>>, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
-            Some(entry) => {
-                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
-                match &mut entry.value {
-                    Value::List(l) => {
-                        let mut result = Vec::new();
-                        for _ in 0..count {
-                            match l.pop_back() {
-                                Some(v) => result.push(v),
-                                None => break,
-                            }
+            Some(entry) => match &mut entry.value {
+                Value::List(l) => {
+                    let mut result = Vec::new();
+                    for _ in 0..count {
+                        match l.pop_back() {
+                            Some(v) => result.push(v),
+                            None => break,
                         }
-                        if !result.is_empty() {
-                            self.dirty = self.dirty.saturating_add(result.len() as u64);
-                        }
-                        if l.is_empty() {
-                            self.internal_entries_remove(key);
-                            self.stream_groups.remove(key);
-                            self.stream_last_ids.remove(key);
-                        } else if !result.is_empty() {
-                            entry.touch_write(now_ms);
-                        }
-                        Ok(Some(result))
                     }
-                    _ => Err(StoreError::WrongType),
+                    if !result.is_empty() {
+                        self.dirty = self.dirty.saturating_add(result.len() as u64);
+                    }
+                    if l.is_empty() {
+                        self.internal_entries_remove(key);
+                        self.stream_groups.remove(key);
+                        self.stream_last_ids.remove(key);
+                    } else if !result.is_empty() {
+                        entry.touch_write(now_ms);
+                    }
+                    Ok(Some(result))
                 }
-            }
-            None => {
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
-                Ok(None)
-            }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok(None),
         }
     }
 
@@ -4342,9 +4357,12 @@ impl Store {
             return Ok(Vec::new());
         };
 
-        let mut result = match &self.entries.get(keys[base_idx]).unwrap().value {
-            Value::Set(s) => s.clone(),
-            _ => unreachable!(),
+        let mut result = match self.entries.get(keys[base_idx]) {
+            Some(entry) => match &entry.value {
+                Value::Set(s) => s.clone(),
+                _ => return Err(StoreError::WrongType),
+            },
+            None => return Ok(Vec::new()),
         };
 
         for (i, key) in keys.iter().enumerate() {
@@ -5809,29 +5827,26 @@ impl Store {
         key: &[u8],
         now_ms: u64,
     ) -> Result<(bool, Option<StreamId>), StoreError> {
-        self.drop_if_expired(key, now_ms);
-        match self.entries.get(key) {
-            Some(entry) => {
-                self.stat_keyspace_hits = self.stat_keyspace_hits.saturating_add(1);
-                match &entry.value {
-                    Value::Stream(entries) => {
-                        let btree_last = entries.last_key_value().map(|(id, _)| *id);
-                        let xsetid_last = self.stream_last_ids.get(key).copied();
-                        let last_id = match (btree_last, xsetid_last) {
-                            (Some(a), Some(b)) => Some(a.max(b)),
-                            (Some(a), None) => Some(a),
-                            (None, Some(b)) => Some(b),
-                            (None, None) => None,
-                        };
-                        Ok((true, last_id))
-                    }
-                    _ => Err(StoreError::WrongType),
+        if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok((false, None));
+        }
+        match self.entries.get_mut(key) {
+            Some(entry) => match &entry.value {
+                Value::Stream(entries) => {
+                    let btree_last = entries.last_key_value().map(|(id, _)| *id);
+                    let xsetid_last = self.stream_last_ids.get(key).copied();
+                    let last_id = match (btree_last, xsetid_last) {
+                        (Some(a), Some(b)) => Some(a.max(b)),
+                        (Some(a), None) => Some(a),
+                        (None, Some(b)) => Some(b),
+                        (None, None) => None,
+                    };
+                    entry.touch(now_ms);
+                    Ok((true, last_id))
                 }
-            }
-            None => {
-                self.stat_keyspace_misses = self.stat_keyspace_misses.saturating_add(1);
-                Ok((false, None))
-            }
+                _ => Err(StoreError::WrongType),
+            },
+            None => Ok((false, None)),
         }
     }
 
