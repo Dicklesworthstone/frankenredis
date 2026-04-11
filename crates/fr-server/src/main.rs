@@ -1756,23 +1756,18 @@ fn parse_blocking_deadline(timeout_bytes: &[u8], now_ms: u64) -> Option<u64> {
     now_ms.checked_add(delta_ms as u64)
 }
 
-/// Extract the BLOCK timeout from XREAD/XREADGROUP args and compute a deadline.
-fn parse_xread_block_deadline(items: &[RespFrame], now_ms: u64) -> Option<u64> {
-    let streams_pos = items.iter().position(|item| match item {
-        RespFrame::BulkString(Some(arg)) => arg.eq_ignore_ascii_case(b"STREAMS"),
-        _ => false,
-    });
-    let search_end = streams_pos.unwrap_or(items.len());
-    for (i, item) in items.iter().take(search_end).enumerate() {
-        let RespFrame::BulkString(Some(arg)) = item else {
-            continue;
-        };
+/// Extract the BLOCK timeout from XREAD/XREADGROUP argv and compute a deadline.
+fn parse_xread_block_deadline_argv(argv: &[Vec<u8>], now_ms: u64) -> Option<u64> {
+    let streams_pos = argv
+        .iter()
+        .position(|arg| arg.eq_ignore_ascii_case(b"STREAMS"));
+    let search_end = streams_pos.unwrap_or(argv.len());
+    for i in 0..search_end {
+        let arg = &argv[i];
         if !arg.eq_ignore_ascii_case(b"BLOCK") {
             continue;
         }
-        let RespFrame::BulkString(Some(timeout_bytes)) = items.get(i + 1)? else {
-            return None;
-        };
+        let timeout_bytes = argv.get(i + 1)?;
         let ms: i64 = std::str::from_utf8(timeout_bytes).ok()?.parse().ok()?;
         if ms < 0 {
             return None;
@@ -1788,34 +1783,21 @@ fn parse_xread_block_deadline(items: &[RespFrame], now_ms: u64) -> Option<u64> {
 /// Parse a blocking command frame and build `BlockedState` if the command
 /// is a blocking operation with a non-zero timeout.
 fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedState> {
-    let RespFrame::Array(Some(items)) = frame else {
-        return None;
-    };
-    let Some(RespFrame::BulkString(Some(cmd))) = items.first() else {
-        return None;
-    };
+    let argv = fr_command::frame_to_argv(frame).ok()?;
+    let cmd = argv.first()?;
 
     if cmd.eq_ignore_ascii_case(b"BLPOP")
         || cmd.eq_ignore_ascii_case(b"BRPOP")
         || cmd.eq_ignore_ascii_case(b"BZPOPMAX")
         || cmd.eq_ignore_ascii_case(b"BZPOPMIN")
     {
-        if items.len() < 3 {
+        if argv.len() < 3 {
             return None;
         }
         // Last element is the timeout.
-        let timeout_bytes = match items.last() {
-            Some(RespFrame::BulkString(Some(b))) => b,
-            _ => return None,
-        };
+        let timeout_bytes = argv.last()?;
         let deadline_ms = parse_blocking_deadline(timeout_bytes, now_ms)?;
-        let keys: Vec<Vec<u8>> = items[1..items.len() - 1]
-            .iter()
-            .filter_map(|f| match f {
-                RespFrame::BulkString(Some(k)) => Some(k.clone()),
-                _ => None,
-            })
-            .collect();
+        let keys: Vec<Vec<u8>> = argv[1..argv.len() - 1].to_vec();
         if keys.is_empty() {
             return None;
         }
@@ -1830,30 +1812,15 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
         };
         Some(BlockedState { op, deadline_ms })
     } else if cmd.eq_ignore_ascii_case(b"BLMOVE") {
-        if items.len() != 6 {
+        if argv.len() != 6 {
             return None;
         }
-        let timeout_bytes = match &items[5] {
-            RespFrame::BulkString(Some(b)) => b,
-            _ => return None,
-        };
+        let timeout_bytes = &argv[5];
         let deadline_ms = parse_blocking_deadline(timeout_bytes, now_ms)?;
-        let source = match &items[1] {
-            RespFrame::BulkString(Some(b)) => b.clone(),
-            _ => return None,
-        };
-        let destination = match &items[2] {
-            RespFrame::BulkString(Some(b)) => b.clone(),
-            _ => return None,
-        };
-        let wherefrom = match &items[3] {
-            RespFrame::BulkString(Some(b)) => b.clone(),
-            _ => return None,
-        };
-        let whereto = match &items[4] {
-            RespFrame::BulkString(Some(b)) => b.clone(),
-            _ => return None,
-        };
+        let source = argv[1].clone();
+        let destination = argv[2].clone();
+        let wherefrom = argv[3].clone();
+        let whereto = argv[4].clone();
         Some(BlockedState {
             op: BlockingOp::BLmove {
                 source,
@@ -1864,22 +1831,13 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
             deadline_ms,
         })
     } else if cmd.eq_ignore_ascii_case(b"BRPOPLPUSH") {
-        if items.len() != 4 {
+        if argv.len() != 4 {
             return None;
         }
-        let timeout_bytes = match &items[3] {
-            RespFrame::BulkString(Some(b)) => b,
-            _ => return None,
-        };
+        let timeout_bytes = &argv[3];
         let deadline_ms = parse_blocking_deadline(timeout_bytes, now_ms)?;
-        let source = match &items[1] {
-            RespFrame::BulkString(Some(b)) => b.clone(),
-            _ => return None,
-        };
-        let destination = match &items[2] {
-            RespFrame::BulkString(Some(b)) => b.clone(),
-            _ => return None,
-        };
+        let source = argv[1].clone();
+        let destination = argv[2].clone();
         Some(BlockedState {
             op: BlockingOp::BLmove {
                 source,
@@ -1893,21 +1851,11 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
         // BLMPOP timeout numkeys key [...] LEFT|RIGHT [COUNT n]
         // BZMPOP timeout numkeys key [...] MIN|MAX [COUNT n]
         // Timeout is argv[1] in seconds (float).
-        if items.len() < 5 {
+        if argv.len() < 5 {
             return None;
         }
-        let timeout_bytes = match &items[1] {
-            RespFrame::BulkString(Some(b)) => b,
-            _ => return None,
-        };
+        let timeout_bytes = &argv[1];
         let deadline_ms = parse_blocking_deadline(timeout_bytes, now_ms)?;
-        let argv: Vec<Vec<u8>> = items
-            .iter()
-            .filter_map(|f| match f {
-                RespFrame::BulkString(Some(b)) => Some(b.clone()),
-                _ => None,
-            })
-            .collect();
         let op = if cmd.eq_ignore_ascii_case(b"BLMPOP") {
             BlockingOp::BLmpop { argv }
         } else {
@@ -1915,14 +1863,7 @@ fn try_build_blocked_state(frame: &RespFrame, now_ms: u64) -> Option<BlockedStat
         };
         Some(BlockedState { op, deadline_ms })
     } else if cmd.eq_ignore_ascii_case(b"XREAD") || cmd.eq_ignore_ascii_case(b"XREADGROUP") {
-        let deadline_ms = parse_xread_block_deadline(items, now_ms)?;
-        let argv: Vec<Vec<u8>> = items
-            .iter()
-            .filter_map(|f| match f {
-                RespFrame::BulkString(Some(b)) => Some(b.clone()),
-                _ => None,
-            })
-            .collect();
+        let deadline_ms = parse_xread_block_deadline_argv(&argv, now_ms)?;
         let op = if cmd.eq_ignore_ascii_case(b"XREAD") {
             BlockingOp::BXread { argv }
         } else {
@@ -2517,7 +2458,7 @@ mod tests {
         ReplicaSyncState, apply_pending_client_unblocks, check_blocked_clients,
         consume_complete_replication_prefix, drain_replica_stream, drive_replica_sync,
         encode_eof_marked_replication_snapshot, encode_replication_snapshot, find_crlf,
-        parse_blocking_deadline, parse_xread_block_deadline, read_frame_from_stream,
+        parse_blocking_deadline, parse_xread_block_deadline_argv, read_frame_from_stream,
         read_replication_snapshot_from_stream, replica_handshake_frame,
         replica_handshake_read_timeout, replication_follow_up_bytes, server_help_text,
         should_try_inline_parsing, sync_replica_with_primary, try_build_blocked_state,
@@ -3762,30 +3703,22 @@ mod tests {
 
     #[test]
     fn parse_xread_block_deadline_rejects_fractional_and_out_of_range_values() {
-        let fractional = vec![
-            RespFrame::BulkString(Some(b"XREAD".to_vec())),
-            RespFrame::BulkString(Some(b"BLOCK".to_vec())),
-            RespFrame::BulkString(Some(b"1.5".to_vec())),
-        ];
-        assert_eq!(parse_xread_block_deadline(&fractional, 123), None);
+        let fractional = vec![b"XREAD".to_vec(), b"BLOCK".to_vec(), b"1.5".to_vec()];
+        assert_eq!(parse_xread_block_deadline_argv(&fractional, 123), None);
 
-        let overflow = vec![
-            RespFrame::BulkString(Some(b"XREAD".to_vec())),
-            RespFrame::BulkString(Some(b"BLOCK".to_vec())),
-            RespFrame::BulkString(Some(b"1".to_vec())),
-        ];
-        assert_eq!(parse_xread_block_deadline(&overflow, u64::MAX), None);
+        let overflow = vec![b"XREAD".to_vec(), b"BLOCK".to_vec(), b"1".to_vec()];
+        assert_eq!(parse_xread_block_deadline_argv(&overflow, u64::MAX), None);
     }
 
     #[test]
     fn parse_xread_block_deadline_ignores_block_after_streams() {
-        let items = vec![
-            RespFrame::BulkString(Some(b"XREAD".to_vec())),
-            RespFrame::BulkString(Some(b"STREAMS".to_vec())),
-            RespFrame::BulkString(Some(b"BLOCK".to_vec())),
-            RespFrame::BulkString(Some(b"0-0".to_vec())),
+        let argv = vec![
+            b"XREAD".to_vec(),
+            b"STREAMS".to_vec(),
+            b"BLOCK".to_vec(),
+            b"0-0".to_vec(),
         ];
-        assert_eq!(parse_xread_block_deadline(&items, 123), None);
+        assert_eq!(parse_xread_block_deadline_argv(&argv, 123), None);
     }
 
     #[test]
@@ -3799,6 +3732,22 @@ mod tests {
             RespFrame::BulkString(Some(b"0-0".to_vec())),
         ]));
         assert!(try_build_blocked_state(&frame, 1_000).is_none());
+    }
+
+    #[test]
+    fn blocking_state_builder_accepts_resp3_integer_timeout() {
+        let frame = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"BLPOP".to_vec())),
+            RespFrame::BulkString(Some(b"list".to_vec())),
+            RespFrame::Integer(0),
+        ]));
+        let blocked = try_build_blocked_state(&frame, 1_000).expect("must block");
+        assert!(matches!(blocked.op, BlockingOp::BLpop { .. }));
+        let BlockingOp::BLpop { keys } = blocked.op else {
+            return;
+        };
+        assert_eq!(keys, vec![b"list".to_vec()]);
+        assert_eq!(blocked.deadline_ms, u64::MAX);
     }
 
     #[test]
