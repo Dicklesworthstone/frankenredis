@@ -128,6 +128,12 @@ struct ReplicaSyncState {
     retry_after_ms: u64,
 }
 
+impl Drop for ReplicaPrimaryConnection {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
+    }
+}
+
 impl ReplicaSyncState {
     fn new() -> Self {
         Self {
@@ -139,6 +145,12 @@ impl ReplicaSyncState {
     fn schedule_retry(&mut self, now_ms: u64) {
         self.connection = None;
         self.retry_after_ms = now_ms.saturating_add(REPLICA_RECONNECT_BACKOFF_MS);
+    }
+}
+
+impl Drop for ClientConnection {
+    fn drop(&mut self) {
+        let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 }
 
@@ -422,14 +434,12 @@ fn main() -> ExitCode {
         let has_blocked = !blocked_tokens.is_empty();
         let pending_writes = write_tokens.len();
         let tick_plan = plan_tick(0, pending_writes, tick_budget, EventLoopMode::Normal);
-        let poll_timeout = if tick_plan.poll_timeout_ms == 0 || has_blocked {
+        let poll_timeout = if tick_plan.poll_timeout_ms == 0 {
+            Some(std::time::Duration::from_millis(0))
+        } else if has_blocked {
             // When clients are blocked, use a short poll timeout so we
             // can check for available data and timeout expiry frequently.
-            Some(std::time::Duration::from_millis(if has_blocked {
-                100
-            } else {
-                0
-            }))
+            Some(std::time::Duration::from_millis(100))
         } else {
             Some(std::time::Duration::from_millis(tick_plan.poll_timeout_ms))
         };
