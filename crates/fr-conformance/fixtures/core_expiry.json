@@ -1656,6 +1656,110 @@
       }
     },
     {
+      "name": "expireat_non_integer_error",
+      "now_ms": 1000,
+      "argv": [
+        "EXPIREAT",
+        "exp_combo",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "pexpireat_non_integer_error",
+      "now_ms": 1000,
+      "argv": [
+        "PEXPIREAT",
+        "exp_combo",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "expireat_plus_one_error",
+      "now_ms": 1000,
+      "argv": [
+        "EXPIREAT",
+        "exp_combo",
+        "+1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "pexpireat_plus_one_error",
+      "now_ms": 1000,
+      "argv": [
+        "PEXPIREAT",
+        "exp_combo",
+        "+1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "expireat_leading_zero_error",
+      "now_ms": 1000,
+      "argv": [
+        "EXPIREAT",
+        "exp_combo",
+        "01"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "pexpireat_leading_zero_error",
+      "now_ms": 1000,
+      "argv": [
+        "PEXPIREAT",
+        "exp_combo",
+        "01"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "expireat_overflow_error",
+      "now_ms": 1000,
+      "argv": [
+        "EXPIREAT",
+        "exp_combo",
+        "9223372036854775808"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "pexpireat_overflow_error",
+      "now_ms": 1000,
+      "argv": [
+        "PEXPIREAT",
+        "exp_combo",
+        "9223372036854775808"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
       "name": "expiretime_wrong_arity",
       "now_ms": 1000,
       "argv": [
