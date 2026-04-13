@@ -444,6 +444,48 @@
       }
     },
     {
+      "name": "scan_count_noncanonical_plus",
+      "now_ms": 0,
+      "argv": [
+        "SCAN",
+        "0",
+        "COUNT",
+        "+1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "scan_count_noncanonical_leading_zero",
+      "now_ms": 0,
+      "argv": [
+        "SCAN",
+        "0",
+        "COUNT",
+        "01"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "scan_count_zero_rejected",
+      "now_ms": 0,
+      "argv": [
+        "SCAN",
+        "0",
+        "COUNT",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
       "name": "hscan_setup",
       "now_ms": 0,
       "argv": [
@@ -1054,6 +1096,36 @@
       }
     },
     {
+      "name": "hscan_count_noncanonical_plus",
+      "now_ms": 0,
+      "argv": [
+        "HSCAN",
+        "hs",
+        "0",
+        "COUNT",
+        "+1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "hscan_count_noncanonical_leading_zero",
+      "now_ms": 0,
+      "argv": [
+        "HSCAN",
+        "hs",
+        "0",
+        "COUNT",
+        "01"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
       "name": "sscan_match_pattern",
       "now_ms": 0,
       "argv": [
@@ -1140,6 +1212,36 @@
       }
     },
     {
+      "name": "sscan_count_noncanonical_plus",
+      "now_ms": 0,
+      "argv": [
+        "SSCAN",
+        "myset",
+        "0",
+        "COUNT",
+        "+1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "sscan_count_noncanonical_leading_zero",
+      "now_ms": 0,
+      "argv": [
+        "SSCAN",
+        "myset",
+        "0",
+        "COUNT",
+        "01"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
       "name": "zscan_match_pattern",
       "now_ms": 0,
       "argv": [
@@ -1219,6 +1321,36 @@
         "ZSCAN",
         "myzset",
         "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "zscan_count_noncanonical_plus",
+      "now_ms": 0,
+      "argv": [
+        "ZSCAN",
+        "myzset",
+        "0",
+        "COUNT",
+        "+1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "zscan_count_noncanonical_leading_zero",
+      "now_ms": 0,
+      "argv": [
+        "ZSCAN",
+        "myzset",
+        "0",
+        "COUNT",
+        "01"
       ],
       "expect": {
         "kind": "error",

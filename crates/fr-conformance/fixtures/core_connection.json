@@ -121,6 +121,54 @@
       }
     },
     {
+      "name": "select_noncanonical_plus",
+      "now_ms": 14,
+      "argv": [
+        "SELECT",
+        "+1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "select_noncanonical_leading_zero",
+      "now_ms": 15,
+      "argv": [
+        "SELECT",
+        "01"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "select_db15_ok",
+      "now_ms": 16,
+      "argv": [
+        "SELECT",
+        "15"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "select_db0_after_db15",
+      "now_ms": 17,
+      "argv": [
+        "SELECT",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
       "name": "dbsize_empty_returns_0",
       "now_ms": 20,
       "argv": [
