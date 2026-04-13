@@ -834,6 +834,175 @@
           }
         ]
       }
+    },
+    {
+      "name": "replicaof_rejects_leading_plus_port",
+      "now_ms": 0,
+      "argv": [
+        "REPLICAOF",
+        "127.0.0.1",
+        "+6379"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "replicaof_rejects_leading_zero_port",
+      "now_ms": 0,
+      "argv": [
+        "REPLICAOF",
+        "127.0.0.1",
+        "06379"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "replicaof_rejects_negative_port",
+      "now_ms": 0,
+      "argv": [
+        "REPLICAOF",
+        "127.0.0.1",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "replicaof_rejects_port_too_large",
+      "now_ms": 0,
+      "argv": [
+        "REPLICAOF",
+        "127.0.0.1",
+        "65536"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "replicaof_rejects_non_numeric_port",
+      "now_ms": 0,
+      "argv": [
+        "REPLICAOF",
+        "127.0.0.1",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "slaveof_rejects_leading_plus_port",
+      "now_ms": 0,
+      "argv": [
+        "SLAVEOF",
+        "127.0.0.1",
+        "+6379"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "slaveof_rejects_leading_zero_port",
+      "now_ms": 0,
+      "argv": [
+        "SLAVEOF",
+        "127.0.0.1",
+        "06379"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "slaveof_rejects_negative_port",
+      "now_ms": 0,
+      "argv": [
+        "SLAVEOF",
+        "127.0.0.1",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "psync_rejects_leading_plus_offset",
+      "now_ms": 0,
+      "argv": [
+        "PSYNC",
+        "?",
+        "+100"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "psync_rejects_leading_zero_offset",
+      "now_ms": 0,
+      "argv": [
+        "PSYNC",
+        "?",
+        "0100"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "replicaof_accepts_port_65535",
+      "now_ms": 0,
+      "argv": [
+        "REPLICAOF",
+        "127.0.0.1",
+        "65535"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "replicaof_accepts_port_1",
+      "now_ms": 0,
+      "argv": [
+        "REPLICAOF",
+        "127.0.0.1",
+        "1"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "replicaof_back_to_master_after_port_tests",
+      "now_ms": 0,
+      "argv": [
+        "REPLICAOF",
+        "NO",
+        "ONE"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     }
   ]
 }

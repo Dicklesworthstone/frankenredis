@@ -1308,6 +1308,41 @@
         "kind": "error",
         "value": "ERR syntax error"
       }
+    },
+    {
+      "name": "client_id_returns_integer",
+      "now_ms": 290,
+      "argv": [
+        "CLIENT",
+        "ID"
+      ],
+      "expect": {
+        "kind": "any_integer"
+      }
+    },
+    {
+      "name": "client_info_returns_bulk_string",
+      "now_ms": 291,
+      "argv": [
+        "CLIENT",
+        "INFO"
+      ],
+      "expect": {
+        "kind": "any_bulk"
+      }
+    },
+    {
+      "name": "client_info_wrong_arity",
+      "now_ms": 292,
+      "argv": [
+        "CLIENT",
+        "INFO",
+        "extra"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'client' command"
+      }
     }
   ]
 }

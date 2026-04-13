@@ -7765,7 +7765,7 @@ fn sintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
-    let keys_end = 2 + numkeys;
+    let keys_end = 2_usize.saturating_add(numkeys);
     if keys_end > argv.len() {
         return Err(CommandError::SyntaxError);
     }
@@ -8013,7 +8013,7 @@ fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
-    let keys_end = 2 + numkeys;
+    let keys_end = 2_usize.saturating_add(numkeys);
     if keys_end >= argv.len() {
         return Err(CommandError::SyntaxError);
     }
@@ -8085,7 +8085,7 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
-    let keys_end = 2 + numkeys;
+    let keys_end = 2_usize.saturating_add(numkeys);
     if keys_end >= argv.len() {
         return Err(CommandError::SyntaxError);
     }
@@ -10529,14 +10529,18 @@ fn randomkey(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 
 // ── SCAN family ──────────────────────────────────────────────────────
 
-#[allow(clippy::type_complexity)]
-fn parse_scan_args(
-    argv: &[Vec<u8>],
-    start_idx: usize,
-) -> Result<(Option<Vec<u8>>, usize, Option<Vec<u8>>), CommandError> {
+struct ScanArgs {
+    pattern: Option<Vec<u8>>,
+    count: usize,
+    type_filter: Option<Vec<u8>>,
+    novalues: bool,
+}
+
+fn parse_scan_args(argv: &[Vec<u8>], start_idx: usize) -> Result<ScanArgs, CommandError> {
     let mut pattern: Option<Vec<u8>> = None;
     let mut count: usize = 10;
     let mut type_filter: Option<Vec<u8>> = None;
+    let mut novalues = false;
     let mut i = start_idx;
     while i < argv.len() {
         let kw = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -10562,11 +10566,19 @@ fn parse_scan_args(
             }
             type_filter = Some(argv[i + 1].clone());
             i += 2;
+        } else if kw.eq_ignore_ascii_case("NOVALUES") {
+            novalues = true;
+            i += 1;
         } else {
             return Err(CommandError::SyntaxError);
         }
     }
-    Ok((pattern, count, type_filter))
+    Ok(ScanArgs {
+        pattern,
+        count,
+        type_filter,
+        novalues,
+    })
 }
 
 fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -10575,11 +10587,11 @@ fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     }
     let cursor = parse_u64_full_arg(&argv[1])?;
 
-    let (pattern, count, type_filter) = parse_scan_args(argv, 2)?;
-    let (next_cursor, keys) = store.scan(cursor, pattern.as_deref(), count, now_ms);
+    let args = parse_scan_args(argv, 2)?;
+    let (next_cursor, keys) = store.scan(cursor, args.pattern.as_deref(), args.count, now_ms);
 
     // Apply TYPE filter if specified
-    let keys: Vec<Vec<u8>> = if let Some(ref tf) = type_filter {
+    let keys: Vec<Vec<u8>> = if let Some(ref tf) = args.type_filter {
         let tf_str = std::str::from_utf8(tf).map_err(|_| CommandError::InvalidUtf8Argument)?;
         keys.into_iter()
             .filter(|k| {
@@ -10609,16 +10621,26 @@ fn hscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let key = &argv[1];
     let cursor = parse_u64_full_arg(&argv[2])?;
 
-    let (pattern, count, _type_filter) = parse_scan_args(argv, 3)?;
+    let args = parse_scan_args(argv, 3)?;
     let (next_cursor, pairs) = store
-        .hscan(key, cursor, pattern.as_deref(), count, now_ms)
+        .hscan(key, cursor, args.pattern.as_deref(), args.count, now_ms)
         .map_err(CommandError::Store)?;
 
-    let mut items = Vec::with_capacity(pairs.len() * 2);
-    for (field, value) in pairs {
-        items.push(RespFrame::BulkString(Some(field)));
-        items.push(RespFrame::BulkString(Some(value)));
-    }
+    let items: Vec<RespFrame> = if args.novalues {
+        // NOVALUES: return only field names
+        pairs
+            .into_iter()
+            .map(|(field, _)| RespFrame::BulkString(Some(field)))
+            .collect()
+    } else {
+        // Default: return field-value pairs
+        let mut result = Vec::with_capacity(pairs.len() * 2);
+        for (field, value) in pairs {
+            result.push(RespFrame::BulkString(Some(field)));
+            result.push(RespFrame::BulkString(Some(value)));
+        }
+        result
+    };
     Ok(RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(next_cursor.to_string().into_bytes())),
         RespFrame::Array(Some(items)),
@@ -10632,9 +10654,9 @@ fn sscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let key = &argv[1];
     let cursor = parse_u64_full_arg(&argv[2])?;
 
-    let (pattern, count, _type_filter) = parse_scan_args(argv, 3)?;
+    let args = parse_scan_args(argv, 3)?;
     let (next_cursor, members) = store
-        .sscan(key, cursor, pattern.as_deref(), count, now_ms)
+        .sscan(key, cursor, args.pattern.as_deref(), args.count, now_ms)
         .map_err(CommandError::Store)?;
 
     let member_frames: Vec<RespFrame> = members
@@ -10654,16 +10676,26 @@ fn zscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let key = &argv[1];
     let cursor = parse_u64_full_arg(&argv[2])?;
 
-    let (pattern, count, _type_filter) = parse_scan_args(argv, 3)?;
+    let args = parse_scan_args(argv, 3)?;
     let (next_cursor, pairs) = store
-        .zscan(key, cursor, pattern.as_deref(), count, now_ms)
+        .zscan(key, cursor, args.pattern.as_deref(), args.count, now_ms)
         .map_err(CommandError::Store)?;
 
-    let mut items = Vec::with_capacity(pairs.len() * 2);
-    for (member, score) in pairs {
-        items.push(RespFrame::BulkString(Some(member)));
-        items.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
-    }
+    let items: Vec<RespFrame> = if args.novalues {
+        // NOVALUES: return only member names (no scores)
+        pairs
+            .into_iter()
+            .map(|(member, _)| RespFrame::BulkString(Some(member)))
+            .collect()
+    } else {
+        // Default: return member-score pairs
+        let mut result = Vec::with_capacity(pairs.len() * 2);
+        for (member, score) in pairs {
+            result.push(RespFrame::BulkString(Some(member)));
+            result.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+        }
+        result
+    };
     Ok(RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(next_cursor.to_string().into_bytes())),
         RespFrame::Array(Some(items)),
@@ -11404,7 +11436,9 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if argv.len() < 3_usize.saturating_add(numkeys) {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
-    let keys: Vec<&[u8]> = (0..numkeys).map(|i| argv[3_usize.saturating_add(i)].as_slice()).collect();
+    let keys: Vec<&[u8]> = (0..numkeys)
+        .map(|i| argv[3_usize.saturating_add(i)].as_slice())
+        .collect();
     let first_members = store.zget_members_with_scores(keys[0], now_ms)?;
     let mut result: std::collections::HashMap<Vec<u8>, f64> = std::collections::HashMap::new();
     for (member, score) in first_members {
@@ -12517,10 +12551,10 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
-    if argv.len() < 3 + numkeys + 1 {
+    if argv.len() < 3_usize.saturating_add(numkeys).saturating_add(1) {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
-    let direction_idx = 3 + numkeys;
+    let direction_idx = 3_usize.saturating_add(numkeys);
     let direction =
         std::str::from_utf8(&argv[direction_idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     let is_left = if direction.eq_ignore_ascii_case("LEFT") {
@@ -12706,10 +12740,10 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
-    if argv.len() < 3 + numkeys + 1 {
+    if argv.len() < 3_usize.saturating_add(numkeys).saturating_add(1) {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     }
-    let direction_idx = 3 + numkeys;
+    let direction_idx = 3_usize.saturating_add(numkeys);
     let direction =
         std::str::from_utf8(&argv[direction_idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     let use_min = if direction.eq_ignore_ascii_case("MIN") {
@@ -23926,12 +23960,8 @@ mod tests {
     #[test]
     fn latency_histogram_returns_empty_array() {
         let mut store = Store::new();
-        let out = dispatch_argv(
-            &[b"LATENCY".to_vec(), b"HISTOGRAM".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("latency histogram");
+        let out = dispatch_argv(&[b"LATENCY".to_vec(), b"HISTOGRAM".to_vec()], &mut store, 0)
+            .expect("latency histogram");
         assert_eq!(out, RespFrame::Array(Some(vec![])));
 
         // With command arguments (should still return empty)

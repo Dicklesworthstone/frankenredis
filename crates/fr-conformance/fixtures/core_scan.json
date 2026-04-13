@@ -2488,6 +2488,162 @@
       }
     },
     {
+      "name": "hscan_novalues_setup",
+      "now_ms": 450,
+      "argv": [
+        "HSET",
+        "h_novalues",
+        "field1",
+        "value1",
+        "field2",
+        "value2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "hscan_novalues_returns_keys_only",
+      "now_ms": 450,
+      "argv": [
+        "HSCAN",
+        "h_novalues",
+        "0",
+        "NOVALUES"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "field1"
+              },
+              {
+                "kind": "bulk",
+                "value": "field2"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "hscan_novalues_with_match",
+      "now_ms": 450,
+      "argv": [
+        "HSCAN",
+        "h_novalues",
+        "0",
+        "MATCH",
+        "field1",
+        "NOVALUES"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "field1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "zscan_novalues_setup",
+      "now_ms": 460,
+      "argv": [
+        "ZADD",
+        "z_novalues",
+        "1.0",
+        "member1",
+        "2.0",
+        "member2"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
+    },
+    {
+      "name": "zscan_novalues_returns_members_only",
+      "now_ms": 460,
+      "argv": [
+        "ZSCAN",
+        "z_novalues",
+        "0",
+        "NOVALUES"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "member1"
+              },
+              {
+                "kind": "bulk",
+                "value": "member2"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "zscan_novalues_with_match",
+      "now_ms": 460,
+      "argv": [
+        "ZSCAN",
+        "z_novalues",
+        "0",
+        "MATCH",
+        "member1",
+        "NOVALUES"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "member1"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
       "name": "scan_edge_cleanup",
       "now_ms": 500,
       "argv": [
