@@ -133,6 +133,14 @@ impl BufferedTcpClient {
         }
     }
 
+    fn read_responses(&mut self, count: usize) -> Vec<RespFrame> {
+        let mut frames = Vec::with_capacity(count);
+        for _ in 0..count {
+            frames.push(self.read_response());
+        }
+        frames
+    }
+
     fn send_command(&mut self, parts: &[&[u8]]) -> RespFrame {
         self.write_all(&encode_command(parts));
         self.read_response()
@@ -442,8 +450,15 @@ fn start_single_client_server() -> (u16, thread::JoinHandle<()>) {
             let n = match stream.read(&mut buf) {
                 Ok(0) => break, // client disconnected
                 Ok(n) => n,
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => break,
+                Err(ref e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
                 Err(e) => panic!("server read error: {e}"),
             };
             read_buf.extend_from_slice(&buf[..n]);
@@ -1066,25 +1081,27 @@ fn tcp_pubsub_multiple_subscribers() {
     let port = reserve_port();
     let _server = spawn_frankenredis(port, None);
 
-    let mut sub_a = connect_client(port);
+    let mut sub_a = BufferedTcpClient::connect(port);
     sub_a
+        .stream
         .write_all(&encode_command(&[b"SUBSCRIBE", b"chat"]))
         .unwrap();
-    let _ = read_responses(&mut sub_a, 1);
+    let _ = sub_a.read_responses(1);
 
-    let mut sub_b = connect_client(port);
+    let mut sub_b = BufferedTcpClient::connect(port);
     sub_b
+        .stream
         .write_all(&encode_command(&[b"SUBSCRIBE", b"chat"]))
         .unwrap();
-    let _ = read_responses(&mut sub_b, 1);
+    let _ = sub_b.read_responses(1);
 
     let mut pub_client = connect_client(port);
     let pub_resp = send_command(&mut pub_client, &[b"PUBLISH", b"chat", b"broadcast"]);
     assert_eq!(pub_resp, RespFrame::Integer(2), "expected 2 subscribers");
 
-    let msg_a = read_responses(&mut sub_a, 1);
+    let msg_a = sub_a.read_responses(1);
     assert_eq!(msg_a[0], pubsub_message_frame("chat", "broadcast"));
-    let msg_b = read_responses(&mut sub_b, 1);
+    let msg_b = sub_b.read_responses(1);
     assert_eq!(msg_b[0], pubsub_message_frame("chat", "broadcast"));
 
     send_shutdown_nosave(port);
@@ -1095,11 +1112,12 @@ fn tcp_pubsub_pattern_subscribe() {
     let port = reserve_port();
     let _server = spawn_frankenredis(port, None);
 
-    let mut sub_client = connect_client(port);
+    let mut sub_client = BufferedTcpClient::connect(port);
     sub_client
+        .stream
         .write_all(&encode_command(&[b"PSUBSCRIBE", b"news.*"]))
         .unwrap();
-    let confirms = read_responses(&mut sub_client, 1);
+    let confirms = sub_client.read_responses(1);
     assert_eq!(
         confirms[0],
         RespFrame::Array(Some(vec![
@@ -1113,7 +1131,7 @@ fn tcp_pubsub_pattern_subscribe() {
     let pub_resp = send_command(&mut pub_client, &[b"PUBLISH", b"news.sports", b"goal!"]);
     assert_eq!(pub_resp, RespFrame::Integer(1));
 
-    let msgs = read_responses(&mut sub_client, 1);
+    let msgs = sub_client.read_responses(1);
     assert_eq!(
         msgs[0],
         RespFrame::Array(Some(vec![
