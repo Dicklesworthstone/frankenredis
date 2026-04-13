@@ -842,8 +842,84 @@
       }
     },
     {
-      "name": "memory_wrong_arity",
+      "name": "memory_usage_setup",
       "now_ms": 14006,
+      "argv": [
+        "SET",
+        "mem_usage_key",
+        "hello"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "memory_usage_existing_key",
+      "now_ms": 14007,
+      "argv": [
+        "MEMORY",
+        "USAGE",
+        "mem_usage_key"
+      ],
+      "expect": {
+        "kind": "any_integer"
+      }
+    },
+    {
+      "name": "memory_usage_nonexistent_key",
+      "now_ms": 14008,
+      "argv": [
+        "MEMORY",
+        "USAGE",
+        "no_such_key_mem"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
+    },
+    {
+      "name": "memory_usage_with_samples",
+      "now_ms": 14009,
+      "argv": [
+        "MEMORY",
+        "USAGE",
+        "mem_usage_key",
+        "SAMPLES",
+        "5"
+      ],
+      "expect": {
+        "kind": "any_integer"
+      }
+    },
+    {
+      "name": "memory_usage_cleanup",
+      "now_ms": 14010,
+      "argv": [
+        "DEL",
+        "mem_usage_key"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "memory_malloc_stats",
+      "now_ms": 14011,
+      "argv": [
+        "MEMORY",
+        "MALLOC-STATS"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "Memory allocator stats not available"
+      }
+    },
+    {
+      "name": "memory_wrong_arity",
+      "now_ms": 14012,
       "argv": [
         "MEMORY"
       ],
