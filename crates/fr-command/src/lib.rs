@@ -12039,6 +12039,13 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
         Ok(RespFrame::BulkString(Some(
             latency_doctor_report(store).into_bytes(),
         )))
+    } else if sub.eq_ignore_ascii_case("HISTOGRAM") {
+        // LATENCY HISTOGRAM [command ...]
+        // Returns cumulative distribution of latencies for commands.
+        // Currently returns an empty array as per-command latency histograms
+        // are not yet tracked. Full implementation would return map-like data.
+        // TODO: Implement full histogram tracking per-command.
+        Ok(RespFrame::Array(Some(vec![])))
     } else if sub.eq_ignore_ascii_case("HELP") {
         if argv.len() != 2 {
             return Err(CommandError::WrongSubcommandArity {
@@ -12058,6 +12065,9 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
             )),
             RespFrame::BulkString(Some(
                 b"HISTORY <event> - Return latency history for an event.".to_vec(),
+            )),
+            RespFrame::BulkString(Some(
+                b"HISTOGRAM [command ...] - Return latency histograms for commands.".to_vec(),
             )),
             RespFrame::BulkString(Some(b"RESET [<event> ...] - Reset latency data.".to_vec())),
             RespFrame::BulkString(Some(
@@ -23910,6 +23920,52 @@ mod tests {
                 assert!(text.contains("- command: 2 samples, latest 7 ms, max 7 ms"));
             }
             other => panic!("expected bulk string, got {other:?}"), // ubs:ignore — AI triage
+        }
+    }
+
+    #[test]
+    fn latency_histogram_returns_empty_array() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"LATENCY".to_vec(), b"HISTOGRAM".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("latency histogram");
+        assert_eq!(out, RespFrame::Array(Some(vec![])));
+
+        // With command arguments (should still return empty)
+        let out = dispatch_argv(
+            &[
+                b"LATENCY".to_vec(),
+                b"HISTOGRAM".to_vec(),
+                b"GET".to_vec(),
+                b"SET".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("latency histogram with commands");
+        assert_eq!(out, RespFrame::Array(Some(vec![])));
+    }
+
+    #[test]
+    fn latency_help_includes_histogram() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"LATENCY".to_vec(), b"HELP".to_vec()], &mut store, 0)
+            .expect("latency help");
+        match out {
+            RespFrame::Array(Some(items)) => {
+                let has_histogram = items.iter().any(|item| {
+                    if let RespFrame::BulkString(Some(bytes)) = item {
+                        bytes.starts_with(b"HISTOGRAM")
+                    } else {
+                        false
+                    }
+                });
+                assert!(has_histogram, "HELP should include HISTOGRAM");
+            }
+            other => panic!("expected array, got {other:?}"), // ubs:ignore — AI triage
         }
     }
 
