@@ -979,45 +979,6 @@ fn tcp_rdb_restart_preserves_all_data() {
 
 // ---------- Pub/Sub cross-client tests ----------
 
-/// Read multiple RESP frames from a stream until we get the expected count.
-fn read_responses(stream: &mut TcpStream, count: usize) -> Vec<RespFrame> {
-    let mut frames = Vec::new();
-    let mut buf = vec![0u8; 65536];
-    let mut accumulated = Vec::new();
-    let deadline = Instant::now() + Duration::from_secs(10);
-
-    while frames.len() < count {
-        match stream.read(&mut buf) {
-            Ok(0) => panic!("server closed connection while waiting for {count} frames"),
-            Ok(n) => {
-                accumulated.extend_from_slice(&buf[..n]);
-                while let Ok(parsed) = parse_frame(&accumulated) {
-                    frames.push(parsed.frame);
-                    accumulated.drain(..parsed.consumed);
-                    if frames.len() >= count {
-                        break;
-                    }
-                }
-            }
-            Err(ref err)
-                if matches!(
-                    err.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
-            {
-                assert!(
-                    Instant::now() < deadline,
-                    "timed out waiting for {count} frames (got {})",
-                    frames.len()
-                );
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(err) => panic!("read error: {err}"),
-        }
-    }
-    frames
-}
-
 fn pubsub_subscribe_frame(channel: &str, count: i64) -> RespFrame {
     RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(b"subscribe".to_vec())),
@@ -1039,24 +1000,26 @@ fn tcp_pubsub_basic_cross_client_delivery() {
     let port = reserve_port();
     let _server = spawn_frankenredis(port, None);
 
-    let mut sub_client = connect_client(port);
+    let mut sub_client = BufferedTcpClient::connect(port);
     sub_client
+        .stream
         .write_all(&encode_command(&[b"SUBSCRIBE", b"channel1"]))
         .unwrap();
-    let confirms = read_responses(&mut sub_client, 1);
+    let confirms = sub_client.read_responses(1);
     assert_eq!(confirms[0], pubsub_subscribe_frame("channel1", 1));
 
     let mut pub_client = connect_client(port);
     let pub_resp = send_command(&mut pub_client, &[b"PUBLISH", b"channel1", b"hello"]);
     assert_eq!(pub_resp, RespFrame::Integer(1), "expected 1 subscriber");
 
-    let msgs = read_responses(&mut sub_client, 1);
+    let msgs = sub_client.read_responses(1);
     assert_eq!(msgs[0], pubsub_message_frame("channel1", "hello"));
 
     sub_client
+        .stream
         .write_all(&encode_command(&[b"UNSUBSCRIBE", b"channel1"]))
         .unwrap();
-    let unsub = read_responses(&mut sub_client, 1);
+    let unsub = sub_client.read_responses(1);
     assert_eq!(
         unsub[0],
         RespFrame::Array(Some(vec![
