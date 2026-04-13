@@ -7012,8 +7012,12 @@ slave_repl_offset:{primary_offset}\r\n"
             self.server.replica_reconfigure_requested = true;
             return RespFrame::SimpleString("OK".to_string());
         }
-        let Ok(port) = port.parse::<u16>() else {
-            return CommandError::InvalidInteger.to_resp();
+        let port = match parse_i64_arg(&argv[2]) {
+            Ok(value) => match u16::try_from(value) {
+                Ok(port) => port,
+                Err(_) => return CommandError::InvalidInteger.to_resp(),
+            },
+            Err(_) => return CommandError::InvalidInteger.to_resp(),
         };
         if matches!(
             &self.server.replication_runtime_state.role,
