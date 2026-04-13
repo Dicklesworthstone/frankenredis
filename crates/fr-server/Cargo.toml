@@ -18,3 +18,10 @@ fr-persist = { path = "../fr-persist" }
 fr-command = { path = "../fr-command" }
 fr-eventloop = { path = "../fr-eventloop" }
 mio = { version = "1.0", features = ["net", "os-poll"] }
+tikv-jemallocator = { version = "0.6", optional = true }
+mimalloc = { version = "0.1", optional = true }
+
+[features]
+default = []
+jemalloc = ["dep:tikv-jemallocator"]
+mimalloc = ["dep:mimalloc"]
