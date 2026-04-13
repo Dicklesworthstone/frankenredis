@@ -801,16 +801,19 @@ mod tests {
 
     #[test]
     fn fr_p2c_002_u011_invalid_utf8_consistency() {
-        let cases = [
-            b"+\xff\r\n".as_slice(),
-            b"-\xff\r\n".as_slice(),
-            b":\xff\r\n".as_slice(),
+        // Test that invalid UTF-8 in scalar frames is rejected appropriately.
+        // Simple strings and errors should fail with InvalidUtf8, while integers
+        // fail with InvalidInteger (0xFF is not a valid digit).
+        let cases: [(&[u8], RespParseError); 3] = [
+            (b"+\xff\r\n", RespParseError::InvalidUtf8),
+            (b"-\xff\r\n", RespParseError::InvalidUtf8),
+            (b":\xff\r\n", RespParseError::InvalidInteger),
         ];
         let mut input_acc = Vec::new();
         let mut output_acc = Vec::new();
-        for input in cases {
-            let err = parse_frame(input).expect_err("invalid UTF-8 scalar must fail");
-            assert_eq!(err, RespParseError::InvalidUtf8);
+        for (input, expected_err) in cases {
+            let err = parse_frame(input).expect_err("invalid scalar must fail");
+            assert_eq!(err, expected_err);
             input_acc.extend_from_slice(input);
             output_acc.extend_from_slice(err.to_string().as_bytes());
         }
