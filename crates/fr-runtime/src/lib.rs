@@ -1234,6 +1234,9 @@ pub struct ServerState {
     pub blocked_client_ids: HashSet<u64>,
     /// Pending CLIENT UNBLOCK requests to be applied by the standalone server.
     pending_client_unblocks: Vec<(u64, ClientUnblockMode)>,
+    /// Flag set when REPLICAOF/SLAVEOF changes should force the event loop
+    /// to reset replica sync state (drop primary connection and reconnect).
+    replica_reconfigure_requested: bool,
 }
 
 impl Default for ServerState {
@@ -1292,6 +1295,7 @@ impl Default for ServerState {
             client_pause_all: false,
             blocked_client_ids: HashSet::new(),
             pending_client_unblocks: Vec::new(),
+            replica_reconfigure_requested: false,
         }
     }
 }
@@ -2081,6 +2085,13 @@ impl Runtime {
             ));
         }
         Some(("?".to_string(), -1))
+    }
+
+    #[must_use]
+    pub fn take_replica_reconfigure_request(&mut self) -> bool {
+        let requested = self.server.replica_reconfigure_requested;
+        self.server.replica_reconfigure_requested = false;
+        requested
     }
 
     pub fn set_replica_connection_state(&mut self, state: &'static str) {
@@ -6998,6 +7009,7 @@ slave_repl_offset:{primary_offset}\r\n"
                 .rotate_backlog_identity();
             self.server.replication_runtime_state.replicas.clear();
             self.server.refresh_replica_ack_snapshots();
+            self.server.replica_reconfigure_requested = true;
             return RespFrame::SimpleString("OK".to_string());
         }
         let Ok(port) = port.parse::<u16>() else {
@@ -7018,6 +7030,7 @@ slave_repl_offset:{primary_offset}\r\n"
             port,
             state: "connect",
         };
+        self.server.replica_reconfigure_requested = true;
         RespFrame::SimpleString("OK".to_string())
     }
 

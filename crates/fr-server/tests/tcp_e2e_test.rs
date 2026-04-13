@@ -524,21 +524,20 @@ fn tcp_set_get_roundtrip() {
 fn tcp_multiple_commands_pipelined() {
     let (port, server) = start_single_client_server();
 
-    let mut client = TcpStream::connect(format!("127.0.0.1:{port}")).expect("connect");
-    client.set_read_timeout(Some(Duration::from_secs(5))).ok();
+    let mut client = BufferedTcpClient::connect(port);
 
     // Pipeline: send SET + GET in one write
     let mut pipeline = Vec::new();
     pipeline.extend_from_slice(&encode_command(&[b"SET", b"pipe_key", b"pipe_val"]));
     pipeline.extend_from_slice(&encode_command(&[b"GET", b"pipe_key"]));
-    client.write_all(&pipeline).unwrap();
+    client.write_all(&pipeline);
 
-    let set_resp = read_response(&mut client);
-    assert_eq!(set_resp, RespFrame::SimpleString("OK".to_string()));
-
-    let get_resp = read_response(&mut client);
-    assert_eq!(get_resp, RespFrame::BulkString(Some(b"pipe_val".to_vec())));
-
+    let responses = client.read_responses(2);
+    assert_eq!(responses[0], RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(
+        responses[1],
+        RespFrame::BulkString(Some(b"pipe_val".to_vec()))
+    );
     drop(client);
     server.join().expect("server thread");
 }

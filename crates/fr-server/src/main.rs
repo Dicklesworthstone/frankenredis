@@ -6,6 +6,17 @@
 
 #![forbid(unsafe_code)]
 
+#[cfg(all(feature = "jemalloc", feature = "mimalloc"))]
+compile_error!("features \"jemalloc\" and \"mimalloc\" are mutually exclusive");
+
+#[cfg(feature = "jemalloc")]
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::collections::{HashMap, HashSet};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream as StdTcpStream};
@@ -1445,13 +1456,16 @@ fn sync_replica_with_primary(
             &mut read_buf,
             runtime.server.query_buffer_limit,
         )?;
-        if disconnected {
+        // First try to process any buffered data before erroring out on disconnect.
+        // The primary might have sent data before closing the connection.
+        let payload = consume_complete_replication_prefix(&mut read_buf, &parser_config)?;
+        if disconnected && payload.is_empty() {
             return Err(io::Error::new(
                 ErrorKind::UnexpectedEof,
                 "primary closed replication stream during sync",
             ));
         }
-        consume_complete_replication_prefix(&mut read_buf, &parser_config)?
+        payload
     };
 
     runtime
@@ -1609,6 +1623,10 @@ fn drain_replica_stream(
 }
 
 fn drive_replica_sync(runtime: &mut Runtime, replica_sync: &mut ReplicaSyncState, now_ms: u64) {
+    if runtime.take_replica_reconfigure_request() {
+        replica_sync.connection = None;
+        replica_sync.retry_after_ms = 0;
+    }
     if let Some(connection) = replica_sync.connection.as_mut() {
         queue_replica_periodic_ack(runtime, connection, now_ms);
         if let Err(err) =
@@ -2787,6 +2805,8 @@ mod tests {
             ),
             RespFrame::SimpleString("OK".to_string())
         );
+        // Clear reconfigure flag so sync proceeds instead of resetting.
+        let _ = replica.take_replica_reconfigure_request();
         drive_replica_sync(&mut replica, &mut replica_sync, 3);
 
         assert_eq!(
@@ -2911,6 +2931,8 @@ mod tests {
             ),
             RespFrame::SimpleString("OK".to_string())
         );
+        // Clear reconfigure flag so sync proceeds instead of resetting.
+        let _ = replica.take_replica_reconfigure_request();
         drive_replica_sync(&mut replica, &mut replica_sync, 3);
 
         assert_eq!(
@@ -2945,7 +2967,8 @@ mod tests {
         let payload = consume_complete_replication_prefix(&mut read_buf, &ParserConfig::default())
             .expect("prefix parse");
         assert_eq!(payload, frame1_bytes);
-        assert_eq!(read_buf, frame2_bytes[split_at..]);
+        // After consuming the complete frame, the incomplete frame remains
+        assert_eq!(read_buf, &frame2_bytes[..split_at]);
     }
 
     #[test]
@@ -3087,6 +3110,8 @@ mod tests {
             ),
             RespFrame::SimpleString("OK".to_string())
         );
+        // Clear reconfigure flag so sync proceeds instead of resetting.
+        let _ = replica.take_replica_reconfigure_request();
 
         drive_replica_sync(&mut replica, &mut replica_sync, 1);
         drive_replica_sync(&mut replica, &mut replica_sync, 2);
@@ -3229,6 +3254,8 @@ mod tests {
             ),
             RespFrame::SimpleString("OK".to_string())
         );
+        // Clear reconfigure flag so sync proceeds instead of resetting.
+        let _ = replica.take_replica_reconfigure_request();
 
         drive_replica_sync(&mut replica, &mut replica_sync, 1);
         drive_replica_sync(&mut replica, &mut replica_sync, 2);
@@ -3383,6 +3410,8 @@ mod tests {
             ),
             RespFrame::SimpleString("OK".to_string())
         );
+        // Clear reconfigure flag so sync proceeds instead of resetting.
+        let _ = replica.take_replica_reconfigure_request();
 
         drive_replica_sync(&mut replica, &mut replica_sync, 1);
         drive_replica_sync(
@@ -3412,6 +3441,9 @@ mod tests {
             ),
             RespFrame::SimpleString("OK".to_string())
         );
+        // Clear the reconfigure flag so we test connection-failure retry behavior,
+        // not the reconfigure-reset behavior.
+        let _ = runtime.take_replica_reconfigure_request();
 
         let stream = StdTcpStream::connect(addr).expect("connect primary");
         let (server_stream, _) = listener.accept().expect("accept replica");
@@ -3445,6 +3477,39 @@ mod tests {
                 RespFrame::Integer(0),
             ]))
         );
+    }
+
+    #[test]
+    fn replicaof_reconfigure_resets_replica_sync_state() {
+        let mut runtime = Runtime::default_strict();
+        let mut replica_sync = ReplicaSyncState::new();
+        // Simulate an existing replica connection.
+        let listener = StdTcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let stream = StdTcpStream::connect(addr).expect("connect");
+        let (server_stream, _) = listener.accept().expect("accept");
+        drop(server_stream);
+        replica_sync.connection = Some(ReplicaPrimaryConnection {
+            stream,
+            read_buf: Vec::new(),
+            write_buf: Vec::new(),
+            next_ack_ms: 0,
+        });
+
+        assert_eq!(
+            runtime.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"REPLICAOF".to_vec())),
+                    RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                    RespFrame::BulkString(Some(b"6380".to_vec())),
+                ])),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        drive_replica_sync(&mut runtime, &mut replica_sync, 1);
+        assert!(replica_sync.connection.is_none());
+        assert!(replica_sync.retry_after_ms >= 1 + REPLICA_RECONNECT_BACKOFF_MS);
     }
 
     #[test]
