@@ -180,6 +180,123 @@
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
       }
+    },
+    {
+      "name": "migrate_port_leading_plus",
+      "now_ms": 20,
+      "argv": ["MIGRATE", "127.0.0.1", "+6379", "key", "0", "1000"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "migrate_port_leading_zero",
+      "now_ms": 21,
+      "argv": ["MIGRATE", "127.0.0.1", "06379", "key", "0", "1000"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "migrate_db_negative",
+      "now_ms": 22,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "-1", "1000"],
+      "expect": {
+        "kind": "simple",
+        "value": "NOKEY"
+      }
+    },
+    {
+      "name": "migrate_timeout_negative",
+      "now_ms": 23,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "0", "-1"],
+      "expect": {
+        "kind": "simple",
+        "value": "NOKEY"
+      }
+    },
+    {
+      "name": "migrate_copy_option_nokey",
+      "now_ms": 24,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "nokey_copy", "0", "1000", "COPY"],
+      "expect": {
+        "kind": "simple",
+        "value": "NOKEY"
+      }
+    },
+    {
+      "name": "migrate_replace_option_nokey",
+      "now_ms": 25,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "nokey_replace", "0", "1000", "REPLACE"],
+      "expect": {
+        "kind": "simple",
+        "value": "NOKEY"
+      }
+    },
+    {
+      "name": "migrate_copy_replace_combined_nokey",
+      "now_ms": 26,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "nokey_both", "0", "1000", "COPY", "REPLACE"],
+      "expect": {
+        "kind": "simple",
+        "value": "NOKEY"
+      }
+    },
+    {
+      "name": "migrate_auth_with_password_nokey",
+      "now_ms": 27,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "nokey_auth", "0", "1000", "AUTH", "secret"],
+      "expect": {
+        "kind": "simple",
+        "value": "NOKEY"
+      }
+    },
+    {
+      "name": "migrate_auth2_with_user_pass_nokey",
+      "now_ms": 28,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "nokey_auth2", "0", "1000", "AUTH2", "user", "pass"],
+      "expect": {
+        "kind": "simple",
+        "value": "NOKEY"
+      }
+    },
+    {
+      "name": "migrate_keys_option_with_multiple_keys_nokey",
+      "now_ms": 29,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "", "0", "1000", "KEYS", "k1", "k2", "k3"],
+      "expect": {
+        "kind": "simple",
+        "value": "NOKEY"
+      }
+    },
+    {
+      "name": "migrate_all_options_combined_nokey",
+      "now_ms": 30,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "", "0", "1000", "COPY", "REPLACE", "AUTH", "pw", "KEYS", "a", "b"],
+      "expect": {
+        "kind": "simple",
+        "value": "NOKEY"
+      }
+    },
+    {
+      "name": "migrate_auth2_syntax_error_only_user",
+      "now_ms": 31,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "0", "1000", "AUTH2"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "migrate_keys_duplicate_option",
+      "now_ms": 32,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "", "0", "1000", "KEYS", "k1", "KEYS", "k2"],
+      "expect": {
+        "kind": "simple",
+        "value": "NOKEY"
+      }
     }
   ]
 }

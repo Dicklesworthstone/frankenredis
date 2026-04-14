@@ -718,6 +718,189 @@
       "now_ms": 199,
       "argv": ["GET", "eck"],
       "expect": { "kind": "bulk", "value": "v3" }
+    },
+
+    {
+      "name": "watch_nonexistent_key_that_gets_created_watch",
+      "now_ms": 200,
+      "argv": ["WATCH", "newkey_watch"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_nonexistent_key_that_gets_created_set",
+      "now_ms": 201,
+      "argv": ["SET", "newkey_watch", "created"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_nonexistent_key_that_gets_created_multi",
+      "now_ms": 202,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_nonexistent_key_that_gets_created_get_queued",
+      "now_ms": 203,
+      "argv": ["GET", "newkey_watch"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "watch_nonexistent_key_that_gets_created_exec_aborts",
+      "now_ms": 204,
+      "argv": ["EXEC"],
+      "expect": { "kind": "null_array" }
+    },
+
+    {
+      "name": "unwatch_clears_watch_state_setup",
+      "now_ms": 210,
+      "argv": ["SET", "unwk", "v1"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "unwatch_clears_watch_state_watch",
+      "now_ms": 211,
+      "argv": ["WATCH", "unwk"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "unwatch_clears_watch_state_unwatch",
+      "now_ms": 212,
+      "argv": ["UNWATCH"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "unwatch_clears_watch_state_modify",
+      "now_ms": 213,
+      "argv": ["SET", "unwk", "v2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "unwatch_clears_watch_state_multi",
+      "now_ms": 214,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "unwatch_clears_watch_state_get_queued",
+      "now_ms": 215,
+      "argv": ["GET", "unwk"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "unwatch_clears_watch_state_exec_succeeds",
+      "now_ms": 216,
+      "argv": ["EXEC"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "v2" }
+        ]
+      }
+    },
+
+    {
+      "name": "watch_multiple_keys_in_one_call_setup",
+      "now_ms": 220,
+      "argv": ["MSET", "mk1", "a", "mk2", "b", "mk3", "c"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_multiple_keys_in_one_call_watch",
+      "now_ms": 221,
+      "argv": ["WATCH", "mk1", "mk2", "mk3"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_multiple_keys_in_one_call_modify_middle",
+      "now_ms": 222,
+      "argv": ["SET", "mk2", "modified"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_multiple_keys_in_one_call_multi",
+      "now_ms": 223,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_multiple_keys_in_one_call_get_queued",
+      "now_ms": 224,
+      "argv": ["GET", "mk1"],
+      "expect": { "kind": "simple", "value": "QUEUED" }
+    },
+    {
+      "name": "watch_multiple_keys_in_one_call_exec_aborts",
+      "now_ms": 225,
+      "argv": ["EXEC"],
+      "expect": { "kind": "null_array" }
+    },
+
+    {
+      "name": "watch_inside_multi_errors",
+      "now_ms": 230,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "watch_inside_multi_watch_errors",
+      "now_ms": 231,
+      "argv": ["WATCH", "somekey"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR WATCH inside MULTI is not allowed"
+      }
+    },
+    {
+      "name": "watch_inside_multi_discard",
+      "now_ms": 232,
+      "argv": ["DISCARD"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+
+    {
+      "name": "watch_wrong_arity",
+      "now_ms": 240,
+      "argv": ["WATCH"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'watch' command"
+      }
+    },
+
+    {
+      "name": "unwatch_wrong_arity",
+      "now_ms": 241,
+      "argv": ["UNWATCH", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'unwatch' command"
+      }
+    },
+
+    {
+      "name": "exec_after_syntax_error_multi",
+      "now_ms": 250,
+      "argv": ["MULTI"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "exec_after_syntax_error_bad_cmd",
+      "now_ms": 251,
+      "argv": ["SET", "k"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'set' command"
+      }
+    },
+    {
+      "name": "exec_after_syntax_error_exec_aborts",
+      "now_ms": 252,
+      "argv": ["EXEC"],
+      "expect": {
+        "kind": "error",
+        "value": "EXECABORT Transaction discarded because of previous errors."
+      }
     }
   ]
 }
