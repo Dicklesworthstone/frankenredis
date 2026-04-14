@@ -1249,6 +1249,180 @@
         "kind": "simple",
         "value": "OK"
       }
+    },
+    {
+      "name": "copy_db_leading_plus",
+      "now_ms": 100,
+      "argv": [
+        "COPY",
+        "src_str",
+        "dst_bad_db1",
+        "DB",
+        "+0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "copy_db_leading_zeros",
+      "now_ms": 100,
+      "argv": [
+        "COPY",
+        "src_str",
+        "dst_bad_db2",
+        "DB",
+        "00"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "copy_db_non_numeric",
+      "now_ms": 100,
+      "argv": [
+        "COPY",
+        "src_str",
+        "dst_bad_db3",
+        "DB",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "copy_db_negative",
+      "now_ms": 100,
+      "argv": [
+        "COPY",
+        "src_str",
+        "dst_bad_db4",
+        "DB",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR DB index is out of range"
+      }
+    },
+    {
+      "name": "copy_db_float",
+      "now_ms": 100,
+      "argv": [
+        "COPY",
+        "src_str",
+        "dst_bad_db5",
+        "DB",
+        "1.5"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "copy_db_empty",
+      "now_ms": 100,
+      "argv": [
+        "COPY",
+        "src_str",
+        "dst_bad_db6",
+        "DB",
+        ""
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "copy_db_missing_value",
+      "now_ms": 100,
+      "argv": [
+        "COPY",
+        "src_str",
+        "dst_bad_db7",
+        "DB"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "restore_ttl_leading_plus",
+      "now_ms": 100,
+      "argv": [
+        "RESTORE",
+        "restore_key",
+        "+0",
+        "garbage"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "restore_ttl_leading_zeros",
+      "now_ms": 100,
+      "argv": [
+        "RESTORE",
+        "restore_key",
+        "00",
+        "garbage"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "restore_ttl_non_numeric",
+      "now_ms": 100,
+      "argv": [
+        "RESTORE",
+        "restore_key",
+        "abc",
+        "garbage"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "restore_ttl_float",
+      "now_ms": 100,
+      "argv": [
+        "RESTORE",
+        "restore_key",
+        "1.5",
+        "garbage"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "restore_ttl_empty",
+      "now_ms": 100,
+      "argv": [
+        "RESTORE",
+        "restore_key",
+        "",
+        "garbage"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     }
   ]
 }

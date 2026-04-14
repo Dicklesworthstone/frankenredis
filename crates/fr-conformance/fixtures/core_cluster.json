@@ -437,7 +437,7 @@
       }
     },
     {
-      "name": "cluster_countkeysinslot_out_of_range_clamped",
+      "name": "cluster_countkeysinslot_out_of_range_error",
       "now_ms": 0,
       "argv": [
         "CLUSTER",
@@ -445,8 +445,8 @@
         "99999"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 0
+        "kind": "error",
+        "value": "ERR Invalid slot"
       }
     },
     {
@@ -487,8 +487,8 @@
         "-5"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR Invalid slot or number of keys"
       }
     },
     {
@@ -531,7 +531,7 @@
       }
     },
     {
-      "name": "cluster_getkeysinslot_out_of_range_clamped",
+      "name": "cluster_getkeysinslot_out_of_range_error",
       "now_ms": 0,
       "argv": [
         "CLUSTER",
@@ -540,8 +540,8 @@
         "10"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR Invalid slot or number of keys"
       }
     },
     {
@@ -593,7 +593,7 @@
       }
     },
     {
-      "name": "cluster_countkeysinslot_negative_clamped_to_0",
+      "name": "cluster_countkeysinslot_negative_error",
       "now_ms": 0,
       "argv": [
         "CLUSTER",
@@ -601,8 +601,8 @@
         "-1"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 0
+        "kind": "error",
+        "value": "ERR Invalid slot"
       }
     },
     {
@@ -741,6 +741,19 @@
       }
     },
     {
+      "name": "cluster_countkeysinslot_slot_out_of_range",
+      "now_ms": 200,
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT",
+        "16384"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Invalid slot"
+      }
+    },
+    {
       "name": "cluster_keyslot_empty_string",
       "now_ms": 200,
       "argv": [
@@ -765,6 +778,20 @@
       "expect": {
         "kind": "array",
         "value": []
+      }
+    },
+    {
+      "name": "cluster_getkeysinslot_slot_out_of_range",
+      "now_ms": 200,
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "16384",
+        "10"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Invalid slot or number of keys"
       }
     },
     {
@@ -802,6 +829,156 @@
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'cluster' command"
+      }
+    },
+    {
+      "name": "cluster_countkeysinslot_leading_plus",
+      "now_ms": 300,
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT",
+        "+100"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "cluster_countkeysinslot_leading_zeros",
+      "now_ms": 300,
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT",
+        "0100"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "cluster_countkeysinslot_float",
+      "now_ms": 300,
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT",
+        "100.5"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "cluster_countkeysinslot_empty",
+      "now_ms": 300,
+      "argv": [
+        "CLUSTER",
+        "COUNTKEYSINSLOT",
+        ""
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "cluster_getkeysinslot_slot_leading_plus",
+      "now_ms": 300,
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "+100",
+        "10"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "cluster_getkeysinslot_slot_leading_zeros",
+      "now_ms": 300,
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "0100",
+        "10"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "cluster_getkeysinslot_count_leading_plus",
+      "now_ms": 300,
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "0",
+        "+10"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "cluster_getkeysinslot_count_leading_zeros",
+      "now_ms": 300,
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "0",
+        "010"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "cluster_getkeysinslot_slot_float",
+      "now_ms": 300,
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "100.5",
+        "10"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "cluster_getkeysinslot_count_float",
+      "now_ms": 300,
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "0",
+        "10.5"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "cluster_getkeysinslot_negative_slot_error",
+      "now_ms": 300,
+      "argv": [
+        "CLUSTER",
+        "GETKEYSINSLOT",
+        "-1",
+        "10"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Invalid slot or number of keys"
       }
     }
   ]

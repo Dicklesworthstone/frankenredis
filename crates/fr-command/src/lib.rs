@@ -34,6 +34,7 @@ pub enum CommandError {
         subcommand: String,
     },
     InvalidInteger,
+    InvalidSlot,
     SyntaxError,
     NoSuchKey,
     Store(StoreError),
@@ -434,6 +435,9 @@ impl CommandError {
             )),
             CommandError::InvalidInteger => {
                 RespFrame::Error("ERR value is not an integer or out of range".to_string())
+            }
+            CommandError::InvalidSlot => {
+                RespFrame::Error("ERR Invalid or out of range slot".to_string())
             }
             CommandError::SyntaxError => RespFrame::Error("ERR syntax error".to_string()),
             CommandError::NoSuchKey => RespFrame::Error("ERR no such key".to_string()),
@@ -5500,9 +5504,20 @@ fn cluster_cmd(
         if argv.len() != 4 {
             return Err(CommandError::WrongArity("CLUSTER"));
         }
-        let slot: u16 = parse_i64_arg(&argv[2]).map(|v| v.clamp(0, 16383) as u16)?;
+        let slot_val = parse_i64_arg(&argv[2])?;
+        if !(0..=16383).contains(&slot_val) {
+            return Err(CommandError::Custom(
+                "ERR Invalid slot or number of keys".to_string(),
+            ));
+        }
+        let slot = slot_val as u16;
         let count_val = parse_i64_arg(&argv[3])?;
-        let count = if count_val <= 0 {
+        if count_val < 0 {
+            return Err(CommandError::Custom(
+                "ERR Invalid slot or number of keys".to_string(),
+            ));
+        }
+        let count = if count_val == 0 {
             0
         } else {
             usize::try_from(count_val).map_err(|_| CommandError::InvalidInteger)?
@@ -5517,7 +5532,11 @@ fn cluster_cmd(
         if argv.len() != 3 {
             return Err(CommandError::WrongArity("CLUSTER"));
         }
-        let slot: u16 = parse_i64_arg(&argv[2]).map(|v| v.clamp(0, 16383) as u16)?;
+        let slot_val = parse_i64_arg(&argv[2])?;
+        if !(0..=16383).contains(&slot_val) {
+            return Err(CommandError::Custom("ERR Invalid slot".to_string()));
+        }
+        let slot = slot_val as u16;
         let count = store.count_keys_in_slot(slot, now_ms);
         Ok(RespFrame::Integer(count as i64))
     } else if sub.eq_ignore_ascii_case("HELP") {
@@ -6939,10 +6958,10 @@ pub fn parse_migrate_request(argv: &[Vec<u8>]) -> Result<MigrateRequest, Command
     let host = std::str::from_utf8(&argv[1])
         .map_err(|_| CommandError::InvalidUtf8Argument)?
         .to_string();
-    let port = std::str::from_utf8(&argv[2])
-        .ok()
-        .and_then(|s| s.parse::<u16>().ok())
-        .ok_or(CommandError::InvalidInteger)?;
+    let port = match parse_i64_arg(&argv[2]) {
+        Ok(value) => u16::try_from(value).map_err(|_| CommandError::InvalidInteger)?,
+        Err(_) => return Err(CommandError::InvalidInteger),
+    };
     let key_arg = &argv[3];
     let destination_db = parse_i64_arg(&argv[4])?;
     let timeout_ms = parse_i64_arg(&argv[5])?;
@@ -10792,6 +10811,11 @@ fn wait_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("WAIT"));
     }
+    parse_i64_arg(&argv[1])?;
+    let timeout_ms = parse_i64_arg(&argv[2])?;
+    if timeout_ms < 0 {
+        return Err(CommandError::Custom("ERR timeout is negative".to_string()));
+    }
     // WAIT numreplicas timeout - in standalone mode, return 0 replicas
     Ok(RespFrame::Integer(0))
 }
@@ -13205,13 +13229,23 @@ fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
         let arg = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if arg.eq_ignore_ascii_case("REPLACE") {
             replace = true;
-        } else if arg.eq_ignore_ascii_case("DB") {
-            // COPY source destination [DB destination-db] — ignore DB (single-db mode)
             i += 1;
-        } else {
-            return Err(CommandError::SyntaxError);
+            continue;
         }
-        i += 1;
+        if arg.eq_ignore_ascii_case("DB") {
+            if i + 1 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let db = parse_i64_arg(&argv[i + 1])?;
+            if db != 0 {
+                return Err(CommandError::Custom(
+                    "ERR DB index is out of range".to_string(),
+                ));
+            }
+            i += 2;
+            continue;
+        }
+        return Err(CommandError::SyntaxError);
     }
 
     let copied = store

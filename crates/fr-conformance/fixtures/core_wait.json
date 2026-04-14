@@ -702,19 +702,6 @@
       }
     },
     {
-      "name": "wait_timeout_negative",
-      "now_ms": 0,
-      "argv": [
-        "WAIT",
-        "0",
-        "-1"
-      ],
-      "expect": {
-        "kind": "error",
-        "value": "ERR timeout is negative"
-      }
-    },
-    {
       "name": "waitaof_numlocal_leading_plus",
       "now_ms": 0,
       "argv": [

@@ -1735,6 +1735,162 @@
         "kind": "simple",
         "value": "OK"
       }
+    },
+    {
+      "name": "blpop_timeout_leading_plus",
+      "now_ms": 300,
+      "argv": [
+        "BLPOP",
+        "nokey",
+        "+0"
+      ],
+      "expect": {
+        "kind": "null_array",
+        "value": null
+      }
+    },
+    {
+      "name": "blpop_timeout_leading_zeros",
+      "now_ms": 300,
+      "argv": [
+        "BLPOP",
+        "nokey",
+        "00"
+      ],
+      "expect": {
+        "kind": "null_array",
+        "value": null
+      }
+    },
+    {
+      "name": "brpop_timeout_leading_plus",
+      "now_ms": 300,
+      "argv": [
+        "BRPOP",
+        "nokey",
+        "+0"
+      ],
+      "expect": {
+        "kind": "null_array",
+        "value": null
+      }
+    },
+    {
+      "name": "brpop_timeout_empty_string",
+      "now_ms": 300,
+      "argv": [
+        "BRPOP",
+        "nokey",
+        ""
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR timeout is not a float or out of range"
+      }
+    },
+    {
+      "name": "blmove_timeout_leading_plus",
+      "now_ms": 300,
+      "argv": [
+        "BLMOVE",
+        "nokey1",
+        "nokey2",
+        "LEFT",
+        "LEFT",
+        "+0"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
+    },
+    {
+      "name": "blmove_timeout_leading_zeros",
+      "now_ms": 300,
+      "argv": [
+        "BLMOVE",
+        "nokey1",
+        "nokey2",
+        "LEFT",
+        "LEFT",
+        "00"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
+    },
+    {
+      "name": "blmove_timeout_empty",
+      "now_ms": 300,
+      "argv": [
+        "BLMOVE",
+        "nokey1",
+        "nokey2",
+        "LEFT",
+        "LEFT",
+        ""
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR timeout is not a float or out of range"
+      }
+    },
+    {
+      "name": "blmpop_timeout_empty",
+      "now_ms": 300,
+      "argv": [
+        "BLMPOP",
+        "",
+        "1",
+        "nokey",
+        "LEFT"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR timeout is not a float or out of range"
+      }
+    },
+    {
+      "name": "bzpopmin_timeout_empty",
+      "now_ms": 300,
+      "argv": [
+        "BZPOPMIN",
+        "nokey",
+        ""
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR timeout is not a float or out of range"
+      }
+    },
+    {
+      "name": "bzpopmax_timeout_empty",
+      "now_ms": 300,
+      "argv": [
+        "BZPOPMAX",
+        "nokey",
+        ""
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR timeout is not a float or out of range"
+      }
+    },
+    {
+      "name": "bzmpop_timeout_empty",
+      "now_ms": 300,
+      "argv": [
+        "BZMPOP",
+        "",
+        "1",
+        "nokey",
+        "MIN"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR timeout is not a float or out of range"
+      }
     }
   ]
 }

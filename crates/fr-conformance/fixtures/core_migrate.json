@@ -108,6 +108,78 @@
         "kind": "simple",
         "value": "NOKEY"
       }
+    },
+    {
+      "name": "migrate_port_negative",
+      "now_ms": 12,
+      "argv": ["MIGRATE", "127.0.0.1", "-1", "key", "0", "1000"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "migrate_port_float",
+      "now_ms": 13,
+      "argv": ["MIGRATE", "127.0.0.1", "6379.5", "key", "0", "1000"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "migrate_port_empty",
+      "now_ms": 14,
+      "argv": ["MIGRATE", "127.0.0.1", "", "key", "0", "1000"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "migrate_db_float",
+      "now_ms": 15,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "0.5", "1000"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "migrate_db_empty",
+      "now_ms": 16,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "", "1000"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "migrate_timeout_float",
+      "now_ms": 17,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "0", "1000.5"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "migrate_timeout_empty",
+      "now_ms": 18,
+      "argv": ["MIGRATE", "127.0.0.1", "6379", "key", "0", ""],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "migrate_port_out_of_range",
+      "now_ms": 19,
+      "argv": ["MIGRATE", "127.0.0.1", "99999", "key", "0", "1000"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     }
   ]
 }

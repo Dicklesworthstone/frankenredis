@@ -2357,6 +2357,170 @@
       }
     },
     {
+      "name": "expire_negative_setup",
+      "now_ms": 1900000,
+      "argv": [
+        "SET",
+        "expneg",
+        "v"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "expire_negative_deletes",
+      "now_ms": 1900000,
+      "argv": [
+        "EXPIRE",
+        "expneg",
+        "-1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "expire_negative_get_missing",
+      "now_ms": 1900000,
+      "argv": [
+        "GET",
+        "expneg"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
+    },
+    {
+      "name": "expire_negative_pttl_missing",
+      "now_ms": 1900000,
+      "argv": [
+        "PTTL",
+        "expneg"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": -2
+      }
+    },
+    {
+      "name": "pexpire_zero_setup",
+      "now_ms": 1900100,
+      "argv": [
+        "SET",
+        "expzero",
+        "v"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "pexpire_zero_deletes",
+      "now_ms": 1900100,
+      "argv": [
+        "PEXPIRE",
+        "expzero",
+        "0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pexpire_zero_get_missing",
+      "now_ms": 1900100,
+      "argv": [
+        "GET",
+        "expzero"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
+    },
+    {
+      "name": "expireat_past_setup",
+      "now_ms": 1900200,
+      "argv": [
+        "SET",
+        "exppast",
+        "v"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "expireat_past_deletes",
+      "now_ms": 1900200,
+      "argv": [
+        "EXPIREAT",
+        "exppast",
+        "1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "expireat_past_get_missing",
+      "now_ms": 1900200,
+      "argv": [
+        "GET",
+        "exppast"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
+    },
+    {
+      "name": "pexpireat_past_setup",
+      "now_ms": 1900300,
+      "argv": [
+        "SET",
+        "pexppast",
+        "v"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "pexpireat_past_deletes",
+      "now_ms": 1900300,
+      "argv": [
+        "PEXPIREAT",
+        "pexppast",
+        "500"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pexpireat_past_pttl_missing",
+      "now_ms": 1900300,
+      "argv": [
+        "PTTL",
+        "pexppast"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": -2
+      }
+    },
+    {
       "name": "expire_rejects_leading_plus",
       "now_ms": 2000000,
       "argv": [

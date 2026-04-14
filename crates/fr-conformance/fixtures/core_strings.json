@@ -3547,6 +3547,177 @@
         "kind": "simple",
         "value": "OK"
       }
+    },
+    {
+      "name": "setex_leading_plus_seconds",
+      "now_ms": 500,
+      "argv": ["SETEX", "key", "+10", "val"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "setex_leading_zero_seconds",
+      "now_ms": 501,
+      "argv": ["SETEX", "key", "010", "val"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "setex_float_seconds",
+      "now_ms": 502,
+      "argv": ["SETEX", "key", "10.5", "val"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "setex_empty_seconds",
+      "now_ms": 503,
+      "argv": ["SETEX", "key", "", "val"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "psetex_leading_plus_ms",
+      "now_ms": 510,
+      "argv": ["PSETEX", "key", "+1000", "val"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "psetex_leading_zero_ms",
+      "now_ms": 511,
+      "argv": ["PSETEX", "key", "01000", "val"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "psetex_float_ms",
+      "now_ms": 512,
+      "argv": ["PSETEX", "key", "1000.5", "val"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "psetex_empty_ms",
+      "now_ms": 513,
+      "argv": ["PSETEX", "key", "", "val"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "getex_setup_key",
+      "now_ms": 520,
+      "argv": ["SET", "getex_nc_key", "value"],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "getex_ex_leading_plus",
+      "now_ms": 521,
+      "argv": ["GETEX", "getex_nc_key", "EX", "+10"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "getex_ex_leading_zero",
+      "now_ms": 522,
+      "argv": ["GETEX", "getex_nc_key", "EX", "010"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "getex_ex_float",
+      "now_ms": 523,
+      "argv": ["GETEX", "getex_nc_key", "EX", "10.5"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "getex_ex_empty",
+      "now_ms": 524,
+      "argv": ["GETEX", "getex_nc_key", "EX", ""],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "getex_px_leading_plus",
+      "now_ms": 525,
+      "argv": ["GETEX", "getex_nc_key", "PX", "+10000"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "getex_px_leading_zero",
+      "now_ms": 526,
+      "argv": ["GETEX", "getex_nc_key", "PX", "010000"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "getex_exat_leading_plus",
+      "now_ms": 527,
+      "argv": ["GETEX", "getex_nc_key", "EXAT", "+9999999999"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "getex_exat_leading_zero",
+      "now_ms": 528,
+      "argv": ["GETEX", "getex_nc_key", "EXAT", "09999999999"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "getex_pxat_leading_plus",
+      "now_ms": 529,
+      "argv": ["GETEX", "getex_nc_key", "PXAT", "+9999999999999"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "getex_pxat_leading_zero",
+      "now_ms": 530,
+      "argv": ["GETEX", "getex_nc_key", "PXAT", "09999999999999"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
     }
   ]
 }
