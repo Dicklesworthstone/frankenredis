@@ -384,6 +384,96 @@
           { "kind": "bulk", "value": "100" }
         ]
       }
+    },
+    {
+      "name": "object_encoding_expired_setup",
+      "now_ms": 37000,
+      "argv": ["SET", "obj_exp_key", "value"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "object_encoding_expired_set_ttl",
+      "now_ms": 37001,
+      "argv": ["PEXPIRE", "obj_exp_key", "100"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "object_encoding_expired_key",
+      "now_ms": 38000,
+      "argv": ["OBJECT", "ENCODING", "obj_exp_key"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
+    },
+    {
+      "name": "object_idletime_expired_key",
+      "now_ms": 38001,
+      "argv": ["OBJECT", "IDLETIME", "obj_exp_key"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
+    },
+    {
+      "name": "object_refcount_expired_key",
+      "now_ms": 38002,
+      "argv": ["OBJECT", "REFCOUNT", "obj_exp_key"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
+    },
+    {
+      "name": "object_freq_expired_key",
+      "now_ms": 38003,
+      "argv": ["OBJECT", "FREQ", "obj_exp_key"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
+    },
+    {
+      "name": "object_encoding_lowercase_subcommand",
+      "now_ms": 39000,
+      "argv": ["OBJECT", "encoding", "obj_int"],
+      "expect": { "kind": "bulk", "value": "int" }
+    },
+    {
+      "name": "object_encoding_mixedcase_subcommand",
+      "now_ms": 39001,
+      "argv": ["OBJECT", "EnCoDiNg", "obj_int"],
+      "expect": { "kind": "bulk", "value": "int" }
+    },
+    {
+      "name": "object_encoding_hll_setup",
+      "now_ms": 40000,
+      "argv": ["PFADD", "obj_hll", "a", "b", "c"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "object_encoding_hll_raw",
+      "now_ms": 40001,
+      "argv": ["OBJECT", "ENCODING", "obj_hll"],
+      "expect": { "kind": "bulk", "value": "raw" }
+    },
+    {
+      "name": "object_idletime_hll",
+      "now_ms": 45001,
+      "argv": ["OBJECT", "IDLETIME", "obj_hll"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "object_refcount_hll",
+      "now_ms": 45002,
+      "argv": ["OBJECT", "REFCOUNT", "obj_hll"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "object_freq_hll",
+      "now_ms": 45003,
+      "argv": ["OBJECT", "FREQ", "obj_hll"],
+      "expect": { "kind": "integer", "value": 0 }
     }
   ]
 }
