@@ -10346,6 +10346,21 @@ mod tests {
     }
 
     #[test]
+    fn expire_at_milliseconds_emits_expired_event_when_deadline_in_past() {
+        let mut store = Store::new();
+        store.notify_keyspace_events = NOTIFY_KEYEVENT | NOTIFY_EXPIRED;
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 1_000);
+
+        // Deadline in the past (500ms < now 1000ms) should emit "expired" not "del"
+        assert!(store.expire_at_milliseconds(b"k", 500, 1_000));
+        assert_eq!(store.get(b"k", 1_000).unwrap(), None);
+        assert_eq!(
+            store.drain_keyspace_notifications(),
+            vec![(b"__keyevent@0__:expired".to_vec(), b"k".to_vec())]
+        );
+    }
+
+    #[test]
     fn expire_missing_key_returns_false() {
         let mut store = Store::new();
         assert!(!store.expire_seconds(b"missing", 5, 0));

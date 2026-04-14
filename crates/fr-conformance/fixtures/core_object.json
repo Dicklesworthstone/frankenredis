@@ -474,6 +474,54 @@
       "now_ms": 45003,
       "argv": ["OBJECT", "FREQ", "obj_hll"],
       "expect": { "kind": "integer", "value": 0 }
+    },
+    {
+      "name": "object_encoding_stream_setup",
+      "now_ms": 50000,
+      "argv": ["XADD", "obj_stream", "50000-0", "field", "value"],
+      "expect": { "kind": "bulk", "value": "50000-0" }
+    },
+    {
+      "name": "object_encoding_stream_radix_tree",
+      "now_ms": 50001,
+      "argv": ["OBJECT", "ENCODING", "obj_stream"],
+      "expect": { "kind": "bulk", "value": "stream" }
+    },
+    {
+      "name": "object_idletime_stream",
+      "now_ms": 55001,
+      "argv": ["OBJECT", "IDLETIME", "obj_stream"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "object_refcount_stream",
+      "now_ms": 55002,
+      "argv": ["OBJECT", "REFCOUNT", "obj_stream"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "object_encoding_geo_setup",
+      "now_ms": 60000,
+      "argv": ["GEOADD", "obj_geo", "-122.4194", "37.7749", "san_francisco"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "object_encoding_geo_skiplist",
+      "now_ms": 60001,
+      "argv": ["OBJECT", "ENCODING", "obj_geo"],
+      "expect": { "kind": "bulk", "value": "skiplist" }
+    },
+    {
+      "name": "object_idletime_geo",
+      "now_ms": 65001,
+      "argv": ["OBJECT", "IDLETIME", "obj_geo"],
+      "expect": { "kind": "integer", "value": 5 }
+    },
+    {
+      "name": "object_refcount_geo",
+      "now_ms": 65002,
+      "argv": ["OBJECT", "REFCOUNT", "obj_geo"],
+      "expect": { "kind": "integer", "value": 1 }
     }
   ]
 }
