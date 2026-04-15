@@ -6812,29 +6812,7 @@ impl Runtime {
         info.push_str(&format!("role:{role}\r\n"));
 
         match &self.server.replication_runtime_state.role {
-            ReplicationRoleState::Master => {
-                for (i, replica) in self
-                    .server
-                    .replication_runtime_state
-                    .replicas
-                    .values()
-                    .enumerate()
-                {
-                    let ip = replica.ip_address.as_deref().unwrap_or("127.0.0.1");
-                    let port = replica.listening_port;
-                    let state = "online"; // We only track registered replicas
-                    let offset = replica.ack_offset.0;
-                    let lag = self
-                        .server
-                        .replication_ack_state
-                        .primary_offset
-                        .0
-                        .saturating_sub(offset);
-                    info.push_str(&format!(
-                        "slave{i}:ip={ip},port={port},state={state},offset={offset},lag={lag}\r\n"
-                    ));
-                }
-            }
+            ReplicationRoleState::Master => {}
             ReplicationRoleState::Replica { host, port, state } => {
                 let master_link_status = if *state == "connected" { "up" } else { "down" };
                 let master_last_io_seconds_ago = if *state == "connected" { 0 } else { -1 };
@@ -6849,6 +6827,27 @@ slave_read_repl_offset:{primary_offset}\r\n\
 slave_repl_offset:{primary_offset}\r\n"
                 ));
             }
+        }
+        for (i, replica) in self
+            .server
+            .replication_runtime_state
+            .replicas
+            .values()
+            .enumerate()
+        {
+            let ip = replica.ip_address.as_deref().unwrap_or("127.0.0.1");
+            let port = replica.listening_port;
+            let state = "online"; // We only track registered replicas
+            let offset = replica.ack_offset.0;
+            let lag = self
+                .server
+                .replication_ack_state
+                .primary_offset
+                .0
+                .saturating_sub(offset);
+            info.push_str(&format!(
+                "slave{i}:ip={ip},port={port},state={state},offset={offset},lag={lag}\r\n"
+            ));
         }
 
         info.push_str(&format!("connected_slaves:{connected_replicas}\r\n"));
@@ -10435,6 +10434,36 @@ mod tests {
             connected_info.contains("master_last_io_seconds_ago:0\r\n"),
             "{connected_info}"
         );
+    }
+
+    #[test]
+    fn replication_info_lists_downstream_replicas_even_on_intermediate_replica() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        rt.set_replica_connection_state("connected");
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"listening-port", b"6381"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 2);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            unreachable!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("role:slave\r\n"), "{info}");
+        assert!(info.contains("master_host:127.0.0.1\r\n"), "{info}");
+        assert!(info.contains("master_port:6380\r\n"), "{info}");
+        assert!(info.contains("master_link_status:up\r\n"), "{info}");
+        assert!(
+            info.contains("slave0:ip=127.0.0.1,port=6381,state=online,offset=0,lag=0\r\n"),
+            "{info}"
+        );
+        assert!(info.contains("connected_slaves:1\r\n"), "{info}");
     }
 
     #[test]

@@ -1359,6 +1359,48 @@ fn tcp_replica_of_replica_chain_replication() {
     let _replica2 = spawn_frankenredis(replica2_port, Some(replica1_port));
     wait_for_replica_sync(replica2_port, Duration::from_secs(10));
 
+    // Verify each hop reports the expected replication topology.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut last_primary_info = None;
+    let mut last_replica1_info = None;
+    let mut last_replica2_info = None;
+    let mut topology_ready = false;
+    while Instant::now() < deadline {
+        last_primary_info = fetch_info_replication(primary_port);
+        last_replica1_info = fetch_info_replication(replica1_port);
+        last_replica2_info = fetch_info_replication(replica2_port);
+        if last_primary_info.as_ref().is_some_and(|info| {
+            info.contains("role:master\r\n")
+                && info.contains("connected_slaves:1\r\n")
+                && info.contains(&format!(
+                    "slave0:ip=127.0.0.1,port={replica1_port},state=online,"
+                ))
+        }) && last_replica1_info.as_ref().is_some_and(|info| {
+            info.contains("role:slave\r\n")
+                && info.contains("master_host:127.0.0.1\r\n")
+                && info.contains(&format!("master_port:{primary_port}\r\n"))
+                && info.contains("master_link_status:up\r\n")
+                && info.contains("connected_slaves:1\r\n")
+                && info.contains(&format!(
+                    "slave0:ip=127.0.0.1,port={replica2_port},state=online,"
+                ))
+        }) && last_replica2_info.as_ref().is_some_and(|info| {
+            info.contains("role:slave\r\n")
+                && info.contains("master_host:127.0.0.1\r\n")
+                && info.contains(&format!("master_port:{replica1_port}\r\n"))
+                && info.contains("master_link_status:up\r\n")
+                && info.contains("connected_slaves:0\r\n")
+        }) {
+            topology_ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        topology_ready,
+        "replication chain topology info never stabilized; primary={last_primary_info:?}; replica1={last_replica1_info:?}; replica2={last_replica2_info:?}"
+    );
+
     // Verify replica2 has initial data through the chain.
     let mut replica2_client = connect_client(replica2_port);
     for i in 0..10 {
