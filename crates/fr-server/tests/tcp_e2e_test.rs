@@ -1590,6 +1590,132 @@ fn tcp_replica_of_replica_chain_replication() {
 }
 
 #[test]
+fn tcp_failover_command_promotes_target_replica_and_leaves_chain_in_place() {
+    let original_master_port = reserve_port();
+    let target_replica_port = reserve_port();
+    let chained_replica_port = reserve_port();
+
+    let _original_master = spawn_frankenredis(original_master_port, None);
+    let _target_replica = spawn_frankenredis(target_replica_port, Some(original_master_port));
+    let _chained_replica = spawn_frankenredis(chained_replica_port, Some(original_master_port));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut link_up = false;
+    while Instant::now() < deadline {
+        let info1 = fetch_info_replication(target_replica_port);
+        let info2 = fetch_info_replication(chained_replica_port);
+        if info1
+            .as_ref()
+            .is_some_and(|info| info.contains("master_link_status:up\r\n"))
+            && info2
+                .as_ref()
+                .is_some_and(|info| info.contains("master_link_status:up\r\n"))
+        {
+            link_up = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(link_up, "replicas never synced to original master");
+
+    let mut original_master_client = connect_client(original_master_port);
+    assert_eq!(
+        send_command(&mut original_master_client, &[b"SET", b"pre-failover", b"value"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+
+    let target_replica_port_text = target_replica_port.to_string();
+    assert_eq!(
+        send_command(
+            &mut original_master_client,
+            &[
+                b"FAILOVER",
+                b"TO",
+                b"127.0.0.1",
+                target_replica_port_text.as_bytes(),
+                b"FORCE",
+                b"TIMEOUT",
+                b"5000",
+            ],
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    drop(original_master_client);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut last_original_info = None;
+    let mut last_target_info = None;
+    let mut last_chained_info = None;
+    let mut topology_ready = false;
+    while Instant::now() < deadline {
+        last_original_info = fetch_info_replication(original_master_port);
+        last_target_info = fetch_info_replication(target_replica_port);
+        last_chained_info = fetch_info_replication(chained_replica_port);
+
+        if last_original_info.as_ref().is_some_and(|info| {
+            info.contains("role:slave\r\n")
+                && info.contains("master_host:127.0.0.1\r\n")
+                && info.contains(&format!("master_port:{target_replica_port}\r\n"))
+                && info.contains("master_link_status:up\r\n")
+                && info.contains("connected_slaves:1\r\n")
+                && info.contains(&format!(
+                    "slave0:ip=127.0.0.1,port={chained_replica_port},state=online,"
+                ))
+        }) && last_target_info.as_ref().is_some_and(|info| {
+            info.contains("role:master\r\n")
+                && info.contains("connected_slaves:1\r\n")
+                && info.contains(&format!(
+                    "slave0:ip=127.0.0.1,port={original_master_port},state=online,"
+                ))
+        }) && last_chained_info.as_ref().is_some_and(|info| {
+            info.contains("role:slave\r\n")
+                && info.contains("master_host:127.0.0.1\r\n")
+                && info.contains(&format!("master_port:{original_master_port}\r\n"))
+                && info.contains("master_link_status:up\r\n")
+                && info.contains("connected_slaves:0\r\n")
+        }) {
+            topology_ready = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        topology_ready,
+        "FAILOVER topology never stabilized; original={last_original_info:?}; target={last_target_info:?}; chained={last_chained_info:?}"
+    );
+
+    let mut target_master_client = connect_client(target_replica_port);
+    assert_eq!(
+        send_command(&mut target_master_client, &[b"SET", b"post-failover", b"value"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut propagated = false;
+    while Instant::now() < deadline {
+        if fetch_string_value(chained_replica_port, b"post-failover")
+            .is_some_and(|value| value == b"value")
+            && fetch_string_value(original_master_port, b"post-failover")
+                .is_some_and(|value| value == b"value")
+        {
+            propagated = true;
+            break;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        propagated,
+        "post-failover write never reached chained topology; original={:?}; chained={:?}",
+        fetch_string_value(original_master_port, b"post-failover"),
+        fetch_string_value(chained_replica_port, b"post-failover")
+    );
+
+    send_shutdown_nosave(original_master_port);
+    send_shutdown_nosave(target_replica_port);
+    send_shutdown_nosave(chained_replica_port);
+}
+
+#[test]
 fn tcp_sentinel_failover_integration() {
     // Proves the failover sequence orchestrated by Sentinel works correctly on FrankenRedis nodes
     let original_master_port = reserve_port();

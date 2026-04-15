@@ -3,7 +3,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::atomic::{AtomicU64, Ordering},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use fr_command::{
@@ -70,6 +70,54 @@ fn processed_command_counts(argv: &[Vec<u8>]) -> (u64, u64) {
         }
     }
     (read_count, write_count)
+}
+
+fn read_failover_frame(
+    stream: &mut std::net::TcpStream,
+    read_buf: &mut Vec<u8>,
+) -> Result<RespFrame, CommandError> {
+    let parser_config = fr_protocol::ParserConfig::default();
+    loop {
+        match fr_protocol::parse_frame_with_config(read_buf, &parser_config) {
+            Ok(parsed) => {
+                read_buf.drain(..parsed.consumed);
+                return Ok(parsed.frame);
+            }
+            Err(fr_protocol::RespParseError::Incomplete) => {}
+            Err(err) => {
+                return Err(CommandError::Custom(format!(
+                    "ERR FAILOVER target replica replied with invalid RESP: {err}"
+                )));
+            }
+        }
+
+        let mut chunk = [0u8; 4096];
+        match std::io::Read::read(stream, &mut chunk) {
+            Ok(0) => {
+                return Err(CommandError::Custom(
+                    "ERR FAILOVER target replica closed the connection.".to_string(),
+                ));
+            }
+            Ok(n) => read_buf.extend_from_slice(&chunk[..n]),
+            Err(ref err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(err) => {
+                return Err(CommandError::Custom(format!(
+                    "ERR FAILOVER target replica read failed: {err}"
+                )));
+            }
+        }
+    }
+}
+
+fn failover_role_is_master(frame: &RespFrame) -> bool {
+    matches!(
+        frame,
+        RespFrame::Array(Some(items))
+            if matches!(
+                items.first(),
+                Some(RespFrame::BulkString(Some(role))) if role.eq_ignore_ascii_case(b"master")
+            )
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -670,6 +718,7 @@ enum RuntimeSpecialCommand {
     Bgsave,
     Lastsave,
     Bgrewriteaof,
+    Failover,
     Shutdown,
     Pubsub,
     Subscribe,
@@ -780,6 +829,8 @@ fn classify_runtime_special_command(cmd: &[u8]) -> Option<RuntimeSpecialCommand>
                 Some(RuntimeSpecialCommand::Readonly)
             } else if eq_ascii_token(cmd, b"LASTSAVE") {
                 Some(RuntimeSpecialCommand::Lastsave)
+            } else if eq_ascii_token(cmd, b"FAILOVER") {
+                Some(RuntimeSpecialCommand::Failover)
             } else if eq_ascii_token(cmd, b"REPLCONF") {
                 Some(RuntimeSpecialCommand::Replconf)
             } else if eq_ascii_token(cmd, b"SHUTDOWN") {
@@ -893,6 +944,8 @@ fn classify_runtime_special_command_linear(cmd: &[u8]) -> Option<RuntimeSpecialC
         Some(RuntimeSpecialCommand::Lastsave)
     } else if command.eq_ignore_ascii_case("BGREWRITEAOF") {
         Some(RuntimeSpecialCommand::Bgrewriteaof)
+    } else if command.eq_ignore_ascii_case("FAILOVER") {
+        Some(RuntimeSpecialCommand::Failover)
     } else if command.eq_ignore_ascii_case("SHUTDOWN") {
         Some(RuntimeSpecialCommand::Shutdown)
     } else if command.eq_ignore_ascii_case("SUBSCRIBE") {
@@ -3045,6 +3098,7 @@ impl Runtime {
                 Some(RuntimeSpecialCommand::Bgrewriteaof) => {
                     Some(self.handle_bgrewriteaof_command(&argv, now_ms))
                 }
+                Some(RuntimeSpecialCommand::Failover) => Some(self.handle_failover_command(&argv)),
                 Some(RuntimeSpecialCommand::Shutdown) => Some(self.handle_shutdown_command(&argv)),
                 Some(RuntimeSpecialCommand::Pubsub) => Some(self.handle_pubsub_command(&argv)),
                 Some(RuntimeSpecialCommand::Subscribe) => {
@@ -7235,6 +7289,188 @@ slave_priority:{}\r\n",
         }
     }
 
+    fn handle_failover_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Replica { .. }
+        ) {
+            return RespFrame::Error("ERR FAILOVER is not valid when server is a replica.".to_string());
+        }
+
+        let mut abort = false;
+        let mut target_host: Option<String> = None;
+        let mut target_port: Option<u16> = None;
+        let mut force = false;
+        let mut timeout_ms: Option<u64> = None;
+        let mut i = 1;
+        while i < argv.len() {
+            let arg = match std::str::from_utf8(&argv[i]) {
+                Ok(arg) => arg,
+                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+            };
+            if arg.eq_ignore_ascii_case("ABORT") {
+                abort = true;
+                i += 1;
+            } else if arg.eq_ignore_ascii_case("TO") {
+                if i + 2 >= argv.len() {
+                    return CommandError::SyntaxError.to_resp();
+                }
+                target_host = Some(String::from_utf8_lossy(&argv[i + 1]).into_owned());
+                let parsed_port = match parse_i64_arg(&argv[i + 2]) {
+                    Ok(value) => value,
+                    Err(err) => return err.to_resp(),
+                };
+                let Ok(parsed_port) = u16::try_from(parsed_port) else {
+                    return CommandError::InvalidInteger.to_resp();
+                };
+                target_port = Some(parsed_port);
+                i += 3;
+                if i < argv.len()
+                    && std::str::from_utf8(&argv[i])
+                        .is_ok_and(|next| next.eq_ignore_ascii_case("FORCE"))
+                {
+                    force = true;
+                    i += 1;
+                }
+            } else if arg.eq_ignore_ascii_case("TIMEOUT") {
+                if i + 1 >= argv.len() {
+                    return CommandError::SyntaxError.to_resp();
+                }
+                let parsed_timeout = match parse_i64_arg(&argv[i + 1]) {
+                    Ok(value) => value,
+                    Err(err) => return err.to_resp(),
+                };
+                if parsed_timeout <= 0 {
+                    return RespFrame::Error(
+                        "ERR FAILOVER timeout must be greater than 0".to_string(),
+                    );
+                }
+                timeout_ms = Some(parsed_timeout as u64);
+                i += 2;
+            } else {
+                return CommandError::SyntaxError.to_resp();
+            }
+        }
+
+        if abort && (target_host.is_some() || target_port.is_some() || force || timeout_ms.is_some())
+        {
+            return CommandError::SyntaxError.to_resp();
+        }
+        if abort {
+            return RespFrame::Error("ERR No failover in progress.".to_string());
+        }
+
+        if self.server.replication_runtime_state.replicas.is_empty() {
+            return RespFrame::Error("ERR FAILOVER requires connected replicas.".to_string());
+        }
+
+        let selected_target = if let (Some(host), Some(port)) = (target_host, target_port) {
+            let is_known_replica =
+                self.server
+                    .replication_runtime_state
+                    .replicas
+                    .values()
+                    .any(|replica| {
+                        let replica_host = replica.ip_address.as_deref().unwrap_or("127.0.0.1");
+                        replica.listening_port == port && replica_host.eq_ignore_ascii_case(&host)
+                    });
+            if !is_known_replica {
+                return RespFrame::Error(
+                    "ERR FAILOVER target HOST and PORT is not a replica.".to_string(),
+                );
+            }
+            (host, port)
+        } else {
+            let Some(replica) = self
+                .server
+                .replication_runtime_state
+                .replicas
+                .values()
+                .filter(|replica| replica.listening_port != 0)
+                .max_by_key(|replica| (replica.ack_offset.0, replica.listening_port))
+            else {
+                return RespFrame::Error("ERR FAILOVER requires connected replicas.".to_string());
+            };
+            (
+                replica
+                    .ip_address
+                    .clone()
+                    .unwrap_or_else(|| "127.0.0.1".to_string()),
+                replica.listening_port,
+            )
+        };
+
+        match self.promote_failover_target(
+            &selected_target.0,
+            selected_target.1,
+            Duration::from_millis(timeout_ms.unwrap_or(5_000)),
+        ) {
+            Ok(()) => RespFrame::SimpleString("OK".to_string()),
+            Err(err) => err.to_resp(),
+        }
+    }
+
+    fn promote_failover_target(
+        &mut self,
+        host: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<(), CommandError> {
+        let mut stream = std::net::TcpStream::connect((host, port)).map_err(|err| {
+            CommandError::Custom(format!("ERR FAILOVER could not connect to target replica: {err}"))
+        })?;
+        let _ = stream.set_nodelay(true);
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
+
+        let mut read_buf = Vec::new();
+        self.failover_send_command(&mut stream, &mut read_buf, &[b"REPLICAOF", b"NO", b"ONE"])?;
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            let role_reply = self.failover_send_command(&mut stream, &mut read_buf, &[b"ROLE"])?;
+            if failover_role_is_master(&role_reply) {
+                break;
+            }
+            if Instant::now() >= deadline {
+                return Err(CommandError::Custom(
+                    "ERR FAILOVER target replica did not become a master in time.".to_string(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        self.server.replication_runtime_state.role = ReplicationRoleState::Replica {
+            host: host.to_string(),
+            port,
+            state: "connect",
+        };
+        self.server.replica_reconfigure_requested = true;
+        Ok(())
+    }
+
+    fn failover_send_command(
+        &self,
+        stream: &mut std::net::TcpStream,
+        read_buf: &mut Vec<u8>,
+        parts: &[&[u8]],
+    ) -> Result<RespFrame, CommandError> {
+        let frame = RespFrame::Array(Some(
+            parts
+                .iter()
+                .map(|part| RespFrame::BulkString(Some((*part).to_vec())))
+                .collect(),
+        ));
+        std::io::Write::write_all(stream, &frame.to_bytes()).map_err(|err| {
+            CommandError::Custom(format!("ERR FAILOVER target replica write failed: {err}"))
+        })?;
+        let reply = read_failover_frame(stream, read_buf)?;
+        if let RespFrame::Error(message) = &reply {
+            return Err(CommandError::Custom(message.clone()));
+        }
+        Ok(reply)
+    }
+
     fn handle_replicaof_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 3 {
             return CommandError::WrongArity("REPLICAOF").to_resp();
@@ -10346,6 +10582,113 @@ mod tests {
     }
 
     #[test]
+    fn failover_is_rejected_when_server_is_a_replica() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER"]), 1),
+            RespFrame::Error("ERR FAILOVER is not valid when server is a replica.".to_string())
+        );
+    }
+
+    #[test]
+    fn failover_promotes_target_replica_and_demotes_self() {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind failover target listener");
+        let addr = listener.local_addr().expect("failover target addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept failover target");
+            let mut read_buf = Vec::new();
+
+            let promote =
+                runtime_test_frame_to_argv(read_runtime_test_frame(&mut stream, &mut read_buf));
+            assert_eq!(
+                promote,
+                vec![b"REPLICAOF".to_vec(), b"NO".to_vec(), b"ONE".to_vec()]
+            );
+            std::io::Write::write_all(
+                &mut stream,
+                &RespFrame::SimpleString("OK".to_string()).to_bytes(),
+            )
+            .expect("write failover promote reply");
+
+            let role =
+                runtime_test_frame_to_argv(read_runtime_test_frame(&mut stream, &mut read_buf));
+            assert_eq!(role, vec![b"ROLE".to_vec()]);
+            std::io::Write::write_all(
+                &mut stream,
+                &RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"master".to_vec())),
+                    RespFrame::Integer(0),
+                    RespFrame::Array(Some(Vec::new())),
+                ]))
+                .to_bytes(),
+            )
+            .expect("write failover role reply");
+        });
+
+        let mut rt = Runtime::default_strict();
+        rt.server
+            .replication_runtime_state
+            .ensure_replica(42)
+            .listening_port = addr.port();
+        rt.server
+            .replication_runtime_state
+            .ensure_replica(42)
+            .ip_address = Some("127.0.0.1".to_string());
+        rt.server
+            .replication_runtime_state
+            .ensure_replica(42)
+            .ack_offset = crate::ReplOffset(128);
+
+        let port = addr.port().to_string();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"FAILOVER",
+                    b"TO",
+                    b"127.0.0.1",
+                    port.as_bytes(),
+                    b"FORCE",
+                    b"TIMEOUT",
+                    b"5000",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ROLE"]), 1),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"slave".to_vec())),
+                RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                RespFrame::Integer(i64::from(addr.port())),
+                RespFrame::BulkString(Some(b"connect".to_vec())),
+                RespFrame::Integer(0),
+            ]))
+        );
+        assert_eq!(
+            rt.replica_sync_target(),
+            Some(("127.0.0.1".to_string(), addr.port()))
+        );
+        assert!(rt.take_replica_reconfigure_request());
+        assert_eq!(
+            rt.server
+                .replication_runtime_state
+                .replicas
+                .get(&42)
+                .expect("replica still tracked")
+                .listening_port,
+            addr.port()
+        );
+
+        server.join().expect("failover target thread");
+    }
+
+    #[test]
     fn replication_psync_continue_uses_live_backlog_window() {
         let mut rt = Runtime::default_strict();
 
@@ -10827,6 +11170,7 @@ mod tests {
             b"WAITAOF",
             b"QUIT",
             b"quit",
+            b"FAILOVER",
             b"PING",
             b"GET",
             b"SET",
