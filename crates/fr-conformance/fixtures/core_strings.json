@@ -1776,6 +1776,379 @@
       }
     },
     {
+      "name": "lcs_idx_mode",
+      "now_ms": 6706,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcsb",
+        "IDX"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind": "bulk", "value": "matches"},
+          {"kind": "array", "value": [
+            {"kind": "array", "value": [
+              {"kind": "array", "value": [{"kind": "integer", "value": 4}, {"kind": "integer", "value": 7}]},
+              {"kind": "array", "value": [{"kind": "integer", "value": 5}, {"kind": "integer", "value": 8}]}
+            ]},
+            {"kind": "array", "value": [
+              {"kind": "array", "value": [{"kind": "integer", "value": 2}, {"kind": "integer", "value": 3}]},
+              {"kind": "array", "value": [{"kind": "integer", "value": 0}, {"kind": "integer", "value": 1}]}
+            ]}
+          ]},
+          {"kind": "bulk", "value": "len"},
+          {"kind": "integer", "value": 6}
+        ]
+      }
+    },
+    {
+      "name": "lcs_idx_withmatchlen",
+      "now_ms": 6707,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcsb",
+        "IDX",
+        "WITHMATCHLEN"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind": "bulk", "value": "matches"},
+          {"kind": "array", "value": [
+            {"kind": "array", "value": [
+              {"kind": "array", "value": [{"kind": "integer", "value": 4}, {"kind": "integer", "value": 7}]},
+              {"kind": "array", "value": [{"kind": "integer", "value": 5}, {"kind": "integer", "value": 8}]},
+              {"kind": "integer", "value": 4}
+            ]},
+            {"kind": "array", "value": [
+              {"kind": "array", "value": [{"kind": "integer", "value": 2}, {"kind": "integer", "value": 3}]},
+              {"kind": "array", "value": [{"kind": "integer", "value": 0}, {"kind": "integer", "value": 1}]},
+              {"kind": "integer", "value": 2}
+            ]}
+          ]},
+          {"kind": "bulk", "value": "len"},
+          {"kind": "integer", "value": 6}
+        ]
+      }
+    },
+    {
+      "name": "lcs_idx_minmatchlen",
+      "now_ms": 6708,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcsb",
+        "IDX",
+        "MINMATCHLEN",
+        "3"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind": "bulk", "value": "matches"},
+          {"kind": "array", "value": [
+            {"kind": "array", "value": [
+              {"kind": "array", "value": [{"kind": "integer", "value": 4}, {"kind": "integer", "value": 7}]},
+              {"kind": "array", "value": [{"kind": "integer", "value": 5}, {"kind": "integer", "value": 8}]}
+            ]}
+          ]},
+          {"kind": "bulk", "value": "len"},
+          {"kind": "integer", "value": 6}
+        ]
+      }
+    },
+    {
+      "name": "lcs_idx_minmatchlen_withmatchlen",
+      "now_ms": 6709,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcsb",
+        "IDX",
+        "MINMATCHLEN",
+        "3",
+        "WITHMATCHLEN"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind": "bulk", "value": "matches"},
+          {"kind": "array", "value": [
+            {"kind": "array", "value": [
+              {"kind": "array", "value": [{"kind": "integer", "value": 4}, {"kind": "integer", "value": 7}]},
+              {"kind": "array", "value": [{"kind": "integer", "value": 5}, {"kind": "integer", "value": 8}]},
+              {"kind": "integer", "value": 4}
+            ]}
+          ]},
+          {"kind": "bulk", "value": "len"},
+          {"kind": "integer", "value": 6}
+        ]
+      }
+    },
+    {
+      "name": "lcs_setup_empty",
+      "now_ms": 6710,
+      "argv": [
+        "SET",
+        "lcs_empty",
+        ""
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "lcs_empty_string",
+      "now_ms": 6711,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcs_empty"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": ""
+      }
+    },
+    {
+      "name": "lcs_empty_string_len",
+      "now_ms": 6712,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcs_empty",
+        "LEN"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "lcs_setup_identical",
+      "now_ms": 6713,
+      "argv": [
+        "SET",
+        "lcs_identical",
+        "ohmytext"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "lcs_identical_strings",
+      "now_ms": 6714,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcs_identical"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "ohmytext"
+      }
+    },
+    {
+      "name": "lcs_identical_strings_len",
+      "now_ms": 6715,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcs_identical",
+        "LEN"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 8
+      }
+    },
+    {
+      "name": "lcs_setup_no_common",
+      "now_ms": 6716,
+      "argv": [
+        "SET",
+        "lcs_nocommon",
+        "abc"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "lcs_no_common_subsequence",
+      "now_ms": 6717,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcs_nocommon"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": ""
+      }
+    },
+    {
+      "name": "lcs_no_common_idx",
+      "now_ms": 6718,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcs_nocommon",
+        "IDX"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind": "bulk", "value": "matches"},
+          {"kind": "array", "value": []},
+          {"kind": "bulk", "value": "len"},
+          {"kind": "integer", "value": 0}
+        ]
+      }
+    },
+    {
+      "name": "lcs_syntax_error_unknown_option",
+      "now_ms": 6719,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcsb",
+        "UNKNOWN"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "lcs_syntax_error_minmatchlen_missing",
+      "now_ms": 6720,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcsb",
+        "MINMATCHLEN"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "lcs_minmatchlen_negative",
+      "now_ms": 6721,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcsb",
+        "IDX",
+        "MINMATCHLEN",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
+      "name": "lcs_minmatchlen_not_integer",
+      "now_ms": 6722,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcsb",
+        "IDX",
+        "MINMATCHLEN",
+        "abc"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is not an integer or out of range"
+      }
+    },
+    {
+      "name": "lcs_setup_list",
+      "now_ms": 6723,
+      "argv": [
+        "RPUSH",
+        "lcs_list",
+        "item"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "lcs_wrongtype",
+      "now_ms": 6724,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcs_list"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "lcs_both_missing",
+      "now_ms": 6725,
+      "argv": [
+        "LCS",
+        "nokey1",
+        "nokey2"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": ""
+      }
+    },
+    {
+      "name": "lcs_len_only_ignores_idx",
+      "now_ms": 6726,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcsb",
+        "LEN",
+        "IDX"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 6
+      }
+    },
+    {
+      "name": "lcs_minmatchlen_filters_all",
+      "now_ms": 6727,
+      "argv": [
+        "LCS",
+        "lcsa",
+        "lcsb",
+        "IDX",
+        "MINMATCHLEN",
+        "100"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind": "bulk", "value": "matches"},
+          {"kind": "array", "value": []},
+          {"kind": "bulk", "value": "len"},
+          {"kind": "integer", "value": 6}
+        ]
+      }
+    },
+    {
       "name": "object_encoding_int",
       "now_ms": 6800,
       "argv": [
