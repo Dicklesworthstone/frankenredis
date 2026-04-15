@@ -2250,6 +2250,139 @@
       }
     },
     {
+      "name": "rename_ttl_setup",
+      "now_ms": 210,
+      "argv": ["SET", "rename_ttl_src", "ttlval"],
+      "expect": {"kind": "simple", "value": "OK"}
+    },
+    {
+      "name": "rename_ttl_set_expire",
+      "now_ms": 210,
+      "argv": ["PEXPIRE", "rename_ttl_src", "5000"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "rename_ttl_verify_before",
+      "now_ms": 211,
+      "argv": ["PTTL", "rename_ttl_src"],
+      "expect": {"kind": "integer", "value": 4999}
+    },
+    {
+      "name": "rename_ttl_do_rename",
+      "now_ms": 212,
+      "argv": ["RENAME", "rename_ttl_src", "rename_ttl_dst"],
+      "expect": {"kind": "simple", "value": "OK"}
+    },
+    {
+      "name": "rename_ttl_verify_preserved",
+      "now_ms": 213,
+      "argv": ["PTTL", "rename_ttl_dst"],
+      "expect": {"kind": "integer", "value": 4997}
+    },
+    {
+      "name": "rename_ttl_verify_value",
+      "now_ms": 214,
+      "argv": ["GET", "rename_ttl_dst"],
+      "expect": {"kind": "bulk", "value": "ttlval"}
+    },
+    {
+      "name": "rename_cross_type_list_setup",
+      "now_ms": 220,
+      "argv": ["RPUSH", "rename_list_src", "a", "b", "c"],
+      "expect": {"kind": "integer", "value": 3}
+    },
+    {
+      "name": "rename_cross_type_string_setup",
+      "now_ms": 220,
+      "argv": ["SET", "rename_string_dst", "will_be_overwritten"],
+      "expect": {"kind": "simple", "value": "OK"}
+    },
+    {
+      "name": "rename_cross_type_do",
+      "now_ms": 221,
+      "argv": ["RENAME", "rename_list_src", "rename_string_dst"],
+      "expect": {"kind": "simple", "value": "OK"}
+    },
+    {
+      "name": "rename_cross_type_verify_type",
+      "now_ms": 222,
+      "argv": ["TYPE", "rename_string_dst"],
+      "expect": {"kind": "simple", "value": "list"}
+    },
+    {
+      "name": "rename_cross_type_verify_contents",
+      "now_ms": 222,
+      "argv": ["LRANGE", "rename_string_dst", "0", "-1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind": "bulk", "value": "a"},
+          {"kind": "bulk", "value": "b"},
+          {"kind": "bulk", "value": "c"}
+        ]
+      }
+    },
+    {
+      "name": "renamenx_expired_dst_setup_src",
+      "now_ms": 230,
+      "argv": ["SET", "renamenx_exp_src", "source_val"],
+      "expect": {"kind": "simple", "value": "OK"}
+    },
+    {
+      "name": "renamenx_expired_dst_setup_dst",
+      "now_ms": 230,
+      "argv": ["SET", "renamenx_exp_dst", "will_expire"],
+      "expect": {"kind": "simple", "value": "OK"}
+    },
+    {
+      "name": "renamenx_expired_dst_set_ttl",
+      "now_ms": 230,
+      "argv": ["PEXPIRE", "renamenx_exp_dst", "50"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "renamenx_expired_dst_succeeds",
+      "now_ms": 300,
+      "argv": ["RENAMENX", "renamenx_exp_src", "renamenx_exp_dst"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "renamenx_expired_dst_verify",
+      "now_ms": 301,
+      "argv": ["GET", "renamenx_exp_dst"],
+      "expect": {"kind": "bulk", "value": "source_val"}
+    },
+    {
+      "name": "rename_hash_preserves_fields_setup",
+      "now_ms": 310,
+      "argv": ["HSET", "rename_hash_src", "f1", "v1", "f2", "v2"],
+      "expect": {"kind": "integer", "value": 2}
+    },
+    {
+      "name": "rename_hash_do",
+      "now_ms": 311,
+      "argv": ["RENAME", "rename_hash_src", "rename_hash_dst"],
+      "expect": {"kind": "simple", "value": "OK"}
+    },
+    {
+      "name": "rename_hash_verify_type",
+      "now_ms": 312,
+      "argv": ["TYPE", "rename_hash_dst"],
+      "expect": {"kind": "simple", "value": "hash"}
+    },
+    {
+      "name": "rename_hash_verify_field",
+      "now_ms": 312,
+      "argv": ["HGET", "rename_hash_dst", "f1"],
+      "expect": {"kind": "bulk", "value": "v1"}
+    },
+    {
+      "name": "rename_hash_src_gone",
+      "now_ms": 313,
+      "argv": ["EXISTS", "rename_hash_src"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
       "name": "type_wrong_arity",
       "now_ms": 200,
       "argv": [
