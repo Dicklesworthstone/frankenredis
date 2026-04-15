@@ -369,6 +369,168 @@
       }
     },
     {
+      "name": "pexpire_opts_setup",
+      "now_ms": 32100,
+      "argv": ["SET", "pexp_opts", "val"],
+      "expect": {"kind": "simple", "value": "OK"}
+    },
+    {
+      "name": "pexpire_nx_no_ttl_succeeds",
+      "now_ms": 32101,
+      "argv": ["PEXPIRE", "pexp_opts", "10000", "NX"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "pexpire_nx_has_ttl_fails",
+      "now_ms": 32102,
+      "argv": ["PEXPIRE", "pexp_opts", "5000", "NX"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "pexpire_xx_has_ttl_succeeds",
+      "now_ms": 32103,
+      "argv": ["PEXPIRE", "pexp_opts", "8000", "XX"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "pexpire_gt_larger_succeeds",
+      "now_ms": 32104,
+      "argv": ["PEXPIRE", "pexp_opts", "15000", "GT"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "pexpire_gt_smaller_fails",
+      "now_ms": 32105,
+      "argv": ["PEXPIRE", "pexp_opts", "5000", "GT"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "pexpire_lt_smaller_succeeds",
+      "now_ms": 32106,
+      "argv": ["PEXPIRE", "pexp_opts", "3000", "LT"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "pexpire_lt_larger_fails",
+      "now_ms": 32107,
+      "argv": ["PEXPIRE", "pexp_opts", "20000", "LT"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "expireat_opts_setup",
+      "now_ms": 32200,
+      "argv": ["SET", "expat_opts", "val"],
+      "expect": {"kind": "simple", "value": "OK"}
+    },
+    {
+      "name": "expireat_nx_no_ttl_succeeds",
+      "now_ms": 32201,
+      "argv": ["EXPIREAT", "expat_opts", "50", "NX"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "expireat_nx_has_ttl_fails",
+      "now_ms": 32202,
+      "argv": ["EXPIREAT", "expat_opts", "40", "NX"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "expireat_xx_has_ttl_succeeds",
+      "now_ms": 32203,
+      "argv": ["EXPIREAT", "expat_opts", "45", "XX"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "expireat_gt_larger_succeeds",
+      "now_ms": 32204,
+      "argv": ["EXPIREAT", "expat_opts", "60", "GT"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "expireat_gt_smaller_fails",
+      "now_ms": 32205,
+      "argv": ["EXPIREAT", "expat_opts", "40", "GT"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "expireat_lt_smaller_succeeds",
+      "now_ms": 32206,
+      "argv": ["EXPIREAT", "expat_opts", "35", "LT"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "expireat_lt_larger_fails",
+      "now_ms": 32207,
+      "argv": ["EXPIREAT", "expat_opts", "100", "LT"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "pexpireat_opts_setup",
+      "now_ms": 32300,
+      "argv": ["SET", "pexpat_opts", "val"],
+      "expect": {"kind": "simple", "value": "OK"}
+    },
+    {
+      "name": "pexpireat_nx_no_ttl_succeeds",
+      "now_ms": 32301,
+      "argv": ["PEXPIREAT", "pexpat_opts", "50000", "NX"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "pexpireat_nx_has_ttl_fails",
+      "now_ms": 32302,
+      "argv": ["PEXPIREAT", "pexpat_opts", "40000", "NX"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "pexpireat_xx_has_ttl_succeeds",
+      "now_ms": 32303,
+      "argv": ["PEXPIREAT", "pexpat_opts", "45000", "XX"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "pexpireat_gt_larger_succeeds",
+      "now_ms": 32304,
+      "argv": ["PEXPIREAT", "pexpat_opts", "60000", "GT"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "pexpireat_gt_smaller_fails",
+      "now_ms": 32305,
+      "argv": ["PEXPIREAT", "pexpat_opts", "40000", "GT"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "pexpireat_lt_smaller_succeeds",
+      "now_ms": 32306,
+      "argv": ["PEXPIREAT", "pexpat_opts", "35000", "LT"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "pexpireat_lt_larger_fails",
+      "now_ms": 32307,
+      "argv": ["PEXPIREAT", "pexpat_opts", "100000", "LT"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "expire_nx_xx_conflict_setup",
+      "now_ms": 32400,
+      "argv": ["SET", "exp_conflict", "val"],
+      "expect": {"kind": "simple", "value": "OK"}
+    },
+    {
+      "name": "expire_nx_xx_conflict",
+      "now_ms": 32401,
+      "argv": ["EXPIRE", "exp_conflict", "10", "NX", "XX"],
+      "expect": {"kind": "error", "value": "ERR syntax error"}
+    },
+    {
+      "name": "expire_gt_lt_conflict",
+      "now_ms": 32402,
+      "argv": ["EXPIRE", "exp_conflict", "10", "GT", "LT"],
+      "expect": {"kind": "error", "value": "ERR syntax error"}
+    },
+    {
       "name": "type_string_returns_string",
       "now_ms": 33000,
       "argv": [
