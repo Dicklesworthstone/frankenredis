@@ -253,6 +253,36 @@ fn spawn_legacy_redis_with_requirepass(port: u16, requirepass: Option<&str>) -> 
     child
 }
 
+fn spawn_legacy_redis_replica(port: u16, primary_port: u16) -> ManagedChild {
+    let dir = unique_temp_dir("frankenredis-legacy-replica");
+    let mut command = Command::new(legacy_redis_server_path());
+    command
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--save")
+        .arg("")
+        .arg("--appendonly")
+        .arg("no")
+        .arg("--repl-diskless-sync")
+        .arg("no")
+        .arg("--repl-diskless-sync-delay")
+        .arg("0")
+        .arg("--protected-mode")
+        .arg("no")
+        .arg("--replicaof")
+        .arg("127.0.0.1")
+        .arg(primary_port.to_string())
+        .arg("--dir")
+        .arg(dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let child = ManagedChild::spawn(command, None);
+    wait_for_port(port);
+    child
+}
+
 fn spawn_frankenredis(port: u16, primary_port: Option<u16>) -> ManagedChild {
     spawn_frankenredis_opts(port, primary_port, None, None)
 }
@@ -1409,14 +1439,17 @@ fn tcp_frankenredis_to_frankenredis_fullresync_and_live_streaming() {
 
 /// Test replica-of-replica chain: Primary → Replica1 → Replica2.
 /// Verifies data propagates through the entire chain, including live streaming.
-#[test]
-fn tcp_replica_of_replica_chain_replication() {
+fn exercise_replica_of_replica_chain<SP, SR>(spawn_primary: SP, spawn_replica: SR)
+where
+    SP: FnOnce(u16) -> ManagedChild,
+    SR: Fn(u16, u16) -> ManagedChild,
+{
     let primary_port = reserve_port();
     let replica1_port = reserve_port();
     let replica2_port = reserve_port();
 
     // Start primary.
-    let _primary = spawn_frankenredis(primary_port, None);
+    let _primary = spawn_primary(primary_port);
 
     // Write initial data to primary before any replicas connect.
     let mut client = connect_client(primary_port);
@@ -1427,7 +1460,7 @@ fn tcp_replica_of_replica_chain_replication() {
     }
 
     // Start replica1 pointing to primary.
-    let _replica1 = spawn_frankenredis(replica1_port, Some(primary_port));
+    let _replica1 = spawn_replica(replica1_port, primary_port);
     wait_for_replica_sync(replica1_port, Duration::from_secs(10));
 
     // Verify replica1 has initial data.
@@ -1444,7 +1477,7 @@ fn tcp_replica_of_replica_chain_replication() {
     }
 
     // Start replica2 pointing to replica1 (chained replication).
-    let _replica2 = spawn_frankenredis(replica2_port, Some(replica1_port));
+    let _replica2 = spawn_replica(replica2_port, replica1_port);
     wait_for_replica_sync(replica2_port, Duration::from_secs(10));
 
     // Verify each hop reports the expected replication topology.
@@ -1587,6 +1620,19 @@ fn tcp_replica_of_replica_chain_replication() {
     send_shutdown_nosave(replica2_port);
     send_shutdown_nosave(replica1_port);
     send_shutdown_nosave(primary_port);
+}
+
+#[test]
+fn tcp_replica_of_replica_chain_replication() {
+    exercise_replica_of_replica_chain(
+        |port| spawn_frankenredis(port, None),
+        |port, primary_port| spawn_frankenredis(port, Some(primary_port)),
+    );
+}
+
+#[test]
+fn tcp_replica_of_replica_chain_matches_legacy_redis_reference() {
+    exercise_replica_of_replica_chain(spawn_legacy_redis, spawn_legacy_redis_replica);
 }
 
 #[test]

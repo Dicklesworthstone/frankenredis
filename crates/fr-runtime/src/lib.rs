@@ -1072,6 +1072,7 @@ struct ReplicaState {
     fsync_offset: ReplOffset,
     listening_port: u16,
     ip_address: Option<String>,
+    last_ack_timestamp_ms: u64,
 }
 
 #[allow(dead_code)]
@@ -1237,6 +1238,10 @@ pub struct ServerState {
     pub repl_backlog_size: u64,
     /// Replication timeout in seconds (CONFIG SET repl-timeout). Default 60.
     pub repl_timeout_sec: u64,
+    /// Minimum healthy replicas required before writes are accepted.
+    min_replicas_to_write: usize,
+    /// Maximum acceptable replica ACK lag, in seconds, for write admission.
+    min_replicas_max_lag: u64,
     /// Replica promotion priority reported in INFO replication / CONFIG.
     pub replica_priority: usize,
     /// Optional username used when this server authenticates to its primary.
@@ -1335,6 +1340,8 @@ impl Default for ServerState {
             max_clients: 10_000,
             repl_backlog_size: DEFAULT_REPL_BACKLOG_SIZE,
             repl_timeout_sec: 60,
+            min_replicas_to_write: 0,
+            min_replicas_max_lag: 10,
             masteruser: None,
             masterauth: None,
             replica_priority: 100,
@@ -3059,7 +3066,9 @@ impl Runtime {
                     Some(self.handle_client_command(&argv, now_ms))
                 }
                 Some(RuntimeSpecialCommand::Role) => Some(self.handle_role_command(&argv)),
-                Some(RuntimeSpecialCommand::Replconf) => Some(self.handle_replconf_command(&argv)),
+                Some(RuntimeSpecialCommand::Replconf) => {
+                    Some(self.handle_replconf_command(&argv, now_ms))
+                }
                 Some(RuntimeSpecialCommand::Psync) | Some(RuntimeSpecialCommand::Sync) => {
                     Some(self.handle_psync_command(&argv))
                 }
@@ -3131,6 +3140,26 @@ impl Runtime {
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
                 self.server.record_command_histogram(&argv, elapsed_us);
                 return reply;
+            }
+        }
+
+        if self.server.min_replicas_to_write > 0
+            && matches!(self.server.replication_runtime_state.role, ReplicationRoleState::Master)
+            && argv.first().is_some_and(|cmd| fr_command::is_write_command(cmd))
+        {
+            let mut good_replicas = 0;
+            for replica in self.server.replication_runtime_state.replicas.values() {
+                let lag = (now_ms / 1000)
+                    .saturating_sub(replica.last_ack_timestamp_ms / 1000)
+                    .saturating_sub(1);
+                if lag <= self.server.min_replicas_max_lag {
+                    good_replicas += 1;
+                }
+            }
+            if good_replicas < self.server.min_replicas_to_write {
+                return RespFrame::Error(
+                    "NOREPLICAS Not enough good replicas to write.".to_string()
+                );
             }
         }
 
@@ -4957,6 +4986,8 @@ impl Runtime {
         let mut next_replica_priority: Option<usize> = None;
         let mut next_repl_diskless_sync: Option<bool> = None;
         let mut next_repl_diskless_sync_delay: Option<u64> = None;
+        let mut next_min_replicas_to_write: Option<usize> = None;
+        let mut next_min_replicas_max_lag: Option<u64> = None;
         let mut next_query_buffer_limit: Option<usize> = None;
         let mut next_proto_max_bulk_len: Option<usize> = None;
         let mut next_output_buffer_limit: Option<usize> = None;
@@ -5192,6 +5223,34 @@ impl Runtime {
                 next_repl_diskless_sync_delay = Some(parsed);
                 static_override_updates
                     .push(("repl-diskless-sync-delay".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("min-replicas-to-write") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as usize,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'min-replicas-to-write'".to_string(),
+                        );
+                    }
+                    Err(err) => return err.to_resp(),
+                };
+                next_min_replicas_to_write = Some(parsed);
+                static_override_updates.push(("min-replicas-to-write".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("min-replicas-max-lag") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as u64,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'min-replicas-max-lag'".to_string(),
+                        );
+                    }
+                    Err(err) => return err.to_resp(),
+                };
+                next_min_replicas_max_lag = Some(parsed);
+                static_override_updates.push(("min-replicas-max-lag".to_string(), parsed.to_string()));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("client-query-buffer-limit") {
@@ -5517,6 +5576,12 @@ impl Runtime {
         }
         if let Some(delay) = next_repl_diskless_sync_delay {
             self.server.repl_diskless_sync_delay_sec = delay;
+        }
+        if let Some(to_write) = next_min_replicas_to_write {
+            self.server.min_replicas_to_write = to_write;
+        }
+        if let Some(max_lag) = next_min_replicas_max_lag {
+            self.server.min_replicas_max_lag = max_lag;
         }
         if let Some(query_buffer_limit) = next_query_buffer_limit {
             self.server.query_buffer_limit = query_buffer_limit;
@@ -7519,7 +7584,7 @@ slave_priority:{}\r\n",
         RespFrame::SimpleString("OK".to_string())
     }
 
-    fn handle_replconf_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_replconf_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         if argv.len() < 2 {
             return CommandError::WrongArity("REPLCONF").to_resp();
         }
@@ -7552,6 +7617,7 @@ slave_priority:{}\r\n",
                 if offset > replica.fsync_offset {
                     replica.fsync_offset = offset;
                 }
+                replica.last_ack_timestamp_ms = now_ms;
             }
             self.server.refresh_replica_ack_snapshots();
             RespFrame::SimpleString("OK".to_string())
@@ -7581,6 +7647,7 @@ slave_priority:{}\r\n",
                 if offset > replica.fsync_offset {
                     replica.fsync_offset = offset;
                 }
+                replica.last_ack_timestamp_ms = now_ms;
             }
             self.server.refresh_replica_ack_snapshots();
             RespFrame::SimpleString("OK".to_string())
