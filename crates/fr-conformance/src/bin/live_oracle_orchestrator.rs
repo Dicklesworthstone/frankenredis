@@ -873,6 +873,11 @@ mod tests {
         assert!(
             parity
                 .iter()
+                .any(|suite| suite.name == "core_module_sentinel")
+        );
+        assert!(
+            parity
+                .iter()
                 .any(|suite| suite.name == "fr_p2c_008_expire_evict_journey")
         );
     }

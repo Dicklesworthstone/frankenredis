@@ -65,13 +65,13 @@ The `baseline` matrix runs the fixed reliability gate in deterministic order:
 
 The `parity` matrix expands that baseline with broader single-node request/response coverage
 such as `core_hash`, `core_list`, `core_set`, `core_zset`, `core_scan`, `core_sort`,
-`core_acl`, `core_config`, `core_cluster`, `core_scripting`, `core_function`,
+`core_acl`, `core_config`, `core_module_sentinel`, `core_cluster`, `core_scripting`, `core_function`,
 `core_object`, `core_pfdebug`, and packet journeys `FR-P2C-004/007/008/009`.
 
 Multi-client or topology-heavy suites remain outside the parity matrix for now because the
 current live-oracle transport is still single-node and single-connection oriented. Those
 surfaces include `core_pubsub`, `core_blocking`, `core_replication`, `core_wait`,
-`core_migrate`, `core_module_sentinel`, and the packet-006 replication fixtures.
+`core_migrate`, and the packet-006 replication fixtures.
 
 It writes a
 self-contained bundle under:

@@ -184,6 +184,13 @@
       "profiles": ["parity"]
     },
     {
+      "name": "core_module_sentinel",
+      "mode": "command",
+      "fixture": "core_module_sentinel.json",
+      "scenario_class": "control_plane",
+      "profiles": ["parity"]
+    },
+    {
       "name": "core_cluster",
       "mode": "command",
       "fixture": "core_cluster.json",

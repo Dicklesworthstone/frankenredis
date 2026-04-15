@@ -42,7 +42,20 @@
       "now_ms": 12,
       "argv": ["MODULE", "HELP"],
       "expect": {
-        "kind": "any_array"
+        "kind": "array",
+        "value": [
+          { "kind": "simple", "value": "MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:" },
+          { "kind": "simple", "value": "LIST" },
+          { "kind": "simple", "value": "    Return a list of loaded modules." },
+          { "kind": "simple", "value": "LOAD <path> [<arg> ...]" },
+          { "kind": "simple", "value": "    Load a module library from <path>, passing to it any optional arguments." },
+          { "kind": "simple", "value": "LOADEX <path> [[CONFIG NAME VALUE] [CONFIG NAME VALUE]] [ARGS ...]" },
+          { "kind": "simple", "value": "    Load a module library from <path>, while passing it module configurations and optional arguments." },
+          { "kind": "simple", "value": "UNLOAD <name>" },
+          { "kind": "simple", "value": "    Unload a module." },
+          { "kind": "simple", "value": "HELP" },
+          { "kind": "simple", "value": "    Print this help." }
+        ]
       }
     },
     {
@@ -51,7 +64,7 @@
       "argv": ["MODULE", "LOAD", "/nonexistent/path"],
       "expect": {
         "kind": "error",
-        "value": "ERR Error loading the extension. Please check the server logs."
+        "value": "ERR MODULE command not allowed. If the enable-module-command option is set to \"local\", you can run it from a local connection, otherwise you need to set this option in the configuration file, and then restart the server."
       }
     },
     {
@@ -60,7 +73,7 @@
       "argv": ["MODULE", "LOADEX", "/nonexistent/path"],
       "expect": {
         "kind": "error",
-        "value": "ERR Error loading the extension. Please check the server logs."
+        "value": "ERR MODULE command not allowed. If the enable-module-command option is set to \"local\", you can run it from a local connection, otherwise you need to set this option in the configuration file, and then restart the server."
       }
     },
     {
@@ -69,7 +82,7 @@
       "argv": ["MODULE", "UNLOAD", "mymodule"],
       "expect": {
         "kind": "error",
-        "value": "ERR Error unloading module: no such module with that name"
+        "value": "ERR MODULE command not allowed. If the enable-module-command option is set to \"local\", you can run it from a local connection, otherwise you need to set this option in the configuration file, and then restart the server."
       }
     },
     {
@@ -78,7 +91,7 @@
       "argv": ["MODULE", "BOGUS"],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'bogus'. Try MODULE HELP."
+        "value": "ERR unknown subcommand 'BOGUS'. Try MODULE HELP."
       }
     },
     {
@@ -87,7 +100,7 @@
       "argv": ["MODULE", "LOAD"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'module|load' subcommand"
+        "value": "ERR wrong number of arguments for 'module|load' command"
       }
     },
     {
@@ -150,7 +163,7 @@
       "argv": ["SENTINEL"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'sentinel' command"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: "
       }
     },
     {
@@ -158,7 +171,8 @@
       "now_ms": 31,
       "argv": ["SENTINEL", "HELP"],
       "expect": {
-        "kind": "any_array"
+        "kind": "error",
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'HELP' "
       }
     },
     {
@@ -166,8 +180,8 @@
       "now_ms": 32,
       "argv": ["SENTINEL", "MYID"],
       "expect": {
-        "kind": "bulk",
-        "value": ""
+        "kind": "error",
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'MYID' "
       }
     },
     {
@@ -175,8 +189,8 @@
       "now_ms": 33,
       "argv": ["SENTINEL", "MASTERS"],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'MASTERS' "
       }
     },
     {
@@ -185,7 +199,7 @@
       "argv": ["SENTINEL", "MASTER", "mymaster"],
       "expect": {
         "kind": "error",
-        "value": "ERR No such master with that name"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'MASTER' 'mymaster' "
       }
     },
     {
@@ -194,7 +208,7 @@
       "argv": ["SENTINEL", "REPLICAS", "mymaster"],
       "expect": {
         "kind": "error",
-        "value": "ERR No such master with that name"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'REPLICAS' 'mymaster' "
       }
     },
     {
@@ -203,7 +217,7 @@
       "argv": ["SENTINEL", "GET-MASTER-ADDR-BY-NAME", "mymaster"],
       "expect": {
         "kind": "error",
-        "value": "ERR No such master with that name"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'GET-MASTER-ADDR-BY-NAME' 'mymaster' "
       }
     },
     {
@@ -212,7 +226,7 @@
       "argv": ["SENTINEL", "CKQUORUM", "mymaster"],
       "expect": {
         "kind": "error",
-        "value": "ERR No such master with that name"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'CKQUORUM' 'mymaster' "
       }
     },
     {
@@ -221,7 +235,7 @@
       "argv": ["SENTINEL", "FAILOVER", "mymaster"],
       "expect": {
         "kind": "error",
-        "value": "ERR No such master with that name"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'FAILOVER' 'mymaster' "
       }
     },
     {
@@ -230,7 +244,7 @@
       "argv": ["SENTINEL", "RESET", "mymaster"],
       "expect": {
         "kind": "error",
-        "value": "ERR No such master with that name"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'RESET' 'mymaster' "
       }
     },
     {
@@ -239,7 +253,7 @@
       "argv": ["SENTINEL", "REMOVE", "mymaster"],
       "expect": {
         "kind": "error",
-        "value": "ERR No such master with that name"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'REMOVE' 'mymaster' "
       }
     },
     {
@@ -248,7 +262,7 @@
       "argv": ["SENTINEL", "SENTINELS", "mymaster"],
       "expect": {
         "kind": "error",
-        "value": "ERR No such master with that name"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'SENTINELS' 'mymaster' "
       }
     },
     {
@@ -257,7 +271,7 @@
       "argv": ["SENTINEL", "SLAVES", "mymaster"],
       "expect": {
         "kind": "error",
-        "value": "ERR No such master with that name"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'SLAVES' 'mymaster' "
       }
     },
     {
@@ -265,8 +279,8 @@
       "now_ms": 43,
       "argv": ["SENTINEL", "FLUSHCONFIG"],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'FLUSHCONFIG' "
       }
     },
     {
@@ -275,7 +289,7 @@
       "argv": ["SENTINEL", "FLUSHCONFIG", "extra"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'sentinel' command"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'FLUSHCONFIG' 'extra' "
       }
     },
     {
@@ -283,8 +297,8 @@
       "now_ms": 45,
       "argv": ["SENTINEL", "PENDING-SCRIPTS"],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'PENDING-SCRIPTS' "
       }
     },
     {
@@ -293,7 +307,7 @@
       "argv": ["SENTINEL", "PENDING-SCRIPTS", "extra"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'sentinel' command"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'PENDING-SCRIPTS' 'extra' "
       }
     },
     {
@@ -302,7 +316,7 @@
       "argv": ["SENTINEL", "BOGUS"],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'bogus'. Try SENTINEL HELP."
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'BOGUS' "
       }
     },
     {
@@ -310,8 +324,8 @@
       "now_ms": 48,
       "argv": ["SENTINEL", "myid"],
       "expect": {
-        "kind": "bulk",
-        "value": ""
+        "kind": "error",
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'myid' "
       }
     },
     {
@@ -319,8 +333,8 @@
       "now_ms": 49,
       "argv": ["SENTINEL", "masters"],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'masters' "
       }
     },
     {
@@ -329,7 +343,7 @@
       "argv": ["SENTINEL", "REPLICAS"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'sentinel' command"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'REPLICAS' "
       }
     },
     {
@@ -338,7 +352,7 @@
       "argv": ["SENTINEL", "GET-MASTER-ADDR-BY-NAME"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'sentinel' command"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'GET-MASTER-ADDR-BY-NAME' "
       }
     },
     {
@@ -347,7 +361,7 @@
       "argv": ["SENTINEL", "CKQUORUM"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'sentinel' command"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'CKQUORUM' "
       }
     },
     {
@@ -356,7 +370,7 @@
       "argv": ["SENTINEL", "FAILOVER"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'sentinel' command"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'FAILOVER' "
       }
     },
     {
@@ -365,7 +379,7 @@
       "argv": ["SENTINEL", "RESET"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'sentinel' command"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'RESET' "
       }
     },
     {
@@ -374,7 +388,7 @@
       "argv": ["SENTINEL", "REMOVE"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'sentinel' command"
+        "value": "ERR unknown command 'SENTINEL', with args beginning with: 'REMOVE' "
       }
     },
     {
@@ -455,7 +469,7 @@
       "argv": ["FAILOVER", "TIMEOUT", "1000", "ABORT"],
       "expect": {
         "kind": "error",
-        "value": "ERR No failover in progress."
+        "value": "ERR syntax error"
       }
     },
     {
@@ -464,7 +478,7 @@
       "argv": ["MODULE", "LOADEX"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'module|loadex' subcommand"
+        "value": "ERR wrong number of arguments for 'module|loadex' command"
       }
     },
     {
@@ -473,7 +487,7 @@
       "argv": ["MODULE", "UNLOAD"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'module|unload' subcommand"
+        "value": "ERR wrong number of arguments for 'module|unload' command"
       }
     },
     {
@@ -482,7 +496,7 @@
       "argv": ["MODULE", "LIST", "extra"],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'module|list' subcommand"
+        "value": "ERR wrong number of arguments for 'module|list' command"
       }
     },
     {
@@ -499,7 +513,20 @@
       "now_ms": 74,
       "argv": ["MODULE", "help"],
       "expect": {
-        "kind": "any_array"
+        "kind": "array",
+        "value": [
+          { "kind": "simple", "value": "MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:" },
+          { "kind": "simple", "value": "LIST" },
+          { "kind": "simple", "value": "    Return a list of loaded modules." },
+          { "kind": "simple", "value": "LOAD <path> [<arg> ...]" },
+          { "kind": "simple", "value": "    Load a module library from <path>, passing to it any optional arguments." },
+          { "kind": "simple", "value": "LOADEX <path> [[CONFIG NAME VALUE] [CONFIG NAME VALUE]] [ARGS ...]" },
+          { "kind": "simple", "value": "    Load a module library from <path>, while passing it module configurations and optional arguments." },
+          { "kind": "simple", "value": "UNLOAD <name>" },
+          { "kind": "simple", "value": "    Unload a module." },
+          { "kind": "simple", "value": "HELP" },
+          { "kind": "simple", "value": "    Print this help." }
+        ]
       }
     }
   ]

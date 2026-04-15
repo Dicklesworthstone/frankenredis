@@ -45,6 +45,10 @@ fn hello_bulk(s: &str) -> RespFrame {
     RespFrame::BulkString(Some(s.as_bytes().to_vec()))
 }
 
+fn hello_simple(s: &str) -> RespFrame {
+    RespFrame::SimpleString(s.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrateRequest {
     pub host: String,
@@ -7274,6 +7278,10 @@ fn failover_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         }
     }
 
+    if abort && (_to_host.is_some() || _to_port.is_some() || _force || _timeout_ms.is_some()) {
+        return Err(CommandError::SyntaxError);
+    }
+
     if abort {
         // No failover in progress in standalone mode
         return Err(CommandError::Custom(
@@ -7287,6 +7295,19 @@ fn failover_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     ))
 }
 
+fn module_wrong_arity(subcommand: &[u8]) -> CommandError {
+    CommandError::Custom(format!(
+        "ERR wrong number of arguments for 'module|{}' command",
+        bytes_to_lossy_string(subcommand).to_ascii_lowercase()
+    ))
+}
+
+fn module_disabled_error() -> CommandError {
+    CommandError::Custom(
+        "ERR MODULE command not allowed. If the enable-module-command option is set to \"local\", you can run it from a local connection, otherwise you need to set this option in the configuration file, and then restart the server.".to_string(),
+    )
+}
+
 fn module_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("MODULE"));
@@ -7294,158 +7315,58 @@ fn module_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
 
     if argv[1].eq_ignore_ascii_case(b"HELP") {
         if argv.len() != 2 {
-            return Err(CommandError::WrongSubcommandArity {
-                command: "MODULE",
-                subcommand: bytes_to_lossy_string(&argv[1]),
-            });
+            return Err(module_wrong_arity(&argv[1]));
         }
         return Ok(RespFrame::Array(Some(vec![
-            hello_bulk("MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
-            hello_bulk("LIST"),
-            hello_bulk("    Return a list of loaded modules."),
-            hello_bulk("LOAD <path> [<arg> ...]"),
-            hello_bulk(
+            hello_simple("MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
+            hello_simple("LIST"),
+            hello_simple("    Return a list of loaded modules."),
+            hello_simple("LOAD <path> [<arg> ...]"),
+            hello_simple(
                 "    Load a module library from <path>, passing to it any optional arguments.",
             ),
-            hello_bulk("LOADEX <path> [[CONFIG NAME VALUE] [CONFIG NAME VALUE]] [ARGS ...]"),
-            hello_bulk(
+            hello_simple("LOADEX <path> [[CONFIG NAME VALUE] [CONFIG NAME VALUE]] [ARGS ...]"),
+            hello_simple(
                 "    Load a module library from <path>, while passing it module configurations and optional arguments.",
             ),
-            hello_bulk("UNLOAD <name>"),
-            hello_bulk("    Unload a module."),
-            hello_bulk("HELP"),
-            hello_bulk("    Print this help."),
+            hello_simple("UNLOAD <name>"),
+            hello_simple("    Unload a module."),
+            hello_simple("HELP"),
+            hello_simple("    Print this help."),
         ])));
     }
 
     if argv[1].eq_ignore_ascii_case(b"LIST") {
         if argv.len() != 2 {
-            return Err(CommandError::WrongSubcommandArity {
-                command: "MODULE",
-                subcommand: bytes_to_lossy_string(&argv[1]),
-            });
+            return Err(module_wrong_arity(&argv[1]));
         }
         return Ok(RespFrame::Array(Some(Vec::new())));
     }
 
     if argv[1].eq_ignore_ascii_case(b"UNLOAD") {
         if argv.len() != 3 {
-            return Err(CommandError::WrongSubcommandArity {
-                command: "MODULE",
-                subcommand: bytes_to_lossy_string(&argv[1]),
-            });
+            return Err(module_wrong_arity(&argv[1]));
         }
-        return Err(CommandError::Custom(
-            "ERR Error unloading module: no such module with that name".to_string(),
-        ));
+        return Err(module_disabled_error());
     }
 
     if argv[1].eq_ignore_ascii_case(b"LOAD") || argv[1].eq_ignore_ascii_case(b"LOADEX") {
         if argv.len() < 3 {
-            return Err(CommandError::WrongSubcommandArity {
-                command: "MODULE",
-                subcommand: bytes_to_lossy_string(&argv[1]),
-            });
+            return Err(module_wrong_arity(&argv[1]));
         }
-        return Err(CommandError::Custom(
-            "ERR Error loading the extension. Please check the server logs.".to_string(),
-        ));
+        return Err(module_disabled_error());
     }
 
-    Err(CommandError::UnknownSubcommand {
-        command: "MODULE",
-        subcommand: bytes_to_lossy_string(&argv[1]),
-    })
+    Err(CommandError::Custom(format!(
+        "ERR unknown subcommand '{}'. Try MODULE HELP.",
+        bytes_to_lossy_string(&argv[1])
+    )))
 }
 
 fn sentinel_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
-    if argv.len() < 2 {
-        return Err(CommandError::WrongArity("SENTINEL"));
-    }
-    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    if sub.eq_ignore_ascii_case("HELP") {
-        if argv.len() != 2 {
-            return Err(CommandError::WrongArity("SENTINEL"));
-        }
-        return Ok(RespFrame::Array(Some(vec![
-            hello_bulk("SENTINEL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
-            hello_bulk("CKQUORUM <master-name>"),
-            hello_bulk("CONFIG GET <option>"),
-            hello_bulk("CONFIG SET <option> <value>"),
-            hello_bulk("DEBUG <option> <value>"),
-            hello_bulk("FAILOVER <master-name>"),
-            hello_bulk("FLUSHCONFIG"),
-            hello_bulk("GET-MASTER-ADDR-BY-NAME <master-name>"),
-            hello_bulk("INFO-CACHE <master-name>"),
-            hello_bulk("IS-MASTER-DOWN-BY-ADDR ..."),
-            hello_bulk("MASTER <master-name>"),
-            hello_bulk("MASTERS"),
-            hello_bulk("MONITOR <name> <ip> <port> <quorum>"),
-            hello_bulk("MYID"),
-            hello_bulk("PENDING-SCRIPTS"),
-            hello_bulk("REMOVE <master-name>"),
-            hello_bulk("REPLICAS <master-name>"),
-            hello_bulk("RESET <pattern>"),
-            hello_bulk("SENTINELS <master-name>"),
-            hello_bulk("SET <master-name> <option> <value>"),
-            hello_bulk("SIMULATE-FAILURE (crash-after-election|crash-after-promotion|help)"),
-            hello_bulk("HELP"),
-        ])));
-    }
-    if sub.eq_ignore_ascii_case("MYID") {
-        if argv.len() != 2 {
-            return Err(CommandError::WrongArity("SENTINEL"));
-        }
-        // In non-sentinel mode, MYID returns an empty string
-        return Ok(RespFrame::BulkString(Some(Vec::new())));
-    }
-    if sub.eq_ignore_ascii_case("MASTERS") {
-        if argv.len() != 2 {
-            return Err(CommandError::WrongArity("SENTINEL"));
-        }
-        // No sentinel masters configured
-        return Ok(RespFrame::Array(Some(Vec::new())));
-    }
-    if sub.eq_ignore_ascii_case("MASTER")
-        || sub.eq_ignore_ascii_case("REPLICAS")
-        || sub.eq_ignore_ascii_case("SLAVES")
-        || sub.eq_ignore_ascii_case("SENTINELS")
-        || sub.eq_ignore_ascii_case("GET-MASTER-ADDR-BY-NAME")
-    {
-        if argv.len() != 3 {
-            return Err(CommandError::WrongArity("SENTINEL"));
-        }
-        return Err(CommandError::Custom(
-            "ERR No such master with that name".to_string(),
-        ));
-    }
-    if sub.eq_ignore_ascii_case("CKQUORUM")
-        || sub.eq_ignore_ascii_case("FAILOVER")
-        || sub.eq_ignore_ascii_case("RESET")
-        || sub.eq_ignore_ascii_case("REMOVE")
-    {
-        if argv.len() != 3 {
-            return Err(CommandError::WrongArity("SENTINEL"));
-        }
-        return Err(CommandError::Custom(
-            "ERR No such master with that name".to_string(),
-        ));
-    }
-    if sub.eq_ignore_ascii_case("FLUSHCONFIG") {
-        if argv.len() != 2 {
-            return Err(CommandError::WrongArity("SENTINEL"));
-        }
-        return Ok(RespFrame::SimpleString("OK".to_string()));
-    }
-    if sub.eq_ignore_ascii_case("PENDING-SCRIPTS") {
-        if argv.len() != 2 {
-            return Err(CommandError::WrongArity("SENTINEL"));
-        }
-        return Ok(RespFrame::Array(Some(Vec::new())));
-    }
-    Err(CommandError::UnknownSubcommand {
-        command: "SENTINEL",
-        subcommand: sub.to_string(),
+    Err(CommandError::UnknownCommand {
+        command: bytes_to_lossy_string(&argv[0]),
+        args_preview: Some(build_unknown_args_preview(argv).unwrap_or_default()),
     })
 }
 
@@ -22046,15 +21967,13 @@ mod tests {
         };
         assert_eq!(
             items.first(),
-            Some(&RespFrame::BulkString(Some(
-                b"MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_vec(),
-            )))
+            Some(&RespFrame::SimpleString(
+                "MODULE <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_string(),
+            ))
         );
         assert_eq!(
             items.last(),
-            Some(&RespFrame::BulkString(Some(
-                b"    Print this help.".to_vec(),
-            )))
+            Some(&RespFrame::SimpleString("    Print this help.".to_string()))
         );
     }
 
@@ -22075,7 +21994,7 @@ mod tests {
         assert_eq!(
             load,
             CommandError::Custom(
-                "ERR Error loading the extension. Please check the server logs.".to_string(),
+                "ERR MODULE command not allowed. If the enable-module-command option is set to \"local\", you can run it from a local connection, otherwise you need to set this option in the configuration file, and then restart the server.".to_string(),
             )
         );
 
@@ -22088,7 +22007,7 @@ mod tests {
         assert_eq!(
             unload,
             CommandError::Custom(
-                "ERR Error unloading module: no such module with that name".to_string(),
+                "ERR MODULE command not allowed. If the enable-module-command option is set to \"local\", you can run it from a local connection, otherwise you need to set this option in the configuration file, and then restart the server.".to_string(),
             )
         );
     }
@@ -22100,10 +22019,7 @@ mod tests {
             .expect_err("module unknown subcommand should fail");
         assert_eq!(
             out,
-            CommandError::UnknownSubcommand {
-                command: "MODULE",
-                subcommand: "WAT".to_string(),
-            }
+            CommandError::Custom("ERR unknown subcommand 'WAT'. Try MODULE HELP.".to_string())
         );
     }
 
@@ -22118,10 +22034,9 @@ mod tests {
         .expect_err("extra module help args should fail");
         assert_eq!(
             err,
-            CommandError::WrongSubcommandArity {
-                command: "MODULE",
-                subcommand: "HELP".to_string(),
-            }
+            CommandError::Custom(
+                "ERR wrong number of arguments for 'module|help' command".to_string()
+            )
         );
     }
 
@@ -22156,7 +22071,27 @@ mod tests {
             0,
         )
         .expect_err("extra sentinel args should fail");
-        assert_eq!(err, CommandError::WrongArity("SENTINEL"));
+        assert_eq!(
+            err,
+            CommandError::UnknownCommand {
+                command: "SENTINEL".to_string(),
+                args_preview: Some("'MASTER' 'mymaster' 'extra' ".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn sentinel_without_subcommand_uses_unknown_command_surface() {
+        let mut store = Store::new();
+        let err = dispatch_argv(&[b"SENTINEL".to_vec()], &mut store, 0)
+            .expect_err("bare sentinel should fail");
+        assert_eq!(
+            err,
+            CommandError::UnknownCommand {
+                command: "SENTINEL".to_string(),
+                args_preview: Some(String::new()),
+            }
+        );
     }
 
     #[test]
@@ -22173,7 +22108,13 @@ mod tests {
             0,
         )
         .expect_err("extra sentinel args should fail");
-        assert_eq!(err, CommandError::WrongArity("SENTINEL"));
+        assert_eq!(
+            err,
+            CommandError::UnknownCommand {
+                command: "SENTINEL".to_string(),
+                args_preview: Some("'FAILOVER' 'mymaster' 'extra' ".to_string()),
+            }
+        );
     }
 
     #[test]
@@ -22185,7 +22126,13 @@ mod tests {
             0,
         )
         .expect_err("extra sentinel help args should fail");
-        assert_eq!(err, CommandError::WrongArity("SENTINEL"));
+        assert_eq!(
+            err,
+            CommandError::UnknownCommand {
+                command: "SENTINEL".to_string(),
+                args_preview: Some("'HELP' 'extra' ".to_string()),
+            }
+        );
     }
 
     #[test]
@@ -22197,7 +22144,30 @@ mod tests {
             0,
         )
         .expect_err("extra sentinel args should fail");
-        assert_eq!(err, CommandError::WrongArity("SENTINEL"));
+        assert_eq!(
+            err,
+            CommandError::UnknownCommand {
+                command: "SENTINEL".to_string(),
+                args_preview: Some("'MASTERS' 'extra' ".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn failover_abort_cannot_be_combined_with_other_options() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"FAILOVER".to_vec(),
+                b"TIMEOUT".to_vec(),
+                b"1000".to_vec(),
+                b"ABORT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("combined failover timeout and abort should fail");
+        assert_eq!(err, CommandError::SyntaxError);
     }
 
     #[test]

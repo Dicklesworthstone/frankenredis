@@ -1,9 +1,91 @@
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::thread::sleep;
+use std::time::{Duration, Instant};
 
 use fr_conformance::{
-    HarnessConfig, run_fixture, run_protocol_fixture, run_replay_fixture,
-    run_replication_handshake_fixture, run_smoke,
+    HarnessConfig, LiveOracleConfig, run_fixture, run_live_redis_diff, run_protocol_fixture,
+    run_replay_fixture, run_replication_handshake_fixture, run_smoke,
 };
+
+struct VendoredRedisOracle {
+    child: Child,
+    port: u16,
+}
+
+impl VendoredRedisOracle {
+    fn start(cfg: &HarnessConfig) -> Self {
+        let server_path = cfg.oracle_root.join("src/redis-server");
+        assert!(
+            server_path.exists(),
+            "vendored redis-server missing at {}",
+            server_path.display()
+        );
+
+        let listener =
+            TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port for vendored redis");
+        let port = listener
+            .local_addr()
+            .expect("ephemeral port address")
+            .port();
+        drop(listener);
+
+        let child = Command::new(&server_path)
+            .args([
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+                "--bind",
+                "127.0.0.1",
+                "--port",
+                &port.to_string(),
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn vendored redis-server");
+
+        assert!(
+            wait_for_redis_ready(port),
+            "vendored redis-server did not become ready on 127.0.0.1:{port}"
+        );
+
+        Self { child, port }
+    }
+}
+
+impl Drop for VendoredRedisOracle {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn wait_for_redis_ready(port: u16) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)) {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+            let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+            if stream.write_all(b"*1\r\n$4\r\nPING\r\n").is_ok() {
+                let mut response = [0_u8; 16];
+                if let Ok(bytes_read) = stream.read(&mut response)
+                    && &response[..bytes_read] == b"+PONG\r\n"
+                {
+                    let _ = stream.shutdown(Shutdown::Both);
+                    return true;
+                }
+            }
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        sleep(Duration::from_millis(25));
+    }
+    false
+}
 
 #[test]
 fn smoke_report_is_stable() {
@@ -384,6 +466,25 @@ fn core_module_sentinel_conformance() {
     let diff = run_fixture(&cfg, "core_module_sentinel.json").expect("module/sentinel fixture");
     assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
     assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_module_sentinel_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff(&cfg, "core_module_sentinel.json", &oracle)
+        .expect("module/sentinel live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
 }
 
 #[test]
