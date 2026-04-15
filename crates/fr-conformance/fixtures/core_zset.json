@@ -2356,6 +2356,210 @@
       }
     },
     {
+      "name": "zadd_nx_xx_conflict",
+      "now_ms": 110,
+      "argv": ["ZADD", "zconflict", "NX", "XX", "1", "member"],
+      "expect": {"kind": "error", "value": "ERR XX and NX options at the same time are not compatible"}
+    },
+    {
+      "name": "zadd_gt_lt_conflict",
+      "now_ms": 111,
+      "argv": ["ZADD", "zconflict", "GT", "LT", "1", "member"],
+      "expect": {"kind": "error", "value": "ERR GT and LT options at the same time are not compatible"}
+    },
+    {
+      "name": "zadd_nx_gt_conflict",
+      "now_ms": 112,
+      "argv": ["ZADD", "zconflict", "NX", "GT", "1", "member"],
+      "expect": {"kind": "error", "value": "ERR GT, LT, and NX options at the same time are not compatible"}
+    },
+    {
+      "name": "zadd_nx_lt_conflict",
+      "now_ms": 113,
+      "argv": ["ZADD", "zconflict", "NX", "LT", "1", "member"],
+      "expect": {"kind": "error", "value": "ERR GT, LT, and NX options at the same time are not compatible"}
+    },
+    {
+      "name": "zadd_xx_gt_setup",
+      "now_ms": 120,
+      "argv": ["ZADD", "zxxgt", "5", "member"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "zadd_xx_gt_higher_updates",
+      "now_ms": 121,
+      "argv": ["ZADD", "zxxgt", "XX", "GT", "10", "member"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "zadd_xx_gt_verify_updated",
+      "now_ms": 122,
+      "argv": ["ZSCORE", "zxxgt", "member"],
+      "expect": {"kind": "bulk", "value": "10"}
+    },
+    {
+      "name": "zadd_xx_gt_lower_noop",
+      "now_ms": 123,
+      "argv": ["ZADD", "zxxgt", "XX", "GT", "3", "member"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "zadd_xx_gt_verify_unchanged",
+      "now_ms": 124,
+      "argv": ["ZSCORE", "zxxgt", "member"],
+      "expect": {"kind": "bulk", "value": "10"}
+    },
+    {
+      "name": "zadd_xx_gt_new_member_ignored",
+      "now_ms": 125,
+      "argv": ["ZADD", "zxxgt", "XX", "GT", "99", "newmember"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "zadd_xx_gt_verify_no_new_member",
+      "now_ms": 126,
+      "argv": ["ZSCORE", "zxxgt", "newmember"],
+      "expect": {"kind": "bulk", "value": null}
+    },
+    {
+      "name": "zadd_xx_lt_setup",
+      "now_ms": 130,
+      "argv": ["ZADD", "zxxlt", "10", "member"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "zadd_xx_lt_lower_updates",
+      "now_ms": 131,
+      "argv": ["ZADD", "zxxlt", "XX", "LT", "5", "member"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "zadd_xx_lt_verify_updated",
+      "now_ms": 132,
+      "argv": ["ZSCORE", "zxxlt", "member"],
+      "expect": {"kind": "bulk", "value": "5"}
+    },
+    {
+      "name": "zadd_xx_lt_higher_noop",
+      "now_ms": 133,
+      "argv": ["ZADD", "zxxlt", "XX", "LT", "20", "member"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "zadd_xx_lt_verify_unchanged",
+      "now_ms": 134,
+      "argv": ["ZSCORE", "zxxlt", "member"],
+      "expect": {"kind": "bulk", "value": "5"}
+    },
+    {
+      "name": "zadd_ch_nx_setup",
+      "now_ms": 140,
+      "argv": ["ZADD", "zchnx", "1", "existing"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "zadd_ch_nx_new_returns_1",
+      "now_ms": 141,
+      "argv": ["ZADD", "zchnx", "CH", "NX", "2", "newmember"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "zadd_ch_nx_existing_returns_0",
+      "now_ms": 142,
+      "argv": ["ZADD", "zchnx", "CH", "NX", "99", "existing"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "zadd_ch_xx_setup",
+      "now_ms": 150,
+      "argv": ["ZADD", "zchxx", "1", "member"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "zadd_ch_xx_update_returns_1",
+      "now_ms": 151,
+      "argv": ["ZADD", "zchxx", "CH", "XX", "5", "member"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
+      "name": "zadd_ch_xx_same_score_returns_0",
+      "now_ms": 152,
+      "argv": ["ZADD", "zchxx", "CH", "XX", "5", "member"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "zadd_ch_xx_nonexistent_returns_0",
+      "now_ms": 153,
+      "argv": ["ZADD", "zchxx", "CH", "XX", "10", "nonexistent"],
+      "expect": {"kind": "integer", "value": 0}
+    },
+    {
+      "name": "zadd_incr_basic",
+      "now_ms": 160,
+      "argv": ["ZADD", "zincr", "INCR", "5", "member"],
+      "expect": {"kind": "bulk", "value": "5"}
+    },
+    {
+      "name": "zadd_incr_existing",
+      "now_ms": 161,
+      "argv": ["ZADD", "zincr", "INCR", "3", "member"],
+      "expect": {"kind": "bulk", "value": "8"}
+    },
+    {
+      "name": "zadd_incr_negative",
+      "now_ms": 162,
+      "argv": ["ZADD", "zincr", "INCR", "-2", "member"],
+      "expect": {"kind": "bulk", "value": "6"}
+    },
+    {
+      "name": "zadd_incr_nx_new",
+      "now_ms": 163,
+      "argv": ["ZADD", "zincr", "INCR", "NX", "10", "newmember"],
+      "expect": {"kind": "bulk", "value": "10"}
+    },
+    {
+      "name": "zadd_incr_nx_existing_returns_nil",
+      "now_ms": 164,
+      "argv": ["ZADD", "zincr", "INCR", "NX", "99", "member"],
+      "expect": {"kind": "bulk", "value": null}
+    },
+    {
+      "name": "zadd_incr_xx_existing",
+      "now_ms": 165,
+      "argv": ["ZADD", "zincr", "INCR", "XX", "4", "member"],
+      "expect": {"kind": "bulk", "value": "10"}
+    },
+    {
+      "name": "zadd_incr_xx_nonexistent_returns_nil",
+      "now_ms": 166,
+      "argv": ["ZADD", "zincr", "INCR", "XX", "5", "nosuchmember"],
+      "expect": {"kind": "bulk", "value": null}
+    },
+    {
+      "name": "zadd_incr_gt_higher",
+      "now_ms": 167,
+      "argv": ["ZADD", "zincr", "INCR", "GT", "5", "member"],
+      "expect": {"kind": "bulk", "value": "15"}
+    },
+    {
+      "name": "zadd_incr_gt_lower_returns_nil",
+      "now_ms": 168,
+      "argv": ["ZADD", "zincr", "INCR", "GT", "-20", "member"],
+      "expect": {"kind": "bulk", "value": null}
+    },
+    {
+      "name": "zadd_incr_multiple_members_error",
+      "now_ms": 169,
+      "argv": ["ZADD", "zincr", "INCR", "1", "a", "2", "b"],
+      "expect": {"kind": "error", "value": "ERR INCR option supports a single increment-element pair"}
+    },
+    {
+      "name": "zadd_options_case_insensitive",
+      "now_ms": 170,
+      "argv": ["ZADD", "zcase", "nx", "ch", "1", "member"],
+      "expect": {"kind": "integer", "value": 1}
+    },
+    {
       "name": "zrangestore_byscore_setup",
       "now_ms": 100,
       "argv": [
