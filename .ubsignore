@@ -1,0 +1,47 @@
+# UBS Ignore Policy for FrankenRedis
+# This file defines patterns and paths to exclude from UBS scanning
+# to reduce noise from test-only code where unwrap/panic is acceptable.
+
+# Test directories
+**/tests/**
+**/test/**
+**/testing/**
+
+# Benchmark directories (benchmarks typically use unwrap)
+**/benches/**
+**/bench/**
+
+# Example code
+**/examples/**
+
+# Build artifacts and dependencies
+target/
+.git/
+legacy_redis_code/
+
+# Conformance test crate (tests against legacy Redis behavior)
+crates/fr-conformance/
+
+# Test fixtures and golden outputs
+golden_outputs/
+baselines/
+artifacts/
+
+# Development scripts
+scripts/
+
+# Files that are test harnesses
+*_test.rs
+*_tests.rs
+test_*.rs
+tests.rs
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Documentation
+*.md
+docs/
