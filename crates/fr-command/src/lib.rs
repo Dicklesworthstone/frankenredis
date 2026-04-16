@@ -11900,7 +11900,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             } else {
                 format!("value:{i}").into_bytes()
             };
-            store.set(key.as_bytes(), value, now_ms, fr_store::SetOptions::default())?;
+            store.set(key.into_bytes(), value, None, now_ms);
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("HELP") {

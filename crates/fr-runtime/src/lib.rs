@@ -1383,6 +1383,8 @@ pub struct ServerState {
     aof_config_path: Option<std::path::PathBuf>,
     /// Path for RDB persistence file (used by SAVE/BGSAVE).
     rdb_path: Option<std::path::PathBuf>,
+    /// Path for the main redis.conf configuration file (used by CONFIG REWRITE).
+    pub config_file_path: Option<std::path::PathBuf>,
     /// Path for ACL SAVE/LOAD persistence file.
     acl_file_path: Option<std::path::PathBuf>,
     /// Dynamically overridden CONFIG parameters (set via CONFIG SET, returned by CONFIG GET).
@@ -1484,6 +1486,7 @@ impl Default for ServerState {
             aof_path: None,
             aof_config_path: None,
             rdb_path: None,
+            config_file_path: None,
             acl_file_path: None,
             config_overrides: HashMap::new(),
             pubsub_channel_subs: HashMap::new(),
@@ -1985,6 +1988,10 @@ impl Runtime {
 
     pub fn set_acl_file_path(&mut self, path: std::path::PathBuf) {
         self.server.set_acl_file_path(path);
+    }
+
+    pub fn set_config_file_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.server.config_file_path = path;
     }
 
     /// Set the server listen port (for INFO server section).
@@ -4972,13 +4979,51 @@ impl Runtime {
                 }
                 .to_resp();
             }
-            return RespFrame::SimpleString("OK".to_string());
+            let Some(path) = &self.server.config_file_path else {
+                return RespFrame::Error("ERR The server is not started with a config file.".to_string());
+            };
+            
+            let mut lines = Vec::new();
+            // We'll just write all parameters that are in SUPPORTED_CONFIG_PARAMETERS
+            // but use the live values from ServerState/Store when possible.
+            
+            // First, get all current values via CONFIG GET *
+            let current_config = self.handle_config_get(&[b"CONFIG".to_vec(), b"GET".to_vec(), b"*".to_vec()]);
+            if let RespFrame::Array(Some(pairs)) = current_config {
+                for chunk in pairs.chunks(2) {
+                    if let (RespFrame::BulkString(Some(k)), RespFrame::BulkString(Some(v))) = (&chunk[0], &chunk[1]) {
+                        let key = String::from_utf8_lossy(k);
+                        let val = String::from_utf8_lossy(v);
+                        // Some parameters shouldn't be in the config file or need special handling
+                        if key == "appendonly" || key == "dir" || key == "dbfilename" || key == "aclfile" || key == "save" {
+                             // these are usually fine
+                        }
+                        lines.push(format!("{key} {val}"));
+                    }
+                }
+            }
+
+            let content = lines.join("\n") + "\n";
+            let tmp_path = path.with_extension("tmp");
+            match (|| -> std::io::Result<()> {
+                use std::io::Write;
+                let mut file = std::fs::File::create(&tmp_path)?;
+                file.write_all(content.as_bytes())?;
+                file.sync_all()?;
+                drop(file);
+                std::fs::rename(&tmp_path, path)?;
+                Ok(())
+            })() {
+                Ok(()) => RespFrame::SimpleString("OK".to_string()),
+                Err(err) => RespFrame::Error(format!("ERR {err}")),
+            }
+        } else {
+            CommandError::UnknownSubcommand {
+                command: "CONFIG",
+                subcommand: sub.to_string(),
+            }
+            .to_resp()
         }
-        CommandError::UnknownSubcommand {
-            command: "CONFIG",
-            subcommand: sub.to_string(),
-        }
-        .to_resp()
     }
 
     fn handle_config_help(&self, argv: &[Vec<u8>]) -> RespFrame {

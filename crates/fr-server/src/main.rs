@@ -244,6 +244,7 @@ fn main() -> ExitCode {
     let mut bind_addr = "127.0.0.1".to_string();
     let mut aof_path: Option<String> = None;
     let mut rdb_path: Option<String> = None;
+    let mut config_path: Option<String> = None;
     let mut replicaof: Option<(String, u16)> = None;
     let mut masteruser: Option<String> = None;
     let mut masterauth: Option<String> = None;
@@ -302,6 +303,14 @@ fn main() -> ExitCode {
                 }
                 rdb_path = Some(args[i].clone());
             }
+            "--config" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("error: --config requires a file path");
+                    return ExitCode::from(1);
+                }
+                config_path = Some(args[i].clone());
+            }
             "--replicaof" => {
                 i += 1;
                 if i >= args.len() {
@@ -358,6 +367,7 @@ fn main() -> ExitCode {
     };
     let mut runtime = Runtime::new(policy);
     runtime.set_server_port(port);
+    runtime.set_config_file_path(config_path.map(std::path::PathBuf::from));
     runtime.set_masteruser(masteruser.map(String::into_bytes));
     runtime.set_masterauth(masterauth.map(String::into_bytes));
     if let Some((host, primary_port)) = replicaof {
