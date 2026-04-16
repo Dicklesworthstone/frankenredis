@@ -485,6 +485,86 @@
       }
     },
     {
+      "name": "config_set_replica_serve_stale_data_no_on_stale_replica",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "replica-serve-stale-data",
+        "no"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "config_get_replica_serve_stale_data_no_on_stale_replica",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "GET",
+        "replica-serve-stale-data"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "replica-serve-stale-data"
+          },
+          {
+            "kind": "bulk",
+            "value": "no"
+          }
+        ]
+      }
+    },
+    {
+      "name": "stale_replica_get_returns_masterdown_when_serving_stale_disabled",
+      "now_ms": 0,
+      "argv": [
+        "GET",
+        "blocked"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'."
+      }
+    },
+    {
+      "name": "role_remains_allowed_while_stale_replica_reads_are_disabled",
+      "now_ms": 0,
+      "argv": [
+        "ROLE"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "slave"
+          },
+          {
+            "kind": "bulk",
+            "value": "127.0.0.1"
+          },
+          {
+            "kind": "integer",
+            "value": 6380
+          },
+          {
+            "kind": "bulk",
+            "value": "connect"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          }
+        ]
+      }
+    },
+    {
       "name": "replicaof_same_master_is_idempotent",
       "now_ms": 0,
       "argv": [

@@ -488,6 +488,25 @@ fn core_module_sentinel_live_redis_matches_runtime() {
 }
 
 #[test]
+fn core_replication_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report =
+        run_live_redis_diff(&cfg, "core_replication.json", &oracle).expect("replication live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
+#[test]
 fn core_debug_conformance() {
     let cfg = HarnessConfig::default_paths();
     let diff = run_fixture(&cfg, "core_debug.json").expect("debug fixture");

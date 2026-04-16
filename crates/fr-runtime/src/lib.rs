@@ -265,6 +265,9 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
 ];
 
 fn canonical_static_config_param(parameter: &str) -> Option<&'static str> {
+    if parameter.eq_ignore_ascii_case("slave-serve-stale-data") {
+        return Some("replica-serve-stale-data");
+    }
     CONFIG_STATIC_PARAMS
         .iter()
         .find(|&&(name, _)| name.eq_ignore_ascii_case(parameter))
@@ -2947,31 +2950,41 @@ impl Runtime {
         else {
             return None; // Masters do not enforce replica-serve-stale-data
         };
-        if state == "connected" {
+        if *state == "connected" {
             return None; // Not stale if connected to primary
         }
+        let Some(command) = argv.first() else {
+            return None;
+        };
         // The following commands are permitted during a stale state.
         let permitted = matches!(
             special_command,
-            Some(RuntimeSpecialCommand::Info)
+            Some(RuntimeSpecialCommand::Acl)
+                | Some(RuntimeSpecialCommand::Client)
                 | Some(RuntimeSpecialCommand::Replicaof)
                 | Some(RuntimeSpecialCommand::Slaveof)
                 | Some(RuntimeSpecialCommand::Auth)
-                | Some(RuntimeSpecialCommand::Ping)
+                | Some(RuntimeSpecialCommand::Hello)
                 | Some(RuntimeSpecialCommand::Shutdown)
                 | Some(RuntimeSpecialCommand::Replconf)
                 | Some(RuntimeSpecialCommand::Role)
                 | Some(RuntimeSpecialCommand::Config)
+                | Some(RuntimeSpecialCommand::Readonly)
+                | Some(RuntimeSpecialCommand::Readwrite)
+                | Some(RuntimeSpecialCommand::Cluster)
                 | Some(RuntimeSpecialCommand::Subscribe)
                 | Some(RuntimeSpecialCommand::Unsubscribe)
                 | Some(RuntimeSpecialCommand::Psubscribe)
                 | Some(RuntimeSpecialCommand::Punsubscribe)
                 | Some(RuntimeSpecialCommand::Ssubscribe)
                 | Some(RuntimeSpecialCommand::Sunsubscribe)
+                | Some(RuntimeSpecialCommand::Publish)
+                | Some(RuntimeSpecialCommand::Spublish)
                 | Some(RuntimeSpecialCommand::Pubsub)
-        ) || argv.first().is_some_and(|cmd| {
-            eq_ascii_token(cmd, b"COMMAND") || eq_ascii_token(cmd, b"LATENCY")
-        });
+                | Some(RuntimeSpecialCommand::Select)
+        ) || eq_ascii_token(command, b"INFO")
+            || eq_ascii_token(command, b"COMMAND")
+            || eq_ascii_token(command, b"LATENCY");
 
         if permitted {
             return None;
@@ -4748,6 +4761,23 @@ impl Runtime {
                 self.server.repl_timeout_sec.to_string().into_bytes(),
             )));
         }
+        if Self::config_pattern_matches(pattern, "replica-serve-stale-data")
+            || Self::config_pattern_matches(pattern, "slave-serve-stale-data")
+        {
+            let key = if Self::config_pattern_matches(pattern, "slave-serve-stale-data") {
+                b"slave-serve-stale-data".as_slice()
+            } else {
+                b"replica-serve-stale-data".as_slice()
+            };
+            entries.push(RespFrame::BulkString(Some(key.to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                if self.server.replica_serve_stale_data {
+                    b"yes".to_vec()
+                } else {
+                    b"no".to_vec()
+                },
+            )));
+        }
         if Self::config_pattern_matches(pattern, "replica-priority")
             || Self::config_pattern_matches(pattern, "slave-priority")
         {
@@ -5046,6 +5076,7 @@ impl Runtime {
                 || name == "maxmemory-samples"
                 || name == "repl-backlog-size"
                 || name == "repl-timeout"
+                || name == "replica-serve-stale-data"
                 || name == "replica-priority"
                 || name == "slave-priority"
                 || name == "repl-diskless-sync"
@@ -5091,6 +5122,7 @@ impl Runtime {
         let mut next_maxclients: Option<usize> = None;
         let mut next_repl_backlog_size: Option<u64> = None;
         let mut next_repl_timeout: Option<u64> = None;
+        let mut next_replica_serve_stale_data: Option<bool> = None;
         let mut next_replica_priority: Option<usize> = None;
         let mut next_repl_diskless_sync: Option<bool> = None;
         let mut next_repl_diskless_sync_delay: Option<u64> = None;
@@ -5279,6 +5311,29 @@ impl Runtime {
                 };
                 next_repl_timeout = Some(parsed);
                 static_override_updates.push(("repl-timeout".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("replica-serve-stale-data")
+                || parameter.eq_ignore_ascii_case("slave-serve-stale-data")
+            {
+                let parsed = match std::str::from_utf8(&pair[1]) {
+                    Ok(s) if s.eq_ignore_ascii_case("yes") => true,
+                    Ok(s) if s.eq_ignore_ascii_case("no") => false,
+                    _ => {
+                        return RespFrame::Error(format!(
+                            "ERR Invalid argument for CONFIG SET '{parameter}'"
+                        ));
+                    }
+                };
+                next_replica_serve_stale_data = Some(parsed);
+                static_override_updates.push((
+                    "replica-serve-stale-data".to_string(),
+                    if parsed {
+                        "yes".to_string()
+                    } else {
+                        "no".to_string()
+                    },
+                ));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("replica-priority")
@@ -12228,6 +12283,108 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"allowed", b"value"]), 10_000),
             RespFrame::SimpleString("OK".to_string())
+        );
+    }
+
+    #[test]
+    fn config_set_replica_serve_stale_data_round_trips_live_values_and_alias() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"replica-serve-stale-data"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"replica-serve-stale-data".to_vec())),
+                RespFrame::BulkString(Some(b"yes".to_vec())),
+            ]))
+        );
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"slave-serve-stale-data", b"no"]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.server.replica_serve_stale_data);
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"GET",
+                    b"replica-serve-stale-data",
+                    b"slave-serve-stale-data",
+                ]),
+                2,
+            ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"replica-serve-stale-data".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+                RespFrame::BulkString(Some(b"slave-serve-stale-data".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn stale_replica_blocks_data_commands_when_replica_serve_stale_data_is_disabled() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"replica-serve-stale-data", b"no"]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let expected =
+            RespFrame::Error("MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'.".to_string());
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"blocked"]), 2),
+            expected
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"blocked", b"value"]), 3),
+            expected
+        );
+    }
+
+    #[test]
+    fn stale_replica_allows_control_plane_commands_to_reconfigure_or_inspect_state() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"replica-serve-stale-data", b"no"]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ROLE"]), 2),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"slave".to_vec())),
+                RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                RespFrame::Integer(6380),
+                RespFrame::BulkString(Some(b"connect".to_vec())),
+                RespFrame::Integer(0),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"NO", b"ONE"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"missing"]), 4),
+            RespFrame::BulkString(None)
         );
     }
 
