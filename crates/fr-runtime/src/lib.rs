@@ -1383,6 +1383,8 @@ pub struct ServerState {
     client_sessions: BTreeMap<u64, ClientSession>,
     /// Pending CLIENT UNBLOCK requests to be applied by the standalone server.
     pending_client_unblocks: Vec<(u64, ClientUnblockMode)>,
+    /// Pending CLIENT KILL requests (client IDs) to be processed by the standalone server.
+    pub pending_client_kills: Vec<u64>,
     /// Flag set when REPLICAOF/SLAVEOF changes should force the event loop
     /// to reset replica sync state (drop primary connection and reconnect).
     replica_reconfigure_requested: bool,
@@ -1460,6 +1462,7 @@ impl Default for ServerState {
             blocked_client_ids: HashSet::new(),
             client_sessions: BTreeMap::new(),
             pending_client_unblocks: Vec::new(),
+            pending_client_kills: Vec::new(),
             replica_reconfigure_requested: false,
         }
     }
@@ -6345,10 +6348,113 @@ impl Runtime {
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("KILL") {
-            // CLIENT KILL [ip:port | ID client-id | ...]
-            // Single-connection runtime: always return 0 (no other clients to kill)
-            Ok::<i64, ()>(0).ok();
-            RespFrame::Integer(0)
+            // CLIENT KILL [ip:port | ID client-id | TYPE type | USER user | SKIPME yes|no]
+            if argv.len() < 3 {
+                // Legacy form: CLIENT KILL addr
+                return RespFrame::Error("ERR syntax error".to_string());
+            }
+
+            let mut killed = 0;
+            let mut i = 2;
+            let mut skipme = true;
+            let mut filter_id: Option<u64> = None;
+            let mut filter_type: Option<String> = None;
+            let mut filter_user: Option<Vec<u8>> = None;
+            let mut filter_addr: Option<String> = None;
+
+            while i < argv.len() {
+                let opt = match std::str::from_utf8(&argv[i]) {
+                    Ok(s) => s,
+                    Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                };
+
+                if opt.eq_ignore_ascii_case("ID") && i + 1 < argv.len() {
+                    let id = match parse_i64_arg(&argv[i + 1]) {
+                        Ok(id) if id > 0 => id as u64,
+                        _ => return RespFrame::Error("ERR Invalid client ID".to_string()),
+                    };
+                    filter_id = Some(id);
+                    i += 2;
+                } else if opt.eq_ignore_ascii_case("TYPE") && i + 1 < argv.len() {
+                    let kind = match std::str::from_utf8(&argv[i + 1]) {
+                        Ok(s) => s.to_string(),
+                        Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                    };
+                    filter_type = Some(kind);
+                    i += 2;
+                } else if opt.eq_ignore_ascii_case("USER") && i + 1 < argv.len() {
+                    filter_user = Some(argv[i + 1].clone());
+                    i += 2;
+                } else if opt.eq_ignore_ascii_case("ADDR") && i + 1 < argv.len() {
+                    let addr = match std::str::from_utf8(&argv[i + 1]) {
+                        Ok(s) => s.to_string(),
+                        Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                    };
+                    filter_addr = Some(addr);
+                    i += 2;
+                } else if opt.eq_ignore_ascii_case("SKIPME") && i + 1 < argv.len() {
+                    let val = match std::str::from_utf8(&argv[i + 1]) {
+                        Ok(s) => s,
+                        Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                    };
+                    if val.eq_ignore_ascii_case("yes") {
+                        skipme = true;
+                    } else if val.eq_ignore_ascii_case("no") {
+                        skipme = false;
+                    } else {
+                        return RespFrame::Error("ERR argument must be 'yes' or 'no'".to_string());
+                    }
+                    i += 2;
+                } else if i == 2 && argv.len() == 3 {
+                    // Legacy form: CLIENT KILL ip:port
+                    filter_addr = Some(opt.to_string());
+                    i += 1;
+                } else {
+                    return RespFrame::Error("ERR syntax error".to_string());
+                }
+            }
+
+            let sessions = self.client_list_sessions();
+            let mut targets = Vec::new();
+
+            for session in sessions.values() {
+                if skipme && session.client_id == self.session.client_id {
+                    continue;
+                }
+                if let Some(id) = filter_id {
+                    if session.client_id != id {
+                        continue;
+                    }
+                }
+                if let Some(kind) = &filter_type {
+                    if !self
+                        .client_type_for_session(session)
+                        .eq_ignore_ascii_case(kind)
+                    {
+                        continue;
+                    }
+                }
+                if let Some(user) = &filter_user {
+                    if session.authenticated_user.as_ref() != Some(user) {
+                        continue;
+                    }
+                }
+                if let Some(addr) = &filter_addr {
+                    if session.peer_addr.as_ref() != Some(addr) {
+                        continue;
+                    }
+                }
+                targets.push(session.client_id);
+            }
+
+            for id in targets {
+                if !self.server.pending_client_kills.contains(&id) {
+                    self.server.pending_client_kills.push(id);
+                    killed += 1;
+                }
+            }
+
+            RespFrame::Integer(killed)
         } else if sub.eq_ignore_ascii_case("PAUSE") {
             // CLIENT PAUSE timeout [WRITE|ALL]
             if argv.len() < 3 || argv.len() > 4 {

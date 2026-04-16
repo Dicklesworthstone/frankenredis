@@ -659,6 +659,17 @@ fn main() -> ExitCode {
             }
         }
 
+        // Process any CLIENT KILL requests from the runtime.
+        let kills: Vec<u64> = std::mem::take(&mut runtime.server.pending_client_kills);
+        for target_id in kills {
+            if let Some(&token) = client_id_to_token.get(&target_id) {
+                if let Some(conn) = clients.get_mut(&token) {
+                    conn.closing = true;
+                    closing_tokens.insert(token);
+                }
+            }
+        }
+
         // Check for graceful shutdown request
         if runtime.server.shutdown_requested {
             if !runtime.server.shutdown_nosave {
