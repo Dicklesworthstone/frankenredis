@@ -212,6 +212,7 @@ dependencies = [
  "fr-protocol",
  "fr-repl",
  "fr-runtime",
+ "fr-store",
  "serde",
  "serde_json",
  "sha2",

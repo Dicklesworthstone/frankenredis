@@ -8,7 +8,8 @@ use std::process::ExitCode;
 
 use fr_conformance::{
     CaseOutcome, DIFFERENTIAL_REPORT_SCHEMA_VERSION, DifferentialReport, HarnessConfig,
-    LiveOracleConfig, run_live_redis_diff, run_live_redis_protocol_diff,
+    LiveOracleConfig, run_live_redis_diff, run_live_redis_multi_client_diff,
+    run_live_redis_protocol_diff,
 };
 use serde::Serialize;
 
@@ -65,7 +66,21 @@ fn run() -> Result<ExitCode, String> {
                 return Err(err);
             }
         },
-        _ => return Err(usage("mode must be 'command' or 'protocol'")),
+        "multi_client" => match run_live_redis_multi_client_diff(&cfg, &cli.fixture, &oracle) {
+            Ok(report) => report,
+            Err(err) => {
+                if let Some(path) = &cli.json_out {
+                    write_json_error_report(path, &cli, &err)?;
+                    println!("json_report: {}", path.display());
+                }
+                return Err(err);
+            }
+        },
+        _ => {
+            return Err(usage(
+                "mode must be 'command', 'protocol', or 'multi_client'",
+            ));
+        }
     };
 
     println!("suite: {}", report.suite);

@@ -432,6 +432,29 @@ pub enum ReplicationHandshakeState {
     Online,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MultiClientFixture {
+    pub suite: String,
+    pub clients: Vec<String>,
+    pub steps: Vec<MultiClientStep>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MultiClientStep {
+    pub name: String,
+    #[serde(default)]
+    pub now_ms: u64,
+    pub client: String,
+    #[serde(default)]
+    pub argv: Option<Vec<String>>,
+    #[serde(default)]
+    pub expect: Option<ExpectedFrame>,
+    #[serde(default)]
+    pub expect_async: Option<ExpectedFrame>,
+    #[serde(default)]
+    pub async_timeout_ms: Option<u64>,
+}
+
 pub fn run_protocol_fixture(
     config: &HarnessConfig,
     fixture_name: &str,
@@ -585,6 +608,241 @@ pub fn run_live_redis_protocol_diff(
         total,
         failed,
     ))
+}
+
+pub fn run_live_redis_multi_client_diff(
+    config: &HarnessConfig,
+    fixture_name: &str,
+    oracle: &LiveOracleConfig,
+) -> Result<DifferentialReport, String> {
+    let fixture = load_multi_client_fixture(config, fixture_name)?;
+    let suite = format!("live_redis_multi_client_diff::{}", fixture.suite);
+    let live_log_path = config
+        .live_log_root
+        .as_ref()
+        .map(|root| live_log_output_path(root, &suite, fixture_name));
+
+    let mut runtime = runtime_for_harness_config(config);
+    if fixture_name.contains("wait") || fixture_name.contains("replication") {
+        runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
+    }
+
+    let mut oracle_clients: std::collections::BTreeMap<String, LiveOracleConnection> =
+        std::collections::BTreeMap::new();
+    let mut runtime_sessions: std::collections::BTreeMap<String, fr_runtime::ClientSession> =
+        std::collections::BTreeMap::new();
+    for client_name in &fixture.clients {
+        oracle_clients.insert(client_name.clone(), connect_live_redis(oracle)?);
+        let session = runtime.new_session();
+        runtime_sessions.insert(client_name.clone(), session);
+    }
+
+    flushall_via_connection(
+        oracle_clients
+            .values_mut()
+            .next()
+            .ok_or_else(|| "multi-client fixture must define at least one client".to_string())?,
+    )?;
+
+    let mut failed = Vec::new();
+    let total = fixture.steps.len();
+    let default_async_timeout_ms = 1000_u64;
+
+    for step in fixture.steps {
+        let client_name = &step.client;
+        let oracle_conn = oracle_clients.get_mut(client_name).ok_or_else(|| {
+            format!(
+                "step '{}' references unknown client '{}'",
+                step.name, client_name
+            )
+        })?;
+        let runtime_session = runtime_sessions.remove(client_name).ok_or_else(|| {
+            format!(
+                "step '{}' references unknown runtime session '{}'",
+                step.name, client_name
+            )
+        })?;
+        let runtime_client_id = runtime_session.client_id;
+        let prev_session = runtime.swap_session(runtime_session);
+
+        let evidence_before = runtime.evidence().events().len();
+
+        if let Some(argv) = &step.argv {
+            let frame = argv_to_frame(argv);
+            send_frame(&mut oracle_conn.stream, &frame)?;
+            let runtime_actual = runtime.execute_frame(frame.clone(), step.now_ms);
+
+            if let Some(expected) = &step.expect {
+                let redis_actual = read_resp_frame_from_stream(&mut oracle_conn.stream)
+                    .map_err(|err| format!("{}: {err}", step.name))?;
+                let frame_ok = frame_matches_expected(&runtime_actual, expected)
+                    && frame_matches_expected(&redis_actual, expected);
+                let new_events = &runtime.evidence().events()[evidence_before..];
+                let outcome = if frame_ok {
+                    LogOutcome::Pass
+                } else {
+                    LogOutcome::Fail
+                };
+                let log_result = validate_structured_log_emission(
+                    StructuredLogEmissionContext {
+                        suite_id: &suite,
+                        fixture_name,
+                        case_name: &step.name,
+                        verification_path: VerificationPath::E2e,
+                        now_ms: step.now_ms,
+                        outcome,
+                        persist_path: live_log_path.as_deref(),
+                    },
+                    new_events,
+                );
+                let passed = frame_ok && log_result.is_ok();
+                if !passed {
+                    let reason_code = reason_code_from_evidence(new_events);
+                    let replay_cmd = replay_cmd_from_evidence(new_events);
+                    let artifact_refs = artifact_refs_from_evidence(new_events);
+                    failed.push(CaseOutcome {
+                        name: step.name.clone(),
+                        passed,
+                        expected: expected_to_frame(expected),
+                        actual: runtime_actual,
+                        detail: build_case_detail(frame_ok, None, log_result.err()),
+                        reason_code,
+                        replay_cmd,
+                        artifact_refs,
+                    });
+                }
+            }
+        } else if let Some(expected_async) = &step.expect_async {
+            let timeout_ms = step.async_timeout_ms.unwrap_or(default_async_timeout_ms);
+            let timeout = Duration::from_millis(timeout_ms);
+            oracle_conn
+                .stream
+                .set_read_timeout(Some(timeout))
+                .map_err(|err| format!("{}: failed to set read timeout: {err}", step.name))?;
+
+            let redis_async = read_optional_resp_frame_from_stream(&mut oracle_conn.stream)
+                .map_err(|err| format!("{}: oracle async read failed: {err}", step.name))?;
+            let runtime_pending = runtime.drain_pubsub_for_client(runtime_client_id);
+            let runtime_async = runtime_pending.first().map(pubsub_message_to_frame);
+
+            let frame_ok = match (&redis_async, &runtime_async) {
+                (Some(redis_frame), Some(runtime_frame)) => {
+                    frame_matches_expected(redis_frame, expected_async)
+                        && frame_matches_expected(runtime_frame, expected_async)
+                }
+                (None, None) => false,
+                _ => false,
+            };
+
+            let new_events = &runtime.evidence().events()[evidence_before..];
+            let outcome = if frame_ok {
+                LogOutcome::Pass
+            } else {
+                LogOutcome::Fail
+            };
+            let log_result = validate_structured_log_emission(
+                StructuredLogEmissionContext {
+                    suite_id: &suite,
+                    fixture_name,
+                    case_name: &step.name,
+                    verification_path: VerificationPath::E2e,
+                    now_ms: step.now_ms,
+                    outcome,
+                    persist_path: live_log_path.as_deref(),
+                },
+                new_events,
+            );
+            let passed = frame_ok && log_result.is_ok();
+            if !passed {
+                let reason_code = reason_code_from_evidence(new_events);
+                let replay_cmd = replay_cmd_from_evidence(new_events);
+                let artifact_refs = artifact_refs_from_evidence(new_events);
+                failed.push(CaseOutcome {
+                    name: step.name.clone(),
+                    passed,
+                    expected: expected_to_frame(expected_async),
+                    actual: runtime_async.unwrap_or(RespFrame::BulkString(None)),
+                    detail: build_case_detail(frame_ok, None, log_result.err()),
+                    reason_code,
+                    replay_cmd,
+                    artifact_refs,
+                });
+            }
+
+            oracle_conn
+                .stream
+                .set_read_timeout(Some(Duration::from_millis(oracle.io_timeout_ms)))
+                .map_err(|err| format!("{}: failed to restore read timeout: {err}", step.name))?;
+        }
+
+        let current_session = runtime.swap_session(prev_session);
+        runtime_sessions.insert(client_name.clone(), current_session);
+    }
+
+    Ok(build_differential_report(
+        suite,
+        fixture_name,
+        total,
+        failed,
+    ))
+}
+
+fn load_multi_client_fixture(
+    config: &HarnessConfig,
+    fixture_name: &str,
+) -> Result<MultiClientFixture, String> {
+    let path = config.fixture_root.join(fixture_name);
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("failed to read fixture {}: {err}", path.display()))?;
+    let fixture: MultiClientFixture = serde_json::from_str(&raw).map_err(|err| {
+        format!(
+            "invalid multi-client fixture JSON {}: {err}",
+            path.display()
+        )
+    })?;
+    Ok(fixture)
+}
+
+fn argv_to_frame(argv: &[String]) -> RespFrame {
+    RespFrame::Array(Some(
+        argv.iter()
+            .map(|arg| RespFrame::BulkString(Some(arg.as_bytes().to_vec())))
+            .collect(),
+    ))
+}
+
+fn flushall_via_connection(conn: &mut LiveOracleConnection) -> Result<(), String> {
+    let frame = RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
+        b"FLUSHALL".to_vec(),
+    ))]));
+    send_frame(&mut conn.stream, &frame)?;
+    let _response = read_resp_frame_from_stream(&mut conn.stream)?;
+    Ok(())
+}
+
+fn pubsub_message_to_frame(msg: &fr_store::PubSubMessage) -> RespFrame {
+    match msg {
+        fr_store::PubSubMessage::Message { channel, data } => RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"message".to_vec())),
+            RespFrame::BulkString(Some(channel.clone())),
+            RespFrame::BulkString(Some(data.clone())),
+        ])),
+        fr_store::PubSubMessage::PMessage {
+            pattern,
+            channel,
+            data,
+        } => RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"pmessage".to_vec())),
+            RespFrame::BulkString(Some(pattern.clone())),
+            RespFrame::BulkString(Some(channel.clone())),
+            RespFrame::BulkString(Some(data.clone())),
+        ])),
+        fr_store::PubSubMessage::SMessage { channel, data } => RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"smessage".to_vec())),
+            RespFrame::BulkString(Some(channel.clone())),
+            RespFrame::BulkString(Some(data.clone())),
+        ])),
+    }
 }
 
 pub fn run_replication_handshake_fixture(
@@ -1620,11 +1878,12 @@ mod tests {
         ExpectedFrame, ExpectedThreat, HarnessConfig, LiveOracleConfig, ReplayFixture,
         StructuredLogEmissionContext, build_differential_report, expected_to_frame,
         live_oracle_case_expects_no_reply, live_oracle_case_uses_dedicated_connection,
-        live_oracle_case_uses_legacy_sync_snapshot, run_fixture, run_live_redis_diff,
-        run_live_redis_protocol_diff, run_protocol_fixture, run_replay_fixture,
-        run_replication_handshake_fixture, run_smoke, runtime_for_harness_config,
-        runtime_matches_live_no_reply_case, runtime_matches_live_sync_snapshot_case,
-        validate_structured_log_emission, validate_threat_expectation,
+        live_oracle_case_uses_legacy_sync_snapshot, load_multi_client_fixture, run_fixture,
+        run_live_redis_diff, run_live_redis_protocol_diff, run_protocol_fixture,
+        run_replay_fixture, run_replication_handshake_fixture, run_smoke,
+        runtime_for_harness_config, runtime_matches_live_no_reply_case,
+        runtime_matches_live_sync_snapshot_case, validate_structured_log_emission,
+        validate_threat_expectation,
     };
     use crate::log_contract::{
         LogMode, LogOutcome, StructuredLogEvent, VerificationPath, live_log_output_path,
@@ -6050,4 +6309,20 @@ mod tests {
     core_fixture_test!(conformance_core_pfdebug, "core_pfdebug.json");
     core_fixture_test!(conformance_core_debug, "core_debug.json");
     core_fixture_test!(conformance_core_wait, "core_wait.json");
+
+    #[test]
+    fn multi_client_fixture_format_loads_correctly() {
+        let config = HarnessConfig::default_paths();
+        let fixture =
+            load_multi_client_fixture(&config, "core_pubsub_multi_client.json").expect("load");
+        assert_eq!(fixture.suite, "core_pubsub_multi_client");
+        assert_eq!(fixture.clients, vec!["subscriber", "publisher"]);
+        assert_eq!(fixture.steps.len(), 5);
+        assert_eq!(fixture.steps[0].name, "subscriber_subscribes_to_channel1");
+        assert_eq!(fixture.steps[0].client, "subscriber");
+        assert!(fixture.steps[0].argv.is_some());
+        assert!(fixture.steps[0].expect.is_some());
+        assert!(fixture.steps[2].expect_async.is_some());
+        assert_eq!(fixture.steps[2].async_timeout_ms, Some(2000));
+    }
 }

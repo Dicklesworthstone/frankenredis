@@ -353,7 +353,7 @@ fn load_suite_manifest(path: &Path) -> Result<SuiteMatrixManifest, String> {
                 suite.name
             ));
         }
-        if !matches!(suite.mode.as_str(), "command" | "protocol") {
+        if !matches!(suite.mode.as_str(), "command" | "protocol" | "multi_client") {
             return Err(format!(
                 "suite '{}' uses unsupported mode '{}'",
                 suite.name, suite.mode

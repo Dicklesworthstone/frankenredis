@@ -1,0 +1,68 @@
+{
+  "suite": "core_pubsub_multi_client",
+  "clients": ["subscriber", "publisher"],
+  "steps": [
+    {
+      "name": "subscriber_subscribes_to_channel1",
+      "now_ms": 0,
+      "client": "subscriber",
+      "argv": ["SUBSCRIBE", "channel1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "subscribe" },
+          { "kind": "bulk", "value": "channel1" },
+          { "kind": "integer", "value": 1 }
+        ]
+      }
+    },
+    {
+      "name": "publisher_publishes_hello",
+      "now_ms": 10,
+      "client": "publisher",
+      "argv": ["PUBLISH", "channel1", "hello"],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "subscriber_receives_hello",
+      "now_ms": 20,
+      "client": "subscriber",
+      "expect_async": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "message" },
+          { "kind": "bulk", "value": "channel1" },
+          { "kind": "bulk", "value": "hello" }
+        ]
+      },
+      "async_timeout_ms": 2000
+    },
+    {
+      "name": "subscriber_unsubscribes",
+      "now_ms": 30,
+      "client": "subscriber",
+      "argv": ["UNSUBSCRIBE", "channel1"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "unsubscribe" },
+          { "kind": "bulk", "value": "channel1" },
+          { "kind": "integer", "value": 0 }
+        ]
+      }
+    },
+    {
+      "name": "publisher_publishes_after_unsub",
+      "now_ms": 40,
+      "client": "publisher",
+      "argv": ["PUBLISH", "channel1", "gone"],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    }
+  ]
+}

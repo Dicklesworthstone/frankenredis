@@ -245,6 +245,13 @@
       "fixture": "fr_p2c_009_tls_config_journey.json",
       "scenario_class": "packet_journey",
       "profiles": ["parity"]
+    },
+    {
+      "name": "core_pubsub_multi_client",
+      "mode": "multi_client",
+      "fixture": "core_pubsub_multi_client.json",
+      "scenario_class": "multi_client",
+      "profiles": ["multi_client"]
     }
   ]
 }
