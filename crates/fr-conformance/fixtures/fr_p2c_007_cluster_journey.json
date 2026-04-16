@@ -143,8 +143,8 @@
         "READONLY"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -165,8 +165,8 @@
         "READWRITE"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {

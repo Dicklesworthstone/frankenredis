@@ -3567,22 +3567,19 @@ mod tests {
     #[test]
     fn fr_p2c_007_u007_client_mode_flags_transition_and_logs() {
         let mut runtime = Runtime::default_strict();
+        let cluster_disabled =
+            RespFrame::Error("ERR This instance has cluster support disabled".to_string());
 
         assert!(!runtime.is_cluster_read_only());
         assert!(!runtime.is_cluster_asking());
 
         let readonly = runtime.execute_frame(command_frame(&["READONLY"]), 705);
-        assert_eq!(readonly, RespFrame::SimpleString("OK".to_string()));
-        assert!(runtime.is_cluster_read_only());
+        assert_eq!(readonly, cluster_disabled);
+        assert!(!runtime.is_cluster_read_only());
         assert!(!runtime.is_cluster_asking());
 
-        let asking = runtime.execute_frame(command_frame(&["ASKING"]), 706);
-        assert_eq!(asking, RespFrame::SimpleString("OK".to_string()));
-        assert!(runtime.is_cluster_read_only());
-        assert!(runtime.is_cluster_asking());
-
         let readwrite = runtime.execute_frame(command_frame(&["READWRITE"]), 707);
-        assert_eq!(readwrite, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(readwrite, cluster_disabled);
         assert!(!runtime.is_cluster_read_only());
         assert!(!runtime.is_cluster_asking());
 
@@ -3601,10 +3598,9 @@ mod tests {
             threat_class: ThreatClass::MetadataAmbiguity,
             decision_action: DecisionAction::FailClosed,
             subsystem: "cluster_client_mode",
-            action: "readonly_asking_readwrite_transition",
-            reason_code: "cluster.client_mode_flag_transition_violation",
-            reason: "client cluster mode flags transition deterministically and enforce arity"
-                .to_string(),
+            action: "readonly_readwrite_disabled_surface",
+            reason_code: "cluster.client_mode_disabled_surface",
+            reason: "READONLY and READWRITE reject standalone deployments while preserving local client mode state and arity checks".to_string(),
             input_digest: "fr_p2c_007_u007_input".to_string(),
             output_digest: "fr_p2c_007_u007_output".to_string(),
             state_digest_before: "cluster_client_mode_start".to_string(),
@@ -3633,20 +3629,23 @@ mod tests {
 
     #[test]
     fn fr_p2c_007_u007_property_cluster_mode_state_is_sequence_deterministic() {
+        let cluster_disabled =
+            RespFrame::Error("ERR This instance has cluster support disabled".to_string());
+
         let mut canonical = Runtime::default_strict();
-        let canonical_sequence = ["READONLY", "ASKING", "READWRITE", "READONLY", "ASKING"];
+        let canonical_sequence = ["READONLY", "READWRITE", "READONLY", "READWRITE"];
         for (idx, command_name) in canonical_sequence.iter().enumerate() {
             let reply = canonical.execute_frame(command_frame(&[*command_name]), 720 + idx as u64);
-            assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+            assert_eq!(reply, cluster_disabled);
         }
-        assert!(canonical.is_cluster_read_only());
-        assert!(canonical.is_cluster_asking());
+        assert!(!canonical.is_cluster_read_only());
+        assert!(!canonical.is_cluster_asking());
 
         let mut casefold = Runtime::default_strict();
-        let casefold_sequence = ["readonly", "asking", "readwrite", "READONLY", "asking"];
+        let casefold_sequence = ["readonly", "readwrite", "READONLY", "READWRITE"];
         for (idx, command_name) in casefold_sequence.iter().enumerate() {
             let reply = casefold.execute_frame(command_frame(&[*command_name]), 720 + idx as u64);
-            assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+            assert_eq!(reply, cluster_disabled);
         }
         assert_eq!(
             casefold.is_cluster_read_only(),
@@ -3655,13 +3654,13 @@ mod tests {
         assert_eq!(casefold.is_cluster_asking(), canonical.is_cluster_asking());
 
         let mut redundant = Runtime::default_strict();
-        let redundant_sequence = ["READONLY", "ASKING", "ASKING"];
+        let redundant_sequence = ["READONLY", "READONLY", "READWRITE"];
         for (idx, command_name) in redundant_sequence.iter().enumerate() {
             let reply = redundant.execute_frame(command_frame(&[*command_name]), 730 + idx as u64);
-            assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
+            assert_eq!(reply, cluster_disabled);
         }
-        assert!(redundant.is_cluster_read_only());
-        assert!(redundant.is_cluster_asking());
+        assert!(!redundant.is_cluster_read_only());
+        assert!(!redundant.is_cluster_asking());
 
         let event = EvidenceEvent {
             ts_utc: "unix_ms:725".to_string(),
@@ -3672,9 +3671,9 @@ mod tests {
             threat_class: ThreatClass::MetadataAmbiguity,
             decision_action: DecisionAction::FailClosed,
             subsystem: "cluster_client_mode_property",
-            action: "cluster_mode_sequence_reduce",
+            action: "cluster_mode_disabled_sequence_reduce",
             reason_code: "parity_ok",
-            reason: "cluster client-mode state converges deterministically for equivalent command sequences".to_string(),
+            reason: "cluster client-mode state remains unchanged for equivalent READONLY/READWRITE sequences when cluster support is disabled".to_string(),
             input_digest: "fr_p2c_007_u007_property_input".to_string(),
             output_digest: "fr_p2c_007_u007_property_output".to_string(),
             state_digest_before: "cluster_mode_property_start".to_string(),
@@ -3712,17 +3711,18 @@ mod tests {
 
         let strict_readonly = strict.execute_frame(command_frame(&["READONLY"]), 741);
         let hardened_readonly = hardened.execute_frame(command_frame(&["READONLY"]), 741);
-        assert_eq!(strict_readonly, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(
+            strict_readonly,
+            RespFrame::Error("ERR This instance has cluster support disabled".to_string())
+        );
         assert_eq!(strict_readonly, hardened_readonly);
-
-        let strict_asking = strict.execute_frame(command_frame(&["ASKING"]), 742);
-        let hardened_asking = hardened.execute_frame(command_frame(&["ASKING"]), 742);
-        assert_eq!(strict_asking, RespFrame::SimpleString("OK".to_string()));
-        assert_eq!(strict_asking, hardened_asking);
 
         let strict_readwrite = strict.execute_frame(command_frame(&["READWRITE"]), 743);
         let hardened_readwrite = hardened.execute_frame(command_frame(&["READWRITE"]), 743);
-        assert_eq!(strict_readwrite, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(
+            strict_readwrite,
+            RespFrame::Error("ERR This instance has cluster support disabled".to_string())
+        );
         assert_eq!(strict_readwrite, hardened_readwrite);
 
         assert!(!strict.is_cluster_read_only());
@@ -3827,11 +3827,11 @@ mod tests {
         assert_eq!(baseline_help, casefold_help);
 
         let readonly = runtime.execute_frame(command_frame(&["READONLY"]), 752);
-        let asking = runtime.execute_frame(command_frame(&["ASKING"]), 753);
         let readwrite = runtime.execute_frame(command_frame(&["READWRITE"]), 754);
-        assert_eq!(readonly, RespFrame::SimpleString("OK".to_string()));
-        assert_eq!(asking, RespFrame::SimpleString("OK".to_string()));
-        assert_eq!(readwrite, RespFrame::SimpleString("OK".to_string()));
+        let cluster_disabled =
+            RespFrame::Error("ERR This instance has cluster support disabled".to_string());
+        assert_eq!(readonly, cluster_disabled);
+        assert_eq!(readwrite, cluster_disabled);
 
         let post_toggle_help = runtime.execute_frame(command_frame(&["CLUSTER", "HELP"]), 755);
         assert_eq!(
@@ -3850,7 +3850,7 @@ mod tests {
             subsystem: "cluster_metamorphic",
             action: "cluster_help_idempotence",
             reason_code: "parity_ok",
-            reason: "cluster help surface is idempotent across case-folded command forms and mode toggles".to_string(),
+            reason: "cluster help surface is idempotent across case-folded command forms and standalone READONLY/READWRITE rejections".to_string(),
             input_digest: "fr_p2c_007_f_metamorphic_input".to_string(),
             output_digest: "fr_p2c_007_f_metamorphic_output".to_string(),
             state_digest_before: "cluster_help_start".to_string(),

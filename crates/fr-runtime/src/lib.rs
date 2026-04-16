@@ -7833,27 +7833,26 @@ slave_priority:{}\r\n",
         let host = String::from_utf8_lossy(&argv[1]).into_owned();
         let port = String::from_utf8_lossy(&argv[2]).into_owned();
         if host.eq_ignore_ascii_case("NO") && port.eq_ignore_ascii_case("ONE") {
-            if matches!(
+            if !matches!(
                 self.server.replication_runtime_state.role,
                 ReplicationRoleState::Master
             ) {
-                return RespFrame::SimpleString("OK Already a master".to_string());
+                self.server.replication_runtime_state.role = ReplicationRoleState::Master;
+                self.server
+                    .replication_runtime_state
+                    .rotate_backlog_identity();
+                self.server.replication_runtime_state.replicas.clear();
+                self.server.refresh_replica_ack_snapshots();
+                self.server.replica_reconfigure_requested = true;
             }
-            self.server.replication_runtime_state.role = ReplicationRoleState::Master;
-            self.server
-                .replication_runtime_state
-                .rotate_backlog_identity();
-            self.server.replication_runtime_state.replicas.clear();
-            self.server.refresh_replica_ack_snapshots();
-            self.server.replica_reconfigure_requested = true;
             return RespFrame::SimpleString("OK".to_string());
         }
         let port = match parse_i64_arg(&argv[2]) {
             Ok(value) => match u16::try_from(value) {
                 Ok(port) => port,
-                Err(_) => return CommandError::InvalidInteger.to_resp(),
+                Err(_) => return RespFrame::Error("ERR Invalid master port".to_string()),
             },
-            Err(_) => return CommandError::InvalidInteger.to_resp(),
+            Err(_) => return RespFrame::Error("ERR Invalid master port".to_string()),
         };
         if matches!(
             &self.server.replication_runtime_state.role,
@@ -7875,115 +7874,118 @@ slave_priority:{}\r\n",
     }
 
     fn handle_replconf_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
-        if argv.len() < 2 {
-            return CommandError::WrongArity("REPLCONF").to_resp();
+        if argv.len() % 2 == 0 {
+            return CommandError::SyntaxError.to_resp();
         }
-        let sub = std::str::from_utf8(&argv[1]).unwrap_or("");
-        if sub.eq_ignore_ascii_case("ACK") {
-            if argv.len() != 3 {
-                return CommandError::WrongArity("REPLCONF").to_resp();
-            }
-            if matches!(
-                self.server.replication_runtime_state.role,
-                ReplicationRoleState::Replica { .. }
-            ) {
-                // Slaves don't accept ACKs from master
+        let mut idx = 1;
+        while idx < argv.len() {
+            let option = String::from_utf8_lossy(&argv[idx]).into_owned();
+            if option.eq_ignore_ascii_case("ACK") {
+                if matches!(
+                    self.server.replication_runtime_state.role,
+                    ReplicationRoleState::Replica { .. }
+                ) {
+                    return RespFrame::SimpleString("OK".to_string());
+                }
+                let offset = match parse_i64_arg(&argv[idx + 1]) {
+                    Ok(value) if value >= 0 => ReplOffset(value as u64),
+                    _ => return CommandError::InvalidInteger.to_resp(),
+                };
+                if let Some(replica) = self
+                    .server
+                    .replication_runtime_state
+                    .replicas
+                    .get_mut(&self.session.client_id)
+                {
+                    if offset > replica.ack_offset {
+                        replica.ack_offset = offset;
+                    }
+                    if offset > replica.fsync_offset {
+                        replica.fsync_offset = offset;
+                    }
+                    if idx + 3 < argv.len() && eq_ascii_token(&argv[idx + 2], b"FACK") {
+                        let fsync_offset = match parse_i64_arg(&argv[idx + 3]) {
+                            Ok(value) if value >= 0 => ReplOffset(value as u64),
+                            _ => return CommandError::InvalidInteger.to_resp(),
+                        };
+                        if fsync_offset > replica.fsync_offset {
+                            replica.fsync_offset = fsync_offset;
+                        }
+                    }
+                    replica.last_ack_timestamp_ms = now_ms;
+                }
+                self.server.refresh_replica_ack_snapshots();
                 return RespFrame::SimpleString("OK".to_string());
             }
-            let offset = match parse_i64_arg(&argv[2]) {
-                Ok(value) if value >= 0 => value as u64,
-                _ => return CommandError::InvalidInteger.to_resp(),
-            };
-            if let Some(replica) = self
-                .server
-                .replication_runtime_state
-                .replicas
-                .get_mut(&self.session.client_id)
-            {
-                let offset = ReplOffset(offset);
-                if offset > replica.ack_offset {
-                    replica.ack_offset = offset;
+            if option.eq_ignore_ascii_case("FACK") {
+                if matches!(
+                    self.server.replication_runtime_state.role,
+                    ReplicationRoleState::Replica { .. }
+                ) {
+                    return RespFrame::SimpleString("OK".to_string());
                 }
-                if offset > replica.fsync_offset {
-                    replica.fsync_offset = offset;
+                let offset = match parse_i64_arg(&argv[idx + 1]) {
+                    Ok(value) if value >= 0 => ReplOffset(value as u64),
+                    _ => return CommandError::InvalidInteger.to_resp(),
+                };
+                if let Some(replica) = self
+                    .server
+                    .replication_runtime_state
+                    .replicas
+                    .get_mut(&self.session.client_id)
+                {
+                    if offset > replica.ack_offset {
+                        replica.ack_offset = offset;
+                    }
+                    if offset > replica.fsync_offset {
+                        replica.fsync_offset = offset;
+                    }
+                    replica.last_ack_timestamp_ms = now_ms;
                 }
-                replica.last_ack_timestamp_ms = now_ms;
-            }
-            self.server.refresh_replica_ack_snapshots();
-            RespFrame::SimpleString("OK".to_string())
-        } else if sub.eq_ignore_ascii_case("FACK") {
-            if argv.len() != 3 {
-                return CommandError::WrongArity("REPLCONF").to_resp();
-            }
-            if matches!(
-                self.server.replication_runtime_state.role,
-                ReplicationRoleState::Replica { .. }
-            ) {
+                self.server.refresh_replica_ack_snapshots();
                 return RespFrame::SimpleString("OK".to_string());
             }
-            let offset = match parse_i64_arg(&argv[2]) {
-                Ok(value) if value >= 0 => ReplOffset(value as u64),
-                _ => return CommandError::InvalidInteger.to_resp(),
-            };
-            if let Some(replica) = self
-                .server
-                .replication_runtime_state
-                .replicas
-                .get_mut(&self.session.client_id)
-            {
-                if offset > replica.ack_offset {
-                    replica.ack_offset = offset;
-                }
-                if offset > replica.fsync_offset {
-                    replica.fsync_offset = offset;
-                }
-                replica.last_ack_timestamp_ms = now_ms;
+            if option.eq_ignore_ascii_case("GETACK") {
+                self.server.refresh_replica_ack_snapshots();
+                return RespFrame::Array(Some(vec![
+                    hello_bulk("REPLCONF"),
+                    hello_bulk("ACK"),
+                    hello_bulk(
+                        &self
+                            .server
+                            .replication_ack_state
+                            .primary_offset
+                            .0
+                            .to_string(),
+                    ),
+                ]));
             }
-            self.server.refresh_replica_ack_snapshots();
-            RespFrame::SimpleString("OK".to_string())
-        } else if sub.eq_ignore_ascii_case("GETACK") {
-            if argv.len() != 3 || !eq_ascii_token(&argv[2], b"*") {
-                return CommandError::WrongArity("REPLCONF").to_resp();
-            }
-            self.server.refresh_replica_ack_snapshots();
-            RespFrame::Array(Some(vec![
-                hello_bulk("REPLCONF"),
-                hello_bulk("ACK"),
-                hello_bulk(
-                    &self
-                        .server
-                        .replication_ack_state
-                        .primary_offset
-                        .0
-                        .to_string(),
-                ),
-            ]))
-        } else if sub.eq_ignore_ascii_case("listening-port") {
-            if argv.len() == 3
-                && let Ok(value) = parse_i64_arg(&argv[2])
-                && let Ok(port) = u16::try_from(value)
-            {
+            if option.eq_ignore_ascii_case("listening-port") {
+                let value = match parse_i64_arg(&argv[idx + 1]) {
+                    Ok(value) => value,
+                    Err(err) => return err.to_resp(),
+                };
+                let port = match u16::try_from(value) {
+                    Ok(port) => port,
+                    Err(_) => return CommandError::InvalidInteger.to_resp(),
+                };
                 self.server
                     .replication_runtime_state
                     .ensure_replica(self.session.client_id)
                     .listening_port = port;
-            }
-            RespFrame::SimpleString("OK".to_string())
-        } else if sub.eq_ignore_ascii_case("ip-address") {
-            if argv.len() == 3 {
+            } else if option.eq_ignore_ascii_case("ip-address") {
                 self.server
                     .replication_runtime_state
                     .ensure_replica(self.session.client_id)
-                    .ip_address = Some(String::from_utf8_lossy(&argv[2]).into_owned());
+                    .ip_address = Some(String::from_utf8_lossy(&argv[idx + 1]).into_owned());
+            } else if option.eq_ignore_ascii_case("capa") {
+                // Ignore capability tokens we do not model explicitly.
+            } else {
+                return RespFrame::Error(format!("ERR Unrecognized REPLCONF option: {option}"));
             }
-            RespFrame::SimpleString("OK".to_string())
-        } else if sub.eq_ignore_ascii_case("capa") {
-            // Acknowledge capabilities, e.g. "psync2", "eof"
-            RespFrame::SimpleString("OK".to_string())
-        } else {
-            // Unknown REPLCONF options are ignored for compatibility
-            RespFrame::SimpleString("OK".to_string())
+            idx += 2;
         }
+        RespFrame::SimpleString("OK".to_string())
     }
 
     fn handle_psync_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -10977,7 +10979,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
                 RespFrame::Integer(6380),
                 RespFrame::BulkString(Some(b"connect".to_vec())),
-                RespFrame::Integer(0),
+                RespFrame::Integer(-1),
             ]))
         );
 
@@ -11014,7 +11016,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
                 RespFrame::Integer(6380),
                 RespFrame::BulkString(Some(b"connect".to_vec())),
-                RespFrame::Integer(0),
+                RespFrame::Integer(-1),
             ]))
         );
     }
@@ -11105,7 +11107,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
                 RespFrame::Integer(i64::from(addr.port())),
                 RespFrame::BulkString(Some(b"connect".to_vec())),
-                RespFrame::Integer(0),
+                RespFrame::Integer(-1),
             ]))
         );
         assert_eq!(
@@ -11469,6 +11471,33 @@ mod tests {
             .expect("replica state");
         assert_eq!(replica.ack_offset, fr_repl::ReplOffset(10));
         assert_eq!(replica.fsync_offset, fr_repl::ReplOffset(10));
+    }
+
+    #[test]
+    fn replication_replconf_matches_legacy_arity_and_unknown_option_behavior() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"ACK"]), 1),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"UNKNOWN", b"something"]), 2),
+            RespFrame::Error("ERR Unrecognized REPLCONF option: UNKNOWN".to_string())
+        );
+    }
+
+    #[test]
+    fn replication_replicaof_invalid_port_uses_redis_error_text() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"+6379"]), 0),
+            RespFrame::Error("ERR Invalid master port".to_string())
+        );
     }
 
     #[test]
@@ -11922,17 +11951,18 @@ mod tests {
         assert!(!rt.is_cluster_asking());
 
         let readonly = rt.execute_frame(command(&[b"READONLY"]), 0);
-        assert_eq!(readonly, RespFrame::SimpleString("OK".to_string()));
-        assert!(rt.is_cluster_read_only());
+        assert_eq!(
+            readonly,
+            RespFrame::Error("ERR This instance has cluster support disabled".to_string())
+        );
+        assert!(!rt.is_cluster_read_only());
         assert!(!rt.is_cluster_asking());
 
-        let asking = rt.execute_frame(command(&[b"ASKING"]), 0);
-        assert_eq!(asking, RespFrame::SimpleString("OK".to_string()));
-        assert!(rt.is_cluster_read_only());
-        assert!(rt.is_cluster_asking());
-
         let readwrite = rt.execute_frame(command(&[b"READWRITE"]), 0);
-        assert_eq!(readwrite, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(
+            readwrite,
+            RespFrame::Error("ERR This instance has cluster support disabled".to_string())
+        );
         assert!(!rt.is_cluster_read_only());
         assert!(!rt.is_cluster_asking());
     }
@@ -12582,7 +12612,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
                 RespFrame::Integer(6380),
                 RespFrame::BulkString(Some(b"connect".to_vec())),
-                RespFrame::Integer(0),
+                RespFrame::Integer(-1),
             ]))
         );
         assert_eq!(

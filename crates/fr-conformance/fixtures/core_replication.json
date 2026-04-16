@@ -205,8 +205,8 @@
         "something"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR Unrecognized REPLCONF option: UNKNOWN"
       }
     },
     {
@@ -216,8 +216,8 @@
         "REPLCONF"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR wrong number of arguments for 'replconf' command"
+        "kind": "simple",
+        "value": "OK"
       }
     },
     {
@@ -371,7 +371,7 @@
       ],
       "expect": {
         "kind": "simple",
-        "value": "OK Already a master"
+        "value": "OK"
       }
     },
     {
@@ -384,7 +384,7 @@
       ],
       "expect": {
         "kind": "simple",
-        "value": "OK Already a master"
+        "value": "OK"
       }
     },
     {
@@ -397,7 +397,7 @@
       ],
       "expect": {
         "kind": "simple",
-        "value": "OK Already a master"
+        "value": "OK"
       }
     },
     {
@@ -418,7 +418,7 @@
       "now_ms": 0,
       "argv": [
         "REPLICAOF",
-        "redis.example.com",
+        "localhost",
         "6380"
       ],
       "expect": {
@@ -479,7 +479,7 @@
           },
           {
             "kind": "integer",
-            "value": 0
+            "value": -1
           }
         ]
       }
@@ -559,7 +559,7 @@
           },
           {
             "kind": "integer",
-            "value": 0
+            "value": -1
           }
         ]
       }
@@ -588,7 +588,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR WAITAOF cannot be used with replica instances. Please also note that writes to replicas are just local and are not propagated."
+        "value": "MASTERDOWN Link with MASTER is down and replica-serve-stale-data is set to 'no'."
       }
     },
     {
@@ -649,7 +649,7 @@
       ],
       "expect": {
         "kind": "simple",
-        "value": "OK Already a master"
+        "value": "OK"
       }
     },
     {
@@ -662,7 +662,7 @@
       ],
       "expect": {
         "kind": "simple",
-        "value": "OK Already a master"
+        "value": "OK"
       }
     },
     {
@@ -804,8 +804,8 @@
         "READONLY"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -815,8 +815,8 @@
         "READWRITE"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -850,8 +850,8 @@
         "readonly"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -861,8 +861,8 @@
         "readwrite"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -875,7 +875,7 @@
       ],
       "expect": {
         "kind": "simple",
-        "value": "OK Already a master"
+        "value": "OK"
       }
     },
     {
@@ -925,7 +925,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Invalid master port"
       }
     },
     {
@@ -938,7 +938,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Invalid master port"
       }
     },
     {
@@ -951,7 +951,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Invalid master port"
       }
     },
     {
@@ -964,7 +964,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Invalid master port"
       }
     },
     {
@@ -977,7 +977,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Invalid master port"
       }
     },
     {
@@ -990,7 +990,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Invalid master port"
       }
     },
     {
@@ -1003,7 +1003,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Invalid master port"
       }
     },
     {
@@ -1016,7 +1016,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Invalid master port"
       }
     },
     {

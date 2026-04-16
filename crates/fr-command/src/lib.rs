@@ -5572,52 +5572,41 @@ fn cluster_cmd(
 // ── REPLCONF ────────────────────────────────────────────────────────
 
 fn replconf_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
-    // REPLCONF subcommand [args...]
-    if argv.len() < 2 {
-        return Err(CommandError::WrongArity("REPLCONF"));
+    if argv.len() % 2 == 0 {
+        return Err(CommandError::SyntaxError);
     }
-    let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    if sub.eq_ignore_ascii_case("ACK") {
-        if argv.len() != 3 {
-            return Err(CommandError::WrongArity("REPLCONF"));
+    let mut idx = 1;
+    while idx < argv.len() {
+        let option =
+            std::str::from_utf8(&argv[idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if option.eq_ignore_ascii_case("ACK") || option.eq_ignore_ascii_case("FACK") {
+            let offset = parse_i64_arg(&argv[idx + 1])?;
+            if offset < 0 {
+                return Err(CommandError::InvalidInteger);
+            }
+            return Ok(RespFrame::SimpleString("OK".to_string()));
         }
-        let offset = parse_i64_arg(&argv[2])?;
-        if offset < 0 {
-            return Err(CommandError::InvalidInteger);
+        if option.eq_ignore_ascii_case("GETACK") {
+            return Ok(RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"REPLCONF".to_vec())),
+                RespFrame::BulkString(Some(b"ACK".to_vec())),
+                RespFrame::BulkString(Some(b"0".to_vec())),
+            ])));
         }
-        Ok(RespFrame::SimpleString("OK".to_string()))
-    } else if sub.eq_ignore_ascii_case("FACK") {
-        if argv.len() != 3 {
-            return Err(CommandError::WrongArity("REPLCONF"));
+        if option.eq_ignore_ascii_case("listening-port") {
+            let parsed = parse_i64_arg(&argv[idx + 1])?;
+            u16::try_from(parsed).map_err(|_| CommandError::InvalidInteger)?;
+        } else if option.eq_ignore_ascii_case("ip-address") || option.eq_ignore_ascii_case("capa")
+        {
+            // Accept configuration pairs silently.
+        } else {
+            return Err(CommandError::Custom(format!(
+                "ERR Unrecognized REPLCONF option: {option}"
+            )));
         }
-        let offset = parse_i64_arg(&argv[2])?;
-        if offset < 0 {
-            return Err(CommandError::InvalidInteger);
-        }
-        // REPLCONF ACK <offset> — replica acknowledges replication offset
-        // In standalone mode, accept but no-op (no active replication)
-        Ok(RespFrame::SimpleString("OK".to_string()))
-    } else if sub.eq_ignore_ascii_case("GETACK") {
-        if argv.len() != 3 || !argv[2].eq_ignore_ascii_case(b"*") {
-            return Err(CommandError::WrongArity("REPLCONF"));
-        }
-        // REPLCONF GETACK * — master requests ACK from replica
-        // Return REPLCONF ACK 0 (we report offset 0 as standalone)
-        Ok(RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(b"REPLCONF".to_vec())),
-            RespFrame::BulkString(Some(b"ACK".to_vec())),
-            RespFrame::BulkString(Some(b"0".to_vec())),
-        ])))
-    } else if sub.eq_ignore_ascii_case("listening-port")
-        || sub.eq_ignore_ascii_case("ip-address")
-        || sub.eq_ignore_ascii_case("capa")
-    {
-        // Handshake configuration — accept silently
-        Ok(RespFrame::SimpleString("OK".to_string()))
-    } else {
-        // Unknown subcommand — still accept per Redis behavior
-        Ok(RespFrame::SimpleString("OK".to_string()))
+        idx += 2;
     }
+    Ok(RespFrame::SimpleString("OK".to_string()))
 }
 
 // ── PSYNC ───────────────────────────────────────────────────────────
@@ -5646,8 +5635,12 @@ fn replicaof_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     let host = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     let port = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if host.eq_ignore_ascii_case("NO") && port.eq_ignore_ascii_case("ONE") {
-        Ok(RespFrame::SimpleString("OK Already a master".to_string()))
+        Ok(RespFrame::SimpleString("OK".to_string()))
     } else {
+        let parsed = parse_i64_arg(&argv[2])
+            .map_err(|_| CommandError::Custom("ERR Invalid master port".to_string()))?;
+        u16::try_from(parsed)
+            .map_err(|_| CommandError::Custom("ERR Invalid master port".to_string()))?;
         // Accept but don't actually replicate - standalone mode
         Ok(RespFrame::SimpleString("OK".to_string()))
     }
@@ -5659,14 +5652,18 @@ fn readonly_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     if argv.len() != 1 {
         return Err(CommandError::WrongArity("READONLY"));
     }
-    Ok(RespFrame::SimpleString("OK".to_string()))
+    Err(CommandError::Custom(
+        "ERR This instance has cluster support disabled".to_string(),
+    ))
 }
 
 fn readwrite_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     if argv.len() != 1 {
         return Err(CommandError::WrongArity("READWRITE"));
     }
-    Ok(RespFrame::SimpleString("OK".to_string()))
+    Err(CommandError::Custom(
+        "ERR This instance has cluster support disabled".to_string(),
+    ))
 }
 
 // ── ZRANGESTORE ────────────────────────────────────────────────────
@@ -26293,6 +26290,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn replicaof_invalid_port_uses_redis_error_text() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"REPLICAOF".to_vec(), b"127.0.0.1".to_vec(), b"+6379".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Invalid master port".to_string())
+        );
+    }
+
     // ── FUNCTION tests ──────────────────────────────────────────────
 
     #[test]
@@ -26584,17 +26596,23 @@ mod tests {
     }
 
     #[test]
-    fn readonly_returns_ok() {
+    fn readonly_reports_cluster_disabled() {
         let mut store = Store::new();
-        let out = dispatch_argv(&[b"READONLY".to_vec()], &mut store, 0).unwrap();
-        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        let err = dispatch_argv(&[b"READONLY".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR This instance has cluster support disabled".to_string())
+        );
     }
 
     #[test]
-    fn readwrite_returns_ok() {
+    fn readwrite_reports_cluster_disabled() {
         let mut store = Store::new();
-        let out = dispatch_argv(&[b"READWRITE".to_vec()], &mut store, 0).unwrap();
-        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        let err = dispatch_argv(&[b"READWRITE".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR This instance has cluster support disabled".to_string())
+        );
     }
 
     #[test]
@@ -28207,7 +28225,7 @@ mod tests {
 
         let err =
             dispatch_argv(&[b"REPLCONF".to_vec(), b"ACK".to_vec()], &mut store, 0).unwrap_err();
-        assert_eq!(err, CommandError::WrongArity("REPLCONF"));
+        assert_eq!(err, CommandError::SyntaxError);
 
         let err = dispatch_argv(
             &[b"REPLCONF".to_vec(), b"ACK".to_vec(), b"-1".to_vec()],
@@ -28226,8 +28244,15 @@ mod tests {
             &mut store,
             0,
         )
-        .unwrap_err();
-        assert_eq!(err, CommandError::WrongArity("REPLCONF"));
+        .unwrap();
+        assert_eq!(
+            err,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"REPLCONF".to_vec())),
+                RespFrame::BulkString(Some(b"ACK".to_vec())),
+                RespFrame::BulkString(Some(b"0".to_vec())),
+            ]))
+        );
     }
 
     #[test]
@@ -28280,8 +28305,27 @@ mod tests {
     #[test]
     fn replconf_wrong_arity() {
         let mut store = Store::new();
-        let out = dispatch_argv(&[b"REPLCONF".to_vec()], &mut store, 0);
-        assert!(out.is_err());
+        let out = dispatch_argv(&[b"REPLCONF".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn replconf_unknown_option_uses_redis_error_text() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"REPLCONF".to_vec(),
+                b"UNKNOWN".to_vec(),
+                b"something".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Unrecognized REPLCONF option: UNKNOWN".to_string())
+        );
     }
 
     #[test]
