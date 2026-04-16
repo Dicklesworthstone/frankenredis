@@ -1453,6 +1453,8 @@ impl Default for ServerState {
             shutdown_nosave: false,
             command_time_budget_ms: 5000,
             last_save_time_sec: 0,
+            latency_tracking: true,
+            latency_percentiles: vec![50.0, 99.0, 99.9],
             aof_path: None,
             aof_config_path: None,
             rdb_path: None,
@@ -5591,6 +5593,41 @@ impl Runtime {
                     Err(err) => return err.to_resp(),
                 };
                 next_slowlog_max_len = Some(parsed);
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("latency-tracking") {
+                let parsed = match std::str::from_utf8(&pair[1]) {
+                    Ok(s) if s.eq_ignore_ascii_case("yes") => true,
+                    Ok(s) if s.eq_ignore_ascii_case("no") => false,
+                    _ => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'latency-tracking'".to_string(),
+                        );
+                    }
+                };
+                next_latency_tracking = Some(parsed);
+                static_override_updates.push(("latency-tracking".to_string(), if parsed { "yes".to_string() } else { "no".to_string() }));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("latency-tracking-info-percentiles") {
+                let val_str = match std::str::from_utf8(&pair[1]) {
+                    Ok(v) => v,
+                    Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                };
+                let mut ps = Vec::new();
+                for part in val_str.split_whitespace() {
+                    let p = match part.parse::<f64>() {
+                        Ok(v) if (0.0..=100.0).contains(&v) => v,
+                        _ => {
+                            return RespFrame::Error(
+                                "ERR Invalid argument for CONFIG SET 'latency-tracking-info-percentiles'".to_string(),
+                            );
+                        }
+                    };
+                    ps.push(p);
+                }
+                next_latency_percentiles = Some(ps);
+                static_override_updates.push(("latency-tracking-info-percentiles".to_string(), val_str.to_string()));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("latency-monitor-threshold") {
