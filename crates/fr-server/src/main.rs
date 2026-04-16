@@ -638,6 +638,25 @@ fn main() -> ExitCode {
             }
         }
 
+        // Disconnect clients that have exceeded the configured idle timeout.
+        let client_timeout_sec = runtime.server.client_timeout_sec;
+        if client_timeout_sec > 0 {
+            let timeout_ms = client_timeout_sec * 1000;
+            for (&token, conn) in clients.iter_mut() {
+                if conn.closing || conn.blocked.is_some() || conn.replication_sent_offset.is_some() {
+                    continue; // Skip closing, blocked, and replica clients.
+                }
+                if runtime.is_pubsub_client(conn.session.client_id) {
+                    continue;
+                }
+                let idle_ms = ts.saturating_sub(conn.session.last_interaction_ms);
+                if idle_ms > timeout_ms {
+                    conn.closing = true;
+                    closing_tokens.insert(token);
+                }
+            }
+        }
+
         // Check for graceful shutdown request
         if runtime.server.shutdown_requested {
             if !runtime.server.shutdown_nosave {

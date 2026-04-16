@@ -1241,6 +1241,8 @@ pub struct ServerState {
     pub repl_backlog_size: u64,
     /// Replication timeout in seconds (CONFIG SET repl-timeout). Default 60.
     pub repl_timeout_sec: u64,
+    /// Idle client timeout in seconds (CONFIG SET timeout). Default 0 = disabled.
+    pub client_timeout_sec: u64,
     /// Minimum healthy replicas required before writes are accepted.
     min_replicas_to_write: usize,
     /// Maximum acceptable replica ACK lag, in seconds, for write admission.
@@ -1345,6 +1347,7 @@ impl Default for ServerState {
             max_clients: 10_000,
             repl_backlog_size: DEFAULT_REPL_BACKLOG_SIZE,
             repl_timeout_sec: 60,
+            client_timeout_sec: 0,
             min_replicas_to_write: 0,
             min_replicas_max_lag: 10,
             masteruser: None,
@@ -2614,29 +2617,33 @@ impl Runtime {
         self.server.pubsub_outbox.remove(&client_id);
     }
 
-    fn pubsub_sub_count(&self, client_id: u64) -> usize {
+    pub fn pubsub_sub_count(&self, client_id: u64) -> usize {
         self.server
             .pubsub_client_channels
             .get(&client_id)
-            .map_or(0, HashSet::len)
+            .map_or(0, std::collections::HashSet::len)
             + self
                 .server
                 .pubsub_client_patterns
                 .get(&client_id)
-                .map_or(0, HashSet::len)
+                .map_or(0, std::collections::HashSet::len)
     }
 
-    fn pubsub_shard_sub_count(&self, client_id: u64) -> usize {
+    pub fn pubsub_shard_sub_count(&self, client_id: u64) -> usize {
         self.server
             .pubsub_client_shard_channels
             .get(&client_id)
-            .map_or(0, HashSet::len)
+            .map_or(0, std::collections::HashSet::len)
+    }
+
+    /// Returns true if a given client ID has any active pub/sub subscriptions.
+    pub fn is_pubsub_client(&self, client_id: u64) -> bool {
+        self.pubsub_sub_count(client_id) > 0 || self.pubsub_shard_sub_count(client_id) > 0
     }
 
     /// Returns true if the current client has any active pub/sub subscriptions.
     pub fn is_in_subscription_mode(&self) -> bool {
-        self.pubsub_sub_count(self.session.client_id) > 0
-            || self.pubsub_shard_sub_count(self.session.client_id) > 0
+        self.is_pubsub_client(self.session.client_id)
     }
 
     pub fn configure_maxmemory_enforcement(
@@ -5134,6 +5141,7 @@ impl Runtime {
         let mut next_latency_monitor_threshold: Option<u64> = None;
         let mut next_hz: Option<u64> = None;
         let mut next_maxclients: Option<usize> = None;
+        let mut next_client_timeout_sec: Option<u64> = None;
         let mut next_repl_backlog_size: Option<u64> = None;
         let mut next_repl_timeout: Option<u64> = None;
         let mut next_replica_serve_stale_data: Option<bool> = None;
@@ -5309,6 +5317,7 @@ impl Runtime {
                     }
                     Err(err) => return err.to_resp(),
                 };
+                next_client_timeout_sec = Some(parsed);
                 static_override_updates.push(("timeout".to_string(), parsed.to_string()));
                 continue;
             }
@@ -5746,6 +5755,9 @@ impl Runtime {
         if let Some(mc) = next_maxclients {
             self.server.max_clients = mc;
             self.server.store.server_maxclients = mc as u64;
+        }
+        if let Some(timeout) = next_client_timeout_sec {
+            self.server.client_timeout_sec = timeout;
         }
         if let Some(backlog_size) = next_repl_backlog_size {
             self.server.repl_backlog_size = backlog_size;
@@ -8716,6 +8728,7 @@ mod tests {
 
         assert_eq!(rt.server.maxmemory_bytes, 1024);
         assert_eq!(rt.server.hz, 42);
+        assert_eq!(rt.server.client_timeout_sec, 30);
         assert_eq!(
             rt.server
                 .config_overrides

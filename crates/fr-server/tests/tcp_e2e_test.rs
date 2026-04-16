@@ -2012,3 +2012,32 @@ fn tcp_sentinel_failover_integration() {
     send_shutdown_nosave(replica1_port);
     send_shutdown_nosave(replica2_port);
 }
+
+#[test]
+fn idle_client_disconnected_after_timeout() {
+    let port = reserve_port();
+    let _server = spawn_frankenredis(port, None);
+
+    let mut client = connect_client(port);
+
+    // Set timeout to 1 second
+    let res = send_command(
+        &mut client,
+        &[b"CONFIG", b"SET", b"timeout", b"1"]
+    );
+    assert_eq!(res, RespFrame::SimpleString("OK".to_string()));
+
+    // Wait slightly more than 1 second
+    thread::sleep(Duration::from_millis(1500));
+
+    // Client should have been disconnected by the server
+    // Trying to send a PING might succeed in writing to the local socket buffer,
+    // but reading the response should fail.
+    client.write_all(b"*1\r\n$4\r\nPING\r\n").unwrap_or(());
+    
+    let mut buf = [0u8; 1024];
+    let read_res = client.read(&mut buf);
+    assert!(read_res.unwrap_or(0) == 0, "Server should have closed connection");
+
+    send_shutdown_nosave(port);
+}
