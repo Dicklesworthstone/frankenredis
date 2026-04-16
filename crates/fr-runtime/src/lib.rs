@@ -50,6 +50,15 @@ const CLUSTER_UNKNOWN_SUBCOMMAND_ERROR: &str =
 const ACL_UNKNOWN_SUBCOMMAND_ERROR: &str =
     "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP.";
 const DEFAULT_ACLLOG_MAX_LEN: i64 = 128;
+
+#[derive(Debug, Clone)]
+struct AclLogEntry {
+    count: u64,
+    reason: &'static str,
+    context: String,
+    username: Vec<u8>,
+    timestamp_ms: u64,
+}
 const DEFAULT_REPL_BACKLOG_SIZE: u64 = 1_048_576;
 
 fn processed_command_counts(argv: &[Vec<u8>]) -> (u64, u64) {
@@ -1287,6 +1296,7 @@ pub struct ServerState {
     auth_state: AuthState,
     tls_state: TlsRuntimeState,
     acllog_max_len: i64,
+    acl_log: std::collections::VecDeque<AclLogEntry>,
     replication_ack_state: ReplicationAckState,
     maxmemory_bytes: usize,
     maxmemory_not_counted_bytes: usize,
@@ -1406,6 +1416,7 @@ impl Default for ServerState {
             auth_state: AuthState::default(),
             tls_state: TlsRuntimeState::default(),
             acllog_max_len: DEFAULT_ACLLOG_MAX_LEN,
+            acl_log: std::collections::VecDeque::new(),
             replication_ack_state: ReplicationAckState::default(),
             maxmemory_bytes: 0,
             maxmemory_not_counted_bytes: 0,
@@ -1481,6 +1492,50 @@ impl ServerState {
 
     pub fn set_acl_file_path(&mut self, path: std::path::PathBuf) {
         self.acl_file_path = Some(path);
+    }
+
+    fn record_acl_log_event(
+        &mut self,
+        reason: &'static str,
+        context: String,
+        username: Vec<u8>,
+        timestamp_ms: u64,
+    ) {
+        let max_len = if self.acllog_max_len < 0 {
+            0
+        } else {
+            self.acllog_max_len as usize
+        };
+        if max_len == 0 {
+            return;
+        }
+
+        // Search for existing entry with same reason/context/username/user-details to increment count
+        if let Some(existing) = self.acl_log.iter_mut().find(|e| {
+            e.reason == reason && e.context == context && e.username == username
+        }) {
+            existing.count += 1;
+            existing.timestamp_ms = timestamp_ms;
+            // Move to front (latest)
+            let entry = existing.clone();
+            self.acl_log.retain(|e| {
+                !(e.reason == reason && e.context == context && e.username == username)
+            });
+            self.acl_log.push_front(entry);
+            return;
+        }
+
+        self.acl_log.push_front(AclLogEntry {
+            count: 1,
+            reason,
+            context,
+            username,
+            timestamp_ms,
+        });
+
+        if self.acl_log.len() > max_len {
+            self.acl_log.pop_back();
+        }
     }
 
     pub fn load_aof(&mut self, now_ms: u64) -> Result<usize, PersistError> {
@@ -3178,7 +3233,7 @@ impl Runtime {
         match special_command {
             Some(RuntimeSpecialCommand::Auth) => {
                 let start = Instant::now();
-                let reply = self.handle_auth_command(&argv);
+                let reply = self.handle_auth_command(&argv, now_ms);
                 let elapsed_us = start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
@@ -3187,7 +3242,7 @@ impl Runtime {
             }
             Some(RuntimeSpecialCommand::Hello) => {
                 let start = Instant::now();
-                let reply = self.handle_hello_command(&argv);
+                let reply = self.handle_hello_command(&argv, now_ms);
                 let elapsed_us = start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
@@ -3222,6 +3277,12 @@ impl Runtime {
                 "NOPERM this user has no permissions to run the '{}' command",
                 command_name
             ));
+            self.server.record_acl_log_event(
+                "command",
+                command_name.to_string(),
+                self.session.current_user_name().to_vec(),
+                now_ms,
+            );
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -3319,7 +3380,7 @@ impl Runtime {
         {
             let special_start = Instant::now();
             let special_reply = match special_command {
-                Some(RuntimeSpecialCommand::Acl) => Some(self.handle_acl_command(&argv)),
+                Some(RuntimeSpecialCommand::Acl) => Some(self.handle_acl_command(&argv, now_ms)),
                 Some(RuntimeSpecialCommand::Config) => Some(self.handle_config_command(&argv)),
                 Some(RuntimeSpecialCommand::Client) => {
                     Some(self.handle_client_command(&argv, now_ms))
@@ -4242,7 +4303,7 @@ impl Runtime {
         Ok(outcome.reply)
     }
 
-    fn handle_auth_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_auth_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         if argv.len() != 2 && argv.len() != 3 {
             return CommandError::WrongArity("AUTH").to_resp();
         }
@@ -4258,11 +4319,19 @@ impl Runtime {
             Err(AuthFailure::NotConfigured) => {
                 RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string())
             }
-            Err(AuthFailure::WrongPass) => RespFrame::Error(WRONGPASS_ERROR.to_string()),
+            Err(AuthFailure::WrongPass) => {
+                self.server.record_acl_log_event(
+                    "auth",
+                    "failed login attempt".to_string(),
+                    username.to_vec(),
+                    now_ms,
+                );
+                RespFrame::Error(WRONGPASS_ERROR.to_string())
+            }
         }
     }
 
-    fn handle_hello_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_hello_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         // HELLO with no args: return server info using current protocol (Redis 7+)
         if argv.len() == 1 {
             return build_hello_response(
@@ -4328,6 +4397,12 @@ impl Runtime {
                     return RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string());
                 }
                 Err(AuthFailure::WrongPass) => {
+                    self.server.record_acl_log_event(
+                        "auth",
+                        "failed login attempt".to_string(),
+                        username.to_vec(),
+                        now_ms,
+                    );
                     return RespFrame::Error(WRONGPASS_ERROR.to_string());
                 }
             }
@@ -4363,7 +4438,7 @@ impl Runtime {
         Ok(())
     }
 
-    fn handle_acl_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_acl_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         if argv.len() < 2 {
             return CommandError::WrongArity("ACL").to_resp();
         }
@@ -4420,6 +4495,12 @@ impl Runtime {
                     if u.is_command_allowed(&cmd_name) {
                         RespFrame::SimpleString("OK".to_string())
                     } else {
+                        self.server.record_acl_log_event(
+                            "command",
+                            cmd_name.to_string(),
+                            username.clone(),
+                            now_ms,
+                        );
                         RespFrame::Error(format!(
                             "ERR User '{}' has no permissions to run the '{}' command",
                             String::from_utf8_lossy(username),
@@ -4665,17 +4746,58 @@ impl Runtime {
         RespFrame::BulkString(Some(truncated.as_bytes().to_vec()))
     }
 
-    fn handle_acl_log(&self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_acl_log(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() == 2 {
-            RespFrame::Array(Some(Vec::new()))
+            let entries: Vec<RespFrame> = self
+                .server
+                .acl_log
+                .iter()
+                .map(|e| {
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"count".to_vec())),
+                        RespFrame::Integer(e.count as i64),
+                        RespFrame::BulkString(Some(b"reason".to_vec())),
+                        RespFrame::BulkString(Some(e.reason.as_bytes().to_vec())),
+                        RespFrame::BulkString(Some(b"context".to_vec())),
+                        RespFrame::BulkString(Some(e.context.as_bytes().to_vec())),
+                        RespFrame::BulkString(Some(b"username".to_vec())),
+                        RespFrame::BulkString(Some(e.username.clone())),
+                        RespFrame::BulkString(Some(b"age-seconds".to_vec())),
+                        RespFrame::Integer(0), // placeholder
+                    ]))
+                })
+                .collect();
+            RespFrame::Array(Some(entries))
         } else if argv.len() == 3 {
             if eq_ascii_token(&argv[2], b"RESET") {
+                self.server.acl_log.clear();
                 RespFrame::SimpleString("OK".to_string())
             } else {
-                match parse_i64_arg(&argv[2]) {
-                    Ok(_) => RespFrame::Array(Some(Vec::new())),
-                    Err(_) => CommandError::InvalidInteger.to_resp(),
-                }
+                let count = match parse_i64_arg(&argv[2]) {
+                    Ok(c) if c >= 0 => c as usize,
+                    _ => return CommandError::InvalidInteger.to_resp(),
+                };
+                let entries: Vec<RespFrame> = self
+                    .server
+                    .acl_log
+                    .iter()
+                    .take(count)
+                    .map(|e| {
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(b"count".to_vec())),
+                            RespFrame::Integer(e.count as i64),
+                            RespFrame::BulkString(Some(b"reason".to_vec())),
+                            RespFrame::BulkString(Some(e.reason.as_bytes().to_vec())),
+                            RespFrame::BulkString(Some(b"context".to_vec())),
+                            RespFrame::BulkString(Some(e.context.as_bytes().to_vec())),
+                            RespFrame::BulkString(Some(b"username".to_vec())),
+                            RespFrame::BulkString(Some(e.username.clone())),
+                            RespFrame::BulkString(Some(b"age-seconds".to_vec())),
+                            RespFrame::Integer(0), // placeholder
+                        ]))
+                    })
+                    .collect();
+                RespFrame::Array(Some(entries))
             }
         } else {
             CommandError::WrongSubcommandArity {
@@ -6440,7 +6562,9 @@ impl Runtime {
                     }
                 }
                 if let Some(addr) = &filter_addr {
-                    if session.peer_addr.as_ref() != Some(addr) {
+                    if session.peer_addr.map(|peer| peer.to_string()).as_deref()
+                        != Some(addr.as_str())
+                    {
                         continue;
                     }
                 }
