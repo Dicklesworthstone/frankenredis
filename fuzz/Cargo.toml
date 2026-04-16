@@ -1,0 +1,48 @@
+[package]
+name = "frankenredis-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.fr-protocol]
+path = "../crates/fr-protocol"
+
+[dependencies.fr-persist]
+path = "../crates/fr-persist"
+
+[[bin]]
+name = "fuzz_resp_parser"
+path = "fuzz_targets/fuzz_resp_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_aof_decoder"
+path = "fuzz_targets/fuzz_aof_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_rdb_decoder"
+path = "fuzz_targets/fuzz_rdb_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_resp_roundtrip"
+path = "fuzz_targets/fuzz_resp_roundtrip.rs"
+test = false
+doc = false
+bench = false
