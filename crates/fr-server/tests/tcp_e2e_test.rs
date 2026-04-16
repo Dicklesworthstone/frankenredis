@@ -860,6 +860,19 @@ fn tcp_replicaof_cli_flag_bootstraps_replica_link_on_startup() {
 }
 
 #[test]
+fn tcp_frankenredis_min_replicas_gate_blocks_then_admits_writes() {
+    exercise_min_replicas_write_gate(
+        |port| spawn_frankenredis(port, None),
+        |port, primary_port| spawn_frankenredis(port, Some(primary_port)),
+    );
+}
+
+#[test]
+fn tcp_min_replicas_gate_matches_legacy_redis_reference() {
+    exercise_min_replicas_write_gate(spawn_legacy_redis, spawn_legacy_redis_replica);
+}
+
+#[test]
 fn tcp_multi_client_concurrent_access_roundtrip() {
     let port = reserve_port();
     let _server = spawn_frankenredis(port, None);
@@ -1330,6 +1343,63 @@ fn wait_for_replica_sync(replica_port: u16, timeout: Duration) {
         "replica on port {replica_port} did not sync within {timeout:?}; last INFO: {:?}",
         fetch_info_replication(replica_port)
     );
+}
+
+fn exercise_min_replicas_write_gate<SP, SR>(spawn_primary: SP, spawn_replica: SR)
+where
+    SP: FnOnce(u16) -> ManagedChild,
+    SR: Fn(u16, u16) -> ManagedChild,
+{
+    let primary_port = reserve_port();
+    let replica_port = reserve_port();
+
+    let _primary = spawn_primary(primary_port);
+    let mut primary_client = connect_client(primary_port);
+
+    assert_eq!(
+        send_command(
+            &mut primary_client,
+            &[b"CONFIG", b"SET", b"min-replicas-to-write", b"1"],
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        send_command(&mut primary_client, &[b"SET", b"gate-key", b"blocked"]),
+        RespFrame::Error("NOREPLICAS Not enough good replicas to write.".to_string())
+    );
+
+    let _replica = spawn_replica(replica_port, primary_port);
+    wait_for_replica_sync(replica_port, Duration::from_secs(10));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut admitted = false;
+    let mut last_primary_info = None;
+    while Instant::now() < deadline {
+        let reply = send_command(&mut primary_client, &[b"SET", b"gate-key", b"allowed"]);
+        if reply == RespFrame::SimpleString("OK".to_string()) {
+            admitted = true;
+            break;
+        }
+        assert_eq!(
+            reply,
+            RespFrame::Error("NOREPLICAS Not enough good replicas to write.".to_string())
+        );
+        last_primary_info = fetch_info_replication(primary_port);
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        admitted,
+        "primary on port {primary_port} never admitted writes after a healthy replica link; latest INFO: {last_primary_info:?}",
+    );
+
+    wait_until(
+        Duration::from_secs(5),
+        || fetch_string_value(replica_port, b"gate-key").is_some_and(|value| value == b"allowed"),
+        &format!("replica on port {replica_port} never observed gated write"),
+    );
+
+    send_shutdown_nosave(replica_port);
+    send_shutdown_nosave(primary_port);
 }
 
 #[test]

@@ -2868,6 +2868,69 @@ impl Runtime {
         output
     }
 
+    fn command_requires_replica_write_quorum(
+        &self,
+        argv: &[Vec<u8>],
+        special_command: Option<RuntimeSpecialCommand>,
+    ) -> bool {
+        if matches!(special_command, Some(RuntimeSpecialCommand::Exec)) {
+            return self
+                .session
+                .transaction_state
+                .command_queue
+                .iter()
+                .any(|queued| {
+                    queued
+                        .first()
+                        .is_some_and(|command| fr_command::is_write_command(command))
+                });
+        }
+
+        argv.first()
+            .is_some_and(|command| fr_command::is_write_command(command))
+    }
+
+    fn good_replica_write_count(&self, now_ms: u64) -> usize {
+        self.server
+            .replication_runtime_state
+            .replicas
+            .values()
+            .filter(|replica| {
+                if replica.last_ack_timestamp_ms == 0 {
+                    return false;
+                }
+                let lag_seconds = now_ms.saturating_sub(replica.last_ack_timestamp_ms) / 1000;
+                lag_seconds <= self.server.min_replicas_max_lag
+            })
+            .count()
+    }
+
+    fn reject_due_to_replica_write_quorum(
+        &self,
+        argv: &[Vec<u8>],
+        special_command: Option<RuntimeSpecialCommand>,
+        now_ms: u64,
+    ) -> Option<RespFrame> {
+        if !self.command_requires_replica_write_quorum(argv, special_command) {
+            return None;
+        }
+        if !matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Master
+        ) {
+            return None;
+        }
+        if self.server.min_replicas_to_write == 0 || self.server.min_replicas_max_lag == 0 {
+            return None;
+        }
+        if self.good_replica_write_count(now_ms) >= self.server.min_replicas_to_write {
+            return None;
+        }
+        Some(RespFrame::Error(
+            "NOREPLICAS Not enough good replicas to write.".to_string(),
+        ))
+    }
+
     fn execute_frame_internal(
         &mut self,
         frame: RespFrame,
@@ -2992,6 +3055,16 @@ impl Runtime {
                 input_source: ThreatInputDigestSource::Argv(&argv),
                 output: &reply,
             });
+            return reply;
+        }
+
+        let command_arity_ok = argv
+            .first()
+            .is_some_and(|command| fr_command::check_command_arity(command, argv.len()).is_ok());
+        if command_arity_ok
+            && let Some(reply) =
+                self.reject_due_to_replica_write_quorum(&argv, special_command, now_ms)
+        {
             return reply;
         }
 
@@ -3140,26 +3213,6 @@ impl Runtime {
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
                 self.server.record_command_histogram(&argv, elapsed_us);
                 return reply;
-            }
-        }
-
-        if self.server.min_replicas_to_write > 0
-            && matches!(self.server.replication_runtime_state.role, ReplicationRoleState::Master)
-            && argv.first().is_some_and(|cmd| fr_command::is_write_command(cmd))
-        {
-            let mut good_replicas = 0;
-            for replica in self.server.replication_runtime_state.replicas.values() {
-                let lag = (now_ms / 1000)
-                    .saturating_sub(replica.last_ack_timestamp_ms / 1000)
-                    .saturating_sub(1);
-                if lag <= self.server.min_replicas_max_lag {
-                    good_replicas += 1;
-                }
-            }
-            if good_replicas < self.server.min_replicas_to_write {
-                return RespFrame::Error(
-                    "NOREPLICAS Not enough good replicas to write.".to_string()
-                );
             }
         }
 
@@ -12010,6 +12063,113 @@ mod tests {
         assert_eq!(
             exec,
             RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"v".to_vec()))]))
+        );
+    }
+
+    #[test]
+    fn min_replicas_blocks_writes_without_healthy_replicas() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"min-replicas-to-write",
+                    b"1",
+                    b"min-replicas-max-lag",
+                    b"10",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"blocked", b"value"]), 1_000),
+            RespFrame::Error("NOREPLICAS Not enough good replicas to write.".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"blocked"]), 2_000),
+            RespFrame::BulkString(None)
+        );
+    }
+
+    #[test]
+    fn min_replicas_rejects_multi_writes_without_tainting_exec() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"min-replicas-to-write", b"1"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"blocked", b"value"]), 2_000),
+            RespFrame::Error("NOREPLICAS Not enough good replicas to write.".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 3_000),
+            RespFrame::Array(Some(vec![]))
+        );
+    }
+
+    #[test]
+    fn min_replicas_max_lag_zero_disables_write_gate() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"min-replicas-to-write",
+                    b"1",
+                    b"min-replicas-max-lag",
+                    b"0",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"allowed", b"value"]), 1_000),
+            RespFrame::SimpleString("OK".to_string())
+        );
+    }
+
+    #[test]
+    fn min_replicas_allows_writes_after_recent_replica_ack() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"min-replicas-to-write",
+                    b"1",
+                    b"min-replicas-max-lag",
+                    b"10",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let replica = rt
+            .server
+            .replication_runtime_state
+            .ensure_replica(42);
+        replica.last_ack_timestamp_ms = 9_000;
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"allowed", b"value"]), 10_000),
+            RespFrame::SimpleString("OK".to_string())
         );
     }
 
