@@ -2368,19 +2368,11 @@ fn exercise_xread_block_unblocks_on_new_entry(
     reply
 }
 
-#[test]
-fn tcp_xread_block_matches_legacy_redis_reference() {
-    let expected = expected_single_stream_entry(b"s", b"1001-0", b"field", b"value");
-    let legacy = exercise_xread_block_unblocks_on_new_entry(spawn_legacy_redis);
-    let franken = exercise_xread_block_unblocks_on_new_entry(|port| spawn_frankenredis(port, None));
-    assert_eq!(legacy, expected);
-    assert_eq!(franken, legacy);
-}
-
-#[test]
-fn tcp_xreadgroup_block_unblocks_on_new_group_entry() {
+fn exercise_xreadgroup_block_unblocks_on_new_group_entry(
+    spawn: impl FnOnce(u16) -> ManagedChild,
+) -> RespFrame {
     let port = reserve_port();
-    let _server = spawn_frankenredis(port, None);
+    let _server = spawn(port);
 
     let mut reader = connect_client(port);
     assert_eq!(
@@ -2416,7 +2408,25 @@ fn tcp_xreadgroup_block_unblocks_on_new_group_entry() {
         ],
     );
     producer_handle.join().expect("xreadgroup producer thread");
-    assert_eq!(reply, expected_single_stream_entry(b"s", b"1001-0", b"field", b"value"));
-
     send_shutdown_nosave(port);
+    reply
+}
+
+#[test]
+fn tcp_xread_block_matches_legacy_redis_reference() {
+    let expected = expected_single_stream_entry(b"s", b"1001-0", b"field", b"value");
+    let legacy = exercise_xread_block_unblocks_on_new_entry(spawn_legacy_redis);
+    let franken = exercise_xread_block_unblocks_on_new_entry(|port| spawn_frankenredis(port, None));
+    assert_eq!(legacy, expected);
+    assert_eq!(franken, legacy);
+}
+
+#[test]
+fn tcp_xreadgroup_block_matches_legacy_redis_reference() {
+    let expected = expected_single_stream_entry(b"s", b"1001-0", b"field", b"value");
+    let legacy = exercise_xreadgroup_block_unblocks_on_new_group_entry(spawn_legacy_redis);
+    let franken =
+        exercise_xreadgroup_block_unblocks_on_new_group_entry(|port| spawn_frankenredis(port, None));
+    assert_eq!(legacy, expected);
+    assert_eq!(franken, legacy);
 }
