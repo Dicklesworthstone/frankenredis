@@ -1607,10 +1607,19 @@ fn tcp_pubsub_pattern_subscribe_matches_legacy_redis_reference() {
 
 // ---------- Transaction isolation tests ----------
 
-#[test]
-fn tcp_watch_exec_aborts_on_concurrent_modification() {
+fn exercise_watch_exec_abort_on_concurrent_modification(
+    spawn: impl FnOnce(u16) -> ManagedChild,
+) -> (
+    RespFrame,
+    RespFrame,
+    RespFrame,
+    RespFrame,
+    RespFrame,
+    RespFrame,
+    RespFrame,
+) {
     let port = reserve_port();
-    let _server = spawn_frankenredis(port, None);
+    let _server = spawn(port);
 
     // Initialize the key.
     let mut setup = connect_client(port);
@@ -1623,40 +1632,74 @@ fn tcp_watch_exec_aborts_on_concurrent_modification() {
 
     // A watches the key.
     let watch_resp = send_command(&mut client_a, &[b"WATCH", b"watched-key"]);
-    assert_eq!(watch_resp, RespFrame::SimpleString("OK".to_string()));
 
     // A reads current value.
     let val = send_command(&mut client_a, &[b"GET", b"watched-key"]);
-    assert_eq!(val, RespFrame::BulkString(Some(b"0".to_vec())));
 
     // B modifies the key while A has it watched.
     let set_resp = send_command(&mut client_b, &[b"SET", b"watched-key", b"1"]);
-    assert_eq!(set_resp, RespFrame::SimpleString("OK".to_string()));
 
     // A starts a transaction and tries to set the key.
     let multi_resp = send_command(&mut client_a, &[b"MULTI"]);
-    assert_eq!(multi_resp, RespFrame::SimpleString("OK".to_string()));
 
     let queued = send_command(&mut client_a, &[b"SET", b"watched-key", b"2"]);
-    assert_eq!(queued, RespFrame::SimpleString("QUEUED".to_string()));
 
     // EXEC should return null array (transaction aborted because watched key was modified).
     let exec_resp = send_command(&mut client_a, &[b"EXEC"]);
+
+    // The value should be "1" (Client B's write), not "2" (Client A's aborted write).
+    let final_val = send_command(&mut client_b, &[b"GET", b"watched-key"]);
+
+    send_shutdown_nosave(port);
+    (
+        watch_resp, val, set_resp, multi_resp, queued, exec_resp, final_val,
+    )
+}
+
+#[test]
+fn tcp_watch_exec_aborts_on_concurrent_modification() {
+    let (
+        watch_resp,
+        val,
+        set_resp,
+        multi_resp,
+        queued,
+        exec_resp,
+        final_val,
+    ) = exercise_watch_exec_abort_on_concurrent_modification(|port| spawn_frankenredis(port, None));
+    assert_eq!(watch_resp, RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(val, RespFrame::BulkString(Some(b"0".to_vec())));
+    assert_eq!(set_resp, RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(multi_resp, RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(queued, RespFrame::SimpleString("QUEUED".to_string()));
     assert_eq!(
         exec_resp,
         RespFrame::Array(None),
         "EXEC should return nil when WATCH detects modification"
     );
-
-    // The value should be "1" (Client B's write), not "2" (Client A's aborted write).
-    let final_val = send_command(&mut client_b, &[b"GET", b"watched-key"]);
     assert_eq!(
         final_val,
         RespFrame::BulkString(Some(b"1".to_vec())),
         "value should be Client B's write, not the aborted transaction"
     );
+}
 
-    send_shutdown_nosave(port);
+#[test]
+fn tcp_watch_exec_abort_matches_legacy_redis_reference() {
+    let expected = (
+        RespFrame::SimpleString("OK".to_string()),
+        RespFrame::BulkString(Some(b"0".to_vec())),
+        RespFrame::SimpleString("OK".to_string()),
+        RespFrame::SimpleString("OK".to_string()),
+        RespFrame::SimpleString("QUEUED".to_string()),
+        RespFrame::Array(None),
+        RespFrame::BulkString(Some(b"1".to_vec())),
+    );
+    let franken =
+        exercise_watch_exec_abort_on_concurrent_modification(|port| spawn_frankenredis(port, None));
+    let legacy = exercise_watch_exec_abort_on_concurrent_modification(spawn_legacy_redis);
+    assert_eq!(legacy, expected);
+    assert_eq!(franken, legacy);
 }
 
 #[test]
