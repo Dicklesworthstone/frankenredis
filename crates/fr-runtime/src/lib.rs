@@ -34,8 +34,9 @@ use fr_repl::{
     evaluate_wait, evaluate_waitaof, parse_psync_reply,
 };
 use fr_store::{
-    DispatchClientContext, EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus,
-    EvictionSafetyGateState, MaxmemoryPolicy, Store, decode_db_key, encode_db_key, glob_match,
+    CommandHistogram, DispatchClientContext, EvictionLoopFailure, EvictionLoopResult,
+    EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPolicy, Store, decode_db_key,
+    encode_db_key, glob_match,
 };
 
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -114,6 +115,27 @@ fn client_info_command_name(argv: &[Vec<u8>]) -> String {
     }
     let sub = String::from_utf8_lossy(sub).to_ascii_lowercase();
     format!("{command}|{sub}")
+}
+
+fn histogram_percentile_us(hist: &CommandHistogram, percentile: f64) -> f64 {
+    if hist.calls == 0 {
+        return 0.0;
+    }
+
+    let target_rank = ((percentile / 100.0) * hist.calls as f64).ceil() as u64;
+    let target_rank = target_rank.max(1);
+    let mut cumulative = 0_u64;
+    let buckets = hist.to_buckets();
+    for (bucket_start_us, count) in &buckets {
+        cumulative = cumulative.saturating_add(*count);
+        if cumulative >= target_rank {
+            return *bucket_start_us as f64;
+        }
+    }
+    buckets
+        .last()
+        .map(|(bucket_start_us, _)| *bucket_start_us as f64)
+        .unwrap_or(0.0)
 }
 
 fn read_failover_frame(
@@ -1349,6 +1371,10 @@ pub struct ServerState {
     pub shutdown_nosave: bool,
     /// Command time budget in ms (CONFIG SET busy-reply-threshold / lua-time-limit).
     command_time_budget_ms: u64,
+    /// Whether command latency histograms should be recorded for INFO latencystats.
+    latency_tracking: bool,
+    /// Percentiles emitted by INFO latencystats.
+    latency_percentiles: Vec<f64>,
     /// Last successful save timestamp (seconds since epoch).
     last_save_time_sec: u64,
     /// Path for AOF persistence file (used by SAVE/BGSAVE).
@@ -1712,6 +1738,9 @@ impl ServerState {
 
     /// Record command execution latency for LATENCY HISTOGRAM.
     fn record_command_histogram(&mut self, argv: &[Vec<u8>], duration_us: u64) {
+        if !self.latency_tracking {
+            return;
+        }
         let Some(cmd) = argv.first() else { return };
         let Ok(cmd_str) = std::str::from_utf8(cmd) else {
             return;
@@ -5465,6 +5494,8 @@ impl Runtime {
         let mut next_slowlog_slower_than: Option<i64> = None;
         let mut next_slowlog_max_len: Option<usize> = None;
         let mut next_latency_monitor_threshold: Option<u64> = None;
+        let mut next_latency_tracking: Option<bool> = None;
+        let mut next_latency_percentiles: Option<Vec<f64>> = None;
         let mut next_hz: Option<u64> = None;
         let mut next_maxclients: Option<usize> = None;
         let mut next_client_timeout_sec: Option<u64> = None;
@@ -6186,6 +6217,12 @@ impl Runtime {
         }
         if let Some(threshold_ms) = next_latency_monitor_threshold {
             self.server.store.latency_tracker.threshold_ms = threshold_ms;
+        }
+        if let Some(tracking) = next_latency_tracking {
+            self.server.latency_tracking = tracking;
+        }
+        if let Some(percentiles) = next_latency_percentiles {
+            self.server.latency_percentiles = percentiles;
         }
         if let Some(hz) = next_hz {
             self.server.hz = hz;
@@ -7648,6 +7685,7 @@ impl Runtime {
         let is_persistence = section_requested("persistence");
         let is_replication = section_requested("replication");
         let is_keyspace = section_requested("keyspace");
+        let is_latencystats = section_requested("latencystats");
 
         let mut info = Vec::new();
         if is_persistence
@@ -7662,6 +7700,11 @@ impl Runtime {
         }
         if is_keyspace
             && let RespFrame::BulkString(Some(bytes)) = self.handle_info_keyspace_section(now_ms)
+        {
+            info.extend_from_slice(&bytes);
+        }
+        if is_latencystats
+            && let RespFrame::BulkString(Some(bytes)) = self.handle_info_latencystats_section()
         {
             info.extend_from_slice(&bytes);
         }
@@ -7725,6 +7768,24 @@ impl Runtime {
                     "db{db}:keys={keys},expires={expires},avg_ttl=0\r\n"
                 ));
             }
+        }
+        info.push_str("\r\n");
+        RespFrame::BulkString(Some(info.into_bytes()))
+    }
+
+    fn handle_info_latencystats_section(&mut self) -> RespFrame {
+        let mut info = String::from("# Latencystats\r\n");
+        let histograms = self.server.store.all_command_histograms();
+        for (cmd, hist) in histograms {
+            info.push_str(&format!("latency_percentiles_usec_{cmd}:"));
+            for (i, &p) in self.server.latency_percentiles.iter().enumerate() {
+                if i > 0 {
+                    info.push_str(",");
+                }
+                let val = histogram_percentile_us(hist, p);
+                info.push_str(&format!("p{p}={val:.2}"));
+            }
+            info.push_str("\r\n");
         }
         info.push_str("\r\n");
         RespFrame::BulkString(Some(info.into_bytes()))
@@ -13685,6 +13746,82 @@ mod tests {
             ]))
         );
         assert_eq!(rt.server.output_buffer_limit, 1024);
+    }
+
+    #[test]
+    fn config_set_latency_tracking_controls_info_latencystats() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"latency-tracking",
+                    b"no",
+                    b"latency-tracking-info-percentiles",
+                    b"50 99.9",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.server.latency_tracking);
+        assert_eq!(rt.server.latency_percentiles, vec![50.0, 99.9]);
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"GET",
+                    b"latency-tracking",
+                    b"latency-tracking-info-percentiles",
+                ]),
+                1,
+            ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"latency-tracking".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+                RespFrame::BulkString(Some(
+                    b"latency-tracking-info-percentiles".to_vec(),
+                )),
+                RespFrame::BulkString(Some(b"50 99.9".to_vec())),
+            ]))
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"missing"]), 2),
+            RespFrame::BulkString(None)
+        );
+
+        let disabled_info = rt.execute_frame(command(&[b"INFO", b"latencystats"]), 3);
+        let RespFrame::BulkString(Some(disabled_info_bytes)) = disabled_info else {
+            unreachable!("expected bulk INFO response");
+        };
+        let disabled_info = String::from_utf8(disabled_info_bytes).expect("utf8 info");
+        assert!(disabled_info.contains("# Latencystats\r\n"), "{disabled_info}");
+        assert!(
+            !disabled_info.contains("latency_percentiles_usec_GET:"),
+            "{disabled_info}"
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"latency-tracking", b"yes"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"missing"]), 5),
+            RespFrame::BulkString(None)
+        );
+
+        let enabled_info = rt.execute_frame(command(&[b"INFO", b"latencystats"]), 6);
+        let RespFrame::BulkString(Some(enabled_info_bytes)) = enabled_info else {
+            unreachable!("expected bulk INFO response");
+        };
+        let enabled_info = String::from_utf8(enabled_info_bytes).expect("utf8 info");
+        assert!(enabled_info.contains("latency_percentiles_usec_GET:p50="));
+        assert!(enabled_info.contains("p99.9="));
     }
 
     // ── AOF persistence round-trip tests ────────────────────────────────
