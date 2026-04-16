@@ -5450,6 +5450,10 @@ fn waitaof_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     ])))
 }
 
+fn cluster_disabled_error() -> CommandError {
+    CommandError::Custom("ERR This instance has cluster support disabled".to_string())
+}
+
 // ── CLUSTER ─────────────────────────────────────────────────────────
 
 fn cluster_cmd(
@@ -5478,14 +5482,28 @@ fn cluster_cmd(
               total_cluster_links_buffer_limit_exceeded:0\r\n"
                 .to_vec(),
         )))
-    } else if sub.eq_ignore_ascii_case("MYID") {
-        Ok(RespFrame::BulkString(Some(
-            b"0000000000000000000000000000000000000000".to_vec(),
-        )))
-    } else if sub.eq_ignore_ascii_case("SLOTS") || sub.eq_ignore_ascii_case("SHARDS") {
-        Ok(RespFrame::Array(Some(Vec::new())))
-    } else if sub.eq_ignore_ascii_case("NODES") {
-        Ok(RespFrame::BulkString(Some(Vec::new())))
+    } else if sub.eq_ignore_ascii_case("MYID")
+        || sub.eq_ignore_ascii_case("SLOTS")
+        || sub.eq_ignore_ascii_case("SHARDS")
+        || sub.eq_ignore_ascii_case("NODES")
+        || sub.eq_ignore_ascii_case("MEET")
+        || sub.eq_ignore_ascii_case("FORGET")
+        || sub.eq_ignore_ascii_case("REPLICATE")
+        || sub.eq_ignore_ascii_case("REPLICAS")
+        || sub.eq_ignore_ascii_case("FAILOVER")
+        || sub.eq_ignore_ascii_case("ADDSLOTS")
+        || sub.eq_ignore_ascii_case("DELSLOTS")
+        || sub.eq_ignore_ascii_case("ADDSLOTSRANGE")
+        || sub.eq_ignore_ascii_case("DELSLOTSRANGE")
+        || sub.eq_ignore_ascii_case("FLUSHSLOTS")
+        || sub.eq_ignore_ascii_case("SAVECONFIG")
+        || sub.eq_ignore_ascii_case("SET-CONFIG-EPOCH")
+        || sub.eq_ignore_ascii_case("BUMPEPOCH")
+        || sub.eq_ignore_ascii_case("LINKS")
+        || sub.eq_ignore_ascii_case("MYSHARDID")
+        || sub.eq_ignore_ascii_case("SLOTSTATE")
+    {
+        Err(cluster_disabled_error())
     } else if sub.eq_ignore_ascii_case("RESET") {
         if argv.len() > 3 {
             return Err(CommandError::WrongArity("CLUSTER"));
@@ -5551,15 +5569,31 @@ fn cluster_cmd(
             });
         }
         Ok(RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(b"CLUSTER INFO".to_vec())),
-            RespFrame::BulkString(Some(b"CLUSTER MYID".to_vec())),
-            RespFrame::BulkString(Some(b"CLUSTER KEYSLOT <key>".to_vec())),
-            RespFrame::BulkString(Some(b"CLUSTER GETKEYSINSLOT <slot> <count>".to_vec())),
-            RespFrame::BulkString(Some(b"CLUSTER COUNTKEYSINSLOT <slot>".to_vec())),
-            RespFrame::BulkString(Some(b"CLUSTER SLOTS".to_vec())),
-            RespFrame::BulkString(Some(b"CLUSTER SHARDS".to_vec())),
-            RespFrame::BulkString(Some(b"CLUSTER NODES".to_vec())),
-            RespFrame::BulkString(Some(b"CLUSTER RESET".to_vec())),
+            hello_bulk("CLUSTER INFO"),
+            hello_bulk("CLUSTER MYID"),
+            hello_bulk("CLUSTER KEYSLOT <key>"),
+            hello_bulk("CLUSTER GETKEYSINSLOT <slot> <count>"),
+            hello_bulk("CLUSTER COUNTKEYSINSLOT <slot>"),
+            hello_bulk("CLUSTER SLOTS"),
+            hello_bulk("CLUSTER SHARDS"),
+            hello_bulk("CLUSTER NODES"),
+            hello_bulk("CLUSTER RESET [HARD|SOFT]"),
+            hello_bulk("CLUSTER MEET <ip> <port> [bus-port]"),
+            hello_bulk("CLUSTER FORGET <node-id>"),
+            hello_bulk("CLUSTER REPLICATE <node-id>"),
+            hello_bulk("CLUSTER REPLICAS <node-id>"),
+            hello_bulk("CLUSTER FAILOVER [FORCE|TAKEOVER]"),
+            hello_bulk("CLUSTER ADDSLOTS <slot> [slot ...]"),
+            hello_bulk("CLUSTER DELSLOTS <slot> [slot ...]"),
+            hello_bulk("CLUSTER ADDSLOTSRANGE <start-slot> <end-slot> [start-slot end-slot ...]"),
+            hello_bulk("CLUSTER DELSLOTSRANGE <start-slot> <end-slot> [start-slot end-slot ...]"),
+            hello_bulk("CLUSTER FLUSHSLOTS"),
+            hello_bulk("CLUSTER SAVECONFIG"),
+            hello_bulk("CLUSTER SET-CONFIG-EPOCH <epoch>"),
+            hello_bulk("CLUSTER BUMPEPOCH"),
+            hello_bulk("CLUSTER LINKS"),
+            hello_bulk("CLUSTER MYSHARDID"),
+            hello_bulk("CLUSTER SLOTSTATE <slot>"),
         ])))
     } else {
         Err(CommandError::UnknownSubcommand {

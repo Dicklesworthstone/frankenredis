@@ -1016,15 +1016,34 @@ fn classify_cluster_subcommand(cmd: &[u8]) -> Result<ClusterSubcommand, CommandE
     if cmd.len() == 4 && eq_ascii_token(cmd, b"HELP") {
         return Ok(ClusterSubcommand::Help);
     }
-    if (cmd.len() == 4 && (eq_ascii_token(cmd, b"INFO") || eq_ascii_token(cmd, b"MYID")))
+    if (cmd.len() == 4 && (eq_ascii_token(cmd, b"INFO") || eq_ascii_token(cmd, b"MYID") || eq_ascii_token(cmd, b"MEET")))
         || (cmd.len() == 5
             && (eq_ascii_token(cmd, b"SLOTS")
                 || eq_ascii_token(cmd, b"NODES")
-                || eq_ascii_token(cmd, b"RESET")))
-        || (cmd.len() == 6 && eq_ascii_token(cmd, b"SHARDS"))
-        || (cmd.len() == 7 && eq_ascii_token(cmd, b"KEYSLOT"))
-        || (cmd.len() == 13 && eq_ascii_token(cmd, b"GETKEYSINSLOT"))
+                || eq_ascii_token(cmd, b"RESET")
+                || eq_ascii_token(cmd, b"LINKS")))
+        || (cmd.len() == 6
+            && (eq_ascii_token(cmd, b"SHARDS")
+                || eq_ascii_token(cmd, b"FORGET")
+                || eq_ascii_token(cmd, b"REPLICAS")))
+        || (cmd.len() == 7 && (eq_ascii_token(cmd, b"KEYSLOT") || eq_ascii_token(cmd, b"KEYSLOT")))
+        || (cmd.len() == 8
+            && (eq_ascii_token(cmd, b"ADDSLOTS")
+                || eq_ascii_token(cmd, b"DELSLOTS")
+                || eq_ascii_token(cmd, b"FAILOVER")
+                || eq_ascii_token(cmd, b"BUMPEPOCH")))
+        || (cmd.len() == 9
+            && (eq_ascii_token(cmd, b"REPLICATE")
+                || eq_ascii_token(cmd, b"SLOTSTATE")
+                || eq_ascii_token(cmd, b"MYSHARDID")))
+        || (cmd.len() == 10
+            && (eq_ascii_token(cmd, b"FLUSHSLOTS") || eq_ascii_token(cmd, b"SAVECONFIG")))
+        || (cmd.len() == 13
+            && (eq_ascii_token(cmd, b"ADDSLOTSRANGE")
+                || eq_ascii_token(cmd, b"DELSLOTSRANGE")
+                || eq_ascii_token(cmd, b"GETKEYSINSLOT")))
         || (cmd.len() == 15 && eq_ascii_token(cmd, b"COUNTKEYSINSLOT"))
+        || (cmd.len() == 16 && eq_ascii_token(cmd, b"SET-CONFIG-EPOCH"))
     {
         return Ok(ClusterSubcommand::Dispatch);
     }
@@ -4972,6 +4991,36 @@ impl Runtime {
                     .into_bytes(),
             )));
         }
+        if Self::config_pattern_matches(pattern, "cluster-allow-reads-when-down") {
+            entries.push(RespFrame::BulkString(Some(b"cluster-allow-reads-when-down".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                if self.server.cluster_allow_reads_when_down { b"yes".to_vec() } else { b"no".to_vec() },
+            )));
+        }
+        if Self::config_pattern_matches(pattern, "cluster-allow-pubsubshard-when-down") {
+            entries.push(RespFrame::BulkString(Some(b"cluster-allow-pubsubshard-when-down".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                if self.server.cluster_allow_pubsubshard_when_down { b"yes".to_vec() } else { b"no".to_vec() },
+            )));
+        }
+        if Self::config_pattern_matches(pattern, "cluster-link-sendbuf-limit") {
+            entries.push(RespFrame::BulkString(Some(b"cluster-link-sendbuf-limit".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.server.cluster_link_sendbuf_limit.to_string().into_bytes(),
+            )));
+        }
+        if Self::config_pattern_matches(pattern, "cluster-node-timeout") {
+            entries.push(RespFrame::BulkString(Some(b"cluster-node-timeout".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.server.cluster_node_timeout.to_string().into_bytes(),
+            )));
+        }
+        if Self::config_pattern_matches(pattern, "cluster-migration-barrier") {
+            entries.push(RespFrame::BulkString(Some(b"cluster-migration-barrier".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.server.cluster_migration_barrier.to_string().into_bytes(),
+            )));
+        }
         if Self::config_pattern_matches(pattern, "maxmemory-samples") {
             entries.push(RespFrame::BulkString(Some(b"maxmemory-samples".to_vec())));
             entries.push(RespFrame::BulkString(Some(
@@ -5287,6 +5336,11 @@ impl Runtime {
         let mut next_replica_priority: Option<usize> = None;
         let mut next_repl_diskless_sync: Option<bool> = None;
         let mut next_repl_diskless_sync_delay: Option<u64> = None;
+        let mut next_cluster_allow_reads_when_down: Option<bool> = None;
+        let mut next_cluster_allow_pubsubshard_when_down: Option<bool> = None;
+        let mut next_cluster_link_sendbuf_limit: Option<u64> = None;
+        let mut next_cluster_node_timeout: Option<u64> = None;
+        let mut next_cluster_migration_barrier: Option<u64> = None;
         let mut next_min_replicas_to_write: Option<usize> = None;
         let mut next_min_replicas_max_lag: Option<u64> = None;
         let mut next_query_buffer_limit: Option<usize> = None;
@@ -5591,8 +5645,77 @@ impl Runtime {
                     Err(err) => return err.to_resp(),
                 };
                 next_min_replicas_max_lag = Some(parsed);
-                static_override_updates
-                    .push(("min-replicas-max-lag".to_string(), parsed.to_string()));
+                static_override_updates.push(("min-replicas-max-lag".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("cluster-allow-reads-when-down") {
+                let parsed = match std::str::from_utf8(&pair[1]) {
+                    Ok(s) if s.eq_ignore_ascii_case("yes") => true,
+                    Ok(s) if s.eq_ignore_ascii_case("no") => false,
+                    _ => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'cluster-allow-reads-when-down'".to_string(),
+                        );
+                    }
+                };
+                next_cluster_allow_reads_when_down = Some(parsed);
+                static_override_updates.push(("cluster-allow-reads-when-down".to_string(), if parsed { "yes".to_string() } else { "no".to_string() }));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("cluster-allow-pubsubshard-when-down") {
+                let parsed = match std::str::from_utf8(&pair[1]) {
+                    Ok(s) if s.eq_ignore_ascii_case("yes") => true,
+                    Ok(s) if s.eq_ignore_ascii_case("no") => false,
+                    _ => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'cluster-allow-pubsubshard-when-down'".to_string(),
+                        );
+                    }
+                };
+                next_cluster_allow_pubsubshard_when_down = Some(parsed);
+                static_override_updates.push(("cluster-allow-pubsubshard-when-down".to_string(), if parsed { "yes".to_string() } else { "no".to_string() }));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("cluster-link-sendbuf-limit") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as u64,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'cluster-link-sendbuf-limit'".to_string(),
+                        );
+                    }
+                    Err(err) => return err.to_resp(),
+                };
+                next_cluster_link_sendbuf_limit = Some(parsed);
+                static_override_updates.push(("cluster-link-sendbuf-limit".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("cluster-node-timeout") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as u64,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'cluster-node-timeout'".to_string(),
+                        );
+                    }
+                    Err(err) => return err.to_resp(),
+                };
+                next_cluster_node_timeout = Some(parsed);
+                static_override_updates.push(("cluster-node-timeout".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("cluster-migration-barrier") {
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value as u64,
+                    Ok(_) => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'cluster-migration-barrier'".to_string(),
+                        );
+                    }
+                    Err(err) => return err.to_resp(),
+                };
+                next_cluster_migration_barrier = Some(parsed);
+                static_override_updates.push(("cluster-migration-barrier".to_string(), parsed.to_string()));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("client-query-buffer-limit") {
@@ -5924,6 +6047,21 @@ impl Runtime {
         }
         if let Some(delay) = next_repl_diskless_sync_delay {
             self.server.repl_diskless_sync_delay_sec = delay;
+        }
+        if let Some(reads_down) = next_cluster_allow_reads_when_down {
+            self.server.cluster_allow_reads_when_down = reads_down;
+        }
+        if let Some(pubsub_down) = next_cluster_allow_pubsubshard_when_down {
+            self.server.cluster_allow_pubsubshard_when_down = pubsub_down;
+        }
+        if let Some(link_limit) = next_cluster_link_sendbuf_limit {
+            self.server.cluster_link_sendbuf_limit = link_limit;
+        }
+        if let Some(node_timeout) = next_cluster_node_timeout {
+            self.server.cluster_node_timeout = node_timeout;
+        }
+        if let Some(migration_barrier) = next_cluster_migration_barrier {
+            self.server.cluster_migration_barrier = migration_barrier;
         }
         if let Some(to_write) = next_min_replicas_to_write {
             self.server.min_replicas_to_write = to_write;
