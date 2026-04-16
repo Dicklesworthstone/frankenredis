@@ -277,8 +277,14 @@ pub fn run_live_redis_diff(
         let frame = case_to_frame(&case);
         let runtime_actual = runtime.execute_frame(frame.clone(), case.now_ms);
         let new_events = &runtime.evidence().events()[evidence_before..];
-        send_frame(&mut stream, &frame)?;
-        let redis_actual = read_resp_frame_from_stream(&mut stream)?;
+        let redis_actual = if live_oracle_case_uses_dedicated_connection(&case) {
+            let mut dedicated_stream = connect_live_redis(oracle)?;
+            send_frame(&mut dedicated_stream, &frame)?;
+            read_resp_frame_from_stream(&mut dedicated_stream)?
+        } else {
+            send_frame(&mut stream, &frame)?;
+            read_resp_frame_from_stream(&mut stream)?
+        };
         let frame_ok = runtime_actual == redis_actual;
         let outcome = if frame_ok {
             LogOutcome::Pass
@@ -1004,6 +1010,12 @@ fn case_to_frame(case: &ConformanceCase) -> RespFrame {
     RespFrame::Array(Some(args))
 }
 
+fn live_oracle_case_uses_dedicated_connection(case: &ConformanceCase) -> bool {
+    case.argv.first().is_some_and(|command| {
+        command.eq_ignore_ascii_case("PSYNC") || command.eq_ignore_ascii_case("SYNC")
+    })
+}
+
 fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
     match expected {
         ExpectedFrame::Simple { value } => RespFrame::SimpleString(value.clone()),
@@ -1419,12 +1431,13 @@ mod tests {
     use fr_runtime::Runtime;
 
     use super::{
-        CaseOutcome, DIFFERENTIAL_REPORT_SCHEMA_VERSION, EvidenceEvent, ExpectedFrame,
-        ExpectedThreat, HarnessConfig, LiveOracleConfig, ReplayFixture,
-        StructuredLogEmissionContext, build_differential_report, expected_to_frame, run_fixture,
-        run_live_redis_diff, run_live_redis_protocol_diff, run_protocol_fixture,
-        run_replay_fixture, run_replication_handshake_fixture, run_smoke,
-        runtime_for_harness_config, validate_structured_log_emission, validate_threat_expectation,
+        CaseOutcome, ConformanceCase, DIFFERENTIAL_REPORT_SCHEMA_VERSION, EvidenceEvent,
+        ExpectedFrame, ExpectedThreat, HarnessConfig, LiveOracleConfig, ReplayFixture,
+        StructuredLogEmissionContext, build_differential_report, expected_to_frame,
+        live_oracle_case_uses_dedicated_connection, run_fixture, run_live_redis_diff,
+        run_live_redis_protocol_diff, run_protocol_fixture, run_replay_fixture,
+        run_replication_handshake_fixture, run_smoke, runtime_for_harness_config,
+        validate_structured_log_emission, validate_threat_expectation,
     };
     use crate::log_contract::{
         LogMode, LogOutcome, StructuredLogEvent, VerificationPath, live_log_output_path,
@@ -1450,6 +1463,41 @@ mod tests {
             cluster_announce_tls_port: Some(16380),
             max_new_tls_connections_per_cycle: 64,
         }
+    }
+
+    #[test]
+    fn live_oracle_dedicated_connection_classifier_matches_replication_handshakes() {
+        let psync = ConformanceCase {
+            name: "psync".to_string(),
+            now_ms: 0,
+            argv: vec!["PSYNC".to_string(), "?".to_string(), "-1".to_string()],
+            expect: ExpectedFrame::Simple {
+                value: "FULLRESYNC".to_string(),
+            },
+            expect_threat: None,
+        };
+        let sync = ConformanceCase {
+            name: "sync".to_string(),
+            now_ms: 0,
+            argv: vec!["SYNC".to_string()],
+            expect: ExpectedFrame::Simple {
+                value: "FULLRESYNC".to_string(),
+            },
+            expect_threat: None,
+        };
+        let replconf = ConformanceCase {
+            name: "replconf".to_string(),
+            now_ms: 0,
+            argv: vec!["REPLCONF".to_string(), "ACK".to_string(), "1".to_string()],
+            expect: ExpectedFrame::Simple {
+                value: "OK".to_string(),
+            },
+            expect_threat: None,
+        };
+
+        assert!(live_oracle_case_uses_dedicated_connection(&psync));
+        assert!(live_oracle_case_uses_dedicated_connection(&sync));
+        assert!(!live_oracle_case_uses_dedicated_connection(&replconf));
     }
 
     fn invalid_tls_without_listener_ports() -> TlsConfig {
