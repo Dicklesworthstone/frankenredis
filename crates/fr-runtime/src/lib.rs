@@ -6673,30 +6673,28 @@ impl Runtime {
                 if skipme && session.client_id == self.session.client_id {
                     continue;
                 }
-                if let Some(id) = filter_id {
-                    if session.client_id != id {
-                        continue;
-                    }
+                if let Some(id) = filter_id
+                    && session.client_id != id
+                {
+                    continue;
                 }
-                if let Some(kind) = &filter_type {
-                    if !self
+                if let Some(kind) = &filter_type
+                    && !self
                         .client_type_for_session(session)
                         .eq_ignore_ascii_case(kind)
-                    {
-                        continue;
-                    }
+                {
+                    continue;
                 }
-                if let Some(user) = &filter_user {
-                    if session.authenticated_user.as_ref() != Some(user) {
-                        continue;
-                    }
+                if let Some(user) = &filter_user
+                    && session.authenticated_user.as_ref() != Some(user)
+                {
+                    continue;
                 }
-                if let Some(addr) = &filter_addr {
-                    if session.peer_addr.map(|peer| peer.to_string()).as_deref()
+                if let Some(addr) = &filter_addr
+                    && session.peer_addr.map(|peer| peer.to_string()).as_deref()
                         != Some(addr.as_str())
-                    {
-                        continue;
-                    }
+                {
+                    continue;
                 }
                 targets.push(session.client_id);
             }
@@ -7836,7 +7834,7 @@ impl Runtime {
             info.push_str(&format!("latency_percentiles_usec_{cmd}:"));
             for (i, &p) in self.server.latency_percentiles.iter().enumerate() {
                 if i > 0 {
-                    info.push_str(",");
+                    info.push(',');
                 }
                 let val = histogram_percentile_us(hist, p);
                 info.push_str(&format!("p{p}={val:.2}"));
@@ -8407,7 +8405,7 @@ slave_priority:{}\r\n",
     }
 
     fn handle_replconf_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
-        if argv.len() % 2 == 0 {
+        if argv.len().is_multiple_of(2) {
             return CommandError::SyntaxError.to_resp();
         }
         let mut idx = 1;

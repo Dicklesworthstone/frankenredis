@@ -5617,7 +5617,7 @@ fn cluster_cmd(
 // ── REPLCONF ────────────────────────────────────────────────────────
 
 fn replconf_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
-    if argv.len() % 2 == 0 {
+    if argv.len().is_multiple_of(2) {
         return Err(CommandError::SyntaxError);
     }
     let mut idx = 1;
@@ -11924,9 +11924,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             hello_bulk("OOM - Abort via the allocation failure handler."),
             hello_bulk("HELP - Return this help."),
         ])))
-    } else if sub.eq_ignore_ascii_case("PANIC") {
-        std::process::abort();
-    } else if sub.eq_ignore_ascii_case("SEGFAULT") {
+    } else if sub.eq_ignore_ascii_case("PANIC") || sub.eq_ignore_ascii_case("SEGFAULT") {
         std::process::abort();
     } else if sub.eq_ignore_ascii_case("OOM") {
         std::alloc::handle_alloc_error(std::alloc::Layout::new::<u8>());

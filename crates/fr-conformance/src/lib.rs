@@ -453,6 +453,12 @@ pub struct MultiClientStep {
     pub expect_async: Option<ExpectedFrame>,
     #[serde(default)]
     pub async_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub send_only: bool,
+    #[serde(default)]
+    pub read_pending: bool,
+    #[serde(default)]
+    pub blocking_timeout_ms: Option<u64>,
 }
 
 pub fn run_protocol_fixture(
@@ -647,6 +653,8 @@ pub fn run_live_redis_multi_client_diff(
     let mut failed = Vec::new();
     let total = fixture.steps.len();
     let default_async_timeout_ms = 1000_u64;
+    let mut pending_runtime_responses: std::collections::HashMap<String, (u64, RespFrame)> =
+        std::collections::HashMap::new();
 
     for step in fixture.steps {
         let client_name = &step.client;
@@ -672,9 +680,76 @@ pub fn run_live_redis_multi_client_diff(
             send_frame(&mut oracle_conn.stream, &frame)?;
             let runtime_actual = runtime.execute_frame(frame.clone(), step.now_ms);
 
-            if let Some(expected) = &step.expect {
+            if step.send_only {
+                // Blocking command: send to Redis but don't wait for response.
+                // Store runtime result for later comparison when read_pending is called.
+                // Runtime returns immediately (no actual blocking in runtime-only mode).
+                pending_runtime_responses
+                    .insert(client_name.clone(), (step.now_ms, runtime_actual));
+            } else if let Some(expected) = &step.expect {
                 let redis_actual = read_resp_frame_from_stream(&mut oracle_conn.stream)
                     .map_err(|err| format!("{}: {err}", step.name))?;
+                let frame_ok = frame_matches_expected(&runtime_actual, expected)
+                    && frame_matches_expected(&redis_actual, expected);
+                let new_events = &runtime.evidence().events()[evidence_before..];
+                let outcome = if frame_ok {
+                    LogOutcome::Pass
+                } else {
+                    LogOutcome::Fail
+                };
+                let log_result = validate_structured_log_emission(
+                    StructuredLogEmissionContext {
+                        suite_id: &suite,
+                        fixture_name,
+                        case_name: &step.name,
+                        verification_path: VerificationPath::E2e,
+                        now_ms: step.now_ms,
+                        outcome,
+                        persist_path: live_log_path.as_deref(),
+                    },
+                    new_events,
+                );
+                let passed = frame_ok && log_result.is_ok();
+                if !passed {
+                    let reason_code = reason_code_from_evidence(new_events);
+                    let replay_cmd = replay_cmd_from_evidence(new_events);
+                    let artifact_refs = artifact_refs_from_evidence(new_events);
+                    failed.push(CaseOutcome {
+                        name: step.name.clone(),
+                        passed,
+                        expected: expected_to_frame(expected),
+                        actual: runtime_actual,
+                        detail: build_case_detail(frame_ok, None, log_result.err()),
+                        reason_code,
+                        replay_cmd,
+                        artifact_refs,
+                    });
+                }
+            }
+        } else if step.read_pending {
+            // Read pending response from a previous send_only blocking command.
+            let blocking_timeout = Duration::from_millis(step.blocking_timeout_ms.unwrap_or(5000));
+            oracle_conn
+                .stream
+                .set_read_timeout(Some(blocking_timeout))
+                .map_err(|err| format!("{}: failed to set blocking timeout: {err}", step.name))?;
+
+            let redis_actual = read_resp_frame_from_stream(&mut oracle_conn.stream)
+                .map_err(|err| format!("{}: blocking read failed: {err}", step.name))?;
+
+            // For runtime, retrieve the stored response from send_only step.
+            // Runtime doesn't actually block, so it returned immediately.
+            let runtime_actual = pending_runtime_responses
+                .remove(client_name)
+                .map(|(_, frame)| frame)
+                .unwrap_or(RespFrame::BulkString(None));
+
+            oracle_conn
+                .stream
+                .set_read_timeout(Some(Duration::from_millis(oracle.io_timeout_ms)))
+                .map_err(|err| format!("{}: failed to restore timeout: {err}", step.name))?;
+
+            if let Some(expected) = &step.expect {
                 let frame_ok = frame_matches_expected(&runtime_actual, expected)
                     && frame_matches_expected(&redis_actual, expected);
                 let new_events = &runtime.evidence().events()[evidence_before..];
@@ -6324,5 +6399,29 @@ mod tests {
         assert!(fixture.steps[0].expect.is_some());
         assert!(fixture.steps[2].expect_async.is_some());
         assert_eq!(fixture.steps[2].async_timeout_ms, Some(2000));
+    }
+
+    #[test]
+    fn blocking_multi_client_fixture_loads_with_send_only_and_read_pending() {
+        let config = HarnessConfig::default_paths();
+        let fixture =
+            load_multi_client_fixture(&config, "core_blocking_multi_client.json").expect("load");
+        assert_eq!(fixture.suite, "core_blocking_multi_client");
+        assert_eq!(fixture.clients, vec!["blocker", "pusher"]);
+        assert!(fixture.steps.len() >= 4);
+
+        // Step 1: blocker sends BLPOP with send_only=true
+        let blpop_step = &fixture.steps[1];
+        assert_eq!(blpop_step.name, "blocker_sends_blpop");
+        assert!(blpop_step.send_only);
+        assert!(!blpop_step.read_pending);
+
+        // Step 3: blocker reads pending response with read_pending=true
+        let read_step = &fixture.steps[3];
+        assert_eq!(read_step.name, "blocker_receives_blpop_result");
+        assert!(read_step.read_pending);
+        assert!(!read_step.send_only);
+        assert_eq!(read_step.blocking_timeout_ms, Some(5000));
+        assert!(read_step.expect.is_some());
     }
 }

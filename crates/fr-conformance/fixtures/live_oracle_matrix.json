@@ -252,6 +252,13 @@
       "fixture": "core_pubsub_multi_client.json",
       "scenario_class": "multi_client",
       "profiles": ["multi_client"]
+    },
+    {
+      "name": "core_blocking_multi_client",
+      "mode": "multi_client",
+      "fixture": "core_blocking_multi_client.json",
+      "scenario_class": "multi_client",
+      "profiles": ["multi_client"]
     }
   ]
 }

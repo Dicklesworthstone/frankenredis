@@ -85,6 +85,24 @@ Example multi-client fixture format:
 }
 ```
 
+Blocking command wake-up testing uses `send_only` and `read_pending` fields:
+```json
+{
+  "suite": "core_blocking_multi_client",
+  "clients": ["blocker", "pusher"],
+  "steps": [
+    { "name": "blocker_blpop", "client": "blocker", "argv": ["BLPOP", "key", "5"], "send_only": true },
+    { "name": "pusher_rpush", "client": "pusher", "argv": ["RPUSH", "key", "val"], "expect": {...} },
+    { "name": "blocker_receives", "client": "blocker", "read_pending": true, "blocking_timeout_ms": 5000, "expect": {...} }
+  ]
+}
+```
+
+Step fields:
+- `send_only: true` - send command but don't wait for response (for blocking commands)
+- `read_pending: true` - read pending response from previous `send_only` step
+- `blocking_timeout_ms` - timeout for `read_pending` response (default: 5000ms)
+
 Topology-heavy suites (replication chains, cluster) remain outside the parity matrix for now.
 Those surfaces include `core_replication`, `core_wait`, `core_migrate`, and the packet-006
 replication fixtures.

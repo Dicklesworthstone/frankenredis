@@ -1,0 +1,152 @@
+{
+  "suite": "core_blocking_multi_client",
+  "clients": ["blocker", "pusher"],
+  "steps": [
+    {
+      "name": "setup_flushdb",
+      "now_ms": 0,
+      "client": "pusher",
+      "argv": ["FLUSHDB"],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "blocker_sends_blpop",
+      "now_ms": 10,
+      "client": "blocker",
+      "argv": ["BLPOP", "wake_key", "5"],
+      "send_only": true
+    },
+    {
+      "name": "pusher_pushes_data",
+      "now_ms": 100,
+      "client": "pusher",
+      "argv": ["RPUSH", "wake_key", "wakeup_value"],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "blocker_receives_blpop_result",
+      "now_ms": 200,
+      "client": "blocker",
+      "read_pending": true,
+      "blocking_timeout_ms": 5000,
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "wake_key" },
+          { "kind": "bulk", "value": "wakeup_value" }
+        ]
+      }
+    },
+    {
+      "name": "blocker_sends_brpop",
+      "now_ms": 300,
+      "client": "blocker",
+      "argv": ["BRPOP", "brpop_key", "5"],
+      "send_only": true
+    },
+    {
+      "name": "pusher_pushes_brpop_data",
+      "now_ms": 400,
+      "client": "pusher",
+      "argv": ["RPUSH", "brpop_key", "first", "second", "third"],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
+    },
+    {
+      "name": "blocker_receives_brpop_result",
+      "now_ms": 500,
+      "client": "blocker",
+      "read_pending": true,
+      "blocking_timeout_ms": 5000,
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "brpop_key" },
+          { "kind": "bulk", "value": "third" }
+        ]
+      }
+    },
+    {
+      "name": "blocker_sends_bzpopmin",
+      "now_ms": 600,
+      "client": "blocker",
+      "argv": ["BZPOPMIN", "zset_key", "5"],
+      "send_only": true
+    },
+    {
+      "name": "pusher_adds_zset_members",
+      "now_ms": 700,
+      "client": "pusher",
+      "argv": ["ZADD", "zset_key", "10", "member1", "5", "member2", "15", "member3"],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
+    },
+    {
+      "name": "blocker_receives_bzpopmin_result",
+      "now_ms": 800,
+      "client": "blocker",
+      "read_pending": true,
+      "blocking_timeout_ms": 5000,
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "zset_key" },
+          { "kind": "bulk", "value": "member2" },
+          { "kind": "bulk", "value": "5" }
+        ]
+      }
+    },
+    {
+      "name": "blocker_sends_bzpopmax",
+      "now_ms": 900,
+      "client": "blocker",
+      "argv": ["BZPOPMAX", "zset_key", "5"],
+      "send_only": true
+    },
+    {
+      "name": "pusher_triggers_bzpopmax_wakeup",
+      "now_ms": 950,
+      "client": "pusher",
+      "argv": ["ZADD", "zset_key", "99", "highest"],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "blocker_receives_bzpopmax_result",
+      "now_ms": 1000,
+      "client": "blocker",
+      "read_pending": true,
+      "blocking_timeout_ms": 5000,
+      "expect": {
+        "kind": "array",
+        "value": [
+          { "kind": "bulk", "value": "zset_key" },
+          { "kind": "bulk", "value": "highest" },
+          { "kind": "bulk", "value": "99" }
+        ]
+      }
+    },
+    {
+      "name": "cleanup",
+      "now_ms": 1100,
+      "client": "pusher",
+      "argv": ["FLUSHDB"],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    }
+  ]
+}
