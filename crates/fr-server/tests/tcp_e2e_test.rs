@@ -1432,48 +1432,79 @@ fn pubsub_message_frame(channel: &str, data: &str) -> RespFrame {
     ]))
 }
 
-#[test]
-fn tcp_pubsub_basic_cross_client_delivery() {
+fn pubsub_unsubscribe_frame(channel: &str, count: i64) -> RespFrame {
+    RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
+        RespFrame::BulkString(Some(channel.as_bytes().to_vec())),
+        RespFrame::Integer(count),
+    ]))
+}
+
+fn exercise_basic_pubsub_cross_client_delivery(
+    spawn: impl FnOnce(u16) -> ManagedChild,
+) -> (RespFrame, RespFrame, RespFrame, RespFrame, RespFrame) {
     let port = reserve_port();
-    let _server = spawn_frankenredis(port, None);
+    let _server = spawn(port);
 
     let mut sub_client = BufferedTcpClient::connect(port);
     sub_client
         .stream
         .write_all(&encode_command(&[b"SUBSCRIBE", b"channel1"]))
         .unwrap();
-    let confirms = sub_client.read_responses(1);
-    assert_eq!(confirms[0], pubsub_subscribe_frame("channel1", 1));
+    let subscribe = sub_client.read_responses(1).pop().expect("subscribe frame");
 
     let mut pub_client = connect_client(port);
-    let pub_resp = send_command(&mut pub_client, &[b"PUBLISH", b"channel1", b"hello"]);
-    assert_eq!(pub_resp, RespFrame::Integer(1), "expected 1 subscriber");
-
-    let msgs = sub_client.read_responses(1);
-    assert_eq!(msgs[0], pubsub_message_frame("channel1", "hello"));
+    let publish = send_command(&mut pub_client, &[b"PUBLISH", b"channel1", b"hello"]);
+    let message = sub_client.read_responses(1).pop().expect("message frame");
 
     sub_client
         .stream
         .write_all(&encode_command(&[b"UNSUBSCRIBE", b"channel1"]))
         .unwrap();
-    let unsub = sub_client.read_responses(1);
-    assert_eq!(
-        unsub[0],
-        RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
-            RespFrame::BulkString(Some(b"channel1".to_vec())),
-            RespFrame::Integer(0),
-        ]))
-    );
+    let unsubscribe = sub_client
+        .read_responses(1)
+        .pop()
+        .expect("unsubscribe frame");
 
-    let pub_resp2 = send_command(&mut pub_client, &[b"PUBLISH", b"channel1", b"gone"]);
+    let publish_after_unsub = send_command(&mut pub_client, &[b"PUBLISH", b"channel1", b"gone"]);
+    send_shutdown_nosave(port);
+    (
+        subscribe,
+        publish,
+        message,
+        unsubscribe,
+        publish_after_unsub,
+    )
+}
+
+#[test]
+fn tcp_pubsub_basic_cross_client_delivery() {
+    let (subscribe, publish, message, unsubscribe, publish_after_unsub) =
+        exercise_basic_pubsub_cross_client_delivery(|port| spawn_frankenredis(port, None));
+    assert_eq!(subscribe, pubsub_subscribe_frame("channel1", 1));
+    assert_eq!(publish, RespFrame::Integer(1), "expected 1 subscriber");
+    assert_eq!(message, pubsub_message_frame("channel1", "hello"));
+    assert_eq!(unsubscribe, pubsub_unsubscribe_frame("channel1", 0));
     assert_eq!(
-        pub_resp2,
+        publish_after_unsub,
         RespFrame::Integer(0),
         "expected 0 subscribers after unsubscribe"
     );
+}
 
-    send_shutdown_nosave(port);
+#[test]
+fn tcp_pubsub_basic_cross_client_delivery_matches_legacy_redis_reference() {
+    let expected = (
+        pubsub_subscribe_frame("channel1", 1),
+        RespFrame::Integer(1),
+        pubsub_message_frame("channel1", "hello"),
+        pubsub_unsubscribe_frame("channel1", 0),
+        RespFrame::Integer(0),
+    );
+    let franken = exercise_basic_pubsub_cross_client_delivery(|port| spawn_frankenredis(port, None));
+    let legacy = exercise_basic_pubsub_cross_client_delivery(spawn_legacy_redis);
+    assert_eq!(legacy, expected);
+    assert_eq!(franken, legacy);
 }
 
 #[test]
