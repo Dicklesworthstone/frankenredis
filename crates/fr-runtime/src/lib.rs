@@ -4502,7 +4502,7 @@ impl Runtime {
         } else if sub.eq_ignore_ascii_case("GENPASS") {
             self.handle_acl_genpass(argv)
         } else if sub.eq_ignore_ascii_case("LOG") {
-            self.handle_acl_log(argv)
+            self.handle_acl_log(argv, now_ms)
         } else if sub.eq_ignore_ascii_case("SAVE") {
             self.handle_acl_save(argv)
         } else if sub.eq_ignore_ascii_case("LOAD") {
@@ -4784,7 +4784,7 @@ impl Runtime {
         RespFrame::BulkString(Some(truncated.as_bytes().to_vec()))
     }
 
-    fn handle_acl_log(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+    fn handle_acl_log(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         if argv.len() == 2 {
             let entries: Vec<RespFrame> = self
                 .server
@@ -4801,7 +4801,11 @@ impl Runtime {
                         RespFrame::BulkString(Some(b"username".to_vec())),
                         RespFrame::BulkString(Some(e.username.clone())),
                         RespFrame::BulkString(Some(b"age-seconds".to_vec())),
-                        RespFrame::Integer(0), // placeholder
+                        RespFrame::BulkString(Some(
+                            (now_ms.saturating_sub(e.timestamp_ms) / 1000)
+                                .to_string()
+                                .into_bytes(),
+                        )),
                     ]))
                 })
                 .collect();
@@ -4821,6 +4825,7 @@ impl Runtime {
                     .iter()
                     .take(count)
                     .map(|e| {
+                        let age_sec = now_ms.saturating_sub(e.timestamp_ms) / 1000;
                         RespFrame::Array(Some(vec![
                             RespFrame::BulkString(Some(b"count".to_vec())),
                             RespFrame::Integer(e.count as i64),
@@ -4831,7 +4836,7 @@ impl Runtime {
                             RespFrame::BulkString(Some(b"username".to_vec())),
                             RespFrame::BulkString(Some(e.username.clone())),
                             RespFrame::BulkString(Some(b"age-seconds".to_vec())),
-                            RespFrame::Integer(0), // placeholder
+                            RespFrame::BulkString(Some(age_sec.to_string().into_bytes())),
                         ]))
                     })
                     .collect();
@@ -15146,6 +15151,50 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"ACL", b"LOG", b"foo"]), 1),
             RespFrame::Error("ERR value is not an integer or out of range".to_string())
+        );
+    }
+
+    #[test]
+    fn acl_log_reports_age_seconds_from_command_time() {
+        let mut rt = Runtime::default_strict();
+        rt.server
+            .record_acl_log_event("auth", "AUTH".to_string(), b"default".to_vec(), 1_000);
+
+        let reply = rt.execute_frame(command(&[b"ACL", b"LOG"]), 5_500);
+        let entries = match reply {
+            RespFrame::Array(Some(entries)) => entries,
+            other => {
+                assert!(
+                    matches!(other, RespFrame::Array(_)),
+                    "expected ACL LOG array reply, got {other:?}"
+                );
+                return;
+            }
+        };
+        let entry = match &entries[0] {
+            RespFrame::Array(Some(entry)) => entry,
+            other => {
+                assert!(
+                    matches!(other, RespFrame::Array(_)),
+                    "expected ACL LOG entry array, got {other:?}"
+                );
+                return;
+            }
+        };
+        assert_eq!(
+            entry,
+            &vec![
+                RespFrame::BulkString(Some(b"count".to_vec())),
+                RespFrame::Integer(1),
+                RespFrame::BulkString(Some(b"reason".to_vec())),
+                RespFrame::BulkString(Some(b"auth".to_vec())),
+                RespFrame::BulkString(Some(b"context".to_vec())),
+                RespFrame::BulkString(Some(b"AUTH".to_vec())),
+                RespFrame::BulkString(Some(b"username".to_vec())),
+                RespFrame::BulkString(Some(b"default".to_vec())),
+                RespFrame::BulkString(Some(b"age-seconds".to_vec())),
+                RespFrame::BulkString(Some(b"4".to_vec())),
+            ]
         );
     }
 
