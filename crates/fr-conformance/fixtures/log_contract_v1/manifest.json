@@ -8,10 +8,28 @@
     "FR-P2C-006.golden.jsonl",
     "FR-P2C-007.golden.jsonl",
     "FR-P2C-008.golden.jsonl",
-    "FR-P2C-009.golden.jsonl"
+    "FR-P2C-009.golden.jsonl",
+    "live_redis_diff__core_errors__core_errors.golden.jsonl",
+    "live_redis_protocol_diff__protocol_negative__protocol_negative.golden.jsonl"
   ],
   "generated_at_utc": "2026-02-14T00:00:00Z",
   "generator": "cargo run -p fr-conformance --bin emit_log_contract_goldens",
+  "live_fixtures": [
+    {
+      "command_kind": "command",
+      "file": "live_redis_diff__core_errors__core_errors.golden.jsonl",
+      "fixture_name": "core_errors.json",
+      "packet_id": "FR-P2C-003",
+      "suite_id": "live_redis_diff::core_errors"
+    },
+    {
+      "command_kind": "protocol",
+      "file": "live_redis_protocol_diff__protocol_negative__protocol_negative.golden.jsonl",
+      "fixture_name": "protocol_negative.json",
+      "packet_id": "FR-P2C-002",
+      "suite_id": "live_redis_protocol_diff::protocol_negative"
+    }
+  ],
   "packets": [
     "FR-P2C-001",
     "FR-P2C-002",
