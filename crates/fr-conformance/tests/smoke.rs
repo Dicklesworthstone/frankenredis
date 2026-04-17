@@ -7,11 +7,12 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fr_conformance::{
-    CaseOutcome, HarnessConfig, LiveInfoContractCase, LiveInfoFieldComparison,
-    LiveInfoFieldContract, LiveOptionalReplyCase, LiveOracleConfig, run_fixture,
-    run_live_redis_diff, run_live_redis_diff_for_cases, run_live_redis_info_contract_diff,
-    run_live_redis_multi_client_diff, run_live_redis_optional_reply_sequence_diff,
-    run_protocol_fixture, run_replay_fixture, run_replication_handshake_fixture, run_smoke,
+    CaseOutcome, ConformanceCase, ConformanceFixture, HarnessConfig, LiveInfoContractCase,
+    LiveInfoFieldComparison, LiveInfoFieldContract, LiveOptionalReplyCase, LiveOracleConfig,
+    run_fixture, run_live_redis_diff, run_live_redis_diff_for_cases,
+    run_live_redis_info_contract_diff, run_live_redis_multi_client_diff,
+    run_live_redis_optional_reply_sequence_diff, run_protocol_fixture, run_replay_fixture,
+    run_replication_handshake_fixture, run_smoke,
 };
 use fr_protocol::{RespFrame, parse_frame};
 use fr_runtime::Runtime;
@@ -1516,6 +1517,17 @@ const CORE_CONNECTION_LIVE_STABLE_CASES: &[&str] = &[
     "auth_no_password_configured",
 ];
 
+const CORE_CONNECTION_HELLO_LIVE_CASES: &[&str] = &[
+    "hello_resp2",
+    "hello_resp3",
+    "hello_unsupported_version",
+    "hello_version_1_unsupported",
+    "hello_reset_to_2",
+    "hello_no_version_returns_info",
+    "hello_wrong_type_version",
+    "hello_version_0_unsupported",
+];
+
 const CORE_DEBUG_LIVE_STABLE_CASES: &[&str] = &[
     // Arity error (top-level only - subcommand arity errors differ between Redis/FR)
     "debug_wrong_arity",
@@ -1715,12 +1727,160 @@ fn read_frame_from_stream(stream: &mut TcpStream) -> RespFrame {
         let n = stream.read(&mut chunk).expect("read RESP reply");
         assert!(n > 0, "vendored redis closed connection before replying");
         buf.extend_from_slice(&chunk[..n]);
-        match parse_frame(&buf) {
-            Ok(parsed) => return parsed.frame,
-            Err(fr_protocol::RespParseError::Incomplete) => {}
+        match parse_live_frame(&buf) {
+            Ok(Some(frame)) => return frame,
+            Ok(None) => {}
             Err(err) => panic!("vendored redis emitted invalid RESP: {err}"),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveResp3ParseError {
+    Incomplete,
+}
+
+fn parse_live_frame(input: &[u8]) -> Result<Option<RespFrame>, String> {
+    match parse_frame(input) {
+        Ok(parsed) => Ok(Some(parsed.frame)),
+        Err(fr_protocol::RespParseError::Incomplete) => Ok(None),
+        Err(fr_protocol::RespParseError::UnsupportedResp3Type(_)) => {
+            match parse_live_resp3_frame(input, 0) {
+                Ok((frame, _consumed)) => Ok(Some(frame)),
+                Err(LiveResp3ParseError::Incomplete) => Ok(None),
+            }
+        }
+        Err(err) => Err(err.to_string()),
+    }
+}
+
+fn parse_live_resp3_frame(
+    input: &[u8],
+    start: usize,
+) -> Result<(RespFrame, usize), LiveResp3ParseError> {
+    let prefix = *input.get(start).ok_or(LiveResp3ParseError::Incomplete)?;
+    let next = start + 1;
+    match prefix {
+        b'+' => {
+            let (line, consumed) = read_live_resp3_line(input, next)?;
+            Ok((RespFrame::BulkString(Some(line.to_vec())), consumed))
+        }
+        b'-' => {
+            let (line, consumed) = read_live_resp3_line(input, next)?;
+            Ok((
+                RespFrame::Error(String::from_utf8_lossy(line).to_string()),
+                consumed,
+            ))
+        }
+        b':' => {
+            let (line, consumed) = read_live_resp3_line(input, next)?;
+            let value = String::from_utf8_lossy(line)
+                .parse::<i64>()
+                .expect("vendored redis integer reply");
+            Ok((RespFrame::Integer(value), consumed))
+        }
+        b'$' => parse_live_resp3_bulk(input, next),
+        b'*' => parse_live_resp3_array(input, next),
+        b'%' => parse_live_resp3_map(input, next),
+        b'_' => {
+            let consumed = expect_live_resp3_crlf(input, next)?;
+            Ok((RespFrame::BulkString(None), consumed))
+        }
+        other => panic!(
+            "vendored redis emitted unsupported RESP3 frame prefix: {}",
+            char::from(other)
+        ),
+    }
+}
+
+fn parse_live_resp3_bulk(
+    input: &[u8],
+    start: usize,
+) -> Result<(RespFrame, usize), LiveResp3ParseError> {
+    let (line, consumed) = read_live_resp3_line(input, start)?;
+    let len = String::from_utf8_lossy(line)
+        .parse::<i64>()
+        .expect("vendored redis bulk length");
+    if len == -1 {
+        return Ok((RespFrame::BulkString(None), consumed));
+    }
+    let len = usize::try_from(len).expect("vendored redis bulk length fits usize");
+    let end = consumed + len + 2;
+    if input.len() < end {
+        return Err(LiveResp3ParseError::Incomplete);
+    }
+    assert_eq!(&input[consumed + len..end], b"\r\n");
+    Ok((
+        RespFrame::BulkString(Some(input[consumed..consumed + len].to_vec())),
+        end,
+    ))
+}
+
+fn parse_live_resp3_array(
+    input: &[u8],
+    start: usize,
+) -> Result<(RespFrame, usize), LiveResp3ParseError> {
+    let (line, mut cursor) = read_live_resp3_line(input, start)?;
+    let len = String::from_utf8_lossy(line)
+        .parse::<i64>()
+        .expect("vendored redis array length");
+    if len == -1 {
+        return Ok((RespFrame::Array(None), cursor));
+    }
+    let len = usize::try_from(len).expect("vendored redis array length fits usize");
+    let mut items = Vec::with_capacity(len);
+    for _ in 0..len {
+        let (item, consumed) = parse_live_resp3_frame(input, cursor)?;
+        items.push(item);
+        cursor = consumed;
+    }
+    Ok((RespFrame::Array(Some(items)), cursor))
+}
+
+fn parse_live_resp3_map(
+    input: &[u8],
+    start: usize,
+) -> Result<(RespFrame, usize), LiveResp3ParseError> {
+    let (line, mut cursor) = read_live_resp3_line(input, start)?;
+    let len = String::from_utf8_lossy(line)
+        .parse::<usize>()
+        .expect("vendored redis map length");
+    let mut items = Vec::with_capacity(len * 2);
+    for _ in 0..len {
+        let (key, consumed_after_key) = parse_live_resp3_frame(input, cursor)?;
+        cursor = consumed_after_key;
+        let (value, consumed_after_value) = parse_live_resp3_frame(input, cursor)?;
+        cursor = consumed_after_value;
+        items.push(key);
+        items.push(value);
+    }
+    Ok((RespFrame::Array(Some(items)), cursor))
+}
+
+fn read_live_resp3_line(
+    input: &[u8],
+    start: usize,
+) -> Result<(&[u8], usize), LiveResp3ParseError> {
+    let tail = input
+        .get(start..)
+        .ok_or(LiveResp3ParseError::Incomplete)?;
+    let line_end = tail
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .ok_or(LiveResp3ParseError::Incomplete)?;
+    let end = start + line_end;
+    Ok((&input[start..end], end + 2))
+}
+
+fn expect_live_resp3_crlf(
+    input: &[u8],
+    start: usize,
+) -> Result<usize, LiveResp3ParseError> {
+    let bytes = input
+        .get(start..start + 2)
+        .ok_or(LiveResp3ParseError::Incomplete)?;
+    assert_eq!(bytes, b"\r\n");
+    Ok(start + 2)
 }
 
 fn acl_log_field<'a>(entry: &'a [RespFrame], key: &str) -> &'a RespFrame {
@@ -1748,6 +1908,128 @@ fn int_value(frame: &RespFrame) -> i64 {
     match frame {
         RespFrame::Integer(value) => *value,
         other => panic!("expected integer, got {other:?}"),
+    }
+}
+
+fn error_text(frame: &RespFrame) -> &str {
+    match frame {
+        RespFrame::Error(text) => text,
+        other => panic!("expected error frame, got {other:?}"),
+    }
+}
+
+fn load_named_conformance_cases(
+    cfg: &HarnessConfig,
+    fixture_name: &str,
+    case_names: &[&str],
+) -> Vec<ConformanceCase> {
+    let path = cfg.fixture_root.join(fixture_name);
+    let raw = fs::read_to_string(&path).expect("read conformance fixture");
+    let fixture: ConformanceFixture = serde_json::from_str(&raw).expect("parse conformance fixture");
+    case_names
+        .iter()
+        .map(|case_name| {
+            fixture
+                .cases
+                .iter()
+                .find(|case| case.name == *case_name)
+                .unwrap_or_else(|| panic!("missing conformance case '{case_name}'"))
+                .clone()
+        })
+        .collect()
+}
+
+fn hello_field<'a>(reply: &'a RespFrame, key: &str) -> &'a RespFrame {
+    let fields = match reply {
+        RespFrame::Array(Some(fields)) => fields,
+        other => panic!("expected HELLO array reply, got {other:?}"),
+    };
+    fields
+        .chunks_exact(2)
+        .find_map(|pair| match pair {
+            [RespFrame::BulkString(Some(field_name)), value]
+                if field_name.eq_ignore_ascii_case(key.as_bytes()) =>
+            {
+                Some(value)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("HELLO reply missing field '{key}'"))
+}
+
+fn empty_array(frame: &RespFrame) -> bool {
+    matches!(frame, RespFrame::Array(Some(items)) if items.is_empty())
+}
+
+fn is_semver_like(value: &str) -> bool {
+    let parts = value.split('.').collect::<Vec<_>>();
+    parts.len() == 3
+        && parts
+            .iter()
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+}
+
+fn assert_hello_success_contract(reply: &RespFrame, expected_proto: i64) {
+    assert_eq!(bulk_text(hello_field(reply, "server")), "redis");
+    assert!(
+        is_semver_like(&bulk_text(hello_field(reply, "version"))),
+        "HELLO version should look like semver: {:?}",
+        hello_field(reply, "version")
+    );
+    assert_eq!(int_value(hello_field(reply, "proto")), expected_proto);
+    assert!(int_value(hello_field(reply, "id")) >= 1);
+    assert_eq!(bulk_text(hello_field(reply, "mode")), "standalone");
+    assert_eq!(bulk_text(hello_field(reply, "role")), "master");
+    assert!(empty_array(hello_field(reply, "modules")));
+}
+
+fn assert_hello_success_pair(runtime_reply: &RespFrame, live_reply: &RespFrame, expected_proto: i64) {
+    assert_hello_success_contract(runtime_reply, expected_proto);
+    assert_hello_success_contract(live_reply, expected_proto);
+    for key in ["server", "mode", "role"] {
+        assert_eq!(
+            bulk_text(hello_field(runtime_reply, key)),
+            bulk_text(hello_field(live_reply, key)),
+            "HELLO stable field mismatch for {key}"
+        );
+    }
+    assert_eq!(
+        int_value(hello_field(runtime_reply, "proto")),
+        int_value(hello_field(live_reply, "proto"))
+    );
+    assert!(empty_array(hello_field(runtime_reply, "modules")));
+    assert!(empty_array(hello_field(live_reply, "modules")));
+}
+
+fn assert_hello_error_prefix_pair(runtime_reply: &RespFrame, live_reply: &RespFrame, prefix: &str) {
+    assert!(
+        error_text(runtime_reply).starts_with(prefix),
+        "runtime HELLO error should start with '{prefix}', got {:?}",
+        runtime_reply
+    );
+    assert!(
+        error_text(live_reply).starts_with(prefix),
+        "live HELLO error should start with '{prefix}', got {:?}",
+        live_reply
+    );
+}
+
+fn assert_hello_error_contains_pair(
+    runtime_reply: &RespFrame,
+    live_reply: &RespFrame,
+    needles: &[&str],
+) {
+    let runtime_error = error_text(runtime_reply);
+    let live_error = error_text(live_reply);
+    for needle in needles {
+        assert!(
+            runtime_error.contains(needle),
+            "runtime HELLO error should contain '{needle}', got {runtime_error:?}"
+        );
+        assert!(
+            live_error.contains(needle),
+            "live HELLO error should contain '{needle}', got {live_error:?}"
+        );
     }
 }
 
@@ -2956,6 +3238,58 @@ fn core_connection_live_redis_matches_runtime() {
         report.failed
     );
     assert!(report.failed.is_empty());
+}
+
+#[test]
+fn core_connection_hello_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let hello_cases =
+        load_named_conformance_cases(&cfg, "core_connection.json", CORE_CONNECTION_HELLO_LIVE_CASES);
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let mut live = TcpStream::connect(("127.0.0.1", oracle_server.port))
+        .expect("connect to vendored redis for HELLO coverage");
+    live.set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("set live read timeout");
+    live.set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set live write timeout");
+
+    let mut runtime = Runtime::default_strict();
+    for case in hello_cases {
+        let frame = RespFrame::Array(Some(
+            case.argv
+                .iter()
+                .map(|arg| RespFrame::BulkString(Some(arg.as_bytes().to_vec())))
+                .collect(),
+        ));
+        let runtime_reply = runtime.execute_frame(frame.clone(), case.now_ms);
+        let live_reply = send_frame_and_read(&mut live, &frame);
+
+        match case.name.as_str() {
+            "hello_resp2" | "hello_reset_to_2" | "hello_no_version_returns_info" => {
+                assert_hello_success_pair(&runtime_reply, &live_reply, 2);
+            }
+            "hello_resp3" => {
+                assert_hello_success_pair(&runtime_reply, &live_reply, 3);
+            }
+            "hello_unsupported_version"
+            | "hello_version_1_unsupported"
+            | "hello_version_0_unsupported" => {
+                assert_hello_error_prefix_pair(
+                    &runtime_reply,
+                    &live_reply,
+                    "NOPROTO unsupported protocol version",
+                );
+            }
+            "hello_wrong_type_version" => {
+                assert_hello_error_contains_pair(
+                    &runtime_reply,
+                    &live_reply,
+                    &["integer", "out of range"],
+                );
+            }
+            other => panic!("unexpected HELLO live case {other}"),
+        }
+    }
 }
 
 #[test]
