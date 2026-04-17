@@ -363,6 +363,87 @@ const CORE_LIST_LIVE_STABLE_CASES: &[&str] = &[
     "lpush_wrongtype_error",
 ];
 
+const CORE_HASH_LIVE_STABLE_CASES: &[&str] = &[
+    // Basic HSET/HGET
+    "hset_single_field",
+    "hget_existing_field",
+    "hget_missing_field",
+    "hget_missing_key",
+    "hset_multiple_fields",
+    "hset_update_existing_field",
+    "hget_updated_field",
+    // HDEL
+    "hdel_existing_field",
+    "hdel_missing_field",
+    "hdel_multiple_setup",
+    "hdel_multiple_fields",
+    "hdel_missing_key",
+    // HEXISTS
+    "hexists_present",
+    "hexists_absent",
+    "hexists_missing_key",
+    // HLEN
+    "hlen_hash",
+    "hlen_missing_key",
+    "hlen_after_hdel_multiple",
+    // HMSET/HMGET
+    "hmset_ok",
+    "hmget_fields",
+    "hmget_missing_key",
+    // HINCRBY/HINCRBYFLOAT
+    "hincrby_new_field",
+    "hincrby_existing_field",
+    "hincrby_negative",
+    "hincrby_missing_key",
+    "hincrby_on_non_integer",
+    "hincrbyfloat_new_field",
+    "hincrbyfloat_existing",
+    "hincrbyfloat_negative",
+    "hincrbyfloat_missing_key",
+    // HSETNX
+    "hsetnx_new_field",
+    "hsetnx_existing_field",
+    // HSTRLEN
+    "hstrlen_existing",
+    "hstrlen_missing",
+    "hstrlen_missing_key",
+    // HGETALL/HKEYS/HVALS
+    "hgetall_setup",
+    "hgetall_result",
+    "hgetall_missing_key",
+    "hkeys_setup",
+    "hkeys_result",
+    "hkeys_missing_key",
+    "hvals_result",
+    "hvals_missing_key",
+    // HRANDFIELD
+    "hrandfield_setup_single",
+    "hrandfield_single_element",
+    "hrandfield_missing_key",
+    "hrandfield_count_zero",
+    "hrandfield_missing_key_with_count",
+    // Error cases
+    "hset_wrongtype_on_string",
+    "hset_wrongtype_error",
+    "hset_wrong_arity",
+    "hget_wrong_arity",
+    "hdel_wrong_arity",
+    "hmget_wrong_arity",
+    "hexists_wrong_arity",
+    "hlen_wrong_arity",
+    "hmset_wrong_arity_odd",
+    "hset_wrong_arity_odd",
+    // Overflow/special cases
+    "hincrby_overflow_setup",
+    "hincrby_near_max",
+    "hincrby_overflow_error",
+    "hincrbyfloat_nan_error",
+    // Empty hash behavior
+    "hgetall_empty_after_delete",
+    "hgetall_empty_delete_field",
+    "hgetall_empty_hash_returns_empty",
+];
+
 struct VendoredRedisOracle {
     child: Child,
     port: u16,
@@ -1517,6 +1598,11 @@ fn core_server_info_live_redis_matches_runtime() {
                     ),
                     live_info_field(
                         "Replication",
+                        "master_failover_state",
+                        LiveInfoFieldComparison::Exact,
+                    ),
+                    live_info_field(
+                        "Replication",
                         "master_replid",
                         LiveInfoFieldComparison::Shape,
                     ),
@@ -1525,11 +1611,7 @@ fn core_server_info_live_redis_matches_runtime() {
                         "master_repl_offset",
                         LiveInfoFieldComparison::Shape,
                     ),
-                    live_info_field(
-                        "Replication",
-                        "repl_backlog_active",
-                        LiveInfoFieldComparison::Exact,
-                    ),
+                    live_info_field("Replication", "repl_backlog_size", LiveInfoFieldComparison::Shape),
                 ],
             ),
         ],
@@ -1752,6 +1834,30 @@ fn core_list_live_redis_matches_runtime() {
         &oracle,
     )
     .expect("list live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
+#[test]
+fn core_hash_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_hash.json",
+        CORE_HASH_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("hash live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",
