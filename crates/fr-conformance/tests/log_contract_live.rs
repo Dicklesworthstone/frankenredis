@@ -5,31 +5,17 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fr_conformance::log_contract::{
-    LogMode, LogOutcome, STRUCTURED_LOG_SCHEMA_VERSION, StructuredLogEvent, VerificationPath,
-    append_structured_log_jsonl, live_log_output_path,
+    LIVE_LOG_GOLDEN_FIXTURES, LogOutcome, StructuredLogEvent, append_structured_log_jsonl,
+    golden_live_log_events, live_log_golden_file_name, live_log_output_path,
 };
 
-fn sample_event(case_id: &str, outcome: LogOutcome) -> StructuredLogEvent {
-    StructuredLogEvent {
-        schema_version: STRUCTURED_LOG_SCHEMA_VERSION.to_string(),
-        ts_utc: "2026-02-15T00:00:00Z".to_string(),
-        suite_id: "live_redis_diff::core_errors".to_string(),
-        test_or_scenario_id: case_id.to_string(),
-        packet_id: "FR-P2C-003".to_string(),
-        mode: LogMode::Strict,
-        verification_path: VerificationPath::E2e,
-        seed: 7,
-        input_digest: format!("input_{case_id}"),
-        output_digest: format!("output_{case_id}"),
-        duration_ms: 1,
-        outcome,
-        reason_code: format!("reason_{case_id}"),
-        replay_cmd: "rch exec -- cargo test -p fr-conformance -- --nocapture FR_P2C_003"
-            .to_string(),
-        artifact_refs: vec!["TEST_LOG_SCHEMA_V1.md".to_string()],
-        fixture_id: Some("core_errors.json".to_string()),
-        env_ref: Some("crates/fr-conformance/fixtures/log_contract_v1/env.json".to_string()),
+fn render_jsonl(events: &[StructuredLogEvent]) -> String {
+    let mut rendered = String::new();
+    for event in events {
+        rendered.push_str(&event.to_json_line().expect("serialize live golden"));
+        rendered.push('\n');
     }
+    rendered
 }
 
 #[test]
@@ -44,6 +30,36 @@ fn live_path_builder_is_stable() {
 }
 
 #[test]
+fn live_goldens_exist_and_match_expected_payloads() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let log_root = repo_root.join("crates/fr-conformance/fixtures/log_contract_v1");
+
+    for fixture in LIVE_LOG_GOLDEN_FIXTURES {
+        let path = log_root.join(live_log_golden_file_name(fixture));
+        assert!(
+            path.exists(),
+            "missing live golden file for {}: {}",
+            fixture.fixture_name,
+            path.display()
+        );
+
+        let expected = render_jsonl(&golden_live_log_events(fixture).expect("live golden events"));
+        let raw = fs::read_to_string(&path).expect("read live golden");
+        assert_eq!(
+            raw,
+            expected,
+            "checked-in live golden drifted for {}",
+            path.display()
+        );
+
+        for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+            let event: StructuredLogEvent = serde_json::from_str(line).expect("parse line");
+            event.validate().expect("event validates");
+        }
+    }
+}
+
+#[test]
 fn append_jsonl_creates_and_appends_lines() {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -51,11 +67,10 @@ fn append_jsonl_creates_and_appends_lines() {
         .as_nanos();
     let root = std::env::temp_dir().join(format!("fr_conformance_log_contract_live_{unique}"));
     let output = root.join("suite/core_errors.jsonl");
+    let events = golden_live_log_events(LIVE_LOG_GOLDEN_FIXTURES[0]).expect("live golden events");
 
-    append_structured_log_jsonl(&output, &[sample_event("case_1", LogOutcome::Pass)])
-        .expect("append first");
-    append_structured_log_jsonl(&output, &[sample_event("case_2", LogOutcome::Fail)])
-        .expect("append second");
+    append_structured_log_jsonl(&output, &[events[0].clone()]).expect("append first");
+    append_structured_log_jsonl(&output, &[events[1].clone()]).expect("append second");
 
     let raw = fs::read_to_string(&output).expect("read output");
     let lines = raw
@@ -66,8 +81,10 @@ fn append_jsonl_creates_and_appends_lines() {
 
     let first: StructuredLogEvent = serde_json::from_str(lines[0]).expect("parse first");
     let second: StructuredLogEvent = serde_json::from_str(lines[1]).expect("parse second");
-    assert_eq!(first.test_or_scenario_id, "case_1");
-    assert_eq!(second.test_or_scenario_id, "case_2");
+    assert!(first.test_or_scenario_id.ends_with("::pass"));
+    assert_eq!(first.outcome, LogOutcome::Pass);
+    assert!(second.test_or_scenario_id.ends_with("::fail"));
+    assert_eq!(second.outcome, LogOutcome::Fail);
 
     let _ = fs::remove_dir_all(PathBuf::from(&root));
 }

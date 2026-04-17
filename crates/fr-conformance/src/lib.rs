@@ -6,7 +6,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fr_config::{DecisionAction, DriftSeverity, ThreatClass};
 use fr_persist::{AofRecord, decode_aof_stream, encode_aof_stream};
@@ -82,6 +82,34 @@ fn runtime_for_harness_config(config: &HarnessConfig) -> Runtime {
     } else {
         Runtime::default_hardened()
     }
+}
+
+fn configure_runtime_for_fixture(runtime: &mut Runtime, fixture_name: &str) {
+    if matches!(
+        fixture_name,
+        "core_wait.json" | "fr_p2c_006_replication_journey.json"
+    ) {
+        runtime.set_aof_path(PathBuf::from("/dev/null"));
+    }
+    if fixture_name == "core_acl.json" {
+        runtime.set_acl_file_path(std::env::temp_dir().join("fr_acl_fixture_dummy.conf"));
+    }
+    if matches!(fixture_name, "core_config.json" | "core_server.json") {
+        runtime.set_config_file_path(Some(runtime_fixture_config_path(fixture_name)));
+    }
+}
+
+fn runtime_fixture_config_path(fixture_name: &str) -> PathBuf {
+    let timestamp_nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_nanos();
+    let fixture_stem = fixture_name.strip_suffix(".json").unwrap_or(fixture_name);
+    std::env::temp_dir().join(format!(
+        "fr_conformance_{fixture_stem}_{}_{}.conf",
+        std::process::id(),
+        timestamp_nanos
+    ))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -187,12 +215,7 @@ pub fn run_fixture(
         .map(|root| live_log_output_path(root, &fixture.suite, fixture_name));
 
     let mut runtime = runtime_for_harness_config(config);
-    if fixture_name == "core_wait.json" || fixture_name == "fr_p2c_006_replication_journey.json" {
-        runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
-    }
-    if fixture_name == "core_acl.json" {
-        runtime.set_acl_file_path(std::env::temp_dir().join("fr_acl_fixture_dummy.conf"));
-    }
+    configure_runtime_for_fixture(&mut runtime, fixture_name);
     let mut failed = Vec::new();
     let total = fixture.cases.len();
     for case in fixture.cases {
@@ -241,16 +264,39 @@ pub fn run_fixture(
     ))
 }
 
-pub fn run_live_redis_diff(
+fn select_conformance_fixture_cases(
+    fixture: &ConformanceFixture,
+    case_names: &[&str],
+) -> Result<ConformanceFixture, String> {
+    let mut selected = Vec::with_capacity(case_names.len());
+    let mut missing = Vec::new();
+    for case_name in case_names {
+        match fixture.cases.iter().find(|case| case.name == *case_name) {
+            Some(case) => selected.push(case.clone()),
+            None => missing.push((*case_name).to_string()),
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "fixture '{}' is missing requested live-oracle cases: {}",
+            fixture.suite,
+            missing.join(", ")
+        ));
+    }
+    Ok(ConformanceFixture {
+        suite: fixture.suite.clone(),
+        cases: selected,
+    })
+}
+
+fn run_live_redis_diff_with_fixture(
     config: &HarnessConfig,
     fixture_name: &str,
+    fixture: ConformanceFixture,
     oracle: &LiveOracleConfig,
 ) -> Result<DifferentialReport, String> {
-    let fixture = load_conformance_fixture(config, fixture_name)?;
     let mut runtime = runtime_for_harness_config(config);
-    if fixture_name == "core_wait.json" || fixture_name == "fr_p2c_006_replication_journey.json" {
-        runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
-    }
+    configure_runtime_for_fixture(&mut runtime, fixture_name);
     let mut stream = connect_live_redis(oracle)?;
     flushall(&mut stream)?;
     let suite = format!("live_redis_diff::{}", fixture.suite);
@@ -376,6 +422,26 @@ pub fn run_live_redis_diff(
     ))
 }
 
+pub fn run_live_redis_diff(
+    config: &HarnessConfig,
+    fixture_name: &str,
+    oracle: &LiveOracleConfig,
+) -> Result<DifferentialReport, String> {
+    let fixture = load_conformance_fixture(config, fixture_name)?;
+    run_live_redis_diff_with_fixture(config, fixture_name, fixture, oracle)
+}
+
+pub fn run_live_redis_diff_for_cases(
+    config: &HarnessConfig,
+    fixture_name: &str,
+    case_names: &[&str],
+    oracle: &LiveOracleConfig,
+) -> Result<DifferentialReport, String> {
+    let fixture = load_conformance_fixture(config, fixture_name)?;
+    let filtered_fixture = select_conformance_fixture_cases(&fixture, case_names)?;
+    run_live_redis_diff_with_fixture(config, fixture_name, filtered_fixture, oracle)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProtocolFixture {
     pub suite: String,
@@ -476,12 +542,7 @@ pub fn run_protocol_fixture(
         .map(|root| live_log_output_path(root, &fixture.suite, fixture_name));
 
     let mut runtime = runtime_for_harness_config(config);
-    if fixture_name == "core_wait.json" || fixture_name == "fr_p2c_006_replication_journey.json" {
-        runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
-    }
-    if fixture_name == "core_acl.json" {
-        runtime.set_acl_file_path(std::env::temp_dir().join("fr_acl_fixture_dummy.conf"));
-    }
+    configure_runtime_for_fixture(&mut runtime, fixture_name);
     let mut failed = Vec::new();
     let total = fixture.cases.len();
     for case in fixture.cases {
@@ -544,9 +605,7 @@ pub fn run_live_redis_protocol_diff(
 ) -> Result<DifferentialReport, String> {
     let fixture = load_protocol_fixture(config, fixture_name)?;
     let mut runtime = runtime_for_harness_config(config);
-    if fixture_name == "core_wait.json" || fixture_name == "fr_p2c_006_replication_journey.json" {
-        runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
-    }
+    configure_runtime_for_fixture(&mut runtime, fixture_name);
     let suite = format!("live_redis_protocol_diff::{}", fixture.suite);
     let live_log_path = config
         .live_log_root
@@ -1069,10 +1128,7 @@ pub fn run_replay_fixture(
     let mut total = 0_usize;
     for case in fixture.cases {
         let mut runtime = runtime_for_harness_config(config);
-        if fixture_name == "core_wait.json" || fixture_name == "fr_p2c_006_replication_journey.json"
-        {
-            runtime.set_aof_path(std::path::PathBuf::from("/dev/null"));
-        }
+        configure_runtime_for_fixture(&mut runtime, fixture_name);
         let source_records = case
             .records
             .into_iter()
@@ -3832,21 +3888,11 @@ mod tests {
             RespFrame::Error("ERR wrong number of arguments for 'cluster' command".to_string())
         );
 
+        let cluster_disabled =
+            RespFrame::Error("ERR This instance has cluster support disabled".to_string());
+
         let help = runtime.execute_frame(command_frame(&["CLUSTER", "HELP"]), 701);
-        assert_eq!(
-            help,
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"CLUSTER INFO".to_vec())),
-                RespFrame::BulkString(Some(b"CLUSTER MYID".to_vec())),
-                RespFrame::BulkString(Some(b"CLUSTER KEYSLOT <key>".to_vec())),
-                RespFrame::BulkString(Some(b"CLUSTER GETKEYSINSLOT <slot> <count>".to_vec())),
-                RespFrame::BulkString(Some(b"CLUSTER COUNTKEYSINSLOT <slot>".to_vec())),
-                RespFrame::BulkString(Some(b"CLUSTER SLOTS".to_vec())),
-                RespFrame::BulkString(Some(b"CLUSTER SHARDS".to_vec())),
-                RespFrame::BulkString(Some(b"CLUSTER NODES".to_vec())),
-                RespFrame::BulkString(Some(b"CLUSTER RESET".to_vec())),
-            ]))
-        );
+        assert_eq!(help, cluster_disabled);
 
         let help_casefold = runtime.execute_frame(command_frame(&["cluster", "help"]), 702);
         assert_eq!(help_casefold, help);
@@ -3854,9 +3900,15 @@ mod tests {
         let unknown = runtime.execute_frame(command_frame(&["CLUSTER", "NOPE"]), 703);
         assert_eq!(
             unknown,
+            RespFrame::Error("ERR unknown subcommand 'NOPE'. Try CLUSTER HELP.".to_string())
+        );
+
+        let keyslot_wrong_arity =
+            runtime.execute_frame(command_frame(&["CLUSTER", "KEYSLOT"]), 704);
+        assert_eq!(
+            keyslot_wrong_arity,
             RespFrame::Error(
-                "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP."
-                    .to_string(),
+                "ERR wrong number of arguments for 'cluster|keyslot' command".to_string()
             )
         );
 
@@ -3871,7 +3923,7 @@ mod tests {
             subsystem: "cluster_router",
             action: "cluster_subcommand_dispatch",
             reason_code: "cluster.command_router_contract_violation",
-            reason: "cluster subcommand router enforces arity/help/unknown contracts".to_string(),
+            reason: "cluster subcommand router preserves Redis arity, unknown-subcommand, and disabled-cluster precedence".to_string(),
             input_digest: "fr_p2c_007_u001_input".to_string(),
             output_digest: "fr_p2c_007_u001_output".to_string(),
             state_digest_before: "cluster_router_start".to_string(),
@@ -3912,6 +3964,11 @@ mod tests {
         assert!(!runtime.is_cluster_read_only());
         assert!(!runtime.is_cluster_asking());
 
+        let asking = runtime.execute_frame(command_frame(&["ASKING"]), 706);
+        assert_eq!(asking, cluster_disabled);
+        assert!(!runtime.is_cluster_read_only());
+        assert!(!runtime.is_cluster_asking());
+
         let readwrite = runtime.execute_frame(command_frame(&["READWRITE"]), 707);
         assert_eq!(readwrite, cluster_disabled);
         assert!(!runtime.is_cluster_read_only());
@@ -3934,7 +3991,7 @@ mod tests {
             subsystem: "cluster_client_mode",
             action: "readonly_readwrite_disabled_surface",
             reason_code: "cluster.client_mode_disabled_surface",
-            reason: "READONLY and READWRITE reject standalone deployments while preserving local client mode state and arity checks".to_string(),
+            reason: "ASKING, READONLY, and READWRITE reject standalone deployments while preserving local client mode state and arity checks".to_string(),
             input_digest: "fr_p2c_007_u007_input".to_string(),
             output_digest: "fr_p2c_007_u007_output".to_string(),
             state_digest_before: "cluster_client_mode_start".to_string(),
@@ -4042,6 +4099,10 @@ mod tests {
         let strict_help = strict.execute_frame(command_frame(&["CLUSTER", "HELP"]), 740);
         let hardened_help = hardened.execute_frame(command_frame(&["CLUSTER", "HELP"]), 740);
         assert_eq!(strict_help, hardened_help);
+        assert_eq!(
+            strict_help,
+            RespFrame::Error("ERR This instance has cluster support disabled".to_string())
+        );
 
         let strict_readonly = strict.execute_frame(command_frame(&["READONLY"]), 741);
         let hardened_readonly = hardened.execute_frame(command_frame(&["READONLY"]), 741);
@@ -4066,10 +4127,8 @@ mod tests {
 
         let strict_unknown = strict.execute_frame(command_frame(&["CLUSTER", "NOPE"]), 744);
         let hardened_unknown = hardened.execute_frame(command_frame(&["CLUSTER", "NOPE"]), 744);
-        let expected_unknown = RespFrame::Error(
-            "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP."
-                .to_string(),
-        );
+        let expected_unknown =
+            RespFrame::Error("ERR unknown subcommand 'NOPE'. Try CLUSTER HELP.".to_string());
         assert_eq!(strict_unknown, expected_unknown);
         assert_eq!(strict_unknown, hardened_unknown);
 
@@ -4159,11 +4218,12 @@ mod tests {
         let baseline_help = runtime.execute_frame(command_frame(&["CLUSTER", "HELP"]), 750);
         let casefold_help = runtime.execute_frame(command_frame(&["cluster", "help"]), 751);
         assert_eq!(baseline_help, casefold_help);
+        let cluster_disabled =
+            RespFrame::Error("ERR This instance has cluster support disabled".to_string());
+        assert_eq!(baseline_help, cluster_disabled);
 
         let readonly = runtime.execute_frame(command_frame(&["READONLY"]), 752);
         let readwrite = runtime.execute_frame(command_frame(&["READWRITE"]), 754);
-        let cluster_disabled =
-            RespFrame::Error("ERR This instance has cluster support disabled".to_string());
         assert_eq!(readonly, cluster_disabled);
         assert_eq!(readwrite, cluster_disabled);
 
@@ -4184,7 +4244,7 @@ mod tests {
             subsystem: "cluster_metamorphic",
             action: "cluster_help_idempotence",
             reason_code: "parity_ok",
-            reason: "cluster help surface is idempotent across case-folded command forms and standalone READONLY/READWRITE rejections".to_string(),
+            reason: "cluster disabled help surface is idempotent across case-folded command forms and standalone ASKING/READONLY/READWRITE rejections".to_string(),
             input_digest: "fr_p2c_007_f_metamorphic_input".to_string(),
             output_digest: "fr_p2c_007_f_metamorphic_output".to_string(),
             state_digest_before: "cluster_help_start".to_string(),
@@ -4225,10 +4285,7 @@ mod tests {
         let cluster_unknown = runtime.execute_frame(command_frame(&["CLUSTER", "NOPE"]), 761);
         assert_eq!(
             cluster_unknown,
-            RespFrame::Error(
-                "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP."
-                    .to_string(),
-            )
+            RespFrame::Error("ERR unknown subcommand 'NOPE'. Try CLUSTER HELP.".to_string())
         );
 
         let readonly_wrong_arity =

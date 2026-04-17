@@ -1,7 +1,18 @@
 use std::fs;
 use std::path::PathBuf;
 
-use fr_conformance::log_contract::{PACKET_FAMILIES, StructuredLogEvent, VerificationPath};
+use fr_conformance::log_contract::{
+    PACKET_FAMILIES, StructuredLogEvent, VerificationPath, golden_packet_logs,
+};
+
+fn render_jsonl(events: &[StructuredLogEvent]) -> String {
+    let mut rendered = String::new();
+    for event in events {
+        rendered.push_str(&event.to_json_line().expect("serialize golden"));
+        rendered.push('\n');
+    }
+    rendered
+}
 
 #[test]
 fn golden_logs_exist_and_validate() {
@@ -16,7 +27,14 @@ fn golden_logs_exist_and_validate() {
             path.display()
         );
 
+        let expected = render_jsonl(&golden_packet_logs(packet_id).expect("golden packet logs"));
         let raw = fs::read_to_string(&path).expect("read golden log");
+        assert_eq!(
+            raw,
+            expected,
+            "checked-in packet golden drifted for {}",
+            path.display()
+        );
         let lines = raw
             .lines()
             .filter(|line| !line.trim().is_empty())

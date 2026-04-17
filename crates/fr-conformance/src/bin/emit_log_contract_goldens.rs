@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use fr_conformance::log_contract::{
-    PACKET_FAMILIES, STRUCTURED_LOG_SCHEMA_VERSION, golden_packet_logs,
+    LIVE_LOG_GOLDEN_FIXTURES, PACKET_FAMILIES, STRUCTURED_LOG_SCHEMA_VERSION,
+    golden_live_log_events, golden_packet_logs, live_log_golden_file_name,
 };
 use serde_json::json;
 
@@ -41,12 +42,34 @@ fn run() -> Result<(), String> {
         generated_files.push(output_path);
     }
 
+    for fixture in LIVE_LOG_GOLDEN_FIXTURES {
+        let events = golden_live_log_events(fixture)?;
+        let output_path = output_dir.join(live_log_golden_file_name(fixture));
+
+        let mut payload = String::new();
+        for event in events {
+            payload.push_str(&event.to_json_line()?);
+            payload.push('\n');
+        }
+
+        fs::write(&output_path, payload)
+            .map_err(|err| format!("failed to write {}: {err}", output_path.display()))?;
+        generated_files.push(output_path);
+    }
+
     let manifest_path = output_dir.join("manifest.json");
     let manifest = json!({
         "schema_version": STRUCTURED_LOG_SCHEMA_VERSION,
         "generated_at_utc": "2026-02-14T00:00:00Z",
         "generator": "cargo run -p fr-conformance --bin emit_log_contract_goldens",
         "packets": PACKET_FAMILIES,
+        "live_fixtures": LIVE_LOG_GOLDEN_FIXTURES.iter().map(|fixture| json!({
+            "suite_id": fixture.suite_id,
+            "fixture_name": fixture.fixture_name,
+            "packet_id": fixture.packet_id,
+            "command_kind": fixture.command_kind,
+            "file": live_log_golden_file_name(*fixture),
+        })).collect::<Vec<_>>(),
         "files": generated_files.iter().map(|path| path.file_name().and_then(|name| name.to_str()).unwrap_or("<invalid>")).collect::<Vec<_>>(),
     });
     fs::write(
@@ -75,6 +98,7 @@ fn run() -> Result<(), String> {
     let repro_lock = [
         "cargo run -p fr-conformance --bin emit_log_contract_goldens",
         "cargo test -p fr-conformance --test log_contract_goldens -- --nocapture",
+        "cargo test -p fr-conformance --test log_contract_live -- --nocapture",
         "cargo test --workspace",
     ]
     .join("\n");
@@ -90,6 +114,9 @@ fn run() -> Result<(), String> {
         "",
         "Contains one golden `unit` and one golden `e2e` structured log entry",
         "for each packet family `FR-P2C-001..009`.",
+        "",
+        "Also contains deterministic live-oracle diff golden logs for the",
+        "`live_redis_diff::*` and `live_redis_protocol_diff::*` paths.",
         "",
         "See `TEST_LOG_SCHEMA_V1.md` for schema and replay rules.",
     ]

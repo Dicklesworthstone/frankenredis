@@ -22,6 +22,29 @@ pub const PACKET_FAMILIES: [&str; 9] = [
     "FR-P2C-009",
 ];
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveLogGoldenFixture {
+    pub suite_id: &'static str,
+    pub fixture_name: &'static str,
+    pub packet_id: &'static str,
+    pub command_kind: &'static str,
+}
+
+pub const LIVE_LOG_GOLDEN_FIXTURES: [LiveLogGoldenFixture; 2] = [
+    LiveLogGoldenFixture {
+        suite_id: "live_redis_diff::core_errors",
+        fixture_name: "core_errors.json",
+        packet_id: "FR-P2C-003",
+        command_kind: "command",
+    },
+    LiveLogGoldenFixture {
+        suite_id: "live_redis_protocol_diff::protocol_negative",
+        fixture_name: "protocol_negative.json",
+        packet_id: "FR-P2C-002",
+        command_kind: "protocol",
+    },
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationPath {
@@ -265,6 +288,102 @@ pub fn golden_packet_logs(packet_id: &str) -> Result<[StructuredLogEvent; 2], St
     Ok([unit, e2e])
 }
 
+#[must_use]
+pub fn live_oracle_replay_cmd(command_kind: &str, fixture_name: &str) -> String {
+    format!(
+        "rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- {command_kind} --fixture {fixture_name}"
+    )
+}
+
+#[must_use]
+pub fn live_log_golden_file_name(fixture: LiveLogGoldenFixture) -> String {
+    let suite_slug = sanitize_path_segment(fixture.suite_id);
+    let fixture_base = fixture
+        .fixture_name
+        .strip_suffix(".json")
+        .unwrap_or(fixture.fixture_name);
+    let fixture_slug = sanitize_path_segment(fixture_base);
+    format!("{suite_slug}__{fixture_slug}.golden.jsonl")
+}
+
+pub fn golden_live_log_events(
+    fixture: LiveLogGoldenFixture,
+) -> Result<[StructuredLogEvent; 2], String> {
+    match fixture.command_kind {
+        "command" | "protocol" | "multi_client" => {}
+        other => {
+            return Err(format!(
+                "unknown live-oracle command kind '{other}' for fixture '{}'",
+                fixture.fixture_name
+            ));
+        }
+    }
+
+    let fixture_base = fixture
+        .fixture_name
+        .strip_suffix(".json")
+        .unwrap_or(fixture.fixture_name);
+    let artifact_file = format!(
+        "crates/fr-conformance/fixtures/log_contract_v1/{}",
+        live_log_golden_file_name(fixture)
+    );
+    let replay_cmd = live_oracle_replay_cmd(fixture.command_kind, fixture.fixture_name);
+
+    let pass = StructuredLogEvent {
+        schema_version: STRUCTURED_LOG_SCHEMA_VERSION.to_string(),
+        ts_utc: "2026-02-15T00:00:00Z".to_string(),
+        suite_id: fixture.suite_id.to_string(),
+        test_or_scenario_id: format!("{fixture_base}::pass"),
+        packet_id: fixture.packet_id.to_string(),
+        mode: LogMode::Strict,
+        verification_path: VerificationPath::E2e,
+        seed: 7,
+        input_digest: deterministic_digest(&format!("{fixture_base}:pass:input")),
+        output_digest: deterministic_digest(&format!("{fixture_base}:pass:output")),
+        duration_ms: 1,
+        outcome: LogOutcome::Pass,
+        reason_code: "live_oracle_parity_ok".to_string(),
+        replay_cmd: replay_cmd.clone(),
+        artifact_refs: vec![
+            "TEST_LOG_SCHEMA_V1.md".to_string(),
+            "crates/fr-conformance/fixtures/log_contract_v1/manifest.json".to_string(),
+            "crates/fr-conformance/fixtures/log_contract_v1/env.json".to_string(),
+            "crates/fr-conformance/fixtures/log_contract_v1/repro.lock".to_string(),
+            artifact_file.clone(),
+        ],
+        fixture_id: Some(fixture.fixture_name.to_string()),
+        env_ref: Some("crates/fr-conformance/fixtures/log_contract_v1/env.json".to_string()),
+    };
+
+    let fail = StructuredLogEvent {
+        schema_version: STRUCTURED_LOG_SCHEMA_VERSION.to_string(),
+        ts_utc: "2026-02-15T00:00:01Z".to_string(),
+        suite_id: fixture.suite_id.to_string(),
+        test_or_scenario_id: format!("{fixture_base}::fail"),
+        packet_id: fixture.packet_id.to_string(),
+        mode: LogMode::Strict,
+        verification_path: VerificationPath::E2e,
+        seed: 8,
+        input_digest: deterministic_digest(&format!("{fixture_base}:fail:input")),
+        output_digest: deterministic_digest(&format!("{fixture_base}:fail:output")),
+        duration_ms: 2,
+        outcome: LogOutcome::Fail,
+        reason_code: "live_oracle_frame_mismatch".to_string(),
+        replay_cmd,
+        artifact_refs: vec![
+            "TEST_LOG_SCHEMA_V1.md".to_string(),
+            "crates/fr-conformance/fixtures/log_contract_v1/manifest.json".to_string(),
+            "crates/fr-conformance/fixtures/log_contract_v1/env.json".to_string(),
+            "crates/fr-conformance/fixtures/log_contract_v1/repro.lock".to_string(),
+            artifact_file,
+        ],
+        fixture_id: Some(fixture.fixture_name.to_string()),
+        env_ref: Some("crates/fr-conformance/fixtures/log_contract_v1/env.json".to_string()),
+    };
+
+    Ok([pass, fail])
+}
+
 fn deterministic_digest(label: &str) -> String {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in label.as_bytes() {
@@ -342,10 +461,10 @@ mod tests {
     use fr_runtime::EvidenceEvent;
 
     use super::{
-        LogMode, LogOutcome, PACKET_FAMILIES, RuntimeEvidenceContext,
+        LIVE_LOG_GOLDEN_FIXTURES, LogMode, LogOutcome, PACKET_FAMILIES, RuntimeEvidenceContext,
         STRUCTURED_LOG_SCHEMA_VERSION, StructuredLogEvent, VerificationPath,
-        append_structured_log_jsonl, e2e_replay_cmd, golden_packet_logs, live_log_output_path,
-        unit_replay_cmd,
+        append_structured_log_jsonl, e2e_replay_cmd, golden_live_log_events, golden_packet_logs,
+        live_log_golden_file_name, live_log_output_path, live_oracle_replay_cmd, unit_replay_cmd,
     };
 
     fn sample_runtime_event() -> EvidenceEvent {
@@ -390,6 +509,21 @@ mod tests {
     }
 
     #[test]
+    fn live_oracle_replay_templates_are_deterministic() {
+        let command = live_oracle_replay_cmd("command", "core_errors.json");
+        assert_eq!(
+            command,
+            "rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- command --fixture core_errors.json"
+        );
+
+        let protocol = live_oracle_replay_cmd("protocol", "protocol_negative.json");
+        assert_eq!(
+            protocol,
+            "rch exec -- cargo run -p fr-conformance --bin live_oracle_diff -- protocol --fixture protocol_negative.json"
+        );
+    }
+
+    #[test]
     fn golden_packet_logs_validate_for_every_packet_family() {
         for packet_id in PACKET_FAMILIES {
             let logs = golden_packet_logs(packet_id).expect("packet logs");
@@ -406,6 +540,26 @@ mod tests {
     fn unknown_packet_family_is_rejected() {
         let err = golden_packet_logs("FR-P2C-404").expect_err("must fail");
         assert!(err.contains("unknown packet family"));
+    }
+
+    #[test]
+    fn golden_live_log_events_validate_for_every_fixture() {
+        for fixture in LIVE_LOG_GOLDEN_FIXTURES {
+            let logs = golden_live_log_events(fixture).expect("live log golden");
+            assert_eq!(logs[0].verification_path, VerificationPath::E2e);
+            assert_eq!(logs[1].verification_path, VerificationPath::E2e);
+            assert_eq!(logs[0].outcome, LogOutcome::Pass);
+            assert_eq!(logs[1].outcome, LogOutcome::Fail);
+            assert_eq!(
+                logs[0].artifact_refs.last().expect("artifact ref present"),
+                &format!(
+                    "crates/fr-conformance/fixtures/log_contract_v1/{}",
+                    live_log_golden_file_name(fixture)
+                )
+            );
+            logs[0].validate().expect("pass log validates");
+            logs[1].validate().expect("fail log validates");
+        }
     }
 
     #[test]
