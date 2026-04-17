@@ -147,6 +147,107 @@ const CORE_SCRIPTING_LIVE_STABLE_CASES: &[&str] = &[
     "eval_math_functions",
 ];
 
+const CORE_STRINGS_LIVE_STABLE_CASES: &[&str] = &[
+    // Basic SET/GET
+    "ping",
+    "set_foo",
+    "get_foo",
+    // INCR/DECR
+    "incr_counter_1",
+    "incr_counter_2",
+    // SET with NX/XX/GET options
+    "set_nx_new_key",
+    "set_nx_existing_key",
+    "set_nx_verify_unchanged",
+    "set_xx_existing",
+    "set_xx_missing",
+    "set_get_returns_old",
+    "set_get_verify",
+    "set_get_missing_key",
+    // MSET/MGET
+    "mset_multi",
+    "mget_multi",
+    "msetnx_all_new",
+    "msetnx_one_exists",
+    "msetnx_verify_unchanged",
+    // INCRBYFLOAT/DECRBY/INCRBY
+    "incrbyfloat_new_key",
+    "incrbyfloat_add",
+    "incrbyfloat_negative",
+    "decrby_new_key",
+    "decrby_existing",
+    // STRLEN
+    "strlen_existing",
+    "strlen_missing",
+    // SETRANGE/GETRANGE basics
+    "setrange_extend",
+    "getrange_result",
+    "getrange_zero_prefix",
+    // SETNX
+    "setnx_new_key",
+    "setnx_existing",
+    "setnx_verify",
+    // GETSET
+    "getset_existing",
+    "getset_verify",
+    // Error cases
+    "incr_on_non_integer",
+    "wrong_arity",
+    // APPEND
+    "append_to_new_key",
+    "append_to_existing",
+    "append_verify",
+    "append_empty_string",
+    // STRLEN extended
+    "strlen_nonexistent",
+    "strlen_empty_value_setup",
+    "strlen_empty_value",
+    "strlen_wrong_arity",
+    "strlen_wrongtype_setup",
+    "strlen_wrongtype",
+    // SETRANGE extended
+    "setrange_setup",
+    "setrange_middle",
+    "setrange_verify",
+    "setrange_extend_verify",
+    "setrange_new_key",
+    "setrange_new_key_verify",
+    "setrange_zero_offset",
+    "setrange_zero_verify",
+    "setrange_wrong_arity",
+    // GETRANGE extended
+    "getrange_setup",
+    "getrange_full",
+    "getrange_substring",
+    "getrange_negative_end",
+    "getrange_negative_start",
+    "getrange_out_of_bounds",
+    "getrange_reversed_indices",
+    "getrange_nonexistent_key",
+    "getrange_wrong_arity",
+    // GETDEL
+    "getdel_setup",
+    "getdel_returns_value",
+    "getdel_key_gone",
+    "getdel_nonexistent",
+    "getdel_wrong_arity",
+    // INCR/DECR new key
+    "incr_new_key",
+    "decr_new_key",
+    "incrby_new_key",
+    "decrby_new_key",
+    "incr_not_integer_setup",
+    "incr_not_integer",
+    // GETSET extended
+    "getset_setup",
+    "getset_returns_old",
+    "getset_verify_new",
+    "getset_nonexistent_returns_nil",
+    "getset_nonexistent_creates_key",
+    // SUBSTR
+    "substr_basic",
+];
+
 struct VendoredRedisOracle {
     child: Child,
     port: u16,
@@ -1344,6 +1445,30 @@ fn core_sort_live_redis_matches_runtime() {
         ..LiveOracleConfig::default()
     };
     let report = run_live_redis_diff(&cfg, "core_sort.json", &oracle).expect("sort live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
+#[test]
+fn core_strings_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_strings.json",
+        CORE_STRINGS_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("strings live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",
