@@ -8,6 +8,7 @@ use fr_store::{
     ExpireTimeValue, MaxmemoryPolicy, PttlValue, PubSubMessage, ScoreBound, Store, StoreError,
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
     StreamGroupReadCursor, StreamGroupReadOptions, StreamId, ValueType, glob_match, read_rss_bytes,
+    sha1_hex_public,
 };
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
@@ -4183,6 +4184,11 @@ fn xdel(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         return Err(CommandError::WrongArity("XDEL"));
     }
 
+    let (stream_exists, _) = store.xlast_id_with_existence(&argv[1], now_ms)?;
+    if !stream_exists {
+        return Ok(RespFrame::Integer(0));
+    }
+
     let mut ids = Vec::with_capacity(argv.len() - 2);
     for arg in &argv[2..] {
         let id = match parse_stream_id(arg) {
@@ -5247,7 +5253,7 @@ fn xrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     };
 
     if matches!(count, Some(0)) {
-        return Ok(RespFrame::Array(Some(vec![])));
+        return Ok(RespFrame::Array(None));
     }
 
     let records = store.xrange(&argv[1], start, end, count, now_ms)?;
@@ -5294,7 +5300,7 @@ fn xrevrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     };
 
     if matches!(count, Some(0)) {
-        return Ok(RespFrame::Array(Some(vec![])));
+        return Ok(RespFrame::Array(None));
     }
 
     let records = store.xrevrange(&argv[1], end, start, count, now_ms)?;
@@ -7553,7 +7559,7 @@ fn clamp_i128_to_i64(value: i128) -> i64 {
     }
 }
 
-fn build_unknown_args_preview(argv: &[Vec<u8>]) -> Option<String> {
+pub fn build_unknown_args_preview(argv: &[Vec<u8>]) -> Option<String> {
     if argv.len() < 2 {
         return None;
     }
@@ -10126,6 +10132,27 @@ fn client_wrong_subcommand_arity(subcommand: &str) -> CommandError {
     ))
 }
 
+const SCRIPT_NOSCRIPT_ERROR: &str = "ERR This Redis command is not allowed from script";
+
+fn script_noscript_command_error() -> CommandError {
+    CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
+}
+
+fn format_eval_noscript_error(script: &[u8]) -> String {
+    format!(
+        "{SCRIPT_NOSCRIPT_ERROR} script: {}, on @user_script:1.",
+        sha1_hex_public(script)
+    )
+}
+
+fn eval_script_error_reply(script: &[u8], error: String) -> RespFrame {
+    if error == SCRIPT_NOSCRIPT_ERROR {
+        RespFrame::Error(format_eval_noscript_error(script))
+    } else {
+        RespFrame::Error(format!("ERR Error running script: {error}"))
+    }
+}
+
 fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("CLIENT"));
@@ -10134,6 +10161,9 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
     if sub.eq_ignore_ascii_case("SETNAME") {
         if argv.len() != 3 {
             return Err(client_wrong_subcommand_arity(sub));
+        }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
         }
         if argv[2].iter().any(|&b| b <= b' ') {
             return Err(CommandError::Custom(
@@ -10151,12 +10181,18 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         if argv.len() != 2 {
             return Err(client_wrong_subcommand_arity(sub));
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         Ok(RespFrame::BulkString(
             store.dispatch_client_ctx.client_name.clone(),
         ))
     } else if sub.eq_ignore_ascii_case("ID") {
         if argv.len() != 2 {
             return Err(client_wrong_subcommand_arity(sub));
+        }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
         }
         Ok(RespFrame::Integer(
             i64::try_from(store.dispatch_client_ctx.client_id).unwrap_or(i64::MAX),
@@ -11664,7 +11700,7 @@ fn eval_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_script(script, &keys_vec, &args_vec, store, now_ms) {
         Ok(frame) => Ok(frame),
-        Err(e) => Ok(RespFrame::Error(format!("ERR Error running script: {e}"))),
+        Err(e) => Ok(eval_script_error_reply(script, e)),
     };
     store.script_nesting_level -= 1;
     result
@@ -11702,7 +11738,7 @@ fn evalsha_cmd(
     store.script_nesting_level += 1;
     let result = match lua_eval::eval_script(&script, &keys_vec, &args_vec, store, now_ms) {
         Ok(frame) => Ok(frame),
-        Err(e) => Ok(RespFrame::Error(format!("ERR Error running script: {e}"))),
+        Err(e) => Ok(eval_script_error_reply(&script, e)),
     };
     store.script_nesting_level -= 1;
     result
@@ -13349,10 +13385,10 @@ mod tests {
     use fr_store::{Store, StoreError};
 
     use super::{
-        COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec, classify_command,
-        client_wrong_subcommand_arity, dispatch_argv, drain_pubsub_messages, eq_ascii_command,
-        execute_migrate, frame_to_argv, is_write_command, parse_blocking_deadline_milliseconds,
-        parse_migrate_request, pubsub_message_to_frame,
+        COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec, SCRIPT_NOSCRIPT_ERROR,
+        classify_command, client_wrong_subcommand_arity, dispatch_argv, drain_pubsub_messages,
+        eq_ascii_command, execute_migrate, frame_to_argv, is_write_command,
+        parse_blocking_deadline_milliseconds, parse_migrate_request, pubsub_message_to_frame,
     };
 
     fn classify_command_linear(cmd: &[u8]) -> Option<CommandId> {
@@ -17454,6 +17490,21 @@ mod tests {
         )
         .expect("xrange missing");
         assert_eq!(missing, RespFrame::Array(Some(vec![])));
+
+        let count_zero = dispatch_argv(
+            &[
+                b"XRANGE".to_vec(),
+                b"stream".to_vec(),
+                b"-".to_vec(),
+                b"+".to_vec(),
+                b"COUNT".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xrange count zero");
+        assert_eq!(count_zero, RespFrame::Array(None));
     }
 
     #[test]
@@ -17642,6 +17693,21 @@ mod tests {
         .expect("xrevrange inverted bounds");
         assert_eq!(empty, RespFrame::Array(Some(vec![])));
 
+        let count_zero = dispatch_argv(
+            &[
+                b"XREVRANGE".to_vec(),
+                b"stream".to_vec(),
+                b"+".to_vec(),
+                b"-".to_vec(),
+                b"COUNT".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xrevrange count zero");
+        assert_eq!(count_zero, RespFrame::Array(None));
+
         store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
         let wrongtype = dispatch_argv(
             &[
@@ -17786,6 +17852,14 @@ mod tests {
         )
         .expect("xdel missing key");
         assert_eq!(missing, RespFrame::Integer(0));
+
+        let missing_invalid = dispatch_argv(
+            &[b"XDEL".to_vec(), b"missing".to_vec(), b"bad-id".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("xdel missing key invalid id");
+        assert_eq!(missing_invalid, RespFrame::Integer(0));
 
         let arity = dispatch_argv(&[b"XDEL".to_vec(), b"stream".to_vec()], &mut store, 0)
             .expect_err("xdel arity");
@@ -18748,6 +18822,30 @@ mod tests {
                 "XREADGROUP command is not allowed with BLOCK option from scripts".to_string()
             ))
         );
+    }
+
+    #[test]
+    fn client_identity_subcommands_rejected_from_scripts_after_arity_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let setname_arity =
+            dispatch_argv(&[b"CLIENT".to_vec(), b"SETNAME".to_vec()], &mut store, 0)
+                .expect_err("client setname arity");
+        assert_eq!(setname_arity, client_wrong_subcommand_arity("SETNAME"));
+
+        for argv in [
+            vec![
+                b"CLIENT".to_vec(),
+                b"SETNAME".to_vec(),
+                b"lua-client".to_vec(),
+            ],
+            vec![b"CLIENT".to_vec(), b"GETNAME".to_vec()],
+            vec![b"CLIENT".to_vec(), b"ID".to_vec()],
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).expect_err("client noscript");
+            assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        }
     }
 
     #[test]

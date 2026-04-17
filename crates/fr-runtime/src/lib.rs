@@ -7,8 +7,8 @@ use std::{
 };
 
 use fr_command::{
-    CommandError, MigrateKeySpec, command_acl_categories, commands_in_acl_category, dispatch_argv,
-    execute_migrate, frame_to_argv, parse_migrate_request,
+    CommandError, MigrateKeySpec, build_unknown_args_preview, command_acl_categories,
+    commands_in_acl_category, dispatch_argv, execute_migrate, frame_to_argv, parse_migrate_request,
 };
 use fr_config::{
     DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
@@ -82,6 +82,13 @@ fn processed_command_counts(argv: &[Vec<u8>]) -> (u64, u64) {
         }
     }
     (read_count, write_count)
+}
+
+fn wrong_arity_error(command: &'static str) -> RespFrame {
+    RespFrame::Error(format!(
+        "ERR wrong number of arguments for '{}' command",
+        command
+    ))
 }
 
 fn client_info_command_name(argv: &[Vec<u8>]) -> String {
@@ -763,6 +770,20 @@ impl AuthState {
             .get(username)
             .is_some_and(|user| user.enabled)
     }
+}
+
+/// Parse ACL file contents and return the canonical `ACL SAVE` serialization.
+pub fn canonicalize_acl_rules(content: &str) -> Result<String, String> {
+    let mut auth_state = AuthState::default();
+    auth_state.load_acl_rules(content)?;
+    Ok(auth_state.serialize_acl_rules())
+}
+
+/// Parse ACL file contents and return the observable `ACL LIST` entries.
+pub fn acl_list_entries_from_rules(content: &str) -> Result<Vec<String>, String> {
+    let mut auth_state = AuthState::default();
+    auth_state.load_acl_rules(content)?;
+    Ok(auth_state.acl_list_entries())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3438,10 +3459,11 @@ impl Runtime {
                 if !fr_command::is_known_command(cmd_bytes) {
                     self.session.transaction_state.exec_abort = true;
                     let cmd_str = std::str::from_utf8(cmd_bytes).unwrap_or("");
-                    return RespFrame::Error(format!(
-                        "ERR unknown command '{}'",
-                        fr_command::trim_and_cap_string(cmd_str, 128)
-                    ));
+                    return CommandError::UnknownCommand {
+                        command: fr_command::trim_and_cap_string(cmd_str, 128),
+                        args_preview: build_unknown_args_preview(&argv),
+                    }
+                    .to_resp();
                 }
                 // Validate arity before queueing (Redis rejects wrong arity
                 // immediately and sets EXECABORT).
@@ -3488,11 +3510,11 @@ impl Runtime {
                 }
                 Some(RuntimeSpecialCommand::Wait) => Some(self.handle_wait_command(&argv)),
                 Some(RuntimeSpecialCommand::Waitaof) => Some(self.handle_waitaof_command(&argv)),
-                Some(RuntimeSpecialCommand::Multi) => Some(self.handle_multi_command()),
+                Some(RuntimeSpecialCommand::Multi) => Some(self.handle_multi_command(&argv)),
                 Some(RuntimeSpecialCommand::Exec) => {
-                    Some(self.handle_exec_command(now_ms, packet_id))
+                    Some(self.handle_exec_command(&argv, now_ms, packet_id))
                 }
-                Some(RuntimeSpecialCommand::Discard) => Some(self.handle_discard_command()),
+                Some(RuntimeSpecialCommand::Discard) => Some(self.handle_discard_command(&argv)),
                 Some(RuntimeSpecialCommand::Watch) => {
                     Some(self.handle_watch_command(&argv, now_ms))
                 }
@@ -4431,6 +4453,10 @@ impl Runtime {
         }
     }
 
+    fn client_name_is_valid(name: &[u8]) -> bool {
+        name.iter().all(|&b| b > b' ')
+    }
+
     fn handle_hello_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
         // HELLO with no args: return server info using current protocol (Redis 7+)
         if argv.len() == 1 {
@@ -4474,7 +4500,7 @@ impl Runtime {
                 let Some(name) = options.next() else {
                     return CommandError::SyntaxError.to_resp();
                 };
-                if name.contains(&b' ') {
+                if !Self::client_name_is_valid(name) {
                     return RespFrame::Error(
                         "ERR Client names cannot contain spaces, newlines or special characters."
                             .to_string(),
@@ -6549,8 +6575,7 @@ impl Runtime {
             if argv.len() != 3 {
                 return client_wrong_subcommand_arity(sub);
             }
-            // Redis validates: name must not contain spaces or control chars (< 0x20)
-            if argv[2].iter().any(|&b| b <= b' ') {
+            if !Self::client_name_is_valid(&argv[2]) {
                 return RespFrame::Error(
                     "ERR Client names cannot contain spaces, newlines or special characters."
                         .to_string(),
@@ -8696,9 +8721,15 @@ slave_priority:{}\r\n",
         response
     }
 
-    fn handle_multi_command(&mut self) -> RespFrame {
+    fn handle_multi_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if self.session.transaction_state.in_transaction {
             return RespFrame::Error("ERR MULTI calls can not be nested".to_string());
+        }
+        if argv.len() != 1 {
+            self.session.transaction_state.in_transaction = true;
+            self.session.transaction_state.exec_abort = true;
+            self.session.transaction_state.command_queue.clear();
+            return wrong_arity_error("multi");
         }
         self.session.transaction_state.in_transaction = true;
         self.session.transaction_state.exec_abort = false;
@@ -8706,7 +8737,21 @@ slave_priority:{}\r\n",
         RespFrame::SimpleString("OK".to_string())
     }
 
-    fn handle_exec_command(&mut self, now_ms: u64, packet_id: u64) -> RespFrame {
+    fn handle_exec_command(&mut self, argv: &[Vec<u8>], now_ms: u64, packet_id: u64) -> RespFrame {
+        if argv.len() != 1 {
+            if self.session.transaction_state.in_transaction {
+                self.session.transaction_state.in_transaction = false;
+                self.session.transaction_state.exec_abort = false;
+                self.session.transaction_state.command_queue.clear();
+                self.session.transaction_state.watched_keys.clear();
+                self.session.transaction_state.watch_dirty = false;
+                return RespFrame::Error(
+                    "EXECABORT Transaction discarded because of: wrong number of arguments for 'exec' command"
+                        .to_string(),
+                );
+            }
+            return wrong_arity_error("exec");
+        }
         if !self.session.transaction_state.in_transaction {
             return RespFrame::Error("ERR EXEC without MULTI".to_string());
         }
@@ -8807,7 +8852,13 @@ slave_priority:{}\r\n",
         RespFrame::Array(Some(results))
     }
 
-    fn handle_discard_command(&mut self) -> RespFrame {
+    fn handle_discard_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        if argv.len() != 1 {
+            if self.session.transaction_state.in_transaction {
+                self.session.transaction_state.exec_abort = true;
+            }
+            return wrong_arity_error("discard");
+        }
         if !self.session.transaction_state.in_transaction {
             return RespFrame::Error("ERR DISCARD without MULTI".to_string());
         }
@@ -9399,13 +9450,14 @@ mod tests {
     };
     use fr_persist::{AofRecord, PersistError, RdbValue, decode_aof_stream, write_aof_file};
     use fr_protocol::{RespFrame, parse_frame};
+    use fr_store::sha1_hex_public;
 
     use super::{
         ClientSession, ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
-        Runtime, ServerState, canonical_static_config_param, classify_cluster_subcommand,
-        classify_cluster_subcommand_linear, classify_runtime_special_command,
-        classify_runtime_special_command_linear, client_wrong_subcommand_arity,
-        store_to_rdb_entries,
+        Runtime, ServerState, acl_list_entries_from_rules, canonical_static_config_param,
+        canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
+        classify_runtime_special_command, classify_runtime_special_command_linear,
+        client_wrong_subcommand_arity, store_to_rdb_entries, wrong_arity_error,
     };
 
     fn command(parts: &[&[u8]]) -> RespFrame {
@@ -10181,6 +10233,57 @@ mod tests {
     }
 
     #[test]
+    fn hello_uses_last_auth_in_chain() {
+        let mut rt = Runtime::default_strict();
+        rt.add_user(b"alice".to_vec(), b"secret1".to_vec());
+        rt.add_user(b"bob".to_vec(), b"secret2".to_vec());
+
+        let reply = rt.execute_frame(
+            command(&[
+                b"HELLO", b"2", b"AUTH", b"bob", b"secret2", b"AUTH", b"alice", b"secret1",
+            ]),
+            0,
+        );
+        assert!(matches!(reply, RespFrame::Array(Some(_))));
+        assert!(rt.is_authenticated());
+        assert_eq!(rt.session.current_user_name(), b"alice");
+    }
+
+    #[test]
+    fn hello_failed_later_auth_does_not_clobber_existing_user_or_name() {
+        let mut rt = Runtime::default_strict();
+        rt.add_user(b"alice".to_vec(), b"secret1".to_vec());
+        rt.add_user(b"bob".to_vec(), b"secret2".to_vec());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"secret1"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"SETNAME", b"client0"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let reply = rt.execute_frame(
+            command(&[
+                b"HELLO", b"2", b"AUTH", b"alice", b"secret1", b"AUTH", b"bob", b"secret2",
+                b"AUTH", b"alice", b"wrong", b"SETNAME", b"client1",
+            ]),
+            2,
+        );
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "WRONGPASS invalid username-password pair or user is disabled.".to_string()
+            )
+        );
+        assert!(rt.is_authenticated());
+        assert_eq!(rt.session.current_user_name(), b"alice");
+        assert_eq!(rt.session.client_name, Some(b"client0".to_vec()));
+        assert_eq!(rt.session.resp_protocol_version, 2);
+    }
+
+    #[test]
     fn fr_p2c_004_u009b_client_list_reflects_session_protocol_db_and_user_state() {
         let mut rt = Runtime::default_strict();
         rt.session.selected_db = 5;
@@ -10220,6 +10323,42 @@ mod tests {
     }
 
     #[test]
+    fn hello_setname_rejects_control_chars_without_leaking_state() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"SETNAME", b"keep"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let reply = rt.execute_frame(command(&[b"HELLO", b"3", b"SETNAME", b"bad\nname"]), 1);
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR Client names cannot contain spaces, newlines or special characters."
+                    .to_string()
+            )
+        );
+        assert_eq!(rt.session.client_name, Some(b"keep".to_vec()));
+        assert_eq!(rt.session.resp_protocol_version, 2);
+    }
+
+    #[test]
+    fn hello_uses_last_setname_in_chain() {
+        let mut rt = Runtime::default_strict();
+
+        let reply = rt.execute_frame(
+            command(&[
+                b"HELLO", b"3", b"SETNAME", b"client1", b"SETNAME", b"client2",
+            ]),
+            0,
+        );
+        assert!(matches!(reply, RespFrame::Array(Some(_))));
+        assert_eq!(rt.session.client_name, Some(b"client2".to_vec()));
+        assert_eq!(rt.session.resp_protocol_version, 3);
+    }
+
+    #[test]
     fn client_list_reports_age_and_resets_idle_for_current_command() {
         let mut rt = Runtime::default_strict();
 
@@ -10238,40 +10377,39 @@ mod tests {
     }
 
     #[test]
-    fn client_dispatch_context_flows_through_eval_and_syncs_back_to_session() {
+    fn client_identity_commands_are_rejected_from_eval_scripts_without_leaking_state() {
         let mut rt = Runtime::default_strict();
         rt.session.client_name = Some(b"before".to_vec());
+        let id_script = b"return redis.call('CLIENT','ID')";
+        let setname_script = b"return redis.call('CLIENT','SETNAME','lua-client')";
+        let getname_script = b"return redis.call('CLIENT','GETNAME')";
 
         assert_eq!(
-            rt.execute_frame(
-                command(&[b"EVAL", b"return redis.call('CLIENT','ID')", b"0"]),
-                0,
-            ),
-            RespFrame::Integer(rt.session.client_id as i64)
+            rt.execute_frame(command(&[b"EVAL", id_script, b"0"]), 0),
+            RespFrame::Error(format!(
+                "ERR This Redis command is not allowed from script script: {}, on @user_script:1.",
+                sha1_hex_public(id_script)
+            ))
         );
 
         assert_eq!(
-            rt.execute_frame(
-                command(&[
-                    b"EVAL",
-                    b"return redis.call('CLIENT','SETNAME','lua-client')",
-                    b"0",
-                ]),
-                1,
-            ),
-            RespFrame::SimpleString("OK".to_string())
+            rt.execute_frame(command(&[b"EVAL", setname_script, b"0"]), 1),
+            RespFrame::Error(format!(
+                "ERR This Redis command is not allowed from script script: {}, on @user_script:1.",
+                sha1_hex_public(setname_script)
+            ))
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"EVAL", getname_script, b"0"]), 2),
+            RespFrame::Error(format!(
+                "ERR This Redis command is not allowed from script script: {}, on @user_script:1.",
+                sha1_hex_public(getname_script)
+            ))
         );
         assert_eq!(
             rt.session.client_name.as_deref(),
-            Some(b"lua-client".as_slice())
-        );
-
-        assert_eq!(
-            rt.execute_frame(
-                command(&[b"EVAL", b"return redis.call('CLIENT','GETNAME')", b"0"]),
-                2,
-            ),
-            RespFrame::BulkString(Some(b"lua-client".to_vec()))
+            Some(b"before".as_slice())
         );
     }
 
@@ -13116,6 +13254,74 @@ mod tests {
     }
 
     #[test]
+    fn multi_extra_args_match_redis_execabort_flow() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI", b"extra"]), 0),
+            wrong_arity_error("multi")
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC", b"extra"]), 1),
+            RespFrame::Error(
+                "EXECABORT Transaction discarded because of: wrong number of arguments for 'exec' command"
+                    .to_string(),
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"DISCARD"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+    }
+
+    #[test]
+    fn discard_extra_args_preserve_tainted_transaction_until_exec() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"DISCARD", b"extra"]), 1),
+            wrong_arity_error("discard")
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"multi"]), 2),
+            RespFrame::Error("ERR MULTI calls can not be nested".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"exec"]), 3),
+            RespFrame::Error(
+                "EXECABORT Transaction discarded because of previous errors.".to_string(),
+            )
+        );
+    }
+
+    #[test]
+    fn unknown_command_inside_multi_includes_args_preview() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"MULTI"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"NOPE", b"a", b"b"]), 1),
+            RespFrame::Error(
+                "ERR unknown command 'NOPE', with args beginning with: 'a' 'b' ".to_string(),
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"EXEC"]), 2),
+            RespFrame::Error(
+                "EXECABORT Transaction discarded because of previous errors.".to_string(),
+            )
+        );
+    }
+
+    #[test]
     fn min_replicas_blocks_writes_without_healthy_replicas() {
         let mut rt = Runtime::default_strict();
 
@@ -15529,6 +15735,34 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"ACL", b"LOAD"]), 1),
             RespFrame::Error("ERR There is no configured ACL file".to_string())
+        );
+    }
+
+    #[test]
+    fn canonicalize_acl_rules_round_trip_is_stable() {
+        let content = "\
+# comment
+user alice reset on >pass -@all +get ~* &*
+user bob reset off nopass +@all
+";
+        let canonical = canonicalize_acl_rules(content).expect("valid ACL file should parse");
+        assert_eq!(
+            canonicalize_acl_rules(&canonical).expect("canonical ACL should reparse"),
+            canonical,
+            "canonical ACL serialization should be stable across reparses"
+        );
+        assert_eq!(
+            acl_list_entries_from_rules(content).expect("valid ACL file should list"),
+            acl_list_entries_from_rules(&canonical).expect("canonical ACL should list"),
+            "ACL LIST view should remain stable after canonicalization"
+        );
+    }
+
+    #[test]
+    fn canonicalize_acl_rules_rejects_invalid_lines() {
+        assert_eq!(
+            canonicalize_acl_rules("not-a-user-line\n"),
+            Err("ERR /ACL file contains invalid format".to_string())
         );
     }
 

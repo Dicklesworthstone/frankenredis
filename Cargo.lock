@@ -256,6 +256,7 @@ dependencies = [
  "fr-protocol",
  "fr-repl",
  "fr-store",
+ "proptest",
 ]
 
 [[package]]
@@ -281,6 +282,7 @@ dependencies = [
  "fr-expire",
  "fr-persist",
  "libc",
+ "proptest",
 ]
 
 [[package]]

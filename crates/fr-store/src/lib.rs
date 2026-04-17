@@ -14181,7 +14181,7 @@ mod tests {
 
     // ── Golden artifact tests ──────────────────────────────────────────
     mod golden {
-        use crate::{decode_db_key, encode_db_key, glob_match, DB_NAMESPACE_PREFIX};
+        use crate::{DB_NAMESPACE_PREFIX, decode_db_key, encode_db_key, glob_match};
 
         #[test]
         fn golden_encode_db_key_db0_passthrough() {
@@ -14209,8 +14209,7 @@ mod tests {
         #[test]
         fn golden_db_namespace_prefix() {
             assert_eq!(
-                DB_NAMESPACE_PREFIX,
-                b"\0frdb\0",
+                DB_NAMESPACE_PREFIX, b"\0frdb\0",
                 "DB namespace prefix must be \\0frdb\\0"
             );
         }
@@ -14220,7 +14219,8 @@ mod tests {
             for db in [1, 5, 15] {
                 let key = b"testkey";
                 let encoded = encode_db_key(db, key);
-                let (decoded_db, decoded_key) = decode_db_key(&encoded).expect("decode must succeed");
+                let (decoded_db, decoded_key) =
+                    decode_db_key(&encoded).expect("decode must succeed");
                 assert_eq!(decoded_db, db);
                 assert_eq!(decoded_key, key);
             }
@@ -14229,13 +14229,19 @@ mod tests {
         #[test]
         fn golden_decode_db_key_rejects_unprefixed() {
             let unprefixed = b"plainkey";
-            assert!(decode_db_key(unprefixed).is_none(), "Unprefixed keys must return None");
+            assert!(
+                decode_db_key(unprefixed).is_none(),
+                "Unprefixed keys must return None"
+            );
         }
 
         #[test]
         fn golden_decode_db_key_rejects_short() {
             let short = b"\0frdb\0\x00\x00"; // Too short for full db number
-            assert!(decode_db_key(short).is_none(), "Short keys must return None");
+            assert!(
+                decode_db_key(short).is_none(),
+                "Short keys must return None"
+            );
         }
 
         #[test]
