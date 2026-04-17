@@ -1407,7 +1407,7 @@
       }
     },
     {
-      "name": "acl_log_empty",
+      "name": "acl_log_shows_recent_failed_auth_attempts",
       "now_ms": 100,
       "argv": [
         "ACL",
@@ -1415,7 +1415,263 @@
       ],
       "expect": {
         "kind": "array",
-        "value": []
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "count"
+              },
+              {
+                "kind": "integer",
+                "value": 1
+              },
+              {
+                "kind": "bulk",
+                "value": "reason"
+              },
+              {
+                "kind": "bulk",
+                "value": "auth"
+              },
+              {
+                "kind": "bulk",
+                "value": "context"
+              },
+              {
+                "kind": "bulk",
+                "value": "toplevel"
+              },
+              {
+                "kind": "bulk",
+                "value": "object"
+              },
+              {
+                "kind": "bulk",
+                "value": "AUTH"
+              },
+              {
+                "kind": "bulk",
+                "value": "username"
+              },
+              {
+                "kind": "bulk",
+                "value": "disabled_user"
+              },
+              {
+                "kind": "bulk",
+                "value": "age-seconds"
+              },
+              {
+                "kind": "any_bulk"
+              },
+              {
+                "kind": "bulk",
+                "value": "client-info"
+              },
+              {
+                "kind": "bulk_contains_all",
+                "value": [
+                  "cmd=auth",
+                  "user=testuser",
+                  "resp=2"
+                ]
+              },
+              {
+                "kind": "bulk",
+                "value": "entry-id"
+              },
+              {
+                "kind": "any_integer"
+              },
+              {
+                "kind": "bulk",
+                "value": "timestamp-created"
+              },
+              {
+                "kind": "any_integer"
+              },
+              {
+                "kind": "bulk",
+                "value": "timestamp-last-updated"
+              },
+              {
+                "kind": "any_integer"
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "count"
+              },
+              {
+                "kind": "integer",
+                "value": 1
+              },
+              {
+                "kind": "bulk",
+                "value": "reason"
+              },
+              {
+                "kind": "bulk",
+                "value": "auth"
+              },
+              {
+                "kind": "bulk",
+                "value": "context"
+              },
+              {
+                "kind": "bulk",
+                "value": "toplevel"
+              },
+              {
+                "kind": "bulk",
+                "value": "object"
+              },
+              {
+                "kind": "bulk",
+                "value": "AUTH"
+              },
+              {
+                "kind": "bulk",
+                "value": "username"
+              },
+              {
+                "kind": "bulk",
+                "value": "nobody"
+              },
+              {
+                "kind": "bulk",
+                "value": "age-seconds"
+              },
+              {
+                "kind": "any_bulk"
+              },
+              {
+                "kind": "bulk",
+                "value": "client-info"
+              },
+              {
+                "kind": "bulk_contains_all",
+                "value": [
+                  "cmd=auth",
+                  "user=testuser",
+                  "resp=2"
+                ]
+              },
+              {
+                "kind": "bulk",
+                "value": "entry-id"
+              },
+              {
+                "kind": "any_integer"
+              },
+              {
+                "kind": "bulk",
+                "value": "timestamp-created"
+              },
+              {
+                "kind": "any_integer"
+              },
+              {
+                "kind": "bulk",
+                "value": "timestamp-last-updated"
+              },
+              {
+                "kind": "any_integer"
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "count"
+              },
+              {
+                "kind": "integer",
+                "value": 1
+              },
+              {
+                "kind": "bulk",
+                "value": "reason"
+              },
+              {
+                "kind": "bulk",
+                "value": "auth"
+              },
+              {
+                "kind": "bulk",
+                "value": "context"
+              },
+              {
+                "kind": "bulk",
+                "value": "toplevel"
+              },
+              {
+                "kind": "bulk",
+                "value": "object"
+              },
+              {
+                "kind": "bulk",
+                "value": "AUTH"
+              },
+              {
+                "kind": "bulk",
+                "value": "username"
+              },
+              {
+                "kind": "bulk",
+                "value": "testuser"
+              },
+              {
+                "kind": "bulk",
+                "value": "age-seconds"
+              },
+              {
+                "kind": "any_bulk"
+              },
+              {
+                "kind": "bulk",
+                "value": "client-info"
+              },
+              {
+                "kind": "bulk_contains_all",
+                "value": [
+                  "cmd=auth",
+                  "user=testuser",
+                  "resp=2"
+                ]
+              },
+              {
+                "kind": "bulk",
+                "value": "entry-id"
+              },
+              {
+                "kind": "any_integer"
+              },
+              {
+                "kind": "bulk",
+                "value": "timestamp-created"
+              },
+              {
+                "kind": "any_integer"
+              },
+              {
+                "kind": "bulk",
+                "value": "timestamp-last-updated"
+              },
+              {
+                "kind": "any_integer"
+              }
+            ]
+          }
+        ]
       }
     },
     {

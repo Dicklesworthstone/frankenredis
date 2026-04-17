@@ -9,8 +9,8 @@
         "INFO"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": "cluster_enabled:0\r\ncluster_state:ok\r\ncluster_slots_assigned:0\r\ncluster_slots_ok:0\r\ncluster_slots_pfail:0\r\ncluster_slots_fail:0\r\ncluster_known_nodes:0\r\ncluster_size:0\r\ncluster_current_epoch:0\r\ncluster_my_epoch:0\r\ncluster_stats_messages_sent:0\r\ncluster_stats_messages_received:0\r\ntotal_cluster_links_buffer_limit_exceeded:0\r\n"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -21,8 +21,8 @@
         "MYID"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": "0000000000000000000000000000000000000000"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -33,8 +33,8 @@
         "SLOTS"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -45,8 +45,8 @@
         "SHARDS"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -57,8 +57,8 @@
         "NODES"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": ""
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -69,8 +69,8 @@
         "RESET"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -82,8 +82,8 @@
         "foo"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 12182
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -95,8 +95,8 @@
         "bar"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 5061
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -108,8 +108,8 @@
         "hello"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 866
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -121,8 +121,8 @@
         "{user}.following"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 5474
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -134,8 +134,8 @@
         "user"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 5474
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -147,8 +147,8 @@
         "{}.foo"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 64
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -186,8 +186,8 @@
         "12182"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 1
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -199,8 +199,8 @@
         "0"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 0
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -213,13 +213,8 @@
         "10"
       ],
       "expect": {
-        "kind": "array",
-        "value": [
-          {
-            "kind": "bulk",
-            "value": "foo"
-          }
-        ]
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -232,8 +227,8 @@
         "10"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -246,8 +241,8 @@
         "0"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -258,45 +253,8 @@
         "HELP"
       ],
       "expect": {
-        "kind": "array",
-        "value": [
-          {
-            "kind": "bulk",
-            "value": "CLUSTER INFO"
-          },
-          {
-            "kind": "bulk",
-            "value": "CLUSTER MYID"
-          },
-          {
-            "kind": "bulk",
-            "value": "CLUSTER KEYSLOT <key>"
-          },
-          {
-            "kind": "bulk",
-            "value": "CLUSTER GETKEYSINSLOT <slot> <count>"
-          },
-          {
-            "kind": "bulk",
-            "value": "CLUSTER COUNTKEYSINSLOT <slot>"
-          },
-          {
-            "kind": "bulk",
-            "value": "CLUSTER SLOTS"
-          },
-          {
-            "kind": "bulk",
-            "value": "CLUSTER SHARDS"
-          },
-          {
-            "kind": "bulk",
-            "value": "CLUSTER NODES"
-          },
-          {
-            "kind": "bulk",
-            "value": "CLUSTER RESET"
-          }
-        ]
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -319,7 +277,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP."
+        "value": "ERR unknown subcommand 'NOSUCH'. Try CLUSTER HELP."
       }
     },
     {
@@ -331,7 +289,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'cluster' command"
+        "value": "ERR wrong number of arguments for 'cluster|keyslot' command"
       }
     },
     {
@@ -343,7 +301,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'cluster' command"
+        "value": "ERR wrong number of arguments for 'cluster|countkeysinslot' command"
       }
     },
     {
@@ -356,7 +314,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'cluster' command"
+        "value": "ERR wrong number of arguments for 'cluster|getkeysinslot' command"
       }
     },
     {
@@ -367,8 +325,8 @@
         "info"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": "cluster_enabled:0\r\ncluster_state:ok\r\ncluster_slots_assigned:0\r\ncluster_slots_ok:0\r\ncluster_slots_pfail:0\r\ncluster_slots_fail:0\r\ncluster_known_nodes:0\r\ncluster_size:0\r\ncluster_current_epoch:0\r\ncluster_my_epoch:0\r\ncluster_stats_messages_sent:0\r\ncluster_stats_messages_received:0\r\ntotal_cluster_links_buffer_limit_exceeded:0\r\n"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -380,8 +338,8 @@
         "HARD"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -393,8 +351,8 @@
         "SOFT"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -406,8 +364,8 @@
         ""
       ],
       "expect": {
-        "kind": "integer",
-        "value": 0
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -419,8 +377,8 @@
         "{user}.followers"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 5474
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -433,7 +391,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -446,7 +404,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid slot"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -460,7 +418,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -474,7 +432,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -488,7 +446,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid slot or number of keys"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -526,8 +484,8 @@
         "5474"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 2
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -541,7 +499,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid slot or number of keys"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -552,8 +510,8 @@
         "myid"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": "0000000000000000000000000000000000000000"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -564,8 +522,8 @@
         "slots"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -576,8 +534,8 @@
         "shards"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -588,8 +546,8 @@
         "nodes"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": ""
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -602,7 +560,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid slot"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -614,8 +572,8 @@
         "{foo}bar{baz}"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 12182
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -627,8 +585,8 @@
         "}foo"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 5221
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -640,8 +598,8 @@
         "{foo"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 13308
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -653,8 +611,8 @@
         "hello world"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 15332
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -667,7 +625,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR syntax error"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -681,7 +639,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'cluster' command"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -695,7 +653,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'cluster' command"
+        "value": "ERR wrong number of arguments for 'cluster|keyslot' command"
       }
     },
     {
@@ -709,7 +667,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'cluster' command"
+        "value": "ERR wrong number of arguments for 'cluster|countkeysinslot' command"
       }
     },
     {
@@ -724,7 +682,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'cluster' command"
+        "value": "ERR wrong number of arguments for 'cluster|getkeysinslot' command"
       }
     },
     {
@@ -736,8 +694,8 @@
         "16383"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 0
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -750,7 +708,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid slot"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -762,8 +720,8 @@
         ""
       ],
       "expect": {
-        "kind": "integer",
-        "value": 0
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -776,8 +734,8 @@
         "100"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -791,7 +749,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid slot or number of keys"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -804,8 +762,8 @@
         "0"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -817,7 +775,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'CLUSTER'. Try CLUSTER HELP."
+        "value": "ERR unknown subcommand 'NOSUCHSUB'. Try CLUSTER HELP."
       }
     },
     {
@@ -841,7 +799,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -854,7 +812,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -867,7 +825,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -880,7 +838,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -894,7 +852,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -908,7 +866,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -922,7 +880,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -936,7 +894,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -950,7 +908,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -964,7 +922,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
@@ -978,7 +936,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid slot or number of keys"
+        "value": "ERR This instance has cluster support disabled"
       }
     },
 
@@ -986,61 +944,61 @@
       "name": "cluster_keyslot_hash_tag_colon",
       "now_ms": 400,
       "argv": ["CLUSTER", "KEYSLOT", "{user}:1"],
-      "expect": { "kind": "integer", "value": 5474 }
+      "expect": { "kind": "error", "value": "ERR This instance has cluster support disabled" }
     },
     {
       "name": "cluster_keyslot_hash_tag_colon_999",
       "now_ms": 401,
       "argv": ["CLUSTER", "KEYSLOT", "{user}:999"],
-      "expect": { "kind": "integer", "value": 5474 }
+      "expect": { "kind": "error", "value": "ERR This instance has cluster support disabled" }
     },
     {
       "name": "cluster_keyslot_empty_hash_tag_prefix",
       "now_ms": 402,
       "argv": ["CLUSTER", "KEYSLOT", "{}key"],
-      "expect": { "kind": "integer", "value": 14961 }
+      "expect": { "kind": "error", "value": "ERR This instance has cluster support disabled" }
     },
     {
       "name": "cluster_keyslot_nested_double_braces",
       "now_ms": 403,
       "argv": ["CLUSTER", "KEYSLOT", "{{foo}}"],
-      "expect": { "kind": "integer", "value": 13308 }
+      "expect": { "kind": "error", "value": "ERR This instance has cluster support disabled" }
     },
     {
       "name": "cluster_keyslot_unclosed_brace_alt",
       "now_ms": 404,
       "argv": ["CLUSTER", "KEYSLOT", "{foo"],
-      "expect": { "kind": "integer", "value": 13308 }
+      "expect": { "kind": "error", "value": "ERR This instance has cluster support disabled" }
     },
     {
       "name": "cluster_keyslot_empty_key_alt",
       "now_ms": 405,
       "argv": ["CLUSTER", "KEYSLOT", ""],
-      "expect": { "kind": "integer", "value": 0 }
+      "expect": { "kind": "error", "value": "ERR This instance has cluster support disabled" }
     },
     {
       "name": "cluster_countkeysinslot_slot_zero",
       "now_ms": 410,
       "argv": ["CLUSTER", "COUNTKEYSINSLOT", "0"],
-      "expect": { "kind": "integer", "value": 0 }
+      "expect": { "kind": "error", "value": "ERR This instance has cluster support disabled" }
     },
     {
       "name": "cluster_countkeysinslot_invalid_16384",
       "now_ms": 411,
       "argv": ["CLUSTER", "COUNTKEYSINSLOT", "16384"],
-      "expect": { "kind": "error", "value": "ERR Invalid slot" }
+      "expect": { "kind": "error", "value": "ERR This instance has cluster support disabled" }
     },
     {
       "name": "cluster_countkeysinslot_negative_alt",
       "now_ms": 412,
       "argv": ["CLUSTER", "COUNTKEYSINSLOT", "-1"],
-      "expect": { "kind": "error", "value": "ERR Invalid slot" }
+      "expect": { "kind": "error", "value": "ERR This instance has cluster support disabled" }
     },
     {
       "name": "cluster_help_any_array",
       "now_ms": 430,
       "argv": ["CLUSTER", "HELP"],
-      "expect": { "kind": "any_array" }
+      "expect": { "kind": "error", "value": "ERR This instance has cluster support disabled" }
     }
   ]
 }

@@ -717,25 +717,25 @@
       }
     },
     {
-      "name": "readonly_returns_ok",
+      "name": "readonly_reports_cluster_disabled",
       "now_ms": 120,
       "argv": [
         "READONLY"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {
-      "name": "readwrite_returns_ok",
+      "name": "readwrite_reports_cluster_disabled",
       "now_ms": 121,
       "argv": [
         "READWRITE"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR This instance has cluster support disabled"
       }
     },
     {

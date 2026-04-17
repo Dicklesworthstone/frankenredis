@@ -110,7 +110,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|setname' command"
       }
     },
     {
@@ -288,7 +288,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|pause' command"
       }
     },
     {
@@ -300,7 +300,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|tracking' command"
       }
     },
     {
@@ -313,7 +313,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|id' command"
       }
     },
     {
@@ -350,7 +350,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|no-evict' command"
       }
     },
     {
@@ -362,7 +362,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|no-touch' command"
       }
     },
     {
@@ -387,7 +387,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|reply' command"
       }
     },
     {
@@ -400,7 +400,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|unpause' command"
       }
     },
     {
@@ -453,7 +453,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|caching' command"
       }
     },
     {
@@ -483,7 +483,7 @@
       }
     },
     {
-      "name": "client_kill_addr",
+      "name": "client_kill_legacy_addr_reports_no_such_client",
       "now_ms": 90,
       "argv": [
         "CLIENT",
@@ -491,8 +491,8 @@
         "127.0.0.1:12345"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 0
+        "kind": "error",
+        "value": "ERR No such client"
       }
     },
     {
@@ -651,7 +651,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|setinfo' command"
       }
     },
     {
@@ -837,7 +837,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|getname' command"
       }
     },
     {
@@ -867,15 +867,15 @@
       }
     },
     {
-      "name": "client_kill_no_filter_returns_zero",
+      "name": "client_kill_without_filter_rejects_missing_target",
       "now_ms": 150,
       "argv": [
         "CLIENT",
         "KILL"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 0
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'client|kill' command"
       }
     },
     {
@@ -1207,7 +1207,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|getredir' command"
       }
     },
     {
@@ -1239,7 +1239,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|trackinginfo' command"
       }
     },
     {
@@ -1251,7 +1251,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|unblock' command"
       }
     },
     {
@@ -1341,7 +1341,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'client' command"
+        "value": "ERR wrong number of arguments for 'client|info' command"
       }
     }
   ]
