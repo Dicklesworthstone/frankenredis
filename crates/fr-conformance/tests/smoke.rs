@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fr_conformance::{
     CaseOutcome, HarnessConfig, LiveOracleConfig, run_fixture, run_live_redis_diff,
-    run_live_redis_diff_for_cases, run_protocol_fixture, run_replay_fixture,
-    run_replication_handshake_fixture, run_smoke,
+    run_live_redis_diff_for_cases, run_live_redis_multi_client_diff, run_protocol_fixture,
+    run_replay_fixture, run_replication_handshake_fixture, run_smoke,
 };
 use fr_protocol::{RespFrame, parse_frame};
 use fr_runtime::Runtime;
@@ -799,6 +799,44 @@ fn core_module_sentinel_live_redis_matches_runtime() {
     };
     let report = run_live_redis_diff(&cfg, "core_module_sentinel.json", &oracle)
         .expect("module/sentinel live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
+#[test]
+fn core_pubsub_multi_client_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_multi_client_diff(&cfg, "core_pubsub_multi_client.json", &oracle)
+        .expect("pubsub multi-client live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
+#[test]
+fn core_blocking_multi_client_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_multi_client_diff(&cfg, "core_blocking_multi_client.json", &oracle)
+        .expect("blocking multi-client live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",
