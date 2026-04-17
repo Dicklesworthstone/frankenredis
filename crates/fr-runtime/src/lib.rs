@@ -7,8 +7,10 @@ use std::{
 };
 
 use fr_command::{
-    CommandError, MigrateKeySpec, build_unknown_args_preview, command_acl_categories,
-    commands_in_acl_category, dispatch_argv, execute_migrate, frame_to_argv, parse_migrate_request,
+    CommandError, MigrateKeySpec, apply_client_reply_state, build_unknown_args_preview,
+    client_tracking_getredir_value, client_trackinginfo_frame, command_acl_categories,
+    commands_in_acl_category, dispatch_argv, execute_migrate, frame_to_argv,
+    parse_client_tracking_state, parse_migrate_request, validate_client_caching_mode,
 };
 use fr_config::{
     DecisionAction, DriftSeverity, HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass,
@@ -34,9 +36,9 @@ use fr_repl::{
     evaluate_wait, evaluate_waitaof, parse_psync_reply,
 };
 use fr_store::{
-    CommandHistogram, DispatchClientContext, EvictionLoopFailure, EvictionLoopResult,
-    EvictionLoopStatus, EvictionSafetyGateState, MaxmemoryPolicy, Store, decode_db_key,
-    encode_db_key, glob_match,
+    ClientReplyState, ClientTrackingState, CommandHistogram, DispatchClientContext,
+    EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState,
+    MaxmemoryPolicy, Store, decode_db_key, encode_db_key, glob_match,
 };
 
 static PACKET_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -1857,6 +1859,10 @@ pub struct ClientSession {
     client_no_evict: bool,
     /// Flags: client no-touch mode.
     client_no_touch: bool,
+    /// Client-side caching / tracking configuration.
+    client_tracking: ClientTrackingState,
+    /// Per-client direct reply suppression state for CLIENT REPLY.
+    client_reply: ClientReplyState,
     /// Client peer address (set on connection accept).
     pub peer_addr: Option<std::net::SocketAddr>,
     /// Connection acceptance timestamp in ms since epoch.
@@ -1881,6 +1887,8 @@ impl Default for ClientSession {
             client_lib_ver: None,
             client_no_evict: false,
             client_no_touch: false,
+            client_tracking: ClientTrackingState::default(),
+            client_reply: ClientReplyState::default(),
             peer_addr: None,
             connected_at_ms: 0,
             last_interaction_ms: 0,
@@ -1939,6 +1947,8 @@ impl ClientSession {
         self.client_lib_ver = None;
         self.client_no_evict = false;
         self.client_no_touch = false;
+        self.client_tracking = ClientTrackingState::default();
+        self.client_reply = ClientReplyState::default();
         self.refresh_authentication_for_server(auth_state, false);
     }
 }
@@ -2545,6 +2555,11 @@ impl Runtime {
     /// Retrieve the current client session ID.
     pub fn client_id(&self) -> u64 {
         self.session.client_id
+    }
+
+    #[must_use]
+    pub fn suppress_current_network_reply(&self) -> bool {
+        self.session.client_reply.suppress_current_response
     }
 
     /// Resolve the current tail ID for a stream key, used by blocking XREAD
@@ -3338,6 +3353,10 @@ impl Runtime {
             Some(RuntimeSpecialCommand::Auth) => {
                 let start = Instant::now();
                 let reply = self.handle_auth_command(&argv, now_ms);
+                let reply = match apply_client_reply_state(&argv, &mut self.session.client_reply) {
+                    Ok(()) => reply,
+                    Err(err) => err.to_resp(),
+                };
                 let elapsed_us = start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
@@ -3347,6 +3366,10 @@ impl Runtime {
             Some(RuntimeSpecialCommand::Hello) => {
                 let start = Instant::now();
                 let reply = self.handle_hello_command(&argv, now_ms);
+                let reply = match apply_client_reply_state(&argv, &mut self.session.client_reply) {
+                    Ok(()) => reply,
+                    Err(err) => err.to_resp(),
+                };
                 let elapsed_us = start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
@@ -3358,6 +3381,7 @@ impl Runtime {
 
         if self.session.requires_auth(&self.server.auth_state) {
             let reply = RespFrame::Error(NOAUTH_ERROR.to_string());
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -3381,6 +3405,7 @@ impl Runtime {
                 "NOPERM this user has no permissions to run the '{}' command",
                 command_name
             ));
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
             self.record_acl_log_event(
                 "command",
                 command_name.to_ascii_uppercase(),
@@ -3412,10 +3437,12 @@ impl Runtime {
             && let Some(reply) =
                 self.reject_due_to_replica_write_quorum(&argv, special_command, now_ms)
         {
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
 
         if let Some(reply) = self.reject_stale_replica_read_request(&argv, special_command) {
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
 
@@ -3444,6 +3471,7 @@ impl Runtime {
                     | Some(RuntimeSpecialCommand::Sunsubscribe)
             );
             if is_sub_cmd {
+                self.apply_existing_client_reply_suppression_to_undispatched_reply();
                 return RespFrame::Error(
                     "ERR Command not allowed inside a transaction".to_string(),
                 );
@@ -3453,12 +3481,14 @@ impl Runtime {
                     Some(cmd) => cmd,
                     None => {
                         self.session.transaction_state.exec_abort = true;
+                        self.apply_existing_client_reply_suppression_to_undispatched_reply();
                         return CommandError::InvalidCommandFrame.to_resp();
                     }
                 };
                 if !fr_command::is_known_command(cmd_bytes) {
                     self.session.transaction_state.exec_abort = true;
                     let cmd_str = std::str::from_utf8(cmd_bytes).unwrap_or("");
+                    self.apply_existing_client_reply_suppression_to_undispatched_reply();
                     return CommandError::UnknownCommand {
                         command: fr_command::trim_and_cap_string(cmd_str, 128),
                         args_preview: build_unknown_args_preview(&argv),
@@ -3469,12 +3499,14 @@ impl Runtime {
                 // immediately and sets EXECABORT).
                 if let Err(cmd_name) = fr_command::check_command_arity(cmd_bytes, argv.len()) {
                     self.session.transaction_state.exec_abort = true;
+                    self.apply_existing_client_reply_suppression_to_undispatched_reply();
                     return RespFrame::Error(format!(
                         "ERR wrong number of arguments for '{}' command",
                         cmd_name
                     ));
                 }
                 self.session.transaction_state.command_queue.push(argv);
+                self.apply_existing_client_reply_suppression_to_undispatched_reply();
                 return RespFrame::SimpleString("QUEUED".to_string());
             }
         }
@@ -3560,6 +3592,10 @@ impl Runtime {
                 _ => None,
             };
             if let Some(reply) = special_reply {
+                let reply = match apply_client_reply_state(&argv, &mut self.session.client_reply) {
+                    Ok(()) => reply,
+                    Err(err) => err.to_resp(),
+                };
                 let elapsed_us = special_start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
@@ -3569,6 +3605,7 @@ impl Runtime {
         }
 
         if let Some(reply) = self.enforce_maxmemory_before_dispatch(&argv, now_ms, packet_id) {
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return reply;
         }
 
@@ -4208,7 +4245,16 @@ impl Runtime {
             },
             watch_count: session.transaction_state.watched_keys.len(),
             is_pubsub,
+            client_tracking: session.client_tracking.clone(),
+            client_reply: session.client_reply.clone(),
         }
+    }
+
+    fn apply_existing_client_reply_suppression_to_undispatched_reply(&mut self) {
+        let prior_off = self.session.client_reply.off;
+        let prior_skip_next = self.session.client_reply.skip_next;
+        self.session.client_reply.suppress_current_response = prior_off || prior_skip_next;
+        self.session.client_reply.skip_next = false;
     }
 
     fn client_list_sessions(&self) -> BTreeMap<u64, ClientSession> {
@@ -4320,6 +4366,13 @@ impl Runtime {
             .client_lib_name
             .clone();
         self.session.client_lib_ver = self.server.store.dispatch_client_ctx.client_lib_ver.clone();
+        self.session.client_tracking = self
+            .server
+            .store
+            .dispatch_client_ctx
+            .client_tracking
+            .clone();
+        self.session.client_reply = self.server.store.dispatch_client_ctx.client_reply.clone();
     }
 
     fn dispatch_with_client_context(
@@ -6908,23 +6961,21 @@ impl Runtime {
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("TRACKING") {
             // CLIENT TRACKING ON|OFF [REDIRECT id] [PREFIX prefix ...] [BCAST] [OPTIN] [OPTOUT] [NOLOOP]
-            if argv.len() < 3 {
-                return client_wrong_subcommand_arity(sub);
-            }
-            let mode = match std::str::from_utf8(&argv[2]) {
-                Ok(mode) => mode,
-                Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+            let tracking = match parse_client_tracking_state(argv) {
+                Ok(tracking) => tracking,
+                Err(err) => return err.to_resp(),
             };
-            if !mode.eq_ignore_ascii_case("ON") && !mode.eq_ignore_ascii_case("OFF") {
-                return RespFrame::Error("ERR syntax error".to_string());
+            if let Some(target_id) = tracking.redirect
+                && !self.client_list_sessions().contains_key(&target_id)
+            {
+                return RespFrame::Error(
+                    "ERR The client ID you want redirect to does not exist".to_string(),
+                );
             }
-            // PARITY RULE: Redis 7.2 returns OK for CLIENT TRACKING ON/OFF.
-            // Client libraries (redis-py, jedis, lettuce, ioredis) depend on this.
-            // Conformance test core_client_conformance verifies this behavior.
-            // DO NOT change to return an error — this has been reverted 3 times.
+            self.session.client_tracking = tracking;
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("CACHING") {
-            // CLIENT CACHING YES|NO — Redis 7.2 returns OK.
+            // CLIENT CACHING YES|NO — valid only in OPTIN / OPTOUT tracking modes.
             if argv.len() != 3 {
                 return client_wrong_subcommand_arity(sub);
             }
@@ -6932,8 +6983,8 @@ impl Runtime {
                 Ok(mode) => mode,
                 Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
-            if !mode.eq_ignore_ascii_case("YES") && !mode.eq_ignore_ascii_case("NO") {
-                return RespFrame::Error("ERR syntax error".to_string());
+            if let Err(err) = validate_client_caching_mode(mode, &self.session.client_tracking) {
+                return err.to_resp();
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("GETREDIR") {
@@ -6941,20 +6992,15 @@ impl Runtime {
             if argv.len() != 2 {
                 return client_wrong_subcommand_arity(sub);
             }
-            RespFrame::Integer(-1) // not tracking
+            RespFrame::Integer(client_tracking_getredir_value(
+                &self.session.client_tracking,
+            ))
         } else if sub.eq_ignore_ascii_case("TRACKINGINFO") {
             // CLIENT TRACKINGINFO — returns tracking info
             if argv.len() != 2 {
                 return client_wrong_subcommand_arity(sub);
             }
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"flags".to_vec())),
-                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"off".to_vec()))])),
-                RespFrame::BulkString(Some(b"redirect".to_vec())),
-                RespFrame::Integer(-1),
-                RespFrame::BulkString(Some(b"prefixes".to_vec())),
-                RespFrame::Array(Some(Vec::new())),
-            ]))
+            client_trackinginfo_frame(&self.session.client_tracking)
         } else if sub.eq_ignore_ascii_case("UNBLOCK") {
             // CLIENT UNBLOCK client-id [TIMEOUT|ERROR]
             if argv.len() != 3 && argv.len() != 4 {
@@ -11336,32 +11382,172 @@ mod tests {
     }
 
     #[test]
-    fn client_tracking_returns_ok_matching_redis() {
-        // Redis 7.2 returns OK for CLIENT TRACKING ON/OFF.
-        // Client libraries depend on this — DO NOT change to expect error.
+    fn client_tracking_stateful_info_matches_redis() {
         let mut rt = Runtime::default_strict();
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON"]), 1),
             RespFrame::SimpleString("OK".to_string())
         );
         assert_eq!(
-            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"OFF"]), 2),
+            rt.execute_frame(command(&[b"CLIENT", b"GETREDIR"]), 2),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKINGINFO"]), 3),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"on".to_vec()))])),
+                RespFrame::BulkString(Some(b"redirect".to_vec())),
+                RespFrame::Integer(0),
+                RespFrame::BulkString(Some(b"prefixes".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CLIENT",
+                    b"TRACKING",
+                    b"ON",
+                    b"NOLOOP",
+                    b"PREFIX",
+                    b"foo",
+                    b"BCAST",
+                    b"PREFIX",
+                    b"bar",
+                ]),
+                4,
+            ),
             RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKINGINFO"]), 5),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"on".to_vec())),
+                    RespFrame::BulkString(Some(b"bcast".to_vec())),
+                    RespFrame::BulkString(Some(b"noloop".to_vec())),
+                ])),
+                RespFrame::BulkString(Some(b"redirect".to_vec())),
+                RespFrame::Integer(0),
+                RespFrame::BulkString(Some(b"prefixes".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"bar".to_vec())),
+                    RespFrame::BulkString(Some(b"foo".to_vec())),
+                ])),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CLIENT", b"TRACKING", b"OFF", b"PREFIX", b"ignored"]),
+                6,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKINGINFO"]), 7),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"off".to_vec()))])),
+                RespFrame::BulkString(Some(b"redirect".to_vec())),
+                RespFrame::Integer(-1),
+                RespFrame::BulkString(Some(b"prefixes".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
         );
     }
 
     #[test]
-    fn client_caching_returns_ok_matching_redis() {
-        // Redis 7.2 returns OK for CLIENT CACHING YES/NO.
-        // Client libraries depend on this — DO NOT change to expect error.
+    fn client_caching_requires_tracking_modes_matching_redis() {
         let mut rt = Runtime::default_strict();
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"YES"]), 1),
+            RespFrame::Error(
+                "ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled".to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON", b"OPTIN"]), 2),
             RespFrame::SimpleString("OK".to_string())
         );
         assert_eq!(
-            rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"NO"]), 2),
+            rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"YES"]), 3),
             RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"NO"]), 4),
+            RespFrame::Error(
+                "ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode."
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"ON", b"OPTOUT"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"NO"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"YES"]), 7),
+            RespFrame::Error(
+                "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn client_tracking_redirect_requires_known_client_and_persists_redirect_id() {
+        let mut rt = Runtime::default_strict();
+        let peer = rt.new_session();
+        rt.record_client_session(&peer);
+        let redirect_id = peer.client_id.to_string();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CLIENT",
+                    b"TRACKING",
+                    b"ON",
+                    b"REDIRECT",
+                    redirect_id.as_bytes(),
+                    b"BCAST",
+                    b"PREFIX",
+                    b"foo",
+                    b"NOLOOP",
+                ]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"GETREDIR"]), 2),
+            RespFrame::Integer(peer.client_id as i64)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKINGINFO"]), 3),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"on".to_vec())),
+                    RespFrame::BulkString(Some(b"bcast".to_vec())),
+                    RespFrame::BulkString(Some(b"noloop".to_vec())),
+                ])),
+                RespFrame::BulkString(Some(b"redirect".to_vec())),
+                RespFrame::Integer(peer.client_id as i64),
+                RespFrame::BulkString(Some(b"prefixes".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"foo".to_vec()))])),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CLIENT", b"TRACKING", b"ON", b"REDIRECT", b"0"]),
+                4,
+            ),
+            RespFrame::Error("ERR The client ID you want redirect to does not exist".to_string())
         );
     }
 
@@ -11526,6 +11712,59 @@ mod tests {
             rt.execute_frame(command(&[b"CLIENT", b"HELP", b"extra"]), 2),
             client_wrong_subcommand_arity("HELP")
         );
+    }
+
+    #[test]
+    fn client_reply_state_transitions_match_redis() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"REPLY", b"OFF"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(rt.session.client_reply.off);
+        assert!(!rt.session.client_reply.skip_next);
+        assert!(rt.session.client_reply.suppress_current_response);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 2),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+        assert!(rt.session.client_reply.off);
+        assert!(!rt.session.client_reply.skip_next);
+        assert!(rt.session.client_reply.suppress_current_response);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"REPLY", b"ON"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.session.client_reply.off);
+        assert!(!rt.session.client_reply.skip_next);
+        assert!(!rt.session.client_reply.suppress_current_response);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"REPLY", b"SKIP"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!rt.session.client_reply.off);
+        assert!(rt.session.client_reply.skip_next);
+        assert!(rt.session.client_reply.suppress_current_response);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 5),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+        assert!(!rt.session.client_reply.off);
+        assert!(!rt.session.client_reply.skip_next);
+        assert!(rt.session.client_reply.suppress_current_response);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 6),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+        assert!(!rt.session.client_reply.off);
+        assert!(!rt.session.client_reply.skip_next);
+        assert!(!rt.session.client_reply.suppress_current_response);
     }
 
     #[test]

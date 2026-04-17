@@ -982,7 +982,7 @@ fn process_buffered_frames(
                         consumed_total += consumed;
                         break; // Stop processing — client is now blocked.
                     }
-                } else if suppress_client_network_reply(&parsed_frame, &response) {
+                } else if suppress_client_network_reply(runtime, &parsed_frame, &response) {
                     // Redis treats REPLCONF ACK/GETACK as internal control
                     // frames and does not send a direct reply on client links.
                 } else {
@@ -2591,7 +2591,14 @@ fn is_quit_frame(frame: &RespFrame) -> bool {
         .is_some_and(|cmd| cmd.eq_ignore_ascii_case(b"QUIT"))
 }
 
-fn suppress_client_network_reply(frame: &RespFrame, response: &RespFrame) -> bool {
+fn suppress_client_network_reply(
+    runtime: &Runtime,
+    frame: &RespFrame,
+    response: &RespFrame,
+) -> bool {
+    if runtime.suppress_current_network_reply() {
+        return true;
+    }
     if matches!(response, RespFrame::Error(_)) {
         return false;
     }
@@ -4512,6 +4519,135 @@ mod tests {
         assert!(paused_tokens.contains(&Token(1)));
         assert!(conn.write_buf.is_empty());
         assert!(!conn.read_buf.is_empty());
+    }
+
+    #[test]
+    fn client_reply_off_suppresses_network_replies_until_on() {
+        use crate::ClientConnection;
+        use fr_protocol::RespFrame;
+        use fr_runtime::Runtime;
+        use mio::Token;
+        use std::collections::HashSet;
+        use std::net::{TcpListener, TcpStream};
+
+        fn frame(parts: &[&[u8]]) -> RespFrame {
+            RespFrame::Array(Some(
+                parts
+                    .iter()
+                    .map(|part| RespFrame::BulkString(Some(part.to_vec())))
+                    .collect(),
+            ))
+        }
+
+        let mut runtime = Runtime::default_strict();
+        let ts = 20;
+        let session = runtime.new_session();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let (mut server_stream, _server_addr) = listener.accept().unwrap();
+        server_stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, ts);
+
+        let pipeline = [
+            frame(&[b"CLIENT", b"REPLY", b"OFF"]),
+            frame(&[b"NOPE"]),
+            frame(&[b"CLIENT", b"REPLY", b"ON"]),
+            frame(&[b"PING"]),
+        ];
+        for frame in pipeline {
+            conn.read_buf.extend_from_slice(&frame.to_bytes());
+        }
+
+        let mut blocked_tokens = HashSet::new();
+        let mut closing_tokens = HashSet::new();
+        let mut write_tokens = HashSet::new();
+        let mut paused_tokens = HashSet::new();
+        let prev = runtime.swap_session(std::mem::take(&mut conn.session));
+        crate::process_buffered_frames(
+            Token(1),
+            &mut conn,
+            &mut runtime,
+            &mut blocked_tokens,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            ts,
+        );
+        conn.session = runtime.swap_session(prev);
+
+        assert!(conn.try_flush().unwrap());
+
+        let mut response = [0_u8; 12];
+        std::io::Read::read_exact(&mut server_stream, &mut response).unwrap();
+        assert_eq!(response, *b"+OK\r\n+PONG\r\n");
+    }
+
+    #[test]
+    fn client_reply_skip_suppresses_current_and_next_network_reply() {
+        use crate::ClientConnection;
+        use fr_protocol::RespFrame;
+        use fr_runtime::Runtime;
+        use mio::Token;
+        use std::collections::HashSet;
+        use std::net::{TcpListener, TcpStream};
+
+        fn frame(parts: &[&[u8]]) -> RespFrame {
+            RespFrame::Array(Some(
+                parts
+                    .iter()
+                    .map(|part| RespFrame::BulkString(Some(part.to_vec())))
+                    .collect(),
+            ))
+        }
+
+        let mut runtime = Runtime::default_strict();
+        let ts = 21;
+        let session = runtime.new_session();
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let (mut server_stream, _server_addr) = listener.accept().unwrap();
+        server_stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+        let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, ts);
+
+        let pipeline = [
+            frame(&[b"CLIENT", b"REPLY", b"SKIP"]),
+            frame(&[b"NOPE"]),
+            frame(&[b"PING"]),
+        ];
+        for frame in pipeline {
+            conn.read_buf.extend_from_slice(&frame.to_bytes());
+        }
+
+        let mut blocked_tokens = HashSet::new();
+        let mut closing_tokens = HashSet::new();
+        let mut write_tokens = HashSet::new();
+        let mut paused_tokens = HashSet::new();
+        let prev = runtime.swap_session(std::mem::take(&mut conn.session));
+        crate::process_buffered_frames(
+            Token(1),
+            &mut conn,
+            &mut runtime,
+            &mut blocked_tokens,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            ts,
+        );
+        conn.session = runtime.swap_session(prev);
+
+        assert!(conn.try_flush().unwrap());
+
+        let mut response = [0_u8; 7];
+        std::io::Read::read_exact(&mut server_stream, &mut response).unwrap();
+        assert_eq!(response, *b"+PONG\r\n");
     }
 
     #[test]

@@ -874,6 +874,24 @@ impl ValueType {
 /// Default number of databases (matches Redis default).
 pub const DEFAULT_NUM_DATABASES: usize = 16;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClientTrackingState {
+    pub enabled: bool,
+    pub redirect: Option<u64>,
+    pub bcast: bool,
+    pub optin: bool,
+    pub optout: bool,
+    pub noloop: bool,
+    pub prefixes: BTreeSet<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ClientReplyState {
+    pub off: bool,
+    pub skip_next: bool,
+    pub suppress_current_response: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DispatchClientContext {
     pub client_id: u64,
@@ -893,6 +911,8 @@ pub struct DispatchClientContext {
     pub multi_count: i64,
     pub watch_count: usize,
     pub is_pubsub: bool,
+    pub client_tracking: ClientTrackingState,
+    pub client_reply: ClientReplyState,
 }
 
 impl Default for DispatchClientContext {
@@ -915,6 +935,8 @@ impl Default for DispatchClientContext {
             multi_count: -1,
             watch_count: 0,
             is_pubsub: false,
+            client_tracking: ClientTrackingState::default(),
+            client_reply: ClientReplyState::default(),
         }
     }
 }
@@ -8830,10 +8852,6 @@ impl Store {
             ));
         }
 
-        if flush {
-            self.function_libraries.clear();
-        }
-
         let mut pos = 0;
         if data.len() < 4 {
             return Err(StoreError::GenericError(
@@ -8842,6 +8860,12 @@ impl Store {
         }
         let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
         pos += 4;
+        let mut seen_names: HashSet<String> = if append {
+            self.function_libraries.keys().cloned().collect()
+        } else {
+            HashSet::new()
+        };
+        let mut restored_libraries = HashMap::new();
 
         for _ in 0..count {
             if data.len() - pos < 4 {
@@ -8895,7 +8919,7 @@ impl Store {
             let engine = String::from_utf8_lossy(&data[pos..pos + engine_len]).to_string();
             pos += engine_len;
 
-            if append && self.function_libraries.contains_key(&name) {
+            if append && !seen_names.insert(name.clone()) {
                 return Err(StoreError::GenericError(format!(
                     "ERR Library '{name}' already exists"
                 )));
@@ -8917,7 +8941,7 @@ impl Store {
                 }
             }
 
-            self.function_libraries.insert(
+            restored_libraries.insert(
                 name.clone(),
                 FunctionLibrary {
                     name,
@@ -8928,6 +8952,11 @@ impl Store {
                 },
             );
         }
+
+        if flush {
+            self.function_libraries.clear();
+        }
+        self.function_libraries.extend(restored_libraries);
         self.dirty = self.dirty.saturating_add(1);
         Ok(())
     }
@@ -10315,6 +10344,34 @@ mod tests {
             noack,
             count,
         }
+    }
+
+    fn function_library_snapshot(store: &Store) -> Vec<(String, String, Vec<u8>, Vec<String>)> {
+        store
+            .function_list(None)
+            .into_iter()
+            .map(|library| {
+                (
+                    library.name.clone(),
+                    library.engine.clone(),
+                    library.code.clone(),
+                    library
+                        .functions
+                        .iter()
+                        .map(|function| function.name.clone())
+                        .collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn sample_function_library(name: &str, first_fn: &str, second_fn: &str) -> Vec<u8> {
+        format!(
+            "#!lua name={name}\n\
+             redis.register_function('{first_fn}', function(keys, args) return #keys + #args end)\n\
+             redis.register_function{{function_name='{second_fn}', callback=function(keys, args) return 0 end}}\n"
+        )
+        .into_bytes()
     }
 
     #[test]
@@ -14177,6 +14234,48 @@ mod tests {
         assert_eq!(store.stat_used_memory_peak, 0);
         assert_eq!(store.instantaneous_ops_per_sec(), 0);
         assert_eq!(store.instantaneous_input_kbps(), 0.0);
+    }
+
+    #[test]
+    fn function_dump_restore_roundtrip_preserves_library_snapshot() {
+        let mut original = Store::new();
+        let library = sample_function_library("seedlib", "alpha", "beta");
+        original
+            .function_load(&library, false)
+            .expect("seed library must load");
+        let expected = function_library_snapshot(&original);
+        let dumped = original.function_dump();
+
+        let mut restored = Store::new();
+        restored
+            .function_restore(&dumped, "REPLACE")
+            .expect("self-generated FUNCTION DUMP payload must restore");
+
+        assert_eq!(function_library_snapshot(&restored), expected);
+    }
+
+    #[test]
+    fn function_restore_invalid_dump_is_atomic_even_with_flush_policy() {
+        let mut store = Store::new();
+        let library = sample_function_library("sentinel", "alpha", "beta");
+        store
+            .function_load(&library, false)
+            .expect("sentinel library must load");
+        let before = function_library_snapshot(&store);
+        let invalid_dump = vec![1, 0, 0, 0, 4, 0, 0, 0, b'n', b'a', b'm', b'e'];
+
+        let err = store
+            .function_restore(&invalid_dump, "FLUSH")
+            .expect_err("truncated function dump must fail");
+        assert_eq!(
+            err,
+            StoreError::GenericError("ERR Invalid dump data".to_string())
+        );
+        assert_eq!(
+            function_library_snapshot(&store),
+            before,
+            "failed FUNCTION RESTORE must not clear or partially mutate state"
+        );
     }
 
     // ── Golden artifact tests ──────────────────────────────────────────

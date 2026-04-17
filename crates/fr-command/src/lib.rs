@@ -5,12 +5,12 @@ pub use lua_eval::eval_script;
 
 use fr_protocol::RespFrame;
 use fr_store::{
-    ExpireTimeValue, MaxmemoryPolicy, PttlValue, PubSubMessage, ScoreBound, Store, StoreError,
-    StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
-    StreamGroupReadCursor, StreamGroupReadOptions, StreamId, ValueType, glob_match, read_rss_bytes,
-    sha1_hex_public,
+    ClientReplyState, ClientTrackingState, ExpireTimeValue, MaxmemoryPolicy, PttlValue,
+    PubSubMessage, ScoreBound, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
+    StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamId,
+    ValueType, glob_match, read_rss_bytes, sha1_hex_public,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::OnceLock;
@@ -531,6 +531,7 @@ pub fn dispatch_argv(
     let Some(raw_cmd) = argv.first() else {
         return Err(CommandError::InvalidCommandFrame);
     };
+    apply_client_reply_state(argv, &mut store.dispatch_client_ctx.client_reply)?;
     match classify_command(raw_cmd) {
         Some(CommandId::Ping) => return ping(argv),
         Some(CommandId::Echo) => return echo(argv),
@@ -10133,6 +10134,19 @@ fn client_wrong_subcommand_arity(subcommand: &str) -> CommandError {
 }
 
 const SCRIPT_NOSCRIPT_ERROR: &str = "ERR This Redis command is not allowed from script";
+const CLIENT_TRACKING_REDIRECT_MISSING: &str =
+    "ERR The client ID you want redirect to does not exist";
+const CLIENT_TRACKING_PREFIX_REQUIRES_BCAST: &str =
+    "ERR PREFIX option requires BCAST mode to be enabled";
+const CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT: &str =
+    "ERR You can't specify both OPTIN mode and OPTOUT mode";
+const CLIENT_TRACKING_BCAST_OPT_CONFLICT: &str =
+    "ERR OPTIN and OPTOUT are not compatible with BCAST";
+const CLIENT_CACHING_REQUIRES_TRACKING: &str = "ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled";
+const CLIENT_CACHING_YES_REQUIRES_OPTIN: &str =
+    "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode.";
+const CLIENT_CACHING_NO_REQUIRES_OPTOUT: &str =
+    "ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode.";
 
 fn script_noscript_command_error() -> CommandError {
     CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
@@ -10151,6 +10165,210 @@ fn eval_script_error_reply(script: &[u8], error: String) -> RespFrame {
     } else {
         RespFrame::Error(format!("ERR Error running script: {error}"))
     }
+}
+
+pub fn client_tracking_getredir_value(state: &ClientTrackingState) -> i64 {
+    if !state.enabled {
+        -1
+    } else {
+        i64::try_from(state.redirect.unwrap_or(0)).unwrap_or(i64::MAX)
+    }
+}
+
+fn client_tracking_flags(state: &ClientTrackingState) -> Vec<RespFrame> {
+    if !state.enabled {
+        return vec![RespFrame::BulkString(Some(b"off".to_vec()))];
+    }
+
+    let mut flags = vec![RespFrame::BulkString(Some(b"on".to_vec()))];
+    if state.bcast {
+        flags.push(RespFrame::BulkString(Some(b"bcast".to_vec())));
+    }
+    if state.optin {
+        flags.push(RespFrame::BulkString(Some(b"optin".to_vec())));
+    }
+    if state.optout {
+        flags.push(RespFrame::BulkString(Some(b"optout".to_vec())));
+    }
+    if state.noloop {
+        flags.push(RespFrame::BulkString(Some(b"noloop".to_vec())));
+    }
+    flags
+}
+
+pub fn client_trackinginfo_frame(state: &ClientTrackingState) -> RespFrame {
+    let prefixes = state
+        .prefixes
+        .iter()
+        .map(|prefix| RespFrame::BulkString(Some(prefix.clone())))
+        .collect();
+    RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(b"flags".to_vec())),
+        RespFrame::Array(Some(client_tracking_flags(state))),
+        RespFrame::BulkString(Some(b"redirect".to_vec())),
+        RespFrame::Integer(client_tracking_getredir_value(state)),
+        RespFrame::BulkString(Some(b"prefixes".to_vec())),
+        RespFrame::Array(Some(prefixes)),
+    ]))
+}
+
+pub fn parse_client_tracking_state(argv: &[Vec<u8>]) -> Result<ClientTrackingState, CommandError> {
+    if argv.len() < 3 {
+        return Err(client_wrong_subcommand_arity("TRACKING"));
+    }
+    let mode = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let enabled = if mode.eq_ignore_ascii_case("ON") {
+        true
+    } else if mode.eq_ignore_ascii_case("OFF") {
+        false
+    } else {
+        return Err(CommandError::SyntaxError);
+    };
+
+    let mut redirect = None;
+    let mut bcast = false;
+    let mut optin = false;
+    let mut optout = false;
+    let mut noloop = false;
+    let mut prefixes = BTreeSet::new();
+    let mut idx = 3usize;
+    while idx < argv.len() {
+        if argv[idx].eq_ignore_ascii_case(b"REDIRECT") {
+            if idx + 1 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let parsed = parse_i64_arg(&argv[idx + 1])?;
+            if parsed <= 0 {
+                return Err(CommandError::Custom(
+                    CLIENT_TRACKING_REDIRECT_MISSING.to_string(),
+                ));
+            }
+            redirect = Some(parsed as u64);
+            idx += 2;
+        } else if argv[idx].eq_ignore_ascii_case(b"PREFIX") {
+            if idx + 1 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            prefixes.insert(argv[idx + 1].clone());
+            idx += 2;
+        } else if argv[idx].eq_ignore_ascii_case(b"BCAST") {
+            bcast = true;
+            idx += 1;
+        } else if argv[idx].eq_ignore_ascii_case(b"OPTIN") {
+            optin = true;
+            idx += 1;
+        } else if argv[idx].eq_ignore_ascii_case(b"OPTOUT") {
+            optout = true;
+            idx += 1;
+        } else if argv[idx].eq_ignore_ascii_case(b"NOLOOP") {
+            noloop = true;
+            idx += 1;
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    }
+
+    if !enabled {
+        return Ok(ClientTrackingState::default());
+    }
+    if !bcast && !prefixes.is_empty() {
+        return Err(CommandError::Custom(
+            CLIENT_TRACKING_PREFIX_REQUIRES_BCAST.to_string(),
+        ));
+    }
+    if optin && optout {
+        return Err(CommandError::Custom(
+            CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT.to_string(),
+        ));
+    }
+    if bcast && (optin || optout) {
+        return Err(CommandError::Custom(
+            CLIENT_TRACKING_BCAST_OPT_CONFLICT.to_string(),
+        ));
+    }
+
+    Ok(ClientTrackingState {
+        enabled,
+        redirect,
+        bcast,
+        optin,
+        optout,
+        noloop,
+        prefixes,
+    })
+}
+
+pub fn validate_client_caching_mode(
+    mode: &str,
+    tracking: &ClientTrackingState,
+) -> Result<(), CommandError> {
+    if !mode.eq_ignore_ascii_case("YES") && !mode.eq_ignore_ascii_case("NO") {
+        return Err(CommandError::SyntaxError);
+    }
+    if !tracking.enabled || (!tracking.optin && !tracking.optout) {
+        return Err(CommandError::Custom(
+            CLIENT_CACHING_REQUIRES_TRACKING.to_string(),
+        ));
+    }
+    if mode.eq_ignore_ascii_case("YES") {
+        if !tracking.optin {
+            return Err(CommandError::Custom(
+                CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string(),
+            ));
+        }
+    } else if !tracking.optout {
+        return Err(CommandError::Custom(
+            CLIENT_CACHING_NO_REQUIRES_OPTOUT.to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn apply_client_reply_state(
+    argv: &[Vec<u8>],
+    state: &mut ClientReplyState,
+) -> Result<(), CommandError> {
+    let prior_off = state.off;
+    let prior_skip_next = state.skip_next;
+    state.suppress_current_response = false;
+
+    let is_client_reply = argv.len() >= 2
+        && argv[0].eq_ignore_ascii_case(b"CLIENT")
+        && argv[1].eq_ignore_ascii_case(b"REPLY");
+    if !is_client_reply {
+        state.suppress_current_response = prior_off || prior_skip_next;
+        state.skip_next = false;
+        return Ok(());
+    }
+
+    if argv.len() != 3 {
+        state.suppress_current_response = prior_off || prior_skip_next;
+        state.skip_next = false;
+        return Err(client_wrong_subcommand_arity("REPLY"));
+    }
+
+    let mode = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if mode.eq_ignore_ascii_case("ON") {
+        state.off = false;
+        state.skip_next = false;
+        return Ok(());
+    }
+    if mode.eq_ignore_ascii_case("OFF") {
+        state.off = true;
+        state.skip_next = false;
+        state.suppress_current_response = true;
+        return Ok(());
+    }
+    if mode.eq_ignore_ascii_case("SKIP") {
+        state.off = prior_off;
+        state.skip_next = !prior_off;
+        state.suppress_current_response = true;
+        return Ok(());
+    }
+
+    state.suppress_current_response = prior_off || prior_skip_next;
+    state.skip_next = false;
+    Err(CommandError::SyntaxError)
 }
 
 fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
@@ -10419,13 +10637,7 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("TRACKING") {
         // CLIENT TRACKING ON|OFF [REDIRECT id] [PREFIX prefix ...] [BCAST] [OPTIN] [OPTOUT] [NOLOOP]
-        if argv.len() < 3 {
-            return Err(client_wrong_subcommand_arity(sub));
-        }
-        let mode = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if !mode.eq_ignore_ascii_case("ON") && !mode.eq_ignore_ascii_case("OFF") {
-            return Err(CommandError::SyntaxError);
-        }
+        store.dispatch_client_ctx.client_tracking = parse_client_tracking_state(argv)?;
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("CACHING") {
         // CLIENT CACHING YES|NO
@@ -10433,27 +10645,22 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             return Err(client_wrong_subcommand_arity(sub));
         }
         let mode = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if !mode.eq_ignore_ascii_case("YES") && !mode.eq_ignore_ascii_case("NO") {
-            return Err(CommandError::SyntaxError);
-        }
+        validate_client_caching_mode(mode, &store.dispatch_client_ctx.client_tracking)?;
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("GETREDIR") {
         if argv.len() != 2 {
             return Err(client_wrong_subcommand_arity(sub));
         }
-        Ok(RespFrame::Integer(-1))
+        Ok(RespFrame::Integer(client_tracking_getredir_value(
+            &store.dispatch_client_ctx.client_tracking,
+        )))
     } else if sub.eq_ignore_ascii_case("TRACKINGINFO") {
         if argv.len() != 2 {
             return Err(client_wrong_subcommand_arity(sub));
         }
-        Ok(RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(b"flags".to_vec())),
-            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"off".to_vec()))])),
-            RespFrame::BulkString(Some(b"redirect".to_vec())),
-            RespFrame::Integer(-1),
-            RespFrame::BulkString(Some(b"prefixes".to_vec())),
-            RespFrame::Array(Some(Vec::new())),
-        ])))
+        Ok(client_trackinginfo_frame(
+            &store.dispatch_client_ctx.client_tracking,
+        ))
     } else if sub.eq_ignore_ascii_case("UNBLOCK") {
         if argv.len() != 3 && argv.len() != 4 {
             return Err(client_wrong_subcommand_arity(sub));
@@ -13385,9 +13592,12 @@ mod tests {
     use fr_store::{Store, StoreError};
 
     use super::{
-        COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec, SCRIPT_NOSCRIPT_ERROR,
-        classify_command, client_wrong_subcommand_arity, dispatch_argv, drain_pubsub_messages,
-        eq_ascii_command, execute_migrate, frame_to_argv, is_write_command,
+        CLIENT_CACHING_NO_REQUIRES_OPTOUT, CLIENT_CACHING_REQUIRES_TRACKING,
+        CLIENT_CACHING_YES_REQUIRES_OPTIN, CLIENT_TRACKING_BCAST_OPT_CONFLICT,
+        CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT, CLIENT_TRACKING_PREFIX_REQUIRES_BCAST,
+        CLIENT_TRACKING_REDIRECT_MISSING, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
+        SCRIPT_NOSCRIPT_ERROR, classify_command, client_wrong_subcommand_arity, dispatch_argv,
+        drain_pubsub_messages, eq_ascii_command, execute_migrate, frame_to_argv, is_write_command,
         parse_blocking_deadline_milliseconds, parse_migrate_request, pubsub_message_to_frame,
     };
 
@@ -26061,6 +26271,104 @@ mod tests {
     }
 
     #[test]
+    fn client_reply_state_tracks_off_skip_and_on() {
+        let mut store = Store::new();
+
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLIENT".to_vec(), b"REPLY".to_vec(), b"OFF".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(store.dispatch_client_ctx.client_reply.off);
+        assert!(!store.dispatch_client_ctx.client_reply.skip_next);
+        assert!(
+            store
+                .dispatch_client_ctx
+                .client_reply
+                .suppress_current_response
+        );
+
+        assert_eq!(
+            dispatch_argv(&[b"PING".to_vec()], &mut store, 1).unwrap(),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+        assert!(store.dispatch_client_ctx.client_reply.off);
+        assert!(!store.dispatch_client_ctx.client_reply.skip_next);
+        assert!(
+            store
+                .dispatch_client_ctx
+                .client_reply
+                .suppress_current_response
+        );
+
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLIENT".to_vec(), b"REPLY".to_vec(), b"ON".to_vec()],
+                &mut store,
+                2,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!store.dispatch_client_ctx.client_reply.off);
+        assert!(!store.dispatch_client_ctx.client_reply.skip_next);
+        assert!(
+            !store
+                .dispatch_client_ctx
+                .client_reply
+                .suppress_current_response
+        );
+
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLIENT".to_vec(), b"REPLY".to_vec(), b"SKIP".to_vec()],
+                &mut store,
+                3,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(!store.dispatch_client_ctx.client_reply.off);
+        assert!(store.dispatch_client_ctx.client_reply.skip_next);
+        assert!(
+            store
+                .dispatch_client_ctx
+                .client_reply
+                .suppress_current_response
+        );
+
+        assert_eq!(
+            dispatch_argv(&[b"PING".to_vec()], &mut store, 4).unwrap(),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+        assert!(!store.dispatch_client_ctx.client_reply.off);
+        assert!(!store.dispatch_client_ctx.client_reply.skip_next);
+        assert!(
+            store
+                .dispatch_client_ctx
+                .client_reply
+                .suppress_current_response
+        );
+
+        assert_eq!(
+            dispatch_argv(&[b"PING".to_vec()], &mut store, 5).unwrap(),
+            RespFrame::SimpleString("PONG".to_string())
+        );
+        assert!(!store.dispatch_client_ctx.client_reply.off);
+        assert!(!store.dispatch_client_ctx.client_reply.skip_next);
+        assert!(
+            !store
+                .dispatch_client_ctx
+                .client_reply
+                .suppress_current_response
+        );
+    }
+
+    #[test]
     fn client_no_evict_and_no_touch_validate_mode_and_arity() {
         let mut store = Store::new();
         let err = dispatch_argv(
@@ -26822,7 +27130,7 @@ mod tests {
     }
 
     #[test]
-    fn client_tracking_returns_ok() {
+    fn client_tracking_state_is_reflected_in_info_commands() {
         let mut store = Store::new();
         let out = dispatch_argv(
             &[b"CLIENT".to_vec(), b"TRACKING".to_vec(), b"ON".to_vec()],
@@ -26831,18 +27139,88 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
-    }
+        assert_eq!(
+            dispatch_argv(&[b"CLIENT".to_vec(), b"GETREDIR".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Integer(0)
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLIENT".to_vec(), b"TRACKINGINFO".to_vec()],
+                &mut store,
+                0
+            )
+            .unwrap(),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"on".to_vec()))])),
+                RespFrame::BulkString(Some(b"redirect".to_vec())),
+                RespFrame::Integer(0),
+                RespFrame::BulkString(Some(b"prefixes".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
+        );
 
-    #[test]
-    fn client_caching_returns_ok() {
-        let mut store = Store::new();
-        let out = dispatch_argv(
-            &[b"CLIENT".to_vec(), b"CACHING".to_vec(), b"YES".to_vec()],
-            &mut store,
-            0,
-        )
-        .unwrap();
-        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    b"ON".to_vec(),
+                    b"NOLOOP".to_vec(),
+                    b"PREFIX".to_vec(),
+                    b"foo".to_vec(),
+                    b"BCAST".to_vec(),
+                    b"PREFIX".to_vec(),
+                    b"bar".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLIENT".to_vec(), b"TRACKINGINFO".to_vec()],
+                &mut store,
+                0
+            )
+            .unwrap(),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"on".to_vec())),
+                    RespFrame::BulkString(Some(b"bcast".to_vec())),
+                    RespFrame::BulkString(Some(b"noloop".to_vec())),
+                ])),
+                RespFrame::BulkString(Some(b"redirect".to_vec())),
+                RespFrame::Integer(0),
+                RespFrame::BulkString(Some(b"prefixes".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"bar".to_vec())),
+                    RespFrame::BulkString(Some(b"foo".to_vec())),
+                ])),
+            ]))
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    b"OFF".to_vec(),
+                    b"PREFIX".to_vec(),
+                    b"ignored".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(&[b"CLIENT".to_vec(), b"GETREDIR".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Integer(-1)
+        );
     }
 
     #[test]
@@ -26858,32 +27236,141 @@ mod tests {
     }
 
     #[test]
-    fn client_getredir_returns_minus_one() {
+    fn client_tracking_validates_option_matrix() {
         let mut store = Store::new();
-        let out =
-            dispatch_argv(&[b"CLIENT".to_vec(), b"GETREDIR".to_vec()], &mut store, 0).unwrap();
-        assert_eq!(out, RespFrame::Integer(-1));
+        for (argv, expected) in [
+            (
+                vec![
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    b"ON".to_vec(),
+                    b"PREFIX".to_vec(),
+                    b"foo".to_vec(),
+                ],
+                CommandError::Custom(CLIENT_TRACKING_PREFIX_REQUIRES_BCAST.to_string()),
+            ),
+            (
+                vec![
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    b"ON".to_vec(),
+                    b"OPTIN".to_vec(),
+                    b"OPTOUT".to_vec(),
+                ],
+                CommandError::Custom(CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT.to_string()),
+            ),
+            (
+                vec![
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    b"ON".to_vec(),
+                    b"BCAST".to_vec(),
+                    b"OPTIN".to_vec(),
+                ],
+                CommandError::Custom(CLIENT_TRACKING_BCAST_OPT_CONFLICT.to_string()),
+            ),
+            (
+                vec![
+                    b"CLIENT".to_vec(),
+                    b"TRACKING".to_vec(),
+                    b"ON".to_vec(),
+                    b"REDIRECT".to_vec(),
+                    b"0".to_vec(),
+                ],
+                CommandError::Custom(CLIENT_TRACKING_REDIRECT_MISSING.to_string()),
+            ),
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
+            assert_eq!(err, expected);
+        }
     }
 
     #[test]
-    fn client_trackinginfo_returns_runtime_shape() {
+    fn client_caching_requires_optin_or_optout_modes() {
         let mut store = Store::new();
-        let out = dispatch_argv(
-            &[b"CLIENT".to_vec(), b"TRACKINGINFO".to_vec()],
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLIENT".to_vec(), b"CACHING".to_vec(), b"YES".to_vec()],
+                &mut store,
+                0
+            )
+            .unwrap_err(),
+            CommandError::Custom(CLIENT_CACHING_REQUIRES_TRACKING.to_string())
+        );
+        dispatch_argv(
+            &[b"CLIENT".to_vec(), b"TRACKING".to_vec(), b"ON".to_vec()],
             &mut store,
             0,
         )
         .unwrap();
         assert_eq!(
-            out,
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"flags".to_vec())),
-                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"off".to_vec()))])),
-                RespFrame::BulkString(Some(b"redirect".to_vec())),
-                RespFrame::Integer(-1),
-                RespFrame::BulkString(Some(b"prefixes".to_vec())),
-                RespFrame::Array(Some(Vec::new())),
-            ]))
+            dispatch_argv(
+                &[b"CLIENT".to_vec(), b"CACHING".to_vec(), b"YES".to_vec()],
+                &mut store,
+                0
+            )
+            .unwrap_err(),
+            CommandError::Custom(CLIENT_CACHING_REQUIRES_TRACKING.to_string())
+        );
+
+        dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"TRACKING".to_vec(),
+                b"ON".to_vec(),
+                b"OPTIN".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLIENT".to_vec(), b"CACHING".to_vec(), b"YES".to_vec()],
+                &mut store,
+                0
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLIENT".to_vec(), b"CACHING".to_vec(), b"NO".to_vec()],
+                &mut store,
+                0
+            )
+            .unwrap_err(),
+            CommandError::Custom(CLIENT_CACHING_NO_REQUIRES_OPTOUT.to_string())
+        );
+
+        dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"TRACKING".to_vec(),
+                b"ON".to_vec(),
+                b"OPTOUT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLIENT".to_vec(), b"CACHING".to_vec(), b"NO".to_vec()],
+                &mut store,
+                0
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLIENT".to_vec(), b"CACHING".to_vec(), b"YES".to_vec()],
+                &mut store,
+                0
+            )
+            .unwrap_err(),
+            CommandError::Custom(CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string())
         );
     }
 
