@@ -964,7 +964,7 @@ pub fn read_rdb_file(
 mod tests {
     use fr_protocol::{RespFrame, RespParseError};
 
-    use super::{decode_aof_stream, encode_aof_stream, AofRecord, PersistError};
+    use super::{AofRecord, PersistError, decode_aof_stream, encode_aof_stream};
 
     #[test]
     fn round_trip_aof_record() {
@@ -1083,9 +1083,9 @@ mod tests {
     // ── RDB tests ────────────────────────────────────────────────────
 
     use super::{
-        crc64_redis, decode_rdb, encode_rdb, lzf_decompress, rdb_encode_length, rdb_encode_string,
-        RdbEntry, RdbStreamConsumerGroup, RdbStreamPendingEntry, RdbValue, RDB_CHECKSUM_LEN,
-        RDB_OPCODE_EOF, RDB_TYPE_STRING,
+        RDB_CHECKSUM_LEN, RDB_OPCODE_EOF, RDB_TYPE_STRING, RdbEntry, RdbStreamConsumerGroup,
+        RdbStreamPendingEntry, RdbValue, crc64_redis, decode_rdb, encode_rdb, lzf_decompress,
+        rdb_encode_length, rdb_encode_string,
     };
 
     #[test]

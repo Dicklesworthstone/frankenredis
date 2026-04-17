@@ -1505,7 +1505,10 @@ fn exercise_pattern_pubsub_cross_client_delivery(
         .stream
         .write_all(&encode_command(&[b"PSUBSCRIBE", b"news.*"]))
         .unwrap();
-    let subscribe = sub_client.read_responses(1).pop().expect("psubscribe frame");
+    let subscribe = sub_client
+        .read_responses(1)
+        .pop()
+        .expect("psubscribe frame");
 
     let mut pub_client = connect_client(port);
     let publish_match = send_command(&mut pub_client, &[b"PUBLISH", b"news.sports", b"goal!"]);
@@ -1540,7 +1543,8 @@ fn tcp_pubsub_basic_cross_client_delivery_matches_legacy_redis_reference() {
         pubsub_unsubscribe_frame("channel1", 0),
         RespFrame::Integer(0),
     );
-    let franken = exercise_basic_pubsub_cross_client_delivery(|port| spawn_frankenredis(port, None));
+    let franken =
+        exercise_basic_pubsub_cross_client_delivery(|port| spawn_frankenredis(port, None));
     let legacy = exercise_basic_pubsub_cross_client_delivery(spawn_legacy_redis);
     assert_eq!(legacy, expected);
     assert_eq!(franken, legacy);
@@ -1583,7 +1587,10 @@ fn tcp_pubsub_pattern_subscribe() {
         exercise_pattern_pubsub_cross_client_delivery(|port| spawn_frankenredis(port, None));
     assert_eq!(subscribe, pubsub_psubscribe_frame("news.*", 1));
     assert_eq!(publish_match, RespFrame::Integer(1));
-    assert_eq!(message, pubsub_pmessage_frame("news.*", "news.sports", "goal!"));
+    assert_eq!(
+        message,
+        pubsub_pmessage_frame("news.*", "news.sports", "goal!")
+    );
     assert_eq!(
         publish_miss,
         RespFrame::Integer(0),
@@ -1599,7 +1606,8 @@ fn tcp_pubsub_pattern_subscribe_matches_legacy_redis_reference() {
         pubsub_pmessage_frame("news.*", "news.sports", "goal!"),
         RespFrame::Integer(0),
     );
-    let franken = exercise_pattern_pubsub_cross_client_delivery(|port| spawn_frankenredis(port, None));
+    let franken =
+        exercise_pattern_pubsub_cross_client_delivery(|port| spawn_frankenredis(port, None));
     let legacy = exercise_pattern_pubsub_cross_client_delivery(spawn_legacy_redis);
     assert_eq!(legacy, expected);
     assert_eq!(franken, legacy);
@@ -1658,15 +1666,8 @@ fn exercise_watch_exec_abort_on_concurrent_modification(
 
 #[test]
 fn tcp_watch_exec_aborts_on_concurrent_modification() {
-    let (
-        watch_resp,
-        val,
-        set_resp,
-        multi_resp,
-        queued,
-        exec_resp,
-        final_val,
-    ) = exercise_watch_exec_abort_on_concurrent_modification(|port| spawn_frankenredis(port, None));
+    let (watch_resp, val, set_resp, multi_resp, queued, exec_resp, final_val) =
+        exercise_watch_exec_abort_on_concurrent_modification(|port| spawn_frankenredis(port, None));
     assert_eq!(watch_resp, RespFrame::SimpleString("OK".to_string()));
     assert_eq!(val, RespFrame::BulkString(Some(b"0".to_vec())));
     assert_eq!(set_resp, RespFrame::SimpleString("OK".to_string()));
@@ -2416,12 +2417,7 @@ fn tcp_config_rewrite_updates_file_on_disk() {
     send_shutdown_nosave(port);
 }
 
-fn expected_single_stream_entry(
-    stream: &[u8],
-    id: &[u8],
-    field: &[u8],
-    value: &[u8],
-) -> RespFrame {
+fn expected_single_stream_entry(stream: &[u8], id: &[u8], field: &[u8], value: &[u8]) -> RespFrame {
     RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(stream.to_vec())),
         RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
@@ -2450,7 +2446,10 @@ fn exercise_xread_block_unblocks_on_new_entry(
         thread::sleep(Duration::from_millis(100));
         let mut producer = connect_client(port);
         assert_eq!(
-            send_command(&mut producer, &[b"XADD", b"s", b"1001-0", b"field", b"value"]),
+            send_command(
+                &mut producer,
+                &[b"XADD", b"s", b"1001-0", b"field", b"value"]
+            ),
             RespFrame::BulkString(Some(b"1001-0".to_vec()))
         );
     });
@@ -2484,7 +2483,10 @@ fn exercise_xreadgroup_block_unblocks_on_new_group_entry(
         thread::sleep(Duration::from_millis(100));
         let mut producer = connect_client(port);
         assert_eq!(
-            send_command(&mut producer, &[b"XADD", b"s", b"1001-0", b"field", b"value"]),
+            send_command(
+                &mut producer,
+                &[b"XADD", b"s", b"1001-0", b"field", b"value"]
+            ),
             RespFrame::BulkString(Some(b"1001-0".to_vec()))
         );
     });
@@ -2521,8 +2523,9 @@ fn tcp_xread_block_matches_legacy_redis_reference() {
 fn tcp_xreadgroup_block_matches_legacy_redis_reference() {
     let expected = expected_single_stream_entry(b"s", b"1001-0", b"field", b"value");
     let legacy = exercise_xreadgroup_block_unblocks_on_new_group_entry(spawn_legacy_redis);
-    let franken =
-        exercise_xreadgroup_block_unblocks_on_new_group_entry(|port| spawn_frankenredis(port, None));
+    let franken = exercise_xreadgroup_block_unblocks_on_new_group_entry(|port| {
+        spawn_frankenredis(port, None)
+    });
     assert_eq!(legacy, expected);
     assert_eq!(franken, legacy);
 }

@@ -672,11 +672,11 @@ fn main() -> ExitCode {
         // Process any CLIENT KILL requests from the runtime.
         let kills: Vec<u64> = std::mem::take(&mut runtime.server.pending_client_kills);
         for target_id in kills {
-            if let Some(&token) = client_id_to_token.get(&target_id) {
-                if let Some(conn) = clients.get_mut(&token) {
-                    conn.closing = true;
-                    closing_tokens.insert(token);
-                }
+            if let Some(&token) = client_id_to_token.get(&target_id)
+                && let Some(conn) = clients.get_mut(&token)
+            {
+                conn.closing = true;
+                closing_tokens.insert(token);
             }
         }
 
@@ -1934,7 +1934,9 @@ fn resolve_xread_block_argv(
             continue;
         }
         let key = resolved.get(ids_start + offset)?.clone();
-        let resume_id = runtime.xread_block_resume_id(&key, now_ms).unwrap_or((0, 0));
+        let resume_id = runtime
+            .xread_block_resume_id(&key, now_ms)
+            .unwrap_or((0, 0));
         resolved[id_idx] = format!("{}-{}", resume_id.0, resume_id.1).into_bytes();
     }
     Some(resolved)
@@ -2654,10 +2656,9 @@ mod tests {
         encode_eof_marked_replication_snapshot, encode_replication_snapshot, find_crlf,
         parse_blocking_deadline, parse_xread_block_deadline_argv, read_frame_from_stream,
         read_replication_snapshot_from_stream, replica_handshake_frame,
-        replica_handshake_read_timeout, replication_follow_up_bytes, server_help_text,
-        should_try_inline_parsing, sync_replica_with_primary, try_build_blocked_state,
-        resolve_xread_block_argv,
-        try_fulfill_blocked,
+        replica_handshake_read_timeout, replication_follow_up_bytes, resolve_xread_block_argv,
+        server_help_text, should_try_inline_parsing, sync_replica_with_primary,
+        try_build_blocked_state, try_fulfill_blocked,
     };
     use fr_config::RuntimePolicy;
     use fr_protocol::{ParserConfig, RespFrame};
