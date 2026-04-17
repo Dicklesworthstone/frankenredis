@@ -822,6 +822,210 @@ const CORE_ZSET_LIVE_STABLE_CASES: &[&str] = &[
     "zadd_incr_multiple_members_error",
 ];
 
+const CORE_GENERIC_LIVE_STABLE_CASES: &[&str] = &[
+    // TYPE command
+    "set_key_for_type",
+    "type_string",
+    "type_missing_key",
+    "setup_list_for_type",
+    "type_list",
+    "setup_set_for_type",
+    "type_set",
+    "setup_hash_for_type",
+    "type_hash",
+    "setup_zset_for_type",
+    "type_zset",
+    "type_stream_setup",
+    "type_stream",
+    "type_none",
+    // EXISTS
+    "exists_present",
+    "exists_missing",
+    "exists_multiple",
+    "exists_duplicate_keys",
+    "exists_multi_setup1",
+    "exists_multi_setup2",
+    "exists_multi",
+    "exists_duplicate_key",
+    // DEL/UNLINK
+    "del_single",
+    "del_single_result",
+    "del_missing",
+    "unlink_setup",
+    "unlink_result",
+    "unlink_missing",
+    "del_multiple",
+    "unlink_setup_multi",
+    "unlink_multiple",
+    "unlink_verify_deleted",
+    "unlink_nonexistent",
+    "del_multi_setup1",
+    "del_multi_setup2",
+    "del_multi",
+    // RENAME/RENAMENX
+    "rename_setup",
+    "rename_ok",
+    "rename_verify_new",
+    "rename_verify_old_gone",
+    "rename_missing_key",
+    "renamenx_setup",
+    "renamenx_no_conflict",
+    "renamenx_with_conflict",
+    "renamenx_conflict_result",
+    "rename_missing_source",
+    "rename_self_setup",
+    "rename_self_same_key",
+    "rename_self_verify",
+    "renamenx_missing_source",
+    "renamenx_dest_exists_setup",
+    "renamenx_dest_exists",
+    "rename_nonexistent",
+    "rename_same_key_setup",
+    "rename_same_key",
+    "renamenx_nonexistent_src",
+    // COPY
+    "copy_setup",
+    "copy_success",
+    "copy_verify_src",
+    "copy_verify_dst",
+    "copy_no_replace",
+    "copy_with_replace",
+    "copy_replace_result",
+    "copy_replace_verify",
+    "copy_missing_src",
+    // EXPIRE/TTL/PERSIST (non-timing-dependent)
+    "expire_setup",
+    "expire_set",
+    "ttl_no_expiry",
+    "ttl_missing_key",
+    "pttl_missing_key",
+    "persist_missing_key",
+    "persist_no_expiry",
+    "expire_missing_key",
+    "expiretime_setup",
+    "expiretime_no_expiry",
+    "expiretime_missing",
+    "pexpiretime_no_expiry",
+    "pexpiretime_missing",
+    "persist_nonexistent_key",
+    "persist_no_ttl_key_setup",
+    "persist_no_ttl_key",
+    // EXPIRE options (NX/XX/GT/LT)
+    "expire_nx_setup",
+    "expire_nx_no_existing_ttl",
+    "expire_nx_has_existing_ttl",
+    "expire_xx_setup",
+    "expire_xx_no_existing_ttl",
+    // APPEND
+    "append_new_key",
+    "append_existing",
+    "append_verify",
+    // GETDEL
+    "getdel_setup",
+    "getdel_returns_value",
+    "getdel_key_gone",
+    "getdel_missing",
+    // GETEX (non-timing aspects)
+    "getex_setup",
+    "getex_no_options",
+    "getex_missing",
+    // OBJECT ENCODING
+    "object_encoding_string_embstr",
+    "object_encoding_embstr",
+    "object_encoding_int",
+    "object_encoding_int_result",
+    "object_encoding_hash",
+    "object_encoding_list",
+    "object_encoding_list_result",
+    "object_encoding_set",
+    "object_encoding_zset",
+    "object_encoding_missing_key",
+    "object_encoding_raw_setup",
+    "object_encoding_raw",
+    "object_encoding_lowercase",
+    "object_encoding_stream_setup",
+    "object_encoding_stream",
+    "object_encoding_raw_string_setup",
+    "object_encoding_raw_string",
+    "object_encoding_hashtable_setup",
+    "object_encoding_hashtable",
+    "object_encoding_skiplist_setup",
+    "object_encoding_skiplist",
+    "object_encoding_intset_setup",
+    "object_encoding_intset",
+    "object_encoding_nonexistent",
+    // OBJECT REFCOUNT (skipped: live Redis returns error for missing keys)
+    "object_refcount",
+    // TOUCH
+    "touch_existing",
+    "touch_setup_a",
+    "touch_setup_b",
+    "touch_multiple_existing",
+    "touch_mix_existing_missing",
+    "touch_all_missing",
+    "touch_nonexistent",
+    "touch_mixed_setup",
+    "touch_mixed",
+    // DBSIZE
+    "dbsize_count",
+    // KEYS (pattern matching)
+    "keys_setup_a",
+    "keys_setup_b",
+    "keys_setup_c",
+    "keys_no_match",
+    "keys_single_match",
+    "keys_setup_prefix_a",
+    "keys_setup_prefix_b",
+    "keys_setup_suffix",
+    "keys_prefix_wildcard",
+    "keys_suffix_wildcard",
+    "keys_char_class_setup_a",
+    "keys_char_class_setup_b",
+    "keys_char_class_setup_x",
+    "keys_negated_char_class",
+    "keys_escaped_star_setup",
+    "keys_escaped_star_match",
+    "keys_escaped_question_setup",
+    "keys_escaped_question_match",
+    "keys_literal_brackets_setup",
+    "keys_literal_brackets_match",
+    // RENAME with TTL preservation
+    "rename_ttl_setup",
+    "rename_ttl_set_expire",
+    "rename_ttl_do_rename",
+    "rename_ttl_verify_value",
+    // RENAME cross-type
+    "rename_cross_type_list_setup",
+    "rename_cross_type_string_setup",
+    "rename_cross_type_do",
+    "rename_cross_type_verify_type",
+    "rename_cross_type_verify_contents",
+    // RENAME hash
+    "rename_hash_preserves_fields_setup",
+    "rename_hash_do",
+    "rename_hash_verify_type",
+    "rename_hash_verify_field",
+    "rename_hash_src_gone",
+    // DUMP/RESTORE
+    "dump_missing_key",
+    // Wrong arity errors
+    "touch_wrong_arity",
+    "randomkey_wrong_arity",
+    "rename_wrong_arity",
+    "renamenx_wrong_arity",
+    "type_wrong_arity",
+    "persist_wrong_arity",
+    "del_wrong_arity",
+    "object_wrong_arity",
+    "keys_wrong_arity_zero",
+    "keys_wrong_arity_extra",
+    "dump_wrong_arity_no_args",
+    "dump_wrong_arity_extra",
+    "restore_wrong_arity",
+    "restore_invalid_payload",
+    "sort_stream_wrongtype",
+];
+
 struct VendoredRedisOracle {
     child: Child,
     port: u16,
@@ -2272,6 +2476,30 @@ fn core_zset_live_redis_matches_runtime() {
     let report =
         run_live_redis_diff_for_cases(&cfg, "core_zset.json", CORE_ZSET_LIVE_STABLE_CASES, &oracle)
             .expect("zset live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
+#[test]
+fn core_generic_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_generic.json",
+        CORE_GENERIC_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("generic live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",
