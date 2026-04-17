@@ -189,6 +189,13 @@ pub struct LiveOracleConfig {
     pub align_timing_from_fixture: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveOptionalReplyCase {
+    pub name: String,
+    pub now_ms: u64,
+    pub argv: Vec<String>,
+}
+
 impl Default for LiveOracleConfig {
     fn default() -> Self {
         Self {
@@ -440,6 +447,91 @@ pub fn run_live_redis_diff_for_cases(
     let fixture = load_conformance_fixture(config, fixture_name)?;
     let filtered_fixture = select_conformance_fixture_cases(&fixture, case_names)?;
     run_live_redis_diff_with_fixture(config, fixture_name, filtered_fixture, oracle)
+}
+
+pub fn run_live_redis_optional_reply_sequence_diff(
+    config: &HarnessConfig,
+    suite_name: &str,
+    cases: &[LiveOptionalReplyCase],
+    oracle: &LiveOracleConfig,
+) -> Result<DifferentialReport, String> {
+    let mut runtime = runtime_for_harness_config(config);
+    let mut stream = connect_live_redis(oracle)?;
+    flushall(&mut stream)?;
+    let suite = format!("live_redis_optional_reply_diff::{suite_name}");
+    let live_log_path = config
+        .live_log_root
+        .as_ref()
+        .map(|root| live_log_output_path(root, &suite, suite_name));
+
+    let mut failed = Vec::new();
+    let total = cases.len();
+
+    for case in cases {
+        let evidence_before = runtime.evidence().events().len();
+        let frame = argv_to_frame(&case.argv);
+        let runtime_reply = runtime.execute_frame(frame.clone(), case.now_ms);
+        let runtime_wire_reply =
+            (!runtime.suppress_current_network_reply()).then_some(runtime_reply.clone());
+
+        send_frame(&mut stream, &frame)?;
+        let redis_wire_reply = read_optional_resp_frame_from_stream(&mut stream)?;
+
+        let expected = redis_wire_reply
+            .clone()
+            .unwrap_or_else(live_oracle_no_reply_sentinel);
+        let actual = runtime_wire_reply
+            .clone()
+            .unwrap_or_else(live_oracle_no_reply_sentinel);
+        let frame_ok = actual == expected;
+
+        let new_events = &runtime.evidence().events()[evidence_before..];
+        let outcome = if frame_ok {
+            LogOutcome::Pass
+        } else {
+            LogOutcome::Fail
+        };
+        let log_result = validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: &suite,
+                fixture_name: suite_name,
+                case_name: &case.name,
+                verification_path: VerificationPath::E2e,
+                now_ms: case.now_ms,
+                outcome,
+                persist_path: live_log_path.as_deref(),
+            },
+            new_events,
+        );
+
+        let passed = frame_ok && log_result.is_ok();
+        if !passed {
+            let detail = match (&runtime_wire_reply, &redis_wire_reply) {
+                (None, Some(reply)) => Some(format!(
+                    "runtime emitted no wire reply but live redis replied: {reply:?}"
+                )),
+                (Some(reply), None) => Some(format!(
+                    "live redis emitted no wire reply but runtime replied: {reply:?}"
+                )),
+                _ => None,
+            };
+            let reason_code = reason_code_from_evidence(new_events);
+            let replay_cmd = replay_cmd_from_evidence(new_events);
+            let artifact_refs = artifact_refs_from_evidence(new_events);
+            failed.push(CaseOutcome {
+                name: case.name.clone(),
+                passed,
+                expected,
+                actual,
+                detail: build_case_detail(frame_ok, detail, log_result.err()),
+                reason_code,
+                replay_cmd,
+                artifact_refs,
+            });
+        }
+    }
+
+    Ok(build_differential_report(suite, suite_name, total, failed))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

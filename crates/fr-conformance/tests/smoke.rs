@@ -7,9 +7,10 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fr_conformance::{
-    CaseOutcome, HarnessConfig, LiveOracleConfig, run_fixture, run_live_redis_diff,
-    run_live_redis_diff_for_cases, run_live_redis_multi_client_diff, run_protocol_fixture,
-    run_replay_fixture, run_replication_handshake_fixture, run_smoke,
+    CaseOutcome, HarnessConfig, LiveOptionalReplyCase, LiveOracleConfig, run_fixture,
+    run_live_redis_diff, run_live_redis_diff_for_cases, run_live_redis_multi_client_diff,
+    run_live_redis_optional_reply_sequence_diff, run_protocol_fixture, run_replay_fixture,
+    run_replication_handshake_fixture, run_smoke,
 };
 use fr_protocol::{RespFrame, parse_frame};
 use fr_runtime::Runtime;
@@ -724,6 +725,72 @@ fn core_client_conformance() {
     let diff = run_fixture(&cfg, "core_client.json").expect("client fixture");
     assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
     assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn core_client_reply_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let cases = vec![
+        LiveOptionalReplyCase {
+            name: "client_reply_off_suppresses_own_ok".to_string(),
+            now_ms: 10,
+            argv: ["CLIENT", "REPLY", "OFF"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+        LiveOptionalReplyCase {
+            name: "client_reply_off_suppresses_error_reply".to_string(),
+            now_ms: 11,
+            argv: ["NOPE"].into_iter().map(str::to_string).collect(),
+        },
+        LiveOptionalReplyCase {
+            name: "client_reply_on_restores_replies".to_string(),
+            now_ms: 12,
+            argv: ["CLIENT", "REPLY", "ON"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+        LiveOptionalReplyCase {
+            name: "client_reply_on_allows_following_reply".to_string(),
+            now_ms: 13,
+            argv: ["PING"].into_iter().map(str::to_string).collect(),
+        },
+        LiveOptionalReplyCase {
+            name: "client_reply_skip_suppresses_own_ok".to_string(),
+            now_ms: 14,
+            argv: ["CLIENT", "REPLY", "SKIP"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+        LiveOptionalReplyCase {
+            name: "client_reply_skip_suppresses_next_error".to_string(),
+            now_ms: 15,
+            argv: ["NOPE"].into_iter().map(str::to_string).collect(),
+        },
+        LiveOptionalReplyCase {
+            name: "client_reply_skip_window_expires_after_one_command".to_string(),
+            now_ms: 16,
+            argv: ["PING"].into_iter().map(str::to_string).collect(),
+        },
+    ];
+    let report =
+        run_live_redis_optional_reply_sequence_diff(&cfg, "core_client_reply", &cases, &oracle)
+            .expect("client reply live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
 }
 
 #[test]

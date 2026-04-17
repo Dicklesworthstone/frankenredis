@@ -252,8 +252,8 @@
         "YES"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled"
       }
     },
     {
@@ -465,8 +465,8 @@
         "NO"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled"
       }
     },
     {
@@ -1340,8 +1340,145 @@
       }
     },
     {
-      "name": "client_trackinginfo_wrong_arity",
+      "name": "client_tracking_on_optin",
       "now_ms": 271,
+      "argv": [
+        "CLIENT",
+        "TRACKING",
+        "ON",
+        "OPTIN"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "client_caching_yes_optin_ok",
+      "now_ms": 272,
+      "argv": [
+        "CLIENT",
+        "CACHING",
+        "YES"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "client_caching_no_optin_rejected",
+      "now_ms": 273,
+      "argv": [
+        "CLIENT",
+        "CACHING",
+        "NO"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode."
+      }
+    },
+    {
+      "name": "client_tracking_on_bcast_prefix_noloop",
+      "now_ms": 274,
+      "argv": [
+        "CLIENT",
+        "TRACKING",
+        "ON",
+        "NOLOOP",
+        "PREFIX",
+        "foo",
+        "BCAST",
+        "PREFIX",
+        "bar"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "client_getredir_returns_zero_when_tracking_enabled",
+      "now_ms": 275,
+      "argv": [
+        "CLIENT",
+        "GETREDIR"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "client_trackinginfo_returns_bcast_prefix_noloop",
+      "now_ms": 276,
+      "argv": [
+        "CLIENT",
+        "TRACKINGINFO"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind": "bulk", "value": "flags"},
+          {"kind": "array", "value": [
+            {"kind": "bulk", "value": "on"},
+            {"kind": "bulk", "value": "bcast"},
+            {"kind": "bulk", "value": "noloop"}
+          ]},
+          {"kind": "bulk", "value": "redirect"},
+          {"kind": "integer", "value": 0},
+          {"kind": "bulk", "value": "prefixes"},
+          {"kind": "array", "value": [
+            {"kind": "bulk", "value": "bar"},
+            {"kind": "bulk", "value": "foo"}
+          ]}
+        ]
+      }
+    },
+    {
+      "name": "client_tracking_on_optout",
+      "now_ms": 277,
+      "argv": [
+        "CLIENT",
+        "TRACKING",
+        "ON",
+        "OPTOUT"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "client_caching_no_optout_ok",
+      "now_ms": 278,
+      "argv": [
+        "CLIENT",
+        "CACHING",
+        "NO"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "client_caching_yes_optout_rejected",
+      "now_ms": 279,
+      "argv": [
+        "CLIENT",
+        "CACHING",
+        "YES"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode."
+      }
+    },
+    {
+      "name": "client_trackinginfo_wrong_arity",
+      "now_ms": 280,
       "argv": [
         "CLIENT",
         "TRACKINGINFO",
@@ -1354,7 +1491,7 @@
     },
     {
       "name": "client_unblock_wrong_arity",
-      "now_ms": 280,
+      "now_ms": 281,
       "argv": [
         "CLIENT",
         "UNBLOCK"
