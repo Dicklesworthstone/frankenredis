@@ -28,6 +28,12 @@ path = "../crates/fr-command"
 [dependencies.fr-runtime]
 path = "../crates/fr-runtime"
 
+[dependencies.fr-repl]
+path = "../crates/fr-repl"
+
+[dependencies.fr-config]
+path = "../crates/fr-config"
+
 [[bin]]
 name = "fuzz_resp_parser"
 path = "fuzz_targets/fuzz_resp_parser.rs"
@@ -94,6 +100,27 @@ bench = false
 [[bin]]
 name = "fuzz_function_restore"
 path = "fuzz_targets/fuzz_function_restore.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_psync_reply"
+path = "fuzz_targets/fuzz_psync_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_tls_config"
+path = "fuzz_targets/fuzz_tls_config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_glob_match"
+path = "fuzz_targets/fuzz_glob_match.rs"
 test = false
 doc = false
 bench = false
