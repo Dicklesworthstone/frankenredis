@@ -778,6 +778,116 @@
       }
     },
     {
+      "name": "hello_setname_control_char_error",
+      "now_ms": 110,
+      "argv": [
+        "HELLO",
+        "2",
+        "SETNAME",
+        "bad\nname"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Client names cannot contain spaces, newlines or special characters."
+      }
+    },
+    {
+      "name": "getname_after_hello_setname_control_char_error",
+      "now_ms": 110,
+      "argv": [
+        "CLIENT",
+        "GETNAME"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "fromhello"
+      }
+    },
+    {
+      "name": "hello_setname_last_wins",
+      "now_ms": 111,
+      "argv": [
+        "HELLO",
+        "2",
+        "SETNAME",
+        "client1",
+        "SETNAME",
+        "client2"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "server"
+          },
+          {
+            "kind": "bulk",
+            "value": "redis"
+          },
+          {
+            "kind": "bulk",
+            "value": "version"
+          },
+          {
+            "kind": "bulk",
+            "value": "7.2.0"
+          },
+          {
+            "kind": "bulk",
+            "value": "proto"
+          },
+          {
+            "kind": "integer",
+            "value": 2
+          },
+          {
+            "kind": "bulk",
+            "value": "id"
+          },
+          {
+            "kind": "any_integer"
+          },
+          {
+            "kind": "bulk",
+            "value": "mode"
+          },
+          {
+            "kind": "bulk",
+            "value": "standalone"
+          },
+          {
+            "kind": "bulk",
+            "value": "role"
+          },
+          {
+            "kind": "bulk",
+            "value": "master"
+          },
+          {
+            "kind": "bulk",
+            "value": "modules"
+          },
+          {
+            "kind": "array",
+            "value": []
+          }
+        ]
+      }
+    },
+    {
+      "name": "getname_after_hello_setname_last_wins",
+      "now_ms": 111,
+      "argv": [
+        "CLIENT",
+        "GETNAME"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "client2"
+      }
+    },
+    {
       "name": "client_setname_with_underscore",
       "now_ms": 120,
       "argv": [

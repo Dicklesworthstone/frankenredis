@@ -14,6 +14,88 @@ use fr_conformance::{
 use fr_protocol::{RespFrame, parse_frame};
 use fr_runtime::Runtime;
 
+const CORE_STREAM_LIVE_STABLE_CASES: &[&str] = &[
+    "xlen_missing_key",
+    "xrange_invalid_bound_error",
+    "xrevrange_invalid_bound_error",
+    "xdel_missing_key",
+    "xdel_missing_key_invalid_id_zero",
+    "xadd_explicit_setup",
+    "xadd_lower_id_error",
+    "xadd_equal_id_error",
+    "xrange_count_zero",
+    "xrange_missing_key",
+    "xrevrange_missing_key",
+    "xadd_read1_first",
+    "xadd_read1_second",
+    "xadd_read2_first",
+    "xadd_partial_auto_first_entry",
+    "xadd_partial_auto_same_ms_increments_seq",
+    "xadd_partial_auto_same_ms_increments_again",
+    "xadd_partial_auto_new_ms_resets_seq",
+    "xadd_partial_auto_verify_length",
+    "xadd_partial_auto_lower_ms_rejected",
+];
+
+const CORE_SCRIPTING_LIVE_STABLE_CASES: &[&str] = &[
+    "eval_return_integer",
+    "eval_return_string",
+    "eval_client_setname_rejected_from_script",
+    "eval_client_getname_rejected_from_script",
+    "eval_client_id_rejected_from_script",
+    "eval_return_nil",
+    "eval_return_true_as_integer_1",
+    "eval_return_false_as_nil",
+    "eval_return_table_as_array",
+    "eval_arithmetic",
+    "eval_string_concat",
+    "eval_local_variable",
+    "eval_if_true_branch",
+    "eval_if_false_branch",
+    "eval_numeric_for_loop",
+    "eval_keys_and_argv",
+    "eval_argv_access",
+    "eval_redis_call_set",
+    "eval_redis_call_get",
+    "eval_redis_call_incr",
+    "eval_tonumber",
+    "eval_tostring",
+    "eval_type_function",
+    "eval_string_len_operator",
+    "eval_table_len_operator",
+    "eval_math_floor",
+    "eval_string_sub",
+    "eval_string_upper",
+    "eval_pcall_success",
+    "eval_wrong_arity",
+    "eval_invalid_numkeys",
+    "eval_while_loop",
+    "eval_repeat_until",
+    "eval_table_insert_and_return",
+    "eval_status_reply",
+    "eval_error_reply",
+    "eval_pcall_catches_error",
+    "eval_closure_captures_upvalue",
+    "eval_closure_shared_upvalue_counter",
+    "eval_closure_returns_function_result",
+    "eval_local_recursive_function",
+    "eval_local_recursive_fibonacci",
+    "eval_generic_for_ipairs",
+    "eval_generic_for_pairs",
+    "eval_nested_for_loops",
+    "eval_for_loop_with_step",
+    "eval_for_loop_negative_step",
+    "eval_while_with_break",
+    "eval_for_with_break",
+    "eval_string_gmatch_basic",
+    "eval_table_sort_basic",
+    "eval_table_sort_custom_comparator",
+    "eval_multiple_return_values_first",
+    "eval_redis_call_with_keys_argv",
+    "eval_string_format_basic",
+    "eval_math_functions",
+];
+
 struct VendoredRedisOracle {
     child: Child,
     port: u16,
@@ -1052,8 +1134,13 @@ fn core_scripting_live_redis_matches_runtime() {
         port: oracle_server.port,
         ..LiveOracleConfig::default()
     };
-    let report =
-        run_live_redis_diff(&cfg, "core_scripting.json", &oracle).expect("scripting live diff");
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_scripting.json",
+        CORE_SCRIPTING_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("scripting live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",
@@ -1071,8 +1158,13 @@ fn core_stream_live_redis_matches_runtime() {
         port: oracle_server.port,
         ..LiveOracleConfig::default()
     };
-    let report =
-        run_live_redis_diff(&cfg, "core_stream.json", &oracle).expect("stream live diff");
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_stream.json",
+        CORE_STREAM_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("stream live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",

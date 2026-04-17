@@ -3595,6 +3595,127 @@ mod tests {
     }
 
     #[test]
+    fn fr_p2c_004_f_metamorphic_shadowed_hello_options_preserve_effective_state() {
+        let mut baseline = Runtime::default_strict();
+        let mut transformed = Runtime::default_strict();
+        for runtime in [&mut baseline, &mut transformed] {
+            runtime.add_user(b"alice".to_vec(), b"secret1".to_vec());
+            runtime.add_user(b"bob".to_vec(), b"secret2".to_vec());
+        }
+
+        let baseline_reply = baseline.execute_frame(
+            command_frame(&[
+                "HELLO",
+                "2",
+                "AUTH",
+                "alice",
+                "secret1",
+                "SETNAME",
+                "final-client",
+            ]),
+            526,
+        );
+        let transformed_reply = transformed.execute_frame(
+            command_frame(&[
+                "HELLO",
+                "2",
+                "AUTH",
+                "bob",
+                "secret2",
+                "SETNAME",
+                "shadow-client",
+                "AUTH",
+                "alice",
+                "secret1",
+                "SETNAME",
+                "final-client",
+            ]),
+            526,
+        );
+        match (&baseline_reply, &transformed_reply) {
+            (RespFrame::Array(Some(baseline_parts)), RespFrame::Array(Some(transformed_parts))) => {
+                assert_eq!(baseline_parts.len(), 14);
+                assert_eq!(transformed_parts.len(), 14);
+                for idx in [0usize, 1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13] {
+                    assert_eq!(baseline_parts[idx], transformed_parts[idx]);
+                }
+                assert!(matches!(baseline_parts[7], RespFrame::Integer(_)));
+                assert!(matches!(transformed_parts[7], RespFrame::Integer(_)));
+            }
+            _ => panic!(
+                "HELLO shadowed-option paths returned unexpected replies: baseline={baseline_reply:?} transformed={transformed_reply:?}"
+            ),
+        }
+
+        let baseline_whoami = baseline.execute_frame(command_frame(&["ACL", "WHOAMI"]), 527);
+        let transformed_whoami = transformed.execute_frame(command_frame(&["ACL", "WHOAMI"]), 527);
+        assert_eq!(baseline_whoami, transformed_whoami);
+        assert_eq!(
+            baseline_whoami,
+            RespFrame::BulkString(Some(b"alice".to_vec()))
+        );
+
+        let baseline_name = baseline.execute_frame(command_frame(&["CLIENT", "GETNAME"]), 528);
+        let transformed_name =
+            transformed.execute_frame(command_frame(&["CLIENT", "GETNAME"]), 528);
+        assert_eq!(baseline_name, transformed_name);
+        assert_eq!(
+            baseline_name,
+            RespFrame::BulkString(Some(b"final-client".to_vec()))
+        );
+
+        let baseline_set =
+            baseline.execute_frame(command_frame(&["SET", "fr:p2c:004:mm:key2", "value"]), 529);
+        let transformed_set =
+            transformed.execute_frame(command_frame(&["SET", "fr:p2c:004:mm:key2", "value"]), 529);
+        assert_eq!(baseline_set, transformed_set);
+
+        let baseline_get =
+            baseline.execute_frame(command_frame(&["GET", "fr:p2c:004:mm:key2"]), 530);
+        let transformed_get =
+            transformed.execute_frame(command_frame(&["GET", "fr:p2c:004:mm:key2"]), 530);
+        assert_eq!(baseline_get, transformed_get);
+        assert_eq!(baseline_get, RespFrame::BulkString(Some(b"value".to_vec())));
+
+        let event = EvidenceEvent {
+            ts_utc: "unix_ms:531".to_string(),
+            ts_ms: 531,
+            packet_id: 4,
+            mode: Mode::Strict,
+            severity: DriftSeverity::S0,
+            threat_class: ThreatClass::AuthPolicyConfusion,
+            decision_action: DecisionAction::FailClosed,
+            subsystem: "auth_metamorphic",
+            action: "shadowed_hello_options_invariant",
+            reason_code: "parity_ok",
+            reason: "Shadowed HELLO AUTH and SETNAME options preserve the same effective authenticated user, client name, and command behavior".to_string(),
+            input_digest: "fr_p2c_004_f_metamorphic_shadowed_options_input".to_string(),
+            output_digest: "fr_p2c_004_f_metamorphic_shadowed_options_output".to_string(),
+            state_digest_before: "dual_path_pre_hello".to_string(),
+            state_digest_after: "dual_path_shadowed_options_converged".to_string(),
+            replay_cmd: "FR_MODE=strict FR_SEED=17 rch exec -- cargo test -p fr-conformance -- --nocapture fr_p2c_004_f_metamorphic_shadowed_hello_options_preserve_effective_state".to_string(),
+            artifact_refs: vec![
+                "TEST_LOG_SCHEMA_V1.md".to_string(),
+                "crates/fr-conformance/fixtures/phase2c/FR-P2C-004/contract_table.md".to_string(),
+            ],
+            confidence: Some(1.0),
+        };
+        validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: "fr_p2c_004",
+                fixture_name: "fr_p2c_004_acl_metamorphic",
+                case_name: "f_metamorphic_shadowed_hello_options_invariant",
+                verification_path: VerificationPath::Property,
+                now_ms: 531,
+                outcome: LogOutcome::Pass,
+                persist_path: None,
+            },
+            std::slice::from_ref(&event),
+        )
+        .expect("packet-004 shadowed HELLO options metamorphic log should validate");
+    }
+
+    #[test]
     fn fr_p2c_004_f_adversarial_auth_reason_codes_are_stable() {
         let mut strict = Runtime::default_strict();
         strict.set_requirepass(Some(b"secret".to_vec()));

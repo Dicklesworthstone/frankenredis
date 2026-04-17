@@ -907,15 +907,18 @@
       "name": "multi_extra_args_ignored",
       "now_ms": 260,
       "argv": ["MULTI", "extra"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'multi' command"
+      }
     },
     {
       "name": "multi_extra_args_exec_with_extra",
       "now_ms": 261,
       "argv": ["EXEC", "extra"],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "EXECABORT Transaction discarded because of: wrong number of arguments for 'exec' command"
       }
     },
     {
@@ -928,22 +931,28 @@
       "name": "discard_extra_args_ignored",
       "now_ms": 263,
       "argv": ["DISCARD", "extra"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'discard' command"
+      }
     },
 
     {
       "name": "multi_case_insensitive_lowercase",
       "now_ms": 270,
       "argv": ["multi"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "expect": {
+        "kind": "error",
+        "value": "ERR MULTI calls can not be nested"
+      }
     },
     {
       "name": "multi_case_insensitive_exec_lowercase",
       "now_ms": 271,
       "argv": ["exec"],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "EXECABORT Transaction discarded because of previous errors."
       }
     },
     {
@@ -1021,7 +1030,7 @@
       "argv": ["NOTAREALCMD", "arg"],
       "expect": {
         "kind": "error",
-        "value": "ERR unknown command 'NOTAREALCMD'"
+        "value": "ERR unknown command 'NOTAREALCMD', with args beginning with: 'arg' "
       }
     },
     {

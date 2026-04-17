@@ -28,7 +28,7 @@
       }
     },
     {
-      "name": "eval_client_setname_updates_session_context",
+      "name": "eval_client_setname_rejected_from_script",
       "now_ms": 0,
       "argv": [
         "EVAL",
@@ -36,12 +36,12 @@
         "0"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR This Redis command is not allowed from script script: 0b8ff5cbdb0f1df17a6ac8ec122d80436f8713cc, on @user_script:1."
       }
     },
     {
-      "name": "eval_client_getname_reads_session_context",
+      "name": "eval_client_getname_rejected_from_script",
       "now_ms": 0,
       "argv": [
         "EVAL",
@@ -49,8 +49,21 @@
         "0"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": "lua-client"
+        "kind": "error",
+        "value": "ERR This Redis command is not allowed from script script: 4e8de9ebb5324b557591f0abb672722ded422e4a, on @user_script:1."
+      }
+    },
+    {
+      "name": "eval_client_id_rejected_from_script",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return redis.call('CLIENT','ID')",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR This Redis command is not allowed from script script: 14a340356663d6198502058227488df08c8f36d8, on @user_script:1."
       }
     },
     {

@@ -486,6 +486,19 @@
       }
     },
     {
+      "name": "xdel_missing_key_invalid_id_zero",
+      "now_ms": 1000,
+      "argv": [
+        "XDEL",
+        "missing_stream",
+        "bad-id"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
       "name": "xdel_invalid_id_error",
       "now_ms": 1000,
       "argv": [
@@ -3019,8 +3032,7 @@
         "0"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "null_array"
       }
     },
     {
