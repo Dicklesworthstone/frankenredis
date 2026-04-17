@@ -5,6 +5,10 @@ edition.workspace = true
 license-file.workspace = true
 description = "FrankenRedis standalone server binary"
 
+[lib]
+name = "fr_server"
+path = "src/lib.rs"
+
 [[bin]]
 name = "frankenredis"
 path = "src/main.rs"
