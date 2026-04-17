@@ -15,6 +15,36 @@ use fr_conformance::{
 use fr_protocol::{RespFrame, parse_frame};
 use fr_runtime::Runtime;
 
+const CORE_OBJECT_LIVE_STABLE_CASES: &[&str] = &[
+    "object_encoding_string_int",
+    "object_encoding_returns_int",
+    "object_encoding_string_embstr",
+    "object_encoding_returns_embstr",
+    "object_encoding_string_raw_setup",
+    "object_encoding_returns_raw",
+    "object_encoding_hash_small_setup",
+    "object_encoding_hash_listpack",
+    "object_encoding_list_small_setup",
+    "object_encoding_list_listpack",
+    "object_encoding_set_intset_setup",
+    "object_encoding_set_intset",
+    "object_encoding_set_listpack_setup",
+    "object_encoding_set_listpack",
+    "object_encoding_zset_small_setup",
+    "object_encoding_zset_listpack",
+    "object_encoding_stream_setup",
+    "object_encoding_stream",
+    "object_encoding_missing_key",
+    "object_refcount_string",
+    "object_no_subcommand",
+    "object_encoding_lowercase_subcommand",
+    "object_encoding_mixedcase_subcommand",
+    "object_encoding_hll_setup",
+    "object_encoding_hll_raw",
+    "object_encoding_geo_setup",
+    "object_encoding_geo_skiplist",
+];
+
 const CORE_STREAM_LIVE_STABLE_CASES: &[&str] = &[
     "xlen_missing_key",
     "xrange_invalid_bound_error",
@@ -1232,6 +1262,30 @@ fn core_stream_live_redis_matches_runtime() {
         &oracle,
     )
     .expect("stream live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
+#[test]
+fn core_object_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_object.json",
+        CORE_OBJECT_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("object live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",
