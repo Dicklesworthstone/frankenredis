@@ -155,7 +155,10 @@ fn live_info_case(
 ) -> LiveInfoContractCase {
     LiveInfoContractCase {
         case_name: case_name.to_string(),
-        required_sections: required_sections.iter().map(|section| (*section).to_string()).collect(),
+        required_sections: required_sections
+            .iter()
+            .map(|section| (*section).to_string())
+            .collect(),
         field_contracts: field_contracts.to_vec(),
     }
 }
@@ -442,6 +445,97 @@ const CORE_HASH_LIVE_STABLE_CASES: &[&str] = &[
     "hgetall_empty_after_delete",
     "hgetall_empty_delete_field",
     "hgetall_empty_hash_returns_empty",
+];
+
+const CORE_SET_LIVE_STABLE_CASES: &[&str] = &[
+    // Basic SADD/SCARD/SISMEMBER
+    "sadd_new_members",
+    "sadd_duplicate_member",
+    "scard",
+    "scard_missing_key",
+    "sismember_present",
+    "sismember_absent",
+    "sismember_missing_key",
+    // SREM
+    "srem_existing",
+    "srem_absent",
+    "srem_multiple",
+    "srem_multiple_existing_and_missing",
+    "srem_verify_remaining",
+    // SMEMBERS
+    "smembers_result",
+    "smembers_missing_key",
+    // SMISMEMBER
+    "smismember_check",
+    "smismember_missing_key",
+    // Set operations setup
+    "sadd_set2",
+    // SINTER/SUNION/SDIFF
+    "sinter_sets",
+    "sunion_sets",
+    "sdiff_sets",
+    "sinter_with_nonexistent_key",
+    "sunion_with_nonexistent_key",
+    "sdiff_with_nonexistent_key",
+    // SMOVE
+    "smove_existing",
+    "sismember_after_smove",
+    "sismember_removed_by_smove",
+    "smove_missing_member",
+    "smove_nonexistent_source",
+    // SINTERSTORE/SUNIONSTORE/SDIFFSTORE
+    "sinterstore_dest",
+    "sinterstore_src2",
+    "sinterstore_result",
+    "sunionstore_result",
+    "sdiffstore_result",
+    // SINTERCARD
+    "sintercard_basic",
+    "sintercard_with_limit",
+    "sintercard_limit_zero",
+    "sintercard_nokey",
+    "sintercard_single_key",
+    // SRANDMEMBER
+    "srandmember_seed_single",
+    "srandmember_single_element",
+    "srandmember_count_zero",
+    "srandmember_missing_key",
+    "srandmember_missing_key_with_count",
+    // SPOP
+    "spop_seed_single",
+    "spop_single_element",
+    "spop_empty_after_pop",
+    "spop_from_empty",
+    "spop_missing_key",
+    "spop_seed_count",
+    "spop_with_count",
+    "spop_missing_key_with_count",
+    // Three-way operations
+    "three_way_setup_c",
+    "sdiff_three_sets",
+    "sunion_three_sets",
+    "sinter_three_sets",
+    // Store operations verification
+    "store_verify_setup_a",
+    "store_verify_setup_b",
+    "sinterstore_verify",
+    "sinterstore_verify_members",
+    "sunionstore_verify",
+    "sunionstore_verify_members",
+    "sdiffstore_verify",
+    "sdiffstore_verify_members",
+    "sinterstore_empty_input",
+    // Error cases
+    "sadd_wrongtype_on_string",
+    "sadd_wrongtype_error",
+    "sadd_wrong_arity",
+    "srem_wrong_arity",
+    "srandmember_wrong_arity",
+    "spop_wrong_arity",
+    "sinterstore_wrong_arity",
+    // SMOVE wrongtype
+    "smove_wrongtype_setup",
+    "smove_wrongtype_dst",
 ];
 
 struct VendoredRedisOracle {
@@ -1542,7 +1636,11 @@ fn core_server_info_live_redis_matches_runtime() {
                     ),
                     live_info_field("Clients", "maxclients", LiveInfoFieldComparison::Shape),
                     live_info_field("Clients", "blocked_clients", LiveInfoFieldComparison::Shape),
-                    live_info_field("Clients", "tracking_clients", LiveInfoFieldComparison::Shape),
+                    live_info_field(
+                        "Clients",
+                        "tracking_clients",
+                        LiveInfoFieldComparison::Shape,
+                    ),
                 ],
             ),
             live_info_case(
@@ -1561,11 +1659,7 @@ fn core_server_info_live_redis_matches_runtime() {
                         "mem_fragmentation_ratio",
                         LiveInfoFieldComparison::Shape,
                     ),
-                    live_info_field(
-                        "Memory",
-                        "maxmemory_policy",
-                        LiveInfoFieldComparison::Exact,
-                    ),
+                    live_info_field("Memory", "maxmemory_policy", LiveInfoFieldComparison::Exact),
                 ],
             ),
             live_info_case(
@@ -1611,7 +1705,11 @@ fn core_server_info_live_redis_matches_runtime() {
                         "master_repl_offset",
                         LiveInfoFieldComparison::Shape,
                     ),
-                    live_info_field("Replication", "repl_backlog_size", LiveInfoFieldComparison::Shape),
+                    live_info_field(
+                        "Replication",
+                        "repl_backlog_size",
+                        LiveInfoFieldComparison::Shape,
+                    ),
                 ],
             ),
         ],
@@ -1827,13 +1925,9 @@ fn core_list_live_redis_matches_runtime() {
         port: oracle_server.port,
         ..LiveOracleConfig::default()
     };
-    let report = run_live_redis_diff_for_cases(
-        &cfg,
-        "core_list.json",
-        CORE_LIST_LIVE_STABLE_CASES,
-        &oracle,
-    )
-    .expect("list live diff");
+    let report =
+        run_live_redis_diff_for_cases(&cfg, "core_list.json", CORE_LIST_LIVE_STABLE_CASES, &oracle)
+            .expect("list live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",
@@ -1851,13 +1945,29 @@ fn core_hash_live_redis_matches_runtime() {
         port: oracle_server.port,
         ..LiveOracleConfig::default()
     };
-    let report = run_live_redis_diff_for_cases(
-        &cfg,
-        "core_hash.json",
-        CORE_HASH_LIVE_STABLE_CASES,
-        &oracle,
-    )
-    .expect("hash live diff");
+    let report =
+        run_live_redis_diff_for_cases(&cfg, "core_hash.json", CORE_HASH_LIVE_STABLE_CASES, &oracle)
+            .expect("hash live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
+#[test]
+fn core_set_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report =
+        run_live_redis_diff_for_cases(&cfg, "core_set.json", CORE_SET_LIVE_STABLE_CASES, &oracle)
+            .expect("set live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",
