@@ -1139,6 +1139,125 @@ const CORE_BITMAP_LIVE_STABLE_CASES: &[&str] = &[
     "setbit_bad_value",
 ];
 
+const CORE_HYPERLOGLOG_LIVE_STABLE_CASES: &[&str] = &[
+    // PFADD basic
+    "pfadd_creates_key_returns_1",
+    "pfadd_duplicate_elements_returns_0",
+    "pfadd_new_element_returns_1",
+    "pfadd_no_elements_creates_key",
+    "pfadd_no_elements_existing_returns_0",
+    "pfadd_single_element",
+    "pfadd_empty_string_element",
+    "pfadd_all_duplicates_returns_0",
+    "pfadd_many_elements",
+    "pfadd_repeat_same_elements",
+    "pfadd_numeric_string_elements",
+    // PFCOUNT basic
+    "pfcount_missing_key_returns_0",
+    "pfcount_empty_hll_returns_0",
+    "pfcount_hll1_has_four",
+    "pfcount_single_element",
+    "pfcount_empty_string_element",
+    "pfcount_many_elements",
+    "pfcount_numeric_string_elements",
+    "pfcount_all_nonexistent_returns_0",
+    // PFCOUNT multi-key
+    "pfadd_second_set",
+    "pfcount_hll2_has_three",
+    "pfcount_multiple_keys_union_count",
+    "pfcount_multiple_keys_empty_union",
+    "pfcount_mix_existing_nonexisting",
+    "pfadd_hll3",
+    "pfcount_three_key_union",
+    "pfcount_union_without_merge",
+    "hll_pfcount_multiple_nonexistent",
+    // PFMERGE basic
+    "pfmerge_basic",
+    "pfmerge_dest_only",
+    "pfcount_dest_only_returns_0",
+    "pfcount_merged_has_seven",
+    "pfmerge_nonexistent_sources",
+    "pfcount_merged_none_returns_0",
+    "pfmerge_into_existing",
+    "pfmerge_overwrites_dest",
+    "pfcount_merged_into_existing",
+    "pfmerge_single_source",
+    "pfcount_copied",
+    "pfmerge_three_sources",
+    "pfcount_merged_three",
+    "pfmerge_overlapping_sets",
+    "pfmerge_overlapping_sets_2",
+    "pfmerge_overlapping",
+    "pfcount_overlapping_merged",
+    "pfmerge_dest_is_also_source",
+    "pfmerge_self_merge",
+    "pfcount_after_self_merge",
+    "pfmerge_multiple_overlapping",
+    "pfcount_multi_merge",
+    // Delete and recreate
+    "setup_hll_for_del",
+    "del_hll_for_recreate",
+    "pfadd_after_del_recreate",
+    "pfcount_after_recreate",
+    "del_hll_then_pfcount",
+    "pfcount_after_del",
+    // PFMERGE with empty
+    "pfadd_nonempty_for_merge",
+    "pfmerge_with_empty_source",
+    "pfcount_merged_with_empty",
+    "pfmerge_nonexistent_dest_from_nonexistent_sources",
+    "pfcount_merged_nonexistent_returns_0",
+    // PFADD/PFMERGE after operations
+    "pfadd_after_pfmerge",
+    "pfcount_after_merge_and_add",
+    // Object/type introspection
+    "object_encoding_hll_is_raw",
+    "type_of_hll_is_string",
+    // Large HLL batches
+    "hll_large_flush",
+    "hll_large_pfadd_batch_0",
+    "hll_large_pfadd_batch_1",
+    "hll_large_pfadd_batch_2",
+    "hll_large_pfadd_batch_3",
+    "hll_large_pfadd_batch_4",
+    "hll_large_pfcount_50",
+    "hll_large_pfadd_batch_5",
+    "hll_large_pfadd_batch_6",
+    "hll_large_pfadd_batch_7",
+    "hll_large_pfadd_batch_8",
+    "hll_large_pfadd_batch_9",
+    "hll_large_pfcount_100",
+    // Duplicates and empty strings
+    "hll_dup_in_single_call",
+    "hll_dup_count_is_3",
+    "hll_empty_string_element",
+    "hll_empty_string_count",
+    // Error cases - wrong type
+    "setup_list_key_for_wrongtype",
+    "pfadd_on_list_key_wrongtype",
+    "pfcount_on_list_key_wrongtype",
+    "setup_zset_for_hll_wrongtype",
+    "pfadd_on_zset_wrongtype",
+    "pfcount_on_zset_wrongtype",
+    "pfmerge_src_zset_wrongtype",
+    "pfmerge_on_hash_key_wrongtype",
+    "pfadd_on_hash_key_wrongtype",
+    "pfcount_on_hash_key_wrongtype",
+    "pfmerge_dest_hash_wrongtype",
+    // Error cases - invalid HLL
+    "pfadd_on_string_key_invalid_hll",
+    "pfcount_on_string_key_invalid_hll",
+    "pfmerge_src_invalid_hll",
+    "hll_merge_non_hll_dest_setup",
+    "hll_merge_non_hll_dest_error",
+    "pfadd_dest_wrongtype_setup",
+    "pfmerge_dest_is_non_hll_string",
+    // Wrong arity
+    "pfadd_wrong_arity_no_key",
+    "pfcount_wrong_arity",
+    "pfmerge_wrong_arity",
+];
+
 struct VendoredRedisOracle {
     child: Child,
     port: u16,
@@ -2637,6 +2756,30 @@ fn core_bitmap_live_redis_matches_runtime() {
         &oracle,
     )
     .expect("bitmap live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
+#[test]
+fn core_hyperloglog_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_hyperloglog.json",
+        CORE_HYPERLOGLOG_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("hyperloglog live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",
