@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod commands;
+
 use std::collections::HashMap;
 
 pub const PING_PERIOD_MS: u64 = 1000;
