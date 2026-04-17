@@ -25,6 +25,9 @@ path = "../crates/fr-store"
 [dependencies.fr-command]
 path = "../crates/fr-command"
 
+[dependencies.fr-runtime]
+path = "../crates/fr-runtime"
+
 [[bin]]
 name = "fuzz_resp_parser"
 path = "fuzz_targets/fuzz_resp_parser.rs"
@@ -70,6 +73,13 @@ bench = false
 [[bin]]
 name = "fuzz_runtime_sequence"
 path = "fuzz_targets/fuzz_runtime_sequence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_acl_rules"
+path = "fuzz_targets/fuzz_acl_rules.rs"
 test = false
 doc = false
 bench = false

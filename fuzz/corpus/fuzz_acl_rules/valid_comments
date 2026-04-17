@@ -1,0 +1,4 @@
+# comment
+
+user bob reset off nopass +@all
+user carol reset on >pw1 >pw2 -@all +get +set -del ~*
