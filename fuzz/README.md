@@ -17,6 +17,11 @@ This directory contains fuzz targets for security-critical parser surfaces.
 | `fuzz_psync_reply` | Replica PSYNC reply parsing | Structure-aware parser shape validation + raw canonicalization |
 | `fuzz_tls_config` | TLS config directive parsing and apply planning | Structure-aware parser/validator invariants + rewrite/apply determinism |
 | `fuzz_lua_eval` | Embedded Lua parser and evaluator | Structure-aware pure-script determinism + whitespace/semicolon invariance |
+| `fuzz_client_tracking` | `CLIENT TRACKING` option parsing and caching-mode validation | Structure-aware state round-trip + raw argv canonicalization |
+| `fuzz_client_reply` | `CLIENT REPLY` mode parsing and suppression state transitions | Structure-aware sequence differential against a shadow model + raw command-stream validation |
+| `fuzz_migrate_request` | `MIGRATE` request parsing | Structure-aware option-matrix validation + canonical argv round-trip |
+| `fuzz_keyspace_events` | `notify-keyspace-events` config parsing | Structure-aware flag-model validation + canonical string round-trip |
+| `fuzz_eventloop_validators` | Event-loop planning and validator invariants | Structure-aware state-machine/model checks + raw phase-trace replay |
 
 ## Running Fuzz Tests
 
@@ -53,6 +58,21 @@ cargo +nightly fuzz run fuzz_tls_config
 
 # Run Lua parser/evaluator fuzzer
 cargo +nightly fuzz run fuzz_lua_eval
+
+# Run CLIENT TRACKING parser/invariant fuzzer
+cargo +nightly fuzz run fuzz_client_tracking
+
+# Run CLIENT REPLY state-machine fuzzer
+cargo +nightly fuzz run fuzz_client_reply
+
+# Run MIGRATE request parser fuzzer
+cargo +nightly fuzz run fuzz_migrate_request
+
+# Run notify-keyspace-events parser fuzzer
+cargo +nightly fuzz run fuzz_keyspace_events
+
+# Run event-loop validator/state-machine fuzzer
+cargo +nightly fuzz run fuzz_eventloop_validators
 
 # Run round-trip invariant checker
 cargo +nightly fuzz run fuzz_resp_roundtrip

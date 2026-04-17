@@ -156,15 +156,15 @@ fuzz_target!(|input: FuzzInput| {
                     );
                 }
                 Terminator::Crlf | Terminator::Lf => {
-                    if result.is_ok() {
-                        if let Some(nl) = data.iter().position(|&b| b == b'\n') {
-                            let line = if nl > 0 && data[nl - 1] == b'\r' {
-                                &data[..nl - 1]
-                            } else {
-                                &data[..nl]
-                            };
-                            let _ = split_inline_args(line);
-                        }
+                    if result.is_ok()
+                        && let Some(nl) = data.iter().position(|&b| b == b'\n')
+                    {
+                        let line = if nl > 0 && data[nl - 1] == b'\r' {
+                            &data[..nl - 1]
+                        } else {
+                            &data[..nl]
+                        };
+                        let _ = split_inline_args(line);
                     }
                 }
             }

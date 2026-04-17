@@ -18,7 +18,6 @@ const RDB_TYPE_LIST: u8 = 1;
 const RDB_TYPE_SET: u8 = 2;
 const RDB_TYPE_HASH: u8 = 4;
 const RDB_TYPE_ZSET_2: u8 = 5;
-const RDB_TYPE_STREAM: u8 = 15;
 
 #[derive(Debug, Arbitrary)]
 struct FuzzRdb {

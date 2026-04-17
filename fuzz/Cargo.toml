@@ -34,6 +34,9 @@ path = "../crates/fr-repl"
 [dependencies.fr-config]
 path = "../crates/fr-config"
 
+[dependencies.fr-eventloop]
+path = "../crates/fr-eventloop"
+
 [dependencies.fr-server]
 path = "../crates/fr-server"
 
@@ -145,6 +148,41 @@ bench = false
 [[bin]]
 name = "fuzz_inline_parser"
 path = "fuzz_targets/fuzz_inline_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_client_tracking"
+path = "fuzz_targets/fuzz_client_tracking.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_client_reply"
+path = "fuzz_targets/fuzz_client_reply.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_migrate_request"
+path = "fuzz_targets/fuzz_migrate_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_keyspace_events"
+path = "fuzz_targets/fuzz_keyspace_events.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_eventloop_validators"
+path = "fuzz_targets/fuzz_eventloop_validators.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,9 @@
+localhost
+6380
+primary-key
+9
+-25
+REPLACE
+AUTH2
+default
+sekret
