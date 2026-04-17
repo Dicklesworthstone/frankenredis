@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -196,6 +196,26 @@ pub struct LiveOptionalReplyCase {
     pub argv: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveInfoFieldComparison {
+    Exact,
+    Shape,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveInfoFieldContract {
+    pub section: String,
+    pub field: String,
+    pub comparison: LiveInfoFieldComparison,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveInfoContractCase {
+    pub case_name: String,
+    pub required_sections: Vec<String>,
+    pub field_contracts: Vec<LiveInfoFieldContract>,
+}
+
 impl Default for LiveOracleConfig {
     fn default() -> Self {
         Self {
@@ -326,14 +346,27 @@ fn run_live_redis_diff_with_fixture(
             prev_now_ms = Some(case.now_ms);
         }
 
-        let evidence_before = runtime.evidence().events().len();
         let frame = case_to_frame(&case);
-        let runtime_actual = runtime.execute_frame(frame.clone(), case.now_ms);
-        let new_events = &runtime.evidence().events()[evidence_before..];
+        // Commands that mutate connection-local state need isolated sessions on both
+        // the runtime and live Redis sides so later cases do not inherit their mode.
+        let use_dedicated_connection = live_oracle_case_uses_dedicated_connection(&case);
+        let mut dedicated_runtime = use_dedicated_connection.then(|| {
+            let mut isolated_runtime = runtime_for_harness_config(config);
+            configure_runtime_for_fixture(&mut isolated_runtime, fixture_name);
+            isolated_runtime
+        });
+        let evidence_before = match dedicated_runtime.as_ref() {
+            Some(isolated_runtime) => isolated_runtime.evidence().events().len(),
+            None => runtime.evidence().events().len(),
+        };
+        let runtime_actual = match dedicated_runtime.as_mut() {
+            Some(isolated_runtime) => isolated_runtime.execute_frame(frame.clone(), case.now_ms),
+            None => runtime.execute_frame(frame.clone(), case.now_ms),
+        };
         let redis_actual;
         let frame_ok;
         let mut oracle_detail = None;
-        if live_oracle_case_uses_dedicated_connection(&case) {
+        if use_dedicated_connection {
             let mut dedicated_stream = connect_live_redis(oracle)?;
             send_frame(&mut dedicated_stream, &frame)?;
             if live_oracle_case_uses_legacy_sync_snapshot(&case) {
@@ -386,6 +419,10 @@ fn run_live_redis_diff_with_fixture(
                 frame_ok = runtime_actual == redis_actual;
             }
         }
+        let new_events = match dedicated_runtime.as_ref() {
+            Some(isolated_runtime) => &isolated_runtime.evidence().events()[evidence_before..],
+            None => &runtime.evidence().events()[evidence_before..],
+        };
         let outcome = if frame_ok {
             LogOutcome::Pass
         } else {
@@ -532,6 +569,134 @@ pub fn run_live_redis_optional_reply_sequence_diff(
     }
 
     Ok(build_differential_report(suite, suite_name, total, failed))
+}
+
+pub fn run_live_redis_info_contract_diff(
+    config: &HarnessConfig,
+    fixture_name: &str,
+    cases: &[LiveInfoContractCase],
+    oracle: &LiveOracleConfig,
+) -> Result<DifferentialReport, String> {
+    let fixture = load_conformance_fixture(config, fixture_name)?;
+    let mut fixture_cases = BTreeMap::new();
+    for case in fixture.cases {
+        fixture_cases.insert(case.name.clone(), case);
+    }
+
+    let mut runtime = runtime_for_harness_config(config);
+    configure_runtime_for_fixture(&mut runtime, fixture_name);
+    let mut stream = connect_live_redis(oracle)?;
+    flushall(&mut stream)?;
+    let suite = format!("live_redis_info_contract_diff::{}", fixture_name);
+    let live_log_path = config
+        .live_log_root
+        .as_ref()
+        .map(|root| live_log_output_path(root, &suite, fixture_name));
+
+    let mut failed = Vec::new();
+    let total = cases.len();
+    let mut prev_now_ms: Option<u64> = None;
+
+    for contract in cases {
+        let case = fixture_cases
+            .get(&contract.case_name)
+            .ok_or_else(|| {
+                format!(
+                    "fixture '{}' is missing requested INFO contract case '{}'",
+                    fixture_name, contract.case_name
+                )
+            })?
+            .clone();
+
+        if oracle.align_timing_from_fixture {
+            if let Some(previous) = prev_now_ms {
+                let delta_ms = case.now_ms.saturating_sub(previous);
+                if delta_ms > 0 {
+                    sleep(Duration::from_millis(delta_ms));
+                }
+            }
+            prev_now_ms = Some(case.now_ms);
+        }
+
+        let evidence_before = runtime.evidence().events().len();
+        let frame = case_to_frame(&case);
+        let runtime_actual = runtime.execute_frame(frame.clone(), case.now_ms);
+        send_frame(&mut stream, &frame)?;
+        let redis_actual = read_resp_frame_from_stream(&mut stream)
+            .map_err(|err| format!("{}: {err}", case.name))?;
+
+        let is_info_case = case
+            .argv
+            .first()
+            .is_some_and(|command| command.eq_ignore_ascii_case("INFO"));
+        let runtime_expect_ok =
+            is_info_case || frame_matches_expected(&runtime_actual, &case.expect);
+        let redis_expect_ok = is_info_case || frame_matches_expected(&redis_actual, &case.expect);
+        let contract_result = if is_info_case {
+            compare_live_info_contract(&redis_actual, &runtime_actual, contract)
+        } else {
+            if runtime_actual == redis_actual {
+                Ok(())
+            } else {
+                Err("setup command reply drifted from live redis".to_string())
+            }
+        };
+
+        let new_events = &runtime.evidence().events()[evidence_before..];
+        let outcome = if runtime_expect_ok && redis_expect_ok && contract_result.is_ok() {
+            LogOutcome::Pass
+        } else {
+            LogOutcome::Fail
+        };
+        let log_result = validate_structured_log_emission(
+            StructuredLogEmissionContext {
+                suite_id: &suite,
+                fixture_name,
+                case_name: &case.name,
+                verification_path: VerificationPath::E2e,
+                now_ms: case.now_ms,
+                outcome,
+                persist_path: live_log_path.as_deref(),
+            },
+            new_events,
+        );
+
+        let passed =
+            runtime_expect_ok && redis_expect_ok && contract_result.is_ok() && log_result.is_ok();
+        if !passed {
+            let mut detail_parts = Vec::new();
+            if !runtime_expect_ok {
+                detail_parts.push("runtime reply does not satisfy fixture expectation".to_string());
+            }
+            if !redis_expect_ok {
+                detail_parts
+                    .push("live redis reply does not satisfy fixture expectation".to_string());
+            }
+            if let Err(err) = contract_result {
+                detail_parts.push(err);
+            }
+            if let Err(err) = log_result {
+                detail_parts.push(format!("structured log emission failed: {err}"));
+            }
+            failed.push(CaseOutcome {
+                name: case.name,
+                passed,
+                expected: redis_actual,
+                actual: runtime_actual,
+                detail: (!detail_parts.is_empty()).then(|| detail_parts.join("; ")),
+                reason_code: reason_code_from_evidence(new_events),
+                replay_cmd: replay_cmd_from_evidence(new_events),
+                artifact_refs: artifact_refs_from_evidence(new_events),
+            });
+        }
+    }
+
+    Ok(build_differential_report(
+        suite,
+        fixture_name,
+        total,
+        failed,
+    ))
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1593,7 +1758,15 @@ fn strip_leading_live_replication_keepalives(buf: &mut Vec<u8>) {
 
 fn live_oracle_case_uses_dedicated_connection(case: &ConformanceCase) -> bool {
     case.argv.first().is_some_and(|command| {
-        command.eq_ignore_ascii_case("PSYNC") || command.eq_ignore_ascii_case("SYNC")
+        command.eq_ignore_ascii_case("PSYNC")
+            || command.eq_ignore_ascii_case("SYNC")
+            || command.eq_ignore_ascii_case("AUTH")
+            || command.eq_ignore_ascii_case("HELLO")
+            || command.eq_ignore_ascii_case("QUIT")
+            || command.eq_ignore_ascii_case("READONLY")
+            || command.eq_ignore_ascii_case("READWRITE")
+            || command.eq_ignore_ascii_case("RESET")
+            || command.eq_ignore_ascii_case("SELECT")
     })
 }
 
@@ -1653,6 +1826,158 @@ fn runtime_matches_live_no_reply_case(case: &ConformanceCase, actual: &RespFrame
 
 fn live_oracle_no_reply_sentinel() -> RespFrame {
     RespFrame::Error("NOREPLY live redis produced no direct client response".to_string())
+}
+
+fn compare_live_info_contract(
+    redis_actual: &RespFrame,
+    runtime_actual: &RespFrame,
+    contract: &LiveInfoContractCase,
+) -> Result<(), String> {
+    let redis_sections = parse_info_sections(redis_actual)?;
+    let runtime_sections = parse_info_sections(runtime_actual)?;
+
+    let redis_section_names = redis_sections.keys().cloned().collect::<BTreeSet<_>>();
+    let runtime_section_names = runtime_sections.keys().cloned().collect::<BTreeSet<_>>();
+    let required_sections = contract
+        .required_sections
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    if redis_section_names != runtime_section_names {
+        return Err(format!(
+            "INFO section mismatch: live redis has {:?}, runtime has {:?}",
+            redis_section_names, runtime_section_names
+        ));
+    }
+    if redis_section_names != required_sections {
+        return Err(format!(
+            "INFO sections for '{}' did not match contract: expected {:?}, live/runtime had {:?}",
+            contract.case_name, required_sections, redis_section_names
+        ));
+    }
+
+    for field in &contract.field_contracts {
+        let redis_value = redis_sections
+            .get(&field.section)
+            .and_then(|section| section.get(&field.field))
+            .ok_or_else(|| {
+                format!(
+                    "live redis INFO '{}' is missing field '{}:{}'",
+                    contract.case_name, field.section, field.field
+                )
+            })?;
+        let runtime_value = runtime_sections
+            .get(&field.section)
+            .and_then(|section| section.get(&field.field))
+            .ok_or_else(|| {
+                format!(
+                    "runtime INFO '{}' is missing field '{}:{}'",
+                    contract.case_name, field.section, field.field
+                )
+            })?;
+
+        match field.comparison {
+            LiveInfoFieldComparison::Exact => {
+                if redis_value != runtime_value {
+                    return Err(format!(
+                        "INFO field '{}' exact mismatch: live redis='{}' runtime='{}'",
+                        field.field, redis_value, runtime_value
+                    ));
+                }
+            }
+            LiveInfoFieldComparison::Shape => {
+                let redis_shape = classify_info_value_shape(redis_value);
+                let runtime_shape = classify_info_value_shape(runtime_value);
+                if redis_shape != runtime_shape {
+                    return Err(format!(
+                        "INFO field '{}:{}' shape mismatch: live redis='{}' ({redis_shape}) runtime='{}' ({runtime_shape})",
+                        field.section, field.field, redis_value, runtime_value
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn parse_info_sections(
+    frame: &RespFrame,
+) -> Result<BTreeMap<String, BTreeMap<String, String>>, String> {
+    let RespFrame::BulkString(Some(bytes)) = frame else {
+        return Err(format!("expected INFO bulk string reply, got {frame:?}"));
+    };
+    let text = std::str::from_utf8(bytes)
+        .map_err(|err| format!("INFO reply is not valid UTF-8: {err}"))?;
+    let mut sections = BTreeMap::new();
+    let mut current_section = None::<String>;
+
+    for line in text.split("\r\n") {
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(section) = line.strip_prefix("# ") {
+            let section_name = section.to_string();
+            sections
+                .entry(section_name.clone())
+                .or_insert_with(BTreeMap::new);
+            current_section = Some(section_name);
+            continue;
+        }
+        let Some(section_name) = current_section.as_ref() else {
+            return Err(format!(
+                "INFO reply contained field before section header: {line}"
+            ));
+        };
+        let Some((field, value)) = line.split_once(':') else {
+            return Err(format!("INFO reply line is missing ':' separator: {line}"));
+        };
+        sections
+            .entry(section_name.clone())
+            .or_insert_with(BTreeMap::new)
+            .insert(field.to_string(), value.to_string());
+    }
+
+    Ok(sections)
+}
+
+fn classify_info_value_shape(value: &str) -> &'static str {
+    if value.is_empty() {
+        return "empty";
+    }
+    if value.len() == 40 && value.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return "hex";
+    }
+    if value.len() >= 8
+        && value.chars().all(|ch| ch.is_ascii_hexdigit())
+        && value.chars().any(|ch| matches!(ch, 'a'..='f' | 'A'..='F'))
+    {
+        return "hex";
+    }
+    if value.parse::<i64>().is_ok() {
+        return "integer";
+    }
+    if value.ends_with('%') && value[..value.len() - 1].parse::<f64>().is_ok() {
+        return "percentage";
+    }
+    if value.parse::<f64>().is_ok() {
+        return "float";
+    }
+    if value.starts_with("keys=") && value.contains(",expires=") && value.contains(",avg_ttl=") {
+        return "keyspace_stats";
+    }
+    if value.contains(',') && value.split(',').all(|part| part.split_once('=').is_some()) {
+        return "kv_csv";
+    }
+    let mut chars = value.chars();
+    if let Some(last) = chars.next_back()
+        && matches!(last, 'B' | 'K' | 'M' | 'G' | 'T' | 'P')
+        && chars.as_str().parse::<f64>().is_ok()
+    {
+        return "human_bytes";
+    }
+    "string"
 }
 
 fn runtime_matches_live_sync_snapshot_case(actual: &RespFrame) -> bool {
@@ -2182,9 +2507,49 @@ mod tests {
             },
             expect_threat: None,
         };
+        let select = ConformanceCase {
+            name: "select".to_string(),
+            now_ms: 0,
+            argv: vec!["SELECT".to_string(), "1".to_string()],
+            expect: ExpectedFrame::Simple {
+                value: "OK".to_string(),
+            },
+            expect_threat: None,
+        };
+        let hello = ConformanceCase {
+            name: "hello".to_string(),
+            now_ms: 0,
+            argv: vec!["HELLO".to_string(), "3".to_string()],
+            expect: ExpectedFrame::Simple {
+                value: "server".to_string(),
+            },
+            expect_threat: None,
+        };
+        let reset = ConformanceCase {
+            name: "reset".to_string(),
+            now_ms: 0,
+            argv: vec!["RESET".to_string()],
+            expect: ExpectedFrame::Simple {
+                value: "RESET".to_string(),
+            },
+            expect_threat: None,
+        };
+        let quit = ConformanceCase {
+            name: "quit".to_string(),
+            now_ms: 0,
+            argv: vec!["QUIT".to_string()],
+            expect: ExpectedFrame::Simple {
+                value: "OK".to_string(),
+            },
+            expect_threat: None,
+        };
 
         assert!(live_oracle_case_uses_dedicated_connection(&psync));
         assert!(live_oracle_case_uses_dedicated_connection(&sync));
+        assert!(live_oracle_case_uses_dedicated_connection(&select));
+        assert!(live_oracle_case_uses_dedicated_connection(&hello));
+        assert!(live_oracle_case_uses_dedicated_connection(&reset));
+        assert!(live_oracle_case_uses_dedicated_connection(&quit));
         assert!(!live_oracle_case_uses_dedicated_connection(&replconf));
     }
 

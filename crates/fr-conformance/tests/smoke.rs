@@ -1516,6 +1516,48 @@ const CORE_CONNECTION_LIVE_STABLE_CASES: &[&str] = &[
     "auth_no_password_configured",
 ];
 
+const CORE_DEBUG_LIVE_STABLE_CASES: &[&str] = &[
+    // Arity error (top-level only - subcommand arity errors differ between Redis/FR)
+    "debug_wrong_arity",
+    // SLEEP (fast variants only - returns OK)
+    "debug_sleep_basic",
+    "debug_sleep_non_numeric",
+    "debug_sleep_zero_fast",
+    "debug_sleep_negative_ignored",
+    "debug_sleep_fractional",
+    "debug_sleep_very_small_decimal",
+    "debug_sleep_scientific_notation",
+    "debug_sleep_negative_scientific",
+    "debug_case_insensitive_sleep",
+    // SET-ACTIVE-EXPIRE (0/1 only - Redis accepts more values than FR)
+    "debug_set_active_expire_on",
+    "debug_set_active_expire_off",
+    "debug_set_active_expire_case_insensitive",
+    "debug_set_active_expire_multiple_toggles_on",
+    "debug_set_active_expire_toggle_off",
+    "debug_set_active_expire_toggle_on_again",
+    // DEBUG OBJECT missing key error
+    "debug_object_missing_key",
+    // Setup commands for context
+    "debug_setup_string",
+    "debug_setup_hash",
+    "debug_setup_list",
+    "debug_setup_set",
+    "debug_setup_zset",
+    "debug_setup_stream",
+    "debug_setup_hyperloglog",
+    "debug_setup_int_encoded_string",
+    "debug_setup_embstr_encoded",
+    "debug_setup_raw_encoded",
+    "debug_setup_intset",
+    "debug_setup_empty_string",
+    "debug_setup_empty_list",
+    "debug_setup_special_chars_key",
+    "debug_setup_large_integer",
+    "debug_digest_setup_keys",
+    // Non-deterministic outputs excluded: DEBUG OBJECT, DEBUG DIGEST, DEBUG DIGEST-VALUE
+];
+
 struct VendoredRedisOracle {
     child: Child,
     port: u16,
@@ -1548,6 +1590,8 @@ impl VendoredRedisOracle {
                 "127.0.0.1",
                 "--port",
                 &port.to_string(),
+                "--enable-debug-command",
+                "local",
             ])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1639,7 +1683,7 @@ fn write_vendored_redis_config(port: u16) -> PathBuf {
         timestamp_nanos
     ));
     let config = format!(
-        "bind 127.0.0.1\nport {port}\nsave \"\"\nappendonly no\ndir {}\n",
+        "bind 127.0.0.1\nport {port}\nsave \"\"\nappendonly no\nenable-debug-command local\ndir {}\n",
         temp_root.display()
     );
     fs::write(&config_path, config).expect("write vendored redis config");
@@ -2906,6 +2950,30 @@ fn core_connection_live_redis_matches_runtime() {
         &oracle,
     )
     .expect("connection live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
+#[test]
+fn core_debug_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_debug.json",
+        CORE_DEBUG_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("debug live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",
