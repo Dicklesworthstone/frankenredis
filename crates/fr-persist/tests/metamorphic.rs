@@ -33,24 +33,6 @@ fn arb_rdb_value() -> impl Strategy<Value = RdbValue> {
     ]
 }
 
-fn arb_rdb_entry_with_index(idx: usize) -> impl Strategy<Value = RdbEntry> {
-    (
-        0usize..4,
-        arb_key(),
-        arb_rdb_value(),
-        prop::option::of(0u64..u64::MAX / 2),
-    )
-        .prop_map(move |(db, mut key, value, expire_ms)| {
-            key.extend_from_slice(&idx.to_le_bytes());
-            RdbEntry {
-                db,
-                key,
-                value,
-                expire_ms,
-            }
-        })
-}
-
 fn arb_aof_argv() -> impl Strategy<Value = Vec<Vec<u8>>> {
     prop::collection::vec(arb_value(), 1..8)
 }
@@ -249,7 +231,7 @@ fn unit_aof_single_record_roundtrip() {
     let record = AofRecord {
         argv: vec![b"SET".to_vec(), b"key".to_vec(), b"value".to_vec()],
     };
-    let encoded = encode_aof_stream(&[record.clone()]);
+    let encoded = encode_aof_stream(std::slice::from_ref(&record));
     let decoded = decode_aof_stream(&encoded).unwrap();
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0], record);
@@ -263,7 +245,7 @@ fn unit_rdb_string_roundtrip() {
         value: RdbValue::String(b"myvalue".to_vec()),
         expire_ms: None,
     };
-    let encoded = encode_rdb(&[entry.clone()], &[]);
+    let encoded = encode_rdb(std::slice::from_ref(&entry), &[]);
     let (decoded, _) = decode_rdb(&encoded).unwrap();
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].key, entry.key);
@@ -278,7 +260,7 @@ fn unit_rdb_list_roundtrip() {
         value: RdbValue::List(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]),
         expire_ms: Some(1700000000000),
     };
-    let encoded = encode_rdb(&[entry.clone()], &[]);
+    let encoded = encode_rdb(std::slice::from_ref(&entry), &[]);
     let (decoded, _) = decode_rdb(&encoded).unwrap();
     assert_eq!(decoded.len(), 1);
     assert!(matches!(&decoded[0].value, RdbValue::List(items) if items.len() == 3));
@@ -296,7 +278,7 @@ fn unit_rdb_hash_roundtrip() {
         ]),
         expire_ms: None,
     };
-    let encoded = encode_rdb(&[entry.clone()], &[]);
+    let encoded = encode_rdb(std::slice::from_ref(&entry), &[]);
     let (decoded, _) = decode_rdb(&encoded).unwrap();
     assert_eq!(decoded.len(), 1);
     assert!(matches!(&decoded[0].value, RdbValue::Hash(fields) if fields.len() == 2));
@@ -314,7 +296,7 @@ fn unit_rdb_zset_roundtrip() {
         ]),
         expire_ms: None,
     };
-    let encoded = encode_rdb(&[entry.clone()], &[]);
+    let encoded = encode_rdb(std::slice::from_ref(&entry), &[]);
     let (decoded, _) = decode_rdb(&encoded).unwrap();
     assert_eq!(decoded.len(), 1);
     assert!(matches!(&decoded[0].value, RdbValue::SortedSet(members) if members.len() == 3));
