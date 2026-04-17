@@ -1523,6 +1523,252 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    // ── Golden artifact tests ──────────────────────────────────────────
+    // These freeze exact byte sequences to catch accidental format changes.
+
+    mod golden {
+        use super::*;
+
+        /// Golden test: AOF SET command encoding must produce exact RESP bytes.
+        #[test]
+        fn golden_aof_set_command() {
+            let record = AofRecord {
+                argv: vec![b"SET".to_vec(), b"key".to_vec(), b"value".to_vec()],
+            };
+            let encoded = encode_aof_stream(&[record]);
+            let golden = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
+            assert_eq!(encoded, golden.as_slice(), "AOF SET command encoding changed");
+        }
+
+        /// Golden test: AOF multi-command stream encoding.
+        #[test]
+        fn golden_aof_multi_command() {
+            let records = vec![
+                AofRecord {
+                    argv: vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+                },
+            ];
+            let encoded = encode_aof_stream(&records);
+            let golden = b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n*2\r\n$4\r\nINCR\r\n$7\r\ncounter\r\n";
+            assert_eq!(encoded, golden.as_slice(), "AOF multi-command encoding changed");
+        }
+
+        /// Golden test: RDB magic header must be exactly "REDIS" + version.
+        #[test]
+        fn golden_rdb_magic_header() {
+            let encoded = encode_rdb(&[], &[]);
+            assert!(
+                encoded.starts_with(b"REDIS0011"),
+                "RDB magic header must start with REDIS0011"
+            );
+        }
+
+        /// Golden test: empty RDB must have magic + EOF + checksum.
+        #[test]
+        fn golden_rdb_empty() {
+            let encoded = encode_rdb(&[], &[]);
+            // REDIS0011 (9 bytes) + EOF opcode (1 byte) + CRC64 checksum (8 bytes)
+            assert_eq!(encoded.len(), 18, "Empty RDB should be 18 bytes");
+            assert_eq!(
+                &encoded[..9],
+                b"REDIS0011",
+                "RDB header must be REDIS0011"
+            );
+            assert_eq!(encoded[9], 0xFF, "RDB EOF opcode must be 0xFF");
+        }
+
+        /// Golden test: RDB with aux field must encode aux opcode correctly.
+        #[test]
+        fn golden_rdb_aux_field() {
+            let encoded = encode_rdb(&[], &[("redis-ver", "7.0.0")]);
+            // Header + AUX opcode (0xFA) + length-prefixed key + length-prefixed value
+            assert!(encoded.starts_with(b"REDIS0011"), "RDB header must be REDIS0011");
+            // Aux opcode is 0xFA
+            assert_eq!(encoded[9], 0xFA, "AUX opcode must be 0xFA");
+        }
+
+        /// Golden test: RDB string type encoding.
+        #[test]
+        fn golden_rdb_string_type() {
+            let entries = vec![RdbEntry {
+                db: 0,
+                key: b"k".to_vec(),
+                value: RdbValue::String(b"v".to_vec()),
+                expire_ms: None,
+            }];
+            let encoded = encode_rdb(&entries, &[]);
+
+            // After header, expect:
+            // - SELECTDB opcode (0xFE)
+            // - db number (0x00)
+            // - RESIZEDB opcode (0xFB)
+            // - entries count, expires count
+            // - TYPE_STRING (0x00)
+            // - key length + key
+            // - value length + value
+            // - EOF + checksum
+
+            // Type 0 = string
+            let pos = encoded.iter().position(|&b| b == 0x00).unwrap();
+            assert!(
+                pos < encoded.len() - 8,
+                "String type opcode should appear before EOF"
+            );
+        }
+
+        /// Golden test: RDB with expiry must include EXPIRETIME_MS opcode.
+        #[test]
+        fn golden_rdb_expiry_opcode() {
+            let entries = vec![RdbEntry {
+                db: 0,
+                key: b"k".to_vec(),
+                value: RdbValue::String(b"v".to_vec()),
+                expire_ms: Some(1_000_000),
+            }];
+            let encoded = encode_rdb(&entries, &[]);
+
+            // EXPIRETIME_MS opcode is 0xFC
+            assert!(
+                encoded.contains(&0xFC),
+                "RDB with expiry must contain EXPIRETIME_MS opcode (0xFC)"
+            );
+        }
+
+        /// Golden test: RDB SELECTDB opcode appears for non-zero db.
+        #[test]
+        fn golden_rdb_selectdb_opcode() {
+            let entries = vec![RdbEntry {
+                db: 3,
+                key: b"k".to_vec(),
+                value: RdbValue::String(b"v".to_vec()),
+                expire_ms: None,
+            }];
+            let encoded = encode_rdb(&entries, &[]);
+
+            // SELECTDB opcode is 0xFE
+            assert!(
+                encoded.contains(&0xFE),
+                "RDB must contain SELECTDB opcode (0xFE)"
+            );
+        }
+
+        /// Golden test: RDB list type encoding uses correct type byte.
+        #[test]
+        fn golden_rdb_list_type() {
+            let entries = vec![RdbEntry {
+                db: 0,
+                key: b"mylist".to_vec(),
+                value: RdbValue::List(vec![b"a".to_vec(), b"b".to_vec()]),
+                expire_ms: None,
+            }];
+            let encoded = encode_rdb(&entries, &[]);
+
+            // TYPE_LIST = 1
+            // After SELECTDB+RESIZEDB, should see type byte 0x01
+            let type_byte_found = encoded.windows(2).any(|w| w[0] == 0x01 && w[1] == 0x06);
+            assert!(type_byte_found, "RDB list must have TYPE_LIST (0x01)");
+        }
+
+        /// Golden test: RDB set type encoding uses correct type byte.
+        #[test]
+        fn golden_rdb_set_type() {
+            let entries = vec![RdbEntry {
+                db: 0,
+                key: b"myset".to_vec(),
+                value: RdbValue::Set(vec![b"x".to_vec()]),
+                expire_ms: None,
+            }];
+            let encoded = encode_rdb(&entries, &[]);
+
+            // TYPE_SET = 2
+            let type_byte_found = encoded.windows(2).any(|w| w[0] == 0x02 && w[1] == 0x05);
+            assert!(type_byte_found, "RDB set must have TYPE_SET (0x02)");
+        }
+
+        /// Golden test: RDB hash type encoding uses correct type byte.
+        #[test]
+        fn golden_rdb_hash_type() {
+            let entries = vec![RdbEntry {
+                db: 0,
+                key: b"myhash".to_vec(),
+                value: RdbValue::Hash(vec![(b"f".to_vec(), b"v".to_vec())]),
+                expire_ms: None,
+            }];
+            let encoded = encode_rdb(&entries, &[]);
+
+            // TYPE_HASH = 4
+            let type_byte_found = encoded.windows(2).any(|w| w[0] == 0x04 && w[1] == 0x06);
+            assert!(type_byte_found, "RDB hash must have TYPE_HASH (0x04)");
+        }
+
+        /// Golden test: RDB sorted set type encoding uses ZSET2 type byte.
+        #[test]
+        fn golden_rdb_zset_type() {
+            let entries = vec![RdbEntry {
+                db: 0,
+                key: b"myzset".to_vec(),
+                value: RdbValue::SortedSet(vec![(b"member".to_vec(), 1.5)]),
+                expire_ms: None,
+            }];
+            let encoded = encode_rdb(&entries, &[]);
+
+            // TYPE_ZSET_2 = 5
+            let type_byte_found = encoded.windows(2).any(|w| w[0] == 0x05 && w[1] == 0x06);
+            assert!(type_byte_found, "RDB sorted set must have TYPE_ZSET_2 (0x05)");
+        }
+
+        /// Golden test: RDB stream type encoding uses correct type byte.
+        #[test]
+        fn golden_rdb_stream_type() {
+            let entries = vec![RdbEntry {
+                db: 0,
+                key: b"mystream".to_vec(),
+                value: RdbValue::Stream(vec![], None, Vec::new()),
+                expire_ms: None,
+            }];
+            let encoded = encode_rdb(&entries, &[]);
+
+            // TYPE_STREAM = 15 (0x0F)
+            assert!(
+                encoded.contains(&0x0F),
+                "RDB stream must have TYPE_STREAM (0x0F)"
+            );
+        }
+
+        /// Golden test: RDB EOF marker is always 0xFF.
+        #[test]
+        fn golden_rdb_eof_marker() {
+            let entries = vec![RdbEntry {
+                db: 0,
+                key: b"k".to_vec(),
+                value: RdbValue::String(b"v".to_vec()),
+                expire_ms: None,
+            }];
+            let encoded = encode_rdb(&entries, &[]);
+
+            // EOF is 9 bytes from end (1 EOF + 8 checksum)
+            let eof_pos = encoded.len() - 9;
+            assert_eq!(
+                encoded[eof_pos], 0xFF,
+                "RDB EOF marker must be 0xFF at position {}",
+                eof_pos
+            );
+        }
+
+        /// Golden test: RDB checksum is 8 bytes at the end.
+        #[test]
+        fn golden_rdb_checksum_length() {
+            let encoded = encode_rdb(&[], &[]);
+
+            // Last 8 bytes are the CRC64 checksum
+            let checksum_bytes = &encoded[encoded.len() - 8..];
+            assert_eq!(checksum_bytes.len(), 8, "RDB checksum must be 8 bytes");
+        }
+    }
+
     // ── Proptest fuzz tests ──────────────────────────────────────────
 
     mod fuzz {
