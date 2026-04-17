@@ -1040,4 +1040,225 @@ mod tests {
             }
         }
     }
+
+    /// Golden artifact tests: verify RESP encoding produces exact expected bytes.
+    /// These catch accidental encoding format changes that would break wire compatibility.
+    mod golden {
+        use super::*;
+
+        /// Golden test: SimpleString encoding must produce exact bytes.
+        #[test]
+        fn golden_simple_string_ok() {
+            let frame = RespFrame::SimpleString("OK".to_string());
+            let golden = b"+OK\r\n";
+            assert_eq!(frame.to_bytes(), golden, "SimpleString encoding changed");
+        }
+
+        /// Golden test: SimpleString with spaces and special chars.
+        #[test]
+        fn golden_simple_string_pong() {
+            let frame = RespFrame::SimpleString("PONG".to_string());
+            let golden = b"+PONG\r\n";
+            assert_eq!(frame.to_bytes(), golden, "SimpleString PONG encoding changed");
+        }
+
+        /// Golden test: Error encoding must produce exact bytes.
+        #[test]
+        fn golden_error_generic() {
+            let frame = RespFrame::Error("ERR unknown command".to_string());
+            let golden = b"-ERR unknown command\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Error encoding changed");
+        }
+
+        /// Golden test: Error with WRONGTYPE prefix.
+        #[test]
+        fn golden_error_wrongtype() {
+            let frame = RespFrame::Error(
+                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
+            );
+            let golden =
+                b"-WRONGTYPE Operation against a key holding the wrong kind of value\r\n";
+            assert_eq!(frame.to_bytes(), golden, "WRONGTYPE error encoding changed");
+        }
+
+        /// Golden test: positive integer encoding.
+        #[test]
+        fn golden_integer_positive() {
+            let frame = RespFrame::Integer(42);
+            let golden = b":42\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Positive integer encoding changed");
+        }
+
+        /// Golden test: negative integer encoding.
+        #[test]
+        fn golden_integer_negative() {
+            let frame = RespFrame::Integer(-1);
+            let golden = b":-1\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Negative integer encoding changed");
+        }
+
+        /// Golden test: zero integer encoding.
+        #[test]
+        fn golden_integer_zero() {
+            let frame = RespFrame::Integer(0);
+            let golden = b":0\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Zero integer encoding changed");
+        }
+
+        /// Golden test: large integer encoding (Redis INCR max).
+        #[test]
+        fn golden_integer_large() {
+            let frame = RespFrame::Integer(9_223_372_036_854_775_807);
+            let golden = b":9223372036854775807\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Large integer encoding changed");
+        }
+
+        /// Golden test: null bulk string encoding.
+        #[test]
+        fn golden_bulk_null() {
+            let frame = RespFrame::BulkString(None);
+            let golden = b"$-1\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Null bulk string encoding changed");
+        }
+
+        /// Golden test: empty bulk string encoding.
+        #[test]
+        fn golden_bulk_empty() {
+            let frame = RespFrame::BulkString(Some(vec![]));
+            let golden = b"$0\r\n\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Empty bulk string encoding changed");
+        }
+
+        /// Golden test: simple bulk string encoding.
+        #[test]
+        fn golden_bulk_hello() {
+            let frame = RespFrame::BulkString(Some(b"hello".to_vec()));
+            let golden = b"$5\r\nhello\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Bulk string encoding changed");
+        }
+
+        /// Golden test: bulk string with binary data (including null bytes).
+        #[test]
+        fn golden_bulk_binary() {
+            let frame = RespFrame::BulkString(Some(vec![0x00, 0xFF, 0x0D, 0x0A]));
+            let golden = b"$4\r\n\x00\xFF\x0D\x0A\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Binary bulk string encoding changed");
+        }
+
+        /// Golden test: null array encoding.
+        #[test]
+        fn golden_array_null() {
+            let frame = RespFrame::Array(None);
+            let golden = b"*-1\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Null array encoding changed");
+        }
+
+        /// Golden test: empty array encoding.
+        #[test]
+        fn golden_array_empty() {
+            let frame = RespFrame::Array(Some(vec![]));
+            let golden = b"*0\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Empty array encoding changed");
+        }
+
+        /// Golden test: array with single integer.
+        #[test]
+        fn golden_array_single_int() {
+            let frame = RespFrame::Array(Some(vec![RespFrame::Integer(1)]));
+            let golden = b"*1\r\n:1\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Single-element array encoding changed");
+        }
+
+        /// Golden test: array with mixed types (typical LRANGE response).
+        #[test]
+        fn golden_array_mixed() {
+            let frame = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"first".to_vec())),
+                RespFrame::BulkString(Some(b"second".to_vec())),
+            ]));
+            let golden = b"*2\r\n$5\r\nfirst\r\n$6\r\nsecond\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Mixed array encoding changed");
+        }
+
+        /// Golden test: nested array (typical XREAD response structure).
+        #[test]
+        fn golden_array_nested() {
+            let frame = RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+            ]))]));
+            let golden = b"*1\r\n*2\r\n:1\r\n:2\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Nested array encoding changed");
+        }
+
+        /// Golden test: typical SET command (client request format).
+        #[test]
+        fn golden_command_set() {
+            let frame = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"SET".to_vec())),
+                RespFrame::BulkString(Some(b"key".to_vec())),
+                RespFrame::BulkString(Some(b"value".to_vec())),
+            ]));
+            let golden = b"*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n";
+            assert_eq!(frame.to_bytes(), golden, "SET command encoding changed");
+        }
+
+        /// Golden test: typical GET response (null for missing key).
+        #[test]
+        fn golden_response_get_miss() {
+            let frame = RespFrame::BulkString(None);
+            let golden = b"$-1\r\n";
+            assert_eq!(frame.to_bytes(), golden, "GET miss response encoding changed");
+        }
+
+        /// Golden test: SCAN response format (cursor + keys array).
+        #[test]
+        fn golden_response_scan() {
+            let frame = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"0".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"key1".to_vec())),
+                    RespFrame::BulkString(Some(b"key2".to_vec())),
+                ])),
+            ]));
+            let golden = b"*2\r\n$1\r\n0\r\n*2\r\n$4\r\nkey1\r\n$4\r\nkey2\r\n";
+            assert_eq!(frame.to_bytes(), golden, "SCAN response encoding changed");
+        }
+
+        /// Golden test: HGETALL response format (field-value pairs).
+        #[test]
+        fn golden_response_hgetall() {
+            let frame = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"field1".to_vec())),
+                RespFrame::BulkString(Some(b"value1".to_vec())),
+                RespFrame::BulkString(Some(b"field2".to_vec())),
+                RespFrame::BulkString(Some(b"value2".to_vec())),
+            ]));
+            let golden =
+                b"*4\r\n$6\r\nfield1\r\n$6\r\nvalue1\r\n$6\r\nfield2\r\n$6\r\nvalue2\r\n";
+            assert_eq!(frame.to_bytes(), golden, "HGETALL response encoding changed");
+        }
+
+        /// Golden test: BLPOP response format (key + value).
+        #[test]
+        fn golden_response_blpop() {
+            let frame = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"mylist".to_vec())),
+                RespFrame::BulkString(Some(b"element".to_vec())),
+            ]));
+            let golden = b"*2\r\n$6\r\nmylist\r\n$7\r\nelement\r\n";
+            assert_eq!(frame.to_bytes(), golden, "BLPOP response encoding changed");
+        }
+
+        /// Golden test: Sequence frame encoding (multiple frames concatenated).
+        #[test]
+        fn golden_sequence() {
+            let frame = RespFrame::Sequence(vec![
+                RespFrame::SimpleString("OK".to_string()),
+                RespFrame::Integer(1),
+            ]);
+            let golden = b"+OK\r\n:1\r\n";
+            assert_eq!(frame.to_bytes(), golden, "Sequence encoding changed");
+        }
+    }
 }
