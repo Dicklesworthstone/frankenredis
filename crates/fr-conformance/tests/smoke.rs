@@ -1857,13 +1857,8 @@ fn parse_live_resp3_map(
     Ok((RespFrame::Array(Some(items)), cursor))
 }
 
-fn read_live_resp3_line(
-    input: &[u8],
-    start: usize,
-) -> Result<(&[u8], usize), LiveResp3ParseError> {
-    let tail = input
-        .get(start..)
-        .ok_or(LiveResp3ParseError::Incomplete)?;
+fn read_live_resp3_line(input: &[u8], start: usize) -> Result<(&[u8], usize), LiveResp3ParseError> {
+    let tail = input.get(start..).ok_or(LiveResp3ParseError::Incomplete)?;
     let line_end = tail
         .windows(2)
         .position(|window| window == b"\r\n")
@@ -1872,10 +1867,7 @@ fn read_live_resp3_line(
     Ok((&input[start..end], end + 2))
 }
 
-fn expect_live_resp3_crlf(
-    input: &[u8],
-    start: usize,
-) -> Result<usize, LiveResp3ParseError> {
+fn expect_live_resp3_crlf(input: &[u8], start: usize) -> Result<usize, LiveResp3ParseError> {
     let bytes = input
         .get(start..start + 2)
         .ok_or(LiveResp3ParseError::Incomplete)?;
@@ -1925,7 +1917,8 @@ fn load_named_conformance_cases(
 ) -> Vec<ConformanceCase> {
     let path = cfg.fixture_root.join(fixture_name);
     let raw = fs::read_to_string(&path).expect("read conformance fixture");
-    let fixture: ConformanceFixture = serde_json::from_str(&raw).expect("parse conformance fixture");
+    let fixture: ConformanceFixture =
+        serde_json::from_str(&raw).expect("parse conformance fixture");
     case_names
         .iter()
         .map(|case_name| {
@@ -1983,7 +1976,11 @@ fn assert_hello_success_contract(reply: &RespFrame, expected_proto: i64) {
     assert!(empty_array(hello_field(reply, "modules")));
 }
 
-fn assert_hello_success_pair(runtime_reply: &RespFrame, live_reply: &RespFrame, expected_proto: i64) {
+fn assert_hello_success_pair(
+    runtime_reply: &RespFrame,
+    live_reply: &RespFrame,
+    expected_proto: i64,
+) {
     assert_hello_success_contract(runtime_reply, expected_proto);
     assert_hello_success_contract(live_reply, expected_proto);
     for key in ["server", "mode", "role"] {
@@ -3243,8 +3240,11 @@ fn core_connection_live_redis_matches_runtime() {
 #[test]
 fn core_connection_hello_live_redis_matches_runtime() {
     let cfg = HarnessConfig::default_paths();
-    let hello_cases =
-        load_named_conformance_cases(&cfg, "core_connection.json", CORE_CONNECTION_HELLO_LIVE_CASES);
+    let hello_cases = load_named_conformance_cases(
+        &cfg,
+        "core_connection.json",
+        CORE_CONNECTION_HELLO_LIVE_CASES,
+    );
     let oracle_server = VendoredRedisOracle::start(&cfg);
     let mut live = TcpStream::connect(("127.0.0.1", oracle_server.port))
         .expect("connect to vendored redis for HELLO coverage");
