@@ -973,6 +973,54 @@ fn tcp_replicaof_command_uses_masterauth_for_protected_legacy_primary() {
 }
 
 #[test]
+fn tcp_requirepass_rejects_unauthenticated_psync_handshake() {
+    let port = reserve_port();
+    let temp_dir = unique_temp_dir("frankenredis-protected-psync-config");
+    let config_path = temp_dir.join("frankenredis.conf");
+    let config_path_str = config_path.to_str().unwrap();
+
+    std::fs::write(
+        &config_path,
+        format!("bind 127.0.0.1\nport {port}\nrequirepass secret\n"),
+    )
+    .unwrap();
+
+    let _primary = spawn_frankenredis_config_only(port, config_path_str);
+    let mut replica_client = connect_client(port);
+
+    assert_eq!(
+        send_command(
+            &mut replica_client,
+            &[b"REPLCONF", b"listening-port", b"6380"],
+        ),
+        RespFrame::Error("NOAUTH Authentication required.".to_string())
+    );
+    assert_eq!(
+        send_command(&mut replica_client, &[b"PSYNC", b"?", b"-1"]),
+        RespFrame::Error("NOAUTH Authentication required.".to_string())
+    );
+    assert_eq!(
+        send_command(&mut replica_client, &[b"AUTH", b"secret"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        send_command(
+            &mut replica_client,
+            &[b"REPLCONF", b"listening-port", b"6380"],
+        ),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    let psync = send_command(&mut replica_client, &[b"PSYNC", b"?", b"-1"]);
+    let RespFrame::SimpleString(psync_line) = psync else {
+        panic!("expected FULLRESYNC simple string, got {psync:?}");
+    };
+    assert!(
+        psync_line.starts_with("FULLRESYNC "),
+        "authenticated PSYNC should start full sync, got {psync_line}"
+    );
+}
+
+#[test]
 fn tcp_replicaof_cli_flag_bootstraps_replica_link_on_startup() {
     let primary_port = reserve_port();
     let replica_port = reserve_port();

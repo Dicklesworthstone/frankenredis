@@ -37,7 +37,7 @@ Per the Security Doctrine in AGENTS.md: "Threat model notes for each major subsy
 
 | Threat | Mitigation | Residual Risk |
 |--------|-----------|---------------|
-| Rogue replica injection | No authentication on replica connections. Any client can send PSYNC. | Add `requirepass` enforcement for replicas (Redis `masterauth`). |
+| Rogue replica injection | The normal authentication gate applies to replication commands: requirepass/ACL-protected primaries reject unauthenticated `REPLCONF`, `PSYNC`, and `SYNC`. TCP regression coverage freezes this protected-primary behavior. | Redis-compatible no-auth deployments still accept replica handshakes; production deployments should configure auth and network isolation. |
 | PSYNC replay attack | PSYNC offset validation against backlog window. Out-of-range offsets trigger FULLRESYNC. | Covered for offset bounds. |
 | Snapshot poisoning | RDB snapshots validated with CRC64 on replica side. | Covered. |
 | Replication stream injection | No TLS on replication channel. | Add TLS support for replication connections. |
@@ -67,8 +67,7 @@ Per the Security Doctrine in AGENTS.md: "Threat model notes for each major subsy
 ## Priority of Remaining Mitigations
 
 1. **High**: Add AUTH rate limiting / backoff for brute force protection
-2. **High**: Add `requirepass` / `masterauth` enforcement for replica connections
+2. **High**: Add TLS support for replication connections
 3. **Medium**: Add per-client idle timeout to prevent slowloris
 4. **Medium**: Add per-script memory limit for Lua execution
 5. **Low**: Pad password length comparison to prevent length leakage
-6. **Low**: Add TLS support for replication connections
