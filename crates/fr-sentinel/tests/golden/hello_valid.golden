@@ -1,0 +1,12 @@
+Some(
+    HelloMessage {
+        sentinel_ip: "127.0.0.1",
+        sentinel_port: 26379,
+        sentinel_runid: "3b5a1c0d",
+        current_epoch: 10,
+        master_name: "mymaster",
+        master_ip: "192.168.1.50",
+        master_port: 6379,
+        master_config_epoch: 15,
+    },
+)

@@ -1,0 +1,22 @@
+[
+    ReplicaInfo {
+        ip: "127.0.0.1",
+        port: 6380,
+        runid: None,
+        flags: "online",
+        master_link_status: "",
+        master_link_down_time: 0,
+        slave_priority: 100,
+        slave_repl_offset: 1000,
+    },
+    ReplicaInfo {
+        ip: "192.168.1.101",
+        port: 6381,
+        runid: None,
+        flags: "online",
+        master_link_status: "",
+        master_link_down_time: 0,
+        slave_priority: 100,
+        slave_repl_offset: 990,
+    },
+]

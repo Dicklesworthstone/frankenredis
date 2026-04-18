@@ -1,0 +1,17 @@
+ParsedInfo {
+    role: Some(
+        Master,
+    ),
+    master_host: None,
+    master_port: None,
+    master_link_status: None,
+    master_link_down_since: None,
+    slave_repl_offset: Some(
+        1500,
+    ),
+    slave_priority: None,
+    run_id: None,
+    connected_slaves: Some(
+        2,
+    ),
+}

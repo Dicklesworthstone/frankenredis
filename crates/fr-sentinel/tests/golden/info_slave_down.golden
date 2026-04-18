@@ -1,0 +1,25 @@
+ParsedInfo {
+    role: Some(
+        Slave,
+    ),
+    master_host: Some(
+        "192.168.1.100",
+    ),
+    master_port: Some(
+        6379,
+    ),
+    master_link_status: Some(
+        false,
+    ),
+    master_link_down_since: Some(
+        45000,
+    ),
+    slave_repl_offset: Some(
+        5000,
+    ),
+    slave_priority: Some(
+        0,
+    ),
+    run_id: None,
+    connected_slaves: None,
+}
