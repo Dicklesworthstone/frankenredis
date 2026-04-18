@@ -117,6 +117,10 @@ impl AofManifest {
     pub fn is_empty(&self) -> bool {
         self.base.is_none() && self.history.is_empty() && self.incremental.is_empty()
     }
+
+    pub fn replay_entries(&self) -> impl Iterator<Item = &AofManifestEntry> {
+        self.base.iter().chain(self.incremental.iter())
+    }
 }
 
 const AOF_MANIFEST_MAX_LINE: usize = 1024;
@@ -1455,6 +1459,55 @@ mod tests {
              file \"incr 3.aof\" seq 3 type i\n"
         );
         assert_eq!(parse_aof_manifest(&formatted).expect("reparse"), parsed);
+    }
+
+    #[test]
+    fn aof_manifest_replay_entries_exclude_history_and_preserve_replay_order() {
+        let manifest = parse_aof_manifest(
+            "file base.aof seq 1 type b\n\
+             file old-2.aof seq 2 type h\n\
+             file incr-3.aof seq 3 type i\n\
+             file old-4.aof seq 4 type h\n\
+             file incr-5.aof seq 5 type i\n",
+        )
+        .expect("parse manifest");
+
+        let replay = manifest
+            .replay_entries()
+            .map(|entry| (entry.file_name.as_str(), entry.file_type))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            replay,
+            vec![
+                ("base.aof", AofManifestFileType::Base),
+                ("incr-3.aof", AofManifestFileType::Incremental),
+                ("incr-5.aof", AofManifestFileType::Incremental),
+            ],
+        );
+    }
+
+    #[test]
+    fn aof_manifest_replay_entries_allow_incremental_only_and_empty_manifests() {
+        let manifest = parse_aof_manifest(
+            "file incr-1.aof seq 1 type i\n\
+             file incr-2.aof seq 2 type i\n",
+        )
+        .expect("parse manifest");
+
+        let replay = manifest
+            .replay_entries()
+            .map(|entry| (entry.file_name.as_str(), entry.file_type))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            replay,
+            vec![
+                ("incr-1.aof", AofManifestFileType::Incremental),
+                ("incr-2.aof", AofManifestFileType::Incremental),
+            ],
+        );
+        assert!(AofManifest::default().replay_entries().next().is_none());
     }
 
     #[test]
