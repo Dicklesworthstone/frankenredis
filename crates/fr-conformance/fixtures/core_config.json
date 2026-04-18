@@ -773,6 +773,20 @@
       }
     },
     {
+      "name": "config_set_pidfile_immutable",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "pidfile",
+        "/tmp/redis.pid"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CONFIG SET failed (possibly related to argument 'pidfile') - can't set immutable config"
+      }
+    },
+    {
       "name": "config_set_always_show_logo_immutable",
       "now_ms": 0,
       "argv": [

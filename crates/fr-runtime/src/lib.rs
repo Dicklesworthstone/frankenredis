@@ -6398,6 +6398,7 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("cluster-enabled")
                 || parameter.eq_ignore_ascii_case("databases")
                 || parameter.eq_ignore_ascii_case("daemonize")
+                || parameter.eq_ignore_ascii_case("pidfile")
                 || parameter.eq_ignore_ascii_case("port")
                 || parameter.eq_ignore_ascii_case("rdbchecksum")
                 || parameter.eq_ignore_ascii_case("set-proc-title")
@@ -14652,6 +14653,20 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"daemonize".to_vec())),
                 RespFrame::BulkString(Some(b"no".to_vec())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"pidfile", b"/tmp/redis.pid"]), 0),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'pidfile') - can't set immutable config"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"pidfile"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"pidfile".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
             ]))
         );
         assert_eq!(
