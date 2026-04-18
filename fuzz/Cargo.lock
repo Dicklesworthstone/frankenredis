@@ -95,6 +95,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "fr-sentinel"
+version = "0.1.0"
+dependencies = [
+ "fr-protocol",
+]
+
+[[package]]
 name = "fr-server"
 version = "0.1.0"
 dependencies = [
@@ -129,6 +136,7 @@ dependencies = [
  "fr-protocol",
  "fr-repl",
  "fr-runtime",
+ "fr-sentinel",
  "fr-server",
  "fr-store",
  "libfuzzer-sys",
