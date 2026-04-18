@@ -7,6 +7,10 @@ use std::process::{Child, Command, Stdio};
 use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use fr_config::{
+    ConfigFileParseErrorReason, parse_redis_config, parse_redis_config_bytes,
+    split_config_line_args, split_config_line_args_bytes,
+};
 use fr_conformance::{
     CaseOutcome, ConformanceCase, ConformanceFixture, HarnessConfig, LiveInfoContractCase,
     LiveInfoFieldComparison, LiveInfoFieldContract, LiveOptionalReplyCase, LiveOracleConfig,
@@ -3060,6 +3064,124 @@ fn core_config_conformance() {
     let diff = run_fixture(&cfg, "core_config.json").expect("config fixture");
     assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
     assert!(diff.failed.is_empty());
+}
+
+#[test]
+fn redis_config_file_parser_conformance_matrix() {
+    // Mirrors Redis loadServerConfigFromString() and sdssplitargs() contracts.
+    let parsed = parse_redis_config(
+        "  # full-line comment\r\n\
+         PORT 6380\n\
+         rename-command \"CONFIG\" \"\"\n\
+         notify-keyspace-events \"K\\x45A\\n\\r\\t\\b\\a\\\\\"\n\
+         requirepass 'pa\\'ss#literal'\n\
+         appendonly yes # inline comment stays args\n\
+         \x0bdir /tmp\n",
+    )
+    .expect("config parser conformance fixture");
+
+    let directives = parsed.directives;
+    assert_eq!(directives.len(), 6);
+    assert_eq!(directives[0].line_number, 2);
+    assert_eq!(directives[0].name, b"port");
+    assert_eq!(directives[0].args, vec![b"6380".to_vec()]);
+
+    assert_eq!(directives[1].line_number, 3);
+    assert_eq!(directives[1].name, b"rename-command");
+    assert_eq!(directives[1].args, vec![b"CONFIG".to_vec(), Vec::new()]);
+
+    assert_eq!(directives[2].line_number, 4);
+    assert_eq!(directives[2].name, b"notify-keyspace-events");
+    assert_eq!(directives[2].args, vec![b"KEA\n\r\t\x08\x07\\".to_vec()]);
+
+    assert_eq!(directives[3].line_number, 5);
+    assert_eq!(directives[3].name, b"requirepass");
+    assert_eq!(directives[3].args, vec![b"pa'ss#literal".to_vec()]);
+
+    assert_eq!(directives[4].line_number, 6);
+    assert_eq!(directives[4].name, b"appendonly");
+    assert_eq!(
+        directives[4].args,
+        vec![
+            b"yes".to_vec(),
+            b"#".to_vec(),
+            b"inline".to_vec(),
+            b"comment".to_vec(),
+            b"stays".to_vec(),
+            b"args".to_vec(),
+        ]
+    );
+
+    assert_eq!(directives[5].line_number, 7);
+    assert_eq!(directives[5].name, b"dir");
+    assert_eq!(directives[5].args, vec![b"/tmp".to_vec()]);
+
+    let truncated =
+        parse_redis_config("port 6381\0\nbind 0.0.0.0\n").expect("nul truncates config buffer");
+    assert_eq!(truncated.directives.len(), 1);
+    assert_eq!(truncated.directives[0].line_number, 1);
+    assert_eq!(truncated.directives[0].name, b"port");
+    assert_eq!(truncated.directives[0].args, vec![b"6381".to_vec()]);
+
+    let raw_bytes = parse_redis_config_bytes(b"requirepass \xff\n").expect("raw byte config token");
+    assert_eq!(raw_bytes.directives.len(), 1);
+    assert_eq!(raw_bytes.directives[0].line_number, 1);
+    assert_eq!(raw_bytes.directives[0].name, b"requirepass");
+    assert_eq!(raw_bytes.directives[0].args, vec![vec![0xff]]);
+
+    let vt_comment = parse_redis_config("\x0b# not a full-line comment\n")
+        .expect("vertical tab is not trimmed before Redis comment check");
+    assert_eq!(vt_comment.directives.len(), 1);
+    assert_eq!(vt_comment.directives[0].line_number, 1);
+    assert_eq!(vt_comment.directives[0].name, b"#");
+    assert_eq!(
+        vt_comment.directives[0].args,
+        vec![
+            b"not".to_vec(),
+            b"a".to_vec(),
+            b"full-line".to_vec(),
+            b"comment".to_vec()
+        ]
+    );
+}
+
+#[test]
+fn redis_config_argument_splitter_conformance_matrix() {
+    assert_eq!(
+        split_config_line_args("foo\x0bbar baz").expect("vertical tab inside bare token"),
+        vec![b"foo\x0bbar".to_vec(), b"baz".to_vec()]
+    );
+    assert_eq!(
+        split_config_line_args("\"foo\"\x0bbar").expect("vertical tab after closed quote"),
+        vec![b"foo".to_vec(), b"bar".to_vec()]
+    );
+    assert_eq!(
+        split_config_line_args(r#""\x4g\xzz""#).expect("malformed hex escapes stay literal"),
+        vec![b"x4gxzz".to_vec()]
+    );
+    assert_eq!(
+        split_config_line_args(r#""a\x00b""#).expect("hex nul escape decodes inside token"),
+        vec![b"a\0b".to_vec()]
+    );
+
+    let double_quote_error =
+        split_config_line_args("\"foo\"bar").expect_err("adjacent double-quoted token");
+    assert_eq!(
+        double_quote_error,
+        ConfigFileParseErrorReason::InvalidQuotedToken
+    );
+
+    let single_quote_error =
+        split_config_line_args("'foo'bar").expect_err("adjacent single-quoted token");
+    assert_eq!(
+        single_quote_error,
+        ConfigFileParseErrorReason::InvalidQuotedToken
+    );
+
+    assert_eq!(
+        split_config_line_args_bytes(b"rename-command CONFIG \xfe").expect("raw byte token"),
+        vec![b"rename-command".to_vec(), b"CONFIG".to_vec(), vec![0xfe]]
+    );
 }
 
 #[test]

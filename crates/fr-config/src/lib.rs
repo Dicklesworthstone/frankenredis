@@ -133,6 +133,216 @@ impl RuntimePolicy {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedConfigFile {
+    pub directives: Vec<ParsedConfigDirective>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedConfigDirective {
+    pub line_number: usize,
+    pub name: Vec<u8>,
+    pub args: Vec<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigFileParseError {
+    pub line_number: usize,
+    pub reason: ConfigFileParseErrorReason,
+    pub line: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigFileParseErrorReason {
+    InvalidQuotedToken,
+}
+
+impl ConfigFileParseError {
+    #[must_use]
+    pub fn reason_code(&self) -> &'static str {
+        match self.reason {
+            ConfigFileParseErrorReason::InvalidQuotedToken => "configfile.invalid_quoted_token",
+        }
+    }
+}
+
+impl fmt::Display for ConfigFileParseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.reason {
+            ConfigFileParseErrorReason::InvalidQuotedToken => write!(
+                f,
+                "{} at line {}: unbalanced quotes or quote followed by non-whitespace",
+                self.reason_code(),
+                self.line_number
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigFileParseError {}
+
+pub fn parse_redis_config(input: &str) -> Result<ParsedConfigFile, ConfigFileParseError> {
+    parse_redis_config_bytes(input.as_bytes())
+}
+
+pub fn parse_redis_config_bytes(input: &[u8]) -> Result<ParsedConfigFile, ConfigFileParseError> {
+    let input = input
+        .iter()
+        .position(|byte| *byte == 0)
+        .map_or(input, |nul_pos| &input[..nul_pos]);
+    let mut directives = Vec::new();
+
+    for (line_idx, raw_line) in input.split(|byte| *byte == b'\n').enumerate() {
+        let line_number = line_idx + 1;
+        let line = trim_redis_config_line(raw_line);
+        if line.is_empty() || line.first() == Some(&b'#') {
+            continue;
+        }
+
+        let mut tokens =
+            split_config_line_args_bytes(line).map_err(|reason| ConfigFileParseError {
+                line_number,
+                reason,
+                line: String::from_utf8_lossy(line).into_owned(),
+            })?;
+
+        if tokens.is_empty() {
+            continue;
+        }
+
+        let mut name = tokens.remove(0);
+        name.make_ascii_lowercase();
+        directives.push(ParsedConfigDirective {
+            line_number,
+            name,
+            args: tokens,
+        });
+    }
+
+    Ok(ParsedConfigFile { directives })
+}
+
+pub fn split_config_line_args(line: &str) -> Result<Vec<Vec<u8>>, ConfigFileParseErrorReason> {
+    split_config_line_args_bytes(line.as_bytes())
+}
+
+pub fn split_config_line_args_bytes(
+    bytes: &[u8],
+) -> Result<Vec<Vec<u8>>, ConfigFileParseErrorReason> {
+    let mut pos = 0;
+    let mut args = Vec::new();
+
+    loop {
+        while byte_at(bytes, pos) != 0 && is_c_isspace(byte_at(bytes, pos)) {
+            pos += 1;
+        }
+
+        if byte_at(bytes, pos) == 0 {
+            return Ok(args);
+        }
+
+        let mut current = Vec::new();
+        let mut in_double_quote = false;
+        let mut in_single_quote = false;
+        let mut done = false;
+
+        while !done {
+            let byte = byte_at(bytes, pos);
+            if in_double_quote {
+                if byte == b'\\'
+                    && byte_at(bytes, pos + 1) == b'x'
+                    && is_ascii_hex(byte_at(bytes, pos + 2))
+                    && is_ascii_hex(byte_at(bytes, pos + 3))
+                {
+                    let decoded = (hex_value(byte_at(bytes, pos + 2)) << 4)
+                        + hex_value(byte_at(bytes, pos + 3));
+                    current.push(decoded);
+                    pos += 3;
+                } else if byte == b'\\' && byte_at(bytes, pos + 1) != 0 {
+                    pos += 1;
+                    current.push(match byte_at(bytes, pos) {
+                        b'n' => b'\n',
+                        b'r' => b'\r',
+                        b't' => b'\t',
+                        b'b' => 0x08,
+                        b'a' => 0x07,
+                        other => other,
+                    });
+                } else if byte == b'"' {
+                    if byte_at(bytes, pos + 1) != 0 && !is_c_isspace(byte_at(bytes, pos + 1)) {
+                        return Err(ConfigFileParseErrorReason::InvalidQuotedToken);
+                    }
+                    done = true;
+                } else if byte == 0 {
+                    return Err(ConfigFileParseErrorReason::InvalidQuotedToken);
+                } else {
+                    current.push(byte);
+                }
+            } else if in_single_quote {
+                if byte == b'\\' && byte_at(bytes, pos + 1) == b'\'' {
+                    pos += 1;
+                    current.push(b'\'');
+                } else if byte == b'\'' {
+                    if byte_at(bytes, pos + 1) != 0 && !is_c_isspace(byte_at(bytes, pos + 1)) {
+                        return Err(ConfigFileParseErrorReason::InvalidQuotedToken);
+                    }
+                    done = true;
+                } else if byte == 0 {
+                    return Err(ConfigFileParseErrorReason::InvalidQuotedToken);
+                } else {
+                    current.push(byte);
+                }
+            } else {
+                match byte {
+                    b' ' | b'\n' | b'\r' | b'\t' | 0 => done = true,
+                    b'"' => in_double_quote = true,
+                    b'\'' => in_single_quote = true,
+                    other => current.push(other),
+                }
+            }
+
+            if byte != 0 {
+                pos += 1;
+            }
+        }
+
+        args.push(current);
+    }
+}
+
+fn trim_redis_config_line(line: &[u8]) -> &[u8] {
+    let start = line
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        .unwrap_or(line.len());
+    let end = line
+        .iter()
+        .rposition(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+        .map_or(start, |idx| idx + 1);
+    &line[start..end]
+}
+
+fn byte_at(bytes: &[u8], pos: usize) -> u8 {
+    bytes.get(pos).copied().unwrap_or(0)
+}
+
+fn is_c_isspace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\n' | b'\r' | b'\t' | 0x0b | 0x0c)
+}
+
+fn is_ascii_hex(byte: u8) -> bool {
+    byte.is_ascii_hexdigit()
+}
+
+fn hex_value(byte: u8) -> u8 {
+    match byte {
+        b'0'..=b'9' => byte - b'0',
+        b'a'..=b'f' => byte - b'a' + 10,
+        b'A'..=b'F' => byte - b'A' + 10,
+        _ => 0,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TlsProtocol {
     TlsV1_2,
@@ -666,10 +876,12 @@ pub fn evaluate_tls_hardened_deviation(
 #[cfg(test)]
 mod tests {
     use super::{
-        DecisionAction, DriftSeverity, HARDENED_ALLOWLIST_DEFAULT, HardenedDeviationCategory, Mode,
-        RuntimePolicy, ThreatClass, TlsAuthClients, TlsCfgError, TlsConfig, TlsDirective,
-        TlsListenerTransition, TlsProtocol, TlsRuntimeState, evaluate_tls_hardened_deviation,
-        parse_tls_protocols, plan_tls_runtime_apply, rewrite_tls_directives, tls_directive_policy,
+        ConfigFileParseErrorReason, DecisionAction, DriftSeverity, HARDENED_ALLOWLIST_DEFAULT,
+        HardenedDeviationCategory, Mode, RuntimePolicy, ThreatClass, TlsAuthClients, TlsCfgError,
+        TlsConfig, TlsDirective, TlsListenerTransition, TlsProtocol, TlsRuntimeState,
+        evaluate_tls_hardened_deviation, parse_redis_config, parse_redis_config_bytes,
+        parse_tls_protocols, plan_tls_runtime_apply, rewrite_tls_directives,
+        split_config_line_args, split_config_line_args_bytes, tls_directive_policy,
         validate_bind_transition_atomicity, validate_tls_config, validate_tls_directive_value,
     };
 
@@ -1024,5 +1236,126 @@ mod tests {
         let err = validate_tls_config(&config).expect_err("must fail");
         assert_eq!(err.reason_code(), "tlscfg.safety_gate_contract_violation");
         assert!(matches!(err, TlsCfgError::SafetyGateContractViolation(_)));
+    }
+
+    #[test]
+    fn redis_config_parser_skips_comments_and_lowercases_directives() {
+        let parsed = parse_redis_config("  # comment\r\nPORT 6380\n\nappendonly yes\n")
+            .expect("config should parse");
+        assert_eq!(parsed.directives.len(), 2);
+        assert_eq!(parsed.directives[0].line_number, 2);
+        assert_eq!(parsed.directives[0].name, b"port");
+        assert_eq!(parsed.directives[0].args, vec![b"6380".to_vec()]);
+        assert_eq!(parsed.directives[1].name, b"appendonly");
+        assert_eq!(parsed.directives[1].args, vec![b"yes".to_vec()]);
+    }
+
+    #[test]
+    fn redis_config_parser_preserves_inline_hash_as_argument() {
+        let parsed = parse_redis_config("port 6379 # inline comment is still an arg\n")
+            .expect("config should parse like Redis sdssplitargs");
+        assert_eq!(parsed.directives[0].name, b"port");
+        assert_eq!(
+            parsed.directives[0].args,
+            vec![
+                b"6379".to_vec(),
+                b"#".to_vec(),
+                b"inline".to_vec(),
+                b"comment".to_vec(),
+                b"is".to_vec(),
+                b"still".to_vec(),
+                b"an".to_vec(),
+                b"arg".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn redis_config_parser_keeps_vertical_tab_prefixed_hash_line() {
+        let parsed = parse_redis_config("\x0b# not a full-line comment\n")
+            .expect("vertical tab is not trimmed before Redis comment check");
+        assert_eq!(parsed.directives.len(), 1);
+        assert_eq!(parsed.directives[0].line_number, 1);
+        assert_eq!(parsed.directives[0].name, b"#");
+        assert_eq!(
+            parsed.directives[0].args,
+            vec![
+                b"not".to_vec(),
+                b"a".to_vec(),
+                b"full-line".to_vec(),
+                b"comment".to_vec()
+            ]
+        );
+    }
+
+    #[test]
+    fn redis_config_line_split_decodes_double_quote_escapes() {
+        let args = split_config_line_args(r#"set "line\n\x41\t\\" tail"#)
+            .expect("quoted line should parse");
+        assert_eq!(
+            args,
+            vec![b"set".to_vec(), b"line\nA\t\\".to_vec(), b"tail".to_vec(),]
+        );
+
+        let args = split_config_line_args(r#"set "\x4g\xzz" tail"#)
+            .expect("malformed hex escapes stay literal like Redis sdssplitargs");
+        assert_eq!(
+            args,
+            vec![b"set".to_vec(), b"x4gxzz".to_vec(), b"tail".to_vec()]
+        );
+
+        let args = split_config_line_args(r#"set "a\x00b" tail"#)
+            .expect("hex nul escape decodes inside SDS token");
+        assert_eq!(
+            args,
+            vec![b"set".to_vec(), b"a\0b".to_vec(), b"tail".to_vec()]
+        );
+    }
+
+    #[test]
+    fn redis_config_line_split_decodes_single_quote_escape_only() {
+        let args = split_config_line_args(r#"dir 'it\'s\nliteral'"#)
+            .expect("single quoted line should parse");
+        assert_eq!(args, vec![b"dir".to_vec(), br"it's\nliteral".to_vec()]);
+    }
+
+    #[test]
+    fn redis_config_line_split_rejects_invalid_quoted_tokens() {
+        let err = split_config_line_args(r#"port "6379"#).expect_err("unterminated quote");
+        assert_eq!(err, ConfigFileParseErrorReason::InvalidQuotedToken);
+
+        let err = split_config_line_args(r#""foo"bar"#).expect_err("adjacent token after quote");
+        assert_eq!(err, ConfigFileParseErrorReason::InvalidQuotedToken);
+    }
+
+    #[test]
+    fn redis_config_line_split_treats_nul_as_c_string_end() {
+        let args = split_config_line_args("port 6379\0ignored").expect("nul terminates line");
+        assert_eq!(args, vec![b"port".to_vec(), b"6379".to_vec()]);
+    }
+
+    #[test]
+    fn redis_config_parser_treats_nul_as_config_buffer_end() {
+        let parsed = parse_redis_config("port 6380\0\nbind 0.0.0.0\n")
+            .expect("nul should terminate full config input");
+        assert_eq!(parsed.directives.len(), 1);
+        assert_eq!(parsed.directives[0].name, b"port");
+        assert_eq!(parsed.directives[0].args, vec![b"6380".to_vec()]);
+    }
+
+    #[test]
+    fn redis_config_parser_preserves_raw_non_utf8_bytes() {
+        let parsed = parse_redis_config_bytes(b"requirepass \xff\n")
+            .expect("raw byte config should parse like Redis C strings");
+        assert_eq!(parsed.directives.len(), 1);
+        assert_eq!(parsed.directives[0].name, b"requirepass");
+        assert_eq!(parsed.directives[0].args, vec![vec![0xff]]);
+
+        let args =
+            split_config_line_args_bytes(b"rename-command CONFIG \xfe").expect("raw byte token");
+        assert_eq!(
+            args,
+            vec![b"rename-command".to_vec(), b"CONFIG".to_vec(), vec![0xfe]]
+        );
     }
 }

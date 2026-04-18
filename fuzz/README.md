@@ -22,6 +22,7 @@ This directory contains fuzz targets for security-critical parser surfaces.
 | `fuzz_migrate_request` | `MIGRATE` request parsing | Structure-aware option-matrix validation + canonical argv round-trip |
 | `fuzz_keyspace_events` | `notify-keyspace-events` config parsing | Structure-aware flag-model validation + canonical string round-trip |
 | `fuzz_eventloop_validators` | Event-loop planning and validator invariants | Structure-aware state-machine/model checks + raw phase-trace replay |
+| `fuzz_config_file` | Redis config file tokenization | Structure-aware directive parsing + raw quoted-token hardening |
 
 ## Running Fuzz Tests
 
@@ -73,6 +74,9 @@ cargo +nightly fuzz run fuzz_keyspace_events
 
 # Run event-loop validator/state-machine fuzzer
 cargo +nightly fuzz run fuzz_eventloop_validators
+
+# Run Redis config file parser fuzzer
+cargo +nightly fuzz run fuzz_config_file
 
 # Run round-trip invariant checker
 cargo +nightly fuzz run fuzz_resp_roundtrip

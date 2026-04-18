@@ -186,3 +186,10 @@ path = "fuzz_targets/fuzz_eventloop_validators.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_config_file"
+path = "fuzz_targets/fuzz_config_file.rs"
+test = false
+doc = false
+bench = false
