@@ -33,8 +33,8 @@
       "now_ms": 3,
       "argv": ["MIGRATE", "127.0.0.1", "notaport", "key", "0", "1000"],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "simple",
+        "value": "NOKEY"
       }
     },
     {
@@ -114,8 +114,8 @@
       "now_ms": 12,
       "argv": ["MIGRATE", "127.0.0.1", "-1", "key", "0", "1000"],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "simple",
+        "value": "NOKEY"
       }
     },
     {
@@ -123,8 +123,8 @@
       "now_ms": 13,
       "argv": ["MIGRATE", "127.0.0.1", "6379.5", "key", "0", "1000"],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "simple",
+        "value": "NOKEY"
       }
     },
     {
@@ -132,8 +132,8 @@
       "now_ms": 14,
       "argv": ["MIGRATE", "127.0.0.1", "", "key", "0", "1000"],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "simple",
+        "value": "NOKEY"
       }
     },
     {
@@ -177,8 +177,8 @@
       "now_ms": 19,
       "argv": ["MIGRATE", "127.0.0.1", "99999", "key", "0", "1000"],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "simple",
+        "value": "NOKEY"
       }
     },
     {
@@ -186,8 +186,8 @@
       "now_ms": 20,
       "argv": ["MIGRATE", "127.0.0.1", "+6379", "key", "0", "1000"],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "simple",
+        "value": "NOKEY"
       }
     },
     {
@@ -195,8 +195,8 @@
       "now_ms": 21,
       "argv": ["MIGRATE", "127.0.0.1", "06379", "key", "0", "1000"],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "simple",
+        "value": "NOKEY"
       }
     },
     {
@@ -321,8 +321,8 @@
       "now_ms": 35,
       "argv": ["MIGRATE", "127.0.0.1", "65536", "key", "0", "1000"],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "simple",
+        "value": "NOKEY"
       }
     },
     {
@@ -438,8 +438,8 @@
       "now_ms": 48,
       "argv": ["MIGRATE", "127.0.0.1", " 6379", "key", "0", "1000"],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "simple",
+        "value": "NOKEY"
       }
     },
     {

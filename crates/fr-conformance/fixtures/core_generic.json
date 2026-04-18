@@ -2206,7 +2206,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'blah'. Try OBJECT HELP."
+        "value": "ERR unknown subcommand 'BLAH'. Try OBJECT HELP."
       }
     },
     {

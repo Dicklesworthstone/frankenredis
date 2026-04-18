@@ -56,12 +56,12 @@
       }
     },
     {
-      "name": "pfdebug_unknown_subcommand_error",
+      "name": "pfdebug_unknown_subcommand_missing_key_error",
       "now_ms": 6,
       "argv": ["PFDEBUG", "BOGUS", "key"],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown PFDEBUG subcommand 'BOGUS'"
+        "value": "ERR The specified key does not exist"
       }
     },
     {
@@ -92,8 +92,43 @@
       }
     },
     {
-      "name": "pfdebug_encoding_returns_dense",
+      "name": "pfdebug_encoding_returns_sparse",
       "now_ms": 11,
+      "argv": ["PFDEBUG", "ENCODING", "hll1"],
+      "expect": {
+        "kind": "simple",
+        "value": "sparse"
+      }
+    },
+    {
+      "name": "pfdebug_decode_sparse_returns_rle",
+      "now_ms": 12,
+      "argv": ["PFDEBUG", "DECODE", "hll1"],
+      "expect": {
+        "kind": "bulk",
+        "value": "Z:5964 v:2,1 Z:2352 v:1,1 Z:2412 v:1,1 Z:5653"
+      }
+    },
+    {
+      "name": "pfdebug_unknown_subcommand_existing_hll_error",
+      "now_ms": 13,
+      "argv": ["PFDEBUG", "BOGUS", "hll1"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Unknown PFDEBUG subcommand 'BOGUS'"
+      }
+    },
+    {
+      "name": "pfdebug_getreg_returns_register_array",
+      "now_ms": 14,
+      "argv": ["PFDEBUG", "GETREG", "hll1"],
+      "expect": {
+        "kind": "any_array"
+      }
+    },
+    {
+      "name": "pfdebug_encoding_after_getreg_returns_dense",
+      "now_ms": 15,
       "argv": ["PFDEBUG", "ENCODING", "hll1"],
       "expect": {
         "kind": "simple",
@@ -101,16 +136,8 @@
       }
     },
     {
-      "name": "pfdebug_getreg_returns_register_array",
-      "now_ms": 12,
-      "argv": ["PFDEBUG", "GETREG", "hll1"],
-      "expect": {
-        "kind": "any_array"
-      }
-    },
-    {
       "name": "pfdebug_todense_already_dense_returns_0",
-      "now_ms": 13,
+      "now_ms": 16,
       "argv": ["PFDEBUG", "TODENSE", "hll1"],
       "expect": {
         "kind": "integer",
@@ -119,11 +146,11 @@
     },
     {
       "name": "pfdebug_decode_on_dense_errors",
-      "now_ms": 14,
+      "now_ms": 17,
       "argv": ["PFDEBUG", "DECODE", "hll1"],
       "expect": {
         "kind": "error",
-        "value": "HLL encoding is not sparse"
+        "value": "ERR HLL encoding is not sparse"
       }
     },
     {
@@ -166,6 +193,15 @@
       "name": "pfdebug_decode_wrongtype_list",
       "now_ms": 24,
       "argv": ["PFDEBUG", "DECODE", "listkey"],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
+    },
+    {
+      "name": "pfdebug_unknown_subcommand_wrongtype_list_error",
+      "now_ms": 24,
+      "argv": ["PFDEBUG", "BOGUS", "listkey"],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -222,7 +258,7 @@
       "argv": ["PFDEBUG", "ENCODING", "hll_empty"],
       "expect": {
         "kind": "simple",
-        "value": "dense"
+        "value": "sparse"
       }
     },
     {
@@ -231,7 +267,7 @@
       "argv": ["PFDEBUG", "TODENSE", "hll_empty"],
       "expect": {
         "kind": "integer",
-        "value": 0
+        "value": 1
       }
     },
     {
@@ -319,7 +355,7 @@
       "argv": ["PFDEBUG", "decode", "hll1"],
       "expect": {
         "kind": "error",
-        "value": "HLL encoding is not sparse"
+        "value": "ERR HLL encoding is not sparse"
       }
     },
     {
@@ -332,12 +368,12 @@
       }
     },
     {
-      "name": "pfdebug_encoding_multiple_values_dense",
+      "name": "pfdebug_encoding_multiple_values_sparse",
       "now_ms": 61,
       "argv": ["PFDEBUG", "ENCODING", "hll2"],
       "expect": {
         "kind": "simple",
-        "value": "dense"
+        "value": "sparse"
       }
     },
     {
@@ -349,7 +385,7 @@
       }
     },
     {
-      "name": "pfdebug_todense_already_dense_multiple",
+      "name": "pfdebug_todense_already_dense_multiple_returns_0",
       "now_ms": 63,
       "argv": ["PFDEBUG", "TODENSE", "hll2"],
       "expect": {

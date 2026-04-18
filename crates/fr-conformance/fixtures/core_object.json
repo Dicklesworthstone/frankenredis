@@ -211,7 +211,7 @@
       "argv": ["OBJECT", "BOGUS", "somekey"],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'bogus'. Try OBJECT HELP."
+        "value": "ERR unknown subcommand 'BOGUS'. Try OBJECT HELP."
       }
     },
     {

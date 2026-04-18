@@ -159,7 +159,7 @@
       "argv": ["DEBUG", "BOGUS", "arg"],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'bogus'. Try DEBUG HELP."
+        "value": "ERR unknown subcommand or wrong number of arguments for 'BOGUS'. Try DEBUG HELP."
       }
     },
     {
@@ -840,7 +840,7 @@
       "argv": ["DEBUG", ""],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for ''. Try DEBUG HELP."
+        "value": "ERR unknown subcommand or wrong number of arguments for ''. Try DEBUG HELP."
       }
     },
     {
@@ -849,7 +849,7 @@
       "argv": ["DEBUG", "12345"],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for '12345'. Try DEBUG HELP."
+        "value": "ERR unknown subcommand or wrong number of arguments for '12345'. Try DEBUG HELP."
       }
     }
   ]

@@ -9,7 +9,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR unknown command 'NOPE'"
+        "value": "ERR unknown command 'NOPE', with args beginning with: "
       }
     },
     {
@@ -164,7 +164,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR value is out of range, must be positive"
       }
     },
     {
@@ -178,7 +178,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR timeout is negative"
       }
     },
     {
@@ -250,7 +250,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR syntax error"
+        "value": "ERR Unsupported option ZZ"
       }
     },
     {
@@ -279,7 +279,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR syntax error"
+        "value": "ERR Unsupported option ZZ"
       }
     },
     {
@@ -1027,8 +1027,8 @@
         "abc"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "bulk",
+        "value": null
       }
     },
     {
@@ -1053,7 +1053,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR unknown command ''"
+        "value": "ERR unknown command '', with args beginning with: "
       }
     },
     {
@@ -1064,7 +1064,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR unknown command 'FoObAr'"
+        "value": "ERR unknown command 'FoObAr', with args beginning with: "
       }
     },
     {
@@ -1077,7 +1077,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'badsubcmd'. Try OBJECT HELP."
+        "value": "ERR unknown subcommand 'BADSUBCMD'. Try OBJECT HELP."
       }
     },
     {
@@ -1091,7 +1091,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR offset is out of range"
       }
     },
     {

@@ -1107,7 +1107,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR unknown command 'NOPE'"
+        "value": "ERR unknown command 'NOPE', with args beginning with: "
       }
     },
     {
@@ -2712,7 +2712,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR offset is out of range"
       }
     },
     {

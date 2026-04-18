@@ -90,6 +90,28 @@
       }
     },
     {
+      "name": "config_get_exact_enable_protected_configs",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "GET",
+        "enable-protected-configs"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "enable-protected-configs"
+          },
+          {
+            "kind": "bulk",
+            "value": "no"
+          }
+        ]
+      }
+    },
+    {
       "name": "config_get_exact_hz",
       "now_ms": 0,
       "argv": [
@@ -787,6 +809,20 @@
       }
     },
     {
+      "name": "config_set_enable_protected_configs_immutable",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "enable-protected-configs",
+        "yes"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CONFIG SET failed (possibly related to argument 'enable-protected-configs') - can't set immutable config"
+      }
+    },
+    {
       "name": "config_set_enable_module_command_immutable",
       "now_ms": 0,
       "argv": [
@@ -1078,7 +1114,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try CONFIG HELP."
+        "value": "ERR unknown subcommand 'NOSUCH'. Try CONFIG HELP."
       }
     },
     {
@@ -1700,7 +1736,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'foobar'. Try CONFIG HELP."
+        "value": "ERR unknown subcommand 'FOOBAR'. Try CONFIG HELP."
       }
     },
     {
@@ -1712,7 +1748,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try CONFIG HELP."
+        "value": "ERR unknown subcommand 'NOSUCH'. Try CONFIG HELP."
       }
     },
     {
@@ -2305,7 +2341,7 @@
       "argv": ["CONFIG", "BOGUS"],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'bogus'. Try CONFIG HELP."
+        "value": "ERR unknown subcommand 'BOGUS'. Try CONFIG HELP."
       }
     },
 

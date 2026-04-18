@@ -322,7 +322,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR unknown command 'NOTAREALCOMMAND'"
+        "value": "ERR unknown command 'NOTAREALCOMMAND', with args beginning with: "
       }
     },
     {
@@ -1079,7 +1079,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR unknown command 'XYZCOMMAND'"
+        "value": "ERR unknown command 'XYZCOMMAND', with args beginning with: "
       }
     },
     {
@@ -1336,7 +1336,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try COMMAND HELP."
+        "value": "ERR unknown subcommand 'NOSUCH'. Try COMMAND HELP."
       }
     },
     {
@@ -1387,7 +1387,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try DEBUG HELP."
+        "value": "ERR unknown subcommand or wrong number of arguments for 'NOSUCH'. Try DEBUG HELP."
       }
     },
     {
@@ -1546,7 +1546,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try OBJECT HELP."
+        "value": "ERR unknown subcommand 'NOSUCH'. Try OBJECT HELP."
       }
     },
     {
@@ -2004,7 +2004,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nope'. Try OBJECT HELP."
+        "value": "ERR unknown subcommand 'NOPE'. Try OBJECT HELP."
       }
     },
     {

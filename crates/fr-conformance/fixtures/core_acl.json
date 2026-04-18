@@ -370,7 +370,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'badcmd'. Try ACL HELP."
+        "value": "ERR unknown subcommand 'BADCMD'. Try ACL HELP."
       }
     },
     {

@@ -1,6 +1,11 @@
 MigrateRequest {
     host: "127.0.0.1",
-    port: 7777,
+    port_arg: [
+        55,
+        55,
+        55,
+        55,
+    ],
     destination_db: 1,
     timeout: 2s,
     copy: true,
