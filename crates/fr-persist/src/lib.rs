@@ -30,6 +30,51 @@ pub struct AofReplayTransactionTrim {
     pub truncated_from_offset: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AofReplaySegmentPosition {
+    Final,
+    NonFinal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AofReplayTailRepairPolicy {
+    Disabled,
+    BoundedFinalSegment { max_tail_bytes: usize },
+    HardenedNonAllowlisted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AofReplayTailFailure {
+    Parse(RespParseError),
+    InvalidFrame,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AofReplayTailRepair {
+    pub records: Vec<AofReplayRecord>,
+    pub truncated_from_offset: usize,
+    pub truncated_bytes: usize,
+    pub failure: AofReplayTailFailure,
+    pub reason_code: &'static str,
+    pub policy_reason_code: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AofReplayTailFatal {
+    pub records: Vec<AofReplayRecord>,
+    pub failure_offset: usize,
+    pub trailing_bytes: usize,
+    pub failure: AofReplayTailFailure,
+    pub reason_code: &'static str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AofReplayTailRepairOutcome {
+    Clean { records: Vec<AofReplayRecord> },
+    Repaired(AofReplayTailRepair),
+    Fatal(AofReplayTailFatal),
+}
+
 #[derive(Debug)]
 pub enum PersistError {
     InvalidFrame,
@@ -447,14 +492,22 @@ pub fn decode_aof_stream(input: &[u8]) -> Result<Vec<AofRecord>, PersistError> {
         .collect())
 }
 
+const AOF_MAX_BULK_LEN: usize = 1024 * 1024 * 1024;
+const AOF_MAX_ARRAY_LEN: usize = 10 * 1024 * 1024;
+const AOF_MAX_RECURSION_DEPTH: usize = 1024;
+
+fn aof_parser_config() -> fr_protocol::ParserConfig {
+    fr_protocol::ParserConfig {
+        max_bulk_len: AOF_MAX_BULK_LEN,
+        max_array_len: AOF_MAX_ARRAY_LEN,
+        max_recursion_depth: AOF_MAX_RECURSION_DEPTH,
+    }
+}
+
 pub fn decode_aof_stream_with_offsets(input: &[u8]) -> Result<Vec<AofReplayRecord>, PersistError> {
     let mut cursor = 0usize;
     let mut out = Vec::new();
-    let parser_config = fr_protocol::ParserConfig {
-        max_bulk_len: 1024 * 1024 * 1024, // 1GiB for AOF
-        max_array_len: 10 * 1024 * 1024,  // 10M elements
-        max_recursion_depth: 1024,
-    };
+    let parser_config = aof_parser_config();
     while cursor < input.len() {
         let parsed = fr_protocol::parse_frame_with_config(&input[cursor..], &parser_config)?;
         let record = AofRecord::from_resp_frame(&parsed.frame)?;
@@ -468,6 +521,130 @@ pub fn decode_aof_stream_with_offsets(input: &[u8]) -> Result<Vec<AofReplayRecor
         cursor = end_offset;
     }
     Ok(out)
+}
+
+/// Decode an AOF segment and classify final-tail repair eligibility.
+#[must_use]
+pub fn classify_aof_replay_tail_repair(
+    input: &[u8],
+    segment_position: AofReplaySegmentPosition,
+    policy: AofReplayTailRepairPolicy,
+) -> AofReplayTailRepairOutcome {
+    let mut cursor = 0usize;
+    let mut records = Vec::new();
+    let parser_config = aof_parser_config();
+
+    while cursor < input.len() {
+        let parsed = match fr_protocol::parse_frame_with_config(&input[cursor..], &parser_config) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return classify_aof_tail_failure(
+                    records,
+                    cursor,
+                    input.len().saturating_sub(cursor),
+                    AofReplayTailFailure::Parse(error),
+                    segment_position,
+                    policy,
+                );
+            }
+        };
+
+        let record = match AofRecord::from_resp_frame(&parsed.frame) {
+            Ok(record) => record,
+            Err(error) => {
+                return classify_aof_tail_failure(
+                    records,
+                    cursor,
+                    input.len().saturating_sub(cursor),
+                    aof_tail_failure_from_persist_error(error),
+                    segment_position,
+                    policy,
+                );
+            }
+        };
+
+        let start_offset = cursor;
+        let end_offset = cursor.saturating_add(parsed.consumed);
+        records.push(AofReplayRecord {
+            record,
+            start_offset,
+            end_offset,
+        });
+        cursor = end_offset;
+    }
+
+    AofReplayTailRepairOutcome::Clean { records }
+}
+
+fn aof_tail_failure_from_persist_error(error: PersistError) -> AofReplayTailFailure {
+    match error {
+        PersistError::Parse(error) => AofReplayTailFailure::Parse(error),
+        PersistError::InvalidFrame
+        | PersistError::Io(_)
+        | PersistError::ManifestParseViolation { .. }
+        | PersistError::ManifestPathViolation { .. } => AofReplayTailFailure::InvalidFrame,
+    }
+}
+
+fn classify_aof_tail_failure(
+    records: Vec<AofReplayRecord>,
+    failure_offset: usize,
+    trailing_bytes: usize,
+    failure: AofReplayTailFailure,
+    segment_position: AofReplaySegmentPosition,
+    policy: AofReplayTailRepairPolicy,
+) -> AofReplayTailRepairOutcome {
+    if segment_position == AofReplaySegmentPosition::NonFinal {
+        return AofReplayTailRepairOutcome::Fatal(AofReplayTailFatal {
+            records,
+            failure_offset,
+            trailing_bytes,
+            failure,
+            reason_code: "persist.replay.nonfinal_truncation_fatal",
+        });
+    }
+
+    match policy {
+        AofReplayTailRepairPolicy::BoundedFinalSegment { max_tail_bytes }
+            if trailing_bytes <= max_tail_bytes =>
+        {
+            AofReplayTailRepairOutcome::Repaired(AofReplayTailRepair {
+                records,
+                truncated_from_offset: failure_offset,
+                truncated_bytes: trailing_bytes,
+                failure,
+                reason_code: "persist.replay.tail_truncate_recover",
+                policy_reason_code: "persist.replay.repair_policy_applied",
+            })
+        }
+        AofReplayTailRepairPolicy::BoundedFinalSegment { .. } => {
+            AofReplayTailRepairOutcome::Fatal(AofReplayTailFatal {
+                records,
+                failure_offset,
+                trailing_bytes,
+                failure,
+                reason_code: "persist.replay.tail_repair_bound_exceeded",
+            })
+        }
+        AofReplayTailRepairPolicy::HardenedNonAllowlisted => {
+            AofReplayTailRepairOutcome::Fatal(AofReplayTailFatal {
+                records,
+                failure_offset,
+                trailing_bytes,
+                failure,
+                reason_code: "persist.hardened_nonallowlisted_rejected",
+            })
+        }
+        AofReplayTailRepairPolicy::Disabled => {
+            AofReplayTailRepairOutcome::Fatal(AofReplayTailFatal {
+                records,
+                failure_offset,
+                trailing_bytes,
+                failure,
+                reason_code: "persist.replay.frame_parse_invalid",
+            })
+        }
+    }
 }
 
 /// Decode a Redis replay stream that is either RESP-only or RDB preamble + RESP tail.
@@ -1417,9 +1594,11 @@ mod tests {
     use fr_protocol::{RespFrame, RespParseError};
 
     use super::{
-        AofManifest, AofManifestFileType, AofRecord, PersistError, decode_aof_replay_stream,
-        decode_aof_stream, decode_aof_stream_with_offsets, encode_aof_stream, format_aof_manifest,
-        parse_aof_manifest, trim_incomplete_multi_replay,
+        AofManifest, AofManifestFileType, AofRecord, AofReplaySegmentPosition,
+        AofReplayTailFailure, AofReplayTailRepairOutcome, AofReplayTailRepairPolicy, PersistError,
+        classify_aof_replay_tail_repair, decode_aof_replay_stream, decode_aof_stream,
+        decode_aof_stream_with_offsets, encode_aof_stream, format_aof_manifest, parse_aof_manifest,
+        trim_incomplete_multi_replay,
     };
 
     #[test]
@@ -1596,6 +1775,194 @@ mod tests {
 
         assert_eq!(trimmed.records, replay_records);
         assert_eq!(trimmed.truncated_from_offset, None);
+    }
+
+    #[test]
+    fn classify_aof_replay_tail_repair_preserves_clean_segment() -> Result<(), String> {
+        let records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+        }];
+        let encoded = encode_aof_stream(&records);
+
+        let outcome = classify_aof_replay_tail_repair(
+            &encoded,
+            AofReplaySegmentPosition::Final,
+            AofReplayTailRepairPolicy::Disabled,
+        );
+
+        let AofReplayTailRepairOutcome::Clean {
+            records: replay_records,
+        } = outcome
+        else {
+            return Err(format!(
+                "clean segment should not require repair: {outcome:?}"
+            ));
+        };
+        assert_eq!(replay_records.len(), 1);
+        assert_eq!(replay_records[0].record, records[0]);
+        assert_eq!(replay_records[0].start_offset, 0);
+        assert_eq!(replay_records[0].end_offset, encoded.len());
+        Ok(())
+    }
+
+    #[test]
+    fn classify_aof_replay_tail_repair_truncates_bounded_final_tail() -> Result<(), String> {
+        let records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"before".to_vec(), b"1".to_vec()],
+        }];
+        let valid_prefix = encode_aof_stream(&records);
+        let mut encoded = valid_prefix.clone();
+        encoded.extend_from_slice(b"*2\r\n$3\r\nSET\r\n$1\r\nx");
+        let truncated_bytes = encoded.len() - valid_prefix.len();
+
+        let outcome = classify_aof_replay_tail_repair(
+            &encoded,
+            AofReplaySegmentPosition::Final,
+            AofReplayTailRepairPolicy::BoundedFinalSegment {
+                max_tail_bytes: truncated_bytes,
+            },
+        );
+
+        let AofReplayTailRepairOutcome::Repaired(repair) = outcome else {
+            return Err(format!("bounded final tail should repair: {outcome:?}"));
+        };
+        assert_eq!(repair.records.len(), 1);
+        assert_eq!(repair.records[0].record, records[0]);
+        assert_eq!(repair.truncated_from_offset, valid_prefix.len());
+        assert_eq!(repair.truncated_bytes, truncated_bytes);
+        assert_eq!(
+            repair.failure,
+            AofReplayTailFailure::Parse(RespParseError::Incomplete)
+        );
+        assert_eq!(repair.reason_code, "persist.replay.tail_truncate_recover");
+        assert_eq!(
+            repair.policy_reason_code,
+            "persist.replay.repair_policy_applied"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classify_aof_replay_tail_repair_handles_corrupt_final_frame() -> Result<(), String> {
+        let records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"before".to_vec(), b"1".to_vec()],
+        }];
+        let valid_prefix = encode_aof_stream(&records);
+        let mut encoded = valid_prefix.clone();
+        encoded.extend_from_slice(b"$3\r\nbad\r\n");
+        let corrupted_bytes = encoded.len() - valid_prefix.len();
+
+        let outcome = classify_aof_replay_tail_repair(
+            &encoded,
+            AofReplaySegmentPosition::Final,
+            AofReplayTailRepairPolicy::BoundedFinalSegment {
+                max_tail_bytes: corrupted_bytes,
+            },
+        );
+
+        let AofReplayTailRepairOutcome::Repaired(repair) = outcome else {
+            return Err(format!(
+                "bounded final corruption should repair: {outcome:?}"
+            ));
+        };
+        assert_eq!(repair.records.len(), 1);
+        assert_eq!(repair.truncated_from_offset, valid_prefix.len());
+        assert_eq!(repair.truncated_bytes, corrupted_bytes);
+        assert_eq!(repair.failure, AofReplayTailFailure::InvalidFrame);
+        Ok(())
+    }
+
+    #[test]
+    fn classify_aof_replay_tail_repair_rejects_nonfinal_tail_corruption() -> Result<(), String> {
+        let records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"before".to_vec(), b"1".to_vec()],
+        }];
+        let valid_prefix = encode_aof_stream(&records);
+        let mut encoded = valid_prefix.clone();
+        encoded.extend_from_slice(b"*2\r\n$3\r\nSET\r\n$1\r\nx");
+
+        let outcome = classify_aof_replay_tail_repair(
+            &encoded,
+            AofReplaySegmentPosition::NonFinal,
+            AofReplayTailRepairPolicy::BoundedFinalSegment {
+                max_tail_bytes: encoded.len(),
+            },
+        );
+
+        let AofReplayTailRepairOutcome::Fatal(fatal) = outcome else {
+            return Err(format!("non-final segment must fail closed: {outcome:?}"));
+        };
+        assert_eq!(fatal.records.len(), 1);
+        assert_eq!(fatal.failure_offset, valid_prefix.len());
+        assert_eq!(fatal.trailing_bytes, encoded.len() - valid_prefix.len());
+        assert_eq!(
+            fatal.failure,
+            AofReplayTailFailure::Parse(RespParseError::Incomplete)
+        );
+        assert_eq!(
+            fatal.reason_code,
+            "persist.replay.nonfinal_truncation_fatal"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classify_aof_replay_tail_repair_rejects_over_bound_final_tail() -> Result<(), String> {
+        let records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"before".to_vec(), b"1".to_vec()],
+        }];
+        let valid_prefix = encode_aof_stream(&records);
+        let mut encoded = valid_prefix.clone();
+        encoded.extend_from_slice(b"*2\r\n$3\r\nSET\r\n$1\r\nx");
+
+        let outcome = classify_aof_replay_tail_repair(
+            &encoded,
+            AofReplaySegmentPosition::Final,
+            AofReplayTailRepairPolicy::BoundedFinalSegment { max_tail_bytes: 1 },
+        );
+
+        let AofReplayTailRepairOutcome::Fatal(fatal) = outcome else {
+            return Err(format!(
+                "over-bound final tail should stay fatal: {outcome:?}"
+            ));
+        };
+        assert_eq!(fatal.records.len(), 1);
+        assert_eq!(fatal.failure_offset, valid_prefix.len());
+        assert_eq!(
+            fatal.reason_code,
+            "persist.replay.tail_repair_bound_exceeded"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classify_aof_replay_tail_repair_rejects_hardened_nonallowlisted_repair() -> Result<(), String>
+    {
+        let records = vec![AofRecord {
+            argv: vec![b"SET".to_vec(), b"before".to_vec(), b"1".to_vec()],
+        }];
+        let valid_prefix = encode_aof_stream(&records);
+        let mut encoded = valid_prefix.clone();
+        encoded.extend_from_slice(b"*2\r\n$3\r\nSET\r\n$1\r\nx");
+
+        let outcome = classify_aof_replay_tail_repair(
+            &encoded,
+            AofReplaySegmentPosition::Final,
+            AofReplayTailRepairPolicy::HardenedNonAllowlisted,
+        );
+
+        let AofReplayTailRepairOutcome::Fatal(fatal) = outcome else {
+            return Err(format!(
+                "non-allowlisted hardened repair must reject: {outcome:?}"
+            ));
+        };
+        assert_eq!(fatal.records.len(), 1);
+        assert_eq!(fatal.failure_offset, valid_prefix.len());
+        assert_eq!(
+            fatal.reason_code,
+            "persist.hardened_nonallowlisted_rejected"
+        );
+        Ok(())
     }
 
     #[test]
