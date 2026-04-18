@@ -1,0 +1,4 @@
+ExpiryDecision {
+    should_evict: true,
+    remaining_ms: -2,
+}
