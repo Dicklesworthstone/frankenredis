@@ -531,6 +531,14 @@ pub struct RdbEntry {
     pub expire_ms: Option<u64>,
 }
 
+/// Decoded RDB payload plus the byte offset immediately after the checksum.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RdbDecodeResult {
+    pub entries: Vec<RdbEntry>,
+    pub aux: BTreeMap<String, String>,
+    pub consumed: usize,
+}
+
 /// Stream entry: (ms, seq, fields).
 pub type StreamEntry = (u64, u64, Vec<(Vec<u8>, Vec<u8>)>);
 
@@ -908,8 +916,11 @@ fn rdb_decode_string(data: &[u8]) -> Option<(Vec<u8>, usize)> {
     }
 }
 
-/// Decode an RDB file into entries. Returns entries and auxiliary metadata.
-pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String>), PersistError> {
+/// Decode an RDB preamble and report the first byte after its checksum.
+///
+/// Redis AOF replay can begin with an RDB preamble followed by RESP AOF records.
+/// This API decodes only the RDB prefix and leaves any tail bytes to the caller.
+pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
     if data.len() < 9 + RDB_CHECKSUM_LEN || &data[..5] != b"REDIS" {
         return Err(PersistError::InvalidFrame);
     }
@@ -952,7 +963,7 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
 
         match opcode {
             RDB_OPCODE_EOF => {
-                if data.len() != cursor + RDB_CHECKSUM_LEN {
+                if cursor + RDB_CHECKSUM_LEN > data.len() {
                     return Err(PersistError::InvalidFrame);
                 }
                 let expected_checksum = u64::from_le_bytes(
@@ -967,6 +978,7 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
                 if pending_expire_ms.is_some() {
                     return Err(PersistError::InvalidFrame);
                 }
+                cursor += RDB_CHECKSUM_LEN;
                 saw_eof = true;
                 break;
             }
@@ -1282,7 +1294,21 @@ pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String
         return Err(PersistError::InvalidFrame);
     }
 
-    Ok((entries, aux))
+    Ok(RdbDecodeResult {
+        entries,
+        aux,
+        consumed: cursor,
+    })
+}
+
+/// Decode an RDB file into entries. Returns entries and auxiliary metadata.
+pub fn decode_rdb(data: &[u8]) -> Result<(Vec<RdbEntry>, BTreeMap<String, String>), PersistError> {
+    let decoded = decode_rdb_prefix(data)?;
+    if decoded.consumed != data.len() {
+        return Err(PersistError::InvalidFrame);
+    }
+
+    Ok((decoded.entries, decoded.aux))
 }
 
 /// Write an RDB snapshot to a file. Uses atomic rename for crash safety.
@@ -1674,8 +1700,8 @@ mod tests {
 
     use super::{
         RDB_CHECKSUM_LEN, RDB_OPCODE_EOF, RDB_TYPE_STRING, RdbEntry, RdbStreamConsumerGroup,
-        RdbStreamPendingEntry, RdbValue, crc64_redis, decode_rdb, encode_rdb, lzf_decompress,
-        rdb_encode_length, rdb_encode_string,
+        RdbStreamPendingEntry, RdbValue, crc64_redis, decode_rdb, decode_rdb_prefix, encode_rdb,
+        lzf_decompress, rdb_encode_length, rdb_encode_string,
     };
 
     #[test]
@@ -1787,6 +1813,54 @@ mod tests {
         assert_eq!(decoded, entries);
         assert_eq!(aux_map.get("redis-ver").map(String::as_str), Some("7.0.0"));
         assert_eq!(aux_map.get("ctime").map(String::as_str), Some("1700000000"));
+    }
+
+    #[test]
+    fn rdb_prefix_decode_reports_consumed_length_before_aof_tail() {
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"preamble-key".to_vec(),
+            value: RdbValue::String(b"preamble-value".to_vec()),
+            expire_ms: None,
+        }];
+        let mut combined = encode_rdb(&entries, &[("redis-ver", "7.2.0")]);
+        let rdb_len = combined.len();
+        let tail_records = vec![AofRecord {
+            argv: vec![
+                b"SET".to_vec(),
+                b"tail-key".to_vec(),
+                b"tail-value".to_vec(),
+            ],
+        }];
+        combined.extend_from_slice(&encode_aof_stream(&tail_records));
+
+        let decoded = decode_rdb_prefix(&combined).expect("decode rdb preamble");
+
+        assert_eq!(decoded.consumed, rdb_len);
+        assert_eq!(decoded.entries, entries);
+        assert_eq!(
+            decoded.aux.get("redis-ver").map(String::as_str),
+            Some("7.2.0")
+        );
+        let decoded_tail = decode_aof_stream(&combined[decoded.consumed..]).expect("decode tail");
+        assert_eq!(decoded_tail, tail_records);
+    }
+
+    #[test]
+    fn rdb_whole_file_decode_rejects_aof_tail_after_preamble() {
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"strict-key".to_vec(),
+            value: RdbValue::String(b"strict-value".to_vec()),
+            expire_ms: None,
+        }];
+        let mut combined = encode_rdb(&entries, &[]);
+        combined.extend_from_slice(&encode_aof_stream(&[AofRecord {
+            argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+        }]));
+
+        let err = decode_rdb(&combined).expect_err("strict decode must reject trailing AOF");
+        assert_eq!(err, PersistError::InvalidFrame);
     }
 
     #[test]
