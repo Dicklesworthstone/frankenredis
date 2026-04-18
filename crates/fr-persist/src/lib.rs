@@ -11,6 +11,13 @@ pub struct AofRecord {
     pub argv: Vec<Vec<u8>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AofReplayRecord {
+    pub record: AofRecord,
+    pub start_offset: usize,
+    pub end_offset: usize,
+}
+
 #[derive(Debug)]
 pub enum PersistError {
     InvalidFrame,
@@ -422,6 +429,13 @@ pub fn encode_aof_stream(records: &[AofRecord]) -> Vec<u8> {
 }
 
 pub fn decode_aof_stream(input: &[u8]) -> Result<Vec<AofRecord>, PersistError> {
+    Ok(decode_aof_stream_with_offsets(input)?
+        .into_iter()
+        .map(|entry| entry.record)
+        .collect())
+}
+
+pub fn decode_aof_stream_with_offsets(input: &[u8]) -> Result<Vec<AofReplayRecord>, PersistError> {
     let mut cursor = 0usize;
     let mut out = Vec::new();
     let parser_config = fr_protocol::ParserConfig {
@@ -432,8 +446,14 @@ pub fn decode_aof_stream(input: &[u8]) -> Result<Vec<AofRecord>, PersistError> {
     while cursor < input.len() {
         let parsed = fr_protocol::parse_frame_with_config(&input[cursor..], &parser_config)?;
         let record = AofRecord::from_resp_frame(&parsed.frame)?;
-        out.push(record);
-        cursor = cursor.saturating_add(parsed.consumed);
+        let start_offset = cursor;
+        let end_offset = cursor.saturating_add(parsed.consumed);
+        out.push(AofReplayRecord {
+            record,
+            start_offset,
+            end_offset,
+        });
+        cursor = end_offset;
     }
     Ok(out)
 }
@@ -1304,7 +1324,7 @@ mod tests {
 
     use super::{
         AofManifest, AofManifestFileType, AofRecord, PersistError, decode_aof_stream,
-        encode_aof_stream, format_aof_manifest, parse_aof_manifest,
+        decode_aof_stream_with_offsets, encode_aof_stream, format_aof_manifest, parse_aof_manifest,
     };
 
     #[test]
@@ -1343,6 +1363,46 @@ mod tests {
         let encoded = encode_aof_stream(&records);
         let decoded = decode_aof_stream(&encoded).expect("decode stream");
         assert_eq!(decoded, records);
+    }
+
+    #[test]
+    fn decode_aof_stream_with_offsets_preserves_record_boundaries() {
+        let records = vec![
+            AofRecord {
+                argv: vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"INCR".to_vec(), b"counter".to_vec()],
+            },
+        ];
+        let first_len = records[0].to_resp_frame().to_bytes().len();
+        let encoded = encode_aof_stream(&records);
+
+        let decoded = decode_aof_stream_with_offsets(&encoded).expect("decode stream");
+
+        assert_eq!(decoded.len(), 2);
+        assert_eq!(decoded[0].record, records[0]);
+        assert_eq!(decoded[0].start_offset, 0);
+        assert_eq!(decoded[0].end_offset, first_len);
+        assert_eq!(decoded[1].record, records[1]);
+        assert_eq!(decoded[1].start_offset, first_len);
+        assert_eq!(decoded[1].end_offset, encoded.len());
+    }
+
+    #[test]
+    fn decode_aof_stream_with_offsets_accepts_empty_stream() {
+        let decoded = decode_aof_stream_with_offsets(b"").expect("empty stream");
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn decode_aof_stream_with_offsets_rejects_invalid_and_incomplete_frames() {
+        let err = decode_aof_stream_with_offsets(b"$3\r\nbad\r\n").expect_err("must fail");
+        assert_eq!(err, PersistError::InvalidFrame);
+
+        let err =
+            decode_aof_stream_with_offsets(b"*2\r\n$3\r\nGET\r\n$1\r\nk").expect_err("must fail");
+        assert_eq!(err, PersistError::Parse(RespParseError::Incomplete));
     }
 
     #[test]
