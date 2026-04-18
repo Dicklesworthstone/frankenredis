@@ -2650,6 +2650,10 @@ mod tests {
             }
             fr_persist::PersistError::Parse(_) => "persist.replay.frame_parse_invalid",
             fr_persist::PersistError::Io(_) => "persist.replay.io_error",
+            fr_persist::PersistError::ManifestParseViolation { .. }
+            | fr_persist::PersistError::ManifestPathViolation { .. } => {
+                "persist.manifest.parse_or_path_violation"
+            }
         }
     }
 

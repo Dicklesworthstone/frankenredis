@@ -16,6 +16,8 @@ pub enum PersistError {
     InvalidFrame,
     Parse(RespParseError),
     Io(std::io::Error),
+    ManifestParseViolation { line: usize, reason: &'static str },
+    ManifestPathViolation { line: usize, file_name: String },
 }
 
 impl PartialEq for PersistError {
@@ -24,6 +26,26 @@ impl PartialEq for PersistError {
             (Self::InvalidFrame, Self::InvalidFrame) => true,
             (Self::Parse(a), Self::Parse(b)) => a == b,
             (Self::Io(_), Self::Io(_)) => false, // I/O errors are not structurally comparable
+            (
+                Self::ManifestParseViolation {
+                    line: left_line,
+                    reason: left_reason,
+                },
+                Self::ManifestParseViolation {
+                    line: right_line,
+                    reason: right_reason,
+                },
+            ) => left_line == right_line && left_reason == right_reason,
+            (
+                Self::ManifestPathViolation {
+                    line: left_line,
+                    file_name: left_file_name,
+                },
+                Self::ManifestPathViolation {
+                    line: right_line,
+                    file_name: right_file_name,
+                },
+            ) => left_line == right_line && left_file_name == right_file_name,
             _ => false,
         }
     }
@@ -41,6 +63,318 @@ impl From<std::io::Error> for PersistError {
     fn from(value: std::io::Error) -> Self {
         Self::Io(value)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AofManifestFileType {
+    Base,
+    History,
+    Incremental,
+}
+
+impl AofManifestFileType {
+    fn from_manifest_token(token: &str, line: usize) -> Result<Self, PersistError> {
+        let bytes = token.as_bytes();
+        if bytes.len() != 1 {
+            return Err(manifest_parse_error(line, "invalid file type"));
+        }
+
+        match bytes[0] {
+            b'b' => Ok(Self::Base),
+            b'h' => Ok(Self::History),
+            b'i' => Ok(Self::Incremental),
+            _ => Err(manifest_parse_error(line, "unknown file type")),
+        }
+    }
+
+    const fn as_manifest_char(self) -> char {
+        match self {
+            Self::Base => 'b',
+            Self::History => 'h',
+            Self::Incremental => 'i',
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AofManifestEntry {
+    pub file_name: String,
+    pub file_seq: u64,
+    pub file_type: AofManifestFileType,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AofManifest {
+    pub base: Option<AofManifestEntry>,
+    pub history: Vec<AofManifestEntry>,
+    pub incremental: Vec<AofManifestEntry>,
+    pub curr_base_file_seq: u64,
+    pub curr_incr_file_seq: u64,
+}
+
+impl AofManifest {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.base.is_none() && self.history.is_empty() && self.incremental.is_empty()
+    }
+}
+
+const AOF_MANIFEST_MAX_LINE: usize = 1024;
+
+fn manifest_parse_error(line: usize, reason: &'static str) -> PersistError {
+    PersistError::ManifestParseViolation { line, reason }
+}
+
+#[must_use]
+pub fn is_aof_manifest_basename(file_name: &str) -> bool {
+    !file_name.is_empty() && !file_name.contains('/') && !file_name.contains('\\')
+}
+
+pub fn parse_aof_manifest(input: &str) -> Result<AofManifest, PersistError> {
+    let mut manifest = AofManifest::default();
+    let mut max_incr_seq = 0_u64;
+    let mut saw_physical_line = false;
+
+    for (index, raw_line) in input.lines().enumerate() {
+        let line_number = index + 1;
+        saw_physical_line = true;
+
+        if raw_line.as_bytes().first() == Some(&b'#') {
+            continue;
+        }
+        if raw_line.len() > AOF_MANIFEST_MAX_LINE {
+            return Err(manifest_parse_error(line_number, "line too long"));
+        }
+
+        let line = raw_line.trim_matches(|ch| matches!(ch, ' ' | '\t' | '\r' | '\n'));
+        if line.is_empty() {
+            return Err(manifest_parse_error(line_number, "empty manifest row"));
+        }
+
+        let argv = split_manifest_args(line)
+            .ok_or_else(|| manifest_parse_error(line_number, "invalid manifest quoting"))?;
+        if argv.len() < 6 || !argv.len().is_multiple_of(2) {
+            return Err(manifest_parse_error(line_number, "invalid field count"));
+        }
+
+        let entry = parse_aof_manifest_entry(&argv, line_number)?;
+        match entry.file_type {
+            AofManifestFileType::Base => {
+                if manifest.base.is_some() {
+                    return Err(manifest_parse_error(line_number, "duplicate base file"));
+                }
+                manifest.curr_base_file_seq = entry.file_seq;
+                manifest.base = Some(entry);
+            }
+            AofManifestFileType::History => {
+                manifest.history.push(entry);
+            }
+            AofManifestFileType::Incremental => {
+                if entry.file_seq <= max_incr_seq {
+                    return Err(manifest_parse_error(
+                        line_number,
+                        "non-monotonic incremental sequence",
+                    ));
+                }
+                max_incr_seq = entry.file_seq;
+                manifest.curr_incr_file_seq = entry.file_seq;
+                manifest.incremental.push(entry);
+            }
+        }
+    }
+
+    if !saw_physical_line {
+        return Err(manifest_parse_error(0, "empty manifest"));
+    }
+
+    Ok(manifest)
+}
+
+pub fn read_aof_manifest_file(path: &Path) -> Result<AofManifest, PersistError> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => parse_aof_manifest(&contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AofManifest::default()),
+        Err(error) => Err(PersistError::Io(error)),
+    }
+}
+
+#[must_use]
+pub fn format_aof_manifest(manifest: &AofManifest) -> String {
+    let mut out = String::new();
+    if let Some(base) = &manifest.base {
+        push_manifest_entry(&mut out, base);
+    }
+    for entry in &manifest.history {
+        push_manifest_entry(&mut out, entry);
+    }
+    for entry in &manifest.incremental {
+        push_manifest_entry(&mut out, entry);
+    }
+    out
+}
+
+fn parse_aof_manifest_entry(
+    argv: &[String],
+    line: usize,
+) -> Result<AofManifestEntry, PersistError> {
+    let mut file_name = None;
+    let mut file_seq = None;
+    let mut file_type = None;
+
+    for pair in argv.chunks_exact(2) {
+        let key = pair[0].as_str();
+        let value = pair[1].as_str();
+        if key.eq_ignore_ascii_case("file") {
+            if file_name.replace(value.to_string()).is_some() {
+                return Err(manifest_parse_error(line, "duplicate file field"));
+            }
+        } else if key.eq_ignore_ascii_case("seq") {
+            if file_seq
+                .replace(parse_manifest_sequence(value, line)?)
+                .is_some()
+            {
+                return Err(manifest_parse_error(line, "duplicate seq field"));
+            }
+        } else if key.eq_ignore_ascii_case("type")
+            && file_type
+                .replace(AofManifestFileType::from_manifest_token(value, line)?)
+                .is_some()
+        {
+            return Err(manifest_parse_error(line, "duplicate type field"));
+        }
+    }
+
+    let file_name = file_name.ok_or_else(|| manifest_parse_error(line, "missing file field"))?;
+    if !is_aof_manifest_basename(&file_name) {
+        return Err(PersistError::ManifestPathViolation { line, file_name });
+    }
+
+    Ok(AofManifestEntry {
+        file_name,
+        file_seq: file_seq.ok_or_else(|| manifest_parse_error(line, "missing seq field"))?,
+        file_type: file_type.ok_or_else(|| manifest_parse_error(line, "missing type field"))?,
+    })
+}
+
+fn parse_manifest_sequence(value: &str, line: usize) -> Result<u64, PersistError> {
+    if value.is_empty()
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+        || (value.len() > 1 && value.starts_with('0'))
+    {
+        return Err(manifest_parse_error(line, "invalid seq field"));
+    }
+    let seq = value
+        .parse::<u64>()
+        .map_err(|_| manifest_parse_error(line, "invalid seq field"))?;
+    if seq == 0 {
+        return Err(manifest_parse_error(line, "invalid seq field"));
+    }
+    Ok(seq)
+}
+
+fn split_manifest_args(line: &str) -> Option<Vec<String>> {
+    let bytes = line.as_bytes();
+    let mut args = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < bytes.len() {
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor == bytes.len() {
+            break;
+        }
+
+        let mut arg = String::new();
+        let mut quote = None;
+        while cursor < bytes.len() {
+            let byte = bytes[cursor];
+            if let Some(quote_byte) = quote {
+                if byte == quote_byte {
+                    quote = None;
+                    cursor += 1;
+                    continue;
+                }
+                if byte == b'\\' {
+                    cursor += 1;
+                    let escaped = *bytes.get(cursor)?;
+                    arg.push(unescape_manifest_byte(escaped));
+                    cursor += 1;
+                    continue;
+                }
+                arg.push(char::from(byte));
+                cursor += 1;
+                continue;
+            }
+
+            if byte.is_ascii_whitespace() {
+                break;
+            }
+            if matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+                cursor += 1;
+                continue;
+            }
+            if byte == b'\\' {
+                cursor += 1;
+                let escaped = *bytes.get(cursor)?;
+                arg.push(unescape_manifest_byte(escaped));
+                cursor += 1;
+                continue;
+            }
+            arg.push(char::from(byte));
+            cursor += 1;
+        }
+
+        if quote.is_some() {
+            return None;
+        }
+        args.push(arg);
+    }
+
+    Some(args)
+}
+
+fn unescape_manifest_byte(byte: u8) -> char {
+    match byte {
+        b'n' => '\n',
+        b'r' => '\r',
+        b't' => '\t',
+        other => char::from(other),
+    }
+}
+
+fn push_manifest_entry(out: &mut String, entry: &AofManifestEntry) {
+    out.push_str("file ");
+    out.push_str(&format_manifest_file_name(&entry.file_name));
+    out.push_str(" seq ");
+    out.push_str(&entry.file_seq.to_string());
+    out.push_str(" type ");
+    out.push(entry.file_type.as_manifest_char());
+    out.push('\n');
+}
+
+fn format_manifest_file_name(file_name: &str) -> String {
+    if file_name
+        .bytes()
+        .all(|byte| !byte.is_ascii_whitespace() && !matches!(byte, b'"' | b'\'' | b'\\'))
+    {
+        return file_name.to_string();
+    }
+
+    let mut out = String::from("\"");
+    for byte in file_name.bytes() {
+        match byte {
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            other => out.push(char::from(other)),
+        }
+    }
+    out.push('"');
+    out
 }
 
 impl AofRecord {
@@ -964,7 +1298,10 @@ pub fn read_rdb_file(
 mod tests {
     use fr_protocol::{RespFrame, RespParseError};
 
-    use super::{AofRecord, PersistError, decode_aof_stream, encode_aof_stream};
+    use super::{
+        AofManifest, AofManifestFileType, AofRecord, PersistError, decode_aof_stream,
+        encode_aof_stream, format_aof_manifest, parse_aof_manifest,
+    };
 
     #[test]
     fn round_trip_aof_record() {
@@ -1078,6 +1415,146 @@ mod tests {
     fn sync_parent_dir_accepts_relative_paths() {
         super::sync_parent_dir(std::path::Path::new("relative-test.aof"))
             .expect("sync relative parent");
+    }
+
+    #[test]
+    fn aof_manifest_parses_base_history_and_incremental_rows() {
+        let manifest = parse_aof_manifest(
+            "# generated by Redis\n\
+             file appendonly.aof.1.base.rdb seq 1 type b\n\
+             file appendonly.aof.2.incr.aof seq 2 type h\n\
+             file appendonly.aof.3.incr.aof seq 3 type i\n\
+             file appendonly.aof.4.incr.aof seq 4 type i\n",
+        )
+        .expect("parse manifest");
+
+        let base = manifest.base.as_ref().expect("base entry");
+        assert_eq!(base.file_name, "appendonly.aof.1.base.rdb");
+        assert_eq!(base.file_seq, 1);
+        assert_eq!(base.file_type, AofManifestFileType::Base);
+        assert_eq!(manifest.history.len(), 1);
+        assert_eq!(manifest.incremental.len(), 2);
+        assert_eq!(manifest.curr_base_file_seq, 1);
+        assert_eq!(manifest.curr_incr_file_seq, 4);
+    }
+
+    #[test]
+    fn aof_manifest_format_preserves_redis_ordering() {
+        let parsed = parse_aof_manifest(
+            "file base.aof seq 1 type b\n\
+             file old.aof seq 2 type h\n\
+             file \"incr 3.aof\" seq 3 type i\n",
+        )
+        .expect("parse manifest");
+
+        let formatted = format_aof_manifest(&parsed);
+        assert_eq!(
+            formatted,
+            "file base.aof seq 1 type b\n\
+             file old.aof seq 2 type h\n\
+             file \"incr 3.aof\" seq 3 type i\n"
+        );
+        assert_eq!(parse_aof_manifest(&formatted).expect("reparse"), parsed);
+    }
+
+    #[test]
+    fn aof_manifest_empty_input_is_rejected_but_missing_file_is_empty() {
+        let err = parse_aof_manifest("").expect_err("empty manifest must fail");
+        assert_eq!(
+            err,
+            PersistError::ManifestParseViolation {
+                line: 0,
+                reason: "empty manifest",
+            }
+        );
+
+        let missing = super::read_aof_manifest_file(std::path::Path::new(
+            "/tmp/fr_persist_missing_manifest_for_test.manifest",
+        ))
+        .expect("missing manifest");
+        assert_eq!(missing, AofManifest::default());
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn aof_manifest_rejects_duplicate_base() {
+        let err = parse_aof_manifest(
+            "file base-1.aof seq 1 type b\n\
+             file base-2.aof seq 2 type b\n",
+        )
+        .expect_err("duplicate base must fail");
+
+        assert_eq!(
+            err,
+            PersistError::ManifestParseViolation {
+                line: 2,
+                reason: "duplicate base file",
+            }
+        );
+    }
+
+    #[test]
+    fn aof_manifest_rejects_path_style_filename() {
+        let err = parse_aof_manifest("file ../appendonly.aof seq 1 type b\n")
+            .expect_err("path filename must fail");
+
+        assert_eq!(
+            err,
+            PersistError::ManifestPathViolation {
+                line: 1,
+                file_name: "../appendonly.aof".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn aof_manifest_rejects_non_monotonic_incremental_sequences() {
+        let err = parse_aof_manifest(
+            "file appendonly.aof.3.incr.aof seq 3 type i\n\
+             file appendonly.aof.2.incr.aof seq 2 type i\n",
+        )
+        .expect_err("non-monotonic incr must fail");
+
+        assert_eq!(
+            err,
+            PersistError::ManifestParseViolation {
+                line: 2,
+                reason: "non-monotonic incremental sequence",
+            }
+        );
+    }
+
+    #[test]
+    fn aof_manifest_rejects_malformed_rows() {
+        let err =
+            parse_aof_manifest("file appendonly.aof seq 1\n").expect_err("missing type must fail");
+        assert_eq!(
+            err,
+            PersistError::ManifestParseViolation {
+                line: 1,
+                reason: "invalid field count",
+            }
+        );
+
+        let err = parse_aof_manifest("file appendonly.aof seq 01 type i\n")
+            .expect_err("leading-zero seq must fail");
+        assert_eq!(
+            err,
+            PersistError::ManifestParseViolation {
+                line: 1,
+                reason: "invalid seq field",
+            }
+        );
+
+        let err = parse_aof_manifest("file appendonly.aof seq x type i\n")
+            .expect_err("nonnumeric seq must fail");
+        assert_eq!(
+            err,
+            PersistError::ManifestParseViolation {
+                line: 1,
+                reason: "invalid seq field",
+            }
+        );
     }
 
     // ── RDB tests ────────────────────────────────────────────────────
