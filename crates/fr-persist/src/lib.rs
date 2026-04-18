@@ -18,6 +18,12 @@ pub struct AofReplayRecord {
     pub end_offset: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct AofReplayStream {
+    pub rdb_preamble: Option<RdbDecodeResult>,
+    pub records: Vec<AofReplayRecord>,
+}
+
 #[derive(Debug)]
 pub enum PersistError {
     InvalidFrame,
@@ -456,6 +462,28 @@ pub fn decode_aof_stream_with_offsets(input: &[u8]) -> Result<Vec<AofReplayRecor
         cursor = end_offset;
     }
     Ok(out)
+}
+
+/// Decode a Redis replay stream that is either RESP-only or RDB preamble + RESP tail.
+pub fn decode_aof_replay_stream(input: &[u8]) -> Result<AofReplayStream, PersistError> {
+    if input.starts_with(b"REDIS") {
+        let rdb_preamble = decode_rdb_prefix(input)?;
+        let mut records = decode_aof_stream_with_offsets(&input[rdb_preamble.consumed..])?;
+        for record in &mut records {
+            record.start_offset += rdb_preamble.consumed;
+            record.end_offset += rdb_preamble.consumed;
+        }
+
+        return Ok(AofReplayStream {
+            rdb_preamble: Some(rdb_preamble),
+            records,
+        });
+    }
+
+    Ok(AofReplayStream {
+        rdb_preamble: None,
+        records: decode_aof_stream_with_offsets(input)?,
+    })
 }
 
 /// Convert a list of command argv vectors (from `Store::to_aof_commands()`)
@@ -1349,8 +1377,9 @@ mod tests {
     use fr_protocol::{RespFrame, RespParseError};
 
     use super::{
-        AofManifest, AofManifestFileType, AofRecord, PersistError, decode_aof_stream,
-        decode_aof_stream_with_offsets, encode_aof_stream, format_aof_manifest, parse_aof_manifest,
+        AofManifest, AofManifestFileType, AofRecord, PersistError, decode_aof_replay_stream,
+        decode_aof_stream, decode_aof_stream_with_offsets, encode_aof_stream, format_aof_manifest,
+        parse_aof_manifest,
     };
 
     #[test]
@@ -1429,6 +1458,31 @@ mod tests {
         let err =
             decode_aof_stream_with_offsets(b"*2\r\n$3\r\nGET\r\n$1\r\nk").expect_err("must fail");
         assert_eq!(err, PersistError::Parse(RespParseError::Incomplete));
+    }
+
+    #[test]
+    fn decode_aof_replay_stream_decodes_resp_only_input_with_offsets() {
+        let records = vec![
+            AofRecord {
+                argv: vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            },
+            AofRecord {
+                argv: vec![b"DEL".to_vec(), b"k".to_vec()],
+            },
+        ];
+        let first_len = records[0].to_resp_frame().to_bytes().len();
+        let encoded = encode_aof_stream(&records);
+
+        let replay = decode_aof_replay_stream(&encoded).expect("decode replay stream");
+
+        assert!(replay.rdb_preamble.is_none());
+        assert_eq!(replay.records.len(), 2);
+        assert_eq!(replay.records[0].record, records[0]);
+        assert_eq!(replay.records[0].start_offset, 0);
+        assert_eq!(replay.records[0].end_offset, first_len);
+        assert_eq!(replay.records[1].record, records[1]);
+        assert_eq!(replay.records[1].start_offset, first_len);
+        assert_eq!(replay.records[1].end_offset, encoded.len());
     }
 
     #[test]
@@ -1844,6 +1898,68 @@ mod tests {
         );
         let decoded_tail = decode_aof_stream(&combined[decoded.consumed..]).expect("decode tail");
         assert_eq!(decoded_tail, tail_records);
+    }
+
+    #[test]
+    fn decode_aof_replay_stream_decodes_rdb_preamble_and_aof_tail() {
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"snapshot-key".to_vec(),
+            value: RdbValue::String(b"snapshot-value".to_vec()),
+            expire_ms: None,
+        }];
+        let mut combined = encode_rdb(&entries, &[("redis-ver", "7.2.4")]);
+        let rdb_len = combined.len();
+        let tail_records = vec![
+            AofRecord {
+                argv: vec![
+                    b"SET".to_vec(),
+                    b"tail-key".to_vec(),
+                    b"tail-value".to_vec(),
+                ],
+            },
+            AofRecord {
+                argv: vec![b"INCR".to_vec(), b"tail-counter".to_vec()],
+            },
+        ];
+        let first_tail_len = tail_records[0].to_resp_frame().to_bytes().len();
+        combined.extend_from_slice(&encode_aof_stream(&tail_records));
+
+        let replay = decode_aof_replay_stream(&combined).expect("decode mixed replay stream");
+        let preamble = replay.rdb_preamble.expect("rdb preamble");
+
+        assert_eq!(preamble.consumed, rdb_len);
+        assert_eq!(preamble.entries, entries);
+        assert_eq!(
+            preamble.aux.get("redis-ver").map(String::as_str),
+            Some("7.2.4")
+        );
+        assert_eq!(replay.records.len(), 2);
+        assert_eq!(replay.records[0].record, tail_records[0]);
+        assert_eq!(replay.records[0].start_offset, rdb_len);
+        assert_eq!(replay.records[0].end_offset, rdb_len + first_tail_len);
+        assert_eq!(replay.records[1].record, tail_records[1]);
+        assert_eq!(replay.records[1].start_offset, rdb_len + first_tail_len);
+        assert_eq!(replay.records[1].end_offset, combined.len());
+    }
+
+    #[test]
+    fn decode_aof_replay_stream_rejects_corrupt_rdb_preamble_before_tail() {
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"snapshot-key".to_vec(),
+            value: RdbValue::String(b"snapshot-value".to_vec()),
+            expire_ms: None,
+        }];
+        let mut combined = encode_rdb(&entries, &[]);
+        let checksum_byte = combined.len() - 1;
+        combined[checksum_byte] ^= 0x7F;
+        combined.extend_from_slice(&encode_aof_stream(&[AofRecord {
+            argv: vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+        }]));
+
+        let err = decode_aof_replay_stream(&combined).expect_err("corrupt preamble must fail");
+        assert_eq!(err, PersistError::InvalidFrame);
     }
 
     #[test]
