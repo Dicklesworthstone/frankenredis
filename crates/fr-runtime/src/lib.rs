@@ -6395,6 +6395,7 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("appenddirname")
                 || parameter.eq_ignore_ascii_case("bind")
                 || parameter.eq_ignore_ascii_case("cluster-enabled")
+                || parameter.eq_ignore_ascii_case("databases")
                 || parameter.eq_ignore_ascii_case("port")
             {
                 return RespFrame::Error(format!(
@@ -14590,6 +14591,20 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"cluster-enabled".to_vec())),
                 RespFrame::BulkString(Some(b"no".to_vec())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"databases", b"32"]), 0),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'databases') - can't set immutable config"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"databases"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"databases".to_vec())),
+                RespFrame::BulkString(Some(b"16".to_vec())),
             ]))
         );
     }
