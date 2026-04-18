@@ -773,6 +773,20 @@
       }
     },
     {
+      "name": "config_set_enable_debug_command_immutable",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "enable-debug-command",
+        "yes"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CONFIG SET failed (possibly related to argument 'enable-debug-command') - can't set immutable config"
+      }
+    },
+    {
       "name": "config_set_tcp_backlog_immutable",
       "now_ms": 0,
       "argv": [
