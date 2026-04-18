@@ -6397,6 +6397,7 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("cluster-enabled")
                 || parameter.eq_ignore_ascii_case("databases")
                 || parameter.eq_ignore_ascii_case("port")
+                || parameter.eq_ignore_ascii_case("rdbchecksum")
                 || parameter.eq_ignore_ascii_case("tcp-backlog")
             {
                 return RespFrame::Error(format!(
@@ -14620,6 +14621,20 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"tcp-backlog".to_vec())),
                 RespFrame::BulkString(Some(b"511".to_vec())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"rdbchecksum", b"no"]), 0),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'rdbchecksum') - can't set immutable config"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"rdbchecksum"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"rdbchecksum".to_vec())),
+                RespFrame::BulkString(Some(b"yes".to_vec())),
             ]))
         );
     }

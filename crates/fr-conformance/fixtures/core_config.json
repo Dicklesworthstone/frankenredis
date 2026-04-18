@@ -745,6 +745,20 @@
       }
     },
     {
+      "name": "config_set_rdbchecksum_immutable",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "rdbchecksum",
+        "no"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CONFIG SET failed (possibly related to argument 'rdbchecksum') - can't set immutable config"
+      }
+    },
+    {
       "name": "config_set_known_static_noop",
       "now_ms": 0,
       "argv": [
