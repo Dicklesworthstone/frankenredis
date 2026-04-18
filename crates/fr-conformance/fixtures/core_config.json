@@ -759,6 +759,20 @@
       }
     },
     {
+      "name": "config_set_unixsocket_immutable",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "unixsocket",
+        "/tmp/redis.sock"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CONFIG SET failed (possibly related to argument 'unixsocket') - can't set immutable config"
+      }
+    },
+    {
       "name": "config_set_daemonize_immutable",
       "now_ms": 0,
       "argv": [

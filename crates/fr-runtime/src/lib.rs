@@ -6404,6 +6404,7 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("rdbchecksum")
                 || parameter.eq_ignore_ascii_case("set-proc-title")
                 || parameter.eq_ignore_ascii_case("tcp-backlog")
+                || parameter.eq_ignore_ascii_case("unixsocket")
             {
                 return RespFrame::Error(format!(
                     "ERR CONFIG SET failed (possibly related to argument '{parameter}') - can't set immutable config"
@@ -14626,6 +14627,25 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"tcp-backlog".to_vec())),
                 RespFrame::BulkString(Some(b"511".to_vec())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[
+                b"CONFIG",
+                b"SET",
+                b"unixsocket",
+                b"/tmp/redis.sock",
+            ]), 0),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'unixsocket') - can't set immutable config"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"unixsocket"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"unixsocket".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
             ]))
         );
         assert_eq!(
