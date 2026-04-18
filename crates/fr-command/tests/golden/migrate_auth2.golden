@@ -1,0 +1,34 @@
+MigrateRequest {
+    host: "127.0.0.1",
+    port: 6379,
+    destination_db: 0,
+    timeout: 1s,
+    copy: false,
+    replace: false,
+    auth_username: Some(
+        [
+            117,
+            115,
+            101,
+            114,
+        ],
+    ),
+    auth_password: Some(
+        [
+            115,
+            101,
+            99,
+            114,
+            101,
+            116,
+        ],
+    ),
+    keys: [
+        [
+            107,
+            101,
+            121,
+            49,
+        ],
+    ],
+}

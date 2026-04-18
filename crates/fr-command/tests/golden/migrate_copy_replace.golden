@@ -1,0 +1,20 @@
+MigrateRequest {
+    host: "127.0.0.1",
+    port: 7777,
+    destination_db: 1,
+    timeout: 2s,
+    copy: true,
+    replace: true,
+    auth_username: None,
+    auth_password: None,
+    keys: [
+        [
+            107,
+            49,
+        ],
+        [
+            107,
+            50,
+        ],
+    ],
+}

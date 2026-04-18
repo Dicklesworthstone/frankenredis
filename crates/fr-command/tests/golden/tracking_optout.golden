@@ -1,0 +1,10 @@
+ClientTrackingState {
+    enabled: true,
+    redirect: None,
+    bcast: false,
+    optin: false,
+    optout: true,
+    caching: None,
+    noloop: false,
+    prefixes: {},
+}
