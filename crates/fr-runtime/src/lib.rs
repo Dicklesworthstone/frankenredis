@@ -6399,6 +6399,7 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("cluster-enabled")
                 || parameter.eq_ignore_ascii_case("databases")
                 || parameter.eq_ignore_ascii_case("daemonize")
+                || parameter.eq_ignore_ascii_case("io-threads")
                 || parameter.eq_ignore_ascii_case("io-threads-do-reads")
                 || parameter.eq_ignore_ascii_case("logfile")
                 || parameter.eq_ignore_ascii_case("pidfile")
@@ -14621,6 +14622,20 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"cluster-config-file".to_vec())),
                 RespFrame::BulkString(Some(b"nodes.conf".to_vec())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"io-threads", b"4"]), 0),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'io-threads') - can't set immutable config"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"io-threads"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"io-threads".to_vec())),
+                RespFrame::BulkString(Some(b"1".to_vec())),
             ]))
         );
         assert_eq!(

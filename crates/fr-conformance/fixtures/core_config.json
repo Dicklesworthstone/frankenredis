@@ -745,6 +745,20 @@
       }
     },
     {
+      "name": "config_set_io_threads_immutable",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "io-threads",
+        "4"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CONFIG SET failed (possibly related to argument 'io-threads') - can't set immutable config"
+      }
+    },
+    {
       "name": "config_set_io_threads_do_reads_immutable",
       "now_ms": 0,
       "argv": [
