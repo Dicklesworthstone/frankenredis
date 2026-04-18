@@ -250,6 +250,7 @@ struct StartupConfig {
     appendonly: Option<bool>,
     appenddirname: Option<String>,
     appendfilename: Option<String>,
+    aclfile: Option<String>,
 }
 
 impl StartupConfig {
@@ -358,6 +359,12 @@ fn startup_config_from_directives(
             b"appendfilename" => {
                 expect_config_arg_count(directive, 1)?;
                 config.appendfilename = Some(config_arg_string(directive, 0)?);
+            }
+            b"aclfile" => {
+                expect_config_arg_count(directive, 1)?;
+                if let Some(path) = non_empty_config_arg_string(directive, 0)? {
+                    config.aclfile = Some(path);
+                }
             }
             _ => {}
         }
@@ -583,6 +590,7 @@ fn main() -> ExitCode {
     }
 
     let mut requirepass = None;
+    let mut aclfile_path = None;
     if let Some(path) = &config_path {
         let startup_config = match load_startup_config_file(path) {
             Ok(config) => config,
@@ -614,6 +622,7 @@ fn main() -> ExitCode {
         if !cli_aof && let Some(config_path) = config_aof_path {
             aof_path = Some(config_path);
         }
+        aclfile_path = startup_config.aclfile;
         requirepass = startup_config.requirepass;
     }
 
@@ -629,6 +638,29 @@ fn main() -> ExitCode {
     }
     runtime.set_masteruser(masteruser.map(String::into_bytes));
     runtime.set_masterauth(masterauth.map(String::into_bytes));
+    if let Some(path) = aclfile_path {
+        runtime.set_acl_file_path(std::path::PathBuf::from(&path));
+        let response = runtime.execute_frame(
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"ACL".to_vec())),
+                RespFrame::BulkString(Some(b"LOAD".to_vec())),
+            ])),
+            now_ms(),
+        );
+        match response {
+            RespFrame::SimpleString(ref line) if line == "OK" => {
+                eprintln!("ACL: loaded rules from {path}");
+            }
+            RespFrame::Error(err) => {
+                eprintln!("error: failed to load aclfile '{path}': {err}");
+                return ExitCode::from(1);
+            }
+            other => {
+                eprintln!("error: unexpected ACL LOAD response during startup: {other:?}");
+                return ExitCode::from(1);
+            }
+        }
+    }
     if let Some((host, primary_port)) = replicaof {
         let response = runtime.execute_frame(
             RespFrame::Array(Some(vec![
@@ -2793,6 +2825,7 @@ mod tests {
              appendonly yes\n\
              appenddirname aof-from-config\n\
              appendfilename startup.aof\n\
+             aclfile /tmp/frankenredis-startup/users.acl\n\
              timeout 30\n",
         )
         .expect("parse config file");
@@ -2814,6 +2847,7 @@ mod tests {
                 appendonly: Some(true),
                 appenddirname: Some("aof-from-config".to_string()),
                 appendfilename: Some("startup.aof".to_string()),
+                aclfile: Some("/tmp/frankenredis-startup/users.acl".to_string()),
             }
         );
         assert_eq!(

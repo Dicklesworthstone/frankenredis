@@ -2532,6 +2532,131 @@ fn tcp_config_file_applies_persistence_startup_paths() {
     send_shutdown_nosave(port);
 }
 
+#[test]
+fn tcp_config_file_applies_aclfile_startup_load() {
+    let port = reserve_port();
+    let temp_dir = unique_temp_dir("frankenredis-startup-aclfile-config");
+    let config_path = temp_dir.join("frankenredis.conf");
+    let acl_path = temp_dir.join("users.acl");
+    let config_path_str = config_path.to_str().unwrap();
+    let acl_path_text = acl_path.to_string_lossy();
+
+    std::fs::write(
+        &acl_path,
+        "user default on nopass ~* &* +@all\n\
+         user alice reset on >pass ~* &* -@all +get\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &config_path,
+        format!("bind 127.0.0.1\nport {port}\naclfile \"{acl_path_text}\"\n"),
+    )
+    .unwrap();
+
+    let _server = spawn_frankenredis_config_only(port, config_path_str);
+    let mut client = connect_client(port);
+
+    assert_eq!(
+        send_command(&mut client, &[b"PING"]),
+        RespFrame::Error("NOAUTH Authentication required.".to_string())
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"AUTH", b"default", b"anything"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        send_command(&mut client, &[b"CONFIG", b"GET", b"aclfile"]),
+        RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"aclfile".to_vec())),
+            RespFrame::BulkString(Some(acl_path_text.as_bytes().to_vec())),
+        ]))
+    );
+
+    let users = send_command(&mut client, &[b"ACL", b"USERS"]);
+    let RespFrame::Array(Some(users)) = users else {
+        panic!("expected ACL USERS array response");
+    };
+    assert!(users.contains(&RespFrame::BulkString(Some(b"default".to_vec()))));
+    assert!(users.contains(&RespFrame::BulkString(Some(b"alice".to_vec()))));
+
+    let mut alice = connect_client(port);
+    assert_eq!(
+        send_command(&mut alice, &[b"AUTH", b"alice", b"pass"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        send_command(&mut alice, &[b"GET", b"missing"]),
+        RespFrame::BulkString(None)
+    );
+    assert_eq!(
+        send_command(&mut alice, &[b"SET", b"k", b"v"]),
+        RespFrame::Error(
+            "NOPERM this user has no permissions to run the 'SET' command".to_string()
+        )
+    );
+
+    send_shutdown_nosave(port);
+}
+
+#[test]
+fn tcp_config_file_rejects_invalid_aclfile_at_startup() {
+    let port = reserve_port();
+    let temp_dir = unique_temp_dir("frankenredis-startup-invalid-aclfile-config");
+    let config_path = temp_dir.join("frankenredis.conf");
+    let acl_path = temp_dir.join("users.acl");
+    let config_path_str = config_path.to_str().unwrap();
+    let acl_path_text = acl_path.to_string_lossy();
+
+    std::fs::write(&acl_path, "totally invalid acl contents\n").unwrap();
+    std::fs::write(
+        &config_path,
+        format!("bind 127.0.0.1\nport {port}\naclfile \"{acl_path_text}\"\n"),
+    )
+    .unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_frankenredis"))
+        .arg("--mode")
+        .arg("strict")
+        .arg("--config")
+        .arg(config_path_str)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn frankenredis with invalid aclfile config");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll frankenredis process") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("server did not fail fast for invalid aclfile config");
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        pipe.read_to_string(&mut stderr)
+            .expect("read startup failure stderr");
+    }
+
+    assert!(
+        !status.success(),
+        "invalid aclfile startup should exit with failure"
+    );
+    assert!(
+        stderr.contains("failed to load aclfile"),
+        "stderr should explain aclfile startup failure, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("ERR /ACL file contains invalid format"),
+        "stderr should include ACL parser error, got: {stderr}"
+    );
+}
+
 fn expected_single_stream_entry(stream: &[u8], id: &[u8], field: &[u8], value: &[u8]) -> RespFrame {
     RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(stream.to_vec())),
