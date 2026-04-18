@@ -7459,18 +7459,15 @@ impl Store {
         now_ms: u64,
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
-        let (mut registers, existed) = match self.entries.get(key) {
+        let (mut registers, encoding, existed) = match self.entries.get(key) {
             Some(entry) => match &entry.value {
                 Value::String(data) => {
-                    if data.starts_with(HLL_MAGIC) {
-                        (hll_parse_registers(data)?, true)
-                    } else {
-                        return Err(StoreError::InvalidHllValue);
-                    }
+                    let (encoding, registers) = hll_parse(data)?;
+                    (registers, encoding, true)
                 }
                 _ => return Err(StoreError::WrongType),
             },
-            None => (vec![0u8; HLL_REGISTERS], false),
+            None => (vec![0u8; HLL_REGISTERS], HllEncoding::Sparse, false),
         };
 
         let mut modified = false;
@@ -7488,7 +7485,12 @@ impl Store {
         let created = !existed;
         if created || modified {
             let expires_at = self.entries.get(key).and_then(|e| e.expires_at_ms);
-            let data = hll_encode(&registers);
+            let encoding = match encoding {
+                HllEncoding::Dense => HllEncoding::Dense,
+                HllEncoding::Sparse if hll_sparse_should_promote(&registers) => HllEncoding::Dense,
+                HllEncoding::Sparse => HllEncoding::Sparse,
+            };
+            let data = hll_encode(&registers, encoding);
             let mut entry = Entry::new(Value::String(data), expires_at, now_ms);
             entry.touch_write(now_ms);
             self.internal_entries_insert(key.to_vec(), entry);
@@ -7506,15 +7508,11 @@ impl Store {
             if let Some(entry) = self.entries.get_mut(key) {
                 match &entry.value {
                     Value::String(data) => {
-                        if data.starts_with(HLL_MAGIC) {
-                            let regs = hll_parse_registers(data)?;
-                            for i in 0..HLL_REGISTERS {
-                                merged[i] = merged[i].max(regs[i]);
-                            }
-                            entry.touch(now_ms);
-                        } else {
-                            return Err(StoreError::InvalidHllValue);
+                        let registers = hll_parse_registers(data)?;
+                        for i in 0..HLL_REGISTERS {
+                            merged[i] = merged[i].max(registers[i]);
                         }
+                        entry.touch(now_ms);
                     }
                     _ => return Err(StoreError::WrongType),
                 }
@@ -7532,6 +7530,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<(), StoreError> {
         let mut merged = vec![0u8; HLL_REGISTERS];
+        let mut dest_encoding = HllEncoding::Sparse;
 
         // Include dest if it already holds an HLL, and preserve its TTL
         self.drop_if_expired(dest, now_ms);
@@ -7539,13 +7538,10 @@ impl Store {
         if let Some(entry) = self.entries.get(dest) {
             match &entry.value {
                 Value::String(data) => {
-                    if data.starts_with(HLL_MAGIC) {
-                        let regs = hll_parse_registers(data)?;
-                        for i in 0..HLL_REGISTERS {
-                            merged[i] = merged[i].max(regs[i]);
-                        }
-                    } else {
-                        return Err(StoreError::InvalidHllValue);
+                    let (encoding, registers) = hll_parse(data)?;
+                    dest_encoding = encoding;
+                    for i in 0..HLL_REGISTERS {
+                        merged[i] = merged[i].max(registers[i]);
                     }
                 }
                 _ => return Err(StoreError::WrongType),
@@ -7558,13 +7554,9 @@ impl Store {
             if let Some(entry) = self.entries.get(src) {
                 match &entry.value {
                     Value::String(data) => {
-                        if data.starts_with(HLL_MAGIC) {
-                            let regs = hll_parse_registers(data)?;
-                            for i in 0..HLL_REGISTERS {
-                                merged[i] = merged[i].max(regs[i]);
-                            }
-                        } else {
-                            return Err(StoreError::InvalidHllValue);
+                        let registers = hll_parse_registers(data)?;
+                        for i in 0..HLL_REGISTERS {
+                            merged[i] = merged[i].max(registers[i]);
                         }
                     }
                     _ => return Err(StoreError::WrongType),
@@ -7572,7 +7564,12 @@ impl Store {
             }
         }
 
-        let data = hll_encode(&merged);
+        let dest_encoding = match dest_encoding {
+            HllEncoding::Dense => HllEncoding::Dense,
+            HllEncoding::Sparse if hll_sparse_should_promote(&merged) => HllEncoding::Dense,
+            HllEncoding::Sparse => HllEncoding::Sparse,
+        };
+        let data = hll_encode(&merged, dest_encoding);
         let mut entry = Entry::new(Value::String(data), existing_ttl, now_ms);
         entry.touch_write(now_ms);
         self.internal_entries_insert(dest.to_vec(), entry);
@@ -7587,11 +7584,37 @@ impl Store {
     ) -> Result<Option<Vec<u8>>, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
+            Some(entry) => {
+                let (encoding, registers) = match &entry.value {
+                    Value::String(data) => hll_parse(data)?,
+                    _ => return Err(StoreError::WrongType),
+                };
+                match encoding {
+                    HllEncoding::Sparse => {
+                        entry.value = Value::String(hll_encode(&registers, HllEncoding::Dense));
+                        entry.touch_write(now_ms);
+                        self.dirty = self.dirty.saturating_add(1);
+                    }
+                    HllEncoding::Dense => entry.touch(now_ms),
+                }
+                Ok(Some(registers))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn hll_debug_validate(
+        &mut self,
+        key: &[u8],
+        now_ms: u64,
+    ) -> Result<Option<()>, StoreError> {
+        self.drop_if_expired(key, now_ms);
+        match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::String(data) => {
-                    let registers = hll_parse_registers(data)?;
+                    hll_parse(data)?;
                     entry.touch(now_ms);
-                    Ok(Some(registers))
+                    Ok(Some(()))
                 }
                 _ => Err(StoreError::WrongType),
             },
@@ -7608,11 +7631,14 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::String(data) => {
-                    hll_parse_registers(data)?;
+                    let (encoding, registers) = hll_parse(data)?;
                     entry.touch(now_ms);
-                    Err(StoreError::GenericError(
-                        "HLL encoding is not sparse".to_string(),
-                    ))
+                    match encoding {
+                        HllEncoding::Sparse => Ok(Some(hll_sparse_decode(&registers)?)),
+                        HllEncoding::Dense => Err(StoreError::GenericError(
+                            "ERR HLL encoding is not sparse".to_string(),
+                        )),
+                    }
                 }
                 _ => Err(StoreError::WrongType),
             },
@@ -7629,9 +7655,9 @@ impl Store {
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::String(data) => {
-                    hll_parse_registers(data)?;
+                    let (encoding, _) = hll_parse(data)?;
                     entry.touch(now_ms);
-                    Ok(Some("dense"))
+                    Ok(Some(encoding.as_str()))
                 }
                 _ => Err(StoreError::WrongType),
             },
@@ -7646,14 +7672,24 @@ impl Store {
     ) -> Result<Option<bool>, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get_mut(key) {
-            Some(entry) => match &entry.value {
-                Value::String(data) => {
-                    hll_parse_registers(data)?;
-                    entry.touch(now_ms);
-                    Ok(Some(false))
+            Some(entry) => {
+                let (encoding, registers) = match &entry.value {
+                    Value::String(data) => hll_parse(data)?,
+                    _ => return Err(StoreError::WrongType),
+                };
+                match encoding {
+                    HllEncoding::Sparse => {
+                        entry.value = Value::String(hll_encode(&registers, HllEncoding::Dense));
+                        entry.touch_write(now_ms);
+                        self.dirty = self.dirty.saturating_add(1);
+                        Ok(Some(true))
+                    }
+                    HllEncoding::Dense => {
+                        entry.touch(now_ms);
+                        Ok(Some(false))
+                    }
                 }
-                _ => Err(StoreError::WrongType),
-            },
+            }
             None => Ok(None),
         }
     }
@@ -10012,8 +10048,54 @@ fn lex_in_range(member: &[u8], min: &[u8], max: &[u8]) -> bool {
 
 const HLL_P: u32 = 14;
 const HLL_REGISTERS: usize = 1 << HLL_P; // 16384
-const HLL_MAGIC: &[u8] = b"HYLL";
-const HLL_DATA_SIZE: usize = HLL_MAGIC.len() + HLL_REGISTERS; // 16388
+const HLL_LEGACY_MAGIC: &[u8] = b"HYLL";
+const HLL_MAGIC_V2: &[u8] = b"HYL2";
+const HLL_HEADER_SIZE: usize = HLL_MAGIC_V2.len() + 1;
+const HLL_DATA_SIZE: usize = HLL_HEADER_SIZE + HLL_REGISTERS; // 16389
+const HLL_LEGACY_DATA_SIZE: usize = HLL_LEGACY_MAGIC.len() + HLL_REGISTERS; // 16388
+const HLL_REDIS_HEADER_SIZE: usize = 16;
+const HLL_SPARSE_VAL_MAX_VALUE: u8 = 32;
+const HLL_SPARSE_VAL_MAX_LEN: usize = 4;
+const HLL_SPARSE_ZERO_MAX_LEN: usize = 64;
+const HLL_SPARSE_XZERO_MAX_LEN: usize = 16_384;
+const HLL_REDIS_SPARSE_MAX_BYTES: usize = 3_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HllEncoding {
+    Sparse,
+    Dense,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HllSparseOpcode {
+    Zero(usize),
+    XZero(usize),
+    Val { value: u8, len: usize },
+}
+
+impl HllEncoding {
+    fn as_byte(self) -> u8 {
+        match self {
+            Self::Sparse => 0,
+            Self::Dense => 1,
+        }
+    }
+
+    fn from_byte(byte: u8) -> Option<Self> {
+        match byte {
+            0 => Some(Self::Sparse),
+            1 => Some(Self::Dense),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sparse => "sparse",
+            Self::Dense => "dense",
+        }
+    }
+}
 
 /// MurmurHash64A-style hash for HyperLogLog element hashing.
 /// HyperLogLog accuracy depends on good bit dispersion; the earlier FNV-based
@@ -10065,18 +10147,100 @@ fn hll_rho(w: u64) -> u8 {
     (tz + 1) as u8
 }
 
-fn hll_parse_registers(data: &[u8]) -> Result<Vec<u8>, StoreError> {
-    if data.len() != HLL_DATA_SIZE || !data.starts_with(HLL_MAGIC) {
-        return Err(StoreError::InvalidHllValue);
+fn hll_parse(data: &[u8]) -> Result<(HllEncoding, Vec<u8>), StoreError> {
+    if data.len() == HLL_DATA_SIZE && data.starts_with(HLL_MAGIC_V2) {
+        let encoding =
+            HllEncoding::from_byte(data[HLL_MAGIC_V2.len()]).ok_or(StoreError::InvalidHllValue)?;
+        return Ok((encoding, data[HLL_HEADER_SIZE..].to_vec()));
     }
-    Ok(data[HLL_MAGIC.len()..].to_vec())
+    if data.len() == HLL_LEGACY_DATA_SIZE && data.starts_with(HLL_LEGACY_MAGIC) {
+        return Ok((HllEncoding::Dense, data[HLL_LEGACY_MAGIC.len()..].to_vec()));
+    }
+    Err(StoreError::InvalidHllValue)
 }
 
-fn hll_encode(registers: &[u8]) -> Vec<u8> {
+fn hll_parse_registers(data: &[u8]) -> Result<Vec<u8>, StoreError> {
+    hll_parse(data).map(|(_, registers)| registers)
+}
+
+fn hll_encode(registers: &[u8], encoding: HllEncoding) -> Vec<u8> {
     let mut data = Vec::with_capacity(HLL_DATA_SIZE);
-    data.extend_from_slice(HLL_MAGIC);
+    data.extend_from_slice(HLL_MAGIC_V2);
+    data.push(encoding.as_byte());
     data.extend_from_slice(registers);
     data
+}
+
+fn hll_sparse_opcodes(registers: &[u8]) -> Option<Vec<HllSparseOpcode>> {
+    let mut opcodes = Vec::new();
+    let mut index = 0;
+    while index < registers.len() {
+        let value = registers[index];
+        let mut run_len = 1usize;
+        while index + run_len < registers.len() && registers[index + run_len] == value {
+            run_len += 1;
+        }
+        if value == 0 {
+            let mut remaining = run_len;
+            while remaining > 0 {
+                let chunk = if remaining > HLL_SPARSE_ZERO_MAX_LEN {
+                    remaining.min(HLL_SPARSE_XZERO_MAX_LEN)
+                } else {
+                    remaining
+                };
+                if chunk > HLL_SPARSE_ZERO_MAX_LEN {
+                    opcodes.push(HllSparseOpcode::XZero(chunk));
+                } else {
+                    opcodes.push(HllSparseOpcode::Zero(chunk));
+                }
+                remaining -= chunk;
+            }
+        } else {
+            if value > HLL_SPARSE_VAL_MAX_VALUE {
+                return None;
+            }
+            let mut remaining = run_len;
+            while remaining > 0 {
+                let chunk = remaining.min(HLL_SPARSE_VAL_MAX_LEN);
+                opcodes.push(HllSparseOpcode::Val { value, len: chunk });
+                remaining -= chunk;
+            }
+        }
+        index += run_len;
+    }
+    Some(opcodes)
+}
+
+fn hll_sparse_storage_len(registers: &[u8]) -> Option<usize> {
+    hll_sparse_opcodes(registers).map(|opcodes| {
+        HLL_REDIS_HEADER_SIZE
+            + opcodes
+                .iter()
+                .map(|opcode| match opcode {
+                    HllSparseOpcode::Zero(_) | HllSparseOpcode::Val { .. } => 1,
+                    HllSparseOpcode::XZero(_) => 2,
+                })
+                .sum::<usize>()
+    })
+}
+
+fn hll_sparse_should_promote(registers: &[u8]) -> bool {
+    match hll_sparse_storage_len(registers) {
+        Some(len) => len > HLL_REDIS_SPARSE_MAX_BYTES,
+        None => true,
+    }
+}
+
+fn hll_sparse_decode(registers: &[u8]) -> Result<String, StoreError> {
+    let mut segments = Vec::new();
+    for opcode in hll_sparse_opcodes(registers).ok_or(StoreError::InvalidHllValue)? {
+        match opcode {
+            HllSparseOpcode::Zero(len) => segments.push(format!("z:{len}")),
+            HllSparseOpcode::XZero(len) => segments.push(format!("Z:{len}")),
+            HllSparseOpcode::Val { value, len } => segments.push(format!("v:{value},{len}")),
+        }
+    }
+    Ok(segments.join(" "))
 }
 
 fn hll_estimate(registers: &[u8]) -> u64 {
@@ -10129,7 +10293,7 @@ fn hll_run_selftest() -> Result<(), String> {
         for value in &mut expected {
             *value = (next_u64() & 63) as u8;
         }
-        let encoded = hll_encode(&expected);
+        let encoded = hll_encode(&expected, HllEncoding::Sparse);
         let decoded = hll_parse_registers(&encoded)
             .map_err(|_| "TESTFAILED encoded register payload did not round-trip".to_string())?;
         if decoded != expected {
@@ -10334,11 +10498,11 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 mod tests {
     use super::{
         EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue,
-        LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED,
-        NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, ScoreBound, ScoreMember, Store, StoreError,
-        StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
-        StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value, ValueType,
-        encode_db_key,
+        HLL_REGISTERS, LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED,
+        NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, ScoreBound, ScoreMember, Store,
+        StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
+        StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value,
+        ValueType, encode_db_key, hll_sparse_decode,
     };
 
     fn group_read_options(
@@ -13660,22 +13824,42 @@ mod tests {
     }
 
     #[test]
-    fn hll_debug_getreg_returns_full_register_vector() {
+    fn hll_debug_getreg_returns_full_register_vector_and_promotes_sparse_to_dense() {
         let mut store = Store::new();
         store
             .pfadd(b"hll", &[b"a".to_vec(), b"b".to_vec()], 0)
             .unwrap();
+        assert_eq!(store.hll_debug_encoding(b"hll", 0).unwrap(), Some("sparse"));
         let registers = store.hll_debug_getreg(b"hll", 0).unwrap().unwrap();
         assert_eq!(registers.len(), 16_384);
         assert!(registers.iter().any(|value| *value != 0));
+        assert_eq!(store.hll_debug_encoding(b"hll", 0).unwrap(), Some("dense"));
     }
 
     #[test]
-    fn hll_debug_encoding_and_todense_report_dense_representation() {
+    fn hll_debug_sparse_encoding_decode_and_todense_match_redis_contract() {
         let mut store = Store::new();
-        store.pfadd(b"hll", &[b"a".to_vec()], 0).unwrap();
+        store.pfadd(b"hll", &[], 0).unwrap();
+        assert_eq!(store.hll_debug_encoding(b"hll", 0).unwrap(), Some("sparse"));
+        assert_eq!(
+            store.hll_debug_decode(b"hll", 0).unwrap(),
+            Some("Z:16384".to_string())
+        );
+        assert_eq!(store.hll_debug_todense(b"hll", 0).unwrap(), Some(true));
         assert_eq!(store.hll_debug_encoding(b"hll", 0).unwrap(), Some("dense"));
         assert_eq!(store.hll_debug_todense(b"hll", 0).unwrap(), Some(false));
+    }
+
+    #[test]
+    fn hll_sparse_decode_matches_redis_opcode_split_limits() {
+        let mut registers = vec![0u8; HLL_REGISTERS];
+        registers[0..5].fill(1);
+        registers[5..8].fill(0);
+        registers[8..13].fill(2);
+        assert_eq!(
+            hll_sparse_decode(&registers).unwrap(),
+            "v:1,4 v:1,1 z:3 v:2,4 v:2,1 Z:16371"
+        );
     }
 
     #[test]
