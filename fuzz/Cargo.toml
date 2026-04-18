@@ -40,6 +40,9 @@ path = "../crates/fr-eventloop"
 [dependencies.fr-server]
 path = "../crates/fr-server"
 
+[dependencies.fr-sentinel]
+path = "../crates/fr-sentinel"
+
 [[bin]]
 name = "fuzz_resp_parser"
 path = "fuzz_targets/fuzz_resp_parser.rs"
@@ -193,3 +196,11 @@ path = "fuzz_targets/fuzz_config_file.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_sentinel_parsers"
+path = "fuzz_targets/fuzz_sentinel_parsers.rs"
+test = false
+doc = false
+bench = false
+
