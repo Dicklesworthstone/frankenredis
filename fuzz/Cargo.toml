@@ -204,3 +204,10 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "fuzz_aof_manifest_parser"
+path = "fuzz_targets/fuzz_aof_manifest_parser.rs"
+test = false
+doc = false
+bench = false
+
