@@ -6398,6 +6398,7 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("cluster-enabled")
                 || parameter.eq_ignore_ascii_case("databases")
                 || parameter.eq_ignore_ascii_case("daemonize")
+                || parameter.eq_ignore_ascii_case("logfile")
                 || parameter.eq_ignore_ascii_case("pidfile")
                 || parameter.eq_ignore_ascii_case("port")
                 || parameter.eq_ignore_ascii_case("rdbchecksum")
@@ -14653,6 +14654,20 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"daemonize".to_vec())),
                 RespFrame::BulkString(Some(b"no".to_vec())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"logfile", b"/tmp/redis.log"]), 0),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'logfile') - can't set immutable config"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"logfile"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"logfile".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
             ]))
         );
         assert_eq!(
