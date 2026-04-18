@@ -1,4 +1,4 @@
-use fr_config::{parse_redis_config_bytes, split_config_line_args_bytes};
+use fr_config::{parse_redis_config_bytes, split_config_line_args_bytes, parse_tls_protocols};
 use std::fs;
 use std::path::Path;
 
@@ -51,7 +51,13 @@ fn parse_and_snapshot(test_name: &str, input: &[u8]) {
 fn split_and_snapshot(test_name: &str, input: &[u8]) {
     match split_config_line_args_bytes(input) {
         Ok(result) => {
-            let actual = format!("{:#?}", result.iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect::<Vec<_>>());
+            let actual = format!(
+                "{:#?}",
+                result
+                    .iter()
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+                    .collect::<Vec<_>>()
+            );
             assert_golden(test_name, &actual);
         }
         Err(e) => {
@@ -104,3 +110,37 @@ fn golden_split_escapes() {
 fn golden_split_invalid() {
     split_and_snapshot("split_invalid", b"requirepass \"unclosed");
 }
+
+fn parse_tls_and_snapshot(test_name: &str, input: &str) {
+    match parse_tls_protocols(input) {
+        Ok(result) => {
+            let actual = format!("{:#?}", result);
+            assert_golden(test_name, &actual);
+        }
+        Err(e) => {
+            let actual = format!("Error: {:#?}", e);
+            assert_golden(test_name, &actual);
+        }
+    }
+}
+
+#[test]
+fn golden_tls_protocols_valid() {
+    parse_tls_and_snapshot("tls_protocols_valid", "TLSv1.2 TLSv1.3");
+}
+
+#[test]
+fn golden_tls_protocols_comma_separated() {
+    parse_tls_and_snapshot("tls_protocols_comma", "TLSv1.2,TLSv1.3");
+}
+
+#[test]
+fn golden_tls_protocols_invalid() {
+    parse_tls_and_snapshot("tls_protocols_invalid", "TLSv1.2 SSLv3");
+}
+
+#[test]
+fn golden_tls_protocols_empty() {
+    parse_tls_and_snapshot("tls_protocols_empty", "");
+}
+

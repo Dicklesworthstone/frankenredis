@@ -1,0 +1,3 @@
+Error: ProtocolsParseContractViolation(
+    "unsupported protocol 'SSLv3'",
+)

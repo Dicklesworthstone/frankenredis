@@ -1,4 +1,4 @@
-use fr_command::{parse_client_tracking_state, parse_migrate_request};
+use fr_command::{parse_client_tracking_state, parse_migrate_request, command_keys, command_key_indexes};
 use std::fs;
 use std::path::Path;
 
@@ -69,27 +69,73 @@ fn parse_tracking_and_snapshot(test_name: &str, args: &[&str]) {
 
 #[test]
 fn golden_migrate_basic() {
-    parse_migrate_and_snapshot("migrate_basic", &["MIGRATE", "192.168.1.34", "6379", "mykey", "0", "5000"]);
+    parse_migrate_and_snapshot(
+        "migrate_basic",
+        &["MIGRATE", "192.168.1.34", "6379", "mykey", "0", "5000"],
+    );
 }
 
 #[test]
 fn golden_migrate_copy_replace() {
-    parse_migrate_and_snapshot("migrate_copy_replace", &["MIGRATE", "127.0.0.1", "7777", "", "1", "2000", "COPY", "REPLACE", "KEYS", "k1", "k2"]);
+    parse_migrate_and_snapshot(
+        "migrate_copy_replace",
+        &[
+            "MIGRATE",
+            "127.0.0.1",
+            "7777",
+            "",
+            "1",
+            "2000",
+            "COPY",
+            "REPLACE",
+            "KEYS",
+            "k1",
+            "k2",
+        ],
+    );
 }
 
 #[test]
 fn golden_migrate_auth() {
-    parse_migrate_and_snapshot("migrate_auth", &["MIGRATE", "127.0.0.1", "6379", "key1", "0", "1000", "AUTH", "secret"]);
+    parse_migrate_and_snapshot(
+        "migrate_auth",
+        &[
+            "MIGRATE",
+            "127.0.0.1",
+            "6379",
+            "key1",
+            "0",
+            "1000",
+            "AUTH",
+            "secret",
+        ],
+    );
 }
 
 #[test]
 fn golden_migrate_auth2() {
-    parse_migrate_and_snapshot("migrate_auth2", &["MIGRATE", "127.0.0.1", "6379", "key1", "0", "1000", "AUTH2", "user", "secret"]);
+    parse_migrate_and_snapshot(
+        "migrate_auth2",
+        &[
+            "MIGRATE",
+            "127.0.0.1",
+            "6379",
+            "key1",
+            "0",
+            "1000",
+            "AUTH2",
+            "user",
+            "secret",
+        ],
+    );
 }
 
 #[test]
 fn golden_migrate_invalid_port() {
-    parse_migrate_and_snapshot("migrate_invalid_port", &["MIGRATE", "127.0.0.1", "65536", "key1", "0", "1000"]);
+    parse_migrate_and_snapshot(
+        "migrate_invalid_port",
+        &["MIGRATE", "127.0.0.1", "65536", "key1", "0", "1000"],
+    );
 }
 
 #[test]
@@ -119,12 +165,20 @@ fn golden_tracking_optout() {
 
 #[test]
 fn golden_tracking_redirect() {
-    parse_tracking_and_snapshot("tracking_redirect", &["CLIENT", "TRACKING", "ON", "REDIRECT", "12345"]);
+    parse_tracking_and_snapshot(
+        "tracking_redirect",
+        &["CLIENT", "TRACKING", "ON", "REDIRECT", "12345"],
+    );
 }
 
 #[test]
 fn golden_tracking_prefixes() {
-    parse_tracking_and_snapshot("tracking_prefixes", &["CLIENT", "TRACKING", "ON", "BCAST", "PREFIX", "foo:", "PREFIX", "bar:"]);
+    parse_tracking_and_snapshot(
+        "tracking_prefixes",
+        &[
+            "CLIENT", "TRACKING", "ON", "BCAST", "PREFIX", "foo:", "PREFIX", "bar:",
+        ],
+    );
 }
 
 #[test]
@@ -136,3 +190,39 @@ fn golden_tracking_noloop() {
 fn golden_tracking_invalid() {
     parse_tracking_and_snapshot("tracking_invalid", &["CLIENT", "TRACKING", "YES"]);
 }
+
+fn keys_and_snapshot(test_name: &str, args: &[&str]) {
+    let argv = to_argv(args);
+    let keys = command_keys(&argv);
+    let indexes = command_key_indexes(&argv);
+    
+    let keys_str: Vec<String> = keys.into_iter().map(|k| String::from_utf8_lossy(&k[..]).into_owned()).collect();
+    let actual = format!("Keys: {:#?}\nIndexes: {:#?}", keys_str, indexes);
+    assert_golden(test_name, &actual);
+}
+
+#[test]
+fn golden_keys_get() {
+    keys_and_snapshot("keys_get", &["GET", "mykey"]);
+}
+
+#[test]
+fn golden_keys_mset() {
+    keys_and_snapshot("keys_mset", &["MSET", "key1", "val1", "key2", "val2"]);
+}
+
+#[test]
+fn golden_keys_zinterstore() {
+    keys_and_snapshot("keys_zinterstore", &["ZINTERSTORE", "out", "2", "zset1", "zset2", "WEIGHTS", "2", "3"]);
+}
+
+#[test]
+fn golden_keys_eval() {
+    keys_and_snapshot("keys_eval", &["EVAL", "return 1", "2", "key1", "key2", "arg1"]);
+}
+
+#[test]
+fn golden_keys_xreadgroup() {
+    keys_and_snapshot("keys_xreadgroup", &["XREADGROUP", "GROUP", "g1", "c1", "STREAMS", "stream1", "stream2", ">", ">"]);
+}
+
