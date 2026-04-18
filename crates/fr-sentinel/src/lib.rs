@@ -2,6 +2,7 @@
 
 pub mod commands;
 pub mod consensus;
+pub mod discovery;
 pub mod health;
 
 use std::collections::HashMap;
