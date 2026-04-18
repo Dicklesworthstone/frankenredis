@@ -2233,10 +2233,16 @@ mod tests {
     // ── RDB tests ────────────────────────────────────────────────────
 
     use super::{
-        RDB_CHECKSUM_LEN, RDB_OPCODE_EOF, RDB_TYPE_STRING, RdbEntry, RdbStreamConsumerGroup,
-        RdbStreamPendingEntry, RdbValue, crc64_redis, decode_rdb, decode_rdb_prefix, encode_rdb,
-        lzf_decompress, rdb_encode_length, rdb_encode_string,
+        RDB_CHECKSUM_LEN, RDB_OPCODE_AUX, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME_MS,
+        RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_STRING, RdbEntry,
+        RdbStreamConsumerGroup, RdbStreamPendingEntry, RdbValue, crc64_redis, decode_rdb,
+        decode_rdb_prefix, encode_rdb, lzf_decompress, rdb_encode_length, rdb_encode_string,
     };
+
+    fn append_rdb_checksum(encoded: &mut Vec<u8>) {
+        let checksum = crc64_redis(encoded);
+        encoded.extend_from_slice(&checksum.to_le_bytes());
+    }
 
     #[test]
     fn lzf_decompresses_literal_runs() {
@@ -2347,6 +2353,85 @@ mod tests {
         assert_eq!(decoded, entries);
         assert_eq!(aux_map.get("redis-ver").map(String::as_str), Some("7.0.0"));
         assert_eq!(aux_map.get("ctime").map(String::as_str), Some("1700000000"));
+    }
+
+    #[test]
+    fn rdb_opcode_contract_decodes_selectdb_resizedb_expiry_and_aux() {
+        let entries = vec![RdbEntry {
+            db: 7,
+            key: b"contract-key".to_vec(),
+            value: RdbValue::String(b"contract-value".to_vec()),
+            expire_ms: Some(1_700_000_001_234),
+        }];
+        let encoded = encode_rdb(&entries, &[("future-aux-field", "ignored-safely")]);
+
+        assert!(encoded.contains(&RDB_OPCODE_AUX));
+        assert!(encoded.contains(&RDB_OPCODE_SELECTDB));
+        assert!(encoded.contains(&RDB_OPCODE_RESIZEDB));
+        assert!(encoded.contains(&RDB_OPCODE_EXPIRETIME_MS));
+
+        let decoded = decode_rdb_prefix(&encoded).expect("required RDB opcodes must decode");
+        assert_eq!(decoded.consumed, encoded.len());
+        assert_eq!(decoded.entries, entries);
+        assert_eq!(
+            decoded.aux.get("future-aux-field").map(String::as_str),
+            Some("ignored-safely")
+        );
+    }
+
+    #[test]
+    fn rdb_aux_contract_preserves_unknown_and_non_utf8_fields() {
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"REDIS0011");
+        encoded.push(RDB_OPCODE_AUX);
+        rdb_encode_string(&mut encoded, b"unknown-compatible-aux");
+        rdb_encode_string(&mut encoded, b"preserved");
+        encoded.push(RDB_OPCODE_AUX);
+        rdb_encode_string(&mut encoded, b"\xFFbinary-key");
+        rdb_encode_string(&mut encoded, b"\xFFbinary-value");
+        encoded.push(RDB_OPCODE_EOF);
+        append_rdb_checksum(&mut encoded);
+
+        let decoded = decode_rdb_prefix(&encoded).expect("unknown AUX must be safe");
+        let lossy_key = String::from_utf8_lossy(b"\xFFbinary-key").into_owned();
+        let lossy_value = String::from_utf8_lossy(b"\xFFbinary-value").into_owned();
+
+        assert_eq!(decoded.entries, Vec::new());
+        assert_eq!(
+            decoded
+                .aux
+                .get("unknown-compatible-aux")
+                .map(String::as_str),
+            Some("preserved")
+        );
+        assert_eq!(decoded.aux.get(&lossy_key), Some(&lossy_value));
+    }
+
+    #[test]
+    fn rdb_rejects_unknown_mandatory_opcode_with_valid_checksum() {
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"REDIS0011");
+        encoded.push(0xF4);
+        encoded.push(RDB_OPCODE_EOF);
+        append_rdb_checksum(&mut encoded);
+
+        let err = decode_rdb_prefix(&encoded).expect_err("unknown mandatory opcode must fail");
+        assert_eq!(err, PersistError::InvalidFrame);
+    }
+
+    #[test]
+    fn rdb_rejects_expiry_opcode_not_followed_by_value_type() {
+        let mut encoded = Vec::new();
+        encoded.extend_from_slice(b"REDIS0011");
+        encoded.push(RDB_OPCODE_EXPIRETIME_MS);
+        encoded.extend_from_slice(&1_700_000_001_234_u64.to_le_bytes());
+        encoded.push(RDB_OPCODE_SELECTDB);
+        rdb_encode_length(&mut encoded, 1);
+        encoded.push(RDB_OPCODE_EOF);
+        append_rdb_checksum(&mut encoded);
+
+        let err = decode_rdb_prefix(&encoded).expect_err("dangling expiry must fail");
+        assert_eq!(err, PersistError::InvalidFrame);
     }
 
     #[test]
