@@ -48,6 +48,9 @@ const DEFAULT_AUTH_USER: &[u8] = b"default";
 const NOAUTH_ERROR: &str = "NOAUTH Authentication required.";
 const WRONGPASS_ERROR: &str = "WRONGPASS invalid username-password pair or user is disabled.";
 const AUTH_NOT_CONFIGURED_ERROR: &str = "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?";
+const RDB_DISK_ERROR_WRITE_DENIED: &str = "MISCONF Redis is configured to save RDB snapshots, but it's currently unable to persist to disk. Commands that may modify the data set are disabled, because this instance is configured to report errors during writes if RDB snapshotting fails (stop-writes-on-bgsave-error option). Please check the Redis logs for details about the RDB error.";
+const AOF_DISK_ERROR_WRITE_DENIED: &str =
+    "MISCONF Errors writing to the AOF file: previous AOF write failed";
 #[allow(dead_code)]
 const ACL_UNKNOWN_SUBCOMMAND_ERROR: &str =
     "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP.";
@@ -847,6 +850,28 @@ enum RuntimeSpecialCommand {
     Swapdb,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiskWriteDenialKind {
+    Rdb,
+    Aof,
+}
+
+impl DiskWriteDenialKind {
+    fn error_message(self) -> &'static str {
+        match self {
+            Self::Rdb => RDB_DISK_ERROR_WRITE_DENIED,
+            Self::Aof => AOF_DISK_ERROR_WRITE_DENIED,
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::Rdb => "last RDB save failed while stop-writes-on-bgsave-error is enabled",
+            Self::Aof => "last AOF write failed while appendonly is enabled",
+        }
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClusterSubcommand {
@@ -1393,6 +1418,8 @@ pub struct ServerState {
     min_replicas_to_write: usize,
     /// Maximum acceptable replica ACK lag, in seconds, for write admission.
     min_replicas_max_lag: u64,
+    /// Whether failed RDB persistence should make Redis-compatible write commands fail closed.
+    stop_writes_on_bgsave_error: bool,
     /// Replica promotion priority reported in INFO replication / CONFIG.
     pub replica_priority: usize,
     /// Optional username used when this server authenticates to its primary.
@@ -1513,6 +1540,7 @@ impl Default for ServerState {
             client_timeout_sec: 0,
             min_replicas_to_write: 0,
             min_replicas_max_lag: 10,
+            stop_writes_on_bgsave_error: true,
             masteruser: None,
             masterauth: None,
             replica_serve_stale_data: true,
@@ -3228,6 +3256,60 @@ impl Runtime {
         ))
     }
 
+    fn command_subject_to_disk_write_denial(
+        &self,
+        argv: &[Vec<u8>],
+        special_command: Option<RuntimeSpecialCommand>,
+    ) -> bool {
+        if argv
+            .first()
+            .is_some_and(|command| eq_ascii_token(command, b"PING"))
+        {
+            return true;
+        }
+        self.command_requires_replica_write_quorum(argv, special_command)
+    }
+
+    fn active_disk_write_denial(&self) -> Option<DiskWriteDenialKind> {
+        if self.server.stop_writes_on_bgsave_error
+            && self.server.rdb_path.is_some()
+            && !self.server.store.stat_rdb_last_bgsave_ok
+        {
+            return Some(DiskWriteDenialKind::Rdb);
+        }
+        if self.server.aof_path.is_some() && !self.server.store.stat_aof_last_write_ok {
+            return Some(DiskWriteDenialKind::Aof);
+        }
+        None
+    }
+
+    fn reject_due_to_disk_write_error(
+        &mut self,
+        argv: &[Vec<u8>],
+        special_command: Option<RuntimeSpecialCommand>,
+        now_ms: u64,
+        packet_id: u64,
+    ) -> Option<RespFrame> {
+        if !self.command_subject_to_disk_write_denial(argv, special_command) {
+            return None;
+        }
+        let denial = self.active_disk_write_denial()?;
+        let reply = RespFrame::Error(denial.error_message().to_string());
+        self.record_threat_event(ThreatEventInput {
+            now_ms,
+            packet_id,
+            threat_class: ThreatClass::PersistenceTampering,
+            preferred_deviation: None,
+            subsystem: "persistence",
+            action: "disk_error_write_denial",
+            reason_code: "persist.disk_error_write_denied",
+            reason: denial.reason().to_string(),
+            input_source: ThreatInputDigestSource::Argv(argv),
+            output: &reply,
+        });
+        Some(reply)
+    }
+
     fn reject_stale_replica_read_request(
         &self,
         argv: &[Vec<u8>],
@@ -3432,6 +3514,13 @@ impl Runtime {
         let command_arity_ok = argv
             .first()
             .is_some_and(|command| fr_command::check_command_arity(command, argv.len()).is_ok());
+        if command_arity_ok
+            && let Some(reply) =
+                self.reject_due_to_disk_write_error(&argv, special_command, now_ms, packet_id)
+        {
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
+            return reply;
+        }
         if command_arity_ok
             && let Some(reply) =
                 self.reject_due_to_replica_write_quorum(&argv, special_command, now_ms)
@@ -5547,6 +5636,18 @@ impl Runtime {
                 },
             )));
         }
+        if Self::config_pattern_matches(pattern, "stop-writes-on-bgsave-error") {
+            entries.push(RespFrame::BulkString(Some(
+                b"stop-writes-on-bgsave-error".to_vec(),
+            )));
+            entries.push(RespFrame::BulkString(Some(
+                if self.server.stop_writes_on_bgsave_error {
+                    b"yes".to_vec()
+                } else {
+                    b"no".to_vec()
+                },
+            )));
+        }
         if Self::config_pattern_matches(pattern, "appendfilename") {
             entries.push(RespFrame::BulkString(Some(b"appendfilename".to_vec())));
             let filename = self
@@ -5660,6 +5761,7 @@ impl Runtime {
                 || name == "list-max-listpack-entries"
                 || name == "list-max-listpack-value"
                 || name == "appendonly"
+                || name == "stop-writes-on-bgsave-error"
                 || name == "appendfilename"
                 || name == "appenddirname"
                 || name == "dbfilename"
@@ -5731,6 +5833,7 @@ impl Runtime {
         let mut next_cluster_migration_barrier: Option<u64> = None;
         let mut next_min_replicas_to_write: Option<usize> = None;
         let mut next_min_replicas_max_lag: Option<u64> = None;
+        let mut next_stop_writes_on_bgsave_error: Option<bool> = None;
         let mut next_query_buffer_limit: Option<usize> = None;
         let mut next_proto_max_bulk_len: Option<usize> = None;
         let mut next_output_buffer_limit: Option<usize> = None;
@@ -6080,6 +6183,28 @@ impl Runtime {
                 next_min_replicas_max_lag = Some(parsed);
                 static_override_updates
                     .push(("min-replicas-max-lag".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("stop-writes-on-bgsave-error") {
+                let parsed = match std::str::from_utf8(&pair[1]) {
+                    Ok(s) if s.eq_ignore_ascii_case("yes") => true,
+                    Ok(s) if s.eq_ignore_ascii_case("no") => false,
+                    _ => {
+                        return RespFrame::Error(
+                            "ERR Invalid argument for CONFIG SET 'stop-writes-on-bgsave-error'"
+                                .to_string(),
+                        );
+                    }
+                };
+                next_stop_writes_on_bgsave_error = Some(parsed);
+                static_override_updates.push((
+                    "stop-writes-on-bgsave-error".to_string(),
+                    if parsed {
+                        "yes".to_string()
+                    } else {
+                        "no".to_string()
+                    },
+                ));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("cluster-allow-reads-when-down") {
@@ -6529,6 +6654,9 @@ impl Runtime {
         }
         if let Some(max_lag) = next_min_replicas_max_lag {
             self.server.min_replicas_max_lag = max_lag;
+        }
+        if let Some(stop) = next_stop_writes_on_bgsave_error {
+            self.server.stop_writes_on_bgsave_error = stop;
         }
         if let Some(query_buffer_limit) = next_query_buffer_limit {
             self.server.query_buffer_limit = query_buffer_limit;
@@ -9505,9 +9633,10 @@ mod tests {
     use fr_store::sha1_hex_public;
 
     use super::{
-        ClientSession, ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
-        Runtime, ServerState, acl_list_entries_from_rules, canonical_static_config_param,
-        canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
+        AOF_DISK_ERROR_WRITE_DENIED, ClientSession, ClientUnblockMode, ClusterClientMode,
+        ClusterSubcommand, DEFAULT_AUTH_USER, RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState,
+        acl_list_entries_from_rules, canonical_static_config_param, canonicalize_acl_rules,
+        classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
         client_wrong_subcommand_arity, store_to_rdb_entries, wrong_arity_error,
     };
@@ -15240,6 +15369,89 @@ mod tests {
         let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 2);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
             unreachable!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("aof_last_write_status:err\r\n"), "{info}");
+    }
+
+    #[test]
+    fn fr_p2c_005_u009_rdb_disk_error_denies_writes_until_config_disabled() {
+        let dir = std::env::temp_dir().join("fr_runtime_rdb_disk_error_write_deny_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut rt = Runtime::default_strict();
+        rt.set_rdb_path(dir);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGSAVE"]), 1),
+            RespFrame::Error("ERR error saving RDB snapshot to disk".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"blocked", b"write"]), 2),
+            RespFrame::Error(RDB_DISK_ERROR_WRITE_DENIED.to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PING"]), 3),
+            RespFrame::Error(RDB_DISK_ERROR_WRITE_DENIED.to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"blocked"]), 4),
+            RespFrame::BulkString(None)
+        );
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"stop-writes-on-bgsave-error", b"no"]),
+                5
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"allowed", b"after-config"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"GET", b"stop-writes-on-bgsave-error"]),
+                7
+            ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"stop-writes-on-bgsave-error".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn fr_p2c_005_u009_aof_disk_error_denies_writes() {
+        let dir = std::env::temp_dir().join("fr_runtime_aof_disk_error_write_deny_dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(dir);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SAVE"]), 1),
+            RespFrame::Error("ERR error saving dataset to disk".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"blocked", b"write"]), 2),
+            RespFrame::Error(AOF_DISK_ERROR_WRITE_DENIED.to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"blocked"]), 3),
+            RespFrame::BulkString(None)
+        );
+        assert!(
+            rt.aof_records().is_empty(),
+            "denied writes must not advance the replay-visible AOF stream"
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 4);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            assert!(
+                matches!(info, RespFrame::BulkString(Some(_))),
+                "expected bulk INFO response, got {info:?}"
+            );
+            return;
         };
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("aof_last_write_status:err\r\n"), "{info}");
