@@ -731,6 +731,20 @@
       }
     },
     {
+      "name": "config_set_cluster_config_file_immutable",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "cluster-config-file",
+        "custom-nodes.conf"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CONFIG SET failed (possibly related to argument 'cluster-config-file') - can't set immutable config"
+      }
+    },
+    {
       "name": "config_set_tcp_backlog_immutable",
       "now_ms": 0,
       "argv": [

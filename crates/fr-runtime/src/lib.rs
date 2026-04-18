@@ -6395,6 +6395,7 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("appenddirname")
                 || parameter.eq_ignore_ascii_case("always-show-logo")
                 || parameter.eq_ignore_ascii_case("bind")
+                || parameter.eq_ignore_ascii_case("cluster-config-file")
                 || parameter.eq_ignore_ascii_case("cluster-enabled")
                 || parameter.eq_ignore_ascii_case("databases")
                 || parameter.eq_ignore_ascii_case("daemonize")
@@ -14600,6 +14601,25 @@ mod tests {
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"cluster-enabled".to_vec())),
                 RespFrame::BulkString(Some(b"no".to_vec())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[
+                b"CONFIG",
+                b"SET",
+                b"cluster-config-file",
+                b"custom-nodes.conf",
+            ]), 0),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'cluster-config-file') - can't set immutable config"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"cluster-config-file"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"cluster-config-file".to_vec())),
+                RespFrame::BulkString(Some(b"nodes.conf".to_vec())),
             ]))
         );
         assert_eq!(
