@@ -421,6 +421,24 @@ impl AclUser {
         }
     }
 
+    /// Restrictive starting state for users created via `ACL SETUSER <name> ...`.
+    /// Redis creates new users disabled with no passwords, no commands, no keys,
+    /// and no channels — the rules that follow build them up explicitly.
+    fn new_restricted() -> Self {
+        Self {
+            passwords: Vec::new(),
+            enabled: false,
+            nopass: false,
+            all_commands: false,
+            allowed_commands: HashSet::new(),
+            denied_commands: HashSet::new(),
+            allowed_categories: HashSet::new(),
+            denied_categories: HashSet::new(),
+            all_keys: false,
+            all_channels: false,
+        }
+    }
+
     fn check_password(&self, password: &[u8]) -> bool {
         if self.nopass {
             return true;
@@ -682,10 +700,11 @@ impl AuthState {
     }
 
     fn set_user(&mut self, username: Vec<u8>, rules: &[&[u8]]) -> Result<(), String> {
+        let is_default = username == DEFAULT_AUTH_USER.to_vec();
         let user = self
             .acl_users
             .entry(username)
-            .or_insert_with(AclUser::new_default);
+            .or_insert_with(|| if is_default { AclUser::new_default() } else { AclUser::new_restricted() });
         for rule in rules {
             let rule_str = std::str::from_utf8(rule).unwrap_or("");
             if rule_str.eq_ignore_ascii_case("on") {
@@ -4892,7 +4911,7 @@ impl Runtime {
         RespFrame::Array(Some(
             names
                 .into_iter()
-                .map(|n| RespFrame::BulkString(Some(n.to_vec())))
+                .map(|n| RespFrame::BulkString(Some(n.to_ascii_lowercase())))
                 .collect(),
         ))
     }
@@ -4944,30 +4963,39 @@ impl Runtime {
         let Some(user) = self.server.auth_state.get_user(&argv[2]) else {
             return RespFrame::BulkString(None);
         };
-        let flags_str = if user.enabled {
-            if user.nopass { "on nopass" } else { "on" }
+        let mut flags = Vec::new();
+        if user.enabled {
+            flags.push(RespFrame::BulkString(Some(b"on".to_vec())));
         } else {
-            "off"
-        };
+            flags.push(RespFrame::BulkString(Some(b"off".to_vec())));
+        }
+        if user.nopass {
+            flags.push(RespFrame::BulkString(Some(b"nopass".to_vec())));
+        }
+        flags.push(RespFrame::BulkString(Some(b"sanitize-payload".to_vec())));
+
+        let mut passwords = Vec::new();
+        for p in &user.passwords {
+            passwords.push(RespFrame::BulkString(Some(hex::encode(p).into_bytes())));
+        }
+
         let commands_str = user.commands_string();
         let keys_str = if user.all_keys { "~*" } else { "" };
         let channels_str = if user.all_channels { "&*" } else { "" };
+        
         RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"flags".to_vec())),
-            RespFrame::Array(Some(
-                flags_str
-                    .split_whitespace()
-                    .map(|f| RespFrame::BulkString(Some(f.as_bytes().to_vec())))
-                    .collect(),
-            )),
+            RespFrame::Array(Some(flags)),
             RespFrame::BulkString(Some(b"passwords".to_vec())),
-            RespFrame::Array(Some(Vec::new())),
+            RespFrame::Array(Some(passwords)),
             RespFrame::BulkString(Some(b"commands".to_vec())),
             RespFrame::BulkString(Some(commands_str.into_bytes())),
             RespFrame::BulkString(Some(b"keys".to_vec())),
             RespFrame::BulkString(Some(keys_str.as_bytes().to_vec())),
             RespFrame::BulkString(Some(b"channels".to_vec())),
             RespFrame::BulkString(Some(channels_str.as_bytes().to_vec())),
+            RespFrame::BulkString(Some(b"selectors".to_vec())),
+            RespFrame::Array(Some(Vec::new())),
         ]))
     }
 
@@ -4994,8 +5022,6 @@ impl Runtime {
             "connection",
             "transaction",
             "scripting",
-            "server",
-            "generic",
         ];
 
         if argv.len() == 2 {
@@ -5018,7 +5044,7 @@ impl Runtime {
                         .collect(),
                 ))
             } else {
-                RespFrame::Error(format!("ERR Unknown ACL cat category '{cat}'"))
+                RespFrame::Error(format!("ERR Unknown category '{cat}'"))
             }
         } else {
             CommandError::WrongSubcommandArity {

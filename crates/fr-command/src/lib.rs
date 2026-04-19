@@ -6113,7 +6113,7 @@ fn function_cmd(
         let (lib_count, func_count) = store.function_stats();
         Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"running_script".to_vec())),
-            RespFrame::Integer(0),
+            RespFrame::BulkString(None),
             RespFrame::BulkString(Some(b"engines".to_vec())),
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"LUA".to_vec())),
@@ -6174,24 +6174,46 @@ fn function_cmd(
             });
         }
         Ok(RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(
-                b"FUNCTION LOAD [REPLACE] function-code - Load a library.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"FUNCTION LIST [LIBRARYNAME pattern] [WITHCODE] - List libraries.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(b"FUNCTION STATS - Return engine stats.".to_vec())),
-            RespFrame::BulkString(Some(b"FUNCTION DUMP - Serialize all libraries.".to_vec())),
-            RespFrame::BulkString(Some(
-                b"FUNCTION RESTORE data [FLUSH|APPEND|REPLACE] - Restore libraries.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"FUNCTION FLUSH [ASYNC|SYNC] - Delete all libraries.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"FUNCTION DELETE library-name - Delete a library.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(b"FUNCTION HELP - Return this help.".to_vec())),
+            hello_simple("FUNCTION <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
+            hello_simple("LOAD [REPLACE] <FUNCTION CODE>"),
+            hello_simple("    Create a new library with the given library name and code."),
+            hello_simple("DELETE <LIBRARY NAME>"),
+            hello_simple("    Delete the given library."),
+            hello_simple("LIST [LIBRARYNAME PATTERN] [WITHCODE]"),
+            hello_simple("    Return general information on all the libraries:"),
+            hello_simple("    * Library name"),
+            hello_simple("    * The engine used to run the Library"),
+            hello_simple("    * Library description"),
+            hello_simple("    * Functions list"),
+            hello_simple("    * Library code (if WITHCODE is given)"),
+            hello_simple("    It also possible to get only function that matches a pattern using LIBRARYNAME argument."),
+            hello_simple("STATS"),
+            hello_simple("    Return information about the current function running:"),
+            hello_simple("    * Function name"),
+            hello_simple("    * Command used to run the function"),
+            hello_simple("    * Duration in MS that the function is running"),
+            hello_simple("    If no function is running, return nil"),
+            hello_simple("    In addition, returns a list of available engines."),
+            hello_simple("KILL"),
+            hello_simple("    Kill the current running function."),
+            hello_simple("FLUSH [ASYNC|SYNC]"),
+            hello_simple("    Delete all the libraries."),
+            hello_simple("    When called without the optional mode argument, the behavior is determined by the"),
+            hello_simple("    lazyfree-lazy-user-flush configuration directive. Valid modes are:"),
+            hello_simple("    * ASYNC: Asynchronously flush the libraries."),
+            hello_simple("    * SYNC: Synchronously flush the libraries."),
+            hello_simple("DUMP"),
+            hello_simple("    Return a serialized payload representing the current libraries, can be restored using FUNCTION RESTORE command"),
+            hello_simple("RESTORE <PAYLOAD> [FLUSH|APPEND|REPLACE]"),
+            hello_simple("    Restore the libraries represented by the given payload, it is possible to give a restore policy to"),
+            hello_simple("    control how to handle existing libraries (default APPEND):"),
+            hello_simple("    * FLUSH: delete all existing libraries."),
+            hello_simple("    * APPEND: appends the restored libraries to the existing libraries. On collision, abort."),
+            hello_simple("    * REPLACE: appends the restored libraries to the existing libraries, On collision, replace the old"),
+            hello_simple("      libraries with the new libraries (notice that even on this option there is a chance of failure"),
+            hello_simple("      in case of functions name collision with another library)."),
+            hello_simple("HELP"),
+            hello_simple("    Print this help."),
         ])))
     } else {
         Err(CommandError::UnknownSubcommand {
@@ -6203,8 +6225,11 @@ fn function_cmd(
 
 fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // FCALL function numkeys [key ...] [arg ...]
+    let cmd_name = std::str::from_utf8(&argv[0]).unwrap_or("FCALL");
+    let is_ro = cmd_name.eq_ignore_ascii_case("FCALL_RO");
+
     if argv.len() < 3 {
-        return Err(CommandError::WrongArity("FCALL"));
+        return Err(CommandError::WrongArity(if is_ro { "fcall_ro" } else { "fcall" }));
     }
     if store.script_nesting_level >= 1 {
         return Ok(RespFrame::Error(
@@ -6212,7 +6237,6 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         ));
     }
     let func_name = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-    let (_numkeys, keys, args) = parse_eval_args(argv)?;
 
     // Validate function name contains only safe identifier characters to prevent
     // Lua code injection when constructing the wrapper script.
@@ -6225,12 +6249,21 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     }
 
     // Look up the function by name
-    let script = match store.function_get(func_name) {
-        Some((lib, _func)) => lib.code.clone(),
+    let (script, has_no_writes) = match store.function_get(func_name) {
+        Some((lib, func)) => {
+            let no_writes = func.flags.iter().any(|f| f.eq_ignore_ascii_case("no-writes"));
+            (lib.code.clone(), no_writes)
+        }
         None => {
             return Ok(RespFrame::Error("ERR Function not found".to_string()));
         }
     };
+
+    if is_ro && !has_no_writes {
+        return Ok(RespFrame::Error("ERR Can not execute a script with write flag using *_ro command.".to_string()));
+    }
+
+    let (_numkeys, keys, args) = parse_eval_args(argv)?;
 
     // Transform the library code for execution:
     // 1. Strip the #!lua name=... header line (not valid Lua)
@@ -9214,8 +9247,6 @@ const ACL_CATEGORIES: &[&str] = &[
     "connection",
     "transaction",
     "scripting",
-    "server",
-    "generic",
 ];
 
 struct AclCategoryMaps {
