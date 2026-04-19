@@ -6163,6 +6163,16 @@ fn function_cmd(
         }
         store.function_flush();
         Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("KILL") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "FUNCTION",
+                subcommand: "KILL".to_string(),
+            });
+        }
+        Ok(RespFrame::Error(
+            "NOTBUSY No scripts in execution right now.".to_string(),
+        ))
     } else if sub.eq_ignore_ascii_case("DELETE") {
         if argv.len() != 3 {
             return Err(CommandError::WrongSubcommandArity {
@@ -28430,10 +28440,20 @@ mod tests {
             RespFrame::Error("ERR Library name was not given".to_string())
         );
 
+        let kill = dispatch_argv(&[b"FUNCTION".to_vec(), b"KILL".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(
+            kill,
+            RespFrame::Error("NOTBUSY No scripts in execution right now.".to_string())
+        );
+
         let cases = [
             (
                 vec![b"FUNCTION".to_vec(), b"DELETE".to_vec()],
                 "ERR wrong number of arguments for 'function|delete' command",
+            ),
+            (
+                vec![b"FUNCTION".to_vec(), b"KILL".to_vec(), b"extra".to_vec()],
+                "ERR wrong number of arguments for 'function|kill' command",
             ),
             (
                 vec![b"FUNCTION".to_vec(), b"LOAD".to_vec()],

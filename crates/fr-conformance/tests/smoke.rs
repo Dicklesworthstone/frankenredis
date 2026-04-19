@@ -3419,6 +3419,8 @@ const CORE_FUNCTION_LIVE_STABLE_CASES: &[&str] = &[
     "function_list_after_flush",
     "function_load_bad_header",
     "function_wrong_arity",
+    "function_kill_notbusy",
+    "function_kill_wrong_arity",
     "fcall_wrong_arity",
     "fcall_wrong_arity_no_numkeys",
     "script_load",

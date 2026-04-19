@@ -480,6 +480,31 @@
       }
     },
     {
+      "name": "function_kill_notbusy",
+      "now_ms": 0,
+      "argv": [
+        "FUNCTION",
+        "KILL"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "NOTBUSY No scripts in execution right now."
+      }
+    },
+    {
+      "name": "function_kill_wrong_arity",
+      "now_ms": 0,
+      "argv": [
+        "FUNCTION",
+        "KILL",
+        "extra"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'function|kill' command"
+      }
+    },
+    {
       "name": "fcall_wrong_arity",
       "now_ms": 0,
       "argv": [
