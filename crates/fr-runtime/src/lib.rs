@@ -5392,27 +5392,17 @@ impl Runtime {
     /// Collect all config parameter entries matching a single pattern.
     fn collect_config_entries(&self, pattern: &str, entries: &mut Vec<RespFrame>) {
         if pattern == "maxmemory*" {
-            entries.push(RespFrame::BulkString(Some(
-                b"maxmemory-eviction-tenacity".to_vec(),
-            )));
+            entries.push(RespFrame::BulkString(Some(b"maxmemory-eviction-tenacity".to_vec())));
             entries.push(RespFrame::BulkString(Some(b"10".to_vec())));
             entries.push(RespFrame::BulkString(Some(b"maxmemory-clients".to_vec())));
             entries.push(RespFrame::BulkString(Some(b"0".to_vec())));
             entries.push(RespFrame::BulkString(Some(b"maxmemory-policy".to_vec())));
             entries.push(RespFrame::BulkString(Some(
-                self.server
-                    .store
-                    .maxmemory_policy
-                    .as_config_str()
-                    .as_bytes()
-                    .to_vec(),
+                self.server.store.maxmemory_policy.as_config_str().as_bytes().to_vec(),
             )));
             entries.push(RespFrame::BulkString(Some(b"maxmemory-samples".to_vec())));
             entries.push(RespFrame::BulkString(Some(
-                self.server
-                    .maxmemory_eviction_sample_limit
-                    .to_string()
-                    .into_bytes(),
+                self.server.maxmemory_eviction_sample_limit.to_string().into_bytes(),
             )));
             entries.push(RespFrame::BulkString(Some(b"maxmemory".to_vec())));
             entries.push(RespFrame::BulkString(Some(
