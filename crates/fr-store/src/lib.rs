@@ -8781,7 +8781,7 @@ impl Store {
 
         for (i, part) in header.split_whitespace().enumerate() {
             if i == 0 {
-                engine = part.to_string();
+                engine = part.to_ascii_uppercase();
             } else if let Some(name) = part.strip_prefix("name=") {
                 lib_name = name.to_string();
             }
