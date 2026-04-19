@@ -1556,36 +1556,72 @@
         "kind": "array",
         "value": [
           {
-            "kind": "bulk",
-            "value": "LATENCY <subcommand> [<arg> ...]. Subcommands are:"
+            "kind": "simple",
+            "value": "LATENCY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"
           },
           {
-            "kind": "bulk",
-            "value": "LATEST - Return the latest latency samples."
+            "kind": "simple",
+            "value": "DOCTOR"
           },
           {
-            "kind": "bulk",
-            "value": "DOCTOR - Return a human readable latency analysis report."
+            "kind": "simple",
+            "value": "    Return a human readable latency analysis report."
           },
           {
-            "kind": "bulk",
-            "value": "HISTORY <event> - Return latency history for an event."
+            "kind": "simple",
+            "value": "GRAPH <event>"
           },
           {
-            "kind": "bulk",
-            "value": "HISTOGRAM [command ...] - Return latency histograms for commands."
+            "kind": "simple",
+            "value": "    Return an ASCII latency graph for the <event> class."
           },
           {
-            "kind": "bulk",
-            "value": "RESET [<event> ...] - Reset latency data."
+            "kind": "simple",
+            "value": "HISTORY <event>"
           },
           {
-            "kind": "bulk",
-            "value": "GRAPH <event> - Return an ASCII graph of latency."
+            "kind": "simple",
+            "value": "    Return time-latency samples for the <event> class."
           },
           {
-            "kind": "bulk",
-            "value": "HELP - Return subcommand help summary."
+            "kind": "simple",
+            "value": "LATEST"
+          },
+          {
+            "kind": "simple",
+            "value": "    Return the latest latency samples for all events."
+          },
+          {
+            "kind": "simple",
+            "value": "RESET [<event> ...]"
+          },
+          {
+            "kind": "simple",
+            "value": "    Reset latency data of one or more <event> classes."
+          },
+          {
+            "kind": "simple",
+            "value": "    (default: reset all data for all event classes)"
+          },
+          {
+            "kind": "simple",
+            "value": "HISTOGRAM [COMMAND ...]"
+          },
+          {
+            "kind": "simple",
+            "value": "    Return a cumulative distribution of latencies in the format of a histogram for the specified command names."
+          },
+          {
+            "kind": "simple",
+            "value": "    If no commands are specified then all histograms are replied."
+          },
+          {
+            "kind": "simple",
+            "value": "HELP"
+          },
+          {
+            "kind": "simple",
+            "value": "    Print this help."
           }
         ]
       }

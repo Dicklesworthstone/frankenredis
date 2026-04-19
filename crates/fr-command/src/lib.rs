@@ -12850,26 +12850,25 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
             });
         }
         Ok(RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(
-                b"LATENCY <subcommand> [<arg> ...]. Subcommands are:".to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"LATEST - Return the latest latency samples.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"DOCTOR - Return a human readable latency analysis report.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"HISTORY <event> - Return latency history for an event.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"HISTOGRAM [command ...] - Return latency histograms for commands.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(b"RESET [<event> ...] - Reset latency data.".to_vec())),
-            RespFrame::BulkString(Some(
-                b"GRAPH <event> - Return an ASCII graph of latency.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(b"HELP - Return subcommand help summary.".to_vec())),
+            hello_simple("LATENCY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
+            hello_simple("DOCTOR"),
+            hello_simple("    Return a human readable latency analysis report."),
+            hello_simple("GRAPH <event>"),
+            hello_simple("    Return an ASCII latency graph for the <event> class."),
+            hello_simple("HISTORY <event>"),
+            hello_simple("    Return time-latency samples for the <event> class."),
+            hello_simple("LATEST"),
+            hello_simple("    Return the latest latency samples for all events."),
+            hello_simple("RESET [<event> ...]"),
+            hello_simple("    Reset latency data of one or more <event> classes."),
+            hello_simple("    (default: reset all data for all event classes)"),
+            hello_simple("HISTOGRAM [COMMAND ...]"),
+            hello_simple(
+                "    Return a cumulative distribution of latencies in the format of a histogram for the specified command names.",
+            ),
+            hello_simple("    If no commands are specified then all histograms are replied."),
+            hello_simple("HELP"),
+            hello_simple("    Print this help."),
         ])))
     } else {
         Err(CommandError::UnknownSubcommand {
@@ -25343,19 +25342,48 @@ mod tests {
         let mut store = Store::new();
         let out = dispatch_argv(&[b"LATENCY".to_vec(), b"HELP".to_vec()], &mut store, 0)
             .expect("latency help");
-        match out {
-            RespFrame::Array(Some(items)) => {
-                let has_histogram = items.iter().any(|item| {
-                    if let RespFrame::BulkString(Some(bytes)) = item {
-                        bytes.starts_with(b"HISTOGRAM")
-                    } else {
-                        false
-                    }
-                });
-                assert!(has_histogram, "HELP should include HISTOGRAM");
-            }
-            other => panic!("expected array, got {other:?}"), // ubs:ignore — AI triage
-        }
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::SimpleString(
+                    "LATENCY <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"
+                        .to_string()
+                ),
+                RespFrame::SimpleString("DOCTOR".to_string()),
+                RespFrame::SimpleString(
+                    "    Return a human readable latency analysis report.".to_string()
+                ),
+                RespFrame::SimpleString("GRAPH <event>".to_string()),
+                RespFrame::SimpleString(
+                    "    Return an ASCII latency graph for the <event> class.".to_string()
+                ),
+                RespFrame::SimpleString("HISTORY <event>".to_string()),
+                RespFrame::SimpleString(
+                    "    Return time-latency samples for the <event> class.".to_string()
+                ),
+                RespFrame::SimpleString("LATEST".to_string()),
+                RespFrame::SimpleString(
+                    "    Return the latest latency samples for all events.".to_string()
+                ),
+                RespFrame::SimpleString("RESET [<event> ...]".to_string()),
+                RespFrame::SimpleString(
+                    "    Reset latency data of one or more <event> classes.".to_string()
+                ),
+                RespFrame::SimpleString(
+                    "    (default: reset all data for all event classes)".to_string()
+                ),
+                RespFrame::SimpleString("HISTOGRAM [COMMAND ...]".to_string()),
+                RespFrame::SimpleString(
+                    "    Return a cumulative distribution of latencies in the format of a histogram for the specified command names.".to_string()
+                ),
+                RespFrame::SimpleString(
+                    "    If no commands are specified then all histograms are replied."
+                        .to_string()
+                ),
+                RespFrame::SimpleString("HELP".to_string()),
+                RespFrame::SimpleString("    Print this help.".to_string()),
+            ]))
+        );
     }
 
     #[test]
