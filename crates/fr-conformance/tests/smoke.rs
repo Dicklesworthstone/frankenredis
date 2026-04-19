@@ -3232,7 +3232,7 @@ fn core_config_live_redis_matches_runtime() {
         port: oracle_server.port,
         ..LiveOracleConfig::default()
     };
-    let report = run_live_redis_diff_for_cases(
+    let report = fr_conformance::run_live_redis_diff_for_cases(
         &cfg,
         "core_config.json",
         CORE_CONFIG_LIVE_STABLE_CASES,
