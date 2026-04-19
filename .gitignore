@@ -157,6 +157,15 @@ ubs_*.jsonl
 # Extensionless scratch output files
 /check_result_*
 
+# Root-level scratch diff/oracle binaries + their source files
+/print_diffs
+/print_diffs.rs
+/run_oracle_diff
+/run_oracle_diff.rs
+
+# Golden-test `.actual` outputs (diff output of failing golden comparisons)
+**/tests/golden/*.actual
+
 # Empty test stubs (agent-generated, never completed)
 crates/fr-server/tests/replica_of_replica.rs
 crates/fr-server/tests/test_replica_of_replica.rs
