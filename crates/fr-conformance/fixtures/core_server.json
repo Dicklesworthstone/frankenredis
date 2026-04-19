@@ -324,7 +324,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'bogus'. Try COMMAND HELP."
+        "value": "ERR unknown subcommand 'BOGUS'. Try COMMAND HELP."
       }
     },
     {
@@ -468,7 +468,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'bogus'. Try CONFIG HELP."
+        "value": "ERR unknown subcommand 'BOGUS'. Try CONFIG HELP."
       }
     },
     {
@@ -760,7 +760,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'bogus'. Try OBJECT HELP."
+        "value": "ERR unknown subcommand 'BOGUS'. Try OBJECT HELP."
       }
     },
     {
@@ -1163,7 +1163,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'bogus'. Try LATENCY HELP."
+        "value": "ERR unknown subcommand 'BOGUS'. Try LATENCY HELP."
       }
     },
     {
@@ -1212,7 +1212,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'bogus'. Try DEBUG HELP."
+        "value": "ERR unknown subcommand or wrong number of arguments for 'BOGUS'. Try DEBUG HELP."
       }
     },
     {
@@ -1369,7 +1369,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'bogus'. Try SLOWLOG HELP."
+        "value": "ERR unknown subcommand 'BOGUS'. Try SLOWLOG HELP."
       }
     },
     {
@@ -1716,7 +1716,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try DEBUG HELP."
+        "value": "ERR unknown subcommand or wrong number of arguments for 'NOSUCH'. Try DEBUG HELP."
       }
     },
     {
@@ -1740,7 +1740,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try LATENCY HELP."
+        "value": "ERR unknown subcommand 'NOSUCH'. Try LATENCY HELP."
       }
     },
     {
@@ -1784,7 +1784,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try COMMAND HELP."
+        "value": "ERR unknown subcommand 'NOSUCH'. Try COMMAND HELP."
       }
     },
     {
@@ -2089,7 +2089,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try SLOWLOG HELP."
+        "value": "ERR unknown subcommand 'NOSUCH'. Try SLOWLOG HELP."
       }
     },
     {
@@ -2255,7 +2255,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'nosuch'. Try COMMAND HELP."
+        "value": "ERR unknown subcommand 'NOSUCH'. Try COMMAND HELP."
       }
     },
     {
@@ -2467,8 +2467,8 @@
         "PING"
       ],
       "expect": {
-        "kind": "array",
-        "value": []
+        "kind": "error",
+        "value": "ERR The command has no key arguments"
       }
     },
     {
@@ -2482,7 +2482,265 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid command specified, or key spec not found for 'NOSUCHCMD'"
+        "value": "ERR Invalid command specified"
+      }
+    },
+    {
+      "name": "command_getkeysandflags_set",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYSANDFLAGS",
+        "SET",
+        "alpha",
+        "1"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "alpha"
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "simple",
+                    "value": "OW"
+                  },
+                  {
+                    "kind": "simple",
+                    "value": "update"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "command_getkeysandflags_set_with_get",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYSANDFLAGS",
+        "SET",
+        "alpha",
+        "1",
+        "GET"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "alpha"
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "simple",
+                    "value": "RW"
+                  },
+                  {
+                    "kind": "simple",
+                    "value": "access"
+                  },
+                  {
+                    "kind": "simple",
+                    "value": "update"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "command_getkeysandflags_del",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYSANDFLAGS",
+        "DEL",
+        "a",
+        "b"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "a"
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "simple",
+                    "value": "RM"
+                  },
+                  {
+                    "kind": "simple",
+                    "value": "delete"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "b"
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "simple",
+                    "value": "RM"
+                  },
+                  {
+                    "kind": "simple",
+                    "value": "delete"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "command_getkeysandflags_rename",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYSANDFLAGS",
+        "RENAME",
+        "src",
+        "dst"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "src"
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "simple",
+                    "value": "RW"
+                  },
+                  {
+                    "kind": "simple",
+                    "value": "access"
+                  },
+                  {
+                    "kind": "simple",
+                    "value": "delete"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "dst"
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "simple",
+                    "value": "OW"
+                  },
+                  {
+                    "kind": "simple",
+                    "value": "update"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "command_getkeysandflags_ping_no_keys",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYSANDFLAGS",
+        "PING"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR The command has no key arguments"
+      }
+    },
+    {
+      "name": "command_getkeysandflags_unknown_command",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYSANDFLAGS",
+        "NOSUCHCMD",
+        "arg1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Invalid command specified"
+      }
+    },
+    {
+      "name": "command_getkeysandflags_no_args",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYSANDFLAGS"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Invalid arguments for 'COMMAND GETKEYSANDFLAGS'"
+      }
+    },
+    {
+      "name": "command_getkeysandflags_invalid_number",
+      "now_ms": 0,
+      "argv": [
+        "COMMAND",
+        "GETKEYSANDFLAGS",
+        "SET",
+        "onlykey"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR Invalid number of arguments specified for command"
       }
     },
     {
@@ -4167,7 +4425,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'del' command"
+        "value": "ERR wrong number of arguments for 'unlink' command"
       }
     },
     {
@@ -4239,7 +4497,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Unknown subcommand or wrong number of arguments for 'invalid'. Try SLOWLOG HELP."
+        "value": "ERR unknown subcommand 'INVALID'. Try SLOWLOG HELP."
       }
     },
     {

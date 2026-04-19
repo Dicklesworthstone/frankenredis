@@ -313,19 +313,19 @@
         "value": [
           {
             "kind": "bulk",
-            "value": "maxmemory"
+            "value": "maxmemory-eviction-tenacity"
+          },
+          {
+            "kind": "bulk",
+            "value": "10"
+          },
+          {
+            "kind": "bulk",
+            "value": "maxmemory-clients"
           },
           {
             "kind": "bulk",
             "value": "0"
-          },
-          {
-            "kind": "bulk",
-            "value": "maxmemory-samples"
-          },
-          {
-            "kind": "bulk",
-            "value": "5"
           },
           {
             "kind": "bulk",
@@ -337,11 +337,19 @@
           },
           {
             "kind": "bulk",
-            "value": "maxmemory-eviction-tenacity"
+            "value": "maxmemory-samples"
           },
           {
             "kind": "bulk",
-            "value": "10"
+            "value": "5"
+          },
+          {
+            "kind": "bulk",
+            "value": "maxmemory"
+          },
+          {
+            "kind": "bulk",
+            "value": "0"
           }
         ]
       }
@@ -381,7 +389,7 @@
         "value": [
           {
             "kind": "bulk",
-            "value": "lazyfree-lazy-eviction"
+            "value": "lazyfree-lazy-user-flush"
           },
           {
             "kind": "bulk",
@@ -390,6 +398,14 @@
           {
             "kind": "bulk",
             "value": "lazyfree-lazy-expire"
+          },
+          {
+            "kind": "bulk",
+            "value": "no"
+          },
+          {
+            "kind": "bulk",
+            "value": "lazyfree-lazy-eviction"
           },
           {
             "kind": "bulk",
@@ -406,14 +422,6 @@
           {
             "kind": "bulk",
             "value": "lazyfree-lazy-user-del"
-          },
-          {
-            "kind": "bulk",
-            "value": "no"
-          },
-          {
-            "kind": "bulk",
-            "value": "lazyfree-lazy-user-flush"
           },
           {
             "kind": "bulk",
@@ -1076,7 +1084,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'config|get' subcommand"
+        "value": "ERR wrong number of arguments for 'config|get' command"
       }
     },
     {
@@ -1089,7 +1097,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'config|set' subcommand"
+        "value": "ERR wrong number of arguments for 'config|set' command"
       }
     },
     {
@@ -1102,7 +1110,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'config|resetstat' subcommand"
+        "value": "ERR wrong number of arguments for 'config|resetstat' command"
       }
     },
     {
@@ -1636,7 +1644,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'config|rewrite' subcommand"
+        "value": "ERR wrong number of arguments for 'config|rewrite' command"
       }
     },
     {
@@ -1761,7 +1769,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'config|set' subcommand"
+        "value": "ERR wrong number of arguments for 'config|set' command"
       }
     },
     {
@@ -2092,7 +2100,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR CONFIG SET failed (possibly related to argument 'hz') - argument couldn't be parsed into an integer"
       }
     },
     {
@@ -2105,8 +2113,8 @@
         "0"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR Invalid argument '0' for CONFIG SET 'hz'"
+        "kind": "simple",
+        "value": "OK"
       }
     },
     {
@@ -2120,7 +2128,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid argument '-1' for CONFIG SET 'hz'"
+        "value": "ERR CONFIG SET failed (possibly related to argument 'hz') - argument must be between 0 and 2147483647 inclusive"
       }
     },
     {
@@ -2133,8 +2141,8 @@
         "501"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR Invalid argument '501' for CONFIG SET 'hz'"
+        "kind": "simple",
+        "value": "OK"
       }
     },
     {

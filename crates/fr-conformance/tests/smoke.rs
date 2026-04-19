@@ -2573,6 +2573,42 @@ fn core_acl_conformance() {
     assert!(diff.failed.is_empty());
 }
 
+const CORE_ACL_LIVE_STABLE_CASES: &[&str] = &[
+    "acl_whoami_returns_default",
+    "acl_users_returns_default",
+    "acl_setuser_creates_new_user",
+    "acl_deluser_alice_returns_count",
+    "acl_deluser_default_is_rejected",
+    "acl_deluser_nonexistent_returns_zero",
+    "acl_log_returns_empty_array",
+    "acl_log_reset_returns_ok",
+    "acl_unknown_subcommand_is_rejected",
+    "acl_no_subcommand_is_rejected",
+    "acl_genpass_negative_error",
+    "acl_genpass_too_large_error",
+    "acl_whoami_lowercase",
+    "acl_users_lowercase",
+    "acl_setuser_bob_on",
+    "acl_setuser_bob_off",
+    "acl_deluser_bob",
+];
+
+#[test]
+fn core_acl_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report =
+        run_live_redis_diff_for_cases(&cfg, "core_acl.json", CORE_ACL_LIVE_STABLE_CASES, &oracle)
+            .expect("acl live diff");
+    assert_eq!(report.total, report.passed, "failed: {:?}", report.failed);
+    assert!(report.failed.is_empty());
+}
+
 #[test]
 fn core_acl_log_failed_auth_surface_live_redis_matches_runtime() {
     let cfg = HarnessConfig::default_paths();
@@ -2884,6 +2920,53 @@ fn core_client_conformance() {
     assert!(diff.failed.is_empty());
 }
 
+const CORE_CLIENT_ADMIN_LIVE_STABLE_CASES: &[&str] = &[
+    "client_getname_initially_nil",
+    "client_setname_ok",
+    "client_getname_after_setname",
+    "client_setname_overwrite",
+    "client_getname_after_overwrite",
+    "client_setname_clear_with_empty",
+    "client_getname_after_clear",
+    "client_setname_spaces_rejected",
+    "client_setname_wrong_arity",
+    "client_unknown_subcommand",
+    "client_wrong_arity_no_args",
+    "client_setname_with_underscore",
+    "client_getname_underscore",
+    "client_setname_with_dash",
+    "client_getname_dash",
+    "client_getname_wrong_arity",
+    "client_case_insensitive_subcommand",
+    "client_case_insensitive_setname",
+    "client_verify_lowered",
+    "client_setname_empty_string",
+    "client_getname_after_empty_setname",
+    "client_kill_returns_zero",
+    "client_kill_without_filter_rejects_missing_target",
+    "client_info_wrong_arity",
+];
+
+#[test]
+fn core_client_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_client.json",
+        CORE_CLIENT_ADMIN_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("client admin live diff");
+    assert_eq!(report.total, report.passed, "failed: {:?}", report.failed);
+    assert!(report.failed.is_empty());
+}
+
 #[test]
 fn core_client_tracking_live_redis_matches_runtime() {
     let cfg = HarnessConfig::default_paths();
@@ -3034,6 +3117,45 @@ fn core_pubsub_conformance() {
     assert!(diff.failed.is_empty());
 }
 
+const CORE_PUBSUB_LIVE_STABLE_CASES: &[&str] = &[
+    "subscribe_single_channel",
+    "unsubscribe_mychannel",
+    "unsubscribe_no_channels",
+    "psubscribe_pattern",
+    "punsubscribe_pattern",
+    "punsubscribe_no_patterns",
+    "publish_no_subscribers",
+    "pubsub_channels_empty",
+    "pubsub_numpat_zero",
+    "publish_wrong_arity",
+    "subscribe_wrong_arity",
+    "psubscribe_wrong_arity",
+    "pubsub_wrong_arity",
+    "pubsub_unknown_subcommand",
+    "pubsub_help",
+    "pubsub_help_is_array",
+];
+
+#[test]
+fn core_pubsub_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_pubsub.json",
+        CORE_PUBSUB_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("pubsub live diff");
+    assert_eq!(report.total, report.passed, "failed: {:?}", report.failed);
+    assert!(report.failed.is_empty());
+}
+
 #[test]
 fn core_replication_conformance() {
     let cfg = HarnessConfig::default_paths();
@@ -3064,6 +3186,65 @@ fn core_config_conformance() {
     let diff = run_fixture(&cfg, "core_config.json").expect("config fixture");
     assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
     assert!(diff.failed.is_empty());
+}
+
+const CORE_CONFIG_LIVE_STABLE_CASES: &[&str] = &[
+    "config_get_exact_maxmemory",
+    "config_get_exact_bind",
+    "config_get_exact_enable_protected_configs",
+    "config_get_exact_hz",
+    "config_get_exact_maxmemory_policy",
+    "config_get_no_match",
+    "config_get_prefix_pattern_cluster",
+    "config_wrong_arity_no_subcommand",
+    "config_get_wrong_arity",
+    "config_set_wrong_arity_odd",
+    "config_resetstat_wrong_arity",
+    "config_rewrite_wrong_arity",
+    "config_set_wrong_arity_three_values",
+    "config_resetstat",
+    "config_unknown_subcommand",
+    "config_set_maxmemory",
+    "config_get_maxmemory_after_set",
+    "config_set_maxmemory_zero",
+    "config_get_maxmemory_after_zero",
+    "config_set_hz_value",
+    "config_get_hz_after_set",
+    "config_set_hz_100",
+    "config_get_hz_after_100",
+    "config_set_hz_1_min",
+    "config_get_hz_after_1",
+    "config_set_hz_500_max",
+    "config_get_hz_after_500",
+    "config_set_hz_non_integer",
+    "config_set_hz_zero_error",
+    "config_set_hz_negative_error",
+    "config_set_hz_over_max_error",
+    "config_get_hz_unchanged_after_errors",
+];
+
+#[test]
+fn core_config_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_config.json",
+        CORE_CONFIG_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("config live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
 }
 
 #[test]
@@ -3216,12 +3397,110 @@ fn core_function_conformance() {
     assert!(diff.failed.is_empty());
 }
 
+const CORE_FUNCTION_LIVE_STABLE_CASES: &[&str] = &[
+    "function_list_empty",
+    "function_load_simple",
+    "fcall_not_found",
+    "fcall_myfunc_returns_arg",
+    "fcall_myfunc_no_args_returns_nil",
+    "function_load_numeric_lib",
+    "fcall_add42_returns_integer",
+    "function_delete_numlib",
+    "function_load_redis_call_lib",
+    "fcall_myset_sets_key",
+    "fcall_verify_key_was_set",
+    "function_delete_setlib",
+    "function_load_replace",
+    "function_delete",
+    "function_delete_not_found",
+    "function_list_after_delete",
+    "function_load_for_flush",
+    "function_flush",
+    "function_list_after_flush",
+    "function_load_bad_header",
+    "function_wrong_arity",
+    "fcall_wrong_arity",
+    "fcall_wrong_arity_no_numkeys",
+    "script_load",
+    "script_exists_yes",
+    "script_exists_no",
+    "script_exists_mixed",
+    "evalsha_loaded_script",
+    "script_flush",
+    "script_exists_after_flush",
+    "function_unknown_subcommand",
+    "fcall_ro_basic",
+    "function_delete_rolib",
+    "function_flush_sync",
+    "function_list_after_sync_flush",
+    "fcall_not_found_after_flush",
+    "script_wrong_arity",
+    "script_unknown_subcommand",
+    "script_flush_sync",
+    "script_flush_async",
+];
+
+#[test]
+fn core_function_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report =
+        fr_conformance::run_live_redis_diff(&cfg, "core_function.json", &oracle)
+            .expect("function live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
 #[test]
 fn core_wait_conformance() {
     let cfg = HarnessConfig::default_paths();
     let diff = run_fixture(&cfg, "core_wait.json").expect("wait fixture");
     assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
     assert!(diff.failed.is_empty());
+}
+
+const CORE_WAIT_LIVE_STABLE_CASES: &[&str] = &[
+    "wait_standalone_zero_replicas",
+    "wait_case_insensitive",
+    "wait_after_set_still_zero",
+    "wait_wrong_arity_no_args",
+    "wait_wrong_arity_one_arg",
+    "wait_wrong_arity_extra_args",
+    "wait_invalid_numreplicas",
+    "wait_negative_numreplicas",
+    "wait_invalid_timeout",
+    "wait_negative_timeout",
+    "wait_float_numreplicas",
+    "wait_float_timeout",
+];
+
+#[test]
+fn core_wait_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report =
+        run_live_redis_diff_for_cases(&cfg, "core_wait.json", CORE_WAIT_LIVE_STABLE_CASES, &oracle)
+            .expect("wait live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
 }
 
 #[test]
@@ -3248,6 +3527,52 @@ fn core_errors_conformance() {
     assert!(diff.failed.is_empty());
 }
 
+const CORE_ERRORS_LIVE_STABLE_CASES: &[&str] = &[
+    "unknown_no_args",
+    "unknown_with_args_preview",
+    "unknown_with_long_args_preview",
+    "unknown_case_preserved",
+    "wrong_arity_get",
+    "del_wrong_arity",
+    "append_wrong_arity",
+    "strlen_wrong_arity",
+    "type_wrong_arity",
+    "keys_wrong_arity",
+    "object_unknown_subcommand",
+    "setrange_negative_offset",
+    "setrange_offset_not_integer",
+    "getrange_start_not_integer",
+    "getrange_end_not_integer",
+    "lindex_wrong_arity",
+    "lindex_not_integer",
+    "select_not_integer",
+    "select_negative",
+];
+
+#[test]
+fn core_errors_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_errors.json",
+        CORE_ERRORS_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("errors live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
 #[test]
 fn core_object_conformance() {
     let cfg = HarnessConfig::default_paths();
@@ -3264,12 +3589,119 @@ fn core_pfdebug_conformance() {
     assert!(diff.failed.is_empty());
 }
 
+const CORE_PFDEBUG_LIVE_STABLE_CASES: &[&str] = &[
+    "pfselftest_returns_ok",
+    "pfselftest_wrong_arity",
+    "pfdebug_missing_key_getreg_error",
+    "pfdebug_missing_key_encoding_error",
+    "pfdebug_missing_key_todense_error",
+    "pfdebug_missing_key_decode_error",
+    "pfdebug_unknown_subcommand_missing_key_error",
+    "pfdebug_wrong_arity_no_args",
+    "pfdebug_wrong_arity_too_many",
+    "pfdebug_setup_hll",
+    "pfdebug_encoding_returns_sparse",
+    "pfdebug_unknown_subcommand_existing_hll_error",
+    "pfdebug_getreg_returns_register_array",
+    "pfdebug_encoding_after_getreg_returns_dense",
+    "pfdebug_todense_already_dense_returns_0",
+    "pfdebug_decode_on_dense_errors",
+    "pfdebug_wrongtype_list_setup",
+    "pfdebug_encoding_wrongtype_list",
+    "pfdebug_getreg_wrongtype_list",
+    "pfdebug_todense_wrongtype_list",
+    "pfdebug_decode_wrongtype_list",
+    "pfdebug_unknown_subcommand_wrongtype_list_error",
+    "pfdebug_invalid_hll_setup",
+    "pfdebug_encoding_invalid_hll_string",
+    "pfdebug_getreg_invalid_hll_string",
+    "pfdebug_case_insensitive_subcommand",
+    "pfdebug_case_insensitive_getreg",
+    "pfdebug_case_insensitive_todense",
+    "pfdebug_case_insensitive_decode",
+];
+
+#[test]
+fn core_pfdebug_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_pfdebug.json",
+        CORE_PFDEBUG_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("pfdebug live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
 #[test]
 fn core_migrate_conformance() {
     let cfg = HarnessConfig::default_paths();
     let diff = run_fixture(&cfg, "core_migrate.json").expect("migrate fixture");
     assert_eq!(diff.total, diff.passed, "failed: {:?}", diff.failed);
     assert!(diff.failed.is_empty());
+}
+
+const CORE_MIGRATE_LIVE_STABLE_CASES: &[&str] = &[
+    "migrate_wrong_arity_no_args",
+    "migrate_wrong_arity_too_few",
+    "migrate_wrong_arity_five_args",
+    "migrate_invalid_db",
+    "migrate_invalid_timeout",
+    "migrate_unknown_option_syntax_error",
+    "migrate_auth_missing_password_syntax_error",
+    "migrate_auth2_missing_args_syntax_error",
+    "migrate_keys_with_nonempty_key_error",
+    "migrate_nokey_nonexistent_key",
+    "migrate_nokey_empty_keys_list",
+    "migrate_copy_option_nokey",
+    "migrate_replace_option_nokey",
+    "migrate_copy_replace_combined_nokey",
+    "migrate_auth_with_password_nokey",
+    "migrate_auth2_with_user_pass_nokey",
+    "migrate_keys_option_with_multiple_keys_nokey",
+    "migrate_all_options_combined_nokey",
+    "migrate_auth2_syntax_error_only_user",
+    "migrate_keys_duplicate_option",
+    "migrate_auth_empty_password",
+    "migrate_auth2_empty_credentials",
+    "migrate_options_case_insensitive_copy",
+    "migrate_options_case_insensitive_replace",
+    "migrate_options_case_insensitive_auth",
+    "migrate_options_case_insensitive_keys",
+    "migrate_all_options_different_order",
+    "migrate_auth2_then_replace_copy",
+];
+
+#[test]
+fn core_migrate_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_migrate.json",
+        CORE_MIGRATE_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("migrate live diff");
+    assert_eq!(report.total, report.passed, "failed: {:?}", report.failed);
+    assert!(report.failed.is_empty());
 }
 
 #[test]
@@ -3469,6 +3901,47 @@ fn core_server_config_rewrite_live_redis_matches_runtime() {
         &oracle,
     )
     .expect("server config rewrite live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
+const CORE_SERVER_LIVE_STABLE_CASES: &[&str] = &[
+    "dbsize_empty_db",
+    "dbsize_returns_zero",
+    "dbsize_setup_keys",
+    "dbsize_returns_three",
+    "dbsize_wrong_arity",
+    "touch_setup",
+    "touch_single_existing",
+    "touch_single_missing",
+    "touch_multiple_mixed",
+    "touch_wrong_arity",
+    "unlink_setup",
+    "unlink_multiple",
+    "unlink_verify_gone",
+    "unlink_wrong_arity",
+];
+
+#[test]
+fn core_server_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report = run_live_redis_diff_for_cases(
+        &cfg,
+        "core_server.json",
+        CORE_SERVER_LIVE_STABLE_CASES,
+        &oracle,
+    )
+    .expect("server live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",

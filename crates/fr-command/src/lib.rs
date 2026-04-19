@@ -63,7 +63,7 @@ fn replicaof_command_name(argv: &[Vec<u8>]) -> &'static str {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrateRequest {
     pub host: String,
-    pub port: u16,
+    pub port_arg: Vec<u8>,
     pub destination_db: i64,
     pub timeout: Duration,
     pub copy: bool,
@@ -408,6 +408,251 @@ pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
     Vec::new()
 }
 
+const KEY_FLAGS_NONE: &[&str] = &[];
+const KEY_FLAGS_RO_ACCESS: &[&str] = &["RO", "access"];
+const KEY_FLAGS_RW_ACCESS_UPDATE: &[&str] = &["RW", "access", "update"];
+const KEY_FLAGS_OW_UPDATE: &[&str] = &["OW", "update"];
+const KEY_FLAGS_OW_INSERT: &[&str] = &["OW", "insert"];
+const KEY_FLAGS_RM_DELETE: &[&str] = &["RM", "delete"];
+const KEY_FLAGS_RW_ACCESS_DELETE: &[&str] = &["RW", "access", "delete"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CommandKeyReference {
+    index: usize,
+    flags: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandKeyLookupError {
+    InvalidCommand,
+    NoKeyArguments,
+    InvalidNumberOfArguments,
+    InvalidArguments,
+}
+
+fn command_uses_custom_key_specs(cmd_name: &str) -> bool {
+    cmd_name.eq_ignore_ascii_case("EVAL")
+        || cmd_name.eq_ignore_ascii_case("EVALSHA")
+        || cmd_name.eq_ignore_ascii_case("EVAL_RO")
+        || cmd_name.eq_ignore_ascii_case("EVALSHA_RO")
+        || cmd_name.eq_ignore_ascii_case("FCALL")
+        || cmd_name.eq_ignore_ascii_case("FCALL_RO")
+        || cmd_name.eq_ignore_ascii_case("XREAD")
+        || cmd_name.eq_ignore_ascii_case("XREADGROUP")
+        || cmd_name.eq_ignore_ascii_case("XSETID")
+        || cmd_name.eq_ignore_ascii_case("RESTORE")
+        || cmd_name.eq_ignore_ascii_case("ZUNIONSTORE")
+        || cmd_name.eq_ignore_ascii_case("ZINTERSTORE")
+        || cmd_name.eq_ignore_ascii_case("ZDIFFSTORE")
+        || cmd_name.eq_ignore_ascii_case("ZUNION")
+        || cmd_name.eq_ignore_ascii_case("ZINTER")
+        || cmd_name.eq_ignore_ascii_case("ZDIFF")
+        || cmd_name.eq_ignore_ascii_case("ZINTERCARD")
+        || cmd_name.eq_ignore_ascii_case("SINTERCARD")
+        || cmd_name.eq_ignore_ascii_case("SINTERSTORE")
+        || cmd_name.eq_ignore_ascii_case("SUNIONSTORE")
+        || cmd_name.eq_ignore_ascii_case("SDIFFSTORE")
+        || cmd_name.eq_ignore_ascii_case("MSET")
+        || cmd_name.eq_ignore_ascii_case("MSETNX")
+        || cmd_name.eq_ignore_ascii_case("BITOP")
+        || cmd_name.eq_ignore_ascii_case("SINTER")
+        || cmd_name.eq_ignore_ascii_case("SUNION")
+        || cmd_name.eq_ignore_ascii_case("SDIFF")
+        || cmd_name.eq_ignore_ascii_case("SORT")
+        || cmd_name.eq_ignore_ascii_case("SORT_RO")
+        || cmd_name.eq_ignore_ascii_case("GEORADIUS")
+        || cmd_name.eq_ignore_ascii_case("GEORADIUSBYMEMBER")
+        || cmd_name.eq_ignore_ascii_case("GEOSEARCH")
+        || cmd_name.eq_ignore_ascii_case("GEOSEARCHSTORE")
+        || cmd_name.eq_ignore_ascii_case("XINFO")
+        || cmd_name.eq_ignore_ascii_case("XGROUP")
+        || cmd_name.eq_ignore_ascii_case("XACK")
+        || cmd_name.eq_ignore_ascii_case("XCLAIM")
+        || cmd_name.eq_ignore_ascii_case("XAUTOCLAIM")
+        || cmd_name.eq_ignore_ascii_case("XPENDING")
+        || cmd_name.eq_ignore_ascii_case("OBJECT")
+        || cmd_name.eq_ignore_ascii_case("MEMORY")
+        || cmd_name.eq_ignore_ascii_case("LMPOP")
+        || cmd_name.eq_ignore_ascii_case("ZMPOP")
+        || cmd_name.eq_ignore_ascii_case("BLMPOP")
+        || cmd_name.eq_ignore_ascii_case("BZMPOP")
+        || cmd_name.eq_ignore_ascii_case("SMOVE")
+        || cmd_name.eq_ignore_ascii_case("RENAME")
+        || cmd_name.eq_ignore_ascii_case("RENAMENX")
+        || cmd_name.eq_ignore_ascii_case("COPY")
+        || cmd_name.eq_ignore_ascii_case("LMOVE")
+        || cmd_name.eq_ignore_ascii_case("BLMOVE")
+        || cmd_name.eq_ignore_ascii_case("RPOPLPUSH")
+        || cmd_name.eq_ignore_ascii_case("BRPOPLPUSH")
+}
+
+fn command_has_keys(cmd_name: &str) -> bool {
+    command_uses_custom_key_specs(cmd_name)
+        || COMMAND_TABLE
+            .iter()
+            .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+            .is_some_and(|&(_, _, _, first_key, _, _)| first_key != 0)
+}
+
+fn command_key_lookup_error_frame(err: CommandKeyLookupError) -> RespFrame {
+    match err {
+        CommandKeyLookupError::InvalidCommand => {
+            RespFrame::Error("ERR Invalid command specified".to_string())
+        }
+        CommandKeyLookupError::NoKeyArguments => {
+            RespFrame::Error("ERR The command has no key arguments".to_string())
+        }
+        CommandKeyLookupError::InvalidNumberOfArguments => {
+            RespFrame::Error("ERR Invalid number of arguments specified for command".to_string())
+        }
+        CommandKeyLookupError::InvalidArguments => {
+            RespFrame::Error("ERR Invalid arguments specified for command".to_string())
+        }
+    }
+}
+
+fn command_key_references(
+    argv: &[Vec<u8>],
+) -> Result<Vec<CommandKeyReference>, CommandKeyLookupError> {
+    let Some(raw_cmd) = argv.first() else {
+        return Err(CommandKeyLookupError::InvalidCommand);
+    };
+    let cmd_name =
+        std::str::from_utf8(raw_cmd).map_err(|_| CommandKeyLookupError::InvalidCommand)?;
+    let Some(&(table_name, _arity, flags, _, _, _)) = COMMAND_TABLE
+        .iter()
+        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+    else {
+        return Err(CommandKeyLookupError::InvalidCommand);
+    };
+
+    if check_command_arity(raw_cmd, argv.len()).is_err() {
+        return Err(CommandKeyLookupError::InvalidNumberOfArguments);
+    }
+    if !command_has_keys(table_name) {
+        return Err(CommandKeyLookupError::NoKeyArguments);
+    }
+    if let Some(exact_refs) = command_key_references_with_exact_flags(table_name, argv)? {
+        return Ok(exact_refs);
+    }
+
+    let indexes = command_key_indexes(argv);
+    let derived_flags = command_getkeysandflags_flags(flags);
+    Ok(indexes
+        .into_iter()
+        .map(|index| CommandKeyReference {
+            index,
+            flags: derived_flags,
+        })
+        .collect())
+}
+
+fn command_key_references_with_exact_flags(
+    cmd_name: &str,
+    argv: &[Vec<u8>],
+) -> Result<Option<Vec<CommandKeyReference>>, CommandKeyLookupError> {
+    if cmd_name.eq_ignore_ascii_case("SET") {
+        let flags = if argv[3..].iter().any(|arg| arg.eq_ignore_ascii_case(b"GET")) {
+            KEY_FLAGS_RW_ACCESS_UPDATE
+        } else {
+            KEY_FLAGS_OW_UPDATE
+        };
+        return Ok(Some(vec![CommandKeyReference { index: 1, flags }]));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("MSET") {
+        return Ok(Some(
+            (1..argv.len())
+                .step_by(2)
+                .map(|index| CommandKeyReference {
+                    index,
+                    flags: KEY_FLAGS_OW_UPDATE,
+                })
+                .collect(),
+        ));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("MSETNX") {
+        return Ok(Some(
+            (1..argv.len())
+                .step_by(2)
+                .map(|index| CommandKeyReference {
+                    index,
+                    flags: KEY_FLAGS_OW_INSERT,
+                })
+                .collect(),
+        ));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("DEL") || cmd_name.eq_ignore_ascii_case("UNLINK") {
+        return Ok(Some(
+            (1..argv.len())
+                .map(|index| CommandKeyReference {
+                    index,
+                    flags: KEY_FLAGS_RM_DELETE,
+                })
+                .collect(),
+        ));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("GETDEL") {
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_ACCESS_DELETE,
+        }]));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("RENAME") || cmd_name.eq_ignore_ascii_case("RENAMENX") {
+        return Ok(Some(vec![
+            CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_RW_ACCESS_DELETE,
+            },
+            CommandKeyReference {
+                index: 2,
+                flags: KEY_FLAGS_OW_UPDATE,
+            },
+        ]));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("COPY") {
+        return Ok(Some(vec![
+            CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_RO_ACCESS,
+            },
+            CommandKeyReference {
+                index: 2,
+                flags: KEY_FLAGS_OW_UPDATE,
+            },
+        ]));
+    }
+
+    if cmd_name.eq_ignore_ascii_case("XREAD") || cmd_name.eq_ignore_ascii_case("XREADGROUP") {
+        let Some(streams_idx) = argv
+            .iter()
+            .position(|arg| arg.eq_ignore_ascii_case(b"STREAMS"))
+        else {
+            return Err(CommandKeyLookupError::InvalidArguments);
+        };
+        let remaining = &argv[streams_idx + 1..];
+        if remaining.is_empty() || !remaining.len().is_multiple_of(2) {
+            return Err(CommandKeyLookupError::InvalidArguments);
+        }
+        let num_keys = remaining.len() / 2;
+        return Ok(Some(
+            (0..num_keys)
+                .map(|offset| CommandKeyReference {
+                    index: streams_idx + 1 + offset,
+                    flags: KEY_FLAGS_NONE,
+                })
+                .collect(),
+        ));
+    }
+
+    Ok(None)
+}
+
 impl CommandError {
     pub fn to_resp(&self) -> RespFrame {
         match self {
@@ -420,14 +665,11 @@ impl CommandError {
             CommandError::UnknownCommand {
                 command,
                 args_preview,
-            } => {
-                let mut out = format!("ERR unknown command '{}'", command);
-                if let Some(args_preview) = args_preview {
-                    out.push_str(", with args beginning with: ");
-                    out.push_str(args_preview);
-                }
-                RespFrame::Error(out)
-            }
+            } => RespFrame::Error(format!(
+                "ERR unknown command '{}', with args beginning with: {}",
+                command,
+                args_preview.as_deref().unwrap_or_default()
+            )),
             CommandError::WrongArity(cmd) => RespFrame::Error(format!(
                 "ERR wrong number of arguments for '{}' command",
                 cmd.to_ascii_lowercase()
@@ -444,8 +686,8 @@ impl CommandError {
                 command,
                 subcommand,
             } => RespFrame::Error(format!(
-                "ERR Unknown subcommand or wrong number of arguments for '{}'. Try {} HELP.",
-                subcommand.to_ascii_lowercase(),
+                "ERR unknown subcommand '{}'. Try {} HELP.",
+                subcommand,
                 command.to_ascii_uppercase()
             )),
             CommandError::InvalidInteger => {
@@ -537,7 +779,7 @@ pub fn dispatch_argv(
         Some(CommandId::Echo) => return echo(argv),
         Some(CommandId::Set) => return set(argv, store, now_ms),
         Some(CommandId::Get) => return get(argv, store, now_ms),
-        Some(CommandId::Del) => return del(argv, store, now_ms),
+        Some(CommandId::Del) => return delete_keys(argv, store, now_ms, "DEL"),
         Some(CommandId::Incr) => return incr(argv, store, now_ms),
         Some(CommandId::Expire) => return expire(argv, store, now_ms),
         Some(CommandId::Pexpire) => return pexpire(argv, store, now_ms),
@@ -732,7 +974,7 @@ pub fn dispatch_argv(
         Some(CommandId::Object) => return object_cmd(argv, store, now_ms),
         Some(CommandId::Wait) => return wait_cmd(argv),
         Some(CommandId::Reset) => return reset_cmd(argv),
-        Some(CommandId::Unlink) => return del(argv, store, now_ms),
+        Some(CommandId::Unlink) => return delete_keys(argv, store, now_ms, "UNLINK"),
         Some(CommandId::Touch) => return touch(argv, store, now_ms),
         Some(CommandId::Dump) => return dump_cmd(argv, store, now_ms),
         Some(CommandId::Restore) => return restore_cmd(argv, store, now_ms),
@@ -1832,9 +2074,14 @@ fn get(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
     Ok(RespFrame::BulkString(store.get(&argv[1], now_ms)?))
 }
 
-fn del(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+fn delete_keys(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+    command_name: &'static str,
+) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
-        return Err(CommandError::WrongArity("DEL"));
+        return Err(CommandError::WrongArity(command_name));
     }
     let removed = store.del(&argv[1..], now_ms);
     let removed = i64::try_from(removed).unwrap_or(i64::MAX);
@@ -2376,6 +2623,9 @@ fn lrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 fn lindex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("LINDEX"));
+    }
+    if !store.exists_no_touch(&argv[1], now_ms) {
+        return Ok(RespFrame::BulkString(None));
     }
     let index = parse_i64_arg(&argv[2])?;
     let value = store.lindex(&argv[1], index, now_ms)?;
@@ -5438,15 +5688,27 @@ fn waitaof_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         return Err(CommandError::WrongArity("WAITAOF"));
     }
     let required_local = match parse_i64_arg(&argv[1]) {
-        Ok(value) if value >= 0 => value,
-        _ => return Err(CommandError::InvalidInteger),
+        Ok(value @ 0..=1) => value,
+        Ok(_) => {
+            return Err(CommandError::Custom(
+                "ERR value is out of range, value must between 0 and 1".to_string(),
+            ));
+        }
+        Err(_) => return Err(CommandError::InvalidInteger),
     };
     let _required_replicas = match parse_i64_arg(&argv[2]) {
         Ok(value) if value >= 0 => value,
-        _ => return Err(CommandError::InvalidInteger),
+        _ => {
+            return Err(CommandError::Custom(
+                "ERR value is out of range, must be positive".to_string(),
+            ));
+        }
     };
-    if !matches!(parse_i64_arg(&argv[3]), Ok(value) if value >= 0) {
-        return Err(CommandError::InvalidInteger);
+    let timeout_ms = parse_i64_arg(&argv[3]).map_err(|_| {
+        CommandError::Custom("ERR timeout is not an integer or out of range".to_string())
+    })?;
+    if timeout_ms < 0 {
+        return Err(CommandError::Custom("ERR timeout is negative".to_string()));
     }
     if required_local > 0 {
         return Ok(RespFrame::Error(
@@ -6118,6 +6380,11 @@ fn spublish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comman
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("SPUBLISH"));
     }
+    if store.dispatch_client_ctx.is_pubsub {
+        return Err(CommandError::Custom(
+            "ERR Can't execute 'spublish': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string(),
+        ));
+    }
     let receivers = store.spublish(&argv[1], &argv[2]);
     Ok(RespFrame::Integer(receivers as i64))
 }
@@ -6206,7 +6473,9 @@ fn setrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     }
     let offset = parse_i64_arg(&argv[2])?;
     if offset < 0 {
-        return Err(CommandError::InvalidInteger);
+        return Err(CommandError::Custom(
+            "ERR offset is out of range".to_string(),
+        ));
     }
     let offset_u64 = u64::try_from(offset).map_err(|_| CommandError::InvalidInteger)?;
     let added_len = argv[3].len();
@@ -6899,10 +7168,13 @@ fn pfdebug_cmd(
         return Ok(RespFrame::Integer(i64::from(converted)));
     }
 
-    Err(CommandError::Custom(format!(
-        "ERR Unknown PFDEBUG subcommand '{}'",
-        bytes_to_lossy_string(&argv[1])
-    )))
+    match store.hll_debug_validate(&argv[2], now_ms)? {
+        Some(()) => Err(CommandError::Custom(format!(
+            "ERR Unknown PFDEBUG subcommand '{}'",
+            bytes_to_lossy_string(&argv[1])
+        ))),
+        None => Err(missing()),
+    }
 }
 
 fn pfselftest_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
@@ -6931,10 +7203,6 @@ pub fn parse_migrate_request(argv: &[Vec<u8>]) -> Result<MigrateRequest, Command
     let host = std::str::from_utf8(&argv[1])
         .map_err(|_| CommandError::InvalidUtf8Argument)?
         .to_string();
-    let port = match parse_i64_arg(&argv[2]) {
-        Ok(value) => u16::try_from(value).map_err(|_| CommandError::InvalidInteger)?,
-        Err(_) => return Err(CommandError::InvalidInteger),
-    };
     let key_arg = &argv[3];
     let destination_db = parse_i64_arg(&argv[4])?;
     let timeout_ms = parse_i64_arg(&argv[5])?;
@@ -7001,7 +7269,7 @@ pub fn parse_migrate_request(argv: &[Vec<u8>]) -> Result<MigrateRequest, Command
 
     Ok(MigrateRequest {
         host,
-        port,
+        port_arg: argv[2].clone(),
         destination_db,
         timeout,
         copy,
@@ -7080,7 +7348,12 @@ pub fn execute_migrate(
         });
     }
 
-    let mut stream = migrate_connect(&request.host, request.port, request.timeout)?;
+    // Redis only validates the target port once there is at least one key to transfer.
+    let port = match parse_i64_arg(&request.port_arg) {
+        Ok(value) => u16::try_from(value).map_err(|_| CommandError::InvalidInteger)?,
+        Err(_) => return Err(CommandError::InvalidInteger),
+    };
+    let mut stream = migrate_connect(&request.host, port, request.timeout)?;
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(request.timeout));
     let _ = stream.set_write_timeout(Some(request.timeout));
@@ -7480,7 +7753,9 @@ fn parse_expire_options(extra_args: &[Vec<u8>]) -> Result<ExpireOptions, Command
         } else if option.eq_ignore_ascii_case("LT") {
             options.lt = true;
         } else {
-            return Err(CommandError::SyntaxError);
+            return Err(CommandError::Custom(format!(
+                "ERR Unsupported option {option}"
+            )));
         }
     }
 
@@ -9417,35 +9692,14 @@ fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
                 "ERR Invalid arguments for 'COMMAND GETKEYS'".to_string(),
             ));
         }
-        let cmd_name =
-            std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        let found = COMMAND_TABLE
-            .iter()
-            .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name));
-        match found {
-            Some(&(_name, _arity, _flags, first_key, last_key, step)) => {
-                if first_key == 0 {
-                    return Ok(RespFrame::Array(Some(Vec::new())));
-                }
-                // The simulated argv for the command starts at argv[2..]
-                let cmd_argv = &argv[2..];
-                let mut keys = Vec::new();
-                let actual_last = if last_key < 0 {
-                    cmd_argv.len() as i64 + last_key
-                } else {
-                    last_key
-                };
-                let step_val = if step == 0 { 1 } else { step };
-                let mut i = first_key;
-                while i <= actual_last && (i as usize) < cmd_argv.len() {
-                    keys.push(RespFrame::BulkString(Some(cmd_argv[i as usize].clone())));
-                    i += step_val;
-                }
-                Ok(RespFrame::Array(Some(keys)))
-            }
-            None => Ok(RespFrame::Error(format!(
-                "ERR Invalid command specified, or key spec not found for '{cmd_name}'"
+        match command_key_references(&argv[2..]) {
+            Ok(references) => Ok(RespFrame::Array(Some(
+                references
+                    .into_iter()
+                    .map(|key| RespFrame::BulkString(Some(argv[2 + key.index].clone())))
+                    .collect(),
             ))),
+            Err(err) => Ok(command_key_lookup_error_frame(err)),
         }
     } else if sub.eq_ignore_ascii_case("GETKEYSANDFLAGS") {
         // COMMAND GETKEYSANDFLAGS <command> [args...]
@@ -9454,43 +9708,24 @@ fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
                 "ERR Invalid arguments for 'COMMAND GETKEYSANDFLAGS'".to_string(),
             ));
         }
-        let cmd_name =
-            std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        let found = COMMAND_TABLE
-            .iter()
-            .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name));
-        match found {
-            Some(&(_name, _arity, flags, first_key, last_key, step)) => {
-                if first_key == 0 {
-                    return Ok(RespFrame::Array(Some(Vec::new())));
-                }
-                let cmd_argv = &argv[2..];
-                let mut keys = Vec::new();
-                let actual_last = if last_key < 0 {
-                    cmd_argv.len() as i64 + last_key
-                } else {
-                    last_key
-                };
-                let step_val = if step == 0 { 1 } else { step };
-                let derived_flags = command_getkeysandflags_flags(flags);
-                let mut i = first_key;
-                while i <= actual_last && (i as usize) < cmd_argv.len() {
-                    keys.push(RespFrame::Array(Some(vec![
-                        RespFrame::BulkString(Some(cmd_argv[i as usize].clone())),
-                        RespFrame::Array(Some(
-                            derived_flags
-                                .iter()
-                                .map(|flag| RespFrame::SimpleString((*flag).to_string()))
-                                .collect(),
-                        )),
-                    ])));
-                    i += step_val;
-                }
-                Ok(RespFrame::Array(Some(keys)))
-            }
-            None => Ok(RespFrame::Error(format!(
-                "ERR Invalid command specified, or key spec not found for '{cmd_name}'"
+        match command_key_references(&argv[2..]) {
+            Ok(references) => Ok(RespFrame::Array(Some(
+                references
+                    .into_iter()
+                    .map(|key| {
+                        RespFrame::Array(Some(vec![
+                            RespFrame::BulkString(Some(argv[2 + key.index].clone())),
+                            RespFrame::Array(Some(
+                                key.flags
+                                    .iter()
+                                    .map(|flag| RespFrame::SimpleString((*flag).to_string()))
+                                    .collect(),
+                            )),
+                        ]))
+                    })
+                    .collect(),
             ))),
+            Err(err) => Ok(command_key_lookup_error_frame(err)),
         }
     } else if sub.eq_ignore_ascii_case("HELP") {
         if argv.len() != 2 {
@@ -11066,17 +11301,19 @@ fn wait_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("WAIT"));
     }
-    let numreplicas = parse_i64_arg(&argv[1])?;
-    if numreplicas < 0 {
-        return Err(CommandError::Custom(
-            "ERR numreplicas is negative".to_string(),
-        ));
-    }
-    let timeout_ms = parse_i64_arg(&argv[2])?;
+    let numreplicas = match parse_i64_arg(&argv[1]) {
+        Ok(value) if value >= 0 => value,
+        Ok(_) => 0,
+        Err(_) => return Err(CommandError::InvalidInteger),
+    };
+    let timeout_ms = parse_i64_arg(&argv[2]).map_err(|_| {
+        CommandError::Custom("ERR timeout is not an integer or out of range".to_string())
+    })?;
     if timeout_ms < 0 {
         return Err(CommandError::Custom("ERR timeout is negative".to_string()));
     }
     // WAIT numreplicas timeout - in standalone mode, return 0 replicas
+    let _ = numreplicas;
     Ok(RespFrame::Integer(0))
 }
 
@@ -11535,6 +11772,11 @@ fn publish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("PUBLISH"));
     }
+    if store.dispatch_client_ctx.is_pubsub {
+        return Err(CommandError::Custom(
+            "ERR Can't execute 'publish': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string(),
+        ));
+    }
     let receivers = store.publish(&argv[1], &argv[2]);
     Ok(RespFrame::Integer(receivers as i64))
 }
@@ -11544,6 +11786,61 @@ fn pubsub_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         return Err(CommandError::WrongArity("PUBSUB"));
     }
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let known_subcommand = sub.eq_ignore_ascii_case("CHANNELS")
+        || sub.eq_ignore_ascii_case("NUMSUB")
+        || sub.eq_ignore_ascii_case("NUMPAT")
+        || sub.eq_ignore_ascii_case("SHARDCHANNELS")
+        || sub.eq_ignore_ascii_case("SHARDNUMSUB")
+        || sub.eq_ignore_ascii_case("HELP");
+    if !known_subcommand {
+        return Err(CommandError::Custom(format!(
+            "ERR unknown subcommand '{}'. Try PUBSUB HELP.",
+            sub
+        )));
+    }
+    if store.dispatch_client_ctx.is_pubsub {
+        return Err(CommandError::Custom(format!(
+            "ERR Can't execute 'pubsub|{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
+            sub.to_ascii_lowercase()
+        )));
+    }
+    if sub.eq_ignore_ascii_case("HELP") {
+        if argv.len() != 2 {
+            return Err(CommandError::SyntaxError);
+        }
+        return Ok(RespFrame::Array(Some(vec![
+            RespFrame::SimpleString(
+                "PUBSUB <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_string(),
+            ),
+            RespFrame::SimpleString("CHANNELS [<pattern>]".to_string()),
+            RespFrame::SimpleString(
+                "    Return the currently active channels matching a <pattern> (default: '*')."
+                    .to_string(),
+            ),
+            RespFrame::SimpleString("NUMPAT".to_string()),
+            RespFrame::SimpleString("    Return number of subscriptions to patterns.".to_string()),
+            RespFrame::SimpleString("NUMSUB [<channel> ...]".to_string()),
+            RespFrame::SimpleString(
+                "    Return the number of subscribers for the specified channels, excluding"
+                    .to_string(),
+            ),
+            RespFrame::SimpleString(
+                "    pattern subscriptions(default: no channels).".to_string(),
+            ),
+            RespFrame::SimpleString("SHARDCHANNELS [<pattern>]".to_string()),
+            RespFrame::SimpleString(
+                "    Return the currently active shard level channels matching a <pattern> (default: '*')."
+                    .to_string(),
+            ),
+            RespFrame::SimpleString("SHARDNUMSUB [<shardchannel> ...]".to_string()),
+            RespFrame::SimpleString(
+                "    Return the number of subscribers for the specified shard level channel(s)"
+                    .to_string(),
+            ),
+            RespFrame::SimpleString("HELP".to_string()),
+            RespFrame::SimpleString("    Print this help.".to_string()),
+        ])));
+    }
     if sub.eq_ignore_ascii_case("CHANNELS") {
         if argv.len() != 2 && argv.len() != 3 {
             return Err(CommandError::SyntaxError);
@@ -11599,33 +11896,8 @@ fn pubsub_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             result.push(RespFrame::Integer(store.pubsub_shardnumsub_count(ch) as i64));
         }
         Ok(RespFrame::Array(Some(result)))
-    } else if sub.eq_ignore_ascii_case("HELP") {
-        if argv.len() != 2 {
-            return Err(CommandError::SyntaxError);
-        }
-        Ok(RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(
-                b"PUBSUB <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"CHANNELS [<pattern>] - Return the currently active channels matching a <pattern> (default: '*')."
-                    .to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"NUMPAT - Return number of subscriptions to patterns.".to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"NUMSUB [<channel> ...] - Return the number of subscribers for the specified channels, excluding pattern subscriptions(default: no channels).".to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"SHARDCHANNELS [<pattern>] - Return the currently active shard level channels matching a <pattern> (default: '*').".to_vec(),
-            )),
-            RespFrame::BulkString(Some(
-                b"SHARDNUMSUB [<shardchannel> ...] - Return the number of subscribers for the specified shard level channel(s)".to_vec(),
-            )),
-        ])))
     } else {
-        Err(CommandError::SyntaxError)
+        unreachable!("known pubsub subcommands are handled above")
     }
 }
 
@@ -12219,10 +12491,10 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     } else if sub.eq_ignore_ascii_case("OOM") {
         std::alloc::handle_alloc_error(std::alloc::Layout::new::<u8>());
     } else {
-        Err(CommandError::UnknownSubcommand {
-            command: "DEBUG",
-            subcommand: sub.to_string(),
-        })
+        Err(CommandError::Custom(format!(
+            "ERR unknown subcommand or wrong number of arguments for '{}'. Try DEBUG HELP.",
+            sub.to_ascii_uppercase()
+        )))
     }
 }
 
@@ -14174,6 +14446,27 @@ mod tests {
     }
 
     #[test]
+    fn unknown_command_without_args_keeps_empty_preview_suffix() {
+        let mut store = Store::new();
+        let err = dispatch_argv(&[b"NOPE".to_vec()], &mut store, 0).expect_err("must fail");
+        let resp = err.to_resp();
+        match err {
+            CommandError::UnknownCommand {
+                command,
+                args_preview,
+            } => {
+                assert_eq!(command, "NOPE");
+                assert_eq!(args_preview, None);
+            }
+            other => panic!("unexpected error: {other:?}"), // ubs:ignore — AI triage
+        }
+        assert_eq!(
+            resp,
+            RespFrame::Error("ERR unknown command 'NOPE', with args beginning with: ".to_string())
+        );
+    }
+
+    #[test]
     fn dispatch_invalid_utf8_command_name_errors_invalid_utf8_argument() {
         let mut store = Store::new();
         let argv = vec![vec![0xFF], b"k".to_vec()];
@@ -15362,7 +15655,10 @@ mod tests {
             0,
         )
         .expect_err("unknown option should fail");
-        assert!(matches!(unknown, super::CommandError::SyntaxError));
+        assert_eq!(
+            unknown,
+            super::CommandError::Custom("ERR Unsupported option ZZ".to_string())
+        );
 
         let xx_gt = dispatch_argv(
             &[
@@ -16215,6 +16511,14 @@ mod tests {
         )
         .expect("lindex oob");
         assert_eq!(out, RespFrame::BulkString(None));
+
+        let missing_with_invalid_index = dispatch_argv(
+            &[b"LINDEX".to_vec(), b"missing".to_vec(), b"abc".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("missing key should short-circuit to nil");
+        assert_eq!(missing_with_invalid_index, RespFrame::BulkString(None));
     }
 
     #[test]
@@ -21250,6 +21554,22 @@ mod tests {
 
         let val = dispatch_argv(&[b"GET".to_vec(), b"k".to_vec()], &mut store, 0).expect("get");
         assert_eq!(val, RespFrame::BulkString(Some(b"Hello Redis".to_vec())));
+
+        let negative_offset = dispatch_argv(
+            &[
+                b"SETRANGE".to_vec(),
+                b"k".to_vec(),
+                b"-1".to_vec(),
+                b"bad".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            negative_offset,
+            CommandError::Custom("ERR offset is out of range".to_string())
+        );
     }
 
     #[test]
@@ -22216,7 +22536,18 @@ mod tests {
             0,
         )
         .expect("pfdebug encoding");
-        assert_eq!(encoding, RespFrame::SimpleString("dense".to_string()));
+        assert_eq!(encoding, RespFrame::SimpleString("sparse".to_string()));
+
+        let decode_sparse = dispatch_argv(
+            &[b"PFDEBUG".to_vec(), b"DECODE".to_vec(), b"hll".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("pfdebug sparse decode");
+        let RespFrame::BulkString(Some(decoded)) = decode_sparse else {
+            panic!("expected sparse decode bulk string"); // ubs:ignore — AI triage
+        };
+        assert!(!decoded.is_empty());
 
         let getreg = dispatch_argv(
             &[b"PFDEBUG".to_vec(), b"GETREG".to_vec(), b"hll".to_vec()],
@@ -22234,6 +22565,17 @@ mod tests {
                 .any(|frame| frame != &RespFrame::Integer(0))
         );
 
+        let dense_after_getreg = dispatch_argv(
+            &[b"PFDEBUG".to_vec(), b"ENCODING".to_vec(), b"hll".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("pfdebug dense after getreg");
+        assert_eq!(
+            dense_after_getreg,
+            RespFrame::SimpleString("dense".to_string())
+        );
+
         let todense = dispatch_argv(
             &[b"PFDEBUG".to_vec(), b"TODENSE".to_vec(), b"hll".to_vec()],
             &mut store,
@@ -22241,6 +22583,20 @@ mod tests {
         )
         .expect("pfdebug todense");
         assert_eq!(todense, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn pfdebug_decode_returns_sparse_rle_for_empty_hll() {
+        let mut store = Store::new();
+        dispatch_argv(&[b"PFADD".to_vec(), b"hll".to_vec()], &mut store, 0).expect("pfadd empty");
+
+        let out = dispatch_argv(
+            &[b"PFDEBUG".to_vec(), b"DECODE".to_vec(), b"hll".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("decode should succeed while sparse");
+        assert_eq!(out, RespFrame::BulkString(Some(b"Z:16384".to_vec())));
     }
 
     #[test]
@@ -22252,6 +22608,12 @@ mod tests {
             0,
         )
         .expect("pfadd");
+        dispatch_argv(
+            &[b"PFDEBUG".to_vec(), b"TODENSE".to_vec(), b"hll".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("todense");
 
         let out = dispatch_argv(
             &[b"PFDEBUG".to_vec(), b"DECODE".to_vec(), b"hll".to_vec()],
@@ -22262,13 +22624,13 @@ mod tests {
         assert_eq!(
             out,
             CommandError::Store(StoreError::GenericError(
-                "HLL encoding is not sparse".to_string(),
+                "ERR HLL encoding is not sparse".to_string(),
             ))
         );
     }
 
     #[test]
-    fn pfdebug_missing_key_and_unknown_subcommand_error() {
+    fn pfdebug_missing_key_and_unknown_subcommand_error_follow_redis_priority() {
         let mut store = Store::new();
         let missing = dispatch_argv(
             &[b"PFDEBUG".to_vec(), b"GETREG".to_vec(), b"hll".to_vec()],
@@ -22281,15 +22643,56 @@ mod tests {
             CommandError::Custom("ERR The specified key does not exist".to_string())
         );
 
-        let unknown = dispatch_argv(
+        let missing_unknown = dispatch_argv(
             &[b"PFDEBUG".to_vec(), b"WAT".to_vec(), b"hll".to_vec()],
             &mut store,
             0,
         )
-        .expect_err("unknown subcommand should fail");
+        .expect_err("missing key should take priority");
         assert_eq!(
-            unknown,
+            missing_unknown,
+            CommandError::Custom("ERR The specified key does not exist".to_string())
+        );
+
+        dispatch_argv(
+            &[b"PFADD".to_vec(), b"hll".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("pfadd");
+        let unknown_existing = dispatch_argv(
+            &[b"PFDEBUG".to_vec(), b"WAT".to_vec(), b"hll".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("existing hll should report unknown subcommand");
+        assert_eq!(
+            unknown_existing,
             CommandError::Custom("ERR Unknown PFDEBUG subcommand 'WAT'".to_string())
+        );
+        let still_sparse = dispatch_argv(
+            &[b"PFDEBUG".to_vec(), b"ENCODING".to_vec(), b"hll".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("unknown subcommand should not densify");
+        assert_eq!(still_sparse, RespFrame::SimpleString("sparse".to_string()));
+
+        dispatch_argv(
+            &[b"LPUSH".to_vec(), b"list".to_vec(), b"x".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("lpush");
+        let wrongtype_unknown = dispatch_argv(
+            &[b"PFDEBUG".to_vec(), b"WAT".to_vec(), b"list".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("wrongtype key should report wrongtype");
+        assert_eq!(
+            wrongtype_unknown,
+            CommandError::Store(StoreError::WrongType)
         );
     }
 
@@ -24049,7 +24452,7 @@ mod tests {
         let RespFrame::Array(Some(lines)) = help else {
             panic!("expected pubsub help array"); // ubs:ignore — AI triage
         };
-        assert!(lines.len() >= 6);
+        assert!(lines.len() >= 8);
 
         let err = dispatch_argv(
             &[b"PUBSUB".to_vec(), b"HELP".to_vec(), b"extra".to_vec()],
@@ -24087,6 +24490,63 @@ mod tests {
         assert_eq!(
             err.to_resp(),
             RespFrame::Error("ERR syntax error".to_string())
+        );
+
+        let err = dispatch_argv(&[b"PUBSUB".to_vec(), b"BOGUS".to_vec()], &mut store, 0)
+            .expect_err("pubsub bogus subcommand should fail");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR unknown subcommand 'BOGUS'. Try PUBSUB HELP.".to_string())
+        );
+    }
+
+    #[test]
+    fn pubsub_subscription_context_rejects_publish_spublish_and_introspection() {
+        let mut store = Store::new();
+        store.dispatch_client_ctx.is_pubsub = true;
+
+        let err = dispatch_argv(
+            &[b"PUBLISH".to_vec(), b"alpha".to_vec(), b"msg".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("publish should be rejected while subscribed");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error(
+                "ERR Can't execute 'publish': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string()
+            )
+        );
+
+        let err = dispatch_argv(
+            &[b"SPUBLISH".to_vec(), b"alpha".to_vec(), b"msg".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("spublish should be rejected while subscribed");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error(
+                "ERR Can't execute 'spublish': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string()
+            )
+        );
+
+        let err = dispatch_argv(&[b"PUBSUB".to_vec(), b"NUMPAT".to_vec()], &mut store, 0)
+            .expect_err("pubsub numpat should be rejected while subscribed");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error(
+                "ERR Can't execute 'pubsub|numpat': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string()
+            )
+        );
+
+        let err = dispatch_argv(&[b"PUBSUB".to_vec(), b"HELP".to_vec()], &mut store, 0)
+            .expect_err("pubsub help should be rejected while subscribed");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error(
+                "ERR Can't execute 'pubsub|help': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string()
+            )
         );
     }
 
@@ -24468,6 +24928,38 @@ mod tests {
                 b"OOM - Abort via the allocation failure handler.".to_vec(),
             ))),
             "{items:?}"
+        );
+    }
+
+    #[test]
+    fn debug_unknown_subcommand_without_extra_args_uses_redis_compat_error() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"DEBUG".to_vec(), b"NOSUCH".to_vec()], &mut store, 0)
+            .expect("debug unknown subcommand reply");
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR unknown subcommand or wrong number of arguments for 'NOSUCH'. Try DEBUG HELP."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn debug_unknown_subcommand_with_extra_args_uses_unknown_subcommand_error() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"NOSUCH".to_vec(), b"arg".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug unknown subcommand reply");
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR unknown subcommand or wrong number of arguments for 'NOSUCH'. Try DEBUG HELP."
+                    .to_string()
+            )
         );
     }
 
@@ -26152,6 +26644,38 @@ mod tests {
     // ── WAITAOF test ────────────────────────────────────────────────
 
     #[test]
+    fn wait_clamps_negative_numreplicas_and_uses_timeout_specific_errors() {
+        let mut store = Store::new();
+
+        let invalid_numreplicas = dispatch_argv(
+            &[b"WAIT".to_vec(), b"abc".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(invalid_numreplicas, CommandError::InvalidInteger);
+
+        let negative = dispatch_argv(
+            &[b"WAIT".to_vec(), b"-1".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("negative numreplicas should clamp to zero");
+        assert_eq!(negative, RespFrame::Integer(0));
+
+        let invalid_timeout = dispatch_argv(
+            &[b"WAIT".to_vec(), b"0".to_vec(), b"abc".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            invalid_timeout,
+            CommandError::Custom("ERR timeout is not an integer or out of range".to_string())
+        );
+    }
+
+    #[test]
     fn waitaof_standalone() {
         let mut store = Store::new();
         let out = dispatch_argv(
@@ -26219,7 +26743,26 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert_eq!(invalid_timeout, CommandError::InvalidInteger);
+        assert_eq!(
+            invalid_timeout,
+            CommandError::Custom("ERR timeout is negative".to_string())
+        );
+
+        let invalid_replica = dispatch_argv(
+            &[
+                b"WAITAOF".to_vec(),
+                b"0".to_vec(),
+                b"nope".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            invalid_replica,
+            CommandError::Custom("ERR value is out of range, must be positive".to_string())
+        );
     }
 
     // ── CLUSTER tests ───────────────────────────────────────────────
@@ -26861,7 +27404,7 @@ mod tests {
     }
 
     #[test]
-    fn command_getkeysandflags_reports_key_access_flags() {
+    fn command_getkeysandflags_reports_upstream_key_flags() {
         let mut store = Store::new();
         let out = dispatch_argv(
             &[
@@ -26877,6 +27420,30 @@ mod tests {
         .unwrap();
         assert_eq!(
             out,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"alpha".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::SimpleString("OW".to_string()),
+                    RespFrame::SimpleString("update".to_string()),
+                ])),
+            ]))]))
+        );
+
+        let with_get = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"SET".to_vec(),
+                b"alpha".to_vec(),
+                b"1".to_vec(),
+                b"GET".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            with_get,
             RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"alpha".to_vec())),
                 RespFrame::Array(Some(vec![
@@ -26900,6 +27467,124 @@ mod tests {
         assert_eq!(
             out,
             RespFrame::Error("ERR Invalid arguments for 'COMMAND GETKEYSANDFLAGS'".to_string())
+        );
+    }
+
+    #[test]
+    fn command_getkeys_and_flags_match_upstream_error_taxonomy() {
+        let mut store = Store::new();
+
+        let no_keys = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"GETKEYS".to_vec(), b"PING".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            no_keys,
+            RespFrame::Error("ERR The command has no key arguments".to_string())
+        );
+
+        let unknown = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"NOSUCHCMD".to_vec(),
+                b"arg1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            unknown,
+            RespFrame::Error("ERR Invalid command specified".to_string())
+        );
+
+        let invalid_number = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"SET".to_vec(),
+                b"onlykey".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            invalid_number,
+            RespFrame::Error("ERR Invalid number of arguments specified for command".to_string())
+        );
+    }
+
+    #[test]
+    fn command_getkeysandflags_distinguishes_delete_and_rename_roles() {
+        let mut store = Store::new();
+
+        let del = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"DEL".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            del,
+            RespFrame::Array(Some(vec![
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"a".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::SimpleString("RM".to_string()),
+                        RespFrame::SimpleString("delete".to_string()),
+                    ])),
+                ])),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"b".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::SimpleString("RM".to_string()),
+                        RespFrame::SimpleString("delete".to_string()),
+                    ])),
+                ])),
+            ]))
+        );
+
+        let rename = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"RENAME".to_vec(),
+                b"src".to_vec(),
+                b"dst".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            rename,
+            RespFrame::Array(Some(vec![
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"src".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::SimpleString("RW".to_string()),
+                        RespFrame::SimpleString("access".to_string()),
+                        RespFrame::SimpleString("delete".to_string()),
+                    ])),
+                ])),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"dst".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::SimpleString("OW".to_string()),
+                        RespFrame::SimpleString("update".to_string()),
+                    ])),
+                ])),
+            ]))
         );
     }
 
@@ -29335,6 +30020,17 @@ mod tests {
     }
 
     #[test]
+    fn del_like_wrong_arity_keeps_original_command_name() {
+        let mut store = Store::new();
+
+        let del_err = dispatch_argv(&[b"DEL".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(del_err, CommandError::WrongArity("DEL"));
+
+        let unlink_err = dispatch_argv(&[b"UNLINK".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(unlink_err, CommandError::WrongArity("UNLINK"));
+    }
+
+    #[test]
     fn migrate_partial_target_error_deletes_only_acknowledged_source_keys() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test listener");
         let addr = listener.local_addr().expect("listener addr");
@@ -29515,6 +30211,50 @@ mod tests {
         assert_eq!(reply, RespFrame::SimpleString("OK".to_string()));
 
         server.join().expect("join fake target");
+    }
+
+    #[test]
+    fn migrate_missing_key_skips_port_validation_like_redis() {
+        let mut store = Store::new();
+        let reply = dispatch_argv(
+            &[
+                b"MIGRATE".to_vec(),
+                b"127.0.0.1".to_vec(),
+                b"notaport".to_vec(),
+                b"missing".to_vec(),
+                b"0".to_vec(),
+                b"1000".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("dispatch migrate");
+        assert_eq!(reply, RespFrame::SimpleString("NOKEY".to_string()));
+    }
+
+    #[test]
+    fn migrate_existing_key_still_rejects_invalid_port() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"present".to_vec(), b"value".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("seed present key");
+        let err = dispatch_argv(
+            &[
+                b"MIGRATE".to_vec(),
+                b"127.0.0.1".to_vec(),
+                b"notaport".to_vec(),
+                b"present".to_vec(),
+                b"0".to_vec(),
+                b"1000".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, CommandError::InvalidInteger);
     }
 
     #[test]
@@ -29807,6 +30547,60 @@ mod tests {
                 RespFrame::SimpleString("    Print this help.".to_string()),
             ]))
         );
+    }
+
+    #[test]
+    fn object_unknown_subcommand_matches_redis_error() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"OBJECT".to_vec(), b"BADSUBCMD".to_vec(), b"k".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::UnknownSubcommand {
+                command: "OBJECT",
+                subcommand: "BADSUBCMD".to_string(),
+            }
+        );
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR unknown subcommand 'BADSUBCMD'. Try OBJECT HELP.".to_string())
+        );
+    }
+
+    #[test]
+    fn expire_unknown_option_matches_redis_error() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+
+        for argv in [
+            vec![
+                b"EXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"5".to_vec(),
+                b"ZZ".to_vec(),
+            ],
+            vec![
+                b"PEXPIRE".to_vec(),
+                b"k".to_vec(),
+                b"5".to_vec(),
+                b"ZZ".to_vec(),
+            ],
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
+            assert_eq!(
+                err,
+                CommandError::Custom("ERR Unsupported option ZZ".to_string())
+            );
+        }
     }
 
     mod metamorphic {

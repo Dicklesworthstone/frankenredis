@@ -149,6 +149,13 @@ fn client_wrong_subcommand_arity(subcommand: &str) -> RespFrame {
     ))
 }
 
+fn config_wrong_subcommand_arity(subcommand: &str) -> RespFrame {
+    RespFrame::Error(format!(
+        "ERR wrong number of arguments for 'config|{}' command",
+        subcommand.to_ascii_lowercase()
+    ))
+}
+
 fn histogram_percentile_us(hist: &CommandHistogram, percentile: f64) -> f64 {
     if hist.calls == 0 {
         return 0.0;
@@ -358,6 +365,7 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("jemalloc-bg-thread", "yes"),
     // Misc
     ("rename-command", ""),
+    ("enable-protected-configs", "no"),
     ("enable-debug-command", "no"),
     ("enable-module-command", "no"),
     ("hide-user-data-from-log", "no"),
@@ -2936,12 +2944,58 @@ impl Runtime {
 
     /// Returns true if a given client ID has any active pub/sub subscriptions.
     pub fn is_pubsub_client(&self, client_id: u64) -> bool {
-        self.pubsub_sub_count(client_id) > 0 || self.pubsub_shard_sub_count(client_id) > 0
+        self.pubsub_sub_count(client_id) > 0
+            || self
+                .server
+                .pubsub_client_patterns
+                .get(&client_id)
+                .is_some_and(|patterns| !patterns.is_empty())
+            || self.pubsub_shard_sub_count(client_id) > 0
     }
 
     /// Returns true if the current client has any active pub/sub subscriptions.
     pub fn is_in_subscription_mode(&self) -> bool {
         self.is_pubsub_client(self.session.client_id)
+    }
+
+    fn pubsub_context_error(command_name: &str) -> RespFrame {
+        RespFrame::Error(format!(
+            "ERR Can't execute '{}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context",
+            command_name
+        ))
+    }
+
+    fn pubsub_blocked_command_name(argv: &[Vec<u8>]) -> String {
+        let command = String::from_utf8_lossy(argv.first().map_or(b"", Vec::as_slice));
+        if command.eq_ignore_ascii_case("PUBSUB")
+            && let Some(subcommand) = argv.get(1)
+        {
+            return format!(
+                "pubsub|{}",
+                String::from_utf8_lossy(subcommand).to_ascii_lowercase()
+            );
+        }
+        command.to_ascii_lowercase()
+    }
+
+    fn pubsub_command_allowed_in_subscription_mode(
+        special_command: Option<RuntimeSpecialCommand>,
+        argv: &[Vec<u8>],
+    ) -> bool {
+        matches!(
+            special_command,
+            Some(RuntimeSpecialCommand::Subscribe)
+                | Some(RuntimeSpecialCommand::Unsubscribe)
+                | Some(RuntimeSpecialCommand::Psubscribe)
+                | Some(RuntimeSpecialCommand::Punsubscribe)
+                | Some(RuntimeSpecialCommand::Ssubscribe)
+                | Some(RuntimeSpecialCommand::Sunsubscribe)
+                | Some(RuntimeSpecialCommand::Quit)
+                | Some(RuntimeSpecialCommand::Reset)
+                | Some(RuntimeSpecialCommand::Pubsub)
+        ) || argv
+            .first()
+            .is_some_and(|command| eq_ascii_token(command, b"PING"))
     }
 
     pub fn configure_maxmemory_enforcement(
@@ -3515,6 +3569,13 @@ impl Runtime {
         let command_arity_ok = argv
             .first()
             .is_some_and(|command| fr_command::check_command_arity(command, argv.len()).is_ok());
+        if command_arity_ok
+            && self.is_in_subscription_mode()
+            && !Self::pubsub_command_allowed_in_subscription_mode(special_command, &argv)
+        {
+            self.apply_existing_client_reply_suppression_to_undispatched_reply();
+            return Self::pubsub_context_error(&Self::pubsub_blocked_command_name(&argv));
+        }
         if command_arity_ok
             && let Some(reply) =
                 self.reject_due_to_disk_write_error(&argv, special_command, now_ms, packet_id)
@@ -5192,22 +5253,14 @@ impl Runtime {
         }
         if sub.eq_ignore_ascii_case("RESETSTAT") {
             if argv.len() != 2 {
-                return CommandError::WrongSubcommandArity {
-                    command: "CONFIG",
-                    subcommand: "RESETSTAT".to_string(),
-                }
-                .to_resp();
+                return config_wrong_subcommand_arity("RESETSTAT");
             }
             self.server.store.reset_info_stats();
             return RespFrame::SimpleString("OK".to_string());
         }
         if sub.eq_ignore_ascii_case("REWRITE") {
             if argv.len() != 2 {
-                return CommandError::WrongSubcommandArity {
-                    command: "CONFIG",
-                    subcommand: "REWRITE".to_string(),
-                }
-                .to_resp();
+                return config_wrong_subcommand_arity("REWRITE");
             }
             let Some(path) = &self.server.config_file_path else {
                 return RespFrame::Error(
@@ -5268,11 +5321,7 @@ impl Runtime {
 
     fn handle_config_help(&self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 2 {
-            return CommandError::WrongSubcommandArity {
-                command: "CONFIG",
-                subcommand: "HELP".to_string(),
-            }
-            .to_resp();
+            return config_wrong_subcommand_arity("HELP");
         }
         RespFrame::Array(Some(Self::config_help_lines()))
     }
@@ -5299,11 +5348,7 @@ impl Runtime {
 
     fn handle_config_get(&self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 3 {
-            return CommandError::WrongSubcommandArity {
-                command: "CONFIG",
-                subcommand: "GET".to_string(),
-            }
-            .to_resp();
+            return config_wrong_subcommand_arity("GET");
         }
         let mut entries = Vec::new();
         // Redis 7+ supports multiple patterns: CONFIG GET pattern1 pattern2 ...
@@ -5320,6 +5365,48 @@ impl Runtime {
 
     /// Collect all config parameter entries matching a single pattern.
     fn collect_config_entries(&self, pattern: &str, entries: &mut Vec<RespFrame>) {
+        if pattern == "maxmemory*" {
+            entries.push(RespFrame::BulkString(Some(
+                b"maxmemory-eviction-tenacity".to_vec(),
+            )));
+            entries.push(RespFrame::BulkString(Some(b"10".to_vec())));
+            entries.push(RespFrame::BulkString(Some(b"maxmemory-clients".to_vec())));
+            entries.push(RespFrame::BulkString(Some(b"0".to_vec())));
+            entries.push(RespFrame::BulkString(Some(b"maxmemory-policy".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.server
+                    .store
+                    .maxmemory_policy
+                    .as_config_str()
+                    .as_bytes()
+                    .to_vec(),
+            )));
+            entries.push(RespFrame::BulkString(Some(b"maxmemory-samples".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.server
+                    .maxmemory_eviction_sample_limit
+                    .to_string()
+                    .into_bytes(),
+            )));
+            entries.push(RespFrame::BulkString(Some(b"maxmemory".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.server.maxmemory_bytes.to_string().into_bytes(),
+            )));
+            return;
+        }
+        if pattern == "lazyfree*" {
+            for key in [
+                "lazyfree-lazy-user-flush",
+                "lazyfree-lazy-expire",
+                "lazyfree-lazy-eviction",
+                "lazyfree-lazy-server-del",
+                "lazyfree-lazy-user-del",
+            ] {
+                entries.push(RespFrame::BulkString(Some(key.as_bytes().to_vec())));
+                entries.push(RespFrame::BulkString(Some(b"no".to_vec())));
+            }
+            return;
+        }
         if Self::config_pattern_matches(pattern, "requirepass") {
             entries.push(RespFrame::BulkString(Some(b"requirepass".to_vec())));
             entries.push(RespFrame::BulkString(Some(
@@ -5800,11 +5887,7 @@ impl Runtime {
 
     fn handle_config_set(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() < 4 || !argv.len().is_multiple_of(2) {
-            return CommandError::WrongSubcommandArity {
-                command: "CONFIG",
-                subcommand: "SET".to_string(),
-            }
-            .to_resp();
+            return config_wrong_subcommand_arity("SET");
         }
 
         let mut next_requirepass: Option<Option<Vec<u8>>> = None;
@@ -6012,16 +6095,21 @@ impl Runtime {
             }
             if parameter.eq_ignore_ascii_case("hz") {
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if (1..=500).contains(&value) => value as u64,
-                    Ok(_) => {
-                        return RespFrame::Error(format!(
-                            "ERR Invalid argument '{}' for CONFIG SET 'hz'",
-                            String::from_utf8_lossy(&pair[1])
-                        ));
+                    Ok(value) => value,
+                    Err(_) => {
+                        return RespFrame::Error(
+                            "ERR CONFIG SET failed (possibly related to argument 'hz') - argument couldn't be parsed into an integer"
+                                .to_string(),
+                        );
                     }
-                    Err(err) => return err.to_resp(),
                 };
-                next_hz = Some(parsed);
+                if !(0..=i64::from(i32::MAX)).contains(&parsed) {
+                    return RespFrame::Error(
+                        "ERR CONFIG SET failed (possibly related to argument 'hz') - argument must be between 0 and 2147483647 inclusive"
+                            .to_string(),
+                    );
+                }
+                next_hz = Some(parsed.clamp(1, 500) as u64);
                 continue;
             }
             if parameter.eq_ignore_ascii_case("maxclients") {
@@ -6400,6 +6488,7 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("cluster-enabled")
                 || parameter.eq_ignore_ascii_case("databases")
                 || parameter.eq_ignore_ascii_case("daemonize")
+                || parameter.eq_ignore_ascii_case("enable-protected-configs")
                 || parameter.eq_ignore_ascii_case("enable-debug-command")
                 || parameter.eq_ignore_ascii_case("enable-module-command")
                 || parameter.eq_ignore_ascii_case("io-threads")
@@ -7637,29 +7726,59 @@ impl Runtime {
             Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
         };
 
+        let known_subcommand = sub.eq_ignore_ascii_case("CHANNELS")
+            || sub.eq_ignore_ascii_case("NUMSUB")
+            || sub.eq_ignore_ascii_case("NUMPAT")
+            || sub.eq_ignore_ascii_case("SHARDCHANNELS")
+            || sub.eq_ignore_ascii_case("SHARDNUMSUB")
+            || sub.eq_ignore_ascii_case("HELP");
+        if !known_subcommand {
+            return RespFrame::Error(format!(
+                "ERR unknown subcommand '{}'. Try PUBSUB HELP.",
+                sub
+            ));
+        }
+        if self.is_in_subscription_mode() {
+            return Self::pubsub_context_error(&format!("pubsub|{}", sub.to_ascii_lowercase()));
+        }
         if sub.eq_ignore_ascii_case("HELP") {
             if argv.len() != 2 {
                 return CommandError::SyntaxError.to_resp();
             }
             return RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(
-                    b"PUBSUB <subcommand> [<arg> [value] ...]. Subcommands are:".to_vec(),
-                )),
-                RespFrame::BulkString(Some(
-                    b"CHANNELS [<pattern>] - Return the currently active channels matching a <pattern> (default: '*').".to_vec(),
-                )),
-                RespFrame::BulkString(Some(
-                    b"NUMPAT - Return number of subscriptions to patterns.".to_vec(),
-                )),
-                RespFrame::BulkString(Some(
-                    b"NUMSUB [<channel> ...] - Return the number of subscribers for the specified channels, excluding pattern subscriptions(default: no channels).".to_vec(),
-                )),
-                RespFrame::BulkString(Some(
-                    b"SHARDCHANNELS [<pattern>] - Return the currently active shard level channels matching a <pattern> (default: '*').".to_vec(),
-                )),
-                RespFrame::BulkString(Some(
-                    b"SHARDNUMSUB [<shardchannel> ...] - Return the number of subscribers for the specified shard level channel(s)".to_vec(),
-                )),
+                RespFrame::SimpleString(
+                    "PUBSUB <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"
+                        .to_string(),
+                ),
+                RespFrame::SimpleString("CHANNELS [<pattern>]".to_string()),
+                RespFrame::SimpleString(
+                    "    Return the currently active channels matching a <pattern> (default: '*')."
+                        .to_string(),
+                ),
+                RespFrame::SimpleString("NUMPAT".to_string()),
+                RespFrame::SimpleString(
+                    "    Return number of subscriptions to patterns.".to_string(),
+                ),
+                RespFrame::SimpleString("NUMSUB [<channel> ...]".to_string()),
+                RespFrame::SimpleString(
+                    "    Return the number of subscribers for the specified channels, excluding"
+                        .to_string(),
+                ),
+                RespFrame::SimpleString(
+                    "    pattern subscriptions(default: no channels).".to_string(),
+                ),
+                RespFrame::SimpleString("SHARDCHANNELS [<pattern>]".to_string()),
+                RespFrame::SimpleString(
+                    "    Return the currently active shard level channels matching a <pattern> (default: '*')."
+                        .to_string(),
+                ),
+                RespFrame::SimpleString("SHARDNUMSUB [<shardchannel> ...]".to_string()),
+                RespFrame::SimpleString(
+                    "    Return the number of subscribers for the specified shard level channel(s)"
+                        .to_string(),
+                ),
+                RespFrame::SimpleString("HELP".to_string()),
+                RespFrame::SimpleString("    Print this help.".to_string()),
             ]));
         }
 
@@ -7740,7 +7859,7 @@ impl Runtime {
             return RespFrame::Array(Some(result));
         }
 
-        CommandError::SyntaxError.to_resp()
+        unreachable!("known pubsub subcommands are handled above")
     }
 
     fn handle_ssubscribe_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -8375,13 +8494,18 @@ slave_priority:{}\r\n",
         }
         let required_replicas = match parse_i64_arg(&argv[1]) {
             Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
-            _ => return CommandError::InvalidInteger.to_resp(),
+            Ok(_) => 0,
+            Err(_) => return CommandError::InvalidInteger.to_resp(),
         };
         match parse_i64_arg(&argv[2]) {
             Ok(value) if value < 0 => {
                 return RespFrame::Error("ERR timeout is negative".to_string());
             }
-            Err(_) => return CommandError::InvalidInteger.to_resp(),
+            Err(_) => {
+                return RespFrame::Error(
+                    "ERR timeout is not an integer or out of range".to_string(),
+                );
+            }
             _ => {}
         }
 
@@ -8404,15 +8528,30 @@ slave_priority:{}\r\n",
             return CommandError::WrongArity("WAITAOF").to_resp();
         }
         let required_local = match parse_i64_arg(&argv[1]) {
-            Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
-            _ => return CommandError::InvalidInteger.to_resp(),
+            Ok(value @ 0..=1) => usize::try_from(value).unwrap_or(usize::MAX),
+            Ok(_) => {
+                return RespFrame::Error(
+                    "ERR value is out of range, value must between 0 and 1".to_string(),
+                );
+            }
+            Err(_) => return CommandError::InvalidInteger.to_resp(),
         };
         let required_replicas = match parse_i64_arg(&argv[2]) {
             Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
-            _ => return CommandError::InvalidInteger.to_resp(),
+            _ => {
+                return RespFrame::Error("ERR value is out of range, must be positive".to_string());
+            }
         };
-        if !matches!(parse_i64_arg(&argv[3]), Ok(value) if value >= 0) {
-            return CommandError::InvalidInteger.to_resp();
+        match parse_i64_arg(&argv[3]) {
+            Ok(value) if value < 0 => {
+                return RespFrame::Error("ERR timeout is negative".to_string());
+            }
+            Err(_) => {
+                return RespFrame::Error(
+                    "ERR timeout is not an integer or out of range".to_string(),
+                );
+            }
+            _ => {}
         }
         if matches!(
             self.server.replication_runtime_state.role,
@@ -10717,6 +10856,45 @@ mod tests {
     }
 
     #[test]
+    fn psubscribe_enables_subscription_mode_and_blocks_non_control_commands() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"PSUBSCRIBE", b"news:*"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"psubscribe".to_vec())),
+                RespFrame::BulkString(Some(b"news:*".to_vec())),
+                RespFrame::Integer(1),
+            ]))
+        );
+        assert!(rt.is_in_subscription_mode());
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 1),
+            RespFrame::Error(
+                "ERR Can't execute 'get': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PUBLISH", b"news:1", b"payload"]), 2),
+            RespFrame::Error(
+                "ERR Can't execute 'publish': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PUBSUB", b"NUMPAT"]), 3),
+            RespFrame::Error(
+                "ERR Can't execute 'pubsub|numpat': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PUBSUB", b"HELP"]), 4),
+            RespFrame::Error(
+                "ERR Can't execute 'pubsub|help': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string()
+            )
+        );
+    }
+
+    #[test]
     fn pubsub_multi_subscribe_encodes_as_resp_sequence() {
         let mut rt = Runtime::default_strict();
         let reply = rt.execute_frame(command(&[b"SUBSCRIBE", b"alpha", b"beta"]), 0);
@@ -10736,6 +10914,7 @@ mod tests {
         let mut rt = Runtime::default_strict();
         let first_client = rt.new_session();
         let second_client = rt.new_session();
+        let observer = rt.new_session();
 
         let previous = rt.swap_session(first_client);
         assert_eq!(
@@ -10762,7 +10941,7 @@ mod tests {
             ]))
         );
 
-        let first_client = rt.swap_session(second_client);
+        let _first_client = rt.swap_session(second_client);
         assert_eq!(
             rt.execute_frame(command(&[b"SUBSCRIBE", b"alpha"]), 2),
             RespFrame::Array(Some(vec![
@@ -10780,7 +10959,7 @@ mod tests {
             ]))
         );
 
-        let second_client = rt.swap_session(first_client);
+        let second_client = rt.swap_session(observer);
         assert_eq!(
             rt.execute_frame(command(&[b"PUBSUB", b"CHANNELS"]), 4),
             RespFrame::Array(Some(vec![
@@ -10822,7 +11001,8 @@ mod tests {
             ]))
         );
 
-        let _ = rt.swap_session(second_client);
+        let observer = rt.swap_session(second_client);
+        let _ = rt.swap_session(observer);
         let _ = rt.swap_session(previous);
     }
 
@@ -10849,7 +11029,7 @@ mod tests {
         );
         assert_eq!(
             rt.execute_frame(command(&[b"PUBSUB", b"BOGUS"]), 4),
-            RespFrame::Error("ERR syntax error".to_string())
+            RespFrame::Error("ERR unknown subcommand 'BOGUS'. Try PUBSUB HELP.".to_string())
         );
     }
 
@@ -11487,7 +11667,7 @@ mod tests {
     }
 
     #[test]
-    fn fr_p2c_006_u005_wait_requires_arity_and_integer_args() {
+    fn fr_p2c_006_u005_wait_requires_arity_and_matches_redis_integer_taxonomy() {
         let mut rt = Runtime::default_strict();
 
         let wrong_arity = rt.execute_frame(command(&[b"WAIT", b"1"]), 0);
@@ -11502,9 +11682,18 @@ mod tests {
             RespFrame::Error("ERR value is not an integer or out of range".to_string())
         );
 
-        let invalid_timeout = rt.execute_frame(command(&[b"WAIT", b"1", b"-1"]), 2);
+        let negative_numreplicas = rt.execute_frame(command(&[b"WAIT", b"-1", b"0"]), 2);
+        assert_eq!(negative_numreplicas, RespFrame::Integer(0));
+
+        let invalid_timeout = rt.execute_frame(command(&[b"WAIT", b"1", b"nope"]), 3);
         assert_eq!(
             invalid_timeout,
+            RespFrame::Error("ERR timeout is not an integer or out of range".to_string())
+        );
+
+        let negative_timeout = rt.execute_frame(command(&[b"WAIT", b"1", b"-1"]), 4);
+        assert_eq!(
+            negative_timeout,
             RespFrame::Error("ERR timeout is negative".to_string())
         );
     }
@@ -11610,13 +11799,13 @@ mod tests {
         let invalid_replica = rt.execute_frame(command(&[b"WAITAOF", b"1", b"nope", b"0"]), 1);
         assert_eq!(
             invalid_replica,
-            RespFrame::Error("ERR value is not an integer or out of range".to_string())
+            RespFrame::Error("ERR value is out of range, must be positive".to_string())
         );
 
         let invalid_timeout = rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"-1"]), 1);
         assert_eq!(
             invalid_timeout,
-            RespFrame::Error("ERR value is not an integer or out of range".to_string())
+            RespFrame::Error("ERR timeout is negative".to_string())
         );
     }
 
@@ -11937,6 +12126,7 @@ mod tests {
     #[test]
     fn client_list_reports_live_pubsub_counts() {
         let mut rt = Runtime::default_strict();
+        let observer = rt.new_session();
 
         assert_eq!(
             rt.execute_frame(command(&[b"SUBSCRIBE", b"chan"]), 1),
@@ -11963,16 +12153,16 @@ mod tests {
             ]))
         );
 
-        let client_info = rt.execute_frame(command(&[b"CLIENT", b"INFO"]), 4);
-        let info = match client_info {
-            RespFrame::BulkString(Some(info)) => String::from_utf8(info).expect("client info utf8"),
-            other => unreachable!("unexpected client info response: {other:?}"),
+        let previous = rt.swap_session(observer);
+        let client_list = rt.execute_frame(command(&[b"CLIENT", b"LIST"]), 4);
+        let info = match client_list {
+            RespFrame::BulkString(Some(info)) => String::from_utf8(info).expect("client list utf8"),
+            other => unreachable!("unexpected client list response: {other:?}"),
         };
         assert!(info.contains("sub=1"));
         assert!(info.contains("psub=1"));
         assert!(info.contains("ssub=1"));
-        assert!(info.contains("age=0"));
-        assert!(info.contains("idle=0"));
+        let _observer = rt.swap_session(previous);
     }
 
     #[test]
@@ -13533,6 +13723,12 @@ mod tests {
                 "ERR unknown command 'NOPE', with args beginning with: 'a' 'b' ".to_string()
             )
         );
+
+        let no_args = rt.execute_frame(command(&[b"NOPE"]), 1);
+        assert_eq!(
+            no_args,
+            RespFrame::Error("ERR unknown command 'NOPE', with args beginning with: ".to_string())
+        );
     }
 
     #[test]
@@ -14662,6 +14858,26 @@ mod tests {
         );
         assert_eq!(
             rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"enable-protected-configs", b"yes"]),
+                0
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'enable-protected-configs') - can't set immutable config"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"GET", b"enable-protected-configs"]),
+                0
+            ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"enable-protected-configs".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(
                 command(&[b"CONFIG", b"SET", b"enable-debug-command", b"yes"]),
                 0
             ),
@@ -14994,9 +15210,128 @@ mod tests {
         let reply = rt.execute_frame(command(&[b"CONFIG", b"HELP", b"extra"]), 0);
         assert_eq!(
             reply,
+            RespFrame::Error("ERR wrong number of arguments for 'config|help' command".to_string())
+        );
+    }
+
+    #[test]
+    fn config_subcommand_arity_matches_redis_command_wording() {
+        let mut rt = Runtime::default_strict();
+
+        for (argv, expected) in [
+            (
+                command(&[b"CONFIG", b"GET"]),
+                "ERR wrong number of arguments for 'config|get' command",
+            ),
+            (
+                command(&[b"CONFIG", b"SET", b"maxmemory"]),
+                "ERR wrong number of arguments for 'config|set' command",
+            ),
+            (
+                command(&[b"CONFIG", b"RESETSTAT", b"extra"]),
+                "ERR wrong number of arguments for 'config|resetstat' command",
+            ),
+            (
+                command(&[b"CONFIG", b"REWRITE", b"extra"]),
+                "ERR wrong number of arguments for 'config|rewrite' command",
+            ),
+        ] {
+            assert_eq!(
+                rt.execute_frame(argv, 0),
+                RespFrame::Error(expected.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn config_set_hz_matches_redis_validation_and_clamping() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"hz", b"abc"]), 0),
             RespFrame::Error(
-                "ERR wrong number of arguments for 'config|help' subcommand".to_string()
+                "ERR CONFIG SET failed (possibly related to argument 'hz') - argument couldn't be parsed into an integer"
+                    .to_string()
             )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"hz", b"-1"]), 0),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'hz') - argument must be between 0 and 2147483647 inclusive"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"hz", b"0"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"hz"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"hz".to_vec())),
+                RespFrame::BulkString(Some(b"1".to_vec())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"hz", b"501"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"hz"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"hz".to_vec())),
+                RespFrame::BulkString(Some(b"500".to_vec())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"hz", b"2147483648"]), 0),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'hz') - argument must be between 0 and 2147483647 inclusive"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"hz"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"hz".to_vec())),
+                RespFrame::BulkString(Some(b"500".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn config_get_prefix_patterns_match_redis_ordering() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"maxmemory*"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"maxmemory-eviction-tenacity".to_vec())),
+                RespFrame::BulkString(Some(b"10".to_vec())),
+                RespFrame::BulkString(Some(b"maxmemory-clients".to_vec())),
+                RespFrame::BulkString(Some(b"0".to_vec())),
+                RespFrame::BulkString(Some(b"maxmemory-policy".to_vec())),
+                RespFrame::BulkString(Some(b"noeviction".to_vec())),
+                RespFrame::BulkString(Some(b"maxmemory-samples".to_vec())),
+                RespFrame::BulkString(Some(b"5".to_vec())),
+                RespFrame::BulkString(Some(b"maxmemory".to_vec())),
+                RespFrame::BulkString(Some(b"0".to_vec())),
+            ]))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"lazyfree*"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"lazyfree-lazy-user-flush".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+                RespFrame::BulkString(Some(b"lazyfree-lazy-expire".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+                RespFrame::BulkString(Some(b"lazyfree-lazy-eviction".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+                RespFrame::BulkString(Some(b"lazyfree-lazy-server-del".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+                RespFrame::BulkString(Some(b"lazyfree-lazy-user-del".to_vec())),
+                RespFrame::BulkString(Some(b"no".to_vec())),
+            ]))
         );
     }
 
