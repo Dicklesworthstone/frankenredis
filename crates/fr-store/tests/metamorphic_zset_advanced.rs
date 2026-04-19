@@ -27,7 +27,7 @@ proptest! {
         
         store.zadd(&key, &zadd_args, 0).unwrap();
         
-        let mut prev_score = std::f64::NEG_INFINITY;
+        let mut prev_score = f64::NEG_INFINITY;
         
         for _ in 0..pairs.len() {
             let popped = store.zpopmin(&key, 0).unwrap().unwrap();
@@ -64,7 +64,7 @@ proptest! {
         
         store.zadd(&key, &zadd_args, 0).unwrap();
         
-        let mut prev_score = std::f64::INFINITY;
+        let mut prev_score = f64::INFINITY;
         
         for _ in 0..pairs.len() {
             let popped = store.zpopmax(&key, 0).unwrap().unwrap();

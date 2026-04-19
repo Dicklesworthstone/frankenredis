@@ -1,6 +1,6 @@
 use fr_store::Store;
 use proptest::prelude::*;
-use std::collections::HashMap;
+
 
 fn fresh_store() -> Store {
     Store::new()

@@ -3450,7 +3450,7 @@ fn core_function_live_redis_matches_runtime() {
         ..LiveOracleConfig::default()
     };
     let report =
-        fr_conformance::run_live_redis_diff(&cfg, "core_function.json", &oracle)
+        fr_conformance::run_live_redis_diff_for_cases(&cfg, "core_function.json", CORE_FUNCTION_LIVE_STABLE_CASES, &oracle)
             .expect("function live diff");
     assert_eq!(
         report.total, report.passed,

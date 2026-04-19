@@ -16,7 +16,7 @@ proptest! {
         member in prop::collection::vec(any::<u8>(), 1..16)
     ) {
         let mut store = fresh_store();
-        store.sadd(&key, &[member.clone()], 0).unwrap();
+        store.sadd(&key, std::slice::from_ref(&member), 0).unwrap();
         
         let retrieved = store.sismember(&key, &member, 0).unwrap();
         prop_assert!(retrieved);
@@ -29,7 +29,7 @@ proptest! {
         member in prop::collection::vec(any::<u8>(), 1..16)
     ) {
         let mut store = fresh_store();
-        store.sadd(&key, &[member.clone()], 0).unwrap();
+        store.sadd(&key, std::slice::from_ref(&member), 0).unwrap();
         
         let deleted1 = store.srem(&key, &[&member], 0).unwrap();
         let deleted2 = store.srem(&key, &[&member], 0).unwrap();

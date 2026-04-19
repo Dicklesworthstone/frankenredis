@@ -17,12 +17,12 @@ proptest! {
     ) {
         let mut store = fresh_store();
         for v in &values {
-            store.rpush(&key, &[v.clone()], 0).unwrap();
+            store.rpush(&key, std::slice::from_ref(v), 0).unwrap();
         }
 
         let len = values.len() as i64;
         // Test with a positive index
-        let pos_idx = (len / 2) as i64;
+        let pos_idx = len / 2;
         store.lset(&key, pos_idx, new_value.clone(), 0).unwrap();
         let retrieved = store.lindex(&key, pos_idx, 0).unwrap();
         prop_assert_eq!(retrieved, Some(new_value.clone()));
@@ -43,7 +43,7 @@ proptest! {
     ) {
         let mut store = fresh_store();
         for v in &values {
-            store.rpush(&key, &[v.clone()], 0).unwrap();
+            store.rpush(&key, std::slice::from_ref(v), 0).unwrap();
         }
 
         let len = values.len() as i64;

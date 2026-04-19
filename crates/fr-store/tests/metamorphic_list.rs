@@ -16,7 +16,7 @@ proptest! {
     ) {
         let mut store = fresh_store();
         for v in &values {
-            store.rpush(&key, &[v.clone()], 0).unwrap();
+            store.rpush(&key, std::slice::from_ref(v), 0).unwrap();
         }
 
         let retrieved = store.lrange(&key, 0, -1, 0).unwrap();
@@ -31,7 +31,7 @@ proptest! {
     ) {
         let mut store = fresh_store();
         for v in &values {
-            store.lpush(&key, &[v.clone()], 0).unwrap();
+            store.lpush(&key, std::slice::from_ref(v), 0).unwrap();
         }
 
         let retrieved = store.lrange(&key, 0, -1, 0).unwrap();
@@ -48,7 +48,7 @@ proptest! {
     ) {
         let mut store = fresh_store();
         for v in &values {
-            store.rpush(&key, &[v.clone()], 0).unwrap();
+            store.rpush(&key, std::slice::from_ref(v), 0).unwrap();
         }
 
         let mut popped = Vec::new();
@@ -69,7 +69,7 @@ proptest! {
     ) {
         let mut store = fresh_store();
         for v in &values {
-            store.rpush(&key, &[v.clone()], 0).unwrap();
+            store.rpush(&key, std::slice::from_ref(v), 0).unwrap();
         }
 
         let mut popped = Vec::new();

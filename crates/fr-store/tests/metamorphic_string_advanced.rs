@@ -1,4 +1,4 @@
-use fr_store::{Store, Value};
+use fr_store::Store;
 use proptest::prelude::*;
 
 fn fresh_store() -> Store {

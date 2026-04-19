@@ -6025,7 +6025,10 @@ fn function_cmd(
     if sub.eq_ignore_ascii_case("LOAD") {
         // FUNCTION LOAD [REPLACE] function-code
         if argv.len() < 3 {
-            return Err(CommandError::WrongArity("FUNCTION"));
+            return Err(CommandError::WrongSubcommandArity {
+                command: "FUNCTION",
+                subcommand: "LOAD".to_string(),
+            });
         }
         let mut replace = false;
         let code_idx;
@@ -6131,7 +6134,10 @@ fn function_cmd(
     } else if sub.eq_ignore_ascii_case("RESTORE") {
         // FUNCTION RESTORE serialized-value [FLUSH|APPEND|REPLACE]
         if argv.len() < 3 {
-            return Err(CommandError::WrongArity("FUNCTION"));
+            return Err(CommandError::WrongSubcommandArity {
+                command: "FUNCTION",
+                subcommand: "RESTORE".to_string(),
+            });
         }
         let policy = if argv.len() >= 4 {
             std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?
@@ -12362,7 +12368,7 @@ fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                 std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
             if !mode.eq_ignore_ascii_case("ASYNC") && !mode.eq_ignore_ascii_case("SYNC") {
                 return Ok(RespFrame::Error(
-                    "ERR SCRIPT FLUSH only supports ASYNC and SYNC options".to_string(),
+                    "ERR SCRIPT FLUSH only support SYNC|ASYNC option".to_string(),
                 ));
             }
         }
@@ -14255,6 +14261,9 @@ mod tests {
             return Some(CommandId::Lrem);
         }
         if eq_ascii_command(cmd, b"RPOPLPUSH") {
+            return Some(CommandId::Rpoplpush);
+        }
+        if eq_ascii_command(cmd, b"HINCRBYFLOAT") {
             return Some(CommandId::Rpoplpush);
         }
         if eq_ascii_command(cmd, b"HINCRBYFLOAT") {

@@ -457,7 +457,7 @@ fn initialize_replay_script(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_redis_endpoint(host: &str, port: u16) -> Result<(), String> {
+fn verify_redis_endpoint(_host: &str, _port: u16) -> Result<(), String> {
     Ok(())
 }
 

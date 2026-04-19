@@ -20,7 +20,7 @@ proptest! {
         prop_assume!(src != dst);
 
         let mut store = fresh_store();
-        store.sadd(&src, &[member.clone()], 0).unwrap();
+        store.sadd(&src, std::slice::from_ref(&member), 0).unwrap();
         
         let other_vec: Vec<Vec<u8>> = other_members.into_iter().filter(|m| m != &member).collect();
         if !other_vec.is_empty() {
