@@ -8787,7 +8787,12 @@ impl Store {
             }
         }
 
-        if engine.is_empty() || lib_name.is_empty() {
+        if lib_name.is_empty() {
+            return Err(StoreError::GenericError(
+                "ERR Library name was not given".to_string(),
+            ));
+        }
+        if engine.is_empty() {
             return Err(StoreError::GenericError(
                 "ERR Missing library metadata".to_string(),
             ));
