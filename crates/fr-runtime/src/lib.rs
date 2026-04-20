@@ -16051,6 +16051,9 @@ mod tests {
             rt.execute_frame(command(&[b"BGSAVE"]), 6),
             RespFrame::SimpleString("Background saving started".to_string())
         );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        rt.check_child_processes(6);
+
         assert!(
             rdb_path.exists(),
             "BGSAVE should write the configured RDB file"
@@ -16174,8 +16177,12 @@ mod tests {
 
         assert_eq!(
             rt.execute_frame(command(&[b"BGSAVE"]), 1),
-            RespFrame::Error("ERR error saving RDB snapshot to disk".to_string())
+            RespFrame::SimpleString("Background saving started".to_string())
         );
+
+        // Wait for child to exit
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        rt.check_child_processes(2);
 
         let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 2);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
@@ -16214,8 +16221,11 @@ mod tests {
 
         assert_eq!(
             rt.execute_frame(command(&[b"BGSAVE"]), 1),
-            RespFrame::Error("ERR error saving RDB snapshot to disk".to_string())
+            RespFrame::SimpleString("Background saving started".to_string())
         );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        rt.check_child_processes(1);
+
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"blocked", b"write"]), 2),
             RespFrame::Error(RDB_DISK_ERROR_WRITE_DENIED.to_string())
