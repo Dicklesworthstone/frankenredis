@@ -5062,6 +5062,45 @@
       }
     },
     {
+      "name": "zpopmax_count_0_returns_empty",
+      "now_ms": 100,
+      "argv": [
+        "ZPOPMAX",
+        "zpop3",
+        "0"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": []
+      }
+    },
+    {
+      "name": "zpopmin_negative_count_errors",
+      "now_ms": 100,
+      "argv": [
+        "ZPOPMIN",
+        "zpop3",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is out of range, must be positive"
+      }
+    },
+    {
+      "name": "zpopmax_negative_count_errors",
+      "now_ms": 100,
+      "argv": [
+        "ZPOPMAX",
+        "zpop3",
+        "-1"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR value is out of range, must be positive"
+      }
+    },
+    {
       "name": "zcount_setup",
       "now_ms": 100,
       "argv": [

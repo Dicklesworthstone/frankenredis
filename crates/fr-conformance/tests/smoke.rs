@@ -822,6 +822,9 @@ const CORE_ZSET_LIVE_STABLE_CASES: &[&str] = &[
     "zpopmin_count_100",
     "zpopmin_count_zero_setup",
     "zpopmin_count_0_returns_empty",
+    "zpopmax_count_0_returns_empty",
+    "zpopmin_negative_count_errors",
+    "zpopmax_negative_count_errors",
     // ZMSCORE
     "zmscore_setup",
     "zmscore_result",

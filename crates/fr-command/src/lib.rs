@@ -3322,13 +3322,21 @@ fn zincrby(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     )))
 }
 
+fn parse_zpop_count(arg: &[u8]) -> Result<usize, CommandError> {
+    match parse_i64_arg(arg) {
+        Ok(count) if count >= 0 => usize::try_from(count).map_err(|_| CommandError::InvalidInteger),
+        _ => Err(CommandError::Custom(
+            "ERR value is out of range, must be positive".to_string(),
+        )),
+    }
+}
+
 fn zpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 || argv.len() > 3 {
         return Err(CommandError::WrongArity("ZPOPMIN"));
     }
     if argv.len() == 3 {
-        let count =
-            usize::try_from(parse_u64_arg(&argv[2])?).map_err(|_| CommandError::InvalidInteger)?;
+        let count = parse_zpop_count(&argv[2])?;
         let pairs = store.zpopmin_count(&argv[1], count, now_ms)?;
         let mut frames = Vec::with_capacity(pairs.len() * 2);
         for (member, score) in pairs {
@@ -3351,8 +3359,7 @@ fn zpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         return Err(CommandError::WrongArity("ZPOPMAX"));
     }
     if argv.len() == 3 {
-        let count =
-            usize::try_from(parse_u64_arg(&argv[2])?).map_err(|_| CommandError::InvalidInteger)?;
+        let count = parse_zpop_count(&argv[2])?;
         let pairs = store.zpopmax_count(&argv[1], count, now_ms)?;
         let mut frames = Vec::with_capacity(pairs.len() * 2);
         for (member, score) in pairs {
@@ -29975,6 +29982,54 @@ mod tests {
                 assert_eq!(arr[3], RespFrame::BulkString(Some(b"2".to_vec())));
             }
             other => panic!("expected array, got {other:?}"), // ubs:ignore — AI triage
+        }
+    }
+
+    #[test]
+    fn zpop_count_zero_returns_empty_array_without_popping() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        for cmd in [b"ZPOPMIN".as_slice(), b"ZPOPMAX".as_slice()] {
+            let out = dispatch_argv(
+                &[cmd.to_vec(), b"zs".to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(out, RespFrame::Array(Some(Vec::new())));
+        }
+
+        let card = dispatch_argv(&[b"ZCARD".to_vec(), b"zs".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(card, RespFrame::Integer(2));
+    }
+
+    #[test]
+    fn zpop_negative_count_errors() {
+        let mut store = Store::new();
+        for cmd in [b"ZPOPMIN".as_slice(), b"ZPOPMAX".as_slice()] {
+            let err = dispatch_argv(
+                &[cmd.to_vec(), b"zs".to_vec(), b"-1".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                CommandError::Custom("ERR value is out of range, must be positive".to_string())
+            );
         }
     }
 
