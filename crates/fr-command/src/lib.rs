@@ -4303,6 +4303,7 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     let mut idx = 2;
     let mut nomkstream = false;
     let mut trim_maxlen: Option<usize> = None;
+    let mut trim_maxlen_approx = false;
     let mut trim_minid: Option<StreamId> = None;
 
     while idx < argv.len() {
@@ -4314,8 +4315,8 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             if idx >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            // Skip optional = or ~ (approximate trimming treated as exact)
             if eq_ascii_command(&argv[idx], b"=") || eq_ascii_command(&argv[idx], b"~") {
+                trim_maxlen_approx = eq_ascii_command(&argv[idx], b"~");
                 idx += 1;
                 if idx >= argv.len() {
                     return Err(CommandError::SyntaxError);
@@ -4422,7 +4423,9 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     store.xadd(&argv[1], id, &fields, now_ms)?;
 
     // Apply inline trimming after the add
-    if let Some(max_len) = trim_maxlen {
+    if let Some(max_len) = trim_maxlen
+        && !trim_maxlen_approx
+    {
         let _ = store.xtrim(&argv[1], max_len, now_ms);
     }
     if let Some(min_id) = trim_minid {
@@ -18884,6 +18887,66 @@ mod tests {
                 ])),
             ]))]))
         );
+    }
+
+    #[test]
+    fn xadd_nomkstream_and_approx_maxlen_match_current_redis_behavior() {
+        let mut store = Store::new();
+
+        let missing = dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"missing".to_vec(),
+                b"NOMKSTREAM".to_vec(),
+                b"*".to_vec(),
+                b"field".to_vec(),
+                b"value".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd nomkstream missing");
+        assert_eq!(missing, RespFrame::BulkString(None));
+
+        let exists = dispatch_argv(&[b"EXISTS".to_vec(), b"missing".to_vec()], &mut store, 0)
+            .expect("exists missing");
+        assert_eq!(exists, RespFrame::Integer(0));
+
+        for id in [b"1-0".as_slice(), b"2-0".as_slice(), b"3-0".as_slice()] {
+            dispatch_argv(
+                &[
+                    b"XADD".to_vec(),
+                    b"stream".to_vec(),
+                    id.to_vec(),
+                    b"k".to_vec(),
+                    b"v".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("seed xadd");
+        }
+
+        let approx = dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"stream".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"~".to_vec(),
+                b"1".to_vec(),
+                b"4-0".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd approx maxlen");
+        assert_eq!(approx, RespFrame::BulkString(Some(b"4-0".to_vec())));
+
+        let len = dispatch_argv(&[b"XLEN".to_vec(), b"stream".to_vec()], &mut store, 0)
+            .expect("xlen after approx");
+        assert_eq!(len, RespFrame::Integer(4));
     }
 
     #[test]

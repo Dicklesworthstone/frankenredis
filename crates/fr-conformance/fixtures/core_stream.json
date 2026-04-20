@@ -4711,7 +4711,7 @@
       "name": "xadd_maxlen_approx_verify_length",
       "now_ms": 90000,
       "argv": ["XLEN", "trimstream"],
-      "expect": { "kind": "integer", "value": 1 }
+      "expect": { "kind": "integer", "value": 3 }
     },
     {
       "name": "xadd_maxlen_equals_modifier",
