@@ -9849,7 +9849,144 @@ fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     }
 }
 
-/// Build a Redis COMMAND INFO entry: [name, arity, flags, first_key, last_key, step]
+fn is_command_info_subcommand(name: &str) -> bool {
+    name.starts_with("command|")
+}
+
+fn command_info_flags(name: &str, flags: &str) -> Vec<RespFrame> {
+    let flags = if name == "command" || is_command_info_subcommand(name) {
+        "loading stale"
+    } else {
+        flags
+    };
+    flags
+        .split_whitespace()
+        .map(|flag| RespFrame::SimpleString(flag.to_string()))
+        .collect()
+}
+
+fn command_info_categories(name: &str) -> Vec<RespFrame> {
+    if name == "command" || is_command_info_subcommand(name) {
+        return vec![hello_simple("@slow"), hello_simple("@connection")];
+    }
+    command_acl_categories(name)
+        .iter()
+        .map(|category| RespFrame::SimpleString(format!("@{category}")))
+        .collect()
+}
+
+fn command_info_tips(name: &str) -> Vec<RespFrame> {
+    match name {
+        "command" | "command|info" | "command|list" | "command|docs" => {
+            vec![hello_bulk("nondeterministic_output_order")]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn command_info_key_specs(
+    name: &str,
+    flags: &str,
+    first_key: i64,
+    last_key: i64,
+    step: i64,
+) -> Vec<RespFrame> {
+    if first_key == 0 && last_key == 0 {
+        return Vec::new();
+    }
+
+    let key_flags: Vec<&str> = if flags.split_whitespace().any(|flag| flag == "readonly") {
+        vec!["RO", "access"]
+    } else if matches!(
+        name,
+        "append"
+            | "geoadd"
+            | "hset"
+            | "hmset"
+            | "lpush"
+            | "lpushx"
+            | "mset"
+            | "msetnx"
+            | "rpush"
+            | "rpushx"
+            | "sadd"
+            | "set"
+            | "setnx"
+            | "xadd"
+            | "zadd"
+    ) {
+        vec!["RW", "insert"]
+    } else {
+        vec!["RW", "access"]
+    };
+    let relative_last_key = if last_key >= first_key {
+        last_key - first_key
+    } else {
+        last_key
+    };
+
+    vec![RespFrame::Array(Some(vec![
+        hello_bulk("flags"),
+        RespFrame::Array(Some(key_flags.into_iter().map(hello_simple).collect())),
+        hello_bulk("begin_search"),
+        RespFrame::Array(Some(vec![
+            hello_bulk("type"),
+            hello_bulk("index"),
+            hello_bulk("spec"),
+            RespFrame::Array(Some(vec![
+                hello_bulk("index"),
+                RespFrame::Integer(first_key),
+            ])),
+        ])),
+        hello_bulk("find_keys"),
+        RespFrame::Array(Some(vec![
+            hello_bulk("type"),
+            hello_bulk("range"),
+            hello_bulk("spec"),
+            RespFrame::Array(Some(vec![
+                hello_bulk("lastkey"),
+                RespFrame::Integer(relative_last_key),
+                hello_bulk("keystep"),
+                RespFrame::Integer(step),
+                hello_bulk("limit"),
+                RespFrame::Integer(0),
+            ])),
+        ])),
+    ]))]
+}
+
+fn command_info_subcommand_entry(name: &str, arity: i64) -> RespFrame {
+    RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(name.as_bytes().to_vec())),
+        RespFrame::Integer(arity),
+        RespFrame::Array(Some(command_info_flags(name, ""))),
+        RespFrame::Integer(0),
+        RespFrame::Integer(0),
+        RespFrame::Integer(0),
+        RespFrame::Array(Some(command_info_categories(name))),
+        RespFrame::Array(Some(command_info_tips(name))),
+        RespFrame::Array(Some(Vec::new())),
+        RespFrame::Array(Some(Vec::new())),
+    ]))
+}
+
+fn command_info_subcommands(name: &str) -> Vec<RespFrame> {
+    if name != "command" {
+        return Vec::new();
+    }
+
+    vec![
+        command_info_subcommand_entry("command|count", 2),
+        command_info_subcommand_entry("command|getkeys", -3),
+        command_info_subcommand_entry("command|docs", -2),
+        command_info_subcommand_entry("command|getkeysandflags", -3),
+        command_info_subcommand_entry("command|list", -2),
+        command_info_subcommand_entry("command|help", 2),
+        command_info_subcommand_entry("command|info", -2),
+    ]
+}
+
+/// Build a Redis COMMAND INFO entry.
 fn command_info_entry(
     name: &str,
     arity: i64,
@@ -9858,17 +9995,19 @@ fn command_info_entry(
     last_key: i64,
     step: i64,
 ) -> RespFrame {
-    let flag_list: Vec<RespFrame> = flags
-        .split_whitespace()
-        .map(|f| RespFrame::SimpleString(f.to_string()))
-        .collect();
     RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(name.as_bytes().to_vec())),
         RespFrame::Integer(arity),
-        RespFrame::Array(Some(flag_list)),
+        RespFrame::Array(Some(command_info_flags(name, flags))),
         RespFrame::Integer(first_key),
         RespFrame::Integer(last_key),
         RespFrame::Integer(step),
+        RespFrame::Array(Some(command_info_categories(name))),
+        RespFrame::Array(Some(command_info_tips(name))),
+        RespFrame::Array(Some(command_info_key_specs(
+            name, flags, first_key, last_key, step,
+        ))),
+        RespFrame::Array(Some(command_info_subcommands(name))),
     ]))
 }
 
@@ -14023,8 +14162,9 @@ mod tests {
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
         SCRIPT_NOSCRIPT_ERROR, classify_command, client_wrong_subcommand_arity, dispatch_argv,
-        drain_pubsub_messages, eq_ascii_command, execute_migrate, frame_to_argv, is_write_command,
-        parse_blocking_deadline_milliseconds, parse_migrate_request, pubsub_message_to_frame,
+        drain_pubsub_messages, eq_ascii_command, execute_migrate, frame_to_argv, hello_bulk,
+        hello_simple, is_write_command, parse_blocking_deadline_milliseconds,
+        parse_migrate_request, pubsub_message_to_frame,
     };
 
     fn classify_command_linear(cmd: &[u8]) -> Option<CommandId> {
@@ -31159,6 +31299,213 @@ mod tests {
                 CommandError::Custom("ERR Unsupported option ZZ".to_string())
             );
         }
+    }
+
+    #[test]
+    fn command_info_matches_redis_10_field_layout() {
+        let mut store = Store::new();
+
+        let command_reply = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"COMMAND".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command info command");
+        assert_eq!(
+            command_reply,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                hello_bulk("command"),
+                RespFrame::Integer(-1),
+                RespFrame::Array(Some(vec![hello_simple("loading"), hello_simple("stale")])),
+                RespFrame::Integer(0),
+                RespFrame::Integer(0),
+                RespFrame::Integer(0),
+                RespFrame::Array(Some(vec![
+                    hello_simple("@slow"),
+                    hello_simple("@connection"),
+                ])),
+                RespFrame::Array(Some(vec![hello_bulk("nondeterministic_output_order")])),
+                RespFrame::Array(Some(Vec::new())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("command|count"),
+                        RespFrame::Integer(2),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("loading"),
+                            hello_simple("stale"),
+                        ])),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("@slow"),
+                            hello_simple("@connection"),
+                        ])),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("command|getkeys"),
+                        RespFrame::Integer(-3),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("loading"),
+                            hello_simple("stale"),
+                        ])),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("@slow"),
+                            hello_simple("@connection"),
+                        ])),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("command|docs"),
+                        RespFrame::Integer(-2),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("loading"),
+                            hello_simple("stale"),
+                        ])),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("@slow"),
+                            hello_simple("@connection"),
+                        ])),
+                        RespFrame::Array(Some(vec![hello_bulk("nondeterministic_output_order")])),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("command|getkeysandflags"),
+                        RespFrame::Integer(-3),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("loading"),
+                            hello_simple("stale"),
+                        ])),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("@slow"),
+                            hello_simple("@connection"),
+                        ])),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("command|list"),
+                        RespFrame::Integer(-2),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("loading"),
+                            hello_simple("stale"),
+                        ])),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("@slow"),
+                            hello_simple("@connection"),
+                        ])),
+                        RespFrame::Array(Some(vec![hello_bulk("nondeterministic_output_order")])),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("command|help"),
+                        RespFrame::Integer(2),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("loading"),
+                            hello_simple("stale"),
+                        ])),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("@slow"),
+                            hello_simple("@connection"),
+                        ])),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("command|info"),
+                        RespFrame::Integer(-2),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("loading"),
+                            hello_simple("stale"),
+                        ])),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("@slow"),
+                            hello_simple("@connection"),
+                        ])),
+                        RespFrame::Array(Some(vec![hello_bulk("nondeterministic_output_order")])),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                    ])),
+                ])),
+            ]))]))
+        );
+
+        let get_reply = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"GET".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command info get");
+        assert_eq!(
+            get_reply,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                hello_bulk("get"),
+                RespFrame::Integer(2),
+                RespFrame::Array(Some(vec![hello_simple("readonly"), hello_simple("fast")])),
+                RespFrame::Integer(1),
+                RespFrame::Integer(1),
+                RespFrame::Integer(1),
+                RespFrame::Array(Some(vec![
+                    hello_simple("@read"),
+                    hello_simple("@string"),
+                    hello_simple("@fast"),
+                ])),
+                RespFrame::Array(Some(Vec::new())),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    hello_bulk("flags"),
+                    RespFrame::Array(Some(vec![hello_simple("RO"), hello_simple("access")])),
+                    hello_bulk("begin_search"),
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("type"),
+                        hello_bulk("index"),
+                        hello_bulk("spec"),
+                        RespFrame::Array(Some(vec![hello_bulk("index"), RespFrame::Integer(1),])),
+                    ])),
+                    hello_bulk("find_keys"),
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("type"),
+                        hello_bulk("range"),
+                        hello_bulk("spec"),
+                        RespFrame::Array(Some(vec![
+                            hello_bulk("lastkey"),
+                            RespFrame::Integer(0),
+                            hello_bulk("keystep"),
+                            RespFrame::Integer(1),
+                            hello_bulk("limit"),
+                            RespFrame::Integer(0),
+                        ])),
+                    ])),
+                ]))])),
+                RespFrame::Array(Some(Vec::new())),
+            ]))]))
+        );
     }
 
     mod metamorphic {

@@ -3979,6 +3979,7 @@ const CORE_SERVER_LIVE_STABLE_CASES: &[&str] = &[
     "latency_history_empty",
     "latency_reset_ok",
     "latency_help",
+    "command_info_get",
     "waitaof_without_appendonly_reports_no_local_ack",
     "waitaof_min_replicas_unmet_without_appendonly",
     "unlink_setup",
@@ -4003,6 +4004,26 @@ fn core_server_live_redis_matches_runtime() {
         &oracle,
     )
     .expect("server live diff");
+    assert_eq!(
+        report.total, report.passed,
+        "mismatches: {:?}",
+        report.failed
+    );
+    assert!(report.failed.is_empty());
+}
+
+#[test]
+fn core_server_command_info_live_redis_matches_runtime() {
+    let cfg = HarnessConfig::default_paths();
+    let oracle_server = VendoredRedisOracle::start(&cfg);
+    let oracle = LiveOracleConfig {
+        host: "127.0.0.1".to_string(),
+        port: oracle_server.port,
+        ..LiveOracleConfig::default()
+    };
+    let report =
+        run_live_redis_diff_for_cases(&cfg, "core_server.json", &["command_info_get"], &oracle)
+            .expect("server command info live diff");
     assert_eq!(
         report.total, report.passed,
         "mismatches: {:?}",
