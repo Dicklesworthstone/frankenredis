@@ -246,6 +246,7 @@ pub fn run_fixture(
     let mut failed = Vec::new();
     let total = fixture.cases.len();
     for case in fixture.cases {
+        runtime.wait_for_child_processes();
         let evidence_before = runtime.evidence().events().len();
         let frame = case_to_frame(&case);
         let actual = runtime.execute_frame(frame, case.now_ms);
@@ -355,6 +356,12 @@ fn run_live_redis_diff_with_fixture(
             configure_runtime_for_fixture(&mut isolated_runtime, fixture_name);
             isolated_runtime
         });
+        
+        match dedicated_runtime.as_mut() {
+            Some(isolated_runtime) => isolated_runtime.check_child_processes(case.now_ms),
+            None => runtime.check_child_processes(case.now_ms),
+        };
+
         let evidence_before = match dedicated_runtime.as_ref() {
             Some(isolated_runtime) => isolated_runtime.evidence().events().len(),
             None => runtime.evidence().events().len(),

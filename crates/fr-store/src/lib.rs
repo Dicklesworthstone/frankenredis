@@ -986,6 +986,7 @@ pub struct Store {
     db_expires_counts: Vec<usize>,
     /// Number of databases (configurable at startup, default 16).
     pub database_count: usize,
+    pub cluster_enabled: bool,
     stream_groups: HashMap<Vec<u8>, StreamGroupState>,
     /// Per-stream last-generated-id set by XSETID (may be higher than max entry).
     stream_last_ids: HashMap<Vec<u8>, StreamId>,
@@ -1214,6 +1215,7 @@ impl Default for Store {
             db_key_counts: vec![0; DEFAULT_NUM_DATABASES],
             db_expires_counts: vec![0; DEFAULT_NUM_DATABASES],
             database_count: DEFAULT_NUM_DATABASES,
+            cluster_enabled: false,
             stream_groups: HashMap::new(),
             stream_last_ids: HashMap::new(),
             stream_max_deleted_ids: HashMap::new(),

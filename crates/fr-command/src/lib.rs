@@ -5798,12 +5798,18 @@ fn cluster_cmd(
         if argv.len() != 3 {
             return Err(cluster_wrong_subcommand_arity(sub));
         }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
         let slot = fr_store::crc16_slot(&argv[2]);
         return Ok(RespFrame::Integer(i64::from(slot)));
     }
     if sub.eq_ignore_ascii_case("GETKEYSINSLOT") {
         if argv.len() != 4 {
             return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
         }
         let slot = parse_i64_arg(&argv[2])?;
         if !(0..=16383).contains(&slot) {
@@ -5823,6 +5829,9 @@ fn cluster_cmd(
     if sub.eq_ignore_ascii_case("COUNTKEYSINSLOT") {
         if argv.len() != 3 {
             return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
         }
         let slot = parse_i64_arg(&argv[2])?;
         if !(0..=16383).contains(&slot) {

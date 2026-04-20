@@ -5,6 +5,7 @@ use fr_store::Store;
 #[test]
 fn test_cluster_keyslot() {
     let mut store = Store::new();
+    store.cluster_enabled = true;
     let out = dispatch_argv(
         &[b"CLUSTER".to_vec(), b"KEYSLOT".to_vec(), b"hello".to_vec()],
         &mut store,
@@ -19,6 +20,7 @@ fn test_cluster_keyslot() {
 #[test]
 fn test_cluster_keyslot_hashtag() {
     let mut store = Store::new();
+    store.cluster_enabled = true;
     let out = dispatch_argv(
         &[b"CLUSTER".to_vec(), b"KEYSLOT".to_vec(), b"{foo}bar".to_vec()],
         &mut store,
@@ -33,6 +35,7 @@ fn test_cluster_keyslot_hashtag() {
 #[test]
 fn test_cluster_getkeysinslot_and_countkeysinslot() {
     let mut store = Store::new();
+    store.cluster_enabled = true;
     
     // The keys "foo" and "{foo}bar" will both hash to slot 12182
     dispatch_argv(&[b"SET".to_vec(), b"foo".to_vec(), b"val".to_vec()], &mut store, 0).unwrap();

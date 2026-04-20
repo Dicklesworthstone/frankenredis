@@ -3252,6 +3252,28 @@ impl Runtime {
         }
     }
 
+    /// Wait for child processes to finish (useful for tests).
+    #[allow(unsafe_code)]
+    pub fn wait_for_child_processes(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            if let Some(pid) = self.server.rdb_bgsave_pid {
+                let mut status = 0;
+                libc::waitpid(pid, &mut status, 0); // Blocking wait
+                self.server.rdb_bgsave_pid = None;
+                let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+                self.server.store.record_bgsave_status(success);
+            }
+            if let Some(pid) = self.server.aof_rewrite_pid {
+                let mut status = 0;
+                libc::waitpid(pid, &mut status, 0); // Blocking wait
+                self.server.aof_rewrite_pid = None;
+                let success = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+                self.server.store.record_aof_bgrewrite_status(success);
+            }
+        }
+    }
+
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
         self.server.store.stat_total_commands_processed += 1;
         if self.session.connected_at_ms == 0 {
