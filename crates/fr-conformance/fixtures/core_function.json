@@ -480,6 +480,19 @@
       }
     },
     {
+      "name": "function_stats_wrong_arity",
+      "now_ms": 0,
+      "argv": [
+        "FUNCTION",
+        "STATS",
+        "extra"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'function|stats' command"
+      }
+    },
+    {
       "name": "function_kill_notbusy",
       "now_ms": 0,
       "argv": [

@@ -3444,7 +3444,9 @@ fn core_function_conformance() {
 
 const CORE_FUNCTION_LIVE_STABLE_CASES: &[&str] = &[
     "function_list_empty",
+    "function_stats_empty",
     "function_load_simple",
+    "function_stats_after_load",
     "fcall_not_found",
     "fcall_myfunc_returns_arg",
     "fcall_myfunc_no_args_returns_nil",
@@ -3464,6 +3466,7 @@ const CORE_FUNCTION_LIVE_STABLE_CASES: &[&str] = &[
     "function_list_after_flush",
     "function_load_bad_header",
     "function_wrong_arity",
+    "function_stats_wrong_arity",
     "function_kill_notbusy",
     "function_kill_wrong_arity",
     "fcall_wrong_arity",

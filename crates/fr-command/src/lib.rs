@@ -3336,7 +3336,16 @@ fn zpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         return Err(CommandError::WrongArity("ZPOPMIN"));
     }
     if argv.len() == 3 {
-        let count = parse_zpop_count(&argv[2])?;
+        let count = parse_i64_arg(&argv[2])?;
+        if count < 0 {
+            return Err(CommandError::Custom(
+                "ERR value is out of range, must be positive".to_string(),
+            ));
+        }
+        if count == 0 {
+            return Ok(RespFrame::Array(Some(vec![])));
+        }
+        let count = count as usize;
         let pairs = store.zpopmin_count(&argv[1], count, now_ms)?;
         let mut frames = Vec::with_capacity(pairs.len() * 2);
         for (member, score) in pairs {
@@ -6131,6 +6140,12 @@ fn function_cmd(
         }
         Ok(RespFrame::Array(Some(result)))
     } else if sub.eq_ignore_ascii_case("STATS") {
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "FUNCTION",
+                subcommand: "STATS".to_string(),
+            });
+        }
         let (lib_count, func_count) = store.function_stats();
         Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"running_script".to_vec())),
@@ -28157,6 +28172,24 @@ mod tests {
         let mut store = Store::new();
         let out = dispatch_argv(&[b"FUNCTION".to_vec(), b"FLUSH".to_vec()], &mut store, 0).unwrap();
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn function_stats_rejects_extra_args() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"FUNCTION".to_vec(), b"STATS".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::WrongSubcommandArity {
+                command: "FUNCTION",
+                subcommand: "STATS".to_string(),
+            }
+        );
     }
 
     // ── SHARD PUB/SUB tests ─────────────────────────────────────────
