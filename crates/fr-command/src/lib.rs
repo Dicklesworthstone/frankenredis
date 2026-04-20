@@ -26836,21 +26836,37 @@ mod tests {
     }
 
     #[test]
-    fn waitaof_standalone() {
+    fn waitaof_standalone_reports_no_local_ack_without_appendonly() {
         let mut store = Store::new();
-        let out = dispatch_argv(
+        let zero_replicas = dispatch_argv(
             &[
                 b"WAITAOF".to_vec(),
                 b"0".to_vec(),
                 b"0".to_vec(),
-                b"0".to_vec(),
+                b"1".to_vec(),
             ],
             &mut store,
             0,
         )
         .unwrap();
         assert_eq!(
-            out,
+            zero_replicas,
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0),]))
+        );
+
+        let unmet_replicas = dispatch_argv(
+            &[
+                b"WAITAOF".to_vec(),
+                b"0".to_vec(),
+                b"5".to_vec(),
+                b"1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            unmet_replicas,
             RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0),]))
         );
     }

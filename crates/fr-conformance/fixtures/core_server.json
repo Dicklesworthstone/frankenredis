@@ -953,20 +953,43 @@
       }
     },
     {
-      "name": "waitaof_returns_local_satisfied",
+      "name": "waitaof_without_appendonly_reports_no_local_ack",
       "now_ms": 15002,
       "argv": [
         "WAITAOF",
         "0",
         "0",
-        "0"
+        "1"
       ],
       "expect": {
         "kind": "array",
         "value": [
           {
             "kind": "integer",
-            "value": 1
+            "value": 0
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "waitaof_min_replicas_unmet_without_appendonly",
+      "now_ms": 15002,
+      "argv": [
+        "WAITAOF",
+        "0",
+        "5",
+        "1"
+      ],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {
+            "kind": "integer",
+            "value": 0
           },
           {
             "kind": "integer",

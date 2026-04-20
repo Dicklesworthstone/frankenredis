@@ -8620,7 +8620,11 @@ slave_priority:{}\r\n",
                 required_replicas,
             },
         );
-        let local_ack = if outcome.local_satisfied { 1 } else { 0 };
+        let local_ack = if self.server.aof_path.is_some() && outcome.local_satisfied {
+            1
+        } else {
+            0
+        };
         let replica_acks = i64::try_from(outcome.acked_replicas).unwrap_or(i64::MAX);
         RespFrame::Array(Some(vec![
             RespFrame::Integer(local_ack),
@@ -11823,6 +11827,23 @@ mod tests {
         assert_eq!(
             invalid_timeout,
             RespFrame::Error("ERR timeout is negative".to_string())
+        );
+    }
+
+    #[test]
+    fn waitaof_without_appendonly_reports_no_local_ack_even_when_threshold_is_zero() {
+        let mut rt = Runtime::default_strict();
+
+        let zero_replicas = rt.execute_frame(command(&[b"WAITAOF", b"0", b"0", b"1"]), 0);
+        assert_eq!(
+            zero_replicas,
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+        );
+
+        let unmet_replicas = rt.execute_frame(command(&[b"WAITAOF", b"0", b"5", b"1"]), 1);
+        assert_eq!(
+            unmet_replicas,
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
         );
     }
 

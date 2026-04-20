@@ -3945,6 +3945,8 @@ const CORE_SERVER_LIVE_STABLE_CASES: &[&str] = &[
     "latency_history_empty",
     "latency_reset_ok",
     "latency_help",
+    "waitaof_without_appendonly_reports_no_local_ack",
+    "waitaof_min_replicas_unmet_without_appendonly",
     "unlink_setup",
     "unlink_multiple",
     "unlink_verify_gone",
