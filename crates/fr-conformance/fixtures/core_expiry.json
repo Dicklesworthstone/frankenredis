@@ -2689,6 +2689,82 @@
       }
     },
     {
+      "name": "expireat_negative_setup",
+      "now_ms": 1900250,
+      "argv": [
+        "SET",
+        "expneg",
+        "v"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "expireat_negative_deletes",
+      "now_ms": 1900250,
+      "argv": [
+        "EXPIREAT",
+        "expneg",
+        "-1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "expireat_negative_get_missing",
+      "now_ms": 1900250,
+      "argv": [
+        "GET",
+        "expneg"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
+    },
+    {
+      "name": "pexpireat_negative_setup",
+      "now_ms": 1900350,
+      "argv": [
+        "SET",
+        "pexpneg",
+        "v"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
+    },
+    {
+      "name": "pexpireat_negative_deletes",
+      "now_ms": 1900350,
+      "argv": [
+        "PEXPIREAT",
+        "pexpneg",
+        "-1"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
+    },
+    {
+      "name": "pexpireat_negative_pttl_missing",
+      "now_ms": 1900350,
+      "argv": [
+        "PTTL",
+        "pexpneg"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": -2
+      }
+    },
+    {
       "name": "expire_rejects_leading_plus",
       "now_ms": 2000000,
       "argv": [

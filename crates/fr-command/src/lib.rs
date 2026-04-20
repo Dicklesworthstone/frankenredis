@@ -16035,6 +16035,50 @@ mod tests {
     }
 
     #[test]
+    fn expireat_and_pexpireat_negative_deadlines_delete_immediately() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"neg".to_vec(), b"v".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("set neg");
+
+        let expireat = dispatch_argv(
+            &[b"EXPIREAT".to_vec(), b"neg".to_vec(), b"-1".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("negative expireat");
+        assert_eq!(expireat, RespFrame::Integer(1));
+        assert_eq!(
+            dispatch_argv(&[b"GET".to_vec(), b"neg".to_vec()], &mut store, 1_000)
+                .expect("get neg after expireat"),
+            RespFrame::BulkString(None)
+        );
+
+        dispatch_argv(
+            &[b"SET".to_vec(), b"pneg".to_vec(), b"v".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("set pneg");
+
+        let pexpireat = dispatch_argv(
+            &[b"PEXPIREAT".to_vec(), b"pneg".to_vec(), b"-1".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("negative pexpireat");
+        assert_eq!(pexpireat, RespFrame::Integer(1));
+        assert_eq!(
+            dispatch_argv(&[b"PTTL".to_vec(), b"pneg".to_vec()], &mut store, 1_000)
+                .expect("pttl pneg after pexpireat"),
+            RespFrame::Integer(-2)
+        );
+    }
+
+    #[test]
     fn expiretime_and_pexpiretime_report_absolute_deadlines() {
         let mut store = Store::new();
         let missing = dispatch_argv(

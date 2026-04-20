@@ -284,9 +284,15 @@ const CORE_EXPIRY_LIVE_STABLE_CASES: &[&str] = &[
     "expireat_past_setup",
     "expireat_past_deletes",
     "expireat_past_get_missing",
+    "expireat_negative_setup",
+    "expireat_negative_deletes",
+    "expireat_negative_get_missing",
     "pexpireat_past_setup",
     "pexpireat_past_deletes",
     "pexpireat_past_pttl_missing",
+    "pexpireat_negative_setup",
+    "pexpireat_negative_deletes",
+    "pexpireat_negative_pttl_missing",
 ];
 
 fn live_info_case(
