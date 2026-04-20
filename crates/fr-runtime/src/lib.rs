@@ -7618,7 +7618,7 @@ impl Runtime {
             match libc::fork() {
                 -1 => {
                     self.server.store.record_bgsave_status(false);
-                    return RespFrame::Error("ERR Can't bgsave: fork error".to_string());
+                    RespFrame::Error("ERR Can't bgsave: fork error".to_string())
                 }
                 0 => {
                     let result = self.persist_snapshot_to_disk(now_ms, true);
@@ -7629,7 +7629,7 @@ impl Runtime {
                     self.server.store.record_save(now_ms, true);
                     self.server.store.record_bgsave_status(true);
                     self.server.last_save_time_sec = self.server.store.last_save_time_sec;
-                    return RespFrame::SimpleString("Background saving started".to_string());
+                    RespFrame::SimpleString("Background saving started".to_string())
                 }
             }
         }
