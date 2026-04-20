@@ -8,6 +8,12 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 /// Redis-compatible version string. Single source of truth for all version reporting.
 pub const REDIS_COMPAT_VERSION: &str = "7.2.0";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BitRangeUnit {
+    Byte,
+    Bit,
+}
+
 thread_local! {
     static TOUCH_DISABLED: Cell<bool> = const { Cell::new(false) };
 }
@@ -2223,6 +2229,7 @@ impl Store {
         key: &[u8],
         start: Option<i64>,
         end: Option<i64>,
+        unit: BitRangeUnit,
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         if !self.record_keyspace_lookup(key, now_ms) {
@@ -2236,26 +2243,84 @@ impl Store {
                 }
                 match &entry.value {
                     Value::String(v) => {
-                        let len = v.len() as i64;
-                        let s = match start {
-                            Some(s) if s < 0 => (len + s).max(0) as usize,
-                            Some(s) => s as usize,
-                            None => 0,
+                        let len = i64::try_from(v.len()).unwrap_or(i64::MAX);
+                        let total_len = match unit {
+                            BitRangeUnit::Byte => len,
+                            BitRangeUnit::Bit => len.saturating_mul(8),
                         };
-                        let e = match end {
-                            Some(e) if e < 0 => (len + e).max(0),
-                            Some(e) => e,
-                            None => len - 1,
-                        };
-                        if s as i64 > e || len == 0 || s >= v.len() {
+                        if total_len == 0 {
                             return Ok(0);
                         }
-                        let end_idx_excl = (e.min(len - 1) as usize).min(v.len() - 1) + 1;
-                        let count = v[s..end_idx_excl]
-                            .iter()
-                            .map(|b| b.count_ones() as usize)
-                            .sum();
-                        Ok(count)
+
+                        let mut range_start = start.unwrap_or(0);
+                        let mut range_end = end.unwrap_or(total_len - 1);
+
+                        if start.is_some_and(|s| s < 0)
+                            && end.is_some_and(|e| e < 0)
+                            && range_start > range_end
+                        {
+                            return Ok(0);
+                        }
+
+                        if range_start < 0 {
+                            range_start += total_len;
+                        }
+                        if range_end < 0 {
+                            range_end += total_len;
+                        }
+                        if range_start < 0 {
+                            range_start = 0;
+                        }
+                        if range_end < 0 {
+                            range_end = 0;
+                        }
+                        if range_end >= total_len {
+                            range_end = total_len - 1;
+                        }
+                        if range_start > range_end {
+                            return Ok(0);
+                        }
+
+                        match unit {
+                            BitRangeUnit::Byte => {
+                                let start_idx = usize::try_from(range_start)
+                                    .expect("non-negative byte range start");
+                                let end_idx = usize::try_from(range_end)
+                                    .expect("non-negative byte range end");
+                                let end_idx_excl = end_idx + 1;
+                                Ok(v[start_idx..end_idx_excl]
+                                    .iter()
+                                    .map(|b| b.count_ones() as usize)
+                                    .sum())
+                            }
+                            BitRangeUnit::Bit => {
+                                let start_byte = usize::try_from(range_start >> 3)
+                                    .expect("non-negative bit range start byte");
+                                let end_byte = usize::try_from(range_end >> 3)
+                                    .expect("non-negative bit range end byte");
+                                let mut count: usize = v[start_byte..=end_byte]
+                                    .iter()
+                                    .map(|b| b.count_ones() as usize)
+                                    .sum();
+
+                                let first_byte_neg_mask =
+                                    (!((1_u16 << (8 - ((range_start & 7) as u32))) - 1) & 0xFF)
+                                        as u8;
+                                let last_byte_neg_mask =
+                                    ((1_u16 << (7 - ((range_end & 7) as u32))) - 1) as u8;
+                                if first_byte_neg_mask != 0 || last_byte_neg_mask != 0 {
+                                    let masked_edges = [
+                                        v[start_byte] & first_byte_neg_mask,
+                                        v[end_byte] & last_byte_neg_mask,
+                                    ];
+                                    count -= masked_edges
+                                        .iter()
+                                        .map(|b| b.count_ones() as usize)
+                                        .sum::<usize>();
+                                }
+                                Ok(count)
+                            }
+                        }
                     }
                     _ => Err(StoreError::WrongType),
                 }
@@ -10506,12 +10571,12 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 #[cfg(test)]
 mod tests {
     use super::{
-        EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue,
-        HLL_REGISTERS, LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED,
-        NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, ScoreBound, ScoreMember, Store,
-        StoreError, StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions,
-        StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value,
-        ValueType, encode_db_key, hll_sparse_decode,
+        BitRangeUnit, EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState,
+        ExpireTimeValue, HLL_REGISTERS, LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel,
+        NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, ScoreBound,
+        ScoreMember, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
+        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
+        StreamPendingEntry, Value, ValueType, encode_db_key, hll_sparse_decode,
     };
 
     fn group_read_options(
@@ -13668,7 +13733,48 @@ mod tests {
     fn bitcount_basic() {
         let mut store = Store::new();
         store.set(b"k".to_vec(), b"\xff".to_vec(), None, 0); // 8 bits set
-        assert_eq!(store.bitcount(b"k", None, None, 0).unwrap(), 8);
+        assert_eq!(
+            store
+                .bitcount(b"k", None, None, BitRangeUnit::Byte, 0)
+                .unwrap(),
+            8
+        );
+    }
+
+    #[test]
+    fn bitcount_bit_range_matches_redis_semantics() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"foobar".to_vec(), None, 0);
+        assert_eq!(
+            store
+                .bitcount(b"k", Some(10), Some(14), BitRangeUnit::Bit, 0)
+                .unwrap(),
+            4
+        );
+        assert_eq!(
+            store
+                .bitcount(b"k", Some(32), Some(87), BitRangeUnit::Bit, 0)
+                .unwrap(),
+            7
+        );
+    }
+
+    #[test]
+    fn bitcount_negative_reverse_range_returns_zero() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"xxxx".to_vec(), None, 0);
+        assert_eq!(
+            store
+                .bitcount(b"k", Some(-6), Some(-7), BitRangeUnit::Byte, 0)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .bitcount(b"k", Some(-6), Some(-15), BitRangeUnit::Bit, 0)
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

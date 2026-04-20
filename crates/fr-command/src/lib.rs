@@ -5,10 +5,10 @@ pub use lua_eval::eval_script;
 
 use fr_protocol::RespFrame;
 use fr_store::{
-    ClientReplyState, ClientTrackingState, ExpireTimeValue, MaxmemoryPolicy, PttlValue,
-    PubSubMessage, ScoreBound, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
-    StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions, StreamId,
-    ValueType, glob_match, read_rss_bytes, sha1_hex_public,
+    BitRangeUnit, ClientReplyState, ClientTrackingState, ExpireTimeValue, MaxmemoryPolicy,
+    PttlValue, PubSubMessage, ScoreBound, Store, StoreError, StreamAutoClaimOptions,
+    StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
+    StreamGroupReadOptions, StreamId, ValueType, glob_match, read_rss_bytes, sha1_hex_public,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::io::{ErrorKind, Read, Write};
@@ -6894,18 +6894,36 @@ fn getbit(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 }
 
 fn bitcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() < 2 || argv.len() > 4 {
-        return Err(CommandError::WrongArity("BITCOUNT"));
-    }
-    let (start, end) = if argv.len() >= 4 {
-        (
+    let (start, end, unit) = match argv.len() {
+        2 => (None, None, BitRangeUnit::Byte),
+        4 => (
             Some(parse_i64_arg(&argv[2])?),
             Some(parse_i64_arg(&argv[3])?),
-        )
-    } else {
-        (None, None)
+            BitRangeUnit::Byte,
+        ),
+        5 => {
+            let unit = if argv[4].eq_ignore_ascii_case(b"bit") {
+                BitRangeUnit::Bit
+            } else if argv[4].eq_ignore_ascii_case(b"byte") {
+                BitRangeUnit::Byte
+            } else {
+                return Err(CommandError::SyntaxError);
+            };
+            (
+                Some(parse_i64_arg(&argv[2])?),
+                Some(parse_i64_arg(&argv[3])?),
+                unit,
+            )
+        }
+        _ => {
+            return Err(if argv.len() < 2 {
+                CommandError::WrongArity("BITCOUNT")
+            } else {
+                CommandError::SyntaxError
+            });
+        }
     };
-    let count = store.bitcount(&argv[1], start, end, now_ms)?;
+    let count = store.bitcount(&argv[1], start, end, unit, now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(count).unwrap_or(i64::MAX)))
 }
 
@@ -21992,6 +22010,61 @@ mod tests {
         .expect("bitcount range");
         // 'f' = 0x66 = 0b01100110 = 4 bits set
         assert_eq!(count, RespFrame::Integer(4));
+    }
+
+    #[test]
+    fn bitcount_with_bit_unit_range() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"foobar".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+
+        let count = dispatch_argv(
+            &[
+                b"BITCOUNT".to_vec(),
+                b"k".to_vec(),
+                b"10".to_vec(),
+                b"14".to_vec(),
+                b"BIT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("bitcount bit range");
+        assert_eq!(count, RespFrame::Integer(4));
+    }
+
+    #[test]
+    fn bitcount_three_arg_form_is_syntax_error() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"BITCOUNT".to_vec(), b"k".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("three-arg bitcount should fail");
+        assert_eq!(err, CommandError::SyntaxError);
+    }
+
+    #[test]
+    fn bitcount_invalid_unit_is_syntax_error() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"BITCOUNT".to_vec(),
+                b"k".to_vec(),
+                b"0".to_vec(),
+                b"1".to_vec(),
+                b"hello".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("bitcount invalid unit should fail");
+        assert_eq!(err, CommandError::SyntaxError);
     }
 
     #[test]

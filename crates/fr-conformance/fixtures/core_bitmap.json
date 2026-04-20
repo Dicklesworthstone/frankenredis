@@ -188,6 +188,64 @@
       }
     },
     {
+      "name": "bitcount_bit_range_10_14",
+      "now_ms": 16,
+      "argv": [
+        "BITCOUNT",
+        "bckey",
+        "10",
+        "14",
+        "BIT"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 4
+      }
+    },
+    {
+      "name": "bitcount_bit_range_out_of_bounds",
+      "now_ms": 17,
+      "argv": [
+        "BITCOUNT",
+        "bckey",
+        "32",
+        "87",
+        "BIT"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 7
+      }
+    },
+    {
+      "name": "bitcount_bit_negative_reverse",
+      "now_ms": 18,
+      "argv": [
+        "BITCOUNT",
+        "bckey",
+        "-6",
+        "-15",
+        "BIT"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
+    },
+    {
+      "name": "bitcount_syntax_error_missing_end",
+      "now_ms": 19,
+      "argv": [
+        "BITCOUNT",
+        "bckey",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR syntax error"
+      }
+    },
+    {
       "name": "bitpos_find_first_set_bit",
       "now_ms": 20,
       "argv": [
@@ -398,7 +456,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'bitcount' command"
+        "value": "ERR syntax error"
       }
     },
     {
