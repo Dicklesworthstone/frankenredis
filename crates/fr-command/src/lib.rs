@@ -5774,8 +5774,8 @@ fn cluster_unknown_subcommand_error(subcommand: &str) -> CommandError {
 
 fn cluster_cmd(
     argv: &[Vec<u8>],
-    _store: &mut Store,
-    _now_ms: u64,
+    store: &mut Store,
+    now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("CLUSTER"));
@@ -5798,19 +5798,35 @@ fn cluster_cmd(
         if argv.len() != 3 {
             return Err(cluster_wrong_subcommand_arity(sub));
         }
-        return Err(cluster_disabled_error());
+        let slot = fr_store::crc16_slot(&argv[2]);
+        return Ok(RespFrame::Integer(i64::from(slot)));
     }
     if sub.eq_ignore_ascii_case("GETKEYSINSLOT") {
         if argv.len() != 4 {
             return Err(cluster_wrong_subcommand_arity(sub));
         }
-        return Err(cluster_disabled_error());
+        let slot = parse_i64_arg(&argv[2])?;
+        if slot < 0 || slot > 16383 {
+            return Err(CommandError::Custom("ERR Invalid slot".to_string()));
+        }
+        let count = parse_i64_arg(&argv[3])?;
+        if count < 0 {
+            return Err(CommandError::InvalidInteger);
+        }
+        let keys = store.keys_in_slot(slot as u16, count as usize, now_ms);
+        let frames: Vec<RespFrame> = keys.into_iter().map(|k| RespFrame::BulkString(Some(k))).collect();
+        return Ok(RespFrame::Array(Some(frames)));
     }
     if sub.eq_ignore_ascii_case("COUNTKEYSINSLOT") {
         if argv.len() != 3 {
             return Err(cluster_wrong_subcommand_arity(sub));
         }
-        return Err(cluster_disabled_error());
+        let slot = parse_i64_arg(&argv[2])?;
+        if slot < 0 || slot > 16383 {
+            return Err(CommandError::Custom("ERR Invalid slot".to_string()));
+        }
+        let count = store.count_keys_in_slot(slot as u16, now_ms);
+        return Ok(RespFrame::Integer(count as i64));
     }
     if sub.eq_ignore_ascii_case("RESET")
         || sub.eq_ignore_ascii_case("MEET")
