@@ -5153,6 +5153,11 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                 subcommand: sub.to_string(),
             });
         }
+        match store.xlen(&argv[2], now_ms) {
+            Ok(0) => return Ok(xgroup_key_required_error()),
+            Ok(_) => {}
+            Err(err) => return Err(CommandError::Store(err)),
+        }
         return match store.xgroup_createconsumer(&argv[2], &argv[3], &argv[4], now_ms) {
             Ok(Some(created)) => Ok(RespFrame::Integer(if created { 1 } else { 0 })),
             Ok(None) => Ok(xgroup_nogroup_error(&argv[2], &argv[3])),
@@ -5220,6 +5225,12 @@ fn xgroup_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
     RespFrame::Error(format!(
         "NOGROUP No such consumer group '{group}' for key name '{key}'"
     ))
+}
+
+fn xgroup_key_required_error() -> RespFrame {
+    RespFrame::Error(
+        "ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.".to_string(),
+    )
 }
 
 fn xclaim_nogroup_error(key: &[u8], group: &[u8]) -> RespFrame {
@@ -21415,7 +21426,7 @@ mod tests {
         assert_eq!(
             missing_key,
             RespFrame::Error(
-                "NOGROUP No such consumer group 'g1' for key name 'missing'".to_string()
+                "ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.".to_string()
             )
         );
 

@@ -103,6 +103,13 @@ const CORE_STREAM_LIVE_STABLE_CASES: &[&str] = &[
     "xadd_partial_auto_new_ms_resets_seq",
     "xadd_partial_auto_verify_length",
     "xadd_partial_auto_lower_ms_rejected",
+    "xgroup_createconsumer_read1_c1_created",
+    "xgroup_createconsumer_read1_c1_duplicate",
+    "xgroup_createconsumer_read1_c2_created",
+    "xgroup_createconsumer_missing_group_error",
+    "xgroup_createconsumer_missing_key_error",
+    "xrange_wrongtype_seed",
+    "xgroup_createconsumer_wrongtype_error",
 ];
 
 const CORE_SCRIPTING_LIVE_STABLE_CASES: &[&str] = &[
