@@ -142,8 +142,8 @@
       "now_ms": 5200,
       "argv": ["OBJECT", "IDLETIME", "no_such_key_obj"],
       "expect": {
-        "kind": "error",
-        "value": "ERR no such key"
+        "kind": "bulk",
+        "value": null
       }
     },
 
@@ -231,6 +231,27 @@
         "kind": "error",
         "value": "ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust."
       }
+    },
+    {
+      "name": "object_idletime_enable_allkeys_lfu",
+      "now_ms": 20010,
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "allkeys-lfu"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "object_idletime_lfu_policy_errors",
+      "now_ms": 20011,
+      "argv": ["OBJECT", "IDLETIME", "obj_int"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust."
+      }
+    },
+    {
+      "name": "object_idletime_disable_lfu_again",
+      "now_ms": 20012,
+      "argv": ["CONFIG", "SET", "maxmemory-policy", "allkeys-lru"],
+      "expect": { "kind": "simple", "value": "OK" }
     },
 
     {
@@ -474,8 +495,8 @@
       "now_ms": 38001,
       "argv": ["OBJECT", "IDLETIME", "obj_exp_key"],
       "expect": {
-        "kind": "error",
-        "value": "ERR no such key"
+        "kind": "bulk",
+        "value": null
       }
     },
     {

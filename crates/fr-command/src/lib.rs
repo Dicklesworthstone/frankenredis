@@ -11464,9 +11464,17 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
                 subcommand: sub.to_string(),
             });
         }
+        if !store.exists_no_touch(&argv[2], now_ms) {
+            return Ok(RespFrame::BulkString(None));
+        }
+        if store.maxmemory_policy.tracks_lfu() {
+            return Ok(RespFrame::Error(
+                "ERR An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.".to_string(),
+            ));
+        }
         match store.object_idletime(&argv[2], now_ms) {
             Some(idle_secs) => Ok(RespFrame::Integer(idle_secs as i64)),
-            None => Ok(RespFrame::Error("ERR no such key".to_string())),
+            None => Ok(RespFrame::BulkString(None)),
         }
     } else if sub.eq_ignore_ascii_case("FREQ") {
         if argv.len() < 3 {
@@ -31285,6 +31293,63 @@ mod tests {
             reply,
             RespFrame::Error(
                 "ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn object_idletime_matches_missing_and_lfu_policy_gating() {
+        let mut store = Store::new();
+
+        let reply = dispatch_argv(
+            &[
+                b"OBJECT".to_vec(),
+                b"IDLETIME".to_vec(),
+                b"missing".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("missing idletime reply");
+        assert_eq!(reply, RespFrame::BulkString(None));
+
+        dispatch_argv(
+            &[b"SET".to_vec(), b"obj".to_vec(), b"v".to_vec()],
+            &mut store,
+            1,
+        )
+        .expect("seed key");
+
+        let reply = dispatch_argv(
+            &[b"OBJECT".to_vec(), b"IDLETIME".to_vec(), b"obj".to_vec()],
+            &mut store,
+            2_500,
+        )
+        .expect("non-lfu idletime reply");
+        assert_eq!(reply, RespFrame::Integer(2));
+
+        dispatch_argv(
+            &[
+                b"CONFIG".to_vec(),
+                b"SET".to_vec(),
+                b"maxmemory-policy".to_vec(),
+                b"allkeys-lfu".to_vec(),
+            ],
+            &mut store,
+            2_501,
+        )
+        .expect("enable lfu");
+
+        let reply = dispatch_argv(
+            &[b"OBJECT".to_vec(), b"IDLETIME".to_vec(), b"obj".to_vec()],
+            &mut store,
+            2_502,
+        )
+        .expect("lfu idletime reply");
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.".to_string()
             )
         );
     }

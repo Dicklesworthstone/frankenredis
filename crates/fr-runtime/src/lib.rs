@@ -17344,4 +17344,32 @@ user bob reset off nopass +@all
             RespFrame::Integer(0)
         );
     }
+
+    #[test]
+    fn object_idletime_matches_missing_key_and_lfu_policy_errors() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"OBJECT", b"IDLETIME", b"missing"]), 0),
+            RespFrame::BulkString(None)
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"v"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"maxmemory-policy", b"allkeys-lfu",]),
+                2,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"OBJECT", b"IDLETIME", b"k"]), 3),
+            RespFrame::Error(
+                "ERR An LFU maxmemory policy is selected, idle time not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.".to_string()
+            )
+        );
+    }
 }
