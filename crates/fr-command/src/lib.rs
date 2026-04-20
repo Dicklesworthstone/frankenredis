@@ -6136,7 +6136,7 @@ fn function_cmd(
                 RespFrame::BulkString(Some(b"library_name".to_vec())),
                 RespFrame::BulkString(Some(lib.name.as_bytes().to_vec())),
                 RespFrame::BulkString(Some(b"engine".to_vec())),
-                RespFrame::BulkString(Some(lib.engine.as_bytes().to_vec())),
+                RespFrame::BulkString(Some(lib.engine.to_ascii_lowercase().into_bytes())),
                 RespFrame::BulkString(Some(b"functions".to_vec())),
             ];
             let funcs: Vec<RespFrame> = lib
@@ -6180,7 +6180,7 @@ fn function_cmd(
         let (lib_count, func_count) = store.function_stats();
         Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"running_script".to_vec())),
-            RespFrame::BulkString(None),
+            RespFrame::Integer(0), // no script is currently running
             RespFrame::BulkString(Some(b"engines".to_vec())),
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"LUA".to_vec())),
@@ -12638,6 +12638,25 @@ fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             }
         }
         store.script_flush();
+        Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("DEBUG") {
+        if argv.len() != 3 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "SCRIPT",
+                subcommand: "DEBUG".to_string(),
+            });
+        }
+        let mode = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if !mode.eq_ignore_ascii_case("YES")
+            && !mode.eq_ignore_ascii_case("SYNC")
+            && !mode.eq_ignore_ascii_case("NO")
+        {
+            return Err(CommandError::Custom(
+                "ERR Use SCRIPT DEBUG YES, SYNC or NO".to_string(),
+            ));
+        }
+        // FrankenRedis does not currently implement a step-by-step Lua debugger.
+        // We accept the command for parity, but debugging mode won't actually trigger.
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("KILL") {
         Ok(RespFrame::Error(
