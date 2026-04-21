@@ -997,8 +997,8 @@ pub fn dispatch_argv(
         Some(CommandId::Waitaof) => return waitaof_cmd(argv),
         Some(CommandId::Cluster) => return cluster_cmd(argv, store, now_ms),
         Some(CommandId::Replconf) => return replconf_cmd(argv, store),
-        Some(CommandId::Psync) => return psync_cmd(argv),
-        Some(CommandId::Replicaof) => return replicaof_cmd(argv),
+        Some(CommandId::Psync) => return psync_cmd(argv, store),
+        Some(CommandId::Replicaof) => return replicaof_cmd(argv, store),
         Some(CommandId::Function) => return function_cmd(argv, store, now_ms),
         Some(CommandId::Fcall) => return fcall_cmd(argv, store, now_ms),
         Some(CommandId::FcallRo) => return fcall_cmd(argv, store, now_ms),
@@ -1011,7 +1011,7 @@ pub fn dispatch_argv(
         Some(CommandId::Zrangestore) => return zrangestore_cmd(argv, store, now_ms),
         Some(CommandId::Monitor) => return monitor_cmd(argv, store),
         Some(CommandId::Migrate) => return migrate_cmd(argv, store, now_ms),
-        Some(CommandId::Failover) => return failover_cmd(argv),
+        Some(CommandId::Failover) => return failover_cmd(argv, store),
         Some(CommandId::Module) => return module_cmd(argv),
         Some(CommandId::Sentinel) => return sentinel_cmd(argv),
         Some(CommandId::Pfdebug) => return pfdebug_cmd(argv, store, now_ms),
@@ -5959,10 +5959,13 @@ fn replconf_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErr
 
 // ── PSYNC ───────────────────────────────────────────────────────────
 
-fn psync_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn psync_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     // PSYNC replid offset
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("PSYNC"));
+    }
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
     }
     // In standalone mode, always respond with FULLRESYNC
     // Generate a deterministic replid for conformance testing
@@ -5975,7 +5978,7 @@ fn psync_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
 
 // ── REPLICAOF / SLAVEOF ─────────────────────────────────────────────
 
-fn replicaof_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn replicaof_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     // REPLICAOF host port / REPLICAOF NO ONE
     if argv.len() < 3 {
         return Err(CommandError::WrongArity(replicaof_command_name(argv)));
@@ -5983,12 +5986,18 @@ fn replicaof_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     let host = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     let port = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if host.eq_ignore_ascii_case("NO") && port.eq_ignore_ascii_case("ONE") {
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else {
         let parsed = parse_i64_arg(&argv[2])
             .map_err(|_| CommandError::Custom("ERR Invalid master port".to_string()))?;
         u16::try_from(parsed)
             .map_err(|_| CommandError::Custom("ERR Invalid master port".to_string()))?;
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         // Accept but don't actually replicate - standalone mode
         Ok(RespFrame::SimpleString("OK".to_string()))
     }
@@ -7700,18 +7709,10 @@ fn migrate_cmd(
     Ok(execute_migrate(&request, &key_specs, store, now_ms)?.reply)
 }
 
-fn failover_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
-    if argv.len() == 2 {
-        let arg = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if arg.eq_ignore_ascii_case("ABORT") {
-            return Err(CommandError::Custom(
-                "ERR No failover in progress.".to_string(),
-            ));
-        }
-    }
-
+fn failover_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     // Parse FAILOVER arguments using Redis's option grammar:
     // [TO host port] [FORCE] [TIMEOUT ms], with each option accepted at most once.
+    let mut abort = false;
     let mut _to_host: Option<&[u8]> = None;
     let mut _to_port: Option<u16> = None;
     let mut _force = false;
@@ -7720,7 +7721,17 @@ fn failover_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     let mut i = 1;
     while i < argv.len() {
         let arg = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if arg.eq_ignore_ascii_case("TIMEOUT") && i + 1 < argv.len() && _timeout_ms.is_none() {
+        if arg.eq_ignore_ascii_case("ABORT")
+            && i + 1 == argv.len()
+            && !abort
+            && _to_host.is_none()
+            && !_force
+            && _timeout_ms.is_none()
+        {
+            abort = true;
+            i += 1;
+        } else if arg.eq_ignore_ascii_case("TIMEOUT") && i + 1 < argv.len() && _timeout_ms.is_none()
+        {
             let ms = parse_i64_arg(&argv[i + 1])?;
             if ms <= 0 {
                 return Err(CommandError::Custom(
@@ -7743,6 +7754,15 @@ fn failover_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
         } else {
             return Err(CommandError::SyntaxError);
         }
+    }
+
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
+    }
+    if abort {
+        return Err(CommandError::Custom(
+            "ERR No failover in progress.".to_string(),
+        ));
     }
 
     // In standalone mode without replicas, FAILOVER cannot proceed
@@ -32044,6 +32064,83 @@ mod tests {
             RespFrame::SimpleString(s) => assert!(s.starts_with("FULLRESYNC ")),
             other => panic!("expected SimpleString, got {other:?}"), // ubs:ignore — AI triage
         }
+    }
+
+    #[test]
+    fn replication_admin_commands_reject_scripts_after_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let psync_arity = dispatch_argv(&[b"PSYNC".to_vec(), b"?".to_vec()], &mut store, 0)
+            .expect_err("psync arity");
+        assert_eq!(psync_arity, CommandError::WrongArity("PSYNC"));
+
+        let psync = dispatch_argv(
+            &[b"PSYNC".to_vec(), b"?".to_vec(), b"-1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("psync noscript");
+        assert_eq!(
+            psync,
+            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
+        );
+
+        let replicaof_arity =
+            dispatch_argv(&[b"REPLICAOF".to_vec()], &mut store, 0).expect_err("replicaof arity");
+        assert_eq!(replicaof_arity, CommandError::WrongArity("REPLICAOF"));
+
+        let replicaof_invalid = dispatch_argv(
+            &[
+                b"REPLICAOF".to_vec(),
+                b"127.0.0.1".to_vec(),
+                b"+6379".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("replicaof invalid port");
+        assert_eq!(
+            replicaof_invalid,
+            CommandError::Custom("ERR Invalid master port".to_string())
+        );
+
+        let replicaof = dispatch_argv(
+            &[b"REPLICAOF".to_vec(), b"NO".to_vec(), b"ONE".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("replicaof noscript");
+        assert_eq!(
+            replicaof,
+            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
+        );
+
+        let failover_syntax = dispatch_argv(
+            &[b"FAILOVER".to_vec(), b"ABORT".to_vec(), b"ABORT".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("failover syntax");
+        assert_eq!(failover_syntax, CommandError::SyntaxError);
+
+        let failover_timeout = dispatch_argv(
+            &[b"FAILOVER".to_vec(), b"TIMEOUT".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("failover timeout");
+        assert_eq!(
+            failover_timeout,
+            CommandError::Custom("ERR FAILOVER timeout must be greater than 0".to_string())
+        );
+
+        let failover = dispatch_argv(&[b"FAILOVER".to_vec(), b"ABORT".to_vec()], &mut store, 0)
+            .expect_err("failover noscript");
+        assert_eq!(
+            failover,
+            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
+        );
     }
 
     fn read_test_frame(stream: &mut TcpStream, read_buf: &mut Vec<u8>) -> RespFrame {
