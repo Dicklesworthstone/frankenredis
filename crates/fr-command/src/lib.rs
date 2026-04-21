@@ -972,7 +972,7 @@ pub fn dispatch_argv(
         Some(CommandId::Memory) => return memory_cmd(argv, store, now_ms),
         Some(CommandId::Substr) => return getrange(argv, store, now_ms),
         Some(CommandId::Bitop) => return bitop(argv, store, now_ms),
-        Some(CommandId::Quit) => return quit(argv),
+        Some(CommandId::Quit) => return quit(argv, store),
         Some(CommandId::Select) => return select(argv),
         Some(CommandId::Info) => return info(argv, store, now_ms),
         Some(CommandId::Command) => return command_cmd(argv),
@@ -986,7 +986,7 @@ pub fn dispatch_argv(
         Some(CommandId::Zscan) => return zscan(argv, store, now_ms),
         Some(CommandId::Object) => return object_cmd(argv, store, now_ms),
         Some(CommandId::Wait) => return wait_cmd(argv),
-        Some(CommandId::Reset) => return reset_cmd(argv),
+        Some(CommandId::Reset) => return reset_cmd(argv, store),
         Some(CommandId::Unlink) => return delete_keys(argv, store, now_ms, "UNLINK"),
         Some(CommandId::Touch) => return touch(argv, store, now_ms),
         Some(CommandId::Dump) => return dump_cmd(argv, store, now_ms),
@@ -8763,9 +8763,12 @@ fn zinterstore(
 
 // ── Server / connection commands ──────────────────────────────────────
 
-fn quit(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn quit(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     if argv.len() != 1 {
         return Err(CommandError::WrongArity("QUIT"));
+    }
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
     }
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
@@ -14081,9 +14084,12 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     Ok(RespFrame::Array(None))
 }
 
-fn reset_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn reset_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     if argv.len() != 1 {
         return Err(CommandError::WrongArity("RESET"));
+    }
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
     }
     Ok(RespFrame::SimpleString("RESET".to_string()))
 }
@@ -20158,6 +20164,25 @@ mod tests {
             vec![b"CLIENT".to_vec(), b"CACHING".to_vec(), b"INVALID".to_vec()],
         ] {
             let err = dispatch_argv(&argv, &mut store, 0).expect_err("client caching noscript");
+            assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        }
+    }
+
+    #[test]
+    fn quit_and_reset_rejected_from_scripts_after_arity_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let quit_arity = dispatch_argv(&[b"QUIT".to_vec(), b"extra".to_vec()], &mut store, 0)
+            .expect_err("quit arity");
+        assert_eq!(quit_arity, CommandError::WrongArity("QUIT"));
+
+        let reset_arity = dispatch_argv(&[b"RESET".to_vec(), b"extra".to_vec()], &mut store, 0)
+            .expect_err("reset arity");
+        assert_eq!(reset_arity, CommandError::WrongArity("RESET"));
+
+        for argv in [vec![b"QUIT".to_vec()], vec![b"RESET".to_vec()]] {
+            let err = dispatch_argv(&argv, &mut store, 0).expect_err("connection noscript");
             assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
         }
     }
