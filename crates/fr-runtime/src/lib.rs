@@ -18462,7 +18462,7 @@ mod tests {
         let saved = std::fs::read_to_string(&acl_path).expect("ACL SAVE should write acl file");
         assert!(
             saved.contains(
-                "user alice reset on #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 ~* &* +get"
+                "user alice reset on sanitize-payload #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 ~* &* +get"
             ),
             "saved ACL file should contain serialized alice rules, got: {saved}"
         );
@@ -18499,6 +18499,23 @@ mod tests {
             !entries.contains(&RespFrame::BulkString(Some(b"bob".to_vec()))),
             "bob should not survive ACL LOAD rollback to saved state"
         );
+
+        let list = rt.execute_frame(command(&[b"ACL", b"LIST"]), 6);
+        let RespFrame::Array(Some(list_entries)) = list else {
+            unreachable!("expected ACL LIST to return an array");
+        };
+        let alice = list_entries
+            .iter()
+            .find_map(|entry| match entry {
+                RespFrame::BulkString(Some(line))
+                    if String::from_utf8_lossy(line).contains("alice") =>
+                {
+                    Some(String::from_utf8_lossy(line).into_owned())
+                }
+                _ => None,
+            })
+            .expect("expected alice in ACL LIST after ACL LOAD");
+        assert_eq!(alice, "user alice on sanitize-payload #<hidden> ~* &* +get");
 
         let _ = std::fs::remove_file(&acl_path);
     }
