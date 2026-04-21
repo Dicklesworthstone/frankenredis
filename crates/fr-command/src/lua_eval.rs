@@ -3554,7 +3554,7 @@ impl<'a> LuaState<'a> {
         }
 
         match dispatch_argv(&argv, self.store, self.now_ms) {
-            Ok(frame) => Ok(vec![resp_to_lua(&frame)]),
+            Ok(frame) => Ok(vec![resp_to_lua_command_result(&argv, &frame)]),
             Err(e) => {
                 let err_msg = match e.to_resp() {
                     RespFrame::Error(msg) => msg,
@@ -3950,6 +3950,45 @@ fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Vec<u8> {
 }
 
 // ── Type conversions ────────────────────────────────────────────────────
+
+fn resp_to_lua_command_result(argv: &[Vec<u8>], frame: &RespFrame) -> LuaValue {
+    if config_get_returns_map_in_lua(argv)
+        && let Some(table) = config_get_resp_to_lua_map(frame)
+    {
+        return LuaValue::Table(table);
+    }
+    resp_to_lua(frame)
+}
+
+fn config_get_returns_map_in_lua(argv: &[Vec<u8>]) -> bool {
+    argv.len() >= 2
+        && argv[0].eq_ignore_ascii_case(b"CONFIG")
+        && argv[1].eq_ignore_ascii_case(b"GET")
+}
+
+fn config_get_resp_to_lua_map(frame: &RespFrame) -> Option<LuaTable> {
+    let items = match frame {
+        RespFrame::Array(Some(items)) | RespFrame::Sequence(items) => items,
+        RespFrame::Array(None) => return Some(LuaTable::new()),
+        _ => return None,
+    };
+
+    if items.len() % 2 != 0 {
+        return None;
+    }
+
+    let table = LuaTable::new();
+    for chunk in items.chunks_exact(2) {
+        let key = match &chunk[0] {
+            RespFrame::BulkString(Some(bytes)) => bytes.clone(),
+            RespFrame::SimpleString(text) => text.as_bytes().to_vec(),
+            _ => return None,
+        };
+        table.set(LuaValue::Str(key), resp_to_lua(&chunk[1]));
+    }
+
+    Some(table)
+}
 
 fn resp_to_lua(frame: &RespFrame) -> LuaValue {
     match frame {
@@ -4534,6 +4573,25 @@ mod tests {
         assert!(
             err.contains("attempt to index a nil value"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn redis_call_config_get_returns_keyed_lua_table() {
+        let mut store = Store::new();
+        let result = eval_script(
+            b"local cfg = redis.call('CONFIG', 'GET', 'maxmemory-policy') return cjson.encode(cfg)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+
+        assert_eq!(
+            result,
+            Ok(RespFrame::BulkString(Some(
+                b"{\"maxmemory-policy\":\"noeviction\"}".to_vec()
+            )))
         );
     }
 
