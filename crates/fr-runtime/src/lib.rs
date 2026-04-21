@@ -14400,6 +14400,18 @@ mod tests {
     }
 
     #[test]
+    fn cluster_myid_returns_node_id_when_cluster_is_enabled() {
+        let mut rt = Runtime::default_strict();
+        rt.server.store.cluster_enabled = true;
+
+        let myid = rt.execute_frame(command(&[b"CLUSTER", b"MYID"]), 0);
+        assert_eq!(
+            myid,
+            RespFrame::BulkString(Some(rt.server.store.server_run_id.as_bytes().to_vec()))
+        );
+    }
+
+    #[test]
     fn fr_p2c_007_u007_client_cluster_mode_flags_transition_cleanly() {
         let mut rt = Runtime::default_strict();
         assert!(!rt.is_cluster_read_only());

@@ -5811,7 +5811,6 @@ fn cluster_cmd(
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if sub.eq_ignore_ascii_case("HELP")
         || sub.eq_ignore_ascii_case("INFO")
-        || sub.eq_ignore_ascii_case("MYID")
         || sub.eq_ignore_ascii_case("SLOTS")
         || sub.eq_ignore_ascii_case("SHARDS")
         || sub.eq_ignore_ascii_case("NODES")
@@ -5821,6 +5820,17 @@ fn cluster_cmd(
             return Err(cluster_wrong_subcommand_arity(sub));
         }
         return Err(cluster_disabled_error());
+    }
+    if sub.eq_ignore_ascii_case("MYID") {
+        if argv.len() != 2 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        return Ok(RespFrame::BulkString(Some(
+            store.server_run_id.as_bytes().to_vec(),
+        )));
     }
     if sub.eq_ignore_ascii_case("KEYSLOT") {
         if argv.len() != 3 {
@@ -14511,7 +14521,8 @@ mod tests {
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
         SCRIPT_NOSCRIPT_ERROR, classify_command, client_wrong_subcommand_arity,
-        cluster_disabled_error, cluster_reset_with_keys_error, dispatch_argv,
+        cluster_disabled_error, cluster_reset_with_keys_error,
+        cluster_wrong_subcommand_arity, dispatch_argv,
         drain_pubsub_messages, eq_ascii_command, execute_migrate,
         format_eval_read_only_script_error, frame_to_argv, hello_bulk, hello_simple,
         is_write_command, parse_blocking_deadline_milliseconds, parse_migrate_request,
@@ -28304,7 +28315,6 @@ mod tests {
         for argv in [
             vec![b"CLUSTER".to_vec(), b"HELP".to_vec()],
             vec![b"CLUSTER".to_vec(), b"INFO".to_vec()],
-            vec![b"CLUSTER".to_vec(), b"MYID".to_vec()],
             vec![b"CLUSTER".to_vec(), b"SLOTS".to_vec()],
             vec![b"CLUSTER".to_vec(), b"KEYSLOT".to_vec(), b"foo".to_vec()],
             vec![
@@ -28370,6 +28380,30 @@ mod tests {
             CommandError::Custom(
                 "ERR wrong number of arguments for 'cluster|keyslot' command".to_string()
             )
+        );
+    }
+
+    #[test]
+    fn cluster_myid_returns_node_id_when_cluster_enabled() {
+        let mut store = Store::new();
+
+        let disabled =
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"MYID".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(disabled, cluster_disabled_error());
+
+        let wrong_arity = dispatch_argv(
+            &[b"CLUSTER".to_vec(), b"MYID".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(wrong_arity, cluster_wrong_subcommand_arity("MYID"));
+
+        store.cluster_enabled = true;
+        let out = dispatch_argv(&[b"CLUSTER".to_vec(), b"MYID".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(
+            out,
+            RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec()))
         );
     }
 
