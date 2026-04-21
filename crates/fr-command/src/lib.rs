@@ -6314,7 +6314,7 @@ fn function_cmd(
                 RespFrame::BulkString(Some(b"library_name".to_vec())),
                 RespFrame::BulkString(Some(lib.name.as_bytes().to_vec())),
                 RespFrame::BulkString(Some(b"engine".to_vec())),
-                RespFrame::BulkString(Some(lib.engine.as_bytes().to_vec())),
+                RespFrame::BulkString(Some(lib.engine.to_ascii_lowercase().into_bytes())),
                 RespFrame::BulkString(Some(b"functions".to_vec())),
             ];
             let funcs: Vec<RespFrame> = lib
@@ -11989,8 +11989,11 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
                 subcommand: sub.to_string(),
             });
         }
+        if !store.exists_no_touch(&argv[2], now_ms) {
+            return Ok(RespFrame::Error("ERR no such key".to_string()));
+        }
         match store.object_freq(&argv[2], now_ms) {
-            None => Ok(RespFrame::BulkString(None)),
+            None => Ok(RespFrame::Error("ERR no such key".to_string())),
             Some(freq) if store.maxmemory_policy.tracks_lfu() => Ok(RespFrame::Integer(freq.into())),
             Some(_) => Ok(RespFrame::Error(
                 "ERR An LFU maxmemory policy is not selected, access frequency not tracked. Please note that when switching between policies at runtime LRU and LFU data will take some time to adjust.".to_string(),
@@ -30299,7 +30302,7 @@ mod tests {
                 RespFrame::BulkString(None),
                 RespFrame::BulkString(Some(b"engines".to_vec())),
                 RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(b"LUA".to_vec())),
+                    RespFrame::BulkString(Some(b"lua".to_vec())),
                     RespFrame::Array(Some(vec![
                         RespFrame::BulkString(Some(b"libraries_count".to_vec())),
                         RespFrame::Integer(1),

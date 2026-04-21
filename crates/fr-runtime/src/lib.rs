@@ -205,14 +205,14 @@ fn acl_log_age_seconds(now_ms: u64, timestamp_ms: u64) -> String {
 
 fn client_wrong_subcommand_arity(subcommand: &str) -> RespFrame {
     RespFrame::Error(format!(
-        "ERR wrong number of arguments for 'client|{}' subcommand",
+        "ERR wrong number of arguments for 'client|{}' command",
         subcommand.to_ascii_lowercase()
     ))
 }
 
 fn config_wrong_subcommand_arity(subcommand: &str) -> RespFrame {
     RespFrame::Error(format!(
-        "ERR wrong number of arguments for 'config|{}' subcommand",
+        "ERR wrong number of arguments for 'config|{}' command",
         subcommand.to_ascii_lowercase()
     ))
 }
