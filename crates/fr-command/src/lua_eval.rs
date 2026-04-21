@@ -3598,6 +3598,7 @@ fn script_command_intercept(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String
         .or_else(|| acl_script_result(argv))
         .or_else(|| auth_script_result(argv))
         .or_else(|| hello_script_result(argv))
+        .or_else(|| sync_script_result(argv))
 }
 
 fn transaction_control_script_result(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
@@ -3857,6 +3858,19 @@ fn hello_script_result(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
 
 fn hello_client_name_is_valid(name: &[u8]) -> bool {
     name.iter().all(|&b| b > b' ')
+}
+
+fn sync_script_result(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
+    let command = argv.first()?;
+    if !command.eq_ignore_ascii_case(b"SYNC") {
+        return None;
+    }
+
+    if argv.len() != 1 {
+        return Some(Err(command_error_string(CommandError::WrongArity("SYNC"))));
+    }
+
+    Some(Err(SCRIPT_NOSCRIPT_ERROR.to_string()))
 }
 
 // ── Lua pattern matching engine ─────────────────────────────────────────
@@ -5167,6 +5181,40 @@ mod tests {
 
         let pcall = eval_script(
             b"local reply = redis.pcall('HELLO'); return reply.err",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(
+            pcall,
+            Ok(RespFrame::BulkString(Some(
+                SCRIPT_NOSCRIPT_ERROR.as_bytes().to_vec()
+            )))
+        );
+    }
+
+    #[test]
+    fn sync_rejects_from_scripts_after_arity_validation() {
+        let mut store = Store::new();
+
+        let arity = eval_script(
+            b"return redis.call('SYNC', 'extra')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(
+            arity,
+            Err("ERR wrong number of arguments for 'sync' command".to_string())
+        );
+
+        let sync = eval_script(b"return redis.call('SYNC')", &[], &[], &mut store, 0);
+        assert_eq!(sync, Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
+
+        let pcall = eval_script(
+            b"local reply = redis.pcall('SYNC'); return reply.err",
             &[],
             &[],
             &mut store,
