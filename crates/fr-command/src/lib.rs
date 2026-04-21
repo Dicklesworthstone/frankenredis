@@ -996,7 +996,7 @@ pub fn dispatch_argv(
         Some(CommandId::Lolwut) => return lolwut_cmd(argv),
         Some(CommandId::Waitaof) => return waitaof_cmd(argv),
         Some(CommandId::Cluster) => return cluster_cmd(argv, store, now_ms),
-        Some(CommandId::Replconf) => return replconf_cmd(argv),
+        Some(CommandId::Replconf) => return replconf_cmd(argv, store),
         Some(CommandId::Psync) => return psync_cmd(argv),
         Some(CommandId::Replicaof) => return replicaof_cmd(argv),
         Some(CommandId::Function) => return function_cmd(argv, store, now_ms),
@@ -5911,7 +5911,7 @@ fn cluster_cmd(
 
 // ── REPLCONF ────────────────────────────────────────────────────────
 
-fn replconf_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn replconf_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     if argv.len().is_multiple_of(2) {
         return Err(CommandError::SyntaxError);
     }
@@ -5924,9 +5924,15 @@ fn replconf_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
             if offset < 0 {
                 return Err(CommandError::InvalidInteger);
             }
+            if store.script_nesting_level >= 1 {
+                return Err(script_noscript_command_error());
+            }
             return Ok(RespFrame::SimpleString("OK".to_string()));
         }
         if option.eq_ignore_ascii_case("GETACK") {
+            if store.script_nesting_level >= 1 {
+                return Err(script_noscript_command_error());
+            }
             return Ok(RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"REPLCONF".to_vec())),
                 RespFrame::BulkString(Some(b"ACK".to_vec())),
@@ -5944,6 +5950,9 @@ fn replconf_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
             )));
         }
         idx += 2;
+    }
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
     }
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
@@ -31888,6 +31897,58 @@ mod tests {
         assert_eq!(
             err,
             CommandError::Custom("ERR Unrecognized REPLCONF option: UNKNOWN".to_string())
+        );
+    }
+
+    #[test]
+    fn replconf_rejected_from_scripts_after_shape_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let arity =
+            dispatch_argv(&[b"REPLCONF".to_vec(), b"ACK".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(arity, CommandError::SyntaxError);
+
+        let invalid = dispatch_argv(
+            &[b"REPLCONF".to_vec(), b"ACK".to_vec(), b"-1".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(invalid, CommandError::InvalidInteger);
+
+        let ack = dispatch_argv(
+            &[b"REPLCONF".to_vec(), b"ACK".to_vec(), b"100".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(ack, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+
+        let getack = dispatch_argv(
+            &[b"REPLCONF".to_vec(), b"GETACK".to_vec(), b"*".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            getack,
+            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
+        );
+
+        let listening_port = dispatch_argv(
+            &[
+                b"REPLCONF".to_vec(),
+                b"listening-port".to_vec(),
+                b"6380".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            listening_port,
+            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
         );
     }
 
