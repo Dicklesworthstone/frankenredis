@@ -3594,7 +3594,10 @@ fn command_error_string(err: CommandError) -> String {
 }
 
 fn script_command_intercept(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
-    transaction_control_script_result(argv).or_else(|| acl_script_result(argv))
+    transaction_control_script_result(argv)
+        .or_else(|| acl_script_result(argv))
+        .or_else(|| auth_script_result(argv))
+        .or_else(|| hello_script_result(argv))
 }
 
 fn transaction_control_script_result(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
@@ -3785,6 +3788,75 @@ fn acl_help_frame() -> RespFrame {
         bulk("HELP"),
         bulk("    Print this help."),
     ]))
+}
+
+fn auth_script_result(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
+    let command = argv.first()?;
+    if !command.eq_ignore_ascii_case(b"AUTH") {
+        return None;
+    }
+
+    if argv.len() != 2 && argv.len() != 3 {
+        return Some(Err(command_error_string(CommandError::WrongArity("AUTH"))));
+    }
+
+    Some(Err(SCRIPT_NOSCRIPT_ERROR.to_string()))
+}
+
+fn hello_script_result(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
+    let command = argv.first()?;
+    if !command.eq_ignore_ascii_case(b"HELLO") {
+        return None;
+    }
+
+    if argv.len() == 1 {
+        return Some(Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
+    }
+
+    let protocol_version = match parse_i64_arg(&argv[1]) {
+        Ok(version) => version,
+        Err(err) => return Some(Err(command_error_string(err))),
+    };
+
+    if protocol_version != 2 && protocol_version != 3 {
+        return Some(Err(format!(
+            "NOPROTO unsupported protocol version '{}'",
+            protocol_version
+        )));
+    }
+
+    let mut options = argv[2..].iter();
+    while let Some(option_arg) = options.next() {
+        let option = match std::str::from_utf8(option_arg) {
+            Ok(option) => option,
+            Err(_) => return Some(Err(command_error_string(CommandError::InvalidUtf8Argument))),
+        };
+        if option.eq_ignore_ascii_case("AUTH") {
+            if options.next().is_none() || options.next().is_none() {
+                return Some(Err(command_error_string(CommandError::SyntaxError)));
+            }
+            continue;
+        }
+        if option.eq_ignore_ascii_case("SETNAME") {
+            let Some(name) = options.next() else {
+                return Some(Err(command_error_string(CommandError::SyntaxError)));
+            };
+            if !hello_client_name_is_valid(name) {
+                return Some(Err(
+                    "ERR Client names cannot contain spaces, newlines or special characters."
+                        .to_string(),
+                ));
+            }
+            continue;
+        }
+        return Some(Err(command_error_string(CommandError::SyntaxError)));
+    }
+
+    Some(Err(SCRIPT_NOSCRIPT_ERROR.to_string()))
+}
+
+fn hello_client_name_is_valid(name: &[u8]) -> bool {
+    name.iter().all(|&b| b > b' ')
 }
 
 // ── Lua pattern matching engine ─────────────────────────────────────────
@@ -4996,6 +5068,105 @@ mod tests {
 
         let pcall = eval_script(
             b"local reply = redis.pcall('ACL', 'WHOAMI'); return reply.err",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(
+            pcall,
+            Ok(RespFrame::BulkString(Some(
+                SCRIPT_NOSCRIPT_ERROR.as_bytes().to_vec()
+            )))
+        );
+    }
+
+    #[test]
+    fn auth_and_hello_reject_from_scripts_after_validation() {
+        let mut store = Store::new();
+
+        let auth_arity = eval_script(b"return redis.call('AUTH')", &[], &[], &mut store, 0);
+        assert_eq!(
+            auth_arity,
+            Err("ERR wrong number of arguments for 'auth' command".to_string())
+        );
+
+        for script in [
+            b"return redis.call('AUTH', 'secret')".as_slice(),
+            b"return redis.call('AUTH', 'alice', 'secret')".as_slice(),
+            b"return redis.call('HELLO')".as_slice(),
+            b"return redis.call('HELLO', '2')".as_slice(),
+            b"return redis.call('HELLO', '3', 'AUTH', 'alice', 'secret')".as_slice(),
+            b"return redis.call('HELLO', '3', 'SETNAME', 'client1')".as_slice(),
+            b"return redis.call('HELLO', '3', 'AUTH', 'alice', 'secret', 'SETNAME', 'client1')"
+                .as_slice(),
+        ] {
+            let err = eval_script(script, &[], &[], &mut store, 0);
+            assert_eq!(err, Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        }
+
+        let hello_integer = eval_script(
+            b"return redis.call('HELLO', 'wat')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(
+            hello_integer,
+            Err("ERR value is not an integer or out of range".to_string())
+        );
+
+        let hello_proto = eval_script(b"return redis.call('HELLO', '4')", &[], &[], &mut store, 0);
+        assert_eq!(
+            hello_proto,
+            Err("NOPROTO unsupported protocol version '4'".to_string())
+        );
+
+        let hello_auth_syntax = eval_script(
+            b"return redis.call('HELLO', '3', 'AUTH', 'alice')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(hello_auth_syntax, Err("ERR syntax error".to_string()));
+
+        let hello_setname_syntax = eval_script(
+            b"return redis.call('HELLO', '3', 'SETNAME')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(hello_setname_syntax, Err("ERR syntax error".to_string()));
+
+        let hello_setname_invalid = eval_script(
+            b"return redis.call('HELLO', '3', 'SETNAME', 'bad\\nname')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(
+            hello_setname_invalid,
+            Err(
+                "ERR Client names cannot contain spaces, newlines or special characters."
+                    .to_string()
+            )
+        );
+
+        let hello_unknown_option = eval_script(
+            b"return redis.call('HELLO', '3', 'BOGUS')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(hello_unknown_option, Err("ERR syntax error".to_string()));
+
+        let pcall = eval_script(
+            b"local reply = redis.pcall('HELLO'); return reply.err",
             &[],
             &[],
             &mut store,
