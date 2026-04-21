@@ -6437,9 +6437,8 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         }));
     }
     if store.script_nesting_level >= 1 {
-        return Ok(RespFrame::Error(
-            "ERR EVAL nested calls are not allowed".to_string(),
-        ));
+        parse_eval_args(argv)?;
+        return Err(script_noscript_command_error());
     }
     let func_name = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
 
@@ -12755,13 +12754,11 @@ fn eval_cmd(
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("EVAL"));
     }
-    if store.script_nesting_level >= 1 {
-        return Ok(RespFrame::Error(
-            "ERR EVAL nested calls are not allowed".to_string(),
-        ));
-    }
     let script = &argv[1];
     let (_numkeys, keys, args) = parse_eval_args(argv)?;
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
+    }
 
     // Cache the script (Redis caches on EVAL too)
     store.script_load(script);
@@ -12791,13 +12788,11 @@ fn evalsha_cmd(
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("EVALSHA"));
     }
-    if store.script_nesting_level >= 1 {
-        return Ok(RespFrame::Error(
-            "ERR EVAL nested calls are not allowed".to_string(),
-        ));
-    }
     let sha1 = &argv[1];
     let (_numkeys, keys, args) = parse_eval_args(argv)?;
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
+    }
 
     // Look up script by SHA1
     let script = match store.script_get(sha1) {
@@ -25996,6 +25991,59 @@ mod tests {
         )
         .expect("evalsha_ro pcall publish rejection");
         assert_eq!(pcall_out, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn nested_scripting_commands_return_noscript_after_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let arity_cases = [
+            (
+                vec![b"EVAL".to_vec(), b"return 1".to_vec()],
+                CommandError::WrongArity("EVAL"),
+            ),
+            (
+                vec![b"EVALSHA".to_vec(), b"deadbeef".to_vec()],
+                CommandError::WrongArity("EVALSHA"),
+            ),
+            (
+                vec![b"FCALL_RO".to_vec(), b"func".to_vec()],
+                CommandError::WrongArity("fcall_ro"),
+            ),
+        ];
+        for (argv, expected) in arity_cases {
+            let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
+            assert_eq!(err, expected, "argv: {argv:?}");
+        }
+
+        let integer_cases = [
+            vec![b"EVAL".to_vec(), b"return 1".to_vec(), b"abc".to_vec()],
+            vec![b"EVALSHA".to_vec(), b"deadbeef".to_vec(), b"abc".to_vec()],
+            vec![b"FCALL".to_vec(), b"func".to_vec(), b"abc".to_vec()],
+            vec![b"FCALL_RO".to_vec(), b"func".to_vec(), b"abc".to_vec()],
+        ];
+        for argv in integer_cases {
+            let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
+            assert_eq!(err, CommandError::InvalidInteger, "argv: {argv:?}");
+        }
+
+        let noscript_cases = [
+            vec![b"EVAL".to_vec(), b"return 1".to_vec(), b"0".to_vec()],
+            vec![b"EVAL_RO".to_vec(), b"return 1".to_vec(), b"0".to_vec()],
+            vec![b"EVALSHA".to_vec(), b"deadbeef".to_vec(), b"0".to_vec()],
+            vec![b"EVALSHA_RO".to_vec(), b"deadbeef".to_vec(), b"0".to_vec()],
+            vec![b"FCALL".to_vec(), b"func".to_vec(), b"0".to_vec()],
+            vec![b"FCALL_RO".to_vec(), b"func".to_vec(), b"0".to_vec()],
+        ];
+        for argv in noscript_cases {
+            let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
+            assert_eq!(
+                err,
+                CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()),
+                "argv: {argv:?}"
+            );
+        }
     }
 
     #[test]
