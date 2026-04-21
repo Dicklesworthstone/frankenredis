@@ -11420,6 +11420,9 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
     } else if sub.eq_ignore_ascii_case("TRACKING") {
         // CLIENT TRACKING ON|OFF [REDIRECT id] [PREFIX prefix ...] [BCAST] [OPTIN] [OPTOUT] [NOLOOP]
         let requested = parse_client_tracking_state(argv)?;
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         let current = store.dispatch_client_ctx.client_tracking.clone();
         store.dispatch_client_ctx.client_tracking =
             apply_client_tracking_update(&current, requested)?;
@@ -14521,9 +14524,8 @@ mod tests {
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
         SCRIPT_NOSCRIPT_ERROR, classify_command, client_wrong_subcommand_arity,
-        cluster_disabled_error, cluster_reset_with_keys_error,
-        cluster_wrong_subcommand_arity, dispatch_argv,
-        drain_pubsub_messages, eq_ascii_command, execute_migrate,
+        cluster_disabled_error, cluster_reset_with_keys_error, cluster_wrong_subcommand_arity,
+        dispatch_argv, drain_pubsub_messages, eq_ascii_command, execute_migrate,
         format_eval_read_only_script_error, frame_to_argv, hello_bulk, hello_simple,
         is_write_command, parse_blocking_deadline_milliseconds, parse_migrate_request,
         pubsub_message_to_frame,
@@ -30255,6 +30257,51 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, CommandError::SyntaxError);
+    }
+
+    #[test]
+    fn client_tracking_rejected_from_scripts_after_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+        let before = store.dispatch_client_ctx.client_tracking.clone();
+
+        let arity = dispatch_argv(&[b"CLIENT".to_vec(), b"TRACKING".to_vec()], &mut store, 0)
+            .expect_err("client tracking arity");
+        assert_eq!(arity, client_wrong_subcommand_arity("TRACKING"));
+
+        let syntax = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"TRACKING".to_vec(), b"MAYBE".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("client tracking syntax");
+        assert_eq!(syntax, CommandError::SyntaxError);
+
+        let matrix = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"TRACKING".to_vec(),
+                b"ON".to_vec(),
+                b"PREFIX".to_vec(),
+                b"foo".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("client tracking option matrix");
+        assert_eq!(
+            matrix,
+            CommandError::Custom(CLIENT_TRACKING_PREFIX_REQUIRES_BCAST.to_string())
+        );
+
+        for argv in [
+            vec![b"CLIENT".to_vec(), b"TRACKING".to_vec(), b"ON".to_vec()],
+            vec![b"CLIENT".to_vec(), b"TRACKING".to_vec(), b"OFF".to_vec()],
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).expect_err("client tracking noscript");
+            assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+            assert_eq!(store.dispatch_client_ctx.client_tracking, before);
+        }
     }
 
     #[test]
