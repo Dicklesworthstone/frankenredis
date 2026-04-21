@@ -12,7 +12,7 @@ use std::rc::Rc;
 use fr_protocol::RespFrame;
 use fr_store::Store;
 
-use crate::dispatch_argv;
+use crate::{SCRIPT_NOSCRIPT_ERROR, dispatch_argv};
 
 // ── Value type ──────────────────────────────────────────────────────────
 
@@ -3553,13 +3553,24 @@ impl<'a> LuaState<'a> {
             argv.push(arg.to_redis_arg()?);
         }
 
-        match dispatch_argv(&argv, self.store, self.now_ms) {
+        let command_result = if let Some(err_msg) = transaction_control_script_error(&argv) {
+            Err(err_msg)
+        } else {
+            match dispatch_argv(&argv, self.store, self.now_ms) {
+                Ok(frame) => Ok(frame),
+                Err(e) => {
+                    let err_msg = match e.to_resp() {
+                        RespFrame::Error(msg) => msg,
+                        _ => format!("{e:?}"),
+                    };
+                    Err(err_msg)
+                }
+            }
+        };
+
+        match command_result {
             Ok(frame) => Ok(vec![resp_to_lua_command_result(&argv, &frame)]),
-            Err(e) => {
-                let err_msg = match e.to_resp() {
-                    RespFrame::Error(msg) => msg,
-                    _ => format!("{e:?}"),
-                };
+            Err(err_msg) => {
                 if is_pcall {
                     let t = LuaTable::new();
                     t.set(
@@ -3573,6 +3584,53 @@ impl<'a> LuaState<'a> {
             }
         }
     }
+}
+
+fn transaction_control_script_error(argv: &[Vec<u8>]) -> Option<String> {
+    let command = argv.first()?;
+    let wrong_arity = |name: &str| {
+        Some(format!(
+            "ERR wrong number of arguments for '{}' command",
+            name.to_ascii_lowercase()
+        ))
+    };
+
+    if command.eq_ignore_ascii_case(b"MULTI") {
+        if argv.len() != 1 {
+            return wrong_arity("MULTI");
+        }
+        return Some(SCRIPT_NOSCRIPT_ERROR.to_string());
+    }
+
+    if command.eq_ignore_ascii_case(b"EXEC") {
+        if argv.len() != 1 {
+            return wrong_arity("EXEC");
+        }
+        return Some(SCRIPT_NOSCRIPT_ERROR.to_string());
+    }
+
+    if command.eq_ignore_ascii_case(b"DISCARD") {
+        if argv.len() != 1 {
+            return wrong_arity("DISCARD");
+        }
+        return Some(SCRIPT_NOSCRIPT_ERROR.to_string());
+    }
+
+    if command.eq_ignore_ascii_case(b"WATCH") {
+        if argv.len() < 2 {
+            return wrong_arity("WATCH");
+        }
+        return Some(SCRIPT_NOSCRIPT_ERROR.to_string());
+    }
+
+    if command.eq_ignore_ascii_case(b"UNWATCH") {
+        if argv.len() != 1 {
+            return wrong_arity("UNWATCH");
+        }
+        return Some(SCRIPT_NOSCRIPT_ERROR.to_string());
+    }
+
+    None
 }
 
 // ── Lua pattern matching engine ─────────────────────────────────────────
@@ -4562,7 +4620,8 @@ mod tests {
     use fr_store::Store;
 
     use super::{
-        LuaTable, LuaValue, eval_script, json_to_lua_value, lua_raw_equal, lua_value_to_json,
+        LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, eval_script, json_to_lua_value, lua_raw_equal,
+        lua_value_to_json,
     };
 
     #[test]
@@ -4591,6 +4650,100 @@ mod tests {
             result,
             Ok(RespFrame::BulkString(Some(
                 b"{\"maxmemory-policy\":\"noeviction\"}".to_vec()
+            )))
+        );
+    }
+
+    #[test]
+    fn transaction_control_commands_reject_from_scripts_after_arity_validation() {
+        let mut store = Store::new();
+
+        let wrong_multi = eval_script(
+            b"return redis.call('MULTI', 'extra')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(
+            wrong_multi,
+            Err("ERR wrong number of arguments for 'multi' command".to_string())
+        );
+
+        let multi = eval_script(b"return redis.call('MULTI')", &[], &[], &mut store, 0);
+        assert_eq!(multi, Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
+
+        let wrong_exec = eval_script(
+            b"return redis.call('EXEC', 'extra')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(
+            wrong_exec,
+            Err("ERR wrong number of arguments for 'exec' command".to_string())
+        );
+
+        let exec = eval_script(b"return redis.call('EXEC')", &[], &[], &mut store, 0);
+        assert_eq!(exec, Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
+
+        let wrong_discard = eval_script(
+            b"return redis.call('DISCARD', 'extra')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(
+            wrong_discard,
+            Err("ERR wrong number of arguments for 'discard' command".to_string())
+        );
+
+        let discard = eval_script(b"return redis.call('DISCARD')", &[], &[], &mut store, 0);
+        assert_eq!(discard, Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
+
+        let wrong_watch = eval_script(b"return redis.call('WATCH')", &[], &[], &mut store, 0);
+        assert_eq!(
+            wrong_watch,
+            Err("ERR wrong number of arguments for 'watch' command".to_string())
+        );
+
+        let watch = eval_script(
+            b"return redis.call('WATCH', 'k1', 'k2')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(watch, Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
+
+        let wrong_unwatch = eval_script(
+            b"return redis.call('UNWATCH', 'extra')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(
+            wrong_unwatch,
+            Err("ERR wrong number of arguments for 'unwatch' command".to_string())
+        );
+
+        let unwatch = eval_script(b"return redis.call('UNWATCH')", &[], &[], &mut store, 0);
+        assert_eq!(unwatch, Err(SCRIPT_NOSCRIPT_ERROR.to_string()));
+
+        let pcall = eval_script(
+            b"local reply = redis.pcall('MULTI'); return reply.err",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(
+            pcall,
+            Ok(RespFrame::BulkString(Some(
+                SCRIPT_NOSCRIPT_ERROR.as_bytes().to_vec()
             )))
         );
     }
