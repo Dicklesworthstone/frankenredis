@@ -5869,11 +5869,14 @@ fn cluster_cmd(
         return Ok(RespFrame::Integer(count as i64));
     }
     if sub.eq_ignore_ascii_case("RESET") {
-        if !store.cluster_enabled {
-            return Err(cluster_disabled_error());
-        }
         if argv.len() > 3 {
             return Err(cluster_subcommand_syntax_error(sub));
+        }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
         }
         if let Some(mode) = argv.get(2) {
             let mode = std::str::from_utf8(mode).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -27783,6 +27786,40 @@ mod tests {
         let err =
             dispatch_argv(&[b"CLUSTER".to_vec(), b"RESET".to_vec()], &mut store, 0).unwrap_err();
         assert_eq!(err, cluster_reset_with_keys_error());
+    }
+
+    #[test]
+    fn cluster_reset_rejected_from_scripts_after_arity_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let arity = dispatch_argv(
+            &[
+                b"CLUSTER".to_vec(),
+                b"RESET".to_vec(),
+                b"HARD".to_vec(),
+                b"extra".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("cluster reset arity");
+        assert_eq!(
+            arity,
+            CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments for 'RESET'. Try CLUSTER HELP."
+                    .to_string()
+            )
+        );
+
+        for argv in [
+            vec![b"CLUSTER".to_vec(), b"RESET".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"RESET".to_vec(), b"SOFT".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"RESET".to_vec(), b"INVALID".to_vec()],
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).expect_err("cluster reset noscript");
+            assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        }
     }
 
     // ── CLIENT KILL/PAUSE/UNPAUSE tests ─────────────────────────────
