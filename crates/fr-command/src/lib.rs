@@ -994,7 +994,7 @@ pub fn dispatch_argv(
         Some(CommandId::Sort) => return sort_cmd(argv, store, now_ms),
         Some(CommandId::Copy) => return copy_cmd(argv, store, now_ms),
         Some(CommandId::Lolwut) => return lolwut_cmd(argv),
-        Some(CommandId::Waitaof) => return waitaof_cmd(argv),
+        Some(CommandId::Waitaof) => return waitaof_cmd(argv, store),
         Some(CommandId::Cluster) => return cluster_cmd(argv, store, now_ms),
         Some(CommandId::Replconf) => return replconf_cmd(argv, store),
         Some(CommandId::Psync) => return psync_cmd(argv, store),
@@ -5725,7 +5725,7 @@ fn generate_lolwut_art(version: u32) -> String {
 
 // ── WAITAOF ─────────────────────────────────────────────────────────
 
-fn waitaof_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
+fn waitaof_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     // WAITAOF numlocal numreplicas timeout
     if argv.len() != 4 {
         return Err(CommandError::WrongArity("WAITAOF"));
@@ -5752,6 +5752,9 @@ fn waitaof_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     })?;
     if timeout_ms < 0 {
         return Err(CommandError::Custom("ERR timeout is negative".to_string()));
+    }
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
     }
     if required_local > 0 {
         return Ok(RespFrame::Error(
@@ -28151,6 +28154,97 @@ mod tests {
         assert_eq!(
             invalid_replica,
             CommandError::Custom("ERR value is out of range, must be positive".to_string())
+        );
+    }
+
+    #[test]
+    fn waitaof_rejected_from_scripts_after_integer_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let wrong_arity = dispatch_argv(
+            &[b"WAITAOF".to_vec(), b"0".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("wrong arity should win");
+        assert_eq!(wrong_arity, CommandError::WrongArity("WAITAOF"));
+
+        let invalid_local = dispatch_argv(
+            &[
+                b"WAITAOF".to_vec(),
+                b"nope".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("invalid local should still be integer error");
+        assert_eq!(invalid_local, CommandError::InvalidInteger);
+
+        let invalid_replica = dispatch_argv(
+            &[
+                b"WAITAOF".to_vec(),
+                b"0".to_vec(),
+                b"nope".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("invalid replica should still be range error");
+        assert_eq!(
+            invalid_replica,
+            CommandError::Custom("ERR value is out of range, must be positive".to_string())
+        );
+
+        let invalid_timeout = dispatch_argv(
+            &[
+                b"WAITAOF".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("invalid timeout should still win");
+        assert_eq!(
+            invalid_timeout,
+            CommandError::Custom("ERR timeout is negative".to_string())
+        );
+
+        let valid = dispatch_argv(
+            &[
+                b"WAITAOF".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("valid waitaof from script should noscript");
+        assert_eq!(
+            valid,
+            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
+        );
+
+        let valid_local = dispatch_argv(
+            &[
+                b"WAITAOF".to_vec(),
+                b"1".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("noscript should win before disabled appendonly reply");
+        assert_eq!(
+            valid_local,
+            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
         );
     }
 
