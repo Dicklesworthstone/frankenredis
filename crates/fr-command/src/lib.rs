@@ -11146,6 +11146,9 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         if argv.len() != 3 {
             return Err(client_wrong_subcommand_arity(sub));
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         let mode = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if !mode.eq_ignore_ascii_case("ON") && !mode.eq_ignore_ascii_case("OFF") {
             return Err(CommandError::Custom(
@@ -11156,6 +11159,9 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
     } else if sub.eq_ignore_ascii_case("SETINFO") {
         if argv.len() != 4 {
             return Err(client_wrong_subcommand_arity(sub));
+        }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
         }
         let attr = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         let val = std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -11341,12 +11347,18 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         if argv.len() != 2 {
             return Err(client_wrong_subcommand_arity(sub));
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         Ok(RespFrame::Integer(client_tracking_getredir_value(
             &store.dispatch_client_ctx.client_tracking,
         )))
     } else if sub.eq_ignore_ascii_case("TRACKINGINFO") {
         if argv.len() != 2 {
             return Err(client_wrong_subcommand_arity(sub));
+        }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
         }
         Ok(client_trackinginfo_frame(
             &store.dispatch_client_ctx.client_tracking,
@@ -28305,6 +28317,77 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, client_wrong_subcommand_arity("NO-TOUCH"));
+    }
+
+    #[test]
+    fn client_connection_meta_subcommands_reject_scripts_after_arity_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let err =
+            dispatch_argv(&[b"CLIENT".to_vec(), b"NO-EVICT".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(err, client_wrong_subcommand_arity("NO-EVICT"));
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"NO-TOUCH".to_vec(),
+                b"ON".to_vec(),
+                b"EXTRA".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, client_wrong_subcommand_arity("NO-TOUCH"));
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"SETINFO".to_vec(),
+                b"LIB-NAME".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, client_wrong_subcommand_arity("SETINFO"));
+
+        let err = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"GETREDIR".to_vec(), b"EXTRA".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, client_wrong_subcommand_arity("GETREDIR"));
+
+        let err = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"TRACKINGINFO".to_vec(),
+                b"EXTRA".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, client_wrong_subcommand_arity("TRACKINGINFO"));
+
+        for argv in [
+            vec![b"CLIENT".to_vec(), b"NO-EVICT".to_vec(), b"ON".to_vec()],
+            vec![b"CLIENT".to_vec(), b"NO-TOUCH".to_vec(), b"OFF".to_vec()],
+            vec![
+                b"CLIENT".to_vec(),
+                b"SETINFO".to_vec(),
+                b"LIB-NAME".to_vec(),
+                b"redis-py".to_vec(),
+            ],
+            vec![b"CLIENT".to_vec(), b"GETREDIR".to_vec()],
+            vec![b"CLIENT".to_vec(), b"TRACKINGINFO".to_vec()],
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
+            assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        }
     }
 
     #[test]
