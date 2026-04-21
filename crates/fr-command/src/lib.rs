@@ -5783,7 +5783,9 @@ fn cluster_subcommand_syntax_error(subcommand: &str) -> CommandError {
 }
 
 fn cluster_reset_with_keys_error() -> CommandError {
-    CommandError::Custom("ERR CLUSTER RESET can't be called with master nodes containing keys".to_string())
+    CommandError::Custom(
+        "ERR CLUSTER RESET can't be called with master nodes containing keys".to_string(),
+    )
 }
 
 // ── CLUSTER ─────────────────────────────────────────────────────────
@@ -14341,10 +14343,9 @@ mod tests {
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
         SCRIPT_NOSCRIPT_ERROR, classify_command, client_wrong_subcommand_arity,
         cluster_reset_with_keys_error, dispatch_argv, drain_pubsub_messages, eq_ascii_command,
-        execute_migrate,
-        format_eval_read_only_script_error, frame_to_argv, hello_bulk, hello_simple,
-        is_write_command, parse_blocking_deadline_milliseconds, parse_migrate_request,
-        pubsub_message_to_frame,
+        execute_migrate, format_eval_read_only_script_error, frame_to_argv, hello_bulk,
+        hello_simple, is_write_command, parse_blocking_deadline_milliseconds,
+        parse_migrate_request, pubsub_message_to_frame,
     };
 
     fn classify_command_linear(cmd: &[u8]) -> Option<CommandId> {
@@ -27769,8 +27770,8 @@ mod tests {
             0,
         )
         .unwrap();
-        let err = dispatch_argv(&[b"CLUSTER".to_vec(), b"RESET".to_vec()], &mut store, 0)
-            .unwrap_err();
+        let err =
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"RESET".to_vec()], &mut store, 0).unwrap_err();
         assert_eq!(err, cluster_reset_with_keys_error());
     }
 
