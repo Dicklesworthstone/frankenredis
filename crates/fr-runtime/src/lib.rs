@@ -5572,8 +5572,6 @@ impl Runtime {
             "connection",
             "transaction",
             "scripting",
-            "server",
-            "generic",
         ];
 
         if argv.len() == 2 {
@@ -17558,6 +17556,38 @@ mod tests {
         assert!(
             matches!(&flush_reply, RespFrame::Error(e) if e.contains("NOPERM")),
             "FLUSHDB should be denied, got: {flush_reply:?}"
+        );
+    }
+
+    #[test]
+    fn acl_cat_returns_redis_canonical_category_order() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"CAT"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"keyspace".to_vec())),
+                RespFrame::BulkString(Some(b"read".to_vec())),
+                RespFrame::BulkString(Some(b"write".to_vec())),
+                RespFrame::BulkString(Some(b"set".to_vec())),
+                RespFrame::BulkString(Some(b"sortedset".to_vec())),
+                RespFrame::BulkString(Some(b"list".to_vec())),
+                RespFrame::BulkString(Some(b"hash".to_vec())),
+                RespFrame::BulkString(Some(b"string".to_vec())),
+                RespFrame::BulkString(Some(b"bitmap".to_vec())),
+                RespFrame::BulkString(Some(b"hyperloglog".to_vec())),
+                RespFrame::BulkString(Some(b"geo".to_vec())),
+                RespFrame::BulkString(Some(b"stream".to_vec())),
+                RespFrame::BulkString(Some(b"pubsub".to_vec())),
+                RespFrame::BulkString(Some(b"admin".to_vec())),
+                RespFrame::BulkString(Some(b"fast".to_vec())),
+                RespFrame::BulkString(Some(b"slow".to_vec())),
+                RespFrame::BulkString(Some(b"blocking".to_vec())),
+                RespFrame::BulkString(Some(b"dangerous".to_vec())),
+                RespFrame::BulkString(Some(b"connection".to_vec())),
+                RespFrame::BulkString(Some(b"transaction".to_vec())),
+                RespFrame::BulkString(Some(b"scripting".to_vec())),
+            ]))
         );
     }
 

@@ -304,14 +304,6 @@
           {
             "kind": "bulk",
             "value": "scripting"
-          },
-          {
-            "kind": "bulk",
-            "value": "server"
-          },
-          {
-            "kind": "bulk",
-            "value": "generic"
           }
         ]
       }
