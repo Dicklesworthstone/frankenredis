@@ -88,6 +88,13 @@ fn normalize_acl_hash(hash: &str) -> Option<Vec<u8>> {
     }
 }
 
+fn acl_setuser_missing_password_error(rule_str: &str) -> String {
+    format!(
+        "ERR Error in ACL SETUSER modifier '{}': The password you are trying to remove from the user does not exist",
+        rule_str
+    )
+}
+
 #[derive(Debug, Clone)]
 struct AclLogEntry {
     count: u64,
@@ -832,8 +839,12 @@ impl AuthState {
                 user.nopass = false; // adding a password disables nopass
             } else if let Some(pass) = rule_str.strip_prefix('<') {
                 let hash_hex = sha256_hex_bytes(pass.as_bytes());
+                let original_len = user.passwords.len();
                 user.passwords
                     .retain(|p| p.as_slice() != hash_hex.as_slice());
+                if user.passwords.len() == original_len {
+                    return Err(acl_setuser_missing_password_error(rule_str));
+                }
             } else if let Some(hash) = rule_str.strip_prefix('#') {
                 if let Some(hash_hex) = normalize_acl_hash(hash) {
                     user.passwords.push(hash_hex);
@@ -846,8 +857,12 @@ impl AuthState {
                 }
             } else if let Some(hash) = rule_str.strip_prefix('!') {
                 if let Some(hash_hex) = normalize_acl_hash(hash) {
+                    let original_len = user.passwords.len();
                     user.passwords
                         .retain(|p| p.as_slice() != hash_hex.as_slice());
+                    if user.passwords.len() == original_len {
+                        return Err(acl_setuser_missing_password_error(rule_str));
+                    }
                 } else {
                     return Err(format!(
                         "ERR Error in ACL SETUSER modifier '{}': Syntax error",
@@ -10046,7 +10061,7 @@ mod tests {
         acl_list_entries_from_rules, canonical_static_config_param, canonicalize_acl_rules,
         classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
-        client_wrong_subcommand_arity, store_to_rdb_entries, wrong_arity_error,
+        client_wrong_subcommand_arity, sha256_hex_bytes, store_to_rdb_entries, wrong_arity_error,
     };
 
     fn command(parts: &[&[u8]]) -> RespFrame {
@@ -17492,6 +17507,80 @@ mod tests {
                 RespFrame::BulkString(Some(b"selectors".to_vec())),
                 RespFrame::Array(Some(Vec::new())),
             ]))
+        );
+    }
+
+    #[test]
+    fn acl_setuser_missing_plaintext_password_removal_returns_redis_error() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"alice", b"on", b">password123"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"alice", b"<missing"]), 1),
+            RespFrame::Error(
+                "ERR Error in ACL SETUSER modifier '<missing': The password you are trying to remove from the user does not exist"
+                    .to_string(),
+            )
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"GETUSER", b"alice"]), 2),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"on".to_vec())),
+                    RespFrame::BulkString(Some(b"sanitize-payload".to_vec())),
+                ])),
+                RespFrame::BulkString(Some(b"passwords".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
+                    b"ef92b778bafe771e89245b89ecbc08a44a4e166c06659911881f383d4473e94f".to_vec(),
+                ))])),
+                RespFrame::BulkString(Some(b"commands".to_vec())),
+                RespFrame::BulkString(Some(b"-@all".to_vec())),
+                RespFrame::BulkString(Some(b"keys".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
+                RespFrame::BulkString(Some(b"channels".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
+                RespFrame::BulkString(Some(b"selectors".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn acl_setuser_missing_hash_password_removal_returns_redis_error() {
+        let mut rt = Runtime::default_strict();
+        let missing_hash = String::from_utf8(sha256_hex_bytes(b"missing")).expect("valid hex");
+        let missing_rule = format!("!{missing_hash}");
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"alice", b"on", b">password123"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"alice", missing_rule.as_bytes()]),
+                1,
+            ),
+            RespFrame::Error(format!(
+                "ERR Error in ACL SETUSER modifier '{}': The password you are trying to remove from the user does not exist",
+                missing_rule
+            ),)
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"password123"]), 2),
+            RespFrame::SimpleString("OK".to_string())
         );
     }
 
