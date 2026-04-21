@@ -152,6 +152,10 @@ ubs_*.jsonl
 
 # Beads recovery artifacts
 .beads_recovery/
+.beads/recovery/
+.beads/recovery_*/
+.beads/*.bad_*
+.beads/*.pre_rebuild_*
 
 # Extensionless scratch output files
 /check_result_*
@@ -161,6 +165,13 @@ ubs_*.jsonl
 /print_diffs.rs
 /run_oracle_diff
 /run_oracle_diff.rs
+/debug
+/debug[0-9]*
+/debug.rs
+/debug[0-9]*.rs
+
+# Persisted Redis RDB dumps anywhere in the tree (not just repo root)
+**/dump.rdb
 
 # Golden-test `.actual` outputs (diff output of failing golden comparisons)
 **/tests/golden/*.actual
