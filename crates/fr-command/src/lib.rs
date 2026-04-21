@@ -5842,6 +5842,32 @@ fn cluster_reset_with_keys_error() -> CommandError {
     )
 }
 
+fn cluster_shards_reply(store: &Store) -> RespFrame {
+    let node = RespFrame::Array(Some(vec![
+        hello_bulk("id"),
+        RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+        hello_bulk("port"),
+        RespFrame::Integer(i64::from(store.server_port)),
+        hello_bulk("ip"),
+        hello_bulk("127.0.0.1"),
+        hello_bulk("endpoint"),
+        hello_bulk("127.0.0.1"),
+        hello_bulk("role"),
+        hello_bulk("master"),
+        hello_bulk("replication-offset"),
+        RespFrame::Integer(0),
+        hello_bulk("health"),
+        hello_bulk("online"),
+    ]));
+    let shard = RespFrame::Array(Some(vec![
+        hello_bulk("slots"),
+        RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(16383)])),
+        hello_bulk("nodes"),
+        RespFrame::Array(Some(vec![node])),
+    ]));
+    RespFrame::Array(Some(vec![shard]))
+}
+
 // ── CLUSTER ─────────────────────────────────────────────────────────
 
 fn cluster_cmd(
@@ -5856,7 +5882,6 @@ fn cluster_cmd(
     if sub.eq_ignore_ascii_case("HELP")
         || sub.eq_ignore_ascii_case("INFO")
         || sub.eq_ignore_ascii_case("SLOTS")
-        || sub.eq_ignore_ascii_case("SHARDS")
         || sub.eq_ignore_ascii_case("NODES")
         || sub.eq_ignore_ascii_case("LINKS")
     {
@@ -5875,6 +5900,15 @@ fn cluster_cmd(
         return Ok(RespFrame::BulkString(Some(
             store.server_run_id.as_bytes().to_vec(),
         )));
+    }
+    if sub.eq_ignore_ascii_case("SHARDS") {
+        if argv.len() != 2 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        return Ok(cluster_shards_reply(store));
     }
     if sub.eq_ignore_ascii_case("MYSHARDID") {
         if argv.len() != 2 {
@@ -28791,6 +28825,50 @@ mod tests {
             dispatch_argv(&[b"CLUSTER".to_vec(), b"MYSHARDID".to_vec()], &mut store, 0).unwrap();
         assert_eq!(out_again, out);
         assert_eq!(store.cluster_shard_id.len(), 40);
+    }
+
+    #[test]
+    fn cluster_shards_returns_enabled_topology() {
+        let mut store = Store::new();
+
+        let disabled =
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"SHARDS".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(disabled, cluster_disabled_error());
+
+        let wrong_arity = dispatch_argv(
+            &[b"CLUSTER".to_vec(), b"SHARDS".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(wrong_arity, cluster_wrong_subcommand_arity("SHARDS"));
+
+        store.cluster_enabled = true;
+        let out = dispatch_argv(&[b"CLUSTER".to_vec(), b"SHARDS".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"slots".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(16383)])),
+                RespFrame::BulkString(Some(b"nodes".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"id".to_vec())),
+                    RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+                    RespFrame::BulkString(Some(b"port".to_vec())),
+                    RespFrame::Integer(i64::from(store.server_port)),
+                    RespFrame::BulkString(Some(b"ip".to_vec())),
+                    RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                    RespFrame::BulkString(Some(b"endpoint".to_vec())),
+                    RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                    RespFrame::BulkString(Some(b"role".to_vec())),
+                    RespFrame::BulkString(Some(b"master".to_vec())),
+                    RespFrame::BulkString(Some(b"replication-offset".to_vec())),
+                    RespFrame::Integer(0),
+                    RespFrame::BulkString(Some(b"health".to_vec())),
+                    RespFrame::BulkString(Some(b"online".to_vec())),
+                ]))])),
+            ]))]))
+        );
     }
 
     #[test]

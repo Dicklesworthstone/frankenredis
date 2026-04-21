@@ -14721,6 +14721,38 @@ mod tests {
     }
 
     #[test]
+    fn cluster_shards_returns_enabled_topology() {
+        let mut rt = Runtime::default_strict();
+        rt.server.store.cluster_enabled = true;
+
+        let shards = rt.execute_frame(command(&[b"CLUSTER", b"SHARDS"]), 0);
+        assert_eq!(
+            shards,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"slots".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(16383)])),
+                RespFrame::BulkString(Some(b"nodes".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"id".to_vec())),
+                    RespFrame::BulkString(Some(rt.server.store.server_run_id.as_bytes().to_vec())),
+                    RespFrame::BulkString(Some(b"port".to_vec())),
+                    RespFrame::Integer(i64::from(rt.server.store.server_port)),
+                    RespFrame::BulkString(Some(b"ip".to_vec())),
+                    RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                    RespFrame::BulkString(Some(b"endpoint".to_vec())),
+                    RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                    RespFrame::BulkString(Some(b"role".to_vec())),
+                    RespFrame::BulkString(Some(b"master".to_vec())),
+                    RespFrame::BulkString(Some(b"replication-offset".to_vec())),
+                    RespFrame::Integer(0),
+                    RespFrame::BulkString(Some(b"health".to_vec())),
+                    RespFrame::BulkString(Some(b"online".to_vec())),
+                ]))])),
+            ]))]))
+        );
+    }
+
+    #[test]
     fn fr_p2c_007_u007_client_cluster_mode_flags_transition_cleanly() {
         let mut rt = Runtime::default_strict();
         assert!(!rt.is_cluster_read_only());
