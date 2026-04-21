@@ -5776,6 +5776,16 @@ fn cluster_unknown_subcommand_error(subcommand: &str) -> CommandError {
     ))
 }
 
+fn cluster_subcommand_syntax_error(subcommand: &str) -> CommandError {
+    CommandError::Custom(format!(
+        "ERR unknown subcommand or wrong number of arguments for '{subcommand}'. Try CLUSTER HELP."
+    ))
+}
+
+fn cluster_reset_with_keys_error() -> CommandError {
+    CommandError::Custom("ERR CLUSTER RESET can't be called with master nodes containing keys".to_string())
+}
+
 // ── CLUSTER ─────────────────────────────────────────────────────────
 
 fn cluster_cmd(
@@ -5845,6 +5855,25 @@ fn cluster_cmd(
         }
         let count = store.count_keys_in_slot(slot as u16, now_ms);
         return Ok(RespFrame::Integer(count as i64));
+    }
+    if sub.eq_ignore_ascii_case("RESET") {
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        if argv.len() > 3 {
+            return Err(cluster_subcommand_syntax_error(sub));
+        }
+        if let Some(mode) = argv.get(2) {
+            let mode = std::str::from_utf8(mode).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            if !mode.eq_ignore_ascii_case("SOFT") && !mode.eq_ignore_ascii_case("HARD") {
+                return Err(CommandError::SyntaxError);
+            }
+        }
+        let db_index = store.dispatch_client_ctx.db_index;
+        if store.dbsize_in_db(db_index) != 0 {
+            return Err(cluster_reset_with_keys_error());
+        }
+        return Ok(RespFrame::SimpleString("OK".to_string()));
     }
     if sub.eq_ignore_ascii_case("RESET")
         || sub.eq_ignore_ascii_case("MEET")
@@ -14310,8 +14339,9 @@ mod tests {
         CLIENT_TRACKING_OPT_SWITCH_REQUIRES_DISABLE, CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT,
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
-        SCRIPT_NOSCRIPT_ERROR, classify_command, client_wrong_subcommand_arity, dispatch_argv,
-        drain_pubsub_messages, eq_ascii_command, execute_migrate,
+        SCRIPT_NOSCRIPT_ERROR, classify_command, client_wrong_subcommand_arity,
+        cluster_reset_with_keys_error, dispatch_argv, drain_pubsub_messages, eq_ascii_command,
+        execute_migrate,
         format_eval_read_only_script_error, frame_to_argv, hello_bulk, hello_simple,
         is_write_command, parse_blocking_deadline_milliseconds, parse_migrate_request,
         pubsub_message_to_frame,
@@ -27680,6 +27710,68 @@ mod tests {
                 "ERR wrong number of arguments for 'cluster|keyslot' command".to_string()
             )
         );
+    }
+
+    #[test]
+    fn cluster_reset_enabled_matches_redis_mode_and_key_semantics() {
+        let mut store = Store::new();
+        store.cluster_enabled = true;
+
+        let out = dispatch_argv(&[b"CLUSTER".to_vec(), b"RESET".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+
+        let out = dispatch_argv(
+            &[b"CLUSTER".to_vec(), b"RESET".to_vec(), b"SOFT".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+
+        let out = dispatch_argv(
+            &[b"CLUSTER".to_vec(), b"RESET".to_vec(), b"HARD".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+
+        let invalid_mode = dispatch_argv(
+            &[b"CLUSTER".to_vec(), b"RESET".to_vec(), b"INVALID".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(invalid_mode, CommandError::SyntaxError);
+
+        let wrong_arity = dispatch_argv(
+            &[
+                b"CLUSTER".to_vec(),
+                b"RESET".to_vec(),
+                b"HARD".to_vec(),
+                b"extra".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            wrong_arity,
+            CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments for 'RESET'. Try CLUSTER HELP."
+                    .to_string()
+            )
+        );
+
+        dispatch_argv(
+            &[b"SET".to_vec(), b"reset-key".to_vec(), b"value".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let err = dispatch_argv(&[b"CLUSTER".to_vec(), b"RESET".to_vec()], &mut store, 0)
+            .unwrap_err();
+        assert_eq!(err, cluster_reset_with_keys_error());
     }
 
     // ── CLIENT KILL/PAUSE/UNPAUSE tests ─────────────────────────────

@@ -4046,6 +4046,7 @@ fn core_cluster_disabled_surface_live_redis_matches_runtime() {
         &[
             "cluster_info",
             "cluster_myid",
+            "cluster_reset",
             "cluster_getkeysinslot_with_key",
             "cluster_countkeysinslot_with_key",
             "cluster_countkeysinslot_slot_zero",
@@ -4059,6 +4060,9 @@ fn core_cluster_disabled_surface_live_redis_matches_runtime() {
             "cluster_unknown_subcommand",
             "cluster_keyslot_wrong_arity",
             "cluster_reset_hard",
+            "cluster_reset_soft",
+            "cluster_reset_invalid_arg",
+            "cluster_reset_wrong_arity_extra",
         ],
         &oracle,
     )
