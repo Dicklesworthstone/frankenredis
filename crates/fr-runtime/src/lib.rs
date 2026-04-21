@@ -1689,6 +1689,8 @@ pub struct ServerState {
     pub rdb_bgsave_pid: Option<i32>,
     /// Child PID for BGREWRITEAOF
     pub aof_rewrite_pid: Option<i32>,
+    /// Whether an AOF rewrite is pending because another background child is active.
+    pub aof_rewrite_scheduled: bool,
     /// Path for RDB persistence file (used by SAVE/BGSAVE).
     rdb_path: Option<std::path::PathBuf>,
     /// Path for the main redis.conf configuration file (used by CONFIG REWRITE).
@@ -1798,6 +1800,7 @@ impl Default for ServerState {
             appendfsync_mode: AppendFsyncMode::Everysec,
             rdb_bgsave_pid: None,
             aof_rewrite_pid: None,
+            aof_rewrite_scheduled: false,
             rdb_path: None,
             config_file_path: None,
             acl_file_path: None,
@@ -2093,7 +2096,7 @@ impl ServerState {
             .primary_offset
             .0
             .saturating_add(encoded_len);
-        if self.aof_path.is_some() {
+        if self.local_waitaof_fsync_tracks_primary_offset() {
             self.replication_ack_state.local_fsync_offset =
                 self.replication_ack_state.primary_offset;
         }
@@ -2101,6 +2104,13 @@ impl ServerState {
             self.replication_ack_state.primary_offset,
             self.repl_backlog_size,
         );
+    }
+
+    fn local_waitaof_fsync_tracks_primary_offset(&self) -> bool {
+        self.aof_path.is_some()
+            && self.store.aof_enabled
+            && !self.aof_rewrite_scheduled
+            && self.appendfsync_mode != AppendFsyncMode::No
     }
 }
 
@@ -3420,7 +3430,7 @@ impl Runtime {
 
     /// Check and reap any completed background child processes.
     #[allow(unsafe_code)]
-    pub fn check_child_processes(&mut self, _now_ms: u64) {
+    pub fn check_child_processes(&mut self, now_ms: u64) {
         #[cfg(unix)]
         unsafe {
             if let Some(pid) = self.server.rdb_bgsave_pid {
@@ -3443,6 +3453,7 @@ impl Runtime {
                 }
             }
         }
+        self.maybe_run_scheduled_aof_rewrite(now_ms);
     }
 
     /// Wait for child processes to finish (useful for tests).
@@ -3465,6 +3476,17 @@ impl Runtime {
                 self.server.store.record_aof_bgrewrite_status(success);
             }
         }
+        self.maybe_run_scheduled_aof_rewrite(0);
+    }
+
+    fn maybe_run_scheduled_aof_rewrite(&mut self, now_ms: u64) {
+        if !self.server.aof_rewrite_scheduled
+            || self.server.rdb_bgsave_pid.is_some()
+            || self.server.aof_rewrite_pid.is_some()
+        {
+            return;
+        }
+        let _ = self.handle_bgrewriteaof_requested(now_ms);
     }
 
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
@@ -7190,15 +7212,25 @@ impl Runtime {
                 });
                 self.server.aof_config_path = Some(configured_path.clone());
                 self.server.aof_path = Some(configured_path);
+                self.server.aof_rewrite_scheduled =
+                    self.server.rdb_bgsave_pid.is_some() || self.server.aof_rewrite_pid.is_some();
+                if !self.server.aof_rewrite_scheduled {
+                    self.server.replication_ack_state.local_fsync_offset =
+                        self.server.replication_ack_state.primary_offset;
+                }
             } else {
                 self.server.aof_path = None;
+                self.server.aof_rewrite_scheduled = false;
             }
             self.server.store.set_aof_enabled(appendonly);
         }
         if let Some(mode) = next_appendfsync {
             self.server.appendfsync_mode = mode;
-        }
-        if self.server.aof_path.is_some() {
+            if self.server.local_waitaof_fsync_tracks_primary_offset() {
+                self.server.replication_ack_state.local_fsync_offset =
+                    self.server.replication_ack_state.primary_offset;
+            }
+        } else if self.server.local_waitaof_fsync_tracks_primary_offset() {
             self.server.replication_ack_state.local_fsync_offset =
                 self.server.replication_ack_state.primary_offset;
         }
@@ -7949,6 +7981,7 @@ impl Runtime {
 
     fn handle_bgrewriteaof_requested(&mut self, now_ms: u64) -> RespFrame {
         let Some(path) = &self.server.aof_path else {
+            self.server.aof_rewrite_scheduled = false;
             return RespFrame::Error(
                 "ERR appendonly is disabled, cannot rewrite append only file".to_string(),
             );
@@ -7957,9 +7990,13 @@ impl Runtime {
         let commands = self.server.store.to_aof_commands(now_ms);
         let records = argv_to_aof_records(commands);
         if let Err(_e) = write_aof_file(path, &records) {
+            self.server.aof_rewrite_scheduled = false;
             self.server.store.record_aof_bgrewrite_status(false);
             return RespFrame::Error("ERR error rewriting AOF file".to_string());
         }
+        self.server.aof_rewrite_scheduled = false;
+        self.server.replication_ack_state.local_fsync_offset =
+            self.server.replication_ack_state.primary_offset;
         self.server.store.record_aof_rewrite(now_ms);
         self.server.store.record_aof_bgrewrite_status(true);
         RespFrame::SimpleString("Background append only file rewriting started".to_string())
@@ -8806,8 +8843,14 @@ impl Runtime {
             "aof_enabled:{}\r\n",
             usize::from(self.server.aof_path.is_some())
         ));
-        info.push_str("aof_rewrite_in_progress:0\r\n");
-        info.push_str("aof_rewrite_scheduled:0\r\n");
+        info.push_str(&format!(
+            "aof_rewrite_in_progress:{}\r\n",
+            usize::from(self.server.aof_rewrite_pid.is_some())
+        ));
+        info.push_str(&format!(
+            "aof_rewrite_scheduled:{}\r\n",
+            usize::from(self.server.aof_rewrite_scheduled)
+        ));
         info.push_str(&format!(
             "aof_last_rewrite_time_sec:{}\r\n",
             self.server
@@ -12307,7 +12350,7 @@ mod tests {
     }
 
     #[test]
-    fn config_set_appendfsync_no_keeps_local_waitaof_locally_satisfied() {
+    fn config_set_appendfsync_no_leaves_local_waitaof_unsatisfied() {
         let mut rt = Runtime::default_strict();
         rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
 
@@ -12321,7 +12364,7 @@ mod tests {
         );
         assert_eq!(
             rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"50"]), 2),
-            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
         );
 
         assert_eq!(
@@ -12332,6 +12375,51 @@ mod tests {
             rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"50"]), 4),
             RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
         );
+    }
+
+    #[test]
+    fn waitaof_stays_unsatisfied_until_postponed_aof_rewrite_runs() {
+        let dir = std::env::temp_dir().join("fr_runtime_waitaof_postponed_aof_rewrite");
+        let _ = std::fs::create_dir_all(&dir);
+
+        let mut rt = Runtime::default_strict();
+        rt.server.aof_config_path = Some(dir.join("appendonly.aof"));
+        rt.server.rdb_bgsave_pid = Some(42);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendonly", b"yes"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"x", b"y"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"10000"]), 2),
+            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 3);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            unreachable!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("aof_rewrite_scheduled:1\r\n"), "{info}");
+
+        rt.server.rdb_bgsave_pid = None;
+        rt.maybe_run_scheduled_aof_rewrite(4);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"10000"]), 5),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 6);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            unreachable!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("aof_rewrite_scheduled:0\r\n"), "{info}");
     }
 
     #[test]
