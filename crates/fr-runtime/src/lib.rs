@@ -17665,7 +17665,8 @@ mod tests {
         assert_eq!(
             rt.execute_frame(
                 command(&[
-                    b"ACL", b"SETUSER", b"bob", b"on", b">pass", b"-@all", b"+get", b"+set"
+                    b"ACL", b"SETUSER", b"bob", b"on", b">pass", b"-@all", b"+get", b"+set",
+                    b"allkeys"
                 ]),
                 0
             ),
@@ -17710,7 +17711,8 @@ mod tests {
                     b">pass",
                     b"+@all",
                     b"-del",
-                    b"-flushdb"
+                    b"-flushdb",
+                    b"allkeys"
                 ]),
                 0
             ),
@@ -17794,7 +17796,8 @@ mod tests {
                     b">pass",
                     b"-@all",
                     b"+@read",
-                    b"+@connection"
+                    b"+@connection",
+                    b"allkeys"
                 ]),
                 0
             ),
@@ -17840,7 +17843,8 @@ mod tests {
                     b"on",
                     b">pass",
                     b"+@all",
-                    b"-@dangerous"
+                    b"-@dangerous",
+                    b"allkeys"
                 ]),
                 0
             ),
@@ -17868,7 +17872,8 @@ mod tests {
         assert_eq!(
             rt.execute_frame(
                 command(&[
-                    b"ACL", b"SETUSER", b"mixed", b"on", b">pass", b"-@all", b"+@read", b"+set"
+                    b"ACL", b"SETUSER", b"mixed", b"on", b">pass", b"-@all", b"+@read", b"+set",
+                    b"allkeys"
                 ]),
                 0
             ),
@@ -17985,7 +17990,7 @@ mod tests {
         assert_eq!(
             rt.execute_frame(
                 command(&[
-                    b"ACL", b"SETUSER", b"ci", b"on", b">pass", b"-@all", b"+GET"
+                    b"ACL", b"SETUSER", b"ci", b"on", b">pass", b"-@all", b"+GET", b"allkeys"
                 ]),
                 0
             ),
@@ -18018,7 +18023,8 @@ mod tests {
                     b"on",
                     b">pass",
                     b"-@all",
-                    b"+get"
+                    b"+get",
+                    b"allkeys"
                 ]),
                 0
             ),
@@ -18064,7 +18070,8 @@ mod tests {
                     b"on",
                     b">pass",
                     b"+@all",
-                    b"-del"
+                    b"-del",
+                    b"allkeys"
                 ]),
                 0
             ),
