@@ -29099,6 +29099,7 @@ mod tests {
         store.stat_expired_stale_perc = 50;
         store.stat_expire_cycle_cpu_milliseconds = 7;
         store.record_slowlog(&[b"GET".to_vec(), b"k".to_vec()], 20_000, 1);
+        store.record_command_histogram("GET", 100);
 
         let out = dispatch_argv(&[b"CONFIG".to_vec(), b"RESETSTAT".to_vec()], &mut store, 0)
             .expect("config resetstat");
@@ -29114,6 +29115,7 @@ mod tests {
         assert_eq!(store.stat_expired_stale_perc, 0);
         assert_eq!(store.stat_expire_cycle_cpu_milliseconds, 0);
         assert_eq!(store.slowlog_len(), 0);
+        assert!(store.all_command_histograms().is_empty());
     }
 
     #[test]

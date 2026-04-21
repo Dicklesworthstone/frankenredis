@@ -1476,6 +1476,7 @@ impl Store {
 
     pub fn reset_info_stats(&mut self) {
         self.reset_slowlog();
+        self.command_histograms = CommandHistogramTracker::default();
         self.stat_total_commands_processed = 0;
         self.stat_total_connections_received = 0;
         self.stat_unexpected_error_replies = 0;
@@ -14702,6 +14703,7 @@ mod tests {
         store.stat_used_memory_rss = 3000;
         store.stat_used_memory_peak = 4000;
         store.stat_total_commands_processed = 500;
+        store.record_command_histogram("GET", 123);
         store.record_ops_sec_sample(100);
         store.reset_info_stats();
         assert_eq!(store.stat_total_net_input_bytes, 0);
@@ -14710,6 +14712,7 @@ mod tests {
         assert_eq!(store.stat_used_memory_peak, 0);
         assert_eq!(store.instantaneous_ops_per_sec(), 0);
         assert_eq!(store.instantaneous_input_kbps(), 0.0);
+        assert!(store.all_command_histograms().is_empty());
     }
 
     #[test]

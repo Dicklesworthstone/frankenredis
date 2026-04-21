@@ -10860,6 +10860,46 @@ mod tests {
     }
 
     #[test]
+    fn config_resetstat_clears_info_latencystats_histograms() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"latency-tracking", b"yes"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"missing"]), 1),
+            RespFrame::BulkString(None)
+        );
+
+        let before_reset = rt.execute_frame(command(&[b"INFO", b"latencystats"]), 2);
+        let RespFrame::BulkString(Some(before_reset_bytes)) = before_reset else {
+            panic!("expected bulk info response");
+        };
+        let before_reset = String::from_utf8(before_reset_bytes).expect("utf8 info");
+        assert!(before_reset.contains("latency_percentiles_usec_GET:"));
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let after_reset = rt.execute_frame(command(&[b"INFO", b"latencystats"]), 4);
+        let RespFrame::BulkString(Some(after_reset_bytes)) = after_reset else {
+            panic!("expected bulk info response");
+        };
+        let after_reset = String::from_utf8(after_reset_bytes).expect("utf8 info");
+        assert!(
+            !after_reset.contains("latency_percentiles_usec_GET:"),
+            "{after_reset}"
+        );
+    }
+
+    #[test]
     fn total_error_replies_counts_runtime_and_delegated_errors() {
         let mut rt = Runtime::default_strict();
         rt.set_requirepass(Some(b"secret".to_vec()));
