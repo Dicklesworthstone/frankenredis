@@ -947,6 +947,7 @@ pub struct DispatchClientContext {
     pub is_pubsub: bool,
     pub client_tracking: ClientTrackingState,
     pub client_reply: ClientReplyState,
+    pub acl_permissions: Option<DispatchAclPermissions>,
 }
 
 impl Default for DispatchClientContext {
@@ -971,8 +972,42 @@ impl Default for DispatchClientContext {
             is_pubsub: false,
             client_tracking: ClientTrackingState::default(),
             client_reply: ClientReplyState::default(),
+            acl_permissions: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchAclPermissionReason {
+    Command,
+    Key,
+    Channel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchAclLogContext {
+    Lua,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAclLogEvent {
+    pub reason: DispatchAclPermissionReason,
+    pub context: DispatchAclLogContext,
+    pub object: String,
+    pub username: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DispatchAclPermissions {
+    pub all_commands: bool,
+    pub allowed_commands: HashSet<String>,
+    pub denied_commands: HashSet<String>,
+    pub allowed_categories: HashSet<String>,
+    pub denied_categories: HashSet<String>,
+    pub key_patterns: Vec<Vec<u8>>,
+    pub all_keys: bool,
+    pub channel_patterns: Vec<Vec<u8>>,
+    pub all_channels: bool,
 }
 
 #[derive(Debug)]
@@ -1121,6 +1156,8 @@ pub struct Store {
     pub maxmemory_bytes_live: usize,
     /// Current client/session metadata for delegated dispatch paths such as Lua.
     pub dispatch_client_ctx: DispatchClientContext,
+    /// ACL log events raised inside delegated dispatch paths such as Lua scripts.
+    pending_acl_log_events: Vec<PendingAclLogEvent>,
     /// Controls whether runtime active-expire cycles are allowed to run.
     pub active_expire_enabled: bool,
     /// Set by DEBUG RELOAD; runtime consumes it after command dispatch.
@@ -1284,6 +1321,7 @@ impl Default for Store {
             server_maxclients: 10000,
             maxmemory_bytes_live: 0,
             dispatch_client_ctx: DispatchClientContext::default(),
+            pending_acl_log_events: Vec::new(),
             active_expire_enabled: true,
             debug_reload_requested: false,
             bgrewriteaof_requested: false,
@@ -8791,6 +8829,15 @@ impl Store {
     #[must_use]
     pub fn take_bgrewriteaof_requested(&mut self) -> bool {
         std::mem::take(&mut self.bgrewriteaof_requested)
+    }
+
+    pub fn request_acl_log_event(&mut self, event: PendingAclLogEvent) {
+        self.pending_acl_log_events.push(event);
+    }
+
+    #[must_use]
+    pub fn drain_pending_acl_log_events(&mut self) -> Vec<PendingAclLogEvent> {
+        std::mem::take(&mut self.pending_acl_log_events)
     }
 
     pub fn estimate_memory_usage_bytes(&self) -> usize {

@@ -5,10 +5,12 @@ pub use lua_eval::eval_script;
 
 use fr_protocol::RespFrame;
 use fr_store::{
-    BitRangeUnit, ClientReplyState, ClientTrackingState, ExpireTimeValue, MaxmemoryPolicy,
-    PttlValue, PubSubMessage, ScoreBound, Store, StoreError, StreamAutoClaimOptions,
-    StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
-    StreamGroupReadOptions, StreamId, ValueType, glob_match, read_rss_bytes, sha1_hex_public,
+    BitRangeUnit, ClientReplyState, ClientTrackingState, DispatchAclLogContext,
+    DispatchAclPermissionReason, DispatchAclPermissions, ExpireTimeValue, MaxmemoryPolicy,
+    PendingAclLogEvent, PttlValue, PubSubMessage, ScoreBound, Store, StoreError,
+    StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
+    StreamGroupReadCursor, StreamGroupReadOptions, StreamId, ValueType, glob_match, read_rss_bytes,
+    sha1_hex_public,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::io::{ErrorKind, Read, Write};
@@ -789,6 +791,45 @@ pub fn dispatch_argv(
         && command_writes_or_may_replicate_in_readonly_script(argv)
     {
         return Err(read_only_script_write_command_error());
+    }
+    if store.script_nesting_level >= 1
+        && let Some(permissions) = &store.dispatch_client_ctx.acl_permissions
+        && let Some(permission_error) = dispatch_acl_permission_error_for_argv(argv, permissions)
+    {
+        let command_name = String::from_utf8_lossy(raw_cmd).into_owned();
+        let (reason, object, error) = match permission_error {
+            DispatchAclPermissionError::Command => (
+                DispatchAclPermissionReason::Command,
+                command_name.to_ascii_uppercase(),
+                CommandError::Custom(format!(
+                    "NOPERM this user has no permissions to run the '{}' command",
+                    command_name
+                )),
+            ),
+            DispatchAclPermissionError::Key(key) => {
+                let key_name = String::from_utf8_lossy(&key).into_owned();
+                (
+                    DispatchAclPermissionReason::Key,
+                    key_name,
+                    CommandError::Custom("NOPERM No permissions to access a key".to_string()),
+                )
+            }
+            DispatchAclPermissionError::Channel(channel) => {
+                let channel_name = String::from_utf8_lossy(&channel).into_owned();
+                (
+                    DispatchAclPermissionReason::Channel,
+                    channel_name,
+                    CommandError::Custom("NOPERM No permissions to access a channel".to_string()),
+                )
+            }
+        };
+        store.request_acl_log_event(PendingAclLogEvent {
+            reason,
+            context: DispatchAclLogContext::Lua,
+            object,
+            username: store.dispatch_client_ctx.authenticated_user.clone(),
+        });
+        return Err(error);
     }
     match classify_command(raw_cmd) {
         Some(CommandId::Ping) => return ping(argv),
@@ -9530,6 +9571,13 @@ struct AclCategoryMaps {
     by_command: HashMap<&'static str, Vec<&'static str>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DispatchAclPermissionError {
+    Command,
+    Key(Vec<u8>),
+    Channel(Vec<u8>),
+}
+
 static ACL_CATEGORY_MAPS: OnceLock<AclCategoryMaps> = OnceLock::new();
 
 fn acl_category_maps() -> &'static AclCategoryMaps {
@@ -9591,6 +9639,110 @@ pub fn command_acl_categories(command: &str) -> &'static [&'static str] {
         .get(cmd_lower.as_str())
         .map(|cats| cats.as_slice())
         .unwrap_or(&[])
+}
+
+fn dispatch_acl_is_command_allowed(cmd_name: &str, permissions: &DispatchAclPermissions) -> bool {
+    let cmd_lower = cmd_name.to_ascii_lowercase();
+
+    if permissions.denied_commands.contains(&cmd_lower) {
+        return false;
+    }
+    if permissions.allowed_commands.contains(&cmd_lower) {
+        return true;
+    }
+    if permissions.denied_categories.is_empty() && permissions.allowed_categories.is_empty() {
+        return permissions.all_commands;
+    }
+
+    let cmd_categories = command_acl_categories(cmd_lower.as_str());
+    for denied_cat in &permissions.denied_categories {
+        if cmd_categories.contains(&denied_cat.as_str()) {
+            return false;
+        }
+    }
+
+    if !permissions.allowed_categories.is_empty() {
+        for allowed_cat in &permissions.allowed_categories {
+            if cmd_categories.contains(&allowed_cat.as_str()) {
+                return true;
+            }
+        }
+    }
+
+    permissions.all_commands
+}
+
+fn dispatch_acl_channel_permission_error_for_argv(
+    argv: &[Vec<u8>],
+    permissions: &DispatchAclPermissions,
+) -> Option<Vec<u8>> {
+    let command = argv.first()?;
+
+    if command.eq_ignore_ascii_case(b"PUBLISH") || command.eq_ignore_ascii_case(b"SPUBLISH") {
+        let channel = argv.get(1)?;
+        return (!permissions.all_channels
+            && !permissions
+                .channel_patterns
+                .iter()
+                .any(|pattern| glob_match(pattern, channel)))
+        .then(|| channel.clone());
+    }
+
+    if command.eq_ignore_ascii_case(b"SUBSCRIBE") || command.eq_ignore_ascii_case(b"SSUBSCRIBE") {
+        for channel in argv.iter().skip(1) {
+            if !permissions.all_channels
+                && !permissions
+                    .channel_patterns
+                    .iter()
+                    .any(|pattern| glob_match(pattern, channel))
+            {
+                return Some(channel.clone());
+            }
+        }
+        return None;
+    }
+
+    if command.eq_ignore_ascii_case(b"PSUBSCRIBE") {
+        for pattern in argv.iter().skip(1) {
+            if !permissions.all_channels
+                && !permissions
+                    .channel_patterns
+                    .iter()
+                    .any(|allowed| allowed == pattern)
+            {
+                return Some(pattern.clone());
+            }
+        }
+    }
+
+    None
+}
+
+fn dispatch_acl_permission_error_for_argv(
+    argv: &[Vec<u8>],
+    permissions: &DispatchAclPermissions,
+) -> Option<DispatchAclPermissionError> {
+    let cmd = argv.first()?;
+    let cmd_name = String::from_utf8_lossy(cmd);
+    if !dispatch_acl_is_command_allowed(&cmd_name, permissions) {
+        return Some(DispatchAclPermissionError::Command);
+    }
+    if check_command_arity(cmd, argv.len()).is_err() {
+        return None;
+    }
+    for key_index in command_key_indexes(argv) {
+        if let Some(key) = argv.get(key_index)
+            && !permissions.all_keys
+            && !permissions
+                .key_patterns
+                .iter()
+                .any(|pattern| glob_match(pattern, key))
+        {
+            return Some(DispatchAclPermissionError::Key(key.clone()));
+        }
+    }
+    dispatch_acl_channel_permission_error_for_argv(argv, permissions)
+        .map(DispatchAclPermissionError::Channel)
 }
 
 fn command_matches_acl_category(name: &str, flags: &str, category: &str) -> bool {

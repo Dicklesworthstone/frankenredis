@@ -37,9 +37,10 @@ use fr_repl::{
     evaluate_wait, evaluate_waitaof, parse_psync_reply,
 };
 use fr_store::{
-    ClientReplyState, ClientTrackingState, CommandHistogram, DispatchClientContext,
+    ClientReplyState, ClientTrackingState, CommandHistogram, DispatchAclLogContext,
+    DispatchAclPermissionReason, DispatchAclPermissions, DispatchClientContext,
     EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState,
-    MaxmemoryPolicy, Store, decode_db_key, encode_db_key, glob_match,
+    MaxmemoryPolicy, PendingAclLogEvent, Store, decode_db_key, encode_db_key, glob_match,
 };
 use sha2::{Digest, Sha256};
 
@@ -749,6 +750,20 @@ impl AclUser {
         }
 
         None
+    }
+
+    fn to_dispatch_acl_permissions(&self) -> DispatchAclPermissions {
+        DispatchAclPermissions {
+            all_commands: self.all_commands,
+            allowed_commands: self.allowed_commands.clone(),
+            denied_commands: self.denied_commands.clone(),
+            allowed_categories: self.allowed_categories.clone(),
+            denied_categories: self.denied_categories.clone(),
+            key_patterns: self.key_patterns.clone(),
+            all_keys: self.all_keys,
+            channel_patterns: self.channel_patterns.clone(),
+            all_channels: self.all_channels,
+        }
     }
 
     fn sanitize_payload_flag(&self) -> &'static str {
@@ -4934,6 +4949,11 @@ impl Runtime {
             is_pubsub,
             client_tracking: session.client_tracking.clone(),
             client_reply: session.client_reply.clone(),
+            acl_permissions: self
+                .server
+                .auth_state
+                .get_user(session.current_user_name())
+                .map(AclUser::to_dispatch_acl_permissions),
         }
     }
 
@@ -5090,6 +5110,9 @@ impl Runtime {
     }
 
     fn handle_deferred_store_runtime_action(&mut self, now_ms: u64) -> Option<RespFrame> {
+        for event in self.server.store.drain_pending_acl_log_events() {
+            self.record_deferred_acl_log_event(event, now_ms);
+        }
         if self.server.store.take_debug_reload_requested() {
             return Some(self.handle_debug_reload_requested(now_ms));
         }
@@ -5097,6 +5120,25 @@ impl Runtime {
             return Some(self.handle_bgrewriteaof_requested(now_ms));
         }
         None
+    }
+
+    fn record_deferred_acl_log_event(&mut self, event: PendingAclLogEvent, now_ms: u64) {
+        let reason = match event.reason {
+            DispatchAclPermissionReason::Command => "command",
+            DispatchAclPermissionReason::Key => "key",
+            DispatchAclPermissionReason::Channel => "channel",
+        };
+        let context = match event.context {
+            DispatchAclLogContext::Lua => "lua",
+        };
+        self.server.record_acl_log_event(
+            reason,
+            context,
+            event.object,
+            event.username,
+            self.current_acl_log_client_info(now_ms),
+            now_ms,
+        );
     }
 
     fn execute_db_scoped_command(
@@ -18211,6 +18253,63 @@ mod tests {
             unreachable!("expected ACL LOG client-info bulk string");
         };
         assert!(String::from_utf8_lossy(client_info).contains("cmd=exec"));
+    }
+
+    #[test]
+    fn acl_log_marks_script_denials_as_lua() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"LOG", b"RESET"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"antirez", b"on", b">foo", b"+@all", b"allkeys", b"-incr",
+                ]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"antirez", b"foo"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let RespFrame::Error(err) = rt.execute_frame(
+            command(&[b"EVAL", b"return redis.call('incr','foo')", b"0"]),
+            3,
+        ) else {
+            unreachable!("expected EVAL ACL failure");
+        };
+        assert!(err.contains("NOPERM this user has no permissions to run the 'incr' command"));
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"default", b""]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let RespFrame::Array(Some(entries)) = rt.execute_frame(command(&[b"ACL", b"LOG"]), 5)
+        else {
+            unreachable!("expected ACL LOG array");
+        };
+        let RespFrame::Array(Some(entry)) = &entries[0] else {
+            unreachable!("expected ACL LOG entry array");
+        };
+
+        assert_eq!(entry[2], RespFrame::BulkString(Some(b"reason".to_vec())));
+        assert_eq!(entry[3], RespFrame::BulkString(Some(b"command".to_vec())));
+        assert_eq!(entry[4], RespFrame::BulkString(Some(b"context".to_vec())));
+        assert_eq!(entry[5], RespFrame::BulkString(Some(b"lua".to_vec())));
+        assert_eq!(entry[6], RespFrame::BulkString(Some(b"object".to_vec())));
+        assert_eq!(entry[7], RespFrame::BulkString(Some(b"INCR".to_vec())));
+        assert_eq!(entry[8], RespFrame::BulkString(Some(b"username".to_vec())));
+        assert_eq!(entry[9], RespFrame::BulkString(Some(b"antirez".to_vec())));
+        let RespFrame::BulkString(Some(client_info)) = &entry[13] else {
+            unreachable!("expected ACL LOG client-info bulk string");
+        };
+        let client_info = String::from_utf8_lossy(client_info);
+        assert!(client_info.contains("cmd=eval"));
+        assert!(client_info.contains("user=antirez"));
     }
 
     #[test]
