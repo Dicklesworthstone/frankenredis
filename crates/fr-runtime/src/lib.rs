@@ -12469,6 +12469,25 @@ mod tests {
     }
 
     #[test]
+    fn waitaof_appendfsync_always_reports_local_ack_immediately() {
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendfsync", b"always"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"INCR", b"waitaof:always"]), 1),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"1", b"0", b"0"]), 2),
+            RespFrame::Array(Some(vec![RespFrame::Integer(1), RespFrame::Integer(0)]))
+        );
+    }
+
+    #[test]
     fn config_set_appendfsync_no_leaves_local_waitaof_unsatisfied() {
         let mut rt = Runtime::default_strict();
         rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
