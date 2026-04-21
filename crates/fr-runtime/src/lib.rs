@@ -95,6 +95,19 @@ fn acl_setuser_missing_password_error(rule_str: &str) -> String {
     )
 }
 
+fn acl_setuser_allkeys_pattern_error(rule_str: &str) -> String {
+    format!(
+        "ERR Error in ACL SETUSER modifier '{}': Adding a pattern after the * pattern (or the 'allkeys' flag) is not valid and does not have any effect. Try 'resetkeys' to start with an empty list of patterns",
+        rule_str
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AclCommandPermissionError {
+    Command,
+    Key(Vec<u8>),
+}
+
 #[derive(Debug, Clone)]
 struct AclLogEntry {
     count: u64,
@@ -440,7 +453,9 @@ struct AclUser {
     allowed_categories: HashSet<String>,
     /// Explicitly denied categories (lowercase).
     denied_categories: HashSet<String>,
-    /// Key patterns. Empty means no keys allowed unless all_keys is true.
+    /// Explicitly allowed key glob patterns, stored without the leading `~`.
+    key_patterns: Vec<Vec<u8>>,
+    /// True when all keys are allowed regardless of `key_patterns`.
     all_keys: bool,
     /// Channel patterns. Empty means no channels allowed unless all_channels is true.
     all_channels: bool,
@@ -458,6 +473,7 @@ impl AclUser {
             denied_commands: HashSet::new(),
             allowed_categories: HashSet::new(),
             denied_categories: HashSet::new(),
+            key_patterns: Vec::new(),
             all_keys: true,
             all_channels: true,
         }
@@ -477,6 +493,7 @@ impl AclUser {
             denied_commands: HashSet::new(),
             allowed_categories: HashSet::new(),
             denied_categories: HashSet::new(),
+            key_patterns: Vec::new(),
             all_keys: false,
             all_channels: false,
         }
@@ -597,6 +614,51 @@ impl AclUser {
         }
     }
 
+    fn keys_string(&self) -> String {
+        if self.all_keys {
+            return "~*".to_string();
+        }
+
+        self.key_patterns
+            .iter()
+            .map(|pattern| format!("~{}", String::from_utf8_lossy(pattern)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    fn is_key_allowed(&self, key: &[u8]) -> bool {
+        self.all_keys
+            || self
+                .key_patterns
+                .iter()
+                .any(|pattern| glob_match(pattern, key))
+    }
+
+    fn acl_permission_error_for_argv(&self, argv: &[Vec<u8>]) -> Option<AclCommandPermissionError> {
+        let Some(cmd) = argv.first() else {
+            return Some(AclCommandPermissionError::Command);
+        };
+
+        let cmd_name = String::from_utf8_lossy(cmd);
+        if !self.is_command_allowed(&cmd_name) {
+            return Some(AclCommandPermissionError::Command);
+        }
+
+        if fr_command::check_command_arity(cmd, argv.len()).is_err() {
+            return None;
+        }
+
+        for key_index in fr_command::command_key_indexes(argv) {
+            if let Some(key) = argv.get(key_index)
+                && !self.is_key_allowed(key)
+            {
+                return Some(AclCommandPermissionError::Key(key.clone()));
+            }
+        }
+
+        None
+    }
+
     fn sanitize_payload_flag(&self) -> &'static str {
         if self.sanitize_payload {
             "sanitize-payload"
@@ -622,6 +684,13 @@ impl AclUser {
         }
         if self.all_keys {
             parts.push("~*".to_string());
+        } else if !self.key_patterns.is_empty() {
+            parts.push("resetkeys".to_string());
+            parts.extend(
+                self.key_patterns
+                    .iter()
+                    .map(|pattern| format!("~{}", String::from_utf8_lossy(pattern))),
+            );
         }
         if self.all_channels {
             parts.push("&*".to_string());
@@ -661,6 +730,13 @@ impl AclUser {
         }
         if self.all_keys {
             parts.push("~*".to_string());
+        } else if !self.key_patterns.is_empty() {
+            parts.push("resetkeys".to_string());
+            parts.extend(
+                self.key_patterns
+                    .iter()
+                    .map(|pattern| format!("~{}", String::from_utf8_lossy(pattern))),
+            );
         }
         if self.all_channels {
             parts.push("&*".to_string());
@@ -802,10 +878,12 @@ impl AuthState {
                 user.denied_categories.clear();
             } else if rule_str.eq_ignore_ascii_case("allkeys") || rule_str == "~*" {
                 user.all_keys = true;
+                user.key_patterns.clear();
             } else if rule_str.eq_ignore_ascii_case("resetkeys") {
                 // Redis treats ACL modifiers as order-sensitive, so resetkeys must
                 // clear any earlier allkeys/~* grant and let later grants re-enable it.
                 user.all_keys = false;
+                user.key_patterns.clear();
             } else if rule_str.eq_ignore_ascii_case("allchannels") || rule_str == "&*" {
                 user.all_channels = true;
             } else if rule_str == "-@all" || rule_str.eq_ignore_ascii_case("nocommands") {
@@ -870,11 +948,16 @@ impl AuthState {
                     ));
                 }
             } else if rule_str.starts_with('~') {
-                // Key pattern (e.g., ~user:*) — for now, accept but only ~* grants full access.
-                if rule_str == "~*" {
-                    user.all_keys = true;
+                if user.all_keys {
+                    return Err(acl_setuser_allkeys_pattern_error(rule_str));
                 }
-                // Non-wildcard key patterns accepted silently (future: store and enforce).
+                let pattern = rule_str
+                    .strip_prefix('~')
+                    .expect("tilde-prefixed rule should strip");
+                let pattern = pattern.as_bytes().to_vec();
+                user.key_patterns.retain(|existing| existing != &pattern);
+                user.key_patterns.push(pattern);
+                user.all_keys = false;
             } else if rule_str.starts_with('&') {
                 // Channel pattern (e.g., &channel:*).
                 if rule_str == "&*" {
@@ -891,6 +974,7 @@ impl AuthState {
                 user.allowed_categories.clear();
                 user.denied_categories.clear();
                 user.all_keys = false;
+                user.key_patterns.clear();
                 user.all_channels = false;
             } else {
                 return Err(format!(
@@ -3167,21 +3251,16 @@ impl Runtime {
         self.session.is_authenticated()
     }
 
-    fn is_command_authorized(&self, argv: &[Vec<u8>]) -> bool {
+    fn acl_permission_error(&self, argv: &[Vec<u8>]) -> Option<AclCommandPermissionError> {
         let username = self.session.current_user_name();
         let Some(user) = self.server.auth_state.get_user(username) else {
             // User was deleted while session is still active. In Redis, the
             // connection would be killed asynchronously. For compatibility
             // in single-session mode, allow continued access.
-            return true;
+            return None;
         };
 
-        let Some(cmd) = argv.first() else {
-            return false;
-        };
-
-        let cmd_name = String::from_utf8_lossy(cmd);
-        user.is_command_allowed(&cmd_name)
+        user.acl_permission_error_for_argv(argv)
     }
 
     #[must_use]
@@ -3705,15 +3784,39 @@ impl Runtime {
             return reply;
         }
 
-        if !self.is_command_authorized(&argv) {
-            let reply = RespFrame::Error(format!(
-                "NOPERM this user has no permissions to run the '{}' command",
-                command_name
-            ));
+        if let Some(permission_error) = self.acl_permission_error(&argv) {
+            let (log_reason, object, reason_code, threat_reason, reply) = match permission_error {
+                AclCommandPermissionError::Command => (
+                    "command",
+                    command_name.to_ascii_uppercase(),
+                    "auth.noperm_gate_violation",
+                    format!(
+                        "rejected '{}' prior to dispatch due to insufficient ACL permissions",
+                        command_name
+                    ),
+                    RespFrame::Error(format!(
+                        "NOPERM this user has no permissions to run the '{}' command",
+                        command_name
+                    )),
+                ),
+                AclCommandPermissionError::Key(key) => {
+                    let key_name = String::from_utf8_lossy(&key).into_owned();
+                    (
+                        "key",
+                        key_name.clone(),
+                        "auth.noperm_key_gate_violation",
+                        format!(
+                            "rejected '{}' prior to dispatch because key '{}' is outside the user's ACL patterns",
+                            command_name, key_name
+                        ),
+                        RespFrame::Error("NOPERM No permissions to access a key".to_string()),
+                    )
+                }
+            };
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             self.record_acl_log_event(
-                "command",
-                command_name.to_ascii_uppercase(),
+                log_reason,
+                object,
                 self.session.current_user_name().to_vec(),
                 now_ms,
             );
@@ -3724,11 +3827,8 @@ impl Runtime {
                 preferred_deviation: None,
                 subsystem: "admission_gate",
                 action: "reject_unauthorized_command",
-                reason_code: "auth.noperm_gate_violation",
-                reason: format!(
-                    "rejected '{}' prior to dispatch due to insufficient ACL permissions",
-                    command_name
-                ),
+                reason_code,
+                reason: threat_reason,
                 input_source: ThreatInputDigestSource::Argv(&argv),
                 output: &reply,
             });
@@ -4989,21 +5089,37 @@ impl Runtime {
             let user = self.server.auth_state.get_user(username);
             match user {
                 Some(u) => {
-                    let cmd_name = String::from_utf8_lossy(&argv[3]);
-                    if u.is_command_allowed(&cmd_name) {
-                        RespFrame::SimpleString("OK".to_string())
-                    } else {
-                        self.record_acl_log_event(
-                            "command",
-                            cmd_name.to_ascii_uppercase(),
-                            username.clone(),
-                            now_ms,
-                        );
-                        RespFrame::Error(format!(
-                            "ERR User '{}' has no permissions to run the '{}' command",
-                            String::from_utf8_lossy(username),
-                            cmd_name
-                        ))
+                    let dryrun_argv = &argv[3..];
+                    let cmd_name = String::from_utf8_lossy(&dryrun_argv[0]);
+                    match u.acl_permission_error_for_argv(dryrun_argv) {
+                        None => RespFrame::SimpleString("OK".to_string()),
+                        Some(AclCommandPermissionError::Command) => {
+                            self.record_acl_log_event(
+                                "command",
+                                cmd_name.to_ascii_uppercase(),
+                                username.clone(),
+                                now_ms,
+                            );
+                            RespFrame::Error(format!(
+                                "ERR User '{}' has no permissions to run the '{}' command",
+                                String::from_utf8_lossy(username),
+                                cmd_name
+                            ))
+                        }
+                        Some(AclCommandPermissionError::Key(key)) => {
+                            let key_name = String::from_utf8_lossy(&key).into_owned();
+                            self.record_acl_log_event(
+                                "key",
+                                key_name.clone(),
+                                username.clone(),
+                                now_ms,
+                            );
+                            RespFrame::Error(format!(
+                                "ERR User '{}' has no permissions to access the '{}' key",
+                                String::from_utf8_lossy(username),
+                                key_name
+                            ))
+                        }
                     }
                 }
                 None => RespFrame::Error(format!(
@@ -5132,7 +5248,7 @@ impl Runtime {
         }
 
         let commands_str = user.commands_string();
-        let keys_str = if user.all_keys { "~*" } else { "" };
+        let keys_str = user.keys_string();
         let channels_str = if user.all_channels { "&*" } else { "" };
 
         RespFrame::Array(Some(vec![
@@ -5143,7 +5259,7 @@ impl Runtime {
             RespFrame::BulkString(Some(b"commands".to_vec())),
             RespFrame::BulkString(Some(commands_str.into_bytes())),
             RespFrame::BulkString(Some(b"keys".to_vec())),
-            RespFrame::BulkString(Some(keys_str.as_bytes().to_vec())),
+            RespFrame::BulkString(Some(keys_str.into_bytes())),
             RespFrame::BulkString(Some(b"channels".to_vec())),
             RespFrame::BulkString(Some(channels_str.as_bytes().to_vec())),
             RespFrame::BulkString(Some(b"selectors".to_vec())),
@@ -17671,6 +17787,196 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&acl_path);
+    }
+
+    #[test]
+    fn acl_key_patterns_round_trip_through_getuser_list_and_save() {
+        let mut rt = Runtime::default_strict();
+        let acl_path = unique_temp_path("fr_runtime_acl_key_patterns", "acl");
+        rt.set_acl_file_path(acl_path.clone());
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL",
+                    b"SETUSER",
+                    b"alice",
+                    b"on",
+                    b">pass",
+                    b"-@all",
+                    b"+get",
+                    b"+set",
+                    b"resetkeys",
+                    b"~foo:*",
+                    b"~bar:*",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"GETUSER", b"alice"]), 1),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"on".to_vec())),
+                    RespFrame::BulkString(Some(b"sanitize-payload".to_vec())),
+                ])),
+                RespFrame::BulkString(Some(b"passwords".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
+                    b"d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1".to_vec(),
+                ))])),
+                RespFrame::BulkString(Some(b"commands".to_vec())),
+                RespFrame::BulkString(Some(b"+get +set".to_vec())),
+                RespFrame::BulkString(Some(b"keys".to_vec())),
+                RespFrame::BulkString(Some(b"~foo:* ~bar:*".to_vec())),
+                RespFrame::BulkString(Some(b"channels".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
+                RespFrame::BulkString(Some(b"selectors".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
+        );
+
+        let list = rt.execute_frame(command(&[b"ACL", b"LIST"]), 2);
+        let RespFrame::Array(Some(entries)) = list else {
+            unreachable!("expected ACL LIST to return an array");
+        };
+        let alice = entries
+            .iter()
+            .find_map(|entry| match entry {
+                RespFrame::BulkString(Some(line))
+                    if String::from_utf8_lossy(line).contains("alice") =>
+                {
+                    Some(String::from_utf8_lossy(line).into_owned())
+                }
+                _ => None,
+            })
+            .expect("expected alice in ACL LIST");
+        assert_eq!(
+            alice,
+            "user alice on sanitize-payload #<hidden> resetkeys ~foo:* ~bar:* +get +set"
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SAVE"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let saved = std::fs::read_to_string(&acl_path).expect("ACL SAVE should write acl file");
+        assert!(
+            saved.contains(
+                "user alice reset on sanitize-payload #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 resetkeys ~foo:* ~bar:* +get +set"
+            ),
+            "saved ACL file should preserve key patterns, got: {saved}"
+        );
+    }
+
+    #[test]
+    fn acl_key_patterns_gate_runtime_commands_and_dryrun() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL",
+                    b"SETUSER",
+                    b"alice",
+                    b"on",
+                    b">pass",
+                    b"-@all",
+                    b"+get",
+                    b"+set",
+                    b"resetkeys",
+                    b"~foo:*",
+                    b"~bar:*",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"DRYRUN", b"alice", b"SET", b"foo:1", b"v"]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"DRYRUN", b"alice", b"SET", b"zap:3", b"v"]),
+                2,
+            ),
+            RespFrame::Error(
+                "ERR User 'alice' has no permissions to access the 'zap:3' key".to_string(),
+            )
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"pass"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"foo:1", b"a"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"bar:2", b"b"]), 5),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"zap:3", b"c"]), 6),
+            RespFrame::Error("NOPERM No permissions to access a key".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"foo:1"]), 7),
+            RespFrame::BulkString(Some(b"a".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"zap:3"]), 8),
+            RespFrame::Error("NOPERM No permissions to access a key".to_string())
+        );
+    }
+
+    #[test]
+    fn acl_setuser_rejects_key_pattern_after_allkeys_without_resetkeys() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"alice", b"on", b"nopass", b"allkeys"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"alice", b"~foo:*"]), 1),
+            RespFrame::Error(
+                "ERR Error in ACL SETUSER modifier '~foo:*': Adding a pattern after the * pattern (or the 'allkeys' flag) is not valid and does not have any effect. Try 'resetkeys' to start with an empty list of patterns"
+                    .to_string(),
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"GETUSER", b"alice"]), 2),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"on".to_vec())),
+                    RespFrame::BulkString(Some(b"nopass".to_vec())),
+                    RespFrame::BulkString(Some(b"sanitize-payload".to_vec())),
+                ])),
+                RespFrame::BulkString(Some(b"passwords".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+                RespFrame::BulkString(Some(b"commands".to_vec())),
+                RespFrame::BulkString(Some(b"-@all".to_vec())),
+                RespFrame::BulkString(Some(b"keys".to_vec())),
+                RespFrame::BulkString(Some(b"~*".to_vec())),
+                RespFrame::BulkString(Some(b"channels".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
+                RespFrame::BulkString(Some(b"selectors".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
+        );
     }
 
     #[test]
