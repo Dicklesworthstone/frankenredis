@@ -6176,6 +6176,9 @@ fn function_cmd(
         if code_idx >= argv.len() {
             return Err(CommandError::WrongArity("FUNCTION"));
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         match store.function_load(&argv[code_idx], replace) {
             Ok(name) => Ok(RespFrame::BulkString(Some(name.into_bytes()))),
             Err(e) => Err(CommandError::Store(e)),
@@ -6199,6 +6202,9 @@ fn function_cmd(
                 with_code = true;
             }
             i += 1;
+        }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
         }
         let libs = store.function_list(pattern.as_deref());
         let mut result = Vec::new();
@@ -6248,6 +6254,9 @@ fn function_cmd(
                 subcommand: "STATS".to_string(),
             });
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         let (lib_count, func_count) = store.function_stats();
         Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"running_script".to_vec())),
@@ -6264,6 +6273,9 @@ fn function_cmd(
             ])),
         ])))
     } else if sub.eq_ignore_ascii_case("DUMP") {
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         let data = store.function_dump();
         Ok(RespFrame::BulkString(Some(data)))
     } else if sub.eq_ignore_ascii_case("RESTORE") {
@@ -6285,6 +6297,9 @@ fn function_cmd(
         } else {
             ""
         };
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         match store.function_restore(&argv[2], policy) {
             Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
             Err(e) => Err(CommandError::Store(e)),
@@ -6302,6 +6317,9 @@ fn function_cmd(
                 ));
             }
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         store.function_flush();
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("KILL") {
@@ -6310,6 +6328,9 @@ fn function_cmd(
                 command: "FUNCTION",
                 subcommand: "KILL".to_string(),
             });
+        }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
         }
         Ok(RespFrame::Error(
             "NOTBUSY No scripts in execution right now.".to_string(),
@@ -6320,6 +6341,9 @@ fn function_cmd(
                 command: "FUNCTION",
                 subcommand: "DELETE".to_string(),
             });
+        }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
         }
         let name = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         match store.function_delete(name) {
@@ -29312,6 +29336,77 @@ mod tests {
                 subcommand: "STATS".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn function_admin_subcommands_rejected_from_scripts_after_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let stats_arity = dispatch_argv(
+            &[b"FUNCTION".to_vec(), b"STATS".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            stats_arity,
+            CommandError::WrongSubcommandArity {
+                command: "FUNCTION",
+                subcommand: "STATS".to_string(),
+            }
+        );
+
+        let restore_shape = dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"RESTORE".to_vec(),
+                b"payload".to_vec(),
+                b"FLUSH".to_vec(),
+                b"EXTRA".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            restore_shape,
+            CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments for 'RESTORE'. Try FUNCTION HELP."
+                    .to_string(),
+            )
+        );
+
+        let flush_mode = dispatch_argv(
+            &[b"FUNCTION".to_vec(), b"FLUSH".to_vec(), b"BOGUS".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            flush_mode,
+            RespFrame::Error("ERR FUNCTION FLUSH only supports SYNC|ASYNC option".to_string())
+        );
+
+        let library =
+            b"#!lua name=scriptlib\nredis.register_function('echo', function(keys, args) return args[1] end)";
+        for argv in [
+            vec![b"FUNCTION".to_vec(), b"LIST".to_vec()],
+            vec![b"FUNCTION".to_vec(), b"STATS".to_vec()],
+            vec![b"FUNCTION".to_vec(), b"LOAD".to_vec(), library.to_vec()],
+            vec![b"FUNCTION".to_vec(), b"DELETE".to_vec(), b"mylib".to_vec()],
+            vec![b"FUNCTION".to_vec(), b"DUMP".to_vec()],
+            vec![b"FUNCTION".to_vec(), b"FLUSH".to_vec()],
+            vec![b"FUNCTION".to_vec(), b"KILL".to_vec()],
+            vec![
+                b"FUNCTION".to_vec(),
+                b"RESTORE".to_vec(),
+                b"payload".to_vec(),
+            ],
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
+            assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        }
     }
 
     #[test]
