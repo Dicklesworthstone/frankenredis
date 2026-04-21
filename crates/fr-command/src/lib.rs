@@ -11478,6 +11478,9 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                 ));
             }
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         Ok(RespFrame::Integer(0))
     } else if sub.eq_ignore_ascii_case("HELP") {
         if argv.len() != 2 {
@@ -31003,6 +31006,59 @@ mod tests {
             err,
             CommandError::Custom(CLIENT_UNBLOCK_REASON_INVALID.to_string())
         );
+    }
+
+    #[test]
+    fn client_unblock_rejected_from_scripts_after_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let arity = dispatch_argv(&[b"CLIENT".to_vec(), b"UNBLOCK".to_vec()], &mut store, 0)
+            .expect_err("client unblock arity");
+        assert_eq!(arity, client_wrong_subcommand_arity("UNBLOCK"));
+
+        let invalid_id = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"UNBLOCK".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("client unblock invalid id");
+        assert_eq!(invalid_id, CommandError::InvalidInteger);
+
+        let invalid_mode = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"UNBLOCK".to_vec(),
+                b"42".to_vec(),
+                b"WAT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("client unblock invalid mode");
+        assert_eq!(
+            invalid_mode,
+            CommandError::Custom(CLIENT_UNBLOCK_REASON_INVALID.to_string())
+        );
+
+        for argv in [
+            vec![b"CLIENT".to_vec(), b"UNBLOCK".to_vec(), b"42".to_vec()],
+            vec![
+                b"CLIENT".to_vec(),
+                b"UNBLOCK".to_vec(),
+                b"42".to_vec(),
+                b"TIMEOUT".to_vec(),
+            ],
+            vec![
+                b"CLIENT".to_vec(),
+                b"UNBLOCK".to_vec(),
+                b"42".to_vec(),
+                b"ERROR".to_vec(),
+            ],
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).expect_err("client unblock noscript");
+            assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        }
     }
 
     #[test]
