@@ -5,7 +5,6 @@
 
 # Local agent/task tooling state
 .bv/
-.beads/
 
 # Local oracle clone (not part of clean-room implementation)
 legacy_redis_code/
