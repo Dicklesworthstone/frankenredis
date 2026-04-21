@@ -42,7 +42,7 @@
         "value": [
           {
             "kind": "bulk",
-            "value": "user default on nopass ~* &* +@all"
+            "value": "user default on nopass sanitize-payload ~* &* +@all"
           }
         ]
       }
@@ -450,6 +450,10 @@
               {
                 "kind": "bulk",
                 "value": "off"
+              },
+              {
+                "kind": "bulk",
+                "value": "sanitize-payload"
               }
             ]
           },
@@ -467,7 +471,7 @@
           },
           {
             "kind": "bulk",
-            "value": "+@all"
+            "value": "-@all"
           },
           {
             "kind": "bulk",
@@ -475,7 +479,7 @@
           },
           {
             "kind": "bulk",
-            "value": "~*"
+            "value": ""
           },
           {
             "kind": "bulk",
@@ -483,7 +487,15 @@
           },
           {
             "kind": "bulk",
-            "value": "&*"
+            "value": ""
+          },
+          {
+            "kind": "bulk",
+            "value": "selectors"
+          },
+          {
+            "kind": "array",
+            "value": []
           }
         ]
       }
@@ -528,6 +540,10 @@
               {
                 "kind": "bulk",
                 "value": "nopass"
+              },
+              {
+                "kind": "bulk",
+                "value": "sanitize-payload"
               }
             ]
           },
@@ -545,7 +561,7 @@
           },
           {
             "kind": "bulk",
-            "value": "+@all"
+            "value": "-@all"
           },
           {
             "kind": "bulk",
@@ -553,7 +569,7 @@
           },
           {
             "kind": "bulk",
-            "value": "~*"
+            "value": ""
           },
           {
             "kind": "bulk",
@@ -561,7 +577,15 @@
           },
           {
             "kind": "bulk",
-            "value": "&*"
+            "value": ""
+          },
+          {
+            "kind": "bulk",
+            "value": "selectors"
+          },
+          {
+            "kind": "array",
+            "value": []
           }
         ]
       }
@@ -981,6 +1005,10 @@
               {
                 "kind": "bulk",
                 "value": "on"
+              },
+              {
+                "kind": "bulk",
+                "value": "sanitize-payload"
               }
             ]
           },
@@ -998,7 +1026,7 @@
           },
           {
             "kind": "bulk",
-            "value": "+@all"
+            "value": "-@all"
           },
           {
             "kind": "bulk",
@@ -1006,7 +1034,7 @@
           },
           {
             "kind": "bulk",
-            "value": "~*"
+            "value": ""
           },
           {
             "kind": "bulk",
@@ -1014,7 +1042,15 @@
           },
           {
             "kind": "bulk",
-            "value": "&*"
+            "value": ""
+          },
+          {
+            "kind": "bulk",
+            "value": "selectors"
+          },
+          {
+            "kind": "array",
+            "value": []
           }
         ]
       }
@@ -1278,6 +1314,10 @@
               {
                 "kind": "bulk",
                 "value": "nopass"
+              },
+              {
+                "kind": "bulk",
+                "value": "sanitize-payload"
               }
             ]
           },
@@ -1311,7 +1351,15 @@
           },
           {
             "kind": "bulk",
-            "value": "&*"
+            "value": ""
+          },
+          {
+            "kind": "bulk",
+            "value": "selectors"
+          },
+          {
+            "kind": "array",
+            "value": []
           }
         ]
       }
