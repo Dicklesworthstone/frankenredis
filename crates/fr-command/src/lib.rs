@@ -11340,6 +11340,9 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                 }
             }
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
 
         let matches_current_client = !skipme
             && filter_id.is_none_or(|id| store.dispatch_client_ctx.client_id == id)
@@ -11381,10 +11384,16 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                 return Err(CommandError::Custom(CLIENT_PAUSE_MODE_INVALID.to_string()));
             }
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("UNPAUSE") {
         if argv.len() != 2 {
             return Err(client_wrong_subcommand_arity(sub));
+        }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("TRACKING") {
@@ -28406,6 +28415,84 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, client_wrong_subcommand_arity("UNPAUSE"));
+    }
+
+    #[test]
+    fn client_kill_pause_and_unpause_reject_scripts_after_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+        store.dispatch_client_ctx.peer_addr = "10.0.0.9:7777".to_string();
+
+        let kill_shape = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"SKIPME".to_vec(),
+                b"maybe".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            kill_shape,
+            CommandError::Custom("ERR argument must be 'yes' or 'no'".to_string())
+        );
+
+        let pause_shape = dispatch_argv(
+            &[
+                b"CLIENT".to_vec(),
+                b"PAUSE".to_vec(),
+                b"1000".to_vec(),
+                b"WAT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            pause_shape,
+            CommandError::Custom(CLIENT_PAUSE_MODE_INVALID.to_string())
+        );
+
+        let unpause_shape = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"UNPAUSE".to_vec(), b"NOW".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(unpause_shape, client_wrong_subcommand_arity("UNPAUSE"));
+
+        for argv in [
+            vec![
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"10.0.0.9:7777".to_vec(),
+            ],
+            vec![
+                b"CLIENT".to_vec(),
+                b"KILL".to_vec(),
+                b"SKIPME".to_vec(),
+                b"no".to_vec(),
+            ],
+            vec![b"CLIENT".to_vec(), b"PAUSE".to_vec(), b"1000".to_vec()],
+            vec![
+                b"CLIENT".to_vec(),
+                b"PAUSE".to_vec(),
+                b"1000".to_vec(),
+                b"WRITE".to_vec(),
+            ],
+            vec![
+                b"CLIENT".to_vec(),
+                b"PAUSE".to_vec(),
+                b"1000".to_vec(),
+                b"ALL".to_vec(),
+            ],
+            vec![b"CLIENT".to_vec(), b"UNPAUSE".to_vec()],
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
+            assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        }
     }
 
     #[test]
