@@ -6509,6 +6509,9 @@ fn ssubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comm
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SSUBSCRIBE"));
     }
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
+    }
     if argv.len() == 2 {
         let count = store.ssubscribe(argv[1].clone()) as i64;
         return Ok(RespFrame::Array(Some(vec![
@@ -6531,6 +6534,9 @@ fn ssubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comm
 
 fn sunsubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     // SUNSUBSCRIBE [shardchannel ...]
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
+    }
     if argv.len() < 2 {
         // Unsubscribe from all shard channels (sorted for deterministic order)
         let mut channels: Vec<Vec<u8>> = store.subscribed_shard_channels.iter().cloned().collect();
@@ -12051,6 +12057,9 @@ fn subscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comma
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SUBSCRIBE"));
     }
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
+    }
     if argv.len() == 2 {
         // Single channel — return the standard 3-element subscribe reply
         let count = store.subscribe(argv[1].clone()) as i64;
@@ -12074,6 +12083,9 @@ fn subscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comma
 
 fn unsubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
     // UNSUBSCRIBE [channel [channel ...]]
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
+    }
     if argv.len() < 2 {
         // Unsubscribe from all channels — produce one reply per channel
         let channels: Vec<Vec<u8>> = store.subscribed_channels.iter().cloned().collect();
@@ -12125,6 +12137,9 @@ fn psubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comm
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("PSUBSCRIBE"));
     }
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
+    }
     if argv.len() == 2 {
         let count = store.psubscribe(argv[1].clone()) as i64;
         return Ok(RespFrame::Array(Some(vec![
@@ -12146,6 +12161,9 @@ fn psubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comm
 }
 
 fn punsubscribe_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
+    if store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
+    }
     if argv.len() < 2 {
         let patterns: Vec<Vec<u8>> = store.subscribed_patterns.iter().cloned().collect();
         if patterns.is_empty() {
@@ -25019,6 +25037,62 @@ mod tests {
                 RespFrame::Integer(0),
             ]))
         );
+    }
+
+    #[test]
+    fn subscribe_family_rejects_scripts_after_arity_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let err = dispatch_argv(&[b"SUBSCRIBE".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(err, CommandError::WrongArity("SUBSCRIBE"));
+
+        let err = dispatch_argv(&[b"PSUBSCRIBE".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(err, CommandError::WrongArity("PSUBSCRIBE"));
+
+        let err = dispatch_argv(&[b"SSUBSCRIBE".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(err, CommandError::WrongArity("SSUBSCRIBE"));
+
+        for argv in [
+            vec![b"SUBSCRIBE".to_vec(), b"ch1".to_vec()],
+            vec![b"SUBSCRIBE".to_vec(), b"ch1".to_vec(), b"ch2".to_vec()],
+            vec![b"UNSUBSCRIBE".to_vec()],
+            vec![b"UNSUBSCRIBE".to_vec(), b"ch1".to_vec()],
+            vec![b"UNSUBSCRIBE".to_vec(), b"ch1".to_vec(), b"ch2".to_vec()],
+            vec![b"PSUBSCRIBE".to_vec(), b"news.*".to_vec()],
+            vec![
+                b"PSUBSCRIBE".to_vec(),
+                b"news.*".to_vec(),
+                b"events.*".to_vec(),
+            ],
+            vec![b"PUNSUBSCRIBE".to_vec()],
+            vec![b"PUNSUBSCRIBE".to_vec(), b"news.*".to_vec()],
+            vec![
+                b"PUNSUBSCRIBE".to_vec(),
+                b"news.*".to_vec(),
+                b"events.*".to_vec(),
+            ],
+            vec![b"SSUBSCRIBE".to_vec(), b"shard1".to_vec()],
+            vec![
+                b"SSUBSCRIBE".to_vec(),
+                b"shard1".to_vec(),
+                b"shard2".to_vec(),
+            ],
+            vec![b"SUNSUBSCRIBE".to_vec()],
+            vec![b"SUNSUBSCRIBE".to_vec(), b"shard1".to_vec()],
+            vec![
+                b"SUNSUBSCRIBE".to_vec(),
+                b"shard1".to_vec(),
+                b"shard2".to_vec(),
+            ],
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
+            assert_eq!(
+                err,
+                CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()),
+                "argv: {argv:?}"
+            );
+        }
     }
 
     #[test]
