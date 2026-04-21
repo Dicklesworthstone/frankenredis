@@ -10662,7 +10662,9 @@ fn config_cmd(
         if store.script_nesting_level >= 1 {
             return Err(script_noscript_command_error());
         }
-        Ok(RespFrame::SimpleString("OK".to_string()))
+        Err(CommandError::Custom(
+            "ERR The server is running without a config file".to_string(),
+        ))
     } else if sub.eq_ignore_ascii_case("HELP") {
         if argv.len() != 2 {
             return Err(CommandError::WrongSubcommandArity {
@@ -29717,6 +29719,17 @@ mod tests {
                 command: "CONFIG",
                 subcommand: "REWRITE".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn config_rewrite_without_config_file_matches_redis_error() {
+        let mut store = Store::new();
+        let err =
+            dispatch_argv(&[b"CONFIG".to_vec(), b"REWRITE".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR The server is running without a config file".to_string())
         );
     }
 

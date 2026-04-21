@@ -5898,7 +5898,7 @@ impl Runtime {
             }
             let Some(path) = &self.server.config_file_path else {
                 return RespFrame::Error(
-                    "ERR The server is not started with a config file.".to_string(),
+                    "ERR The server is running without a config file".to_string(),
                 );
             };
 
@@ -5942,7 +5942,7 @@ impl Runtime {
                 Ok(())
             })() {
                 Ok(()) => RespFrame::SimpleString("OK".to_string()),
-                Err(err) => RespFrame::Error(format!("ERR {err}")),
+                Err(err) => RespFrame::Error(format!("ERR Rewriting config file: {err}")),
             }
         } else {
             CommandError::UnknownSubcommand {
@@ -16295,6 +16295,38 @@ mod tests {
                 RespFrame::Error(expected.to_string())
             );
         }
+    }
+
+    #[test]
+    fn config_rewrite_requires_loaded_config_file() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"REWRITE"]), 0),
+            RespFrame::Error("ERR The server is running without a config file".to_string())
+        );
+    }
+
+    #[test]
+    fn config_rewrite_surfaces_filesystem_failures() {
+        let mut rt = Runtime::default_strict();
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("unix epoch")
+            .as_nanos();
+        let missing_dir = std::env::temp_dir().join(format!(
+            "fr_runtime_config_rewrite_missing_{}_{}",
+            std::process::id(),
+            unique_suffix
+        ));
+        rt.set_config_file_path(Some(missing_dir.join("redis.conf")));
+
+        let RespFrame::Error(err) = rt.execute_frame(command(&[b"CONFIG", b"REWRITE"]), 0) else {
+            panic!("expected CONFIG REWRITE filesystem error"); // ubs:ignore — test assertion
+        };
+        assert!(
+            err.starts_with("ERR Rewriting config file: "),
+            "unexpected rewrite error: {err}"
+        );
     }
 
     #[test]

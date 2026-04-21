@@ -2341,7 +2341,10 @@
       "name": "config_rewrite_ok",
       "now_ms": 0,
       "argv": ["CONFIG", "REWRITE"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "expect": {
+        "kind": "error",
+        "value": "ERR The server is running without a config file"
+      }
     },
     {
       "name": "config_unknown_subcommand",
