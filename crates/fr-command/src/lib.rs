@@ -13107,6 +13107,9 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
                 subcommand: "LATEST".to_string(),
             });
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         let entries = store
             .latency_latest()
             .into_iter()
@@ -13133,6 +13136,9 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
                 subcommand: "HISTORY".to_string(),
             });
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         let event = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         let history = store
             .latency_history(event)
@@ -13146,6 +13152,9 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
             .collect();
         Ok(RespFrame::Array(Some(history)))
     } else if sub.eq_ignore_ascii_case("RESET") {
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         let mut events = Vec::with_capacity(argv.len().saturating_sub(2));
         for event in &argv[2..] {
             events.push(std::str::from_utf8(event).map_err(|_| CommandError::InvalidUtf8Argument)?);
@@ -13157,6 +13166,9 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
                 command: "LATENCY",
                 subcommand: "GRAPH".to_string(),
             });
+        }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
         }
         let event = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         let history = store.latency_history(event);
@@ -13175,10 +13187,16 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
                 subcommand: "DOCTOR".to_string(),
             });
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         Ok(RespFrame::BulkString(Some(
             latency_doctor_report(store).into_bytes(),
         )))
     } else if sub.eq_ignore_ascii_case("HISTOGRAM") {
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         // LATENCY HISTOGRAM [command ...]
         // Returns histogram data for each command's latency distribution.
         // Format: array of [command_name, histogram_map] pairs.
@@ -26259,6 +26277,78 @@ mod tests {
                 RespFrame::SimpleString("    Print this help.".to_string()),
             ]))
         );
+    }
+
+    #[test]
+    fn latency_subcommands_reject_scripts_after_arity_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let latest_arity = dispatch_argv(
+            &[b"LATENCY".to_vec(), b"LATEST".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            latest_arity,
+            CommandError::WrongSubcommandArity {
+                command: "LATENCY",
+                subcommand: "LATEST".to_string(),
+            }
+        );
+
+        let history_arity =
+            dispatch_argv(&[b"LATENCY".to_vec(), b"HISTORY".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(
+            history_arity,
+            CommandError::WrongSubcommandArity {
+                command: "LATENCY",
+                subcommand: "HISTORY".to_string(),
+            }
+        );
+
+        let graph_arity =
+            dispatch_argv(&[b"LATENCY".to_vec(), b"GRAPH".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(
+            graph_arity,
+            CommandError::WrongSubcommandArity {
+                command: "LATENCY",
+                subcommand: "GRAPH".to_string(),
+            }
+        );
+
+        let doctor_arity = dispatch_argv(
+            &[b"LATENCY".to_vec(), b"DOCTOR".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            doctor_arity,
+            CommandError::WrongSubcommandArity {
+                command: "LATENCY",
+                subcommand: "DOCTOR".to_string(),
+            }
+        );
+
+        for argv in [
+            vec![b"LATENCY".to_vec(), b"LATEST".to_vec()],
+            vec![
+                b"LATENCY".to_vec(),
+                b"HISTORY".to_vec(),
+                b"command".to_vec(),
+            ],
+            vec![b"LATENCY".to_vec(), b"RESET".to_vec()],
+            vec![b"LATENCY".to_vec(), b"RESET".to_vec(), b"command".to_vec()],
+            vec![b"LATENCY".to_vec(), b"GRAPH".to_vec(), b"command".to_vec()],
+            vec![b"LATENCY".to_vec(), b"DOCTOR".to_vec()],
+            vec![b"LATENCY".to_vec(), b"HISTOGRAM".to_vec()],
+            vec![b"LATENCY".to_vec(), b"HISTOGRAM".to_vec(), b"GET".to_vec()],
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
+            assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        }
     }
 
     #[test]
