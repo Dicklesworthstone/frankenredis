@@ -748,7 +748,8 @@
         "SETUSER",
         "testuser",
         "on",
-        ">secret123"
+        ">secret123",
+        "+@all"
       ],
       "expect": {
         "kind": "simple",
