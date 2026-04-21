@@ -16955,6 +16955,7 @@ mod tests {
             result,
             RespFrame::SimpleString("Background saving started".to_string())
         );
+        rt.wait_for_child_processes();
         assert!(
             rdb_path.exists(),
             "BGSAVE should write the configured RDB file"
