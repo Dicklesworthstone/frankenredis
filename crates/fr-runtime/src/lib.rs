@@ -3123,6 +3123,20 @@ impl Runtime {
         }
     }
 
+    fn queue_acl_deleted_user_disconnects(&mut self, username: &[u8]) {
+        let sessions = self.client_list_sessions();
+        for session in sessions.values() {
+            if session.authenticated_user.as_deref() == Some(username)
+                && !self
+                    .server
+                    .pending_client_kills
+                    .contains(&session.client_id)
+            {
+                self.server.pending_client_kills.push(session.client_id);
+            }
+        }
+    }
+
     fn queue_acl_pubsub_revocations_for_all_users(&mut self) {
         let sessions = self.client_list_sessions();
         for session in sessions.values() {
@@ -5479,6 +5493,7 @@ impl Runtime {
                 return RespFrame::Error("ERR The 'default' user cannot be removed".to_string());
             }
             if self.server.auth_state.del_user(username) {
+                self.queue_acl_deleted_user_disconnects(username);
                 deleted += 1;
             }
         }
@@ -18928,6 +18943,69 @@ mod tests {
             RespFrame::SimpleString("OK".to_string())
         );
         assert_eq!(rt.server.pending_client_kills, vec![subscriber.client_id]);
+    }
+
+    #[test]
+    fn acl_deluser_queues_authenticated_sessions_for_disconnect() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"alice", b"on", b">pass", b"+@all", b"~*", b"&*"
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"bob", b"on", b">pass", b"+@all", b"~*", b"&*"
+                ]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let previous = rt.swap_session(rt.new_session());
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"pass"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let alice_one_snapshot = rt.session.clone();
+        rt.record_client_session(&alice_one_snapshot);
+        let alice_one = rt.swap_session(previous);
+
+        let previous = rt.swap_session(rt.new_session());
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"pass"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let alice_two_snapshot = rt.session.clone();
+        rt.record_client_session(&alice_two_snapshot);
+        let alice_two = rt.swap_session(previous);
+
+        let previous = rt.swap_session(rt.new_session());
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"bob", b"pass"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let bob_snapshot = rt.session.clone();
+        rt.record_client_session(&bob_snapshot);
+        let _bob = rt.swap_session(previous);
+
+        rt.server.pending_client_kills.clear();
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"DELUSER", b"alice"]), 5),
+            RespFrame::Integer(1)
+        );
+
+        let mut kills = rt.server.pending_client_kills.clone();
+        kills.sort_unstable();
+        let mut expected = vec![alice_one.client_id, alice_two.client_id];
+        expected.sort_unstable();
+        assert_eq!(kills, expected);
     }
 
     #[test]
