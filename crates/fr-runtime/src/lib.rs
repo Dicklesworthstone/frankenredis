@@ -5049,7 +5049,9 @@ impl Runtime {
     }
 
     fn current_acl_log_context(&self) -> &'static str {
-        if self.session.transaction_state.in_transaction
+        if self.server.store.script_nesting_level > 0 {
+            "lua"
+        } else if self.session.transaction_state.in_transaction
             || self.session.transaction_state.executing_exec
         {
             "multi"
