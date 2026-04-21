@@ -11313,6 +11313,9 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         if argv.len() != 3 {
             return Err(client_wrong_subcommand_arity(sub));
         }
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         let mode = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         apply_client_caching_mode(mode, &mut store.dispatch_client_ctx.client_tracking)?;
         Ok(RespFrame::SimpleString("OK".to_string()))
@@ -19969,6 +19972,25 @@ mod tests {
             vec![b"CLIENT".to_vec(), b"ID".to_vec()],
         ] {
             let err = dispatch_argv(&argv, &mut store, 0).expect_err("client noscript");
+            assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        }
+    }
+
+    #[test]
+    fn client_caching_rejected_from_scripts_after_arity_validation() {
+        let mut store = Store::new();
+        store.script_nesting_level = 1;
+
+        let arity = dispatch_argv(&[b"CLIENT".to_vec(), b"CACHING".to_vec()], &mut store, 0)
+            .expect_err("client caching arity");
+        assert_eq!(arity, client_wrong_subcommand_arity("CACHING"));
+
+        for argv in [
+            vec![b"CLIENT".to_vec(), b"CACHING".to_vec(), b"YES".to_vec()],
+            vec![b"CLIENT".to_vec(), b"CACHING".to_vec(), b"NO".to_vec()],
+            vec![b"CLIENT".to_vec(), b"CACHING".to_vec(), b"INVALID".to_vec()],
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).expect_err("client caching noscript");
             assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
         }
     }
