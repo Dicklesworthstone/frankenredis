@@ -19082,7 +19082,7 @@ mod tests {
             .expect("expected alice in ACL LIST");
         assert_eq!(
             alice,
-            "user alice on sanitize-payload #<hidden> ~* resetchannels &foo:1 &bar:* &orders +@all"
+            "user alice on sanitize-payload #<hidden> +@all ~* resetchannels &foo:1 &bar:* &orders"
         );
 
         assert_eq!(
@@ -19092,7 +19092,7 @@ mod tests {
         let saved = std::fs::read_to_string(&acl_path).expect("ACL SAVE should write acl file");
         assert!(
             saved.contains(
-                "user alice reset on sanitize-payload #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 ~* resetchannels &foo:1 &bar:* &orders +@all"
+                "user alice reset on sanitize-payload #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 +@all ~* resetchannels &foo:1 &bar:* &orders"
             ),
             "saved ACL file should preserve channel patterns, got: {saved}"
         );
