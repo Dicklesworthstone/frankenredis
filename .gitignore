@@ -140,6 +140,7 @@ ubs_*.jsonl
 /*.txt
 /*.json
 !package.json
+!claude-upgrade-progress.json
 /*.sh
 /*.py
 /*.md
@@ -149,6 +150,7 @@ ubs_*.jsonl
 !AGENTS.md
 !CONTRIBUTING.md
 !LICENSE*
+!UPGRADE_LOG.md
 
 # Beads recovery artifacts
 .beads_recovery/
