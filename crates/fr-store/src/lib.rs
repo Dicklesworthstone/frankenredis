@@ -15004,8 +15004,8 @@ mod tests {
     // ── Metamorphic property tests ──────────────────────────────────────────
     mod metamorphic {
         use crate::{
-            Store, StoreError, decode_db_key, encode_db_key, glob_match, keyspace_events_parse,
-            keyspace_events_to_string,
+            Store, StoreError, StreamRecord, decode_db_key, encode_db_key, glob_match,
+            keyspace_events_parse, keyspace_events_to_string,
         };
         use proptest::prelude::*;
         use std::collections::{BTreeMap, BTreeSet};
@@ -15122,6 +15122,33 @@ mod tests {
             }
             map.into_iter()
                 .map(|(member, score)| (score, member))
+                .collect()
+        }
+
+        fn normalized_stream_records(
+            mut records: Vec<Vec<(Vec<u8>, Vec<u8>)>>,
+        ) -> Vec<StreamRecord> {
+            records.truncate(6);
+            if records.is_empty() {
+                records.push(vec![(b"field".to_vec(), b"value".to_vec())]);
+            }
+            records
+                .into_iter()
+                .enumerate()
+                .map(|(idx, fields)| {
+                    let id = (1_000 + (idx as u64 / 2), idx as u64 % 2);
+                    let normalized_fields = fields
+                        .into_iter()
+                        .take(4)
+                        .map(|(field, value)| {
+                            (
+                                normalized_blob(field, b"field"),
+                                normalized_blob(value, b"value"),
+                            )
+                        })
+                        .collect();
+                    (id, normalized_fields)
+                })
                 .collect()
         }
 
@@ -15454,6 +15481,54 @@ mod tests {
                 let reencoded = restored
                     .dump_key(&key, METAMORPHIC_NOW_MS)
                     .expect("restored sorted-set key must dump");
+                prop_assert_eq!(payload, reencoded);
+            }
+
+            #[test]
+            fn mr_dump_restore_stream_payload_roundtrip_is_stable(
+                key in small_key(),
+                records in prop::collection::vec(
+                    prop::collection::vec((small_blob(), small_blob()), 1..5),
+                    1..6
+                ),
+                ttl_ms in optional_ttl_ms(),
+            ) {
+                let records = normalized_stream_records(records);
+                let mut original = Store::new();
+                for (id, fields) in &records {
+                    original
+                        .xadd(&key, *id, fields, METAMORPHIC_NOW_MS)
+                        .expect("valid fuzz stream setup must succeed");
+                }
+                if let Some(ttl_ms) = ttl_ms {
+                    prop_assert!(
+                        original.expire_milliseconds(&key, ttl_ms as i64, METAMORPHIC_NOW_MS),
+                        "freshly installed stream must accept ttl"
+                    );
+                }
+                let expected = original
+                    .xrange(&key, (0, 0), (u64::MAX, u64::MAX), None, METAMORPHIC_NOW_MS)
+                    .expect("installed stream must enumerate");
+
+                let payload = original
+                    .dump_key(&key, METAMORPHIC_NOW_MS)
+                    .expect("installed stream key must dump");
+                let ttl_ms = dump_payload_ttl_ms(&payload);
+
+                let mut restored = Store::new();
+                restored
+                    .restore_key(&key, ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
+                    .expect("self-generated stream dump must restore");
+                prop_assert_eq!(
+                    restored
+                        .xrange(&key, (0, 0), (u64::MAX, u64::MAX), None, METAMORPHIC_NOW_MS)
+                        .expect("restored stream must enumerate"),
+                    expected
+                );
+
+                let reencoded = restored
+                    .dump_key(&key, METAMORPHIC_NOW_MS)
+                    .expect("restored stream key must dump");
                 prop_assert_eq!(payload, reencoded);
             }
 
