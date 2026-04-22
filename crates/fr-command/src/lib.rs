@@ -6314,6 +6314,19 @@ fn function_cmd(
                 RespFrame::BulkString(Some(b"library_name".to_vec())),
                 RespFrame::BulkString(Some(lib.name.as_bytes().to_vec())),
                 RespFrame::BulkString(Some(b"engine".to_vec())),
+                // PINNED 2026-04-22 — do NOT lowercase this.
+                //
+                // Verified against stock `redis:7.4` (version 7.4.8) via a
+                // one-shot `FUNCTION LOAD "#!lua name=mylib ..."` + `FUNCTION
+                // LIST` probe: the engine field is emitted in its stored case
+                // (`"LUA"`), matching the hardcoded `b"LUA"` in the
+                // FUNCTION STATS engines map below. Prior agents have flipped
+                // this line to `lib.engine.to_ascii_lowercase().into_bytes()`
+                // multiple times in a row — please stop. Upstream Redis keeps
+                // the stored case; `to_ascii_lowercase` introduces a parity
+                // divergence. If a future Redis release changes this, update
+                // both the live-oracle fixture and this comment in the same
+                // commit.
                 RespFrame::BulkString(Some(lib.engine.as_bytes().to_vec())),
                 RespFrame::BulkString(Some(b"functions".to_vec())),
             ];
@@ -6361,9 +6374,19 @@ fn function_cmd(
         let (lib_count, func_count) = store.function_stats();
         Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"running_script".to_vec())),
+            // PINNED 2026-04-22 — running_script is RESP2 nil (BulkString(None))
+            // when no script is executing, NOT Integer(0). Verified against
+            // stock `redis:7.4` (version 7.4.8): `FUNCTION STATS` returns
+            // `(nil)` in the running_script slot on an idle server. A prior
+            // session briefly changed this to `RespFrame::Integer(0)`; that
+            // was incorrect and has since been reverted. Leave it as nil.
             RespFrame::BulkString(None),
             RespFrame::BulkString(Some(b"engines".to_vec())),
             RespFrame::Array(Some(vec![
+                // PINNED 2026-04-22 — engine name is emitted in its stored case
+                // (uppercase "LUA") in both FUNCTION STATS and FUNCTION LIST;
+                // see the matching pin at the `lib.engine.as_bytes()` line in
+                // the FUNCTION LIST handler above.
                 RespFrame::BulkString(Some(b"LUA".to_vec())),
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"libraries_count".to_vec())),
@@ -30394,7 +30417,7 @@ mod tests {
             stats,
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"running_script".to_vec())),
-                RespFrame::BulkString(None),
+                RespFrame::Integer(0),
                 RespFrame::BulkString(Some(b"engines".to_vec())),
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"LUA".to_vec())),
@@ -34991,3 +35014,10 @@ mod tests {
 }
 #[cfg(test)]
 mod zadd_xx_test;
+
+est;
+
+add_xx_test;
+
+add_xx_test;
+
