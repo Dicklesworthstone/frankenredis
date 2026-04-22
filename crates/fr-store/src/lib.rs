@@ -9114,10 +9114,12 @@ impl Store {
         self.dirty = self.dirty.saturating_add(1);
     }
 
+    const EMPTY_FUNCTION_DUMP_PAYLOAD: [u8; 10] = [11, 0, 52, 68, 225, 51, 242, 224, 75, 83];
+
     /// Dump all function libraries as a serialized blob.
     pub fn function_dump(&self) -> Vec<u8> {
         if self.function_libraries.is_empty() {
-            return vec![11, 0, 52, 68, 225, 51, 242, 224, 75, 83];
+            return Self::EMPTY_FUNCTION_DUMP_PAYLOAD.to_vec();
         }
         // Simple binary format: [count:4LE] [for each: name_len:4LE name code_len:4LE code]
         let mut buf = Vec::new();
@@ -9150,14 +9152,19 @@ impl Store {
             ));
         }
 
-        let mut pos = 0;
-        if data.len() < 4 {
-            return Err(StoreError::GenericError(
-                "ERR Invalid dump data".to_string(),
-            ));
-        }
-        let count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
-        pos += 4;
+        let (count, mut pos) = if data == Self::EMPTY_FUNCTION_DUMP_PAYLOAD.as_slice() {
+            (0, data.len())
+        } else {
+            if data.len() < 4 {
+                return Err(StoreError::GenericError(
+                    "ERR Invalid dump data".to_string(),
+                ));
+            }
+            (
+                u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize,
+                4,
+            )
+        };
         let mut seen_names: HashSet<String> = if append {
             self.function_libraries.keys().cloned().collect()
         } else {
@@ -10808,6 +10815,14 @@ mod tests {
             &format!("seedlib_{seed:04x}"),
             &format!("alpha_{seed:04x}"),
             &format!("beta_{seed:04x}"),
+        )
+    }
+
+    fn sample_replacement_function_library_from_seed(seed: u16) -> Vec<u8> {
+        sample_function_library(
+            &format!("seedlib_{seed:04x}"),
+            &format!("gamma_{seed:04x}"),
+            &format!("delta_{seed:04x}"),
         )
     }
 
@@ -15013,7 +15028,10 @@ mod tests {
 
     // ── Metamorphic property tests ──────────────────────────────────────────
     mod metamorphic {
-        use super::{function_library_snapshot, sample_function_library_from_seed};
+        use super::{
+            function_library_snapshot, sample_function_library_from_seed,
+            sample_replacement_function_library_from_seed,
+        };
         use crate::{
             Store, StoreError, StreamRecord, decode_db_key, encode_db_key, eq_ascii_ci, glob_match,
             keyspace_events_parse, keyspace_events_to_string,
@@ -15228,6 +15246,34 @@ mod tests {
                 .into_iter()
                 .map(sample_function_library_from_seed)
                 .collect()
+        }
+
+        fn optional_function_library_payloads(mut seeds: Vec<u16>) -> Vec<Vec<u8>> {
+            seeds.truncate(4);
+            BTreeSet::from_iter(seeds)
+                .into_iter()
+                .map(sample_function_library_from_seed)
+                .collect()
+        }
+
+        fn replacement_function_library_payloads(mut seeds: Vec<u16>) -> Vec<Vec<u8>> {
+            seeds.truncate(4);
+            let mut unique_seeds = BTreeSet::from_iter(seeds);
+            if unique_seeds.is_empty() {
+                unique_seeds.insert(0);
+            }
+            unique_seeds
+                .into_iter()
+                .map(sample_replacement_function_library_from_seed)
+                .collect()
+        }
+
+        fn install_function_libraries(store: &mut Store, libraries: &[Vec<u8>]) {
+            for library in libraries {
+                store
+                    .function_load(library, false)
+                    .expect("generated function library must load");
+            }
         }
 
         fn normalized_stream_group_seeds(mut seeds: Vec<u8>) -> Vec<u8> {
@@ -15593,7 +15639,7 @@ mod tests {
                         "AOF rewrite group creation must stay unique during replay"
                     );
                 } else {
-                    panic!("unexpected AOF rewrite command: {argv:?}");
+                    assert!(argv.is_empty(), "unexpected AOF rewrite command: {argv:?}");
                 }
             }
 
@@ -16018,11 +16064,7 @@ mod tests {
             ) {
                 let libraries = normalized_function_library_payloads(seeds);
                 let mut original = Store::new();
-                for library in &libraries {
-                    original
-                        .function_load(library, false)
-                        .expect("generated function library must load");
-                }
+                install_function_libraries(&mut original, &libraries);
 
                 let expected_snapshot = function_library_snapshot(&original);
                 let dumped = original.function_dump();
@@ -16042,11 +16084,7 @@ mod tests {
             ) {
                 let libraries = normalized_function_library_payloads(seeds);
                 let mut store = Store::new();
-                for library in &libraries {
-                    store
-                        .function_load(library, false)
-                        .expect("generated function library must load");
-                }
+                install_function_libraries(&mut store, &libraries);
 
                 let before_snapshot = function_library_snapshot(&store);
                 let before_dump = store.function_dump();
@@ -16061,6 +16099,95 @@ mod tests {
                 );
                 prop_assert_eq!(function_library_snapshot(&store), before_snapshot);
                 prop_assert_eq!(store.function_dump(), before_dump);
+            }
+
+            #[test]
+            fn mr_function_restore_append_of_disjoint_payload_is_union(
+                base_seeds in prop::collection::vec(0u16..2048, 0..6),
+                append_seeds in prop::collection::vec(2048u16..4096, 0..6),
+            ) {
+                let base_libraries = normalized_function_library_payloads(base_seeds);
+                let append_libraries = optional_function_library_payloads(append_seeds);
+
+                let mut payload_store = Store::new();
+                install_function_libraries(&mut payload_store, &append_libraries);
+                let payload_dump = payload_store.function_dump();
+
+                let mut restored = Store::new();
+                install_function_libraries(&mut restored, &base_libraries);
+                restored
+                    .function_restore(&payload_dump, "APPEND")
+                    .expect("APPEND with disjoint libraries must succeed");
+
+                let mut expected = Store::new();
+                install_function_libraries(&mut expected, &base_libraries);
+                install_function_libraries(&mut expected, &append_libraries);
+
+                prop_assert_eq!(
+                    function_library_snapshot(&restored),
+                    function_library_snapshot(&expected)
+                );
+                prop_assert_eq!(restored.function_dump(), expected.function_dump());
+            }
+
+            #[test]
+            fn mr_function_restore_append_collision_is_atomic(
+                base_seeds in prop::collection::vec(0u16..2048, 0..6),
+                append_extra_seeds in prop::collection::vec(2048u16..4096, 0..6),
+            ) {
+                let base_libraries = normalized_function_library_payloads(base_seeds.clone());
+                let colliding_libraries = replacement_function_library_payloads(base_seeds);
+                let append_extras = optional_function_library_payloads(append_extra_seeds);
+
+                let mut payload_store = Store::new();
+                install_function_libraries(&mut payload_store, &colliding_libraries);
+                install_function_libraries(&mut payload_store, &append_extras);
+                let payload_dump = payload_store.function_dump();
+
+                let mut restored = Store::new();
+                install_function_libraries(&mut restored, &base_libraries);
+                let before_snapshot = function_library_snapshot(&restored);
+                let before_dump = restored.function_dump();
+
+                let err = restored
+                    .function_restore(&payload_dump, "APPEND")
+                    .expect_err("APPEND with colliding libraries must fail atomically");
+                prop_assert!(
+                    matches!(err, StoreError::GenericError(message) if message.contains("already exists"))
+                );
+                prop_assert_eq!(function_library_snapshot(&restored), before_snapshot);
+                prop_assert_eq!(restored.function_dump(), before_dump);
+            }
+
+            #[test]
+            fn mr_function_restore_replace_overwrites_collisions_and_keeps_disjoint_existing(
+                base_seeds in prop::collection::vec(0u16..2048, 0..6),
+                stale_seeds in prop::collection::vec(2048u16..4096, 0..6),
+            ) {
+                let original_libraries = normalized_function_library_payloads(base_seeds.clone());
+                let replacement_libraries = replacement_function_library_payloads(base_seeds);
+                let stale_libraries = optional_function_library_payloads(stale_seeds);
+
+                let mut payload_store = Store::new();
+                install_function_libraries(&mut payload_store, &replacement_libraries);
+                let payload_dump = payload_store.function_dump();
+
+                let mut restored = Store::new();
+                install_function_libraries(&mut restored, &original_libraries);
+                install_function_libraries(&mut restored, &stale_libraries);
+                restored
+                    .function_restore(&payload_dump, "REPLACE")
+                    .expect("REPLACE must overwrite colliding libraries");
+
+                let mut expected = Store::new();
+                install_function_libraries(&mut expected, &replacement_libraries);
+                install_function_libraries(&mut expected, &stale_libraries);
+
+                prop_assert_eq!(
+                    function_library_snapshot(&restored),
+                    function_library_snapshot(&expected)
+                );
+                prop_assert_eq!(restored.function_dump(), expected.function_dump());
             }
 
             #[test]
