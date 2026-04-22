@@ -9862,6 +9862,33 @@ impl Store {
                                 group_name.clone(),
                                 id.into_bytes(),
                             ]);
+
+                            for consumer in &group.consumers {
+                                commands.push(vec![
+                                    b"XGROUP".to_vec(),
+                                    b"CREATECONSUMER".to_vec(),
+                                    logical_key.clone(),
+                                    group_name.clone(),
+                                    consumer.clone(),
+                                ]);
+                            }
+
+                            for ((pending_ms, pending_seq), pending_entry) in &group.pending {
+                                let pending_id = format!("{pending_ms}-{pending_seq}");
+                                commands.push(vec![
+                                    b"XCLAIM".to_vec(),
+                                    logical_key.clone(),
+                                    group_name.clone(),
+                                    pending_entry.consumer.clone(),
+                                    b"0".to_vec(),
+                                    pending_id.into_bytes(),
+                                    b"TIME".to_vec(),
+                                    pending_entry.last_delivered_ms.to_string().into_bytes(),
+                                    b"RETRYCOUNT".to_vec(),
+                                    pending_entry.deliveries.to_string().into_bytes(),
+                                    b"FORCE".to_vec(),
+                                ]);
+                            }
                         }
                     }
                 }
@@ -14639,6 +14666,109 @@ mod tests {
     }
 
     #[test]
+    fn aof_commands_stream_with_consumers_and_pending_entries() {
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1, 0), &[(b"k".to_vec(), b"v".to_vec())], 100)
+            .unwrap();
+        assert!(store.xgroup_create(b"s", b"g", (0, 0), false, 100).unwrap());
+        assert_eq!(
+            store
+                .xgroup_createconsumer(b"s", b"g", b"idle", 110)
+                .expect("group must exist"),
+            Some(true)
+        );
+        store
+            .xreadgroup(
+                b"s",
+                b"g",
+                b"alice",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(1)),
+                120,
+            )
+            .expect("pending seed")
+            .expect("group must exist");
+        let _ = store
+            .xclaim(
+                b"s",
+                b"g",
+                b"bob",
+                &[(1, 0)],
+                StreamClaimOptions {
+                    min_idle_time_ms: 0,
+                    idle_ms: None,
+                    time_ms: Some(250),
+                    retry_count: Some(7),
+                    force: false,
+                    justid: false,
+                    last_id: None,
+                },
+                130,
+            )
+            .expect("xclaim must succeed");
+
+        let cmds = store.to_aof_commands(100);
+        assert_eq!(cmds.len(), 6);
+        assert_eq!(cmds[0][0], b"XADD");
+        assert_eq!(
+            cmds[1],
+            vec![
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"1-0".to_vec(),
+            ]
+        );
+        assert_eq!(
+            cmds[2],
+            vec![
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"alice".to_vec(),
+            ]
+        );
+        assert_eq!(
+            cmds[3],
+            vec![
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"bob".to_vec(),
+            ]
+        );
+        assert_eq!(
+            cmds[4],
+            vec![
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"idle".to_vec(),
+            ]
+        );
+        assert_eq!(
+            cmds[5],
+            vec![
+                b"XCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"bob".to_vec(),
+                b"0".to_vec(),
+                b"1-0".to_vec(),
+                b"TIME".to_vec(),
+                b"250".to_vec(),
+                b"RETRYCOUNT".to_vec(),
+                b"7".to_vec(),
+                b"FORCE".to_vec(),
+            ]
+        );
+    }
+
+    #[test]
     fn aof_commands_deterministic_key_order() {
         let mut store = Store::new();
         store.set(b"z_key".to_vec(), b"1".to_vec(), None, 100);
@@ -15101,10 +15231,18 @@ mod tests {
         }
 
         #[derive(Debug, Clone, PartialEq, Eq)]
+        struct AofStreamPendingSnapshot {
+            id: StreamId,
+            consumer: Vec<u8>,
+            deliveries: u64,
+            last_delivered_ms: u64,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
         struct AofStreamGroupSnapshot {
             name: Vec<u8>,
-            consumer_count: usize,
-            pending_count: usize,
+            consumers: Vec<Vec<u8>>,
+            pending: Vec<AofStreamPendingSnapshot>,
             last_delivered_id: (u64, u64),
         }
 
@@ -15547,8 +15685,22 @@ mod tests {
                                             .iter()
                                             .map(|(name, group)| AofStreamGroupSnapshot {
                                                 name: name.clone(),
-                                                consumer_count: group.consumers.len(),
-                                                pending_count: group.pending.len(),
+                                                consumers: group
+                                                    .consumers
+                                                    .iter()
+                                                    .cloned()
+                                                    .collect(),
+                                                pending: group
+                                                    .pending
+                                                    .iter()
+                                                    .map(|(id, pending)| AofStreamPendingSnapshot {
+                                                        id: *id,
+                                                        consumer: pending.consumer.clone(),
+                                                        deliveries: pending.deliveries,
+                                                        last_delivered_ms: pending
+                                                            .last_delivered_ms,
+                                                    })
+                                                    .collect(),
                                                 last_delivered_id: group.last_delivered_id,
                                             })
                                             .collect()
@@ -15589,6 +15741,12 @@ mod tests {
             String::from_utf8_lossy(bytes)
                 .parse::<i64>()
                 .expect("generated integer arg must stay numeric")
+        }
+
+        fn parse_u64_arg(bytes: &[u8]) -> u64 {
+            String::from_utf8_lossy(bytes)
+                .parse::<u64>()
+                .expect("generated unsigned integer arg must stay numeric")
         }
 
         fn parse_f64_arg(bytes: &[u8]) -> f64 {
@@ -15685,19 +15843,90 @@ mod tests {
                         .xsetid(&key, parse_stream_id_arg(&argv[2]), METAMORPHIC_NOW_MS)
                         .expect("XSETID replay must stay valid");
                 } else if eq_ascii_ci(command, b"XGROUP") {
-                    assert!(eq_ascii_ci(&argv[1], b"CREATE"));
-                    assert!(
-                        store
-                            .xgroup_create(
-                                &encode_db_key(current_db, &argv[2]),
-                                &argv[3],
-                                parse_stream_id_arg(&argv[4]),
-                                false,
-                                METAMORPHIC_NOW_MS,
-                            )
-                            .expect("XGROUP CREATE replay must stay valid"),
-                        "AOF rewrite group creation must stay unique during replay"
-                    );
+                    if eq_ascii_ci(&argv[1], b"CREATE") {
+                        assert!(
+                            store
+                                .xgroup_create(
+                                    &encode_db_key(current_db, &argv[2]),
+                                    &argv[3],
+                                    parse_stream_id_arg(&argv[4]),
+                                    false,
+                                    METAMORPHIC_NOW_MS,
+                                )
+                                .expect("XGROUP CREATE replay must stay valid"),
+                            "AOF rewrite group creation must stay unique during replay"
+                        );
+                    } else if eq_ascii_ci(&argv[1], b"CREATECONSUMER") {
+                        assert!(
+                            store
+                                .xgroup_createconsumer(
+                                    &encode_db_key(current_db, &argv[2]),
+                                    &argv[3],
+                                    &argv[4],
+                                    METAMORPHIC_NOW_MS,
+                                )
+                                .expect("XGROUP CREATECONSUMER replay must stay valid")
+                                .expect("generated stream group must exist for consumer replay"),
+                            "AOF rewrite consumer creation must stay unique during replay"
+                        );
+                    } else {
+                        assert!(argv.is_empty(), "unexpected AOF rewrite command: {argv:?}");
+                    }
+                } else if eq_ascii_ci(command, b"XCLAIM") {
+                    let mut ids = Vec::new();
+                    let mut idx = 5usize;
+                    while idx < argv.len() {
+                        if eq_ascii_ci(&argv[idx], b"IDLE")
+                            || eq_ascii_ci(&argv[idx], b"TIME")
+                            || eq_ascii_ci(&argv[idx], b"RETRYCOUNT")
+                            || eq_ascii_ci(&argv[idx], b"FORCE")
+                            || eq_ascii_ci(&argv[idx], b"JUSTID")
+                            || eq_ascii_ci(&argv[idx], b"LASTID")
+                        {
+                            break;
+                        }
+                        ids.push(parse_stream_id_arg(&argv[idx]));
+                        idx += 1;
+                    }
+
+                    let mut options = StreamClaimOptions {
+                        min_idle_time_ms: parse_u64_arg(&argv[4]),
+                        idle_ms: None,
+                        time_ms: None,
+                        retry_count: None,
+                        force: false,
+                        justid: false,
+                        last_id: None,
+                    };
+
+                    while idx < argv.len() {
+                        if eq_ascii_ci(&argv[idx], b"IDLE") {
+                            options.idle_ms = Some(parse_u64_arg(&argv[idx + 1]));
+                            idx += 2;
+                        } else if eq_ascii_ci(&argv[idx], b"TIME") {
+                            options.time_ms = Some(parse_u64_arg(&argv[idx + 1]));
+                            idx += 2;
+                        } else if eq_ascii_ci(&argv[idx], b"RETRYCOUNT") {
+                            options.retry_count = Some(parse_u64_arg(&argv[idx + 1]));
+                            idx += 2;
+                        } else if eq_ascii_ci(&argv[idx], b"FORCE") {
+                            options.force = true;
+                            idx += 1;
+                        } else if eq_ascii_ci(&argv[idx], b"JUSTID") {
+                            options.justid = true;
+                            idx += 1;
+                        } else if eq_ascii_ci(&argv[idx], b"LASTID") {
+                            options.last_id = Some(parse_stream_id_arg(&argv[idx + 1]));
+                            idx += 2;
+                        } else {
+                            assert!(argv.is_empty(), "unexpected AOF rewrite command: {argv:?}");
+                        }
+                    }
+
+                    store
+                        .xclaim(&key, &argv[2], &argv[3], &ids, options, METAMORPHIC_NOW_MS)
+                        .expect("XCLAIM replay must stay valid")
+                        .expect("generated XCLAIM replay must target an existing stream group");
                 } else {
                     assert!(argv.is_empty(), "unexpected AOF rewrite command: {argv:?}");
                 }
@@ -16278,8 +16507,13 @@ mod tests {
                 ),
                 bump_last_id in any::<bool>(),
                 group_seeds in prop::collection::vec(0u8..8, 1..4),
+                idle_consumer_seed in 0u8..8,
+                claim_consumer_seed in 0u8..8,
+                retry_count in 1u8..8,
+                delivery_time_ms in 1u16..512,
             ) {
                 let mut original = Store::new();
+                let original_group_seeds = group_seeds.clone();
                 install_aof_seed_entries(
                     &mut original,
                     &[AofSeedEntry {
@@ -16292,6 +16526,63 @@ mod tests {
                         },
                     }],
                 );
+
+                let normalized_group_seeds = normalized_stream_group_seeds(original_group_seeds);
+                let logical_key = logical_aof_key(0, db);
+                let physical_key = encode_db_key(db as usize, &logical_key);
+                let first_group_name =
+                    format!("grp_{:02x}_{:02x}", 0, normalized_group_seeds[0]).into_bytes();
+                let idle_consumer = format!("idle_{idle_consumer_seed:02x}").into_bytes();
+                let claim_consumer = format!("claim_{claim_consumer_seed:02x}").into_bytes();
+                let pending_seed_consumer = b"reader".to_vec();
+                let pending_entry_id = original
+                    .xrange(
+                        &physical_key,
+                        (0, 0),
+                        (u64::MAX, u64::MAX),
+                        Some(1),
+                        METAMORPHIC_NOW_MS,
+                    )
+                    .expect("generated stream must support XRANGE")
+                    .first()
+                    .map(|(id, _)| *id)
+                    .expect("generated stream must contain at least one record");
+                let _ = original
+                    .xgroup_createconsumer(
+                        &physical_key,
+                        &first_group_name,
+                        &idle_consumer,
+                        METAMORPHIC_NOW_MS,
+                    )
+                    .expect("generated stream group must accept idle consumers");
+                let _ = original
+                    .xreadgroup(
+                        &physical_key,
+                        &first_group_name,
+                        &pending_seed_consumer,
+                        group_read_options(StreamGroupReadCursor::NewEntries, false, Some(1)),
+                        METAMORPHIC_NOW_MS.saturating_add(1),
+                    )
+                    .expect("generated stream group must allow pending seeds")
+                    .expect("generated stream group must exist");
+                let _ = original
+                    .xclaim(
+                        &physical_key,
+                        &first_group_name,
+                        &claim_consumer,
+                        &[pending_entry_id],
+                        StreamClaimOptions {
+                            min_idle_time_ms: 0,
+                            idle_ms: None,
+                            time_ms: Some(u64::from(delivery_time_ms)),
+                            retry_count: Some(u64::from(retry_count)),
+                            force: false,
+                            justid: false,
+                            last_id: None,
+                        },
+                        METAMORPHIC_NOW_MS.saturating_add(2),
+                    )
+                    .expect("generated stream group must allow claim seeds");
 
                 let commands = original.to_aof_commands(METAMORPHIC_NOW_MS);
                 let expected_snapshot = snapshot_aof_replay_state(&original);
