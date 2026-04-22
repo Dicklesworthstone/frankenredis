@@ -252,3 +252,10 @@ path = "fuzz_targets/fuzz_resp_configured_sequences.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_store_hll"
+path = "fuzz_targets/fuzz_store_hll.rs"
+test = false
+doc = false
+bench = false
