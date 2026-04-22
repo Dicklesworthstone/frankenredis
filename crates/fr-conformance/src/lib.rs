@@ -94,6 +94,9 @@ fn configure_runtime_for_fixture(runtime: &mut Runtime, fixture_name: &str) {
     if fixture_name == "core_acl.json" {
         runtime.set_acl_file_path(std::env::temp_dir().join("fr_acl_fixture_dummy.conf"));
     }
+    if matches!(fixture_name, "core_config.json" | "core_server.json") {
+        runtime.set_config_file_path(Some(runtime_fixture_config_path(fixture_name)));
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
