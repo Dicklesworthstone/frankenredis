@@ -6314,7 +6314,7 @@ fn function_cmd(
                 RespFrame::BulkString(Some(b"library_name".to_vec())),
                 RespFrame::BulkString(Some(lib.name.as_bytes().to_vec())),
                 RespFrame::BulkString(Some(b"engine".to_vec())),
-                RespFrame::BulkString(Some(lib.engine.to_ascii_lowercase().into_bytes())),
+                RespFrame::BulkString(Some(lib.engine.as_bytes().to_vec())),
                 RespFrame::BulkString(Some(b"functions".to_vec())),
             ];
             let funcs: Vec<RespFrame> = lib
