@@ -7,4 +7,4 @@ edition = "2024"
 fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
 
 [dev-dependencies]
-proptest = "1"
+proptest = "1.11.0"

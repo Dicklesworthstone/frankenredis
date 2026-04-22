@@ -1,12 +1,25 @@
 # Dependency Upgrade Log
 
-**Date:** 2026-04-21  |  **Project:** frankenredis  |  **Language:** Rust
-**Agent:** Clawdstein-libupdater-frankenredis
+**Date:** 2026-04-21, 2026-04-22  |  **Project:** frankenredis  |  **Language:** Rust
+**Agents:** Clawdstein-libupdater-frankenredis, codex-frankenredis
 
 ## asupersync
 
-**Not applicable** — `frankenredis` does not depend on `asupersync` in any
-`Cargo.toml` (workspace root or per-crate). asupersync bump phase is a no-op.
+**Not applicable for this workspace right now**.
+
+- `frankenredis` is not running a Tokio/Hyper/Axum/Tonic async stack that
+  would benefit from an Asupersync runtime swap. A workspace grep found no
+  `tokio`, `hyper`, `axum`, `tonic`, `reqwest`, `async-std`, or `smol`
+  dependencies.
+- The server boundary is already a custom `mio` event loop in
+  `crates/fr-server/Cargo.toml`, and the runtime/persistence path is built
+  around FrankenRedis-specific orchestration in `fr-runtime`/`fr-persist`
+  rather than general-purpose async task scheduling.
+- Adding `asupersync = "0.3.1"` now would be an architectural rewrite, not a
+  dependency modernization step, and there is no narrow seam where it could be
+  introduced without redesigning the runtime contract.
+
+Result: **did not add `asupersync`**; documented here instead, per request.
 
 ## Inventory
 
@@ -17,22 +30,24 @@ External dependencies (non-path) declared in `crates/*/Cargo.toml`:
 | fr-bench | hdrhistogram | 7.5.4 | 7.5.4 | up-to-date |
 | fr-bench | serde | 1.0.228 | 1.0.228 | up-to-date |
 | fr-bench | serde_json | 1.0.149 | 1.0.149 | up-to-date |
-| fr-command (dev) | proptest | 1 | 1.11.0 | cargo update only |
+| fr-command (dev) | proptest | 1 | 1.11.0 | **BUMP** exact latest |
 | fr-conformance | serde | 1.0.228 | 1.0.228 | up-to-date |
 | fr-conformance | serde_json | 1.0.149 | 1.0.149 | up-to-date |
 | fr-conformance | sha2 | 0.10.9 | 0.11.0 | **BUMP** major 0.10 -> 0.11 |
-| fr-persist (dev) | proptest | 1 | 1.11.0 | cargo update only |
-| fr-protocol (dev) | proptest | 1 | 1.11.0 | cargo update only |
-| fr-runtime | hex | 0.4 | 0.4.3 | cargo update only |
+| fr-persist (dev) | proptest | 1 | 1.11.0 | **BUMP** exact latest |
+| fr-protocol (dev) | proptest | 1 | 1.11.0 | **BUMP** exact latest |
+| fr-runtime | hex | 0.4 | 0.4.3 | **BUMP** exact latest |
 | fr-runtime | libc | 0.2.185 | 0.2.185 | up-to-date |
 | fr-runtime | sha2 | 0.11.0 | 0.11.0 | up-to-date |
-| fr-runtime (dev) | proptest | 1 | 1.11.0 | cargo update only |
-| fr-sentinel (dev) | proptest | 1 | 1.11.0 | cargo update only |
-| fr-server | mio | 1.0 | 1.2.0 | bump spec -> 1.2 |
-| fr-server | tikv-jemallocator | 0.6 | 0.6.1 | cargo update only |
-| fr-server | mimalloc | 0.1 | 0.1.49 | cargo update only |
+| fr-runtime (dev) | proptest | 1 | 1.11.0 | **BUMP** exact latest |
+| fr-sentinel (dev) | proptest | 1 | 1.11.0 | **BUMP** exact latest |
+| fr-server | mio | 1.0 | 1.2.0 | **BUMP** exact latest |
+| fr-server | tikv-jemallocator | 0.6 | 0.6.1 | **BUMP** exact latest |
+| fr-server | mimalloc | 0.1 | 0.1.49 | **BUMP** exact latest |
 | fr-store | libc | 0.2.184 | 0.2.185 | **BUMP** align with fr-runtime |
-| fr-store (dev) | proptest | 1 | 1.11.0 | cargo update only |
+| fr-store (dev) | proptest | 1 | 1.11.0 | **BUMP** exact latest |
+| fuzz | libfuzzer-sys | 0.4 | 0.4.12 | **BUMP** exact latest |
+| fuzz | arbitrary | 1 | 1.4.2 | **BUMP** exact latest |
 
 ## Summary
 
@@ -43,7 +58,30 @@ External dependencies (non-path) declared in `crates/*/Cargo.toml`:
 - **Circuit breaker:** No — clean finish.
 
 First library-updater commit: `8006c7e` (libc alignment)
-Last library-updater commit:  `b8f3d08` (workspace lock refresh)
+Latest library-updater commit: `pending`
+
+## 2026-04-22 exhaustive exact-spec normalization
+
+- Normalized the remaining broad version specs to the current crates.io stable
+  releases across 8 manifests:
+  - `proptest = "1.11.0"` in `fr-command`, `fr-persist`, `fr-protocol`,
+    `fr-runtime`, `fr-sentinel`, and `fr-store`
+  - `hex = "0.4.3"` in `fr-runtime`
+  - `mio = "1.2.0"`, `tikv-jemallocator = "0.6.1"`,
+    `mimalloc = "0.1.49"` in `fr-server`
+  - `libfuzzer-sys = "0.4.12"` and `arbitrary = "1.4.2"` in `fuzz`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_frankenredis_cod cargo update`
+  completed with **no Cargo.lock delta**: `Locking 0 packages to latest compatible versions`.
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_frankenredis_cod cargo check --workspace --all-targets`
+  passed.
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_frankenredis_cod cargo test --workspace -- --nocapture`
+  is still red only on two pre-existing `fr-command` tests in the shared
+  worktree:
+  - `tests::object_freq_and_idletime_require_exact_arity_before_other_paths`
+  - `tests::wrong_subcommand_arity_formats_redis_families_with_expected_wording`
+
+This pass changed manifest specs only; it did not introduce any new compile
+failures.
 
 ## Updates
 

@@ -1,16 +1,20 @@
 {
   "status": "complete",
-  "agent": "Clawdstein-libupdater-frankenredis",
-  "started_at": "2026-04-21",
-  "finished_at": "2026-04-21",
-  "asupersync": "not_applicable",
+  "agent": "codex-frankenredis",
+  "started_at": "2026-04-22",
+  "finished_at": "2026-04-22",
+  "asupersync": "not_applicable_documented",
   "current": null,
   "completed": [
     "libc-fr-store-align",
     "mio-fr-server-1.2",
     "sha2-fr-conformance-0.11",
-    "cargo-update-lock-only"
+    "cargo-update-lock-only",
+    "exact-manifest-spec-normalization",
+    "workspace-check-pass"
   ],
-  "failed": [],
+  "failed": [
+    "workspace-tests-preexisting-fr-command-failures"
+  ],
   "pending": []
 }

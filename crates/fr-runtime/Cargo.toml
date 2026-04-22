@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-hex = "0.4"
+hex = "0.4.3"
 fr-command = { version = "0.1.0", path = "../fr-command" }
 fr-config = { version = "0.1.0", path = "../fr-config" }
 fr-eventloop = { version = "0.1.0", path = "../fr-eventloop" }
@@ -16,4 +16,4 @@ libc = "0.2.185"
 sha2 = "0.11.0"
 
 [dev-dependencies]
-proptest = "1"
+proptest = "1.11.0"
