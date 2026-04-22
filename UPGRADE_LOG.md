@@ -36,9 +36,42 @@ External dependencies (non-path) declared in `crates/*/Cargo.toml`:
 
 ## Summary
 
-*Filled at end of session.*
+- **Updated:** 3 dep specs (+ one bulk lock refresh covering 13 deps)
+- **Skipped / already-latest:** hdrhistogram, serde, serde_json, hex,
+  tikv-jemallocator, libc (fr-runtime), sha2 (fr-runtime)
+- **Failed:** 0
+- **Circuit breaker:** No — clean finish.
+
+First library-updater commit: `8006c7e` (libc alignment)
+Last library-updater commit:  `db7f076` (workspace lock refresh)
 
 ## Updates
+
+### workspace lock-file refresh (cargo update)
+- **Purpose:** Pull all SemVer-compatible patch/minor bumps within existing spec
+  ranges.
+- **Updated in Cargo.lock:**
+  - bitflags 2.11.0 → 2.11.1
+  - hashbrown 0.16.1 → 0.17.0
+  - indexmap 2.13.1 → 2.14.0
+  - itoa 1.0.17 → 1.0.18
+  - libmimalloc-sys 0.1.44 → 0.1.46
+  - mimalloc 0.1.48 → 0.1.49
+  - quote 1.0.44 → 1.0.45
+  - rand 0.9.2 → 0.9.4
+  - syn 2.0.115 → 2.0.117
+  - typenum 1.19.0 → 1.20.0
+  - unicode-ident 1.0.23 → 1.0.24
+  - wasip2 1.0.2 → 1.0.3
+  - (added) wit-bindgen 0.57.1 (transitive of wasip2)
+- **Check:** `cargo check --workspace --all-targets` — green (0.16s, cached).
+- **Tests:**
+  - `cargo test -p fr-protocol` — 54 + 10 + 0 pass, 0 fail.
+  - `cargo test -p fr-command` — 598 pass, 2 pre-existing failures
+    (`function_list_and_stats_match_redis_reply_shapes`,
+    `object_freq_and_idletime_require_exact_arity_before_other_paths`)
+    addressed by the pre-existing dirty `crates/fr-command/src/lib.rs` (other
+    agent). Not introduced by this lock update.
 
 ### sha2 (fr-conformance): 0.10.9 → 0.11.0
 - **Breaking:**

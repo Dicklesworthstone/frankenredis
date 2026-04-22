@@ -1,16 +1,16 @@
 {
-  "status": "in_progress",
+  "status": "complete",
   "agent": "Clawdstein-libupdater-frankenredis",
   "started_at": "2026-04-21",
+  "finished_at": "2026-04-21",
   "asupersync": "not_applicable",
-  "current": "cargo-update-lock-only",
+  "current": null,
   "completed": [
     "libc-fr-store-align",
     "mio-fr-server-1.2",
-    "sha2-fr-conformance-0.11"
+    "sha2-fr-conformance-0.11",
+    "cargo-update-lock-only"
   ],
   "failed": [],
-  "pending": [
-    "cargo-update-lock-only"
-  ]
+  "pending": []
 }
