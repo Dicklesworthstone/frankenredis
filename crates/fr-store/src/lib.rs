@@ -9123,7 +9123,7 @@ impl Store {
         let mut buf = Vec::new();
         let count = self.function_libraries.len() as u32;
         buf.extend_from_slice(&count.to_le_bytes());
-        for lib in self.function_libraries.values() {
+        for lib in self.function_list(None) {
             let name_bytes = lib.name.as_bytes();
             buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
             buf.extend_from_slice(name_bytes);
@@ -10778,15 +10778,17 @@ mod tests {
             .function_list(None)
             .into_iter()
             .map(|library| {
+                let mut function_names: Vec<String> = library
+                    .functions
+                    .iter()
+                    .map(|function| function.name.clone())
+                    .collect();
+                function_names.sort();
                 (
                     library.name.clone(),
                     library.engine.clone(),
                     library.code.clone(),
-                    library
-                        .functions
-                        .iter()
-                        .map(|function| function.name.clone())
-                        .collect(),
+                    function_names,
                 )
             })
             .collect()
@@ -10799,6 +10801,14 @@ mod tests {
              redis.register_function{{function_name='{second_fn}', callback=function(keys, args) return 0 end}}\n"
         )
         .into_bytes()
+    }
+
+    fn sample_function_library_from_seed(seed: u16) -> Vec<u8> {
+        sample_function_library(
+            &format!("seedlib_{seed:04x}"),
+            &format!("alpha_{seed:04x}"),
+            &format!("beta_{seed:04x}"),
+        )
     }
 
     #[test]
@@ -15003,6 +15013,7 @@ mod tests {
 
     // ── Metamorphic property tests ──────────────────────────────────────────
     mod metamorphic {
+        use super::{function_library_snapshot, sample_function_library_from_seed};
         use crate::{
             Store, StoreError, StreamRecord, decode_db_key, encode_db_key, glob_match,
             keyspace_events_parse, keyspace_events_to_string,
@@ -15149,6 +15160,18 @@ mod tests {
                         .collect();
                     (id, normalized_fields)
                 })
+                .collect()
+        }
+
+        fn normalized_function_library_payloads(mut seeds: Vec<u16>) -> Vec<Vec<u8>> {
+            seeds.truncate(4);
+            let mut unique_seeds = BTreeSet::from_iter(seeds);
+            if unique_seeds.is_empty() {
+                unique_seeds.insert(0);
+            }
+            unique_seeds
+                .into_iter()
+                .map(sample_function_library_from_seed)
                 .collect()
         }
 
@@ -15562,6 +15585,57 @@ mod tests {
                     .dump_key(&target_key, METAMORPHIC_NOW_MS)
                     .expect("busy-key failure must preserve original value");
                 prop_assert_eq!(before, after);
+            }
+
+            #[test]
+            fn mr_function_dump_restore_snapshot_roundtrip_is_stable(
+                seeds in prop::collection::vec(0u16..4096, 0..6),
+            ) {
+                let libraries = normalized_function_library_payloads(seeds);
+                let mut original = Store::new();
+                for library in &libraries {
+                    original
+                        .function_load(library, false)
+                        .expect("generated function library must load");
+                }
+
+                let expected_snapshot = function_library_snapshot(&original);
+                let dumped = original.function_dump();
+
+                let mut restored = Store::new();
+                restored
+                    .function_restore(&dumped, "REPLACE")
+                    .expect("self-generated FUNCTION DUMP payload must restore");
+
+                prop_assert_eq!(function_library_snapshot(&restored), expected_snapshot);
+                prop_assert_eq!(restored.function_dump(), dumped);
+            }
+
+            #[test]
+            fn mr_function_restore_invalid_dump_is_atomic_against_generated_snapshot(
+                seeds in prop::collection::vec(0u16..4096, 0..6),
+            ) {
+                let libraries = normalized_function_library_payloads(seeds);
+                let mut store = Store::new();
+                for library in &libraries {
+                    store
+                        .function_load(library, false)
+                        .expect("generated function library must load");
+                }
+
+                let before_snapshot = function_library_snapshot(&store);
+                let before_dump = store.function_dump();
+                let invalid_dump = before_dump[..before_dump.len() - 1].to_vec();
+
+                let err = store
+                    .function_restore(&invalid_dump, "FLUSH")
+                    .expect_err("truncated FUNCTION DUMP payload must fail");
+                prop_assert_eq!(
+                    err,
+                    StoreError::GenericError("ERR Invalid dump data".to_string())
+                );
+                prop_assert_eq!(function_library_snapshot(&store), before_snapshot);
+                prop_assert_eq!(store.function_dump(), before_dump);
             }
         }
     }
