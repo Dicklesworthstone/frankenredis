@@ -444,7 +444,13 @@ fn sha256_hex(path: &Path) -> Result<String, String> {
         }
         hasher.update(&buf[..bytes]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest.as_slice() {
+        use std::fmt::Write;
+        write!(&mut out, "{byte:02x}").expect("write to String is infallible");
+    }
+    Ok(out)
 }
 
 fn artifact_id(rel_path: &str) -> String {

@@ -314,7 +314,13 @@ fn compute_run_fingerprint(cli: &CliArgs) -> String {
     );
     let mut hasher = Sha256::new();
     hasher.update(joined.as_bytes());
-    format!("{:x}", hasher.finalize())
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest.as_slice() {
+        use std::fmt::Write;
+        write!(&mut out, "{byte:02x}").expect("write to String is infallible");
+    }
+    out
 }
 
 fn fixture_root() -> PathBuf {

@@ -40,6 +40,23 @@ External dependencies (non-path) declared in `crates/*/Cargo.toml`:
 
 ## Updates
 
+### sha2 (fr-conformance): 0.10.9 → 0.11.0
+- **Breaking:**
+  - `Digest::finalize()` now returns a `hybrid_array::Array<u8, ...>` newtype
+    instead of `GenericArray`; no longer implements `LowerHex` directly.
+  - Edition 2024, MSRV 1.85 (workspace already on 2024/compatible).
+  - `digest` bumped to v0.11.
+- **Migration:**
+  - Replaced `format!("{:x}", hasher.finalize())` with explicit byte-wise
+    hex formatting (`digest.as_slice()` + `write!(..., "{byte:02x}")`).
+  - Call sites fixed: `crates/fr-conformance/src/bin/raptorq_artifact_gate.rs`
+    and `crates/fr-conformance/src/bin/live_oracle_orchestrator.rs`.
+- **Check:** `cargo check --workspace --all-targets` green.
+- **Tests:** `cargo test -p fr-conformance` — 134 pass, 8 pre-existing failures
+  (conformance_core_{config,connection,function,generic,object,scripting,server},
+  fr_p2c_004_u010_config_requirepass_bridge_mode_split_is_stable), identical
+  count to HEAD. No new failures from the sha2 bump.
+
 ### mio (fr-server): 1.0 → 1.2 (lock 1.1.1 → 1.2.0)
 - **Breaking:** None. 1.x series is SemVer-compatible; 1.0 → 1.2 adds APIs
   (notably additional Unix-source fd handling) without removing any.
