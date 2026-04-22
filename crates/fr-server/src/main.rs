@@ -4516,6 +4516,142 @@ mod tests {
     }
 
     #[test]
+    fn xreadgroup_blocked_client_unblocks_when_xadd_marks_stream_ready() {
+        use crate::ClientConnection;
+        use mio::{Poll, Token};
+        use std::collections::{HashMap, HashSet};
+        use std::net::{TcpListener, TcpStream};
+
+        let mut runtime = Runtime::default_strict();
+        let ts = 2_000;
+
+        assert_eq!(
+            runtime.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"XGROUP".to_vec())),
+                    RespFrame::BulkString(Some(b"CREATE".to_vec())),
+                    RespFrame::BulkString(Some(b"s".to_vec())),
+                    RespFrame::BulkString(Some(b"g1".to_vec())),
+                    RespFrame::BulkString(Some(b"0".to_vec())),
+                    RespFrame::BulkString(Some(b"MKSTREAM".to_vec())),
+                ])),
+                ts,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = TcpStream::connect(addr).unwrap();
+        let (mut peer, _) = listener.accept().unwrap();
+        peer.set_read_timeout(Some(std::time::Duration::from_secs(1)))
+            .unwrap();
+
+        let session = runtime.new_session();
+        let client_id = session.client_id;
+        let token = Token(1); // ubs:ignore
+        let mut conn = ClientConnection::new(mio::net::TcpStream::from_std(stream), session, ts);
+        conn.read_buf.extend_from_slice(
+            &RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"XREADGROUP".to_vec())),
+                RespFrame::BulkString(Some(b"GROUP".to_vec())),
+                RespFrame::BulkString(Some(b"g1".to_vec())),
+                RespFrame::BulkString(Some(b"c1".to_vec())),
+                RespFrame::BulkString(Some(b"BLOCK".to_vec())),
+                RespFrame::BulkString(Some(b"0".to_vec())),
+                RespFrame::BulkString(Some(b"STREAMS".to_vec())),
+                RespFrame::BulkString(Some(b"s".to_vec())),
+                RespFrame::BulkString(Some(b">".to_vec())),
+            ]))
+            .to_bytes(),
+        );
+
+        let mut blocked_tokens = HashSet::new();
+        let mut closing_tokens = HashSet::new();
+        let mut write_tokens = HashSet::new();
+        let mut paused_tokens = HashSet::new();
+
+        let session = std::mem::take(&mut conn.session);
+        let prev = runtime.swap_session(session);
+        process_buffered_frames(
+            token,
+            &mut conn,
+            &mut runtime,
+            &mut blocked_tokens,
+            &mut closing_tokens,
+            &mut write_tokens,
+            &mut paused_tokens,
+            ts,
+        );
+        let updated_session = runtime.swap_session(prev);
+        conn.session = updated_session;
+
+        let blocked = conn.blocked.as_ref().expect("xreadgroup should block");
+        assert!(matches!(blocked.op, BlockingOp::BXreadgroup { .. }));
+        assert_eq!(blocked.deadline_ms, u64::MAX);
+        assert!(blocked_tokens.contains(&token));
+        assert!(conn.write_buf.is_empty());
+        assert!(runtime.server.blocked_client_ids.contains(&client_id));
+
+        assert_eq!(
+            runtime.execute_frame(
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"XADD".to_vec())),
+                    RespFrame::BulkString(Some(b"s".to_vec())),
+                    RespFrame::BulkString(Some(b"2000-0".to_vec())),
+                    RespFrame::BulkString(Some(b"field".to_vec())),
+                    RespFrame::BulkString(Some(b"value".to_vec())),
+                ])),
+                ts + 1,
+            ),
+            RespFrame::BulkString(Some(b"2000-0".to_vec()))
+        );
+
+        let mut clients = HashMap::from([(token, conn)]);
+        let mut poll = Poll::new().unwrap();
+        check_blocked_clients(CheckBlockedClientsContext {
+            clients: &mut clients,
+            blocked_tokens: &mut blocked_tokens,
+            closing_tokens: &mut closing_tokens,
+            paused_tokens: &mut paused_tokens,
+            runtime: &mut runtime,
+            poll: &mut poll,
+            write_tokens: &mut write_tokens,
+            ts: ts + 2,
+        });
+
+        let conn = clients.get_mut(&token).unwrap();
+        assert!(conn.try_flush().unwrap());
+
+        let conn = clients.get(&token).unwrap();
+        assert!(conn.blocked.is_none());
+        assert!(!blocked_tokens.contains(&token));
+        assert!(!runtime.server.blocked_client_ids.contains(&client_id));
+
+        let mut read_buf = Vec::new();
+        let reply = read_frame_from_stream(
+            &mut peer,
+            &mut read_buf,
+            &ParserConfig::default(),
+            runtime.server.query_buffer_limit,
+        )
+        .unwrap();
+        assert_eq!(
+            reply,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"s".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"2000-0".to_vec())),
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(b"field".to_vec())),
+                        RespFrame::BulkString(Some(b"value".to_vec())),
+                    ])),
+                ]))])),
+            ]))]))
+        );
+    }
+
+    #[test]
     fn parse_xread_block_deadline_rejects_fractional_and_out_of_range_values() {
         let fractional = vec![b"XREAD".to_vec(), b"BLOCK".to_vec(), b"1.5".to_vec()];
         assert_eq!(parse_xread_block_deadline_argv(&fractional, 123), None);
