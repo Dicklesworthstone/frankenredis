@@ -474,7 +474,7 @@ struct AclUser {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AclPubsubDefault {
+pub enum AclPubsubDefault {
     AllChannels,
     ResetChannels,
 }
@@ -789,6 +789,11 @@ impl AclUser {
         if !self.nopass {
             parts.extend(self.passwords.iter().map(|_| "#<hidden>".to_string()));
         }
+        parts.extend(
+            self.commands_string()
+                .split_whitespace()
+                .map(str::to_string),
+        );
         if self.all_keys {
             parts.push("~*".to_string());
         } else if !self.key_patterns.is_empty() {
@@ -809,11 +814,6 @@ impl AclUser {
                     .map(|pattern| format!("&{}", String::from_utf8_lossy(pattern))),
             );
         }
-        parts.extend(
-            self.commands_string()
-                .split_whitespace()
-                .map(str::to_string),
-        );
         parts.join(" ")
     }
 
@@ -842,6 +842,11 @@ impl AclUser {
                 }
             }
         }
+        parts.extend(
+            self.commands_string()
+                .split_whitespace()
+                .map(str::to_string),
+        );
         if self.all_keys {
             parts.push("~*".to_string());
         } else if !self.key_patterns.is_empty() {
@@ -862,11 +867,6 @@ impl AclUser {
                     .map(|pattern| format!("&{}", String::from_utf8_lossy(pattern))),
             );
         }
-        parts.extend(
-            self.commands_string()
-                .split_whitespace()
-                .map(str::to_string),
-        );
         parts.join(" ")
     }
 }
