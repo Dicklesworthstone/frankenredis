@@ -15007,6 +15007,7 @@ mod tests {
             keyspace_events_to_string,
         };
         use proptest::prelude::*;
+        use std::collections::{BTreeMap, BTreeSet};
 
         const METAMORPHIC_NOW_MS: u64 = 1_000;
 
@@ -15077,6 +15078,35 @@ mod tests {
                 values.push(b"item".to_vec());
             }
             values
+        }
+
+        fn normalized_set_members(mut members: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+            members.truncate(8);
+            let mut members = BTreeSet::from_iter(
+                members
+                    .into_iter()
+                    .map(|member| normalized_blob(member, b"member")),
+            );
+            if members.is_empty() {
+                members.insert(b"member".to_vec());
+            }
+            members.into_iter().collect()
+        }
+
+        fn normalized_hash_entries(
+            mut entries: Vec<(Vec<u8>, Vec<u8>)>,
+        ) -> Vec<(Vec<u8>, Vec<u8>)> {
+            entries.truncate(8);
+            let mut map = BTreeMap::new();
+            for (field, value) in entries {
+                let field = normalized_blob(field, b"field");
+                let value = normalized_blob(value, b"value");
+                map.insert(field, value);
+            }
+            if map.is_empty() {
+                map.insert(b"field".to_vec(), b"value".to_vec());
+            }
+            map.into_iter().collect()
         }
 
         fn dump_payload_ttl_ms(payload: &[u8]) -> u64 {
@@ -15290,6 +15320,81 @@ mod tests {
                 let reencoded = restored
                     .dump_key(&key, METAMORPHIC_NOW_MS)
                     .expect("restored list key must dump");
+                prop_assert_eq!(payload, reencoded);
+            }
+
+            #[test]
+            fn mr_dump_restore_set_payload_roundtrip_is_stable(
+                key in small_key(),
+                members in prop::collection::vec(small_blob(), 0..8),
+                ttl_ms in optional_ttl_ms(),
+            ) {
+                let members = normalized_set_members(members);
+                let mut original = Store::new();
+                original
+                    .sadd(&key, &members, METAMORPHIC_NOW_MS)
+                    .expect("valid fuzz set setup must succeed");
+                if let Some(ttl_ms) = ttl_ms {
+                    prop_assert!(
+                        original.expire_milliseconds(&key, ttl_ms as i64, METAMORPHIC_NOW_MS),
+                        "freshly installed set must accept ttl"
+                    );
+                }
+
+                let payload = original
+                    .dump_key(&key, METAMORPHIC_NOW_MS)
+                    .expect("installed set key must dump");
+                let ttl_ms = dump_payload_ttl_ms(&payload);
+
+                let mut restored = Store::new();
+                restored
+                    .restore_key(&key, ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
+                    .expect("self-generated set dump must restore");
+                let restored_members =
+                    BTreeSet::from_iter(restored.smembers(&key, METAMORPHIC_NOW_MS).unwrap());
+                let expected_members = BTreeSet::from_iter(members.iter().cloned());
+                prop_assert_eq!(restored_members, expected_members);
+
+                let reencoded = restored
+                    .dump_key(&key, METAMORPHIC_NOW_MS)
+                    .expect("restored set key must dump");
+                prop_assert_eq!(payload, reencoded);
+            }
+
+            #[test]
+            fn mr_dump_restore_hash_payload_roundtrip_is_stable(
+                key in small_key(),
+                entries in prop::collection::vec((small_blob(), small_blob()), 0..8),
+                ttl_ms in optional_ttl_ms(),
+            ) {
+                let entries = normalized_hash_entries(entries);
+                let mut original = Store::new();
+                for (field, value) in &entries {
+                    original
+                        .hset(&key, field.clone(), value.clone(), METAMORPHIC_NOW_MS)
+                        .expect("valid fuzz hash setup must succeed");
+                }
+                if let Some(ttl_ms) = ttl_ms {
+                    prop_assert!(
+                        original.expire_milliseconds(&key, ttl_ms as i64, METAMORPHIC_NOW_MS),
+                        "freshly installed hash must accept ttl"
+                    );
+                }
+
+                let payload = original
+                    .dump_key(&key, METAMORPHIC_NOW_MS)
+                    .expect("installed hash key must dump");
+                let ttl_ms = dump_payload_ttl_ms(&payload);
+
+                let mut restored = Store::new();
+                restored
+                    .restore_key(&key, ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
+                    .expect("self-generated hash dump must restore");
+                prop_assert_eq!(restored.hgetall(&key, METAMORPHIC_NOW_MS).unwrap(), entries);
+
+                let reencoded = restored
+                    .dump_key(&key, METAMORPHIC_NOW_MS)
+                    .expect("restored hash key must dump");
                 prop_assert_eq!(payload, reencoded);
             }
 
