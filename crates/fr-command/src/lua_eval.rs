@@ -5095,7 +5095,7 @@ mod tests {
         );
         assert_eq!(
             whoami_arity,
-            Err("ERR wrong number of arguments for 'acl|whoami' subcommand".to_string())
+            Err("ERR wrong number of arguments for 'acl|whoami' command".to_string())
         );
 
         let genpass_bits = eval_script(
@@ -5145,7 +5145,7 @@ mod tests {
         );
         assert_eq!(
             help_arity,
-            Err("ERR wrong number of arguments for 'acl|help' subcommand".to_string())
+            Err("ERR wrong number of arguments for 'acl|help' command".to_string())
         );
 
         for script in [

@@ -679,18 +679,11 @@ impl CommandError {
             CommandError::WrongSubcommandArity {
                 command,
                 subcommand,
-            } => {
-                let cmd_lower = command.to_ascii_lowercase();
-                let sub_lower = subcommand.to_ascii_lowercase();
-                let kind = match cmd_lower.as_str() {
-                    "acl" | "config" | "slowlog" | "xgroup" | "xinfo" => "subcommand",
-                    _ => "command",
-                };
-                RespFrame::Error(format!(
-                    "ERR wrong number of arguments for '{}|{}' {}",
-                    cmd_lower, sub_lower, kind
-                ))
-            }
+            } => RespFrame::Error(format!(
+                "ERR wrong number of arguments for '{}|{}' command",
+                command.to_ascii_lowercase(),
+                subcommand.to_ascii_lowercase()
+            )),
             CommandError::UnknownSubcommand {
                 command,
                 subcommand,
@@ -29605,7 +29598,7 @@ mod tests {
             assert_eq!(
                 err.to_resp(),
                 RespFrame::Error(format!(
-                    "ERR wrong number of arguments for '{}|{}' subcommand",
+                    "ERR wrong number of arguments for '{}|{}' command",
                     command.to_ascii_lowercase(),
                     subcommand.to_ascii_lowercase()
                 )),
@@ -33808,7 +33801,7 @@ mod tests {
             assert_eq!(
                 err.to_resp(),
                 RespFrame::Error(format!(
-                    "ERR wrong number of arguments for 'object|{}' subcommand",
+                    "ERR wrong number of arguments for 'object|{}' command",
                     subcommand.to_ascii_lowercase()
                 ))
             );
