@@ -42,7 +42,7 @@
         "value": [
           {
             "kind": "bulk",
-            "value": "user default on sanitize-payload nopass +@all ~* resetchannels"
+            "value": "user default on sanitize-payload nopass ~* &* +@all"
           }
         ]
       }

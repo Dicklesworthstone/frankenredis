@@ -493,7 +493,7 @@ impl AclPubsubDefault {
 }
 
 impl AclUser {
-    fn new_default(acl_pubsub_default: AclPubsubDefault) -> Self {
+    fn new_default() -> Self {
         Self {
             passwords: Vec::new(),
             enabled: true,
@@ -507,7 +507,7 @@ impl AclUser {
             key_patterns: Vec::new(),
             all_keys: true,
             channel_patterns: Vec::new(),
-            all_channels: acl_pubsub_default.grants_all_channels(),
+            all_channels: true,
         }
     }
 
@@ -789,11 +789,6 @@ impl AclUser {
         if !self.nopass {
             parts.extend(self.passwords.iter().map(|_| "#<hidden>".to_string()));
         }
-        parts.extend(
-            self.commands_string()
-                .split_whitespace()
-                .map(str::to_string),
-        );
         if self.all_keys {
             parts.push("~*".to_string());
         } else if !self.key_patterns.is_empty() {
@@ -814,6 +809,11 @@ impl AclUser {
                     .map(|pattern| format!("&{}", String::from_utf8_lossy(pattern))),
             );
         }
+        parts.extend(
+            self.commands_string()
+                .split_whitespace()
+                .map(str::to_string),
+        );
         parts.join(" ")
     }
 
@@ -842,11 +842,6 @@ impl AclUser {
                 }
             }
         }
-        parts.extend(
-            self.commands_string()
-                .split_whitespace()
-                .map(str::to_string),
-        );
         if self.all_keys {
             parts.push("~*".to_string());
         } else if !self.key_patterns.is_empty() {
@@ -867,6 +862,11 @@ impl AclUser {
                     .map(|pattern| format!("&{}", String::from_utf8_lossy(pattern))),
             );
         }
+        parts.extend(
+            self.commands_string()
+                .split_whitespace()
+                .map(str::to_string),
+        );
         parts.join(" ")
     }
 }
@@ -887,7 +887,7 @@ impl Default for AuthState {
 impl AuthState {
     fn with_acl_pubsub_default(acl_pubsub_default: AclPubsubDefault) -> Self {
         let mut acl_users = BTreeMap::new();
-        acl_users.insert(DEFAULT_AUTH_USER.to_vec(), AclUser::new_default(acl_pubsub_default));
+        acl_users.insert(DEFAULT_AUTH_USER.to_vec(), AclUser::new_default());
         Self {
             requirepass: None,
             acl_pubsub_default,
@@ -905,7 +905,7 @@ impl AuthState {
         let default_user = self
             .acl_users
             .entry(DEFAULT_AUTH_USER.to_vec())
-            .or_insert_with(|| AclUser::new_default(acl_pubsub_default));
+            .or_insert_with(|| AclUser::new_default());
         if let Some(pass) = requirepass {
             default_user.passwords = vec![sha256_hex_bytes(&pass)];
             default_user.nopass = false;
@@ -921,7 +921,7 @@ impl AuthState {
         let user = self
             .acl_users
             .entry(username)
-            .or_insert_with(|| AclUser::new_default(acl_pubsub_default));
+            .or_insert_with(|| AclUser::new_default());
         user.passwords = vec![sha256_hex_bytes(&password)];
         user.nopass = false;
     }
@@ -981,7 +981,7 @@ impl AuthState {
         let acl_pubsub_default = self.acl_pubsub_default;
         let user = self.acl_users.entry(username).or_insert_with(|| {
             if is_default {
-                AclUser::new_default(acl_pubsub_default)
+                AclUser::new_default()
             } else {
                 AclUser::new_restricted(acl_pubsub_default)
             }
@@ -9394,7 +9394,7 @@ slave_priority:{}\r\n",
                 required_replicas,
             },
         );
-        let local_ack = if self.server.store.aof_enabled && outcome.local_satisfied {
+        let local_ack = if required_local > 0 && self.server.store.aof_enabled && outcome.local_satisfied {
             1
         } else {
             0
