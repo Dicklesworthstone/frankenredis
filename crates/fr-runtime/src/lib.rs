@@ -16318,31 +16318,31 @@ mod tests {
         assert_eq!(
             reply,
             RespFrame::Error(
-                "ERR wrong number of arguments for 'config|help' subcommand".to_string()
+                "ERR wrong number of arguments for 'config|help' command".to_string()
             )
         );
     }
 
     #[test]
-    fn config_subcommand_arity_matches_redis_subcommand_wording() {
+    fn config_subcommand_arity_matches_redis_command_wording() {
         let mut rt = Runtime::default_strict();
 
         for (argv, expected) in [
             (
                 command(&[b"CONFIG", b"GET"]),
-                "ERR wrong number of arguments for 'config|get' subcommand",
+                "ERR wrong number of arguments for 'config|get' command",
             ),
             (
                 command(&[b"CONFIG", b"SET", b"maxmemory"]),
-                "ERR wrong number of arguments for 'config|set' subcommand",
+                "ERR wrong number of arguments for 'config|set' command",
             ),
             (
                 command(&[b"CONFIG", b"RESETSTAT", b"extra"]),
-                "ERR wrong number of arguments for 'config|resetstat' subcommand",
+                "ERR wrong number of arguments for 'config|resetstat' command",
             ),
             (
                 command(&[b"CONFIG", b"REWRITE", b"extra"]),
-                "ERR wrong number of arguments for 'config|rewrite' subcommand",
+                "ERR wrong number of arguments for 'config|rewrite' command",
             ),
         ] {
             assert_eq!(

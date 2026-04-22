@@ -683,7 +683,7 @@ impl CommandError {
                 let cmd_lower = command.to_ascii_lowercase();
                 let sub_lower = subcommand.to_ascii_lowercase();
                 let kind = match cmd_lower.as_str() {
-                    "acl" | "config" | "object" | "slowlog" | "xgroup" | "xinfo" => "subcommand",
+                    "acl" | "object" | "slowlog" | "xgroup" | "xinfo" => "subcommand",
                     _ => "command",
                 };
                 RespFrame::Error(format!(
@@ -29595,10 +29595,9 @@ mod tests {
     }
 
     #[test]
-    fn wrong_subcommand_arity_formats_xfamily_config_and_object_as_subcommands() {
+    fn wrong_subcommand_arity_formats_redis_families_with_expected_wording() {
         for (command, subcommand) in [
             ("ACL", "SETUSER"),
-            ("CONFIG", "RESETSTAT"),
             ("OBJECT", "ENCODING"),
             ("SLOWLOG", "GET"),
             ("XGROUP", "CREATE"),
@@ -29618,6 +29617,17 @@ mod tests {
                 "command={command} subcommand={subcommand}"
             );
         }
+
+        let config_err = CommandError::WrongSubcommandArity {
+            command: "CONFIG",
+            subcommand: "RESETSTAT".to_string(),
+        };
+        assert_eq!(
+            config_err.to_resp(),
+            RespFrame::Error(
+                "ERR wrong number of arguments for 'config|resetstat' command".to_string()
+            )
+        );
 
         let client_err = CommandError::WrongSubcommandArity {
             command: "CLIENT",
