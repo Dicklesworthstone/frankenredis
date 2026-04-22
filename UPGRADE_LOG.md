@@ -69,7 +69,7 @@ External dependencies (non-path) declared in `crates/*/Cargo.toml`:
 - **Circuit breaker:** No — clean finish.
 
 First library-updater commit: `8006c7e` (libc alignment)
-Latest library-updater commit: `9a377f2` (workspace dependency centralization)
+Latest library-updater commit: `d12f79d` (final dependency audit state)
 
 ## 2026-04-22 exhaustive exact-spec normalization
 
@@ -148,6 +148,20 @@ concurrent code change in `fr-runtime`.
   references it, so it should not appear in the lockfile.
 - The only blocker left on the exact user-requested verification command is the
   unrelated shared-worktree `fr-runtime` compile error documented above.
+
+## 2026-04-22 exact rerun requested by user
+
+- Re-ran `cargo update --workspace` locally at the repo root:
+  - result: still a no-op, `Locking 0 packages to latest compatible versions`
+- Re-ran `rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_frankenredis_cod cargo check --workspace`
+  exactly as requested:
+  - result: still blocked by the same unrelated shared-worktree compile error in
+    `crates/fr-runtime/src/lib.rs:984`
+  - error: `AclUser::new_default()` is missing the required
+    `AclPubsubDefault` argument after another in-flight change to that API
+
+No additional dependency bumps remain to apply. The dependency state is fully
+normalized; the remaining failure is outside the library-updater scope.
 
 ## Updates
 
