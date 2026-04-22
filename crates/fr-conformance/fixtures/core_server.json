@@ -1457,7 +1457,7 @@
         "value": [
           {
             "kind": "integer",
-            "value": 0
+            "value": 1
           },
           {
             "kind": "integer",
@@ -1480,7 +1480,7 @@
         "value": [
           {
             "kind": "integer",
-            "value": 0
+            "value": 1
           },
           {
             "kind": "integer",

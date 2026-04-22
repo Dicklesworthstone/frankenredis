@@ -9394,7 +9394,7 @@ slave_priority:{}\r\n",
                 required_replicas,
             },
         );
-        let local_ack = if required_local > 0 && self.server.store.aof_enabled && outcome.local_satisfied {
+        let local_ack = if self.server.store.aof_enabled && outcome.local_satisfied {
             1
         } else {
             0
