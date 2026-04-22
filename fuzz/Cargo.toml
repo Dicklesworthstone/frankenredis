@@ -238,3 +238,10 @@ path = "fuzz_targets/fuzz_command_option_parsers.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_store_scan_family"
+path = "fuzz_targets/fuzz_store_scan_family.rs"
+test = false
+doc = false
+bench = false
