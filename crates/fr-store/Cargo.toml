@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 fr-expire = { version = "0.1.0", path = "../fr-expire" }
 fr-persist = { version = "0.1.0", path = "../fr-persist" }
-libc = "0.2.185"
+libc.workspace = true
 
 [dev-dependencies]
-proptest = "1.11.0"
+proptest.workspace = true

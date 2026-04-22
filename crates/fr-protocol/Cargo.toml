@@ -6,4 +6,4 @@ edition = "2024"
 [dependencies]
 
 [dev-dependencies]
-proptest = "1.11.0"
+proptest.workspace = true

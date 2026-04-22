@@ -83,6 +83,36 @@ Latest library-updater commit: `pending`
 This pass changed manifest specs only; it did not introduce any new compile
 failures.
 
+## 2026-04-22 workspace dependency unification
+
+- Added a root [workspace.dependencies] table in [Cargo.toml] and rewired the
+  `fr-*` manifests plus `fuzz/Cargo.toml` to consume the exact stable external
+  versions from one place instead of repeating per-crate literals.
+- Centralized external pins:
+  - `arbitrary = 1.4.2`
+  - `hdrhistogram = 7.5.4`
+  - `hex = 0.4.3`
+  - `libc = 0.2.185`
+  - `libfuzzer-sys = 0.4.12`
+  - `mimalloc = 0.1.49`
+  - `mio = 1.2.0`
+  - `proptest = 1.11.0`
+  - `serde = 1.0.228`
+  - `serde_json = 1.0.149`
+  - `sha2 = 0.11.0`
+  - `tikv-jemallocator = 0.6.1`
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_frankenredis_cod cargo update`
+  again completed with **no Cargo.lock delta**.
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_frankenredis_cod cargo check --workspace --all-targets`
+  passed again.
+- `rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_frankenredis_cod cargo test --workspace -- --nocapture`
+  remained red only on the same pre-existing `fr-command` failures:
+  - `tests::object_freq_and_idletime_require_exact_arity_before_other_paths`
+  - `tests::wrong_subcommand_arity_formats_redis_families_with_expected_wording`
+
+This unification pass changed dependency declaration layout only. It did not
+change the runtime/test failure surface.
+
 ## Updates
 
 ### workspace lock-file refresh (cargo update)

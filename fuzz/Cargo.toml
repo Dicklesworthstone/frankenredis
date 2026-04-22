@@ -10,8 +10,8 @@ cargo-fuzz = true
 [workspace]
 
 [dependencies]
-libfuzzer-sys = "0.4.12"
-arbitrary = { version = "1.4.2", features = ["derive"] }
+libfuzzer-sys.workspace = true
+arbitrary.workspace = true
 
 [dependencies.fr-protocol]
 path = "../crates/fr-protocol"

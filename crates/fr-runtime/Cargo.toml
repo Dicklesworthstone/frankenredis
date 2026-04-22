@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-hex = "0.4.3"
+hex.workspace = true
 fr-command = { version = "0.1.0", path = "../fr-command" }
 fr-config = { version = "0.1.0", path = "../fr-config" }
 fr-eventloop = { version = "0.1.0", path = "../fr-eventloop" }
@@ -12,8 +12,8 @@ fr-persist = { version = "0.1.0", path = "../fr-persist" }
 fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
 fr-repl = { version = "0.1.0", path = "../fr-repl" }
 fr-store = { version = "0.1.0", path = "../fr-store" }
-libc = "0.2.185"
-sha2 = "0.11.0"
+libc.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
-proptest = "1.11.0"
+proptest.workspace = true

@@ -8,4 +8,4 @@ fr-protocol = { version = "0.1.0", path = "../fr-protocol" }
 fr-store = { version = "0.1.0", path = "../fr-store" }
 
 [dev-dependencies]
-proptest = "1.11.0"
+proptest.workspace = true
