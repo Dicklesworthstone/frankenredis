@@ -493,7 +493,7 @@ impl AclPubsubDefault {
 }
 
 impl AclUser {
-    fn new_default() -> Self {
+    fn new_default(acl_pubsub_default: AclPubsubDefault) -> Self {
         Self {
             passwords: Vec::new(),
             enabled: true,
@@ -507,7 +507,7 @@ impl AclUser {
             key_patterns: Vec::new(),
             all_keys: true,
             channel_patterns: Vec::new(),
-            all_channels: true,
+            all_channels: acl_pubsub_default.grants_all_channels(),
         }
     }
 
@@ -887,7 +887,7 @@ impl Default for AuthState {
 impl AuthState {
     fn with_acl_pubsub_default(acl_pubsub_default: AclPubsubDefault) -> Self {
         let mut acl_users = BTreeMap::new();
-        acl_users.insert(DEFAULT_AUTH_USER.to_vec(), AclUser::new_default());
+        acl_users.insert(DEFAULT_AUTH_USER.to_vec(), AclUser::new_default(acl_pubsub_default));
         Self {
             requirepass: None,
             acl_pubsub_default,
@@ -901,10 +901,11 @@ impl AuthState {
 
     fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
         self.requirepass = requirepass.clone();
+        let acl_pubsub_default = self.acl_pubsub_default;
         let default_user = self
             .acl_users
             .entry(DEFAULT_AUTH_USER.to_vec())
-            .or_insert_with(AclUser::new_default);
+            .or_insert_with(|| AclUser::new_default(acl_pubsub_default));
         if let Some(pass) = requirepass {
             default_user.passwords = vec![sha256_hex_bytes(&pass)];
             default_user.nopass = false;
@@ -916,10 +917,11 @@ impl AuthState {
     }
 
     fn add_user(&mut self, username: Vec<u8>, password: Vec<u8>) {
+        let acl_pubsub_default = self.acl_pubsub_default;
         let user = self
             .acl_users
             .entry(username)
-            .or_insert_with(AclUser::new_default);
+            .or_insert_with(|| AclUser::new_default(acl_pubsub_default));
         user.passwords = vec![sha256_hex_bytes(&password)];
         user.nopass = false;
     }
@@ -979,7 +981,7 @@ impl AuthState {
         let acl_pubsub_default = self.acl_pubsub_default;
         let user = self.acl_users.entry(username).or_insert_with(|| {
             if is_default {
-                AclUser::new_default()
+                AclUser::new_default(acl_pubsub_default)
             } else {
                 AclUser::new_restricted(acl_pubsub_default)
             }
@@ -1120,6 +1122,9 @@ impl AuthState {
                 user.key_patterns.clear();
                 user.channel_patterns.clear();
                 user.all_channels = acl_pubsub_default.grants_all_channels();
+            } else if rule_str.eq_ignore_ascii_case("resetkeys") {
+                user.all_keys = false;
+                user.key_patterns.clear();
             } else {
                 return Err(format!(
                     "ERR Error in ACL SETUSER modifier '{}': Syntax error",
