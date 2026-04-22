@@ -4369,7 +4369,15 @@ impl Runtime {
                 if dirty_after > dirty_before {
                     // Record AOF only for non-special commands (special ones record themselves)
                     if special_command.is_none() && !handled_migrate {
-                        self.capture_aof_record(&argv);
+                        if let Some(script_commands) =
+                            self.take_script_propagation_commands_for_capture(&argv)
+                        {
+                            for script_argv in script_commands {
+                                self.capture_aof_record(&script_argv);
+                            }
+                        } else {
+                            self.capture_aof_record(&argv);
+                        }
                     }
 
                     // Optimized blocking: track keys modified by write commands
@@ -4872,6 +4880,31 @@ impl Runtime {
             self.server.aof_selected_db = self.session.selected_db;
         }
         self.server.capture_aof_record(argv);
+    }
+
+    fn take_script_propagation_commands_for_capture(
+        &mut self,
+        argv: &[Vec<u8>],
+    ) -> Option<Vec<Vec<Vec<u8>>>> {
+        let command = argv.first()?;
+        if !Self::command_uses_script_propagation(command) {
+            return None;
+        }
+        Some(
+            std::mem::take(&mut self.server.store.script_propagation_records)
+                .into_iter()
+                .filter_map(|record| (record.targets != 0).then_some(record.argv))
+                .collect(),
+        )
+    }
+
+    fn command_uses_script_propagation(command: &[u8]) -> bool {
+        eq_ascii_token(command, b"EVAL")
+            || eq_ascii_token(command, b"EVALSHA")
+            || eq_ascii_token(command, b"EVAL_RO")
+            || eq_ascii_token(command, b"EVALSHA_RO")
+            || eq_ascii_token(command, b"FCALL")
+            || eq_ascii_token(command, b"FCALL_RO")
     }
 
     fn command_advances_replication_offset(argv: &[Vec<u8>]) -> bool {
@@ -9962,8 +9995,17 @@ slave_priority:{}\r\n",
                 Ok(mut reply) => {
                     self.strip_db_prefixes_from_frame(&mut reply);
                     if dirty_after > dirty_before {
-                        transaction_dirty = true;
-                        transaction_aof.push(argv.clone());
+                        if let Some(script_commands) =
+                            self.take_script_propagation_commands_for_capture(argv)
+                        {
+                            if !script_commands.is_empty() {
+                                transaction_dirty = true;
+                                transaction_aof.extend(script_commands);
+                            }
+                        } else {
+                            transaction_dirty = true;
+                            transaction_aof.push(argv.clone());
+                        }
 
                         // Optimized blocking: track keys modified by write commands
                         let cmd_keys = fr_command::command_keys(argv);
@@ -12409,6 +12451,42 @@ mod tests {
             vec![b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()]
         );
         assert_eq!(decoded[1].argv, vec![b"DEL".to_vec(), b"k".to_vec()]);
+    }
+
+    #[test]
+    fn eval_set_repl_runtime_consumes_script_propagation_records() {
+        let mut rt = Runtime::default_strict();
+        let reply = rt.execute_frame(
+            command(&[
+                b"EVAL",
+                b"redis.call('SET','a','1')\nredis.set_repl(redis.REPL_NONE)\nredis.call('SET','b','2')\nredis.set_repl(redis.REPL_AOF)\nredis.call('SET','c','3')\nredis.set_repl(redis.REPL_REPLICA)\nredis.call('SET','d','4')\nredis.set_repl(redis.REPL_ALL)\nredis.call('SET','e','5')\nreturn redis.call('GET','e')",
+                b"0",
+            ]),
+            0,
+        );
+        assert_eq!(reply, RespFrame::BulkString(Some(b"5".to_vec())));
+
+        assert_eq!(
+            rt.aof_records(),
+            [
+                AofRecord {
+                    argv: vec![b"SET".to_vec(), b"a".to_vec(), b"1".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"SET".to_vec(), b"c".to_vec(), b"3".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"SET".to_vec(), b"d".to_vec(), b"4".to_vec()],
+                },
+                AofRecord {
+                    argv: vec![b"SET".to_vec(), b"e".to_vec(), b"5".to_vec()],
+                },
+            ]
+        );
+
+        let decoded =
+            decode_aof_stream(&rt.encoded_aof_stream_from_offset(0)).expect("decode backlog");
+        assert_eq!(decoded, rt.aof_records());
     }
 
     #[test]
