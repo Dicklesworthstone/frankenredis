@@ -9470,7 +9470,8 @@ impl Store {
             Value::SortedSet(zs) => {
                 buf.push(5); // type 5 = sorted set
                 encode_length(&mut buf, zs.len());
-                for (member, score) in zs.iter() {
+                // Keep self-generated DUMP payloads stable across restore/re-encode.
+                for (member, score) in zs.iter_asc() {
                     encode_length(&mut buf, member.len());
                     buf.extend_from_slice(member);
                     buf.extend_from_slice(&score.to_le_bytes());
@@ -15109,6 +15110,21 @@ mod tests {
             map.into_iter().collect()
         }
 
+        fn normalized_sorted_set_entries(mut entries: Vec<(Vec<u8>, i16)>) -> Vec<(f64, Vec<u8>)> {
+            entries.truncate(8);
+            let mut map = BTreeMap::new();
+            for (member, score) in entries {
+                let member = normalized_blob(member, b"member");
+                map.insert(member, f64::from(score) / 4.0);
+            }
+            if map.is_empty() {
+                map.insert(b"member".to_vec(), 1.25);
+            }
+            map.into_iter()
+                .map(|(member, score)| (score, member))
+                .collect()
+        }
+
         fn dump_payload_ttl_ms(payload: &[u8]) -> u64 {
             let ttl_offset = payload
                 .len()
@@ -15395,6 +15411,49 @@ mod tests {
                 let reencoded = restored
                     .dump_key(&key, METAMORPHIC_NOW_MS)
                     .expect("restored hash key must dump");
+                prop_assert_eq!(payload, reencoded);
+            }
+
+            #[test]
+            fn mr_dump_restore_sorted_set_payload_roundtrip_is_stable(
+                key in small_key(),
+                entries in prop::collection::vec((small_blob(), -256i16..256i16), 0..8),
+                ttl_ms in optional_ttl_ms(),
+            ) {
+                let entries = normalized_sorted_set_entries(entries);
+                let mut original = Store::new();
+                original
+                    .zadd(&key, &entries, METAMORPHIC_NOW_MS)
+                    .expect("valid fuzz sorted-set setup must succeed");
+                if let Some(ttl_ms) = ttl_ms {
+                    prop_assert!(
+                        original.expire_milliseconds(&key, ttl_ms as i64, METAMORPHIC_NOW_MS),
+                        "freshly installed sorted set must accept ttl"
+                    );
+                }
+                let expected = original
+                    .zget_members_with_scores(&key, METAMORPHIC_NOW_MS)
+                    .expect("installed sorted set must enumerate");
+
+                let payload = original
+                    .dump_key(&key, METAMORPHIC_NOW_MS)
+                    .expect("installed sorted-set key must dump");
+                let ttl_ms = dump_payload_ttl_ms(&payload);
+
+                let mut restored = Store::new();
+                restored
+                    .restore_key(&key, ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
+                    .expect("self-generated sorted-set dump must restore");
+                prop_assert_eq!(
+                    restored
+                        .zget_members_with_scores(&key, METAMORPHIC_NOW_MS)
+                        .expect("restored sorted set must enumerate"),
+                    expected
+                );
+
+                let reencoded = restored
+                    .dump_key(&key, METAMORPHIC_NOW_MS)
+                    .expect("restored sorted-set key must dump");
                 prop_assert_eq!(payload, reencoded);
             }
 
