@@ -15015,13 +15015,64 @@ mod tests {
     mod metamorphic {
         use super::{function_library_snapshot, sample_function_library_from_seed};
         use crate::{
-            Store, StoreError, StreamRecord, decode_db_key, encode_db_key, glob_match,
+            Store, StoreError, StreamRecord, decode_db_key, encode_db_key, eq_ascii_ci, glob_match,
             keyspace_events_parse, keyspace_events_to_string,
         };
         use proptest::prelude::*;
         use std::collections::{BTreeMap, BTreeSet};
 
         const METAMORPHIC_NOW_MS: u64 = 1_000;
+
+        #[derive(Debug, Clone)]
+        enum AofSeedValue {
+            String(Vec<u8>),
+            List(Vec<Vec<u8>>),
+            Set(Vec<Vec<u8>>),
+            Hash(Vec<(Vec<u8>, Vec<u8>)>),
+            SortedSet(Vec<(Vec<u8>, i16)>),
+            Stream {
+                records: Vec<Vec<(Vec<u8>, Vec<u8>)>>,
+                bump_last_id: bool,
+                group_seeds: Vec<u8>,
+            },
+        }
+
+        #[derive(Debug, Clone)]
+        struct AofSeedEntry {
+            db: u8,
+            ttl_ms: Option<u16>,
+            value: AofSeedValue,
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct AofStreamGroupSnapshot {
+            name: Vec<u8>,
+            consumer_count: usize,
+            pending_count: usize,
+            last_delivered_id: (u64, u64),
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        enum AofValueSnapshot {
+            String(Vec<u8>),
+            List(Vec<Vec<u8>>),
+            Set(Vec<Vec<u8>>),
+            Hash(Vec<(Vec<u8>, Vec<u8>)>),
+            SortedSet(Vec<(Vec<u8>, u64)>),
+            Stream {
+                entries: Vec<StreamRecord>,
+                last_id: Option<(u64, u64)>,
+                groups: Vec<AofStreamGroupSnapshot>,
+            },
+        }
+
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct AofKeySnapshot {
+            db: usize,
+            key: Vec<u8>,
+            expires_at_ms: Option<u64>,
+            value: AofValueSnapshot,
+        }
 
         fn valid_keyspace_char() -> impl Strategy<Value = char> {
             prop_oneof![
@@ -15069,6 +15120,10 @@ mod tests {
 
         fn optional_ttl_ms() -> impl Strategy<Value = Option<u64>> {
             prop::option::of(1u16..512).prop_map(|ttl| ttl.map(u64::from))
+        }
+
+        fn optional_small_ttl_ms() -> impl Strategy<Value = Option<u16>> {
+            prop::option::of(1u16..512)
         }
 
         fn normalized_blob(mut bytes: Vec<u8>, fallback: &[u8]) -> Vec<u8> {
@@ -15173,6 +15228,376 @@ mod tests {
                 .into_iter()
                 .map(sample_function_library_from_seed)
                 .collect()
+        }
+
+        fn normalized_stream_group_seeds(mut seeds: Vec<u8>) -> Vec<u8> {
+            seeds.truncate(3);
+            BTreeSet::from_iter(seeds).into_iter().collect()
+        }
+
+        fn aof_seed_entry_strategy() -> impl Strategy<Value = AofSeedEntry> {
+            prop_oneof![
+                (0u8..3, optional_small_ttl_ms(), small_blob()).prop_map(|(db, ttl_ms, value)| {
+                    AofSeedEntry {
+                        db,
+                        ttl_ms,
+                        value: AofSeedValue::String(value),
+                    }
+                }),
+                (
+                    0u8..3,
+                    optional_small_ttl_ms(),
+                    prop::collection::vec(small_blob(), 0..6),
+                )
+                    .prop_map(|(db, ttl_ms, values)| AofSeedEntry {
+                        db,
+                        ttl_ms,
+                        value: AofSeedValue::List(values),
+                    }),
+                (
+                    0u8..3,
+                    optional_small_ttl_ms(),
+                    prop::collection::vec(small_blob(), 0..6),
+                )
+                    .prop_map(|(db, ttl_ms, members)| AofSeedEntry {
+                        db,
+                        ttl_ms,
+                        value: AofSeedValue::Set(members),
+                    }),
+                (
+                    0u8..3,
+                    optional_small_ttl_ms(),
+                    prop::collection::vec((small_blob(), small_blob()), 0..6),
+                )
+                    .prop_map(|(db, ttl_ms, entries)| AofSeedEntry {
+                        db,
+                        ttl_ms,
+                        value: AofSeedValue::Hash(entries),
+                    }),
+                (
+                    0u8..3,
+                    optional_small_ttl_ms(),
+                    prop::collection::vec((small_blob(), -256i16..256i16), 0..6),
+                )
+                    .prop_map(|(db, ttl_ms, entries)| AofSeedEntry {
+                        db,
+                        ttl_ms,
+                        value: AofSeedValue::SortedSet(entries),
+                    }),
+                (
+                    0u8..3,
+                    optional_small_ttl_ms(),
+                    prop::collection::vec(
+                        prop::collection::vec((small_blob(), small_blob()), 1..5),
+                        1..5,
+                    ),
+                    any::<bool>(),
+                    prop::collection::vec(0u8..8, 0..4),
+                )
+                    .prop_map(
+                        |(db, ttl_ms, records, bump_last_id, group_seeds)| {
+                            AofSeedEntry {
+                                db,
+                                ttl_ms,
+                                value: AofSeedValue::Stream {
+                                    records,
+                                    bump_last_id,
+                                    group_seeds,
+                                },
+                            }
+                        }
+                    ),
+            ]
+        }
+
+        fn logical_aof_key(index: usize, db: u8) -> Vec<u8> {
+            format!("aof_{index:02x}_{db:02x}").into_bytes()
+        }
+
+        fn install_aof_seed_entries(store: &mut Store, entries: &[AofSeedEntry]) {
+            for (index, entry) in entries.iter().take(6).enumerate() {
+                let logical_key = logical_aof_key(index, entry.db);
+                let physical_key = encode_db_key(entry.db as usize, &logical_key);
+
+                match &entry.value {
+                    AofSeedValue::String(value) => {
+                        store.set(
+                            physical_key.clone(),
+                            normalized_blob(value.clone(), b"value"),
+                            None,
+                            METAMORPHIC_NOW_MS,
+                        );
+                    }
+                    AofSeedValue::List(values) => {
+                        let values = normalized_list(values.clone());
+                        store
+                            .rpush(&physical_key, &values, METAMORPHIC_NOW_MS)
+                            .expect("generated list seed must install");
+                    }
+                    AofSeedValue::Set(members) => {
+                        let members = normalized_set_members(members.clone());
+                        store
+                            .sadd(&physical_key, &members, METAMORPHIC_NOW_MS)
+                            .expect("generated set seed must install");
+                    }
+                    AofSeedValue::Hash(entries) => {
+                        for (field, value) in normalized_hash_entries(entries.clone()) {
+                            store
+                                .hset(&physical_key, field, value, METAMORPHIC_NOW_MS)
+                                .expect("generated hash seed must install");
+                        }
+                    }
+                    AofSeedValue::SortedSet(entries) => {
+                        let entries = normalized_sorted_set_entries(entries.clone());
+                        store
+                            .zadd(&physical_key, &entries, METAMORPHIC_NOW_MS)
+                            .expect("generated sorted-set seed must install");
+                    }
+                    AofSeedValue::Stream {
+                        records,
+                        bump_last_id,
+                        group_seeds,
+                    } => {
+                        let records = normalized_stream_records(records.clone());
+                        for (id, fields) in &records {
+                            store
+                                .xadd(&physical_key, *id, fields, METAMORPHIC_NOW_MS)
+                                .expect("generated stream seed must install");
+                        }
+
+                        let max_entry_id = records.last().map(|(id, _)| *id).unwrap_or((0, 0));
+                        let recorded_last_id = if *bump_last_id {
+                            let bumped = (
+                                max_entry_id.0.saturating_add(1),
+                                max_entry_id.1.saturating_add(1),
+                            );
+                            store
+                                .xsetid(&physical_key, bumped, METAMORPHIC_NOW_MS)
+                                .expect("generated stream watermark must install");
+                            Some(bumped)
+                        } else {
+                            None
+                        };
+
+                        let group_seeds = normalized_stream_group_seeds(group_seeds.clone());
+                        for (group_idx, group_seed) in group_seeds.into_iter().enumerate() {
+                            let group_name =
+                                format!("grp_{index:02x}_{group_seed:02x}").into_bytes();
+                            let last_delivered_id = if group_idx % 2 == 0 {
+                                (0, 0)
+                            } else {
+                                recorded_last_id.unwrap_or(max_entry_id)
+                            };
+                            assert!(
+                                store
+                                    .xgroup_create(
+                                        &physical_key,
+                                        &group_name,
+                                        last_delivered_id,
+                                        false,
+                                        METAMORPHIC_NOW_MS,
+                                    )
+                                    .expect("generated stream group must install"),
+                                "generated stream group names must stay unique"
+                            );
+                        }
+                    }
+                }
+
+                if let Some(ttl_ms) = entry.ttl_ms {
+                    assert!(
+                        store.expire_milliseconds(
+                            &physical_key,
+                            i64::from(ttl_ms),
+                            METAMORPHIC_NOW_MS,
+                        ),
+                        "freshly installed AOF seed must accept ttl"
+                    );
+                }
+            }
+        }
+
+        fn snapshot_aof_replay_state(store: &Store) -> Vec<AofKeySnapshot> {
+            store
+                .all_keys()
+                .into_iter()
+                .map(|physical_key| {
+                    let (db, logical_key) =
+                        decode_db_key(&physical_key).unwrap_or((0, physical_key.as_slice()));
+                    let entry = store
+                        .entries
+                        .get(&physical_key)
+                        .expect("all_keys entries must exist");
+                    let value = match &entry.value {
+                        crate::Value::String(bytes) => AofValueSnapshot::String(bytes.clone()),
+                        crate::Value::List(list) => {
+                            AofValueSnapshot::List(list.iter().cloned().collect())
+                        }
+                        crate::Value::Set(set) => {
+                            AofValueSnapshot::Set(set.iter().cloned().collect())
+                        }
+                        crate::Value::Hash(hash) => AofValueSnapshot::Hash(
+                            hash.iter()
+                                .map(|(field, value)| (field.clone(), value.clone()))
+                                .collect(),
+                        ),
+                        crate::Value::SortedSet(zs) => AofValueSnapshot::SortedSet(
+                            zs.iter_asc()
+                                .map(|(member, score)| (member.clone(), score.to_bits()))
+                                .collect(),
+                        ),
+                        crate::Value::Stream(entries) => {
+                            let groups = store
+                                .stream_groups
+                                .get(physical_key.as_slice())
+                                .map(|groups| {
+                                    groups
+                                        .iter()
+                                        .map(|(name, group)| AofStreamGroupSnapshot {
+                                            name: name.clone(),
+                                            consumer_count: group.consumers.len(),
+                                            pending_count: group.pending.len(),
+                                            last_delivered_id: group.last_delivered_id,
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            AofValueSnapshot::Stream {
+                                entries: entries
+                                    .iter()
+                                    .map(|(id, fields)| (*id, fields.clone()))
+                                    .collect(),
+                                last_id: store
+                                    .stream_last_ids
+                                    .get(physical_key.as_slice())
+                                    .copied(),
+                                groups,
+                            }
+                        }
+                    };
+
+                    AofKeySnapshot {
+                        db,
+                        key: logical_key.to_vec(),
+                        expires_at_ms: entry.expires_at_ms,
+                        value,
+                    }
+                })
+                .collect()
+        }
+
+        fn parse_usize_arg(bytes: &[u8]) -> usize {
+            String::from_utf8_lossy(bytes)
+                .parse::<usize>()
+                .expect("generated SELECT arg must stay numeric")
+        }
+
+        fn parse_i64_arg(bytes: &[u8]) -> i64 {
+            String::from_utf8_lossy(bytes)
+                .parse::<i64>()
+                .expect("generated integer arg must stay numeric")
+        }
+
+        fn parse_f64_arg(bytes: &[u8]) -> f64 {
+            String::from_utf8_lossy(bytes)
+                .parse::<f64>()
+                .expect("generated float arg must stay numeric")
+        }
+
+        fn parse_stream_id_arg(bytes: &[u8]) -> (u64, u64) {
+            let id = String::from_utf8_lossy(bytes);
+            let (ms, seq) = id
+                .split_once('-')
+                .expect("generated stream ids must contain a dash");
+            (
+                ms.parse::<u64>()
+                    .expect("generated stream millisecond id must stay numeric"),
+                seq.parse::<u64>()
+                    .expect("generated stream sequence id must stay numeric"),
+            )
+        }
+
+        fn replay_aof_commands(commands: &[Vec<Vec<u8>>]) -> Store {
+            let mut store = Store::new();
+            let mut current_db = 0usize;
+
+            for argv in commands {
+                let command = argv
+                    .first()
+                    .expect("AOF rewrite commands must contain a command name");
+                if eq_ascii_ci(command, b"SELECT") {
+                    current_db = parse_usize_arg(&argv[1]);
+                    continue;
+                }
+
+                let key = encode_db_key(current_db, &argv[1]);
+
+                if eq_ascii_ci(command, b"SET") {
+                    store.set(key, argv[2].clone(), None, METAMORPHIC_NOW_MS);
+                } else if eq_ascii_ci(command, b"PEXPIREAT") {
+                    assert!(
+                        store.expire_at_milliseconds(
+                            &key,
+                            parse_i64_arg(&argv[2]),
+                            METAMORPHIC_NOW_MS,
+                        ),
+                        "PEXPIREAT replay must target an existing key"
+                    );
+                } else if eq_ascii_ci(command, b"HSET") {
+                    for pair in argv[2..].chunks_exact(2) {
+                        store
+                            .hset(&key, pair[0].clone(), pair[1].clone(), METAMORPHIC_NOW_MS)
+                            .expect("HSET replay must stay valid");
+                    }
+                } else if eq_ascii_ci(command, b"RPUSH") {
+                    store
+                        .rpush(&key, &argv[2..], METAMORPHIC_NOW_MS)
+                        .expect("RPUSH replay must stay valid");
+                } else if eq_ascii_ci(command, b"SADD") {
+                    store
+                        .sadd(&key, &argv[2..], METAMORPHIC_NOW_MS)
+                        .expect("SADD replay must stay valid");
+                } else if eq_ascii_ci(command, b"ZADD") {
+                    let entries: Vec<(f64, Vec<u8>)> = argv[2..]
+                        .chunks_exact(2)
+                        .map(|pair| (parse_f64_arg(&pair[0]), pair[1].clone()))
+                        .collect();
+                    store
+                        .zadd(&key, &entries, METAMORPHIC_NOW_MS)
+                        .expect("ZADD replay must stay valid");
+                } else if eq_ascii_ci(command, b"XADD") {
+                    let id = parse_stream_id_arg(&argv[2]);
+                    let fields: Vec<(Vec<u8>, Vec<u8>)> = argv[3..]
+                        .chunks_exact(2)
+                        .map(|pair| (pair[0].clone(), pair[1].clone()))
+                        .collect();
+                    store
+                        .xadd(&key, id, &fields, METAMORPHIC_NOW_MS)
+                        .expect("XADD replay must stay valid");
+                } else if eq_ascii_ci(command, b"XSETID") {
+                    store
+                        .xsetid(&key, parse_stream_id_arg(&argv[2]), METAMORPHIC_NOW_MS)
+                        .expect("XSETID replay must stay valid");
+                } else if eq_ascii_ci(command, b"XGROUP") {
+                    assert!(eq_ascii_ci(&argv[1], b"CREATE"));
+                    assert!(
+                        store
+                            .xgroup_create(
+                                &encode_db_key(current_db, &argv[2]),
+                                &argv[3],
+                                parse_stream_id_arg(&argv[4]),
+                                false,
+                                METAMORPHIC_NOW_MS,
+                            )
+                            .expect("XGROUP CREATE replay must stay valid"),
+                        "AOF rewrite group creation must stay unique during replay"
+                    );
+                } else {
+                    panic!("unexpected AOF rewrite command: {argv:?}");
+                }
+            }
+
+            store
         }
 
         fn dump_payload_ttl_ms(payload: &[u8]) -> u64 {
@@ -15636,6 +16061,54 @@ mod tests {
                 );
                 prop_assert_eq!(function_library_snapshot(&store), before_snapshot);
                 prop_assert_eq!(store.function_dump(), before_dump);
+            }
+
+            #[test]
+            fn mr_aof_rewrite_replay_roundtrip_is_stable(
+                entries in prop::collection::vec(aof_seed_entry_strategy(), 0..6),
+            ) {
+                let mut original = Store::new();
+                install_aof_seed_entries(&mut original, &entries);
+
+                let commands = original.to_aof_commands(METAMORPHIC_NOW_MS);
+                let expected_snapshot = snapshot_aof_replay_state(&original);
+
+                let mut replayed = replay_aof_commands(&commands);
+                prop_assert_eq!(snapshot_aof_replay_state(&replayed), expected_snapshot);
+                prop_assert_eq!(replayed.to_aof_commands(METAMORPHIC_NOW_MS), commands);
+            }
+
+            #[test]
+            fn mr_aof_rewrite_stream_metadata_roundtrip_is_stable(
+                db in 0u8..3,
+                ttl_ms in optional_small_ttl_ms(),
+                records in prop::collection::vec(
+                    prop::collection::vec((small_blob(), small_blob()), 1..5),
+                    1..5,
+                ),
+                bump_last_id in any::<bool>(),
+                group_seeds in prop::collection::vec(0u8..8, 1..4),
+            ) {
+                let mut original = Store::new();
+                install_aof_seed_entries(
+                    &mut original,
+                    &[AofSeedEntry {
+                        db,
+                        ttl_ms,
+                        value: AofSeedValue::Stream {
+                            records,
+                            bump_last_id,
+                            group_seeds,
+                        },
+                    }],
+                );
+
+                let commands = original.to_aof_commands(METAMORPHIC_NOW_MS);
+                let expected_snapshot = snapshot_aof_replay_state(&original);
+
+                let mut replayed = replay_aof_commands(&commands);
+                prop_assert_eq!(snapshot_aof_replay_state(&replayed), expected_snapshot);
+                prop_assert_eq!(replayed.to_aof_commands(METAMORPHIC_NOW_MS), commands);
             }
         }
     }
