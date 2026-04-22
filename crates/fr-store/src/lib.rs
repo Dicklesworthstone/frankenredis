@@ -9696,9 +9696,10 @@ impl Store {
 
     /// Generate AOF-compatible command sequences that reconstruct the entire store.
     ///
-    /// Returns a list of command argv vectors. Non-expired entries are serialized
-    /// as the appropriate write command (SET, HSET, RPUSH, SADD, ZADD, XADD),
-    /// followed by PEXPIREAT if the key has an expiry. Expired entries are skipped.
+    /// Returns a list of command argv vectors. Loaded function libraries are serialized
+    /// as deterministic FUNCTION LOAD REPLACE commands first. Non-expired entries are
+    /// then serialized as the appropriate write command (SET, HSET, RPUSH, SADD, ZADD,
+    /// XADD), followed by PEXPIREAT if the key has an expiry. Expired entries are skipped.
     ///
     /// This is the core of AOF rewrite: the output can be wrapped in `AofRecord`
     /// Return all key names in the store (sorted for determinism).
@@ -9731,6 +9732,15 @@ impl Store {
         }
 
         let mut commands = Vec::new();
+
+        for library in self.function_list(None) {
+            commands.push(vec![
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"REPLACE".to_vec(),
+                library.code.clone(),
+            ]);
+        }
 
         // Snapshot the remaining keys (sorted for deterministic output).
         let mut keys: Vec<(usize, Vec<u8>, Vec<u8>)> = self
@@ -14662,6 +14672,34 @@ mod tests {
     }
 
     #[test]
+    fn aof_commands_include_function_libraries_before_keys() {
+        let alpha = sample_function_library("alpha", "afn1", "afn2");
+        let beta = sample_function_library("beta", "bfn1", "bfn2");
+        let mut store = Store::new();
+        store
+            .function_load(&beta, false)
+            .expect("beta library must load");
+        store
+            .function_load(&alpha, false)
+            .expect("alpha library must load");
+        store.set(b"key".to_vec(), b"value".to_vec(), None, 100);
+
+        let cmds = store.to_aof_commands(100);
+        assert_eq!(cmds.len(), 3);
+        assert_eq!(cmds[0][0], b"FUNCTION");
+        assert_eq!(cmds[0][1], b"LOAD");
+        assert_eq!(cmds[0][2], b"REPLACE");
+        assert_eq!(cmds[0][3], alpha);
+        assert_eq!(cmds[1][0], b"FUNCTION");
+        assert_eq!(cmds[1][1], b"LOAD");
+        assert_eq!(cmds[1][2], b"REPLACE");
+        assert_eq!(cmds[1][3], beta);
+        assert_eq!(cmds[2][0], b"SET");
+        assert_eq!(cmds[2][1], b"key");
+        assert_eq!(cmds[2][2], b"value");
+    }
+
+    #[test]
     fn xreadgroup_increments_dirty_on_new_entries() {
         let mut store = Store::new();
         store
@@ -15092,6 +15130,12 @@ mod tests {
             value: AofValueSnapshot,
         }
 
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        struct AofReplaySnapshot {
+            function_libraries: Vec<(String, String, Vec<u8>, Vec<String>)>,
+            keys: Vec<AofKeySnapshot>,
+        }
+
         fn valid_keyspace_char() -> impl Strategy<Value = char> {
             prop_oneof![
                 Just('A'),
@@ -15463,73 +15507,76 @@ mod tests {
             }
         }
 
-        fn snapshot_aof_replay_state(store: &Store) -> Vec<AofKeySnapshot> {
-            store
-                .all_keys()
-                .into_iter()
-                .map(|physical_key| {
-                    let (db, logical_key) =
-                        decode_db_key(&physical_key).unwrap_or((0, physical_key.as_slice()));
-                    let entry = store
-                        .entries
-                        .get(&physical_key)
-                        .expect("all_keys entries must exist");
-                    let value = match &entry.value {
-                        crate::Value::String(bytes) => AofValueSnapshot::String(bytes.clone()),
-                        crate::Value::List(list) => {
-                            AofValueSnapshot::List(list.iter().cloned().collect())
-                        }
-                        crate::Value::Set(set) => {
-                            AofValueSnapshot::Set(set.iter().cloned().collect())
-                        }
-                        crate::Value::Hash(hash) => AofValueSnapshot::Hash(
-                            hash.iter()
-                                .map(|(field, value)| (field.clone(), value.clone()))
-                                .collect(),
-                        ),
-                        crate::Value::SortedSet(zs) => AofValueSnapshot::SortedSet(
-                            zs.iter_asc()
-                                .map(|(member, score)| (member.clone(), score.to_bits()))
-                                .collect(),
-                        ),
-                        crate::Value::Stream(entries) => {
-                            let groups = store
-                                .stream_groups
-                                .get(physical_key.as_slice())
-                                .map(|groups| {
-                                    groups
-                                        .iter()
-                                        .map(|(name, group)| AofStreamGroupSnapshot {
-                                            name: name.clone(),
-                                            consumer_count: group.consumers.len(),
-                                            pending_count: group.pending.len(),
-                                            last_delivered_id: group.last_delivered_id,
-                                        })
-                                        .collect()
-                                })
-                                .unwrap_or_default();
-                            AofValueSnapshot::Stream {
-                                entries: entries
-                                    .iter()
-                                    .map(|(id, fields)| (*id, fields.clone()))
-                                    .collect(),
-                                last_id: store
-                                    .stream_last_ids
-                                    .get(physical_key.as_slice())
-                                    .copied(),
-                                groups,
+        fn snapshot_aof_replay_state(store: &Store) -> AofReplaySnapshot {
+            AofReplaySnapshot {
+                function_libraries: function_library_snapshot(store),
+                keys: store
+                    .all_keys()
+                    .into_iter()
+                    .map(|physical_key| {
+                        let (db, logical_key) =
+                            decode_db_key(&physical_key).unwrap_or((0, physical_key.as_slice()));
+                        let entry = store
+                            .entries
+                            .get(&physical_key)
+                            .expect("all_keys entries must exist");
+                        let value = match &entry.value {
+                            crate::Value::String(bytes) => AofValueSnapshot::String(bytes.clone()),
+                            crate::Value::List(list) => {
+                                AofValueSnapshot::List(list.iter().cloned().collect())
                             }
-                        }
-                    };
+                            crate::Value::Set(set) => {
+                                AofValueSnapshot::Set(set.iter().cloned().collect())
+                            }
+                            crate::Value::Hash(hash) => AofValueSnapshot::Hash(
+                                hash.iter()
+                                    .map(|(field, value)| (field.clone(), value.clone()))
+                                    .collect(),
+                            ),
+                            crate::Value::SortedSet(zs) => AofValueSnapshot::SortedSet(
+                                zs.iter_asc()
+                                    .map(|(member, score)| (member.clone(), score.to_bits()))
+                                    .collect(),
+                            ),
+                            crate::Value::Stream(entries) => {
+                                let groups = store
+                                    .stream_groups
+                                    .get(physical_key.as_slice())
+                                    .map(|groups| {
+                                        groups
+                                            .iter()
+                                            .map(|(name, group)| AofStreamGroupSnapshot {
+                                                name: name.clone(),
+                                                consumer_count: group.consumers.len(),
+                                                pending_count: group.pending.len(),
+                                                last_delivered_id: group.last_delivered_id,
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
+                                AofValueSnapshot::Stream {
+                                    entries: entries
+                                        .iter()
+                                        .map(|(id, fields)| (*id, fields.clone()))
+                                        .collect(),
+                                    last_id: store
+                                        .stream_last_ids
+                                        .get(physical_key.as_slice())
+                                        .copied(),
+                                    groups,
+                                }
+                            }
+                        };
 
-                    AofKeySnapshot {
-                        db,
-                        key: logical_key.to_vec(),
-                        expires_at_ms: entry.expires_at_ms,
-                        value,
-                    }
-                })
-                .collect()
+                        AofKeySnapshot {
+                            db,
+                            key: logical_key.to_vec(),
+                            expires_at_ms: entry.expires_at_ms,
+                            value,
+                        }
+                    })
+                    .collect(),
+            }
         }
 
         fn parse_usize_arg(bytes: &[u8]) -> usize {
@@ -15573,6 +15620,19 @@ mod tests {
                     .expect("AOF rewrite commands must contain a command name");
                 if eq_ascii_ci(command, b"SELECT") {
                     current_db = parse_usize_arg(&argv[1]);
+                    continue;
+                }
+                if eq_ascii_ci(command, b"FUNCTION") {
+                    assert!(eq_ascii_ci(&argv[1], b"LOAD"));
+                    let (replace, code_idx) =
+                        if argv.get(2).is_some_and(|arg| eq_ascii_ci(arg, b"REPLACE")) {
+                            (true, 3usize)
+                        } else {
+                            (false, 2usize)
+                        };
+                    store
+                        .function_load(&argv[code_idx], replace)
+                        .expect("FUNCTION LOAD replay must stay valid");
                     continue;
                 }
 
@@ -16193,9 +16253,12 @@ mod tests {
             #[test]
             fn mr_aof_rewrite_replay_roundtrip_is_stable(
                 entries in prop::collection::vec(aof_seed_entry_strategy(), 0..6),
+                function_seeds in prop::collection::vec(any::<u16>(), 0..4),
             ) {
                 let mut original = Store::new();
                 install_aof_seed_entries(&mut original, &entries);
+                let function_libraries = optional_function_library_payloads(function_seeds);
+                install_function_libraries(&mut original, &function_libraries);
 
                 let commands = original.to_aof_commands(METAMORPHIC_NOW_MS);
                 let expected_snapshot = snapshot_aof_replay_state(&original);
