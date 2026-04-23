@@ -15292,6 +15292,27 @@ mod tests {
     }
 
     #[test]
+    fn function_restore_empty_policy_empty_dump_is_identity() {
+        let empty_dump = Store::new().function_dump();
+        let mut restored = Store::new();
+        restored
+            .function_load(&sample_function_library("seedlib", "alpha", "beta"), false)
+            .expect("seed library must load");
+        restored
+            .function_load(&sample_function_library("keepme", "theta", "iota"), false)
+            .expect("disjoint existing library must load");
+        let before_snapshot = function_library_snapshot(&restored);
+        let before_dump = restored.function_dump();
+
+        restored
+            .function_restore(&empty_dump, "")
+            .expect("empty policy with empty FUNCTION DUMP must behave like APPEND");
+
+        assert_eq!(function_library_snapshot(&restored), before_snapshot);
+        assert_eq!(restored.function_dump(), before_dump);
+    }
+
+    #[test]
     fn function_restore_append_of_disjoint_payload_is_union() {
         let mut payload_store = Store::new();
         payload_store
