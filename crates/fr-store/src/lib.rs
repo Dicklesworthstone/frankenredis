@@ -15127,6 +15127,29 @@ mod tests {
     }
 
     #[test]
+    fn function_dump_restore_roundtrip_preserves_multilibrary_snapshot_order() {
+        let alpha = sample_function_library("alpha", "afn1", "afn2");
+        let beta = sample_function_library("beta", "bfn1", "bfn2");
+        let mut original = Store::new();
+        original
+            .function_load(&beta, false)
+            .expect("beta library must load");
+        original
+            .function_load(&alpha, false)
+            .expect("alpha library must load");
+        let expected = function_library_snapshot(&original);
+        let dumped = original.function_dump();
+
+        let mut restored = Store::new();
+        restored
+            .function_restore(&dumped, "REPLACE")
+            .expect("self-generated multi-library FUNCTION DUMP payload must restore");
+
+        assert_eq!(function_library_snapshot(&restored), expected);
+        assert_eq!(restored.function_dump(), dumped);
+    }
+
+    #[test]
     fn function_restore_invalid_dump_is_atomic_even_with_flush_policy() {
         let mut store = Store::new();
         let library = sample_function_library("sentinel", "alpha", "beta");
