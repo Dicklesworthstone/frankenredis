@@ -10277,6 +10277,28 @@ impl Store {
                             argv.push(value.clone());
                         }
                         commands.push(argv);
+
+                        // Redis 7.4 per-field TTLs: reconstruct each field's
+                        // deadline via HPEXPIREAT (absolute ms) so replay
+                        // recovers identical state regardless of now_ms at
+                        // load time. (br-frankenredis-4bao)
+                        let mut field_ttls: Vec<(Vec<u8>, u64)> = self
+                            .hash_field_expires
+                            .range((physical_key.clone(), Vec::new())..)
+                            .take_while(|((k, _), _)| k == &physical_key)
+                            .map(|((_, f), &at)| (f.clone(), at))
+                            .collect();
+                        field_ttls.sort_by(|a, b| a.0.cmp(&b.0));
+                        for (field, expires_at_ms) in field_ttls {
+                            commands.push(vec![
+                                b"HPEXPIREAT".to_vec(),
+                                logical_key.clone(),
+                                expires_at_ms.to_string().into_bytes(),
+                                b"FIELDS".to_vec(),
+                                b"1".to_vec(),
+                                field,
+                            ]);
+                        }
                     }
                 }
                 Value::List(l) => {

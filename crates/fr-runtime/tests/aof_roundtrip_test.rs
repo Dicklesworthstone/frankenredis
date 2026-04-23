@@ -295,3 +295,144 @@ fn aof_empty_save_and_load() {
 
     std::fs::remove_file(&path).ok();
 }
+
+// ── Hash field TTL (Redis 7.4 HEXPIRE family) (br-frankenredis-4bao) ─
+
+/// Issue HEXPIRE / HPEXPIRE / HPERSIST on a live runtime, persist via
+/// SAVE, boot a fresh runtime off the same AOF file, and verify every
+/// per-field TTL state survived the replay.
+#[test]
+fn aof_roundtrip_hexpire_family_reconstructs_per_field_ttls() {
+    let (mut rt, path) = setup_runtime_with_aof("hexpire_family");
+
+    rt.execute_frame(
+        command(&[
+            b"HSET", b"h", b"f_s", b"v_s", b"f_ms", b"v_ms", b"f_at", b"v_at", b"f_pers", b"v_pers",
+        ]),
+        0,
+    );
+    rt.execute_frame(
+        command(&[b"HEXPIRE", b"h", b"600", b"FIELDS", b"1", b"f_s"]),
+        0,
+    );
+    rt.execute_frame(
+        command(&[b"HPEXPIRE", b"h", b"30000", b"FIELDS", b"1", b"f_ms"]),
+        0,
+    );
+    rt.execute_frame(
+        command(&[
+            b"HEXPIREAT",
+            b"h",
+            b"9999999999",
+            b"FIELDS",
+            b"1",
+            b"f_at",
+        ]),
+        0,
+    );
+    rt.execute_frame(
+        command(&[b"HPEXPIRE", b"h", b"5000", b"FIELDS", b"1", b"f_pers"]),
+        0,
+    );
+    rt.execute_frame(
+        command(&[b"HPERSIST", b"h", b"FIELDS", b"1", b"f_pers"]),
+        0,
+    );
+
+    assert_eq!(
+        rt.execute_frame(command(&[b"SAVE"]), 1),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    let mut rt2 = load_fresh_runtime(&path);
+
+    // Use now_ms=0 for all reads so the source-runtime remaining-ms is
+    // preserved byte-for-byte in the assertions (no drift from saturating
+    // arithmetic in the time-remaining calcs).
+    assert_eq!(
+        rt2.execute_frame(command(&[b"HLEN", b"h"]), 0),
+        RespFrame::Integer(4)
+    );
+    assert_eq!(
+        rt2.execute_frame(command(&[b"HGET", b"h", b"f_s"]), 0),
+        RespFrame::BulkString(Some(b"v_s".to_vec()))
+    );
+    assert_eq!(
+        rt2.execute_frame(
+            command(&[b"HTTL", b"h", b"FIELDS", b"1", b"f_s"]),
+            0,
+        ),
+        RespFrame::Array(Some(vec![RespFrame::Integer(600)]))
+    );
+    assert_eq!(
+        rt2.execute_frame(
+            command(&[b"HPTTL", b"h", b"FIELDS", b"1", b"f_ms"]),
+            0,
+        ),
+        RespFrame::Array(Some(vec![RespFrame::Integer(30_000)]))
+    );
+    assert_eq!(
+        rt2.execute_frame(
+            command(&[b"HEXPIRETIME", b"h", b"FIELDS", b"1", b"f_at"]),
+            0,
+        ),
+        RespFrame::Array(Some(vec![RespFrame::Integer(9_999_999_999)]))
+    );
+    assert_eq!(
+        rt2.execute_frame(
+            command(&[b"HTTL", b"h", b"FIELDS", b"1", b"f_pers"]),
+            0,
+        ),
+        RespFrame::Array(Some(vec![RespFrame::Integer(-1)]))
+    );
+    assert_eq!(
+        rt2.execute_frame(
+            command(&[b"HTTL", b"h", b"FIELDS", b"1", b"nope"]),
+            0,
+        ),
+        RespFrame::Array(Some(vec![RespFrame::Integer(-2)]))
+    );
+
+    std::fs::remove_file(&path).ok();
+}
+
+/// Regression guard: HPEXPIREAT with a past deadline reaps the field
+/// on the source runtime; the AOF should carry the HPEXPIREAT record
+/// and the replay should re-reap the field so it's invisible on the
+/// fresh runtime as well.
+#[test]
+fn aof_roundtrip_hpexpireat_past_deadline_replays_reaped_state() {
+    let (mut rt, path) = setup_runtime_with_aof("hpexpireat_past");
+    rt.execute_frame(
+        command(&[b"HSET", b"h", b"alive", b"a", b"doomed", b"d"]),
+        0,
+    );
+    rt.execute_frame(
+        command(&[b"HPEXPIREAT", b"h", b"1", b"FIELDS", b"1", b"doomed"]),
+        100,
+    );
+    assert_eq!(
+        rt.execute_frame(command(&[b"HGET", b"h", b"doomed"]), 200),
+        RespFrame::BulkString(None)
+    );
+
+    assert_eq!(
+        rt.execute_frame(command(&[b"SAVE"]), 201),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    let mut rt2 = load_fresh_runtime(&path);
+
+    assert_eq!(
+        rt2.execute_frame(command(&[b"HLEN", b"h"]), 300),
+        RespFrame::Integer(1)
+    );
+    assert_eq!(
+        rt2.execute_frame(command(&[b"HGET", b"h", b"doomed"]), 301),
+        RespFrame::BulkString(None)
+    );
+    assert_eq!(
+        rt2.execute_frame(command(&[b"HGET", b"h", b"alive"]), 301),
+        RespFrame::BulkString(Some(b"a".to_vec()))
+    );
+
+    std::fs::remove_file(&path).ok();
+}
