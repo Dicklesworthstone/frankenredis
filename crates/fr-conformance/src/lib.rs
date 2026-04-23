@@ -4954,11 +4954,16 @@ mod tests {
         let strict_log_get = strict.execute_frame(command_frame(&["CONFIG", "GET", "acl*"]), 585);
         let hardened_log_get =
             hardened.execute_frame(command_frame(&["CONFIG", "GET", "acl*"]), 585);
+        // acl-pubsub-default registered as an acl* config post-72bf4d2 but
+        // this expectation was never updated to include it. Default mode is
+        // resetchannels per Runtime::default_strict. (br-frankenredis-ea1j)
         let expected_log_get = RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"acllog-max-len".to_vec())),
             RespFrame::BulkString(Some(b"256".to_vec())),
             RespFrame::BulkString(Some(b"aclfile".to_vec())),
             RespFrame::BulkString(Some(Vec::new())),
+            RespFrame::BulkString(Some(b"acl-pubsub-default".to_vec())),
+            RespFrame::BulkString(Some(b"resetchannels".to_vec())),
         ]));
         assert_eq!(strict_log_get, expected_log_get);
         assert_eq!(strict_log_get, hardened_log_get);

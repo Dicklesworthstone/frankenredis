@@ -4028,7 +4028,11 @@ mod tests {
                 RespFrame::BulkString(Some(addr.ip().to_string().into_bytes())),
                 RespFrame::Integer(i64::from(addr.port())),
                 RespFrame::BulkString(Some(b"reconnect".to_vec())),
-                RespFrame::Integer(0),
+                // ROLE reply now emits -1 for any replica state other than
+                // "connected" (fr-runtime::handle_role_command:9437). Upstream
+                // Redis follows the same convention: unknown/pre-handshake
+                // offset is reported as -1, not 0. (br-frankenredis-ea1j)
+                RespFrame::Integer(-1),
             ]))
         );
     }

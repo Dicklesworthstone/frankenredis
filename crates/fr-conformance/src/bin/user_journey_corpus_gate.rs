@@ -476,7 +476,12 @@ mod tests {
             report.violations
         );
         assert_eq!(report.journey_count, 9);
-        assert_eq!(report.active_differential_count, 6);
-        assert_eq!(report.planned_differential_count, 3);
+        // Corpus drift: two more journeys (FR-P2C-002-J001, FR-P2C-005-J001 era)
+        // flipped from planned -> active since this assertion was written.
+        // Current tallies match the live fixture at
+        // crates/fr-conformance/fixtures/user_workflow_corpus_v1.json.
+        // (br-frankenredis-ea1j)
+        assert_eq!(report.active_differential_count, 8);
+        assert_eq!(report.planned_differential_count, 1);
     }
 }

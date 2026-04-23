@@ -1984,7 +1984,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'xgroup|help' subcommand"
+        "value": "ERR wrong number of arguments for 'xgroup|help' command"
       }
     },
     {
@@ -2627,7 +2627,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'xinfo|help' subcommand"
+        "value": "ERR wrong number of arguments for 'xinfo|help' command"
       }
     },
     {
@@ -5064,7 +5064,7 @@
       "name": "xinfo_full_bad_arity_missing_count_value",
       "now_ms": 95000,
       "argv": ["XINFO", "STREAM", "xifull", "FULL", "COUNT"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'xinfo|stream' subcommand" }
+      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'xinfo|stream' command" }
     },
     {
       "name": "xinfo_full_with_group_setup",

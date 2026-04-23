@@ -839,11 +839,16 @@ mod tests {
             .iter()
             .map(|suite| suite.name.as_str())
             .collect::<Vec<_>>();
+        // fr_p2c_006_replication_journey was promoted into the baseline
+        // matrix after commit 2000608 activated the live-oracle replication
+        // differential; this expectation was missed at the time.
+        // (br-frankenredis-ea1j)
         assert_eq!(
             names,
             vec![
                 "core_strings",
                 "fr_p2c_001_eventloop_journey",
+                "fr_p2c_006_replication_journey",
                 "fr_p2c_003_dispatch_journey",
                 "core_errors",
                 "fr_p2c_002_protocol_negative",

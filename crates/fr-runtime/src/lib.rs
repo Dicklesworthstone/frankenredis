@@ -901,11 +901,10 @@ impl AuthState {
 
     fn set_requirepass(&mut self, requirepass: Option<Vec<u8>>) {
         self.requirepass = requirepass.clone();
-        let acl_pubsub_default = self.acl_pubsub_default;
         let default_user = self
             .acl_users
             .entry(DEFAULT_AUTH_USER.to_vec())
-            .or_insert_with(|| AclUser::new_default());
+            .or_insert_with(AclUser::new_default);
         if let Some(pass) = requirepass {
             default_user.passwords = vec![sha256_hex_bytes(&pass)];
             default_user.nopass = false;
@@ -917,11 +916,10 @@ impl AuthState {
     }
 
     fn add_user(&mut self, username: Vec<u8>, password: Vec<u8>) {
-        let acl_pubsub_default = self.acl_pubsub_default;
         let user = self
             .acl_users
             .entry(username)
-            .or_insert_with(|| AclUser::new_default());
+            .or_insert_with(AclUser::new_default);
         user.passwords = vec![sha256_hex_bytes(&password)];
         user.nopass = false;
     }
@@ -1122,10 +1120,11 @@ impl AuthState {
                 user.key_patterns.clear();
                 user.channel_patterns.clear();
                 user.all_channels = acl_pubsub_default.grants_all_channels();
-            } else if rule_str.eq_ignore_ascii_case("resetkeys") {
-                user.all_keys = false;
-                user.key_patterns.clear();
             } else {
+                // Note: the earlier `resetkeys` arm above already handles the
+                // standalone "resetkeys" modifier. The `reset` arm here is the
+                // full user-reset, not a no-op prefix match — they do not
+                // collide. (br-frankenredis-ea1j)
                 return Err(format!(
                     "ERR Error in ACL SETUSER modifier '{}': Syntax error",
                     rule_str
@@ -13565,19 +13564,19 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"SLOWLOG", b"GET", b"1", b"extra"]), 2),
             RespFrame::Error(
-                "ERR wrong number of arguments for 'slowlog|get' subcommand".to_string()
+                "ERR wrong number of arguments for 'slowlog|get' command".to_string()
             )
         );
         assert_eq!(
             rt.execute_frame(command(&[b"SLOWLOG", b"LEN", b"extra"]), 3),
             RespFrame::Error(
-                "ERR wrong number of arguments for 'slowlog|len' subcommand".to_string()
+                "ERR wrong number of arguments for 'slowlog|len' command".to_string()
             )
         );
         assert_eq!(
             rt.execute_frame(command(&[b"SLOWLOG", b"RESET", b"extra"]), 4),
             RespFrame::Error(
-                "ERR wrong number of arguments for 'slowlog|reset' subcommand".to_string()
+                "ERR wrong number of arguments for 'slowlog|reset' command".to_string()
             )
         );
     }

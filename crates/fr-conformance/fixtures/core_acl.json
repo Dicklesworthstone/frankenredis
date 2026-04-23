@@ -592,7 +592,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'acl|whoami' subcommand"
+        "value": "ERR wrong number of arguments for 'acl|whoami' command"
       }
     },
     {
@@ -1084,7 +1084,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'acl|genpass' subcommand"
+        "value": "ERR wrong number of arguments for 'acl|genpass' command"
       }
     },
     {
@@ -1096,7 +1096,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'acl|deluser' subcommand"
+        "value": "ERR wrong number of arguments for 'acl|deluser' command"
       }
     },
     {
@@ -1108,7 +1108,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'acl|getuser' subcommand"
+        "value": "ERR wrong number of arguments for 'acl|getuser' command"
       }
     },
     {
@@ -1120,7 +1120,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'acl|setuser' subcommand"
+        "value": "ERR wrong number of arguments for 'acl|setuser' command"
       }
     },
     {
@@ -1133,7 +1133,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'acl|save' subcommand"
+        "value": "ERR wrong number of arguments for 'acl|save' command"
       }
     },
     {
@@ -1146,7 +1146,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'acl|load' subcommand"
+        "value": "ERR wrong number of arguments for 'acl|load' command"
       }
     },
     {
