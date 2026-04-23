@@ -5999,22 +5999,187 @@ fn cluster_cmd(
         }
         return Ok(RespFrame::SimpleString("OK".to_string()));
     }
-    if sub.eq_ignore_ascii_case("RESET")
-        || sub.eq_ignore_ascii_case("MEET")
-        || sub.eq_ignore_ascii_case("FORGET")
-        || sub.eq_ignore_ascii_case("REPLICATE")
-        || sub.eq_ignore_ascii_case("REPLICAS")
-        || sub.eq_ignore_ascii_case("FAILOVER")
-        || sub.eq_ignore_ascii_case("ADDSLOTS")
-        || sub.eq_ignore_ascii_case("DELSLOTS")
-        || sub.eq_ignore_ascii_case("ADDSLOTSRANGE")
-        || sub.eq_ignore_ascii_case("DELSLOTSRANGE")
-        || sub.eq_ignore_ascii_case("FLUSHSLOTS")
-        || sub.eq_ignore_ascii_case("SAVECONFIG")
-        || sub.eq_ignore_ascii_case("SET-CONFIG-EPOCH")
-        || sub.eq_ignore_ascii_case("BUMPEPOCH")
-        || sub.eq_ignore_ascii_case("SLOTSTATE")
-    {
+    // ── CLUSTER admin subcommands (first-pass per br-frankenredis-jsr7) ──
+    //
+    // Upstream cluster.c::clusterCommand wires each of these with distinct
+    // validation + reply semantics. We implement arity + syntax validation
+    // against the upstream shape; for commands that need a real node map
+    // (which fr-repl does not yet expose), we accept-OK for no-op admin
+    // flows and surface upstream-matching specific errors ("Unknown node X",
+    // "DB must be empty ...", etc.) rather than the blanket "cluster
+    // support disabled" string. Commands still punted to that blanket
+    // error because they need a slot map / config epoch / node registry:
+    //   SET-CONFIG-EPOCH, SLOTSTATE.
+    if sub.eq_ignore_ascii_case("MEET") {
+        // CLUSTER MEET <host> <port> [cluster-bus-port]
+        if argv.len() != 4 && argv.len() != 5 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        let host = std::str::from_utf8(&argv[2])
+            .map_err(|_| CommandError::InvalidUtf8Argument)?;
+        let port = std::str::from_utf8(&argv[3])
+            .map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if parse_i64_arg(&argv[3]).is_err() {
+            return Err(CommandError::Custom(format!(
+                "ERR Invalid node address specified: {host}:{port}"
+            )));
+        }
+        if let Some(bus_port) = argv.get(4)
+            && parse_i64_arg(bus_port).is_err()
+        {
+            let bus_port_str = std::str::from_utf8(bus_port)
+                .map_err(|_| CommandError::InvalidUtf8Argument)?;
+            return Err(CommandError::Custom(format!(
+                "ERR Invalid base port specified: {bus_port_str}"
+            )));
+        }
+        // Accept but do not yet actually start a cluster handshake — a real
+        // node registry is a separate work item.
+        return Ok(RespFrame::SimpleString("OK".to_string()));
+    }
+    if sub.eq_ignore_ascii_case("FORGET") || sub.eq_ignore_ascii_case("REPLICATE") {
+        // CLUSTER FORGET <node-id> / CLUSTER REPLICATE <node-id>
+        if argv.len() != 3 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        let node_id = std::str::from_utf8(&argv[2])
+            .map_err(|_| CommandError::InvalidUtf8Argument)?;
+        return Err(CommandError::Custom(format!(
+            "ERR Unknown node {node_id}"
+        )));
+    }
+    if sub.eq_ignore_ascii_case("REPLICAS") {
+        // CLUSTER REPLICAS <node-id> — upstream returns the replica array or
+        // "The specified node is not known or can't be a replica" error.
+        if argv.len() != 3 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        let _node_id = std::str::from_utf8(&argv[2])
+            .map_err(|_| CommandError::InvalidUtf8Argument)?;
+        return Err(CommandError::Custom(
+            "ERR The specified node is not known or can't be a replica".to_string(),
+        ));
+    }
+    if sub.eq_ignore_ascii_case("FAILOVER") {
+        // CLUSTER FAILOVER [FORCE | TAKEOVER]
+        if argv.len() > 3 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        if let Some(flag) = argv.get(2) {
+            let flag_str = std::str::from_utf8(flag)
+                .map_err(|_| CommandError::InvalidUtf8Argument)?;
+            if !flag_str.eq_ignore_ascii_case("FORCE")
+                && !flag_str.eq_ignore_ascii_case("TAKEOVER")
+            {
+                return Err(CommandError::SyntaxError);
+            }
+        }
+        // Upstream: "You should send CLUSTER FAILOVER to a replica" when
+        // issued on a master. We treat ourselves as master here (no replica
+        // role tracking at the Store layer yet).
+        return Err(CommandError::Custom(
+            "ERR You should send CLUSTER FAILOVER to a replica".to_string(),
+        ));
+    }
+    if sub.eq_ignore_ascii_case("ADDSLOTS") || sub.eq_ignore_ascii_case("DELSLOTS") {
+        // CLUSTER ADDSLOTS <slot> [slot] ... / CLUSTER DELSLOTS ...
+        if argv.len() < 3 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        for slot_arg in &argv[2..] {
+            let slot = parse_i64_arg(slot_arg)?;
+            if !(0..=16383).contains(&slot) {
+                return Err(CommandError::Custom(
+                    "ERR Invalid or out of range slot".to_string(),
+                ));
+            }
+        }
+        // Accept no-op — a real slot-ownership map is a separate concern.
+        return Ok(RespFrame::SimpleString("OK".to_string()));
+    }
+    if sub.eq_ignore_ascii_case("ADDSLOTSRANGE") || sub.eq_ignore_ascii_case("DELSLOTSRANGE") {
+        // CLUSTER ADDSLOTSRANGE <start> <end> [<start> <end> ...]
+        if argv.len() < 4 || !argv.len().is_multiple_of(2) {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        let mut i = 2;
+        while i + 1 < argv.len() {
+            let start = parse_i64_arg(&argv[i])?;
+            let end = parse_i64_arg(&argv[i + 1])?;
+            if !(0..=16383).contains(&start) || !(0..=16383).contains(&end) {
+                return Err(CommandError::Custom(
+                    "ERR Invalid or out of range slot".to_string(),
+                ));
+            }
+            if start > end {
+                return Err(CommandError::Custom(format!(
+                    "ERR start slot number {start} is greater than end slot number {end}"
+                )));
+            }
+            i += 2;
+        }
+        return Ok(RespFrame::SimpleString("OK".to_string()));
+    }
+    if sub.eq_ignore_ascii_case("FLUSHSLOTS") {
+        if argv.len() != 2 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        let db_index = store.dispatch_client_ctx.db_index;
+        if store.dbsize_in_db(db_index) != 0 {
+            return Err(CommandError::Custom(
+                "ERR DB must be empty to perform CLUSTER FLUSHSLOTS.".to_string(),
+            ));
+        }
+        return Ok(RespFrame::SimpleString("OK".to_string()));
+    }
+    if sub.eq_ignore_ascii_case("SAVECONFIG") {
+        if argv.len() != 2 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        // Upstream writes cluster.conf; we don't persist cluster state yet,
+        // so this is a no-op. Returning OK matches the happy-path reply.
+        return Ok(RespFrame::SimpleString("OK".to_string()));
+    }
+    if sub.eq_ignore_ascii_case("BUMPEPOCH") {
+        if argv.len() != 2 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        // Upstream returns "BUMPED <epoch>" or "STILL <epoch>". We don't
+        // track a real config epoch yet; return BUMPED 1 as the smallest
+        // advance that still parses for clients that inspect the reply.
+        return Ok(RespFrame::SimpleString("BUMPED 1".to_string()));
+    }
+    if sub.eq_ignore_ascii_case("SET-CONFIG-EPOCH") || sub.eq_ignore_ascii_case("SLOTSTATE") {
+        // Real config-epoch / slot-state machinery not yet implemented;
+        // keep the blanket disabled error so clients fail-loud rather
+        // than think a no-op succeeded. (jsr7 follow-up)
         return Err(cluster_disabled_error());
     }
     Err(cluster_unknown_subcommand_error(sub))
@@ -29122,6 +29287,240 @@ mod tests {
             let err = dispatch_argv(&argv, &mut store, 0).expect_err("cluster reset noscript");
             assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
         }
+    }
+
+    // ── CLUSTER admin first-pass (br-frankenredis-jsr7) ─────────────
+
+    #[test]
+    fn cluster_admin_subcommands_honor_cluster_enabled_flag() {
+        // When cluster support is disabled, every admin subcommand returns
+        // the upstream-matching "cluster support disabled" error. Arity
+        // validation fires before the flag check so a too-short request
+        // still surfaces the precise arity error.
+        let mut store = Store::new();
+        for argv in [
+            vec![b"CLUSTER".to_vec(), b"MEET".to_vec(), b"127.0.0.1".to_vec(), b"6380".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"FORGET".to_vec(), b"node".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"REPLICATE".to_vec(), b"node".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"REPLICAS".to_vec(), b"node".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"FAILOVER".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"ADDSLOTS".to_vec(), b"0".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"DELSLOTS".to_vec(), b"0".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"ADDSLOTSRANGE".to_vec(), b"0".to_vec(), b"10".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"DELSLOTSRANGE".to_vec(), b"0".to_vec(), b"10".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"FLUSHSLOTS".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"SAVECONFIG".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"BUMPEPOCH".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"SET-CONFIG-EPOCH".to_vec(), b"1".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"SLOTSTATE".to_vec()],
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
+            assert_eq!(err, cluster_disabled_error(), "argv={argv:?}");
+        }
+    }
+
+    #[test]
+    fn cluster_admin_arity_errors_match_upstream_when_wrong_argc() {
+        let mut store = Store::new();
+        store.cluster_enabled = true;
+
+        let wrong = [
+            // too few args
+            (vec![b"CLUSTER".to_vec(), b"MEET".to_vec()], "MEET"),
+            (vec![b"CLUSTER".to_vec(), b"MEET".to_vec(), b"127.0.0.1".to_vec()], "MEET"),
+            (vec![b"CLUSTER".to_vec(), b"FORGET".to_vec()], "FORGET"),
+            (vec![b"CLUSTER".to_vec(), b"REPLICATE".to_vec()], "REPLICATE"),
+            (vec![b"CLUSTER".to_vec(), b"REPLICAS".to_vec()], "REPLICAS"),
+            (vec![b"CLUSTER".to_vec(), b"ADDSLOTS".to_vec()], "ADDSLOTS"),
+            (vec![b"CLUSTER".to_vec(), b"DELSLOTS".to_vec()], "DELSLOTS"),
+            (vec![b"CLUSTER".to_vec(), b"ADDSLOTSRANGE".to_vec(), b"0".to_vec()], "ADDSLOTSRANGE"),
+            (vec![b"CLUSTER".to_vec(), b"FLUSHSLOTS".to_vec(), b"extra".to_vec()], "FLUSHSLOTS"),
+            (vec![b"CLUSTER".to_vec(), b"SAVECONFIG".to_vec(), b"extra".to_vec()], "SAVECONFIG"),
+            (vec![b"CLUSTER".to_vec(), b"BUMPEPOCH".to_vec(), b"extra".to_vec()], "BUMPEPOCH"),
+            // uneven range pairs
+            (
+                vec![
+                    b"CLUSTER".to_vec(),
+                    b"ADDSLOTSRANGE".to_vec(),
+                    b"0".to_vec(),
+                    b"5".to_vec(),
+                    b"6".to_vec(),
+                ],
+                "ADDSLOTSRANGE",
+            ),
+        ];
+
+        for (argv, sub) in &wrong {
+            let err = dispatch_argv(argv, &mut store, 0).unwrap_err();
+            assert_eq!(err, cluster_wrong_subcommand_arity(sub), "argv={argv:?}");
+        }
+    }
+
+    #[test]
+    fn cluster_admin_happy_paths_when_cluster_enabled_return_ok_or_specific_errors() {
+        let mut store = Store::new();
+        store.cluster_enabled = true;
+
+        // MEET accepts host + numeric port (+ optional bus port).
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"MEET".to_vec(), b"127.0.0.1".to_vec(), b"6380".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"MEET".to_vec(),
+                    b"127.0.0.1".to_vec(),
+                    b"6380".to_vec(),
+                    b"16380".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // MEET invalid port → upstream-matching error.
+        let err = dispatch_argv(
+            &[b"CLUSTER".to_vec(), b"MEET".to_vec(), b"127.0.0.1".to_vec(), b"port".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Invalid node address specified: 127.0.0.1:port".to_string())
+        );
+
+        // FORGET / REPLICATE / REPLICAS on unknown node → upstream wording.
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"FORGET".to_vec(), b"unknownnode".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Unknown node unknownnode".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"REPLICATE".to_vec(), b"unknownnode".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Unknown node unknownnode".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"REPLICAS".to_vec(), b"unknownnode".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom(
+                "ERR The specified node is not known or can't be a replica".to_string()
+            )
+        );
+
+        // FAILOVER on master → upstream error about directing to a replica.
+        assert_eq!(
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"FAILOVER".to_vec()], &mut store, 0).unwrap_err(),
+            CommandError::Custom(
+                "ERR You should send CLUSTER FAILOVER to a replica".to_string()
+            )
+        );
+        // FAILOVER with invalid flag → syntax error.
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"FAILOVER".to_vec(), b"NOPE".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::SyntaxError
+        );
+
+        // ADDSLOTS / DELSLOTS accept valid slots; reject out-of-range.
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"ADDSLOTS".to_vec(), b"0".to_vec(), b"16383".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"ADDSLOTS".to_vec(), b"16384".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Invalid or out of range slot".to_string())
+        );
+
+        // ADDSLOTSRANGE: start > end → upstream wording.
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"ADDSLOTSRANGE".to_vec(),
+                    b"100".to_vec(),
+                    b"50".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom(
+                "ERR start slot number 100 is greater than end slot number 50".to_string()
+            )
+        );
+
+        // FLUSHSLOTS on empty db → OK.
+        assert_eq!(
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"FLUSHSLOTS".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Populate db0 and retry: upstream-matching DB-not-empty error.
+        dispatch_argv(&[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"FLUSHSLOTS".to_vec()], &mut store, 0)
+                .unwrap_err(),
+            CommandError::Custom(
+                "ERR DB must be empty to perform CLUSTER FLUSHSLOTS.".to_string()
+            )
+        );
+
+        // SAVECONFIG + BUMPEPOCH simple replies.
+        assert_eq!(
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"SAVECONFIG".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"BUMPEPOCH".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::SimpleString("BUMPED 1".to_string())
+        );
+
+        // SET-CONFIG-EPOCH / SLOTSTATE still blanket-errored (follow-up).
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"SET-CONFIG-EPOCH".to_vec(), b"5".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            cluster_disabled_error()
+        );
     }
 
     // ── CLIENT KILL/PAUSE/UNPAUSE tests ─────────────────────────────
