@@ -1,0 +1,13 @@
+ParseResult {
+    frame: BulkString(
+        Some(
+            [
+                0,
+                255,
+                13,
+                10,
+            ],
+        ),
+    ),
+    consumed: 10,
+}

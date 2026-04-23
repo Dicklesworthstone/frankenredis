@@ -1,0 +1,6 @@
+ParseResult {
+    frame: Integer(
+        -9223372036854775808,
+    ),
+    consumed: 23,
+}

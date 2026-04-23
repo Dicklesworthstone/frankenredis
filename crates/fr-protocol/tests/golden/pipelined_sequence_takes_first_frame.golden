@@ -1,0 +1,6 @@
+ParseResult {
+    frame: SimpleString(
+        "PING",
+    ),
+    consumed: 7,
+}

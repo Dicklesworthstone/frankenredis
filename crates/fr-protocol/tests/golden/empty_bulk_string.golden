@@ -1,0 +1,8 @@
+ParseResult {
+    frame: BulkString(
+        Some(
+            [],
+        ),
+    ),
+    consumed: 6,
+}
