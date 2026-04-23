@@ -17029,6 +17029,25 @@ mod tests {
             }
 
             #[test]
+            fn mr_function_restore_empty_policy_empty_dump_is_identity(
+                seeds in prop::collection::vec(0u16..4096, 0..6),
+            ) {
+                let libraries = normalized_function_library_payloads(seeds);
+                let empty_dump = Store::new().function_dump();
+                let mut restored = Store::new();
+                install_function_libraries(&mut restored, &libraries);
+                let before_snapshot = function_library_snapshot(&restored);
+                let before_dump = restored.function_dump();
+
+                restored
+                    .function_restore(&empty_dump, "")
+                    .expect("empty policy with empty FUNCTION DUMP must be a no-op");
+
+                prop_assert_eq!(function_library_snapshot(&restored), before_snapshot);
+                prop_assert_eq!(restored.function_dump(), before_dump);
+            }
+
+            #[test]
             fn mr_function_restore_empty_dump_replace_is_identity(
                 seeds in prop::collection::vec(0u16..4096, 0..6),
             ) {
