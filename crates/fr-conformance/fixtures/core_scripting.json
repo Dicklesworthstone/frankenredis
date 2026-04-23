@@ -869,8 +869,8 @@
             "value": "running_script"
           },
           {
-            "kind": "integer",
-            "value": 0
+            "kind": "bulk",
+            "value": null
           },
           {
             "kind": "bulk",
