@@ -15094,6 +15094,61 @@ mod tests {
     }
 
     #[test]
+    fn function_restore_unknown_policy_is_atomic() {
+        let mut store = Store::new();
+        store
+            .function_load(&sample_function_library("seedlib", "alpha", "beta"), false)
+            .expect("seed library must load");
+        let before_snapshot = function_library_snapshot(&store);
+        let before_dump = store.function_dump();
+
+        let err = store
+            .function_restore(&before_dump, "BROKEN")
+            .expect_err("unknown FUNCTION RESTORE policy must fail");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Wrong restore policy given, value should be either FLUSH, APPEND or REPLACE."
+                    .to_string()
+            )
+        );
+        assert_eq!(function_library_snapshot(&store), before_snapshot);
+        assert_eq!(store.function_dump(), before_dump);
+    }
+
+    #[test]
+    fn function_restore_empty_policy_defaults_to_append_for_disjoint_payload() {
+        let mut payload_store = Store::new();
+        payload_store
+            .function_load(&sample_function_library("addon", "epsilon", "zeta"), false)
+            .expect("payload addon library must load");
+        let payload_dump = payload_store.function_dump();
+
+        let mut restored = Store::new();
+        restored
+            .function_load(&sample_function_library("seedlib", "alpha", "beta"), false)
+            .expect("existing seed library must load");
+
+        restored
+            .function_restore(&payload_dump, "")
+            .expect("empty FUNCTION RESTORE policy must behave like APPEND");
+
+        let mut expected = Store::new();
+        expected
+            .function_load(&sample_function_library("seedlib", "alpha", "beta"), false)
+            .expect("expected seed library must load");
+        expected
+            .function_load(&sample_function_library("addon", "epsilon", "zeta"), false)
+            .expect("expected addon library must load");
+
+        assert_eq!(
+            function_library_snapshot(&restored),
+            function_library_snapshot(&expected)
+        );
+        assert_eq!(restored.function_dump(), expected.function_dump());
+    }
+
+    #[test]
     fn function_restore_append_of_disjoint_payload_is_union() {
         let mut payload_store = Store::new();
         payload_store
