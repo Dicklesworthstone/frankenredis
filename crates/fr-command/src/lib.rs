@@ -6,7 +6,8 @@ pub use lua_eval::eval_script;
 use fr_protocol::RespFrame;
 use fr_store::{
     BitRangeUnit, ClientReplyState, ClientTrackingState, DispatchAclLogContext,
-    DispatchAclPermissionReason, DispatchAclPermissions, ExpireTimeValue, MaxmemoryPolicy,
+    DispatchAclPermissionReason, DispatchAclPermissions, ExpireTimeValue, HashFieldPersistResult,
+    HashFieldTtl, HashFieldTtlCondition, HashFieldTtlSet, HashFieldTtlUnit, MaxmemoryPolicy,
     PendingAclLogEvent, PttlValue, PubSubMessage, ScoreBound, Store, StoreError,
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
     StreamGroupReadCursor, StreamGroupReadOptions, StreamId, ValueType, glob_match, read_rss_bytes,
@@ -881,6 +882,15 @@ pub fn dispatch_argv(
         Some(CommandId::Hincrby) => return hincrby(argv, store, now_ms),
         Some(CommandId::Hsetnx) => return hsetnx_cmd(argv, store, now_ms),
         Some(CommandId::Hstrlen) => return hstrlen(argv, store, now_ms),
+        Some(CommandId::Hexpire) => return hexpire_cmd(argv, store, now_ms, HExpireForm::Seconds, false),
+        Some(CommandId::Hpexpire) => return hexpire_cmd(argv, store, now_ms, HExpireForm::Milliseconds, false),
+        Some(CommandId::Hexpireat) => return hexpire_cmd(argv, store, now_ms, HExpireForm::Seconds, true),
+        Some(CommandId::Hpexpireat) => return hexpire_cmd(argv, store, now_ms, HExpireForm::Milliseconds, true),
+        Some(CommandId::Httl) => return httl_cmd(argv, store, now_ms, HashFieldTtlUnit::Seconds, false),
+        Some(CommandId::Hpttl) => return httl_cmd(argv, store, now_ms, HashFieldTtlUnit::Milliseconds, false),
+        Some(CommandId::Hexpiretime) => return httl_cmd(argv, store, now_ms, HashFieldTtlUnit::Seconds, true),
+        Some(CommandId::Hpexpiretime) => return httl_cmd(argv, store, now_ms, HashFieldTtlUnit::Milliseconds, true),
+        Some(CommandId::Hpersist) => return hpersist_cmd(argv, store, now_ms),
         Some(CommandId::Lpush) => return lpush(argv, store, now_ms),
         Some(CommandId::Rpush) => return rpush(argv, store, now_ms),
         Some(CommandId::Lpop) => return lpop(argv, store, now_ms),
@@ -1106,6 +1116,11 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
             | CommandId::Hmset
             | CommandId::Hincrby
             | CommandId::Hsetnx
+            | CommandId::Hexpire
+            | CommandId::Hpexpire
+            | CommandId::Hexpireat
+            | CommandId::Hpexpireat
+            | CommandId::Hpersist
             | CommandId::Lpush
             | CommandId::Rpush
             | CommandId::Lpop
@@ -1229,6 +1244,16 @@ pub enum CommandId {
     Hincrby,
     Hsetnx,
     Hstrlen,
+    // Redis 7.4 hash field TTL family (br-frankenredis-rv89)
+    Hexpire,
+    Hpexpire,
+    Hexpireat,
+    Hpexpireat,
+    Httl,
+    Hpttl,
+    Hexpiretime,
+    Hpexpiretime,
+    Hpersist,
     Lpush,
     Rpush,
     Lpop,
@@ -1462,6 +1487,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Hset)
             } else if eq_ascii_command(cmd, b"HDEL") {
                 Some(CommandId::Hdel)
+            } else if eq_ascii_command(cmd, b"HTTL") {
+                Some(CommandId::Httl)
             } else if eq_ascii_command(cmd, b"HLEN") {
                 Some(CommandId::Hlen)
             } else if eq_ascii_command(cmd, b"LPOP") {
@@ -1533,6 +1560,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Hmget)
             } else if eq_ascii_command(cmd, b"HMSET") {
                 Some(CommandId::Hmset)
+            } else if eq_ascii_command(cmd, b"HPTTL") {
+                Some(CommandId::Hpttl)
             } else if eq_ascii_command(cmd, b"LPUSH") {
                 Some(CommandId::Lpush)
             } else if eq_ascii_command(cmd, b"RPUSH") {
@@ -1713,6 +1742,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Hincrby)
             } else if eq_ascii_command(cmd, b"HSTRLEN") {
                 Some(CommandId::Hstrlen)
+            } else if eq_ascii_command(cmd, b"HEXPIRE") {
+                Some(CommandId::Hexpire)
             } else if eq_ascii_command(cmd, b"ZINCRBY") {
                 Some(CommandId::Zincrby)
             } else if eq_ascii_command(cmd, b"ZPOPMIN") {
@@ -1806,6 +1837,10 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Failover)
             } else if eq_ascii_command(cmd, b"SENTINEL") {
                 Some(CommandId::Sentinel)
+            } else if eq_ascii_command(cmd, b"HPEXPIRE") {
+                Some(CommandId::Hpexpire)
+            } else if eq_ascii_command(cmd, b"HPERSIST") {
+                Some(CommandId::Hpersist)
             } else {
                 None
             }
@@ -1835,6 +1870,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Replicaof)
             } else if eq_ascii_command(cmd, b"READWRITE") {
                 Some(CommandId::Readwrite)
+            } else if eq_ascii_command(cmd, b"HEXPIREAT") {
+                Some(CommandId::Hexpireat)
             } else {
                 None
             }
@@ -1868,6 +1905,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Ssubscribe)
             } else if eq_ascii_command(cmd, b"PFSELFTEST") {
                 Some(CommandId::Pfselftest)
+            } else if eq_ascii_command(cmd, b"HPEXPIREAT") {
+                Some(CommandId::Hpexpireat)
             } else {
                 None
             }
@@ -1897,6 +1936,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Zrangestore)
             } else if eq_ascii_command(cmd, b"BITFIELD_RO") {
                 Some(CommandId::BitfieldRo)
+            } else if eq_ascii_command(cmd, b"HEXPIRETIME") {
+                Some(CommandId::Hexpiretime)
             } else {
                 None
             }
@@ -1904,6 +1945,8 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
         12 => {
             if eq_ascii_command(cmd, b"HINCRBYFLOAT") {
                 Some(CommandId::Hincrbyfloat)
+            } else if eq_ascii_command(cmd, b"HPEXPIRETIME") {
+                Some(CommandId::Hpexpiretime)
             } else if eq_ascii_command(cmd, b"BGREWRITEAOF") {
                 Some(CommandId::Bgrewriteaof)
             } else if eq_ascii_command(cmd, b"PUNSUBSCRIBE") {
@@ -2599,6 +2642,264 @@ fn hstrlen(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     }
     let len = store.hstrlen(&argv[1], &argv[2], now_ms)?;
     Ok(RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)))
+}
+
+// ── HEXPIRE family (Redis 7.4) ──────────────────────────────────────
+//
+// Part 2 of br-frankenredis-rv89. Implements the 9 hash field TTL
+// commands on top of the fr-store primitives landed in
+// br-frankenredis-wwz3.
+
+/// Whether an HEXPIRE-style argument is seconds or milliseconds.
+#[derive(Clone, Copy, Debug)]
+enum HExpireForm {
+    Seconds,
+    Milliseconds,
+}
+
+fn hexpire_command_name(form: HExpireForm, absolute: bool) -> &'static str {
+    match (form, absolute) {
+        (HExpireForm::Seconds, false) => "HEXPIRE",
+        (HExpireForm::Milliseconds, false) => "HPEXPIRE",
+        (HExpireForm::Seconds, true) => "HEXPIREAT",
+        (HExpireForm::Milliseconds, true) => "HPEXPIREAT",
+    }
+}
+
+fn httl_command_name(unit: HashFieldTtlUnit, absolute: bool) -> &'static str {
+    match (unit, absolute) {
+        (HashFieldTtlUnit::Seconds, false) => "HTTL",
+        (HashFieldTtlUnit::Milliseconds, false) => "HPTTL",
+        (HashFieldTtlUnit::Seconds, true) => "HEXPIRETIME",
+        (HashFieldTtlUnit::Milliseconds, true) => "HPEXPIRETIME",
+    }
+}
+
+/// Parse `[NX|XX|GT|LT]` optional flag + mandatory `FIELDS numfields` prefix.
+/// Returns `(condition, field_start_index, numfields)`.
+fn parse_hash_field_ttl_flags_and_fields_header(
+    argv: &[Vec<u8>],
+    after_value_idx: usize,
+    command_name: &'static str,
+) -> Result<(HashFieldTtlCondition, usize, usize), CommandError> {
+    let mut cond = HashFieldTtlCondition::None;
+    let mut idx = after_value_idx;
+    if idx < argv.len() {
+        let tok = std::str::from_utf8(&argv[idx])
+            .map_err(|_| CommandError::InvalidUtf8Argument)?;
+        let matched = if tok.eq_ignore_ascii_case("NX") {
+            cond = HashFieldTtlCondition::Nx;
+            true
+        } else if tok.eq_ignore_ascii_case("XX") {
+            cond = HashFieldTtlCondition::Xx;
+            true
+        } else if tok.eq_ignore_ascii_case("GT") {
+            cond = HashFieldTtlCondition::Gt;
+            true
+        } else if tok.eq_ignore_ascii_case("LT") {
+            cond = HashFieldTtlCondition::Lt;
+            true
+        } else {
+            false
+        };
+        if matched {
+            idx += 1;
+        }
+    }
+    // FIELDS <numfields> field [field ...]
+    if idx >= argv.len() {
+        return Err(CommandError::WrongArity(command_name));
+    }
+    let token = std::str::from_utf8(&argv[idx])
+        .map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if !token.eq_ignore_ascii_case("FIELDS") {
+        return Err(CommandError::SyntaxError);
+    }
+    idx += 1;
+    if idx >= argv.len() {
+        return Err(CommandError::WrongArity(command_name));
+    }
+    let numfields = parse_i64_arg(&argv[idx])?;
+    if numfields < 1 {
+        return Err(CommandError::Custom(
+            "ERR Parameter `numFields` should be greater than 0".to_string(),
+        ));
+    }
+    let numfields = usize::try_from(numfields).map_err(|_| CommandError::InvalidInteger)?;
+    idx += 1;
+    let remaining = argv.len().saturating_sub(idx);
+    if remaining != numfields {
+        return Err(CommandError::Custom(
+            "ERR Parameter `numFields` is more than number of arguments".to_string(),
+        ));
+    }
+    Ok((cond, idx, numfields))
+}
+
+fn hexpire_cmd(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+    form: HExpireForm,
+    absolute: bool,
+) -> Result<RespFrame, CommandError> {
+    let cmd_name = hexpire_command_name(form, absolute);
+    // argv[0]=CMD, [1]=key, [2]=N, [3..]=[flag]+FIELDS+numfields+fields...
+    // Minimum legal form (fields header present): 5 args + at least 1 field → 6.
+    // With 5 args we still enter parsing so the numfields-zero / missing-FIELDS
+    // error wins over the generic arity error, matching upstream's error
+    // precedence.
+    if argv.len() < 5 {
+        return Err(CommandError::WrongArity(cmd_name));
+    }
+    let key = argv[1].as_slice();
+    let raw_value = parse_i64_arg(&argv[2])?;
+    // Compute absolute deadline in ms.
+    let deadline_ms: u64 = match (form, absolute) {
+        (HExpireForm::Seconds, false) => {
+            if raw_value < 0 {
+                return Err(CommandError::Custom(
+                    "ERR invalid expire time in 'hexpire' command".to_string(),
+                ));
+            }
+            now_ms.saturating_add((raw_value as u64).saturating_mul(1000))
+        }
+        (HExpireForm::Milliseconds, false) => {
+            if raw_value < 0 {
+                return Err(CommandError::Custom(
+                    "ERR invalid expire time in 'hpexpire' command".to_string(),
+                ));
+            }
+            now_ms.saturating_add(raw_value as u64)
+        }
+        (HExpireForm::Seconds, true) => {
+            if raw_value < 0 {
+                return Err(CommandError::Custom(
+                    "ERR invalid expire time in 'hexpireat' command".to_string(),
+                ));
+            }
+            (raw_value as u64).saturating_mul(1000)
+        }
+        (HExpireForm::Milliseconds, true) => {
+            if raw_value < 0 {
+                return Err(CommandError::Custom(
+                    "ERR invalid expire time in 'hpexpireat' command".to_string(),
+                ));
+            }
+            raw_value as u64
+        }
+    };
+
+    let (cond, fields_start, numfields) =
+        parse_hash_field_ttl_flags_and_fields_header(argv, 3, cmd_name)?;
+
+    let mut replies = Vec::with_capacity(numfields);
+    for f_idx in 0..numfields {
+        let field = argv[fields_start + f_idx].as_slice();
+        let outcome = store.hash_field_set_abs_expiry(key, field, deadline_ms, cond, now_ms);
+        let code = match outcome {
+            HashFieldTtlSet::Applied => 1,
+            HashFieldTtlSet::AppliedAlreadyExpired => 2,
+            HashFieldTtlSet::ConditionNotMet => 0,
+            HashFieldTtlSet::FieldMissing => -2,
+            HashFieldTtlSet::KeyMissing => -2,
+            HashFieldTtlSet::WrongType => return Err(CommandError::Custom(
+                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
+            )),
+        };
+        replies.push(RespFrame::Integer(code));
+    }
+    Ok(RespFrame::Array(Some(replies)))
+}
+
+fn parse_hash_field_ttl_fields_only_header(
+    argv: &[Vec<u8>],
+    command_name: &'static str,
+) -> Result<(usize, usize), CommandError> {
+    // argv[0]=CMD, [1]=key, [2]="FIELDS", [3]=numfields, [4..]=fields
+    if argv.len() < 5 {
+        return Err(CommandError::WrongArity(command_name));
+    }
+    let token = std::str::from_utf8(&argv[2])
+        .map_err(|_| CommandError::InvalidUtf8Argument)?;
+    if !token.eq_ignore_ascii_case("FIELDS") {
+        return Err(CommandError::SyntaxError);
+    }
+    let numfields = parse_i64_arg(&argv[3])?;
+    if numfields < 1 {
+        return Err(CommandError::Custom(
+            "ERR Parameter `numFields` should be greater than 0".to_string(),
+        ));
+    }
+    let numfields = usize::try_from(numfields).map_err(|_| CommandError::InvalidInteger)?;
+    let fields_start = 4;
+    let remaining = argv.len().saturating_sub(fields_start);
+    if remaining != numfields {
+        return Err(CommandError::Custom(
+            "ERR Parameter `numFields` is more than number of arguments".to_string(),
+        ));
+    }
+    Ok((fields_start, numfields))
+}
+
+fn httl_cmd(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+    unit: HashFieldTtlUnit,
+    absolute: bool,
+) -> Result<RespFrame, CommandError> {
+    let cmd_name = httl_command_name(unit, absolute);
+    let (fields_start, numfields) = parse_hash_field_ttl_fields_only_header(argv, cmd_name)?;
+    let key = argv[1].as_slice();
+
+    let mut replies = Vec::with_capacity(numfields);
+    for f_idx in 0..numfields {
+        let field = argv[fields_start + f_idx].as_slice();
+        let ttl = store.hash_field_ttl(key, field, now_ms, unit, absolute);
+        let code: i64 = match ttl {
+            HashFieldTtl::Remaining(v) => i64::try_from(v).unwrap_or(i64::MAX),
+            HashFieldTtl::NoTtl => -1,
+            HashFieldTtl::FieldMissing => -2,
+            HashFieldTtl::KeyMissing => -2,
+            HashFieldTtl::WrongType => return Err(CommandError::Custom(
+                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
+            )),
+            // Expired field is surfaced the same as FieldMissing at the wire
+            // (upstream reaps the field before reporting); part 3 wires the
+            // actual lazy-delete so this branch becomes observable.
+            HashFieldTtl::Expired => -2,
+        };
+        replies.push(RespFrame::Integer(code));
+    }
+    Ok(RespFrame::Array(Some(replies)))
+}
+
+fn hpersist_cmd(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    _now_ms: u64,
+) -> Result<RespFrame, CommandError> {
+    let (fields_start, numfields) =
+        parse_hash_field_ttl_fields_only_header(argv, "HPERSIST")?;
+    let key = argv[1].as_slice();
+
+    let mut replies = Vec::with_capacity(numfields);
+    for f_idx in 0..numfields {
+        let field = argv[fields_start + f_idx].as_slice();
+        let outcome = store.hash_field_persist(key, field);
+        let code: i64 = match outcome {
+            HashFieldPersistResult::Persisted => 1,
+            HashFieldPersistResult::NoTtl => -1,
+            HashFieldPersistResult::FieldMissing => -2,
+            HashFieldPersistResult::KeyMissing => -2,
+            HashFieldPersistResult::WrongType => return Err(CommandError::Custom(
+                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
+            )),
+        };
+        replies.push(RespFrame::Integer(code));
+    }
+    Ok(RespFrame::Array(Some(replies)))
 }
 
 fn lpush(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -15136,6 +15437,33 @@ mod tests {
         if eq_ascii_command(cmd, b"HSTRLEN") {
             return Some(CommandId::Hstrlen);
         }
+        if eq_ascii_command(cmd, b"HEXPIRE") {
+            return Some(CommandId::Hexpire);
+        }
+        if eq_ascii_command(cmd, b"HPEXPIRE") {
+            return Some(CommandId::Hpexpire);
+        }
+        if eq_ascii_command(cmd, b"HEXPIREAT") {
+            return Some(CommandId::Hexpireat);
+        }
+        if eq_ascii_command(cmd, b"HPEXPIREAT") {
+            return Some(CommandId::Hpexpireat);
+        }
+        if eq_ascii_command(cmd, b"HTTL") {
+            return Some(CommandId::Httl);
+        }
+        if eq_ascii_command(cmd, b"HPTTL") {
+            return Some(CommandId::Hpttl);
+        }
+        if eq_ascii_command(cmd, b"HEXPIRETIME") {
+            return Some(CommandId::Hexpiretime);
+        }
+        if eq_ascii_command(cmd, b"HPEXPIRETIME") {
+            return Some(CommandId::Hpexpiretime);
+        }
+        if eq_ascii_command(cmd, b"HPERSIST") {
+            return Some(CommandId::Hpersist);
+        }
         if eq_ascii_command(cmd, b"LPUSH") {
             return Some(CommandId::Lpush);
         }
@@ -17422,6 +17750,486 @@ mod tests {
         )
         .expect("hstrlen missing");
         assert_eq!(out2, RespFrame::Integer(0));
+    }
+
+    // ── Hash field TTL command family (br-frankenredis-c0z9) ────────
+
+    fn seed_hash_field_ttl_store() -> Store {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"h".to_vec(),
+                b"f1".to_vec(),
+                b"v1".to_vec(),
+                b"f2".to_vec(),
+                b"v2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hset");
+        store
+    }
+
+    #[test]
+    fn hexpire_sets_ttl_and_returns_applied_code() {
+        let mut store = seed_hash_field_ttl_store();
+        let out = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"60".to_vec(),
+                b"FIELDS".to_vec(),
+                b"2".to_vec(),
+                b"f1".to_vec(),
+                b"missing".to_vec(),
+            ],
+            &mut store,
+            1_000,
+        )
+        .expect("hexpire");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),  // f1 applied
+                RespFrame::Integer(-2), // missing field
+            ]))
+        );
+        // HTTL reads it back.
+        let ttl = dispatch_argv(
+            &[
+                b"HTTL".to_vec(),
+                b"h".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            1_000,
+        )
+        .expect("httl");
+        assert_eq!(ttl, RespFrame::Array(Some(vec![RespFrame::Integer(60)])));
+    }
+
+    #[test]
+    fn hpexpire_sets_millisecond_deadline() {
+        let mut store = seed_hash_field_ttl_store();
+        let _ = dispatch_argv(
+            &[
+                b"HPEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"1500".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            100,
+        )
+        .expect("hpexpire");
+        let hpttl = dispatch_argv(
+            &[
+                b"HPTTL".to_vec(),
+                b"h".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            100,
+        )
+        .expect("hpttl");
+        assert_eq!(hpttl, RespFrame::Array(Some(vec![RespFrame::Integer(1500)])));
+    }
+
+    #[test]
+    fn hexpireat_sets_absolute_seconds_deadline() {
+        let mut store = seed_hash_field_ttl_store();
+        // Use an epoch second in the future; HEXPIRETIME should round-trip it.
+        let out = dispatch_argv(
+            &[
+                b"HEXPIREAT".to_vec(),
+                b"h".to_vec(),
+                b"1700000100".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            1_700_000_000_000,
+        )
+        .expect("hexpireat");
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(1)])));
+        let abs = dispatch_argv(
+            &[
+                b"HEXPIRETIME".to_vec(),
+                b"h".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            1_700_000_000_000,
+        )
+        .expect("hexpiretime");
+        assert_eq!(
+            abs,
+            RespFrame::Array(Some(vec![RespFrame::Integer(1_700_000_100)]))
+        );
+    }
+
+    #[test]
+    fn hpexpireat_sets_absolute_milliseconds() {
+        let mut store = seed_hash_field_ttl_store();
+        let _ = dispatch_argv(
+            &[
+                b"HPEXPIREAT".to_vec(),
+                b"h".to_vec(),
+                b"1700000500500".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            1_700_000_000_000,
+        )
+        .expect("hpexpireat");
+        let abs = dispatch_argv(
+            &[
+                b"HPEXPIRETIME".to_vec(),
+                b"h".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            1_700_000_000_000,
+        )
+        .expect("hpexpiretime");
+        assert_eq!(
+            abs,
+            RespFrame::Array(Some(vec![RespFrame::Integer(1_700_000_500_500)]))
+        );
+    }
+
+    #[test]
+    fn hexpire_past_deadline_returns_code_2() {
+        let mut store = seed_hash_field_ttl_store();
+        let out = dispatch_argv(
+            &[
+                b"HPEXPIREAT".to_vec(),
+                b"h".to_vec(),
+                b"1".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            1_000_000,
+        )
+        .expect("hpexpireat past");
+        // Deadline 1 ms is in the past; upstream returns 2.
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(2)])));
+    }
+
+    #[test]
+    fn hexpire_nx_xx_gt_lt_flag_matrix_matches_upstream_codes() {
+        let mut store = seed_hash_field_ttl_store();
+        // NX on a field with no TTL → applies.
+        let nx_first = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"60".to_vec(),
+                b"NX".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hexpire nx first");
+        assert_eq!(nx_first, RespFrame::Array(Some(vec![RespFrame::Integer(1)])));
+        // Second NX → blocked.
+        let nx_second = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"120".to_vec(),
+                b"NX".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hexpire nx second");
+        assert_eq!(nx_second, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+        // GT shorter → blocked.
+        let gt_shorter = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"30".to_vec(),
+                b"GT".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hexpire gt shorter");
+        assert_eq!(gt_shorter, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+        // GT longer → applies.
+        let gt_longer = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"600".to_vec(),
+                b"GT".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hexpire gt longer");
+        assert_eq!(gt_longer, RespFrame::Array(Some(vec![RespFrame::Integer(1)])));
+        // LT shorter → applies.
+        let lt_shorter = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"90".to_vec(),
+                b"LT".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hexpire lt shorter");
+        assert_eq!(lt_shorter, RespFrame::Array(Some(vec![RespFrame::Integer(1)])));
+        // XX on a never-set-again field: seed f2 and attempt XX.
+        let xx_blocked = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"60".to_vec(),
+                b"XX".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hexpire xx blocked");
+        assert_eq!(xx_blocked, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+    }
+
+    #[test]
+    fn httl_and_hpttl_return_minus_one_for_no_ttl_minus_two_for_missing() {
+        let mut store = seed_hash_field_ttl_store();
+        let httl = dispatch_argv(
+            &[
+                b"HTTL".to_vec(),
+                b"h".to_vec(),
+                b"FIELDS".to_vec(),
+                b"3".to_vec(),
+                b"f1".to_vec(),
+                b"f2".to_vec(),
+                b"nope".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("httl");
+        assert_eq!(
+            httl,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(-1),
+                RespFrame::Integer(-1),
+                RespFrame::Integer(-2),
+            ]))
+        );
+        // Key missing → -2 for every field.
+        let missing = dispatch_argv(
+            &[
+                b"HPTTL".to_vec(),
+                b"nope".to_vec(),
+                b"FIELDS".to_vec(),
+                b"2".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hpttl missing key");
+        assert_eq!(
+            missing,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(-2),
+                RespFrame::Integer(-2),
+            ]))
+        );
+    }
+
+    #[test]
+    fn hpersist_reports_persisted_notttl_or_missing_codes() {
+        let mut store = seed_hash_field_ttl_store();
+        dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"60".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hexpire");
+
+        let out = dispatch_argv(
+            &[
+                b"HPERSIST".to_vec(),
+                b"h".to_vec(),
+                b"FIELDS".to_vec(),
+                b"3".to_vec(),
+                b"f1".to_vec(),
+                b"f2".to_vec(),
+                b"nope".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hpersist");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),  // f1 had a TTL → cleared
+                RespFrame::Integer(-1), // f2 existed but had no TTL
+                RespFrame::Integer(-2), // nope is missing
+            ]))
+        );
+    }
+
+    #[test]
+    fn hexpire_wrongtype_error_matches_upstream() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"s".to_vec(), b"string".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+        let err = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"s".to_vec(),
+                b"60".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn hexpire_family_wrong_arity_and_syntax() {
+        let mut store = seed_hash_field_ttl_store();
+        // Missing FIELDS token.
+        let missing_fields = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"60".to_vec(),
+                b"GARBAGE".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(missing_fields, CommandError::SyntaxError);
+        // Numfields mismatch.
+        let mismatch = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"60".to_vec(),
+                b"FIELDS".to_vec(),
+                b"3".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            mismatch,
+            CommandError::Custom(
+                "ERR Parameter `numFields` is more than number of arguments".to_string()
+            )
+        );
+        // numfields < 1.
+        let zero = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"60".to_vec(),
+                b"FIELDS".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            zero,
+            CommandError::Custom(
+                "ERR Parameter `numFields` should be greater than 0".to_string()
+            )
+        );
+        // Negative seconds.
+        let negative = dispatch_argv(
+            &[
+                b"HEXPIRE".to_vec(),
+                b"h".to_vec(),
+                b"-5".to_vec(),
+                b"FIELDS".to_vec(),
+                b"1".to_vec(),
+                b"f1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            negative,
+            CommandError::Custom(
+                "ERR invalid expire time in 'hexpire' command".to_string()
+            )
+        );
     }
 
     #[test]
