@@ -15260,6 +15260,38 @@ mod tests {
     }
 
     #[test]
+    fn function_restore_empty_policy_collision_is_atomic() {
+        let mut payload_store = Store::new();
+        payload_store
+            .function_load(&sample_function_library("seedlib", "gamma", "delta"), false)
+            .expect("replacement seed library must load");
+        payload_store
+            .function_load(&sample_function_library("addon", "epsilon", "zeta"), false)
+            .expect("addon library must load");
+        let payload_dump = payload_store.function_dump();
+
+        let mut restored = Store::new();
+        restored
+            .function_load(&sample_function_library("seedlib", "alpha", "beta"), false)
+            .expect("original seed library must load");
+        restored
+            .function_load(&sample_function_library("keepme", "theta", "iota"), false)
+            .expect("disjoint existing library must load");
+        let before_snapshot = function_library_snapshot(&restored);
+        let before_dump = restored.function_dump();
+
+        let err = restored
+            .function_restore(&payload_dump, "")
+            .expect_err("empty policy must default to APPEND collision semantics");
+        assert!(
+            matches!(err, StoreError::GenericError(ref message) if message.contains("already exists")),
+            "unexpected empty-policy collision error: {err:?}"
+        );
+        assert_eq!(function_library_snapshot(&restored), before_snapshot);
+        assert_eq!(restored.function_dump(), before_dump);
+    }
+
+    #[test]
     fn function_restore_append_of_disjoint_payload_is_union() {
         let mut payload_store = Store::new();
         payload_store
