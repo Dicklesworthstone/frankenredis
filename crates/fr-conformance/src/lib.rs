@@ -9627,6 +9627,220 @@ mod tests {
         });
     }
 
+    /// Cross-impl DUMP/RESTORE round-trip gate for STREAM values.
+    ///
+    /// Seeds a stream with multiple entries (single- and multi-field),
+    /// DUMPs via our `Store::dump_key`, and feeds the payload to the
+    /// vendored oracle via `RESTORE key 0 <payload>`. The oracle's
+    /// `XLEN` and `XRANGE - +` must then echo the original entries
+    /// byte-identically. The reverse direction (`XADD` on oracle →
+    /// `DUMP` → our `restore_key`) drives `Store::xrange` and verifies
+    /// the entries survive the round-trip with IDs and field/value
+    /// order preserved. Exercises
+    /// `fr_persist::encode_upstream_stream_listpacks3_payload` (bead
+    /// frankenredis-6zk9) and the type-21 decoder path
+    /// (frankenredis-qi6z). (br-frankenredis-m17o)
+    #[test]
+    fn live_redis_stream_dump_restore_roundtrip_matches_upstream() {
+        use fr_store::Store;
+
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+
+        // Fixed IDs so XRANGE/XLEN replies are deterministic across
+        // implementations. Upstream accepts any strictly-increasing
+        // (ms, seq) pair on RESTORE.
+        type StreamRoundtripEntry = ((u64, u64), &'static [(&'static [u8], &'static [u8])]);
+        let entries: &[StreamRoundtripEntry] = &[
+            ((100, 0), &[(b"field1", b"value1")]),
+            ((100, 1), &[(b"field1", b"value2"), (b"field2", b"other")]),
+            ((200, 0), &[(b"k", b"v")]),
+            (
+                (300, 42),
+                &[(b"a", b"1"), (b"b", b"two"), (b"c", b"\x00\x01binary\xff")],
+            ),
+        ];
+        let key = b"rt_stream_mvp".to_vec();
+
+        let mut stream_conn =
+            connect_live_redis(&oracle).expect("connect to vendored redis for stream roundtrip");
+        flushall(&mut stream_conn).expect("flushall on oracle");
+
+        // Direction A: our DUMP → oracle RESTORE → oracle XRANGE
+        {
+            let mut store = Store::new();
+            for (id, fields) in entries {
+                let fields_owned: Vec<(Vec<u8>, Vec<u8>)> = fields
+                    .iter()
+                    .map(|(f, v)| (f.to_vec(), v.to_vec()))
+                    .collect();
+                store.xadd(&key, *id, &fields_owned, 100).expect("xadd");
+            }
+            let payload = store
+                .dump_key(&key, 100)
+                .expect("dump_key produced payload for stream");
+
+            let del = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"DEL".to_vec())),
+                RespFrame::BulkString(Some(key.clone())),
+            ]));
+            send_frame(&mut stream_conn, &del).expect("send DEL");
+            let _ = read_resp_frame_from_stream(&mut stream_conn).expect("read DEL reply");
+
+            let restore = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"RESTORE".to_vec())),
+                RespFrame::BulkString(Some(key.clone())),
+                RespFrame::BulkString(Some(b"0".to_vec())),
+                RespFrame::BulkString(Some(payload.clone())),
+            ]));
+            send_frame(&mut stream_conn, &restore).expect("send RESTORE");
+            let reply = read_resp_frame_from_stream(&mut stream_conn)
+                .expect("read RESTORE reply from oracle");
+            match reply {
+                RespFrame::SimpleString(ref s) if s == "OK" => {}
+                other => panic!("oracle rejected our stream DUMP payload: {:?}", other),
+            }
+
+            let xlen = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"XLEN".to_vec())),
+                RespFrame::BulkString(Some(key.clone())),
+            ]));
+            send_frame(&mut stream_conn, &xlen).expect("send XLEN");
+            let xlen_reply =
+                read_resp_frame_from_stream(&mut stream_conn).expect("read XLEN reply from oracle");
+            assert_eq!(
+                xlen_reply,
+                RespFrame::Integer(entries.len() as i64),
+                "XLEN on oracle mismatch after our DUMP→RESTORE",
+            );
+
+            let xrange = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"XRANGE".to_vec())),
+                RespFrame::BulkString(Some(key.clone())),
+                RespFrame::BulkString(Some(b"-".to_vec())),
+                RespFrame::BulkString(Some(b"+".to_vec())),
+            ]));
+            send_frame(&mut stream_conn, &xrange).expect("send XRANGE");
+            let xrange_reply = read_resp_frame_from_stream(&mut stream_conn)
+                .expect("read XRANGE reply from oracle");
+            let RespFrame::Array(Some(items)) = xrange_reply else {
+                panic!("expected XRANGE array from oracle, got other reply");
+            };
+            assert_eq!(
+                items.len(),
+                entries.len(),
+                "XRANGE entry count mismatch after our DUMP→RESTORE",
+            );
+            for (item, (id, fields)) in items.iter().zip(entries.iter()) {
+                let RespFrame::Array(Some(pair)) = item else {
+                    panic!("expected XRANGE entry to be an array");
+                };
+                assert_eq!(pair.len(), 2, "XRANGE entry should have [id, fields]");
+                let expected_id = format!("{}-{}", id.0, id.1).into_bytes();
+                assert_eq!(
+                    pair[0],
+                    RespFrame::BulkString(Some(expected_id.clone())),
+                    "XRANGE entry id mismatch",
+                );
+                let RespFrame::Array(Some(field_pairs)) = &pair[1] else {
+                    panic!("expected XRANGE entry field array");
+                };
+                assert_eq!(
+                    field_pairs.len(),
+                    fields.len() * 2,
+                    "field array length mismatch for id {expected_id:?}",
+                );
+                for (i, (f, v)) in fields.iter().enumerate() {
+                    assert_eq!(
+                        field_pairs[2 * i],
+                        RespFrame::BulkString(Some(f.to_vec())),
+                        "field name mismatch at index {i}",
+                    );
+                    assert_eq!(
+                        field_pairs[2 * i + 1],
+                        RespFrame::BulkString(Some(v.to_vec())),
+                        "field value mismatch at index {i}",
+                    );
+                }
+            }
+        }
+
+        // Direction B: oracle XADD → oracle DUMP → our restore_key
+        {
+            let del = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"DEL".to_vec())),
+                RespFrame::BulkString(Some(key.clone())),
+            ]));
+            send_frame(&mut stream_conn, &del).expect("send DEL (reverse)");
+            let _ =
+                read_resp_frame_from_stream(&mut stream_conn).expect("read DEL reply (reverse)");
+
+            for (id, fields) in entries {
+                let mut argv: Vec<RespFrame> = vec![
+                    RespFrame::BulkString(Some(b"XADD".to_vec())),
+                    RespFrame::BulkString(Some(key.clone())),
+                    RespFrame::BulkString(Some(format!("{}-{}", id.0, id.1).into_bytes())),
+                ];
+                for (f, v) in *fields {
+                    argv.push(RespFrame::BulkString(Some(f.to_vec())));
+                    argv.push(RespFrame::BulkString(Some(v.to_vec())));
+                }
+                let xadd = RespFrame::Array(Some(argv));
+                send_frame(&mut stream_conn, &xadd).expect("send XADD (reverse)");
+                let xadd_reply = read_resp_frame_from_stream(&mut stream_conn)
+                    .expect("read XADD reply (reverse)");
+                let expected_id = format!("{}-{}", id.0, id.1).into_bytes();
+                assert_eq!(
+                    xadd_reply,
+                    RespFrame::BulkString(Some(expected_id)),
+                    "oracle XADD reply mismatch for id {:?}",
+                    id,
+                );
+            }
+
+            let dump = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"DUMP".to_vec())),
+                RespFrame::BulkString(Some(key.clone())),
+            ]));
+            send_frame(&mut stream_conn, &dump).expect("send DUMP (reverse)");
+            let dump_reply =
+                read_resp_frame_from_stream(&mut stream_conn).expect("read DUMP reply (reverse)");
+            let upstream_payload = match dump_reply {
+                RespFrame::BulkString(Some(p)) => p,
+                other => panic!("oracle DUMP returned non-bulk: {:?}", other),
+            };
+
+            let mut store = Store::new();
+            store
+                .restore_key(&key, 0, &upstream_payload, false, 100)
+                .expect("restore_key accepted upstream stream DUMP payload");
+
+            let got_entries = store
+                .xrange(&key, (0, 0), (u64::MAX, u64::MAX), None, 100)
+                .expect("xrange after restore_key");
+            assert_eq!(
+                got_entries.len(),
+                entries.len(),
+                "XRANGE entry count mismatch after oracle DUMP → our restore_key",
+            );
+            for (got, (expected_id, expected_fields)) in got_entries.iter().zip(entries.iter()) {
+                assert_eq!(got.0, *expected_id, "restored stream id mismatch",);
+                assert_eq!(
+                    got.1.len(),
+                    expected_fields.len(),
+                    "restored stream field count mismatch",
+                );
+                for (got_pair, (ef, ev)) in got.1.iter().zip(expected_fields.iter()) {
+                    assert_eq!(got_pair.0.as_slice(), *ef, "restored field name mismatch");
+                    assert_eq!(got_pair.1.as_slice(), *ev, "restored field value mismatch",);
+                }
+            }
+        }
+    }
+
     /// Cross-impl DUMP/RESTORE round-trip gate for STRING values.
     ///
     /// Drives the two directions the `MIGRATE` wire protocol relies
