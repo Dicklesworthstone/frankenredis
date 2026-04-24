@@ -7,6 +7,8 @@ use std::path::Path;
 use fr_protocol::{RespFrame, RespParseError};
 
 pub mod listpack;
+#[allow(dead_code)]
+pub(crate) mod rdb_stream;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AofRecord {
@@ -777,6 +779,19 @@ const RDB_TYPE_HASH: u8 = 4;
 /// (br-frankenredis-th7q)
 const RDB_TYPE_HASH_WITH_TTLS: u8 = 21;
 const RDB_TYPE_STREAM: u8 = 15; // FrankenRedis stream encoding
+/// Upstream Redis stream RDB type tags. Numbers overlap with our
+/// internal types (15 is shared with FrankenRedis stream encoding;
+/// 21 collides with RDB_TYPE_HASH_WITH_TTLS from rv89/th7q). The
+/// decoder dispatches via a context-carrying function in rdb_stream.rs —
+/// the upstream variant is selected only when the decoder is called
+/// via decode_upstream_stream_skeleton, not via the top-level
+/// decode_rdb path. (br-frankenredis-hjub)
+#[allow(dead_code)]
+pub(crate) const UPSTREAM_RDB_TYPE_STREAM_LISTPACKS: u8 = 15;
+#[allow(dead_code)]
+pub(crate) const UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2: u8 = 19;
+#[allow(dead_code)]
+pub(crate) const UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3: u8 = 21;
 const RDB_CHECKSUM_LEN: usize = 8;
 const CRC64_REDIS_POLY: u64 = 0xAD93_D235_94C9_35A9;
 
@@ -1324,8 +1339,13 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                 }
                 cursor += 1;
             }
-            type_byte @ (RDB_TYPE_STRING | RDB_TYPE_LIST | RDB_TYPE_SET | RDB_TYPE_HASH
-            | RDB_TYPE_HASH_WITH_TTLS | RDB_TYPE_ZSET_2 | RDB_TYPE_STREAM) => {
+            type_byte @ (RDB_TYPE_STRING
+            | RDB_TYPE_LIST
+            | RDB_TYPE_SET
+            | RDB_TYPE_HASH
+            | RDB_TYPE_HASH_WITH_TTLS
+            | RDB_TYPE_ZSET_2
+            | RDB_TYPE_STREAM) => {
                 let (key, consumed) =
                     rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                 cursor += consumed;
