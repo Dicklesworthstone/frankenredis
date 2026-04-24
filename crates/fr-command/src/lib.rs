@@ -14941,8 +14941,12 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     let _deadline_ms = parse_blocking_deadline_seconds(&argv[1], now_ms)?;
     let numkeys_val = parse_i64_arg(&argv[2])?;
     if numkeys_val <= 0 {
+        // Upstream t_list.c::lmpopGenericCommand (used by both LMPOP
+        // and BLMPOP via blmpopCommand → lmpopGenericCommand) emits
+        // "numkeys should be greater than 0" through
+        // getRangeLongFromObjectOrReply. (br-frankenredis-04mo)
         return Ok(RespFrame::Error(
-            "ERR numkeys can't be non-positive value".to_string(),
+            "ERR numkeys should be greater than 0".to_string(),
         ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
