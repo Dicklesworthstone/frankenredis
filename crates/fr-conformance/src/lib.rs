@@ -1910,6 +1910,50 @@ fn live_oracle_frames_match(
 ) -> bool {
     runtime_actual == redis_actual
         || live_oracle_no_arg_unsubscribe_sequences_match(case, runtime_actual, redis_actual)
+        || live_oracle_hgetall_field_order_matches(case, runtime_actual, redis_actual)
+}
+
+/// HGETALL returns field/value pairs in hash-backend iteration order,
+/// which upstream doesn't guarantee. Compare after sorting by field
+/// name — semantically equivalent. (br-frankenredis-zk9q)
+fn live_oracle_hgetall_field_order_matches(
+    case: &ConformanceCase,
+    runtime_actual: &RespFrame,
+    redis_actual: &RespFrame,
+) -> bool {
+    if !matches!(
+        case.argv.first(),
+        Some(cmd) if cmd.eq_ignore_ascii_case("HGETALL")
+    ) {
+        return false;
+    }
+    let Some(runtime_pairs) = canonical_hgetall_pairs(runtime_actual) else {
+        return false;
+    };
+    let Some(redis_pairs) = canonical_hgetall_pairs(redis_actual) else {
+        return false;
+    };
+    runtime_pairs == redis_pairs
+}
+
+fn canonical_hgetall_pairs(frame: &RespFrame) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+    let RespFrame::Array(Some(items)) = frame else {
+        return None;
+    };
+    if items.len() % 2 != 0 {
+        return None;
+    }
+    let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(items.len() / 2);
+    for chunk in items.chunks_exact(2) {
+        let (RespFrame::BulkString(Some(field)), RespFrame::BulkString(Some(value))) =
+            (&chunk[0], &chunk[1])
+        else {
+            return None;
+        };
+        pairs.push((field.clone(), value.clone()));
+    }
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    Some(pairs)
 }
 
 fn live_oracle_no_arg_unsubscribe_sequences_match(
