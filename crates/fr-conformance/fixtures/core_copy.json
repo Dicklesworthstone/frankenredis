@@ -575,7 +575,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR DUMP payload version or checksum are wrong"
+        "value": "BUSYKEY Target key name already exists."
       }
     },
     {
@@ -587,8 +587,8 @@
         "src_str"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 0
+        "kind": "error",
+        "value": "ERR source and destination objects are the same"
       }
     },
     {
@@ -601,8 +601,8 @@
         "REPLACE"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 1
+        "kind": "error",
+        "value": "ERR source and destination objects are the same"
       }
     },
     {

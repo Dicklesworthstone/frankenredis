@@ -1283,7 +1283,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR invalid expire time in 'psetex' command"
       }
     },
     {
@@ -1297,7 +1297,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR invalid expire time in 'psetex' command"
       }
     },
     {
@@ -1692,7 +1692,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR invalid expire time in 'setex' command"
       }
     },
     {
@@ -2284,8 +2284,88 @@
         "-1"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR syntax error"
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "matches"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 4
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 7
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 5
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 8
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 2
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 3
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 1
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "len"
+          },
+          {
+            "kind": "integer",
+            "value": 6
+          }
+        ]
       }
     },
     {

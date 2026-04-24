@@ -667,7 +667,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided"
+        "value": "ERR wrong number of arguments for 'geosearch' command"
       }
     },
     {
@@ -682,7 +682,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR exactly one of BYRADIUS or BYBOX must be provided"
+        "value": "ERR wrong number of arguments for 'geosearch' command"
       }
     },
     {
@@ -1617,7 +1617,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided"
+        "value": "ERR syntax error"
       }
     },
     {
@@ -1639,7 +1639,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR exactly one of BYRADIUS or BYBOX must be provided"
+        "value": "ERR syntax error"
       }
     },
     {
@@ -1931,8 +1931,14 @@
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "Palermo" },
-          { "kind": "bulk", "value": "Catania" }
+          {
+            "kind": "bulk",
+            "value": "Palermo"
+          },
+          {
+            "kind": "bulk",
+            "value": "Catania"
+          }
         ]
       }
     },
@@ -1950,8 +1956,14 @@
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "bulk", "value": "Palermo" },
-          { "kind": "bulk", "value": "Catania" }
+          {
+            "kind": "bulk",
+            "value": "Palermo"
+          },
+          {
+            "kind": "bulk",
+            "value": "Catania"
+          }
         ]
       }
     },

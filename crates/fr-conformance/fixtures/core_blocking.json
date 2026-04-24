@@ -1473,7 +1473,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR numkeys can't be non-positive value"
+        "value": "ERR numkeys should be greater than 0"
       }
     },
     {
@@ -1488,7 +1488,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR numkeys can't be non-positive value"
+        "value": "ERR numkeys should be greater than 0"
       }
     },
     {

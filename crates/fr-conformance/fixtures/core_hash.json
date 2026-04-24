@@ -1104,7 +1104,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR increment would produce NaN or Infinity"
+        "value": "ERR value is NaN or Infinity"
       }
     },
     {
@@ -1550,7 +1550,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'hrandfield' command"
+        "value": "ERR syntax error"
       }
     },
     {
@@ -1633,7 +1633,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR increment would produce NaN or Infinity"
+        "value": "ERR value is NaN or Infinity"
       }
     },
     {
@@ -1993,7 +1993,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR increment would produce NaN or Infinity"
+        "value": "ERR value is NaN or Infinity"
       }
     },
     {
@@ -2020,7 +2020,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR increment would produce NaN or Infinity"
+        "value": "ERR value is NaN or Infinity"
       }
     },
     {
@@ -2034,7 +2034,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR increment would produce NaN or Infinity"
+        "value": "ERR value is NaN or Infinity"
       }
     },
     {
