@@ -8053,7 +8053,15 @@ fn hincrbyfloat(
         return Err(CommandError::WrongArity("HINCRBYFLOAT"));
     }
     let delta = parse_f64_arg(&argv[3])?;
-    let new_val = store.hincrbyfloat(&argv[1], &argv[2], delta, now_ms)?;
+    let new_val =
+        store
+            .hincrbyfloat(&argv[1], &argv[2], delta, now_ms)
+            .map_err(|err| match err {
+                StoreError::IncrFloatNaN => {
+                    CommandError::Custom("ERR value is NaN or Infinity".to_string())
+                }
+                other => CommandError::Store(other),
+            })?;
     Ok(RespFrame::BulkString(Some(
         new_val.to_string().into_bytes(),
     )))
@@ -8061,8 +8069,11 @@ fn hincrbyfloat(
 
 fn hrandfield(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // HRANDFIELD key [count [WITHVALUES]]
-    if argv.len() < 2 || argv.len() > 4 {
+    if argv.len() < 2 {
         return Err(CommandError::WrongArity("HRANDFIELD"));
+    }
+    if argv.len() > 4 {
+        return Err(CommandError::SyntaxError);
     }
     if argv.len() == 2 {
         // No count: return single field or nil
@@ -24869,6 +24880,28 @@ mod tests {
     }
 
     #[test]
+    fn hincrbyfloat_infinite_result_matches_redis_error() {
+        let mut store = Store::new();
+        for increment in [b"inf".as_slice(), b"-inf".as_slice()] {
+            let err = dispatch_argv(
+                &[
+                    b"HINCRBYFLOAT".to_vec(),
+                    b"h".to_vec(),
+                    b"f".to_vec(),
+                    increment.to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err.to_resp(),
+                RespFrame::Error("ERR value is NaN or Infinity".to_string())
+            );
+        }
+    }
+
+    #[test]
     fn hrandfield_command() {
         let mut store = Store::new();
         dispatch_argv(
@@ -24894,6 +24927,24 @@ mod tests {
         let out = dispatch_argv(&[b"HRANDFIELD".to_vec(), b"h".to_vec()], &mut store, 0)
             .expect("hrandfield empty");
         assert_eq!(out, RespFrame::BulkString(None));
+    }
+
+    #[test]
+    fn hrandfield_too_many_args_is_syntax_error() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"HRANDFIELD".to_vec(),
+                b"h".to_vec(),
+                b"2".to_vec(),
+                b"WITHVALUES".to_vec(),
+                b"extra".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err.to_resp(), RespFrame::Error("ERR syntax error".to_string()));
     }
 
     #[test]
