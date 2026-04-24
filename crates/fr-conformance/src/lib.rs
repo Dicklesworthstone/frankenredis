@@ -9627,6 +9627,184 @@ mod tests {
         });
     }
 
+    fn send_del(stream: &mut std::net::TcpStream, key: &[u8]) {
+        let del = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"DEL".to_vec())),
+            RespFrame::BulkString(Some(key.to_vec())),
+        ]));
+        send_frame(stream, &del).expect("send DEL");
+        let _ = read_resp_frame_from_stream(stream).expect("read DEL reply");
+    }
+
+    fn send_restore(stream: &mut std::net::TcpStream, key: &[u8], payload: &[u8], kind: &str) {
+        let restore = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"RESTORE".to_vec())),
+            RespFrame::BulkString(Some(key.to_vec())),
+            RespFrame::BulkString(Some(b"0".to_vec())),
+            RespFrame::BulkString(Some(payload.to_vec())),
+        ]));
+        send_frame(stream, &restore).expect("send RESTORE");
+        let reply = read_resp_frame_from_stream(stream).expect("read RESTORE reply");
+        match reply {
+            RespFrame::SimpleString(ref s) if s == "OK" => {}
+            other => panic!(
+                "oracle rejected our DUMP payload for {} key {:?}: {:?}",
+                kind,
+                String::from_utf8_lossy(key),
+                other
+            ),
+        }
+    }
+
+    fn send_dump(stream: &mut std::net::TcpStream, key: &[u8]) -> Vec<u8> {
+        let dump = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"DUMP".to_vec())),
+            RespFrame::BulkString(Some(key.to_vec())),
+        ]));
+        send_frame(stream, &dump).expect("send DUMP");
+        let reply = read_resp_frame_from_stream(stream).expect("read DUMP reply");
+        match reply {
+            RespFrame::BulkString(Some(p)) => p,
+            other => panic!(
+                "oracle DUMP returned non-bulk for key {:?}: {:?}",
+                String::from_utf8_lossy(key),
+                other
+            ),
+        }
+    }
+
+    fn send_rpush(stream: &mut std::net::TcpStream, key: &[u8], value: &[u8]) {
+        let f = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"RPUSH".to_vec())),
+            RespFrame::BulkString(Some(key.to_vec())),
+            RespFrame::BulkString(Some(value.to_vec())),
+        ]));
+        send_frame(stream, &f).expect("send RPUSH");
+        let _ = read_resp_frame_from_stream(stream).expect("read RPUSH reply");
+    }
+
+    fn send_sadd(stream: &mut std::net::TcpStream, key: &[u8], member: &[u8]) {
+        let f = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"SADD".to_vec())),
+            RespFrame::BulkString(Some(key.to_vec())),
+            RespFrame::BulkString(Some(member.to_vec())),
+        ]));
+        send_frame(stream, &f).expect("send SADD");
+        let _ = read_resp_frame_from_stream(stream).expect("read SADD reply");
+    }
+
+    fn send_hset(stream: &mut std::net::TcpStream, key: &[u8], field: &[u8], value: &[u8]) {
+        let f = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"HSET".to_vec())),
+            RespFrame::BulkString(Some(key.to_vec())),
+            RespFrame::BulkString(Some(field.to_vec())),
+            RespFrame::BulkString(Some(value.to_vec())),
+        ]));
+        send_frame(stream, &f).expect("send HSET");
+        let _ = read_resp_frame_from_stream(stream).expect("read HSET reply");
+    }
+
+    fn fetch_list_range(stream: &mut std::net::TcpStream, key: &[u8]) -> Vec<Vec<u8>> {
+        let f = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"LRANGE".to_vec())),
+            RespFrame::BulkString(Some(key.to_vec())),
+            RespFrame::BulkString(Some(b"0".to_vec())),
+            RespFrame::BulkString(Some(b"-1".to_vec())),
+        ]));
+        send_frame(stream, &f).expect("send LRANGE");
+        let reply = read_resp_frame_from_stream(stream).expect("read LRANGE reply");
+        let RespFrame::Array(Some(items)) = reply else {
+            panic!("expected LRANGE array");
+        };
+        items
+            .into_iter()
+            .map(|item| match item {
+                RespFrame::BulkString(Some(b)) => b,
+                other => panic!("expected bulk in LRANGE: {:?}", other),
+            })
+            .collect()
+    }
+
+    fn fetch_set_members_sorted(stream: &mut std::net::TcpStream, key: &[u8]) -> Vec<Vec<u8>> {
+        let f = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"SMEMBERS".to_vec())),
+            RespFrame::BulkString(Some(key.to_vec())),
+        ]));
+        send_frame(stream, &f).expect("send SMEMBERS");
+        let reply = read_resp_frame_from_stream(stream).expect("read SMEMBERS reply");
+        let RespFrame::Array(Some(items)) = reply else {
+            panic!("expected SMEMBERS array");
+        };
+        let mut out: Vec<Vec<u8>> = items
+            .into_iter()
+            .map(|item| match item {
+                RespFrame::BulkString(Some(b)) => b,
+                other => panic!("expected bulk in SMEMBERS: {:?}", other),
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    fn fetch_hgetall_map(
+        stream: &mut std::net::TcpStream,
+        key: &[u8],
+    ) -> std::collections::BTreeMap<Vec<u8>, Vec<u8>> {
+        let f = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"HGETALL".to_vec())),
+            RespFrame::BulkString(Some(key.to_vec())),
+        ]));
+        send_frame(stream, &f).expect("send HGETALL");
+        let reply = read_resp_frame_from_stream(stream).expect("read HGETALL reply");
+        let RespFrame::Array(Some(items)) = reply else {
+            panic!("expected HGETALL array");
+        };
+        assert!(items.len() % 2 == 0, "HGETALL returned odd-length array");
+        let mut out = std::collections::BTreeMap::new();
+        for pair in items.chunks_exact(2) {
+            let (RespFrame::BulkString(Some(f_)), RespFrame::BulkString(Some(v))) =
+                (&pair[0], &pair[1])
+            else {
+                panic!("expected bulks in HGETALL pair");
+            };
+            out.insert(f_.clone(), v.clone());
+        }
+        out
+    }
+
+    fn fetch_zrange_withscores(
+        stream: &mut std::net::TcpStream,
+        key: &[u8],
+    ) -> Vec<(Vec<u8>, f64)> {
+        let f = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"ZRANGE".to_vec())),
+            RespFrame::BulkString(Some(key.to_vec())),
+            RespFrame::BulkString(Some(b"0".to_vec())),
+            RespFrame::BulkString(Some(b"-1".to_vec())),
+            RespFrame::BulkString(Some(b"WITHSCORES".to_vec())),
+        ]));
+        send_frame(stream, &f).expect("send ZRANGE WITHSCORES");
+        let reply = read_resp_frame_from_stream(stream).expect("read ZRANGE reply");
+        let RespFrame::Array(Some(items)) = reply else {
+            panic!("expected ZRANGE array");
+        };
+        assert!(items.len() % 2 == 0, "ZRANGE WITHSCORES odd-length array");
+        let mut out = Vec::new();
+        for pair in items.chunks_exact(2) {
+            let (RespFrame::BulkString(Some(m)), RespFrame::BulkString(Some(s))) =
+                (&pair[0], &pair[1])
+            else {
+                panic!("expected bulks in ZRANGE pair");
+            };
+            let score: f64 = std::str::from_utf8(s)
+                .expect("score utf8")
+                .parse()
+                .expect("score parse");
+            out.push((m.clone(), score));
+        }
+        out
+    }
+
     /// Cross-impl DUMP/RESTORE round-trip gate for STREAM values.
     ///
     /// Seeds a stream with multiple entries (single- and multi-field),
@@ -9841,7 +10019,206 @@ mod tests {
         }
     }
 
-    /// Cross-impl DUMP/RESTORE round-trip gate for STRING values.
+    /// Cross-impl DUMP/RESTORE round-trip gate for container types
+    /// (LIST, SET, HASH, ZSET).
+    ///
+    /// For each container type the test seeds a key on our side,
+    /// DUMPs via `Store::dump_key`, `RESTORE`s into the vendored
+    /// oracle, and compares the oracle's canonical read response
+    /// (`LRANGE` / `SMEMBERS` / `HGETALL` / `ZRANGE`) to the seed.
+    /// Reverse direction: seed the oracle with the same key shape,
+    /// pull via `DUMP`, feed our `Store::restore_key`, and compare
+    /// our canonical read response.
+    ///
+    /// Exercises every upstream container RDB type tag we emit:
+    /// `LIST_QUICKLIST_2` (18), `SET` (2), `SET_INTSET` (11),
+    /// `SET_LISTPACK` (20), `HASH` (4), `HASH_LISTPACK` (16),
+    /// `ZSET_2` (5), `ZSET_LISTPACK` (17), plus their decoder
+    /// counterparts. Pins down MIGRATE interop for every observable
+    /// container value. (br-frankenredis-v8s5)
+    #[test]
+    fn live_redis_container_dump_restore_roundtrip_matches_upstream() {
+        use fr_store::Store;
+
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+
+        let mut stream =
+            connect_live_redis(&oracle).expect("connect to vendored redis for container roundtrip");
+        flushall(&mut stream).expect("flushall on oracle");
+
+        // --- LIST ---
+        {
+            let key = b"rt_list".to_vec();
+            let values: Vec<Vec<u8>> = vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()];
+
+            // A: our DUMP → oracle RESTORE → oracle LRANGE
+            let mut store = Store::new();
+            store.rpush(&key, &values, 100).expect("seed list for DUMP");
+            let payload = store.dump_key(&key, 100).expect("dump list");
+            send_del(&mut stream, &key);
+            send_restore(&mut stream, &key, &payload, "list");
+            let oracle_items = fetch_list_range(&mut stream, &key);
+            assert_eq!(
+                oracle_items, values,
+                "oracle LRANGE mismatch after list DUMP→RESTORE"
+            );
+
+            // B: oracle RPUSH → oracle DUMP → our restore_key → our lrange
+            send_del(&mut stream, &key);
+            for v in &values {
+                send_rpush(&mut stream, &key, v);
+            }
+            let upstream_payload = send_dump(&mut stream, &key);
+            let mut store2 = Store::new();
+            store2
+                .restore_key(&key, 0, &upstream_payload, false, 100)
+                .expect("restore_key for list");
+            let got: Vec<Vec<u8>> = store2
+                .lrange(&key, 0, -1, 100)
+                .expect("lrange after restore_key");
+            assert_eq!(got, values, "our LRANGE mismatch after oracle DUMP→RESTORE");
+        }
+
+        // --- SET (listpack-encoded, small non-integer members) ---
+        {
+            let key = b"rt_set_listpack".to_vec();
+            let members: Vec<Vec<u8>> =
+                vec![b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()];
+
+            let mut store = Store::new();
+            store.sadd(&key, &members, 100).expect("seed set for DUMP");
+            let payload = store.dump_key(&key, 100).expect("dump set");
+            send_del(&mut stream, &key);
+            send_restore(&mut stream, &key, &payload, "set_listpack");
+            let oracle_members = fetch_set_members_sorted(&mut stream, &key);
+            let mut expected_sorted = members.clone();
+            expected_sorted.sort();
+            assert_eq!(
+                oracle_members, expected_sorted,
+                "oracle SMEMBERS mismatch after set_listpack DUMP→RESTORE",
+            );
+
+            // Reverse
+            send_del(&mut stream, &key);
+            for m in &members {
+                send_sadd(&mut stream, &key, m);
+            }
+            let upstream_payload = send_dump(&mut stream, &key);
+            let mut store2 = Store::new();
+            store2
+                .restore_key(&key, 0, &upstream_payload, false, 100)
+                .expect("restore_key for set_listpack");
+            let mut got = store2
+                .smembers(&key, 100)
+                .expect("smembers after restore_key");
+            got.sort();
+            assert_eq!(
+                got, expected_sorted,
+                "our SMEMBERS mismatch after oracle DUMP→RESTORE",
+            );
+        }
+
+        // --- SET_INTSET (all-integer members) ---
+        {
+            let key = b"rt_set_intset".to_vec();
+            let members: Vec<Vec<u8>> = vec![
+                b"1".to_vec(),
+                b"2".to_vec(),
+                b"100".to_vec(),
+                b"42".to_vec(),
+            ];
+
+            let mut store = Store::new();
+            store.sadd(&key, &members, 100).expect("seed intset");
+            let payload = store.dump_key(&key, 100).expect("dump intset");
+            send_del(&mut stream, &key);
+            send_restore(&mut stream, &key, &payload, "set_intset");
+            let oracle_members = fetch_set_members_sorted(&mut stream, &key);
+            let mut expected_sorted = members.clone();
+            expected_sorted.sort();
+            assert_eq!(
+                oracle_members, expected_sorted,
+                "oracle SMEMBERS mismatch after intset DUMP→RESTORE",
+            );
+        }
+
+        // --- HASH (listpack-encoded, small fields) ---
+        {
+            let key = b"rt_hash".to_vec();
+            let pairs: &[(&[u8], &[u8])] =
+                &[(b"field1", b"value1"), (b"field2", b"two"), (b"empty", b"")];
+
+            let mut store = Store::new();
+            for (f, v) in pairs {
+                store
+                    .hset(&key, f.to_vec(), v.to_vec(), 100)
+                    .expect("hset seed");
+            }
+            let payload = store.dump_key(&key, 100).expect("dump hash");
+            send_del(&mut stream, &key);
+            send_restore(&mut stream, &key, &payload, "hash");
+            let oracle_map = fetch_hgetall_map(&mut stream, &key);
+            let expected_map: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = pairs
+                .iter()
+                .map(|(f, v)| (f.to_vec(), v.to_vec()))
+                .collect();
+            assert_eq!(
+                oracle_map, expected_map,
+                "oracle HGETALL mismatch after hash DUMP→RESTORE",
+            );
+
+            // Reverse
+            send_del(&mut stream, &key);
+            for (f, v) in pairs {
+                send_hset(&mut stream, &key, f, v);
+            }
+            let upstream_payload = send_dump(&mut stream, &key);
+            let mut store2 = Store::new();
+            store2
+                .restore_key(&key, 0, &upstream_payload, false, 100)
+                .expect("restore_key for hash");
+            let got = store2
+                .hgetall(&key, 100)
+                .expect("hgetall after restore_key");
+            let got_map: std::collections::BTreeMap<Vec<u8>, Vec<u8>> = got.into_iter().collect();
+            assert_eq!(
+                got_map, expected_map,
+                "our HGETALL mismatch after oracle DUMP→RESTORE",
+            );
+        }
+
+        // --- ZSET_LISTPACK (listpack-encoded sorted set) ---
+        {
+            let key = b"rt_zset".to_vec();
+            let members: &[(f64, &[u8])] = &[(1.0, b"alpha"), (2.5, b"beta"), (7.25, b"gamma")];
+
+            let mut store = Store::new();
+            let zadd: Vec<(f64, Vec<u8>)> = members.iter().map(|(s, m)| (*s, m.to_vec())).collect();
+            store.zadd(&key, &zadd, 100).expect("zadd seed");
+            let payload = store.dump_key(&key, 100).expect("dump zset");
+            send_del(&mut stream, &key);
+            send_restore(&mut stream, &key, &payload, "zset_listpack");
+            let oracle_pairs = fetch_zrange_withscores(&mut stream, &key);
+            assert_eq!(
+                oracle_pairs.len(),
+                members.len(),
+                "oracle ZRANGE count mismatch after zset DUMP→RESTORE",
+            );
+            for ((member, score), (expected_score, expected_member)) in
+                oracle_pairs.iter().zip(members.iter())
+            {
+                assert_eq!(member.as_slice(), *expected_member, "zset member mismatch",);
+                assert!(
+                    (score - expected_score).abs() < 1e-9,
+                    "zset score mismatch: got {score}, expected {expected_score}",
+                );
+            }
+        }
+    }
     ///
     /// Drives the two directions the `MIGRATE` wire protocol relies
     /// on, across the STRING encodings our `dump_key` / `restore_key`
