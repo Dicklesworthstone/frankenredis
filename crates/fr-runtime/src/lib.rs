@@ -56,6 +56,11 @@ const AOF_DISK_ERROR_WRITE_DENIED: &str =
 #[allow(dead_code)]
 const ACL_UNKNOWN_SUBCOMMAND_ERROR: &str =
     "ERR unknown subcommand or wrong number of arguments for 'ACL'. Try ACL HELP.";
+// Upstream acl.c::aclCommand emits this sentence for `ACL SAVE`
+// and `ACL LOAD` when the server started without an `aclfile`
+// configuration directive. (br-frankenredis-faqe)
+const ACL_FILE_NOT_CONFIGURED_ERR: &str =
+    "ERR This Redis instance is not configured to use an ACL file. You may want to specify users via the ACL SETUSER command and then issue a CONFIG REWRITE (assuming you have a Redis configuration file set) in order to store users in the Redis configuration.";
 const DEFAULT_ACLLOG_MAX_LEN: i64 = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5847,7 +5852,10 @@ impl Runtime {
             .to_resp();
         }
         let Some(path) = &self.server.acl_file_path else {
-            return RespFrame::Error("ERR There is no configured ACL file".to_string());
+            // Upstream acl.c::aclCommand rejects SAVE/LOAD with this
+            // exact message when `server.acl_filename[0] == '\0'`.
+            // (br-frankenredis-faqe)
+            return RespFrame::Error(ACL_FILE_NOT_CONFIGURED_ERR.to_string());
         };
         let content = self.server.auth_state.serialize_acl_rules();
         let tmp_path = path.with_extension("tmp");
@@ -5880,7 +5888,7 @@ impl Runtime {
             .to_resp();
         }
         let Some(path) = &self.server.acl_file_path else {
-            return RespFrame::Error("ERR There is no configured ACL file".to_string());
+            return RespFrame::Error(ACL_FILE_NOT_CONFIGURED_ERR.to_string());
         };
         let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
@@ -10752,12 +10760,13 @@ mod tests {
     use fr_store::sha1_hex_public;
 
     use super::{
-        AOF_DISK_ERROR_WRITE_DENIED, AclPubsubDefault, ClientSession, ClientUnblockMode,
-        ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER, RDB_DISK_ERROR_WRITE_DENIED,
-        Runtime, ServerState, acl_list_entries_from_rules, canonical_static_config_param,
-        canonicalize_acl_rules, classify_cluster_subcommand, classify_cluster_subcommand_linear,
-        classify_runtime_special_command, classify_runtime_special_command_linear,
-        client_wrong_subcommand_arity, sha256_hex_bytes, store_to_rdb_entries, wrong_arity_error,
+        ACL_FILE_NOT_CONFIGURED_ERR, AOF_DISK_ERROR_WRITE_DENIED, AclPubsubDefault, ClientSession,
+        ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
+        RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState, acl_list_entries_from_rules,
+        canonical_static_config_param, canonicalize_acl_rules, classify_cluster_subcommand,
+        classify_cluster_subcommand_linear, classify_runtime_special_command,
+        classify_runtime_special_command_linear, client_wrong_subcommand_arity, sha256_hex_bytes,
+        store_to_rdb_entries, wrong_arity_error,
     };
 
     fn command(parts: &[&[u8]]) -> RespFrame {
@@ -19880,11 +19889,11 @@ mod tests {
 
         assert_eq!(
             rt.execute_frame(command(&[b"ACL", b"SAVE"]), 0),
-            RespFrame::Error("ERR There is no configured ACL file".to_string())
+            RespFrame::Error(ACL_FILE_NOT_CONFIGURED_ERR.to_string())
         );
         assert_eq!(
             rt.execute_frame(command(&[b"ACL", b"LOAD"]), 1),
-            RespFrame::Error("ERR There is no configured ACL file".to_string())
+            RespFrame::Error(ACL_FILE_NOT_CONFIGURED_ERR.to_string())
         );
     }
 

@@ -101,9 +101,10 @@ fn configure_runtime_for_fixture(runtime: &mut Runtime, fixture_name: &str) {
     if fixture_name == "core_wait.json" {
         runtime.set_aof_path(PathBuf::from("/dev/null"));
     }
-    if fixture_name == "core_acl.json" {
-        runtime.set_acl_file_path(std::env::temp_dir().join("fr_acl_fixture_dummy.conf"));
-    }
+    // core_acl.json no longer auto-provisions an ACL file path: the
+    // upstream vendored oracle spawns without `--aclfile`, so ACL
+    // SAVE/LOAD must return "This Redis instance is not configured
+    // to use an ACL file." under both impls. (br-frankenredis-faqe)
     if matches!(fixture_name, "core_config.json" | "core_server.json") {
         runtime.set_config_file_path(Some(runtime_fixture_config_path(fixture_name)));
     }
@@ -9314,13 +9315,6 @@ mod tests {
             "auth_nonexistent_user",
             "auth_wrong_arity_too_many",
             "auth_wrong_password",
-            // ACL SAVE/LOAD config-file awareness — our runtime lets
-            // SAVE succeed without an ACL file, upstream rejects.
-            "acl_load_returns_ok",
-            "acl_save_load_roundtrip_load",
-            "acl_save_load_roundtrip_save",
-            "acl_save_load_roundtrip_user_restored",
-            "acl_save_returns_ok",
             // ACL DELUSER cleanup + USERS stale-leakage: harness
             // FLUSHALL doesn't reset the ACL subsystem.
             "acl_deluser_cleanup_bob",
