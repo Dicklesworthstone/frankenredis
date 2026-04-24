@@ -3122,10 +3122,9 @@ fn lpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         return Err(CommandError::WrongArity("LPOP"));
     }
     if argv.len() == 3 {
-        let count =
-            usize::try_from(parse_u64_arg(&argv[2])?).map_err(|_| CommandError::InvalidInteger)?;
+        let count = parse_list_pop_count_arg(&argv[2])?;
         let values = match store.lpop_count(&argv[1], count, now_ms)? {
-            None => return Ok(RespFrame::BulkString(None)),
+            None => return Ok(RespFrame::Array(None)),
             Some(values) => values,
         };
         let frames = values
@@ -3143,10 +3142,9 @@ fn rpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         return Err(CommandError::WrongArity("RPOP"));
     }
     if argv.len() == 3 {
-        let count =
-            usize::try_from(parse_u64_arg(&argv[2])?).map_err(|_| CommandError::InvalidInteger)?;
+        let count = parse_list_pop_count_arg(&argv[2])?;
         let values = match store.rpop_count(&argv[1], count, now_ms)? {
-            None => return Ok(RespFrame::BulkString(None)),
+            None => return Ok(RespFrame::Array(None)),
             Some(values) => values,
         };
         let frames = values
@@ -3157,6 +3155,15 @@ fn rpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     }
     let value = store.rpop(&argv[1], now_ms)?;
     Ok(RespFrame::BulkString(value))
+}
+
+fn parse_list_pop_count_arg(arg: &[u8]) -> Result<usize, CommandError> {
+    match parse_i64_arg(arg)? {
+        count if count >= 0 => usize::try_from(count).map_err(|_| CommandError::InvalidInteger),
+        _ => Err(CommandError::Custom(
+            "ERR value is out of range, must be positive".to_string(),
+        )),
+    }
 }
 
 fn llen(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -9285,7 +9292,7 @@ fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let numkeys_val = parse_i64_arg(&argv[1])?;
     if numkeys_val <= 0 {
         return Ok(RespFrame::Error(
-            "ERR numkeys can't be non-positive value".to_string(),
+            "ERR numkeys should be greater than 0".to_string(),
         ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
@@ -9311,7 +9318,9 @@ fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             }
             let val = parse_i64_arg(&argv[idx])?;
             if val <= 0 {
-                return Err(CommandError::SyntaxError);
+                return Ok(RespFrame::Error(
+                    "ERR count should be greater than 0".to_string(),
+                ));
             }
             count = usize::try_from(val).map_err(|_| CommandError::InvalidInteger)?;
         } else {
@@ -26108,6 +26117,56 @@ mod tests {
     }
 
     #[test]
+    fn lmpop_non_positive_numkeys_and_count_match_redis_errors() {
+        let mut store = Store::new();
+        for (argv, expected) in [
+            (
+                vec![
+                    b"LMPOP".to_vec(),
+                    b"-1".to_vec(),
+                    b"mylist".to_vec(),
+                    b"LEFT".to_vec(),
+                ],
+                "ERR numkeys should be greater than 0",
+            ),
+            (
+                vec![
+                    b"LMPOP".to_vec(),
+                    b"0".to_vec(),
+                    b"mylist".to_vec(),
+                    b"LEFT".to_vec(),
+                ],
+                "ERR numkeys should be greater than 0",
+            ),
+            (
+                vec![
+                    b"LMPOP".to_vec(),
+                    b"1".to_vec(),
+                    b"mylist".to_vec(),
+                    b"LEFT".to_vec(),
+                    b"COUNT".to_vec(),
+                    b"0".to_vec(),
+                ],
+                "ERR count should be greater than 0",
+            ),
+            (
+                vec![
+                    b"LMPOP".to_vec(),
+                    b"1".to_vec(),
+                    b"mylist".to_vec(),
+                    b"LEFT".to_vec(),
+                    b"COUNT".to_vec(),
+                    b"-5".to_vec(),
+                ],
+                "ERR count should be greater than 0",
+            ),
+        ] {
+            let out = dispatch_argv(&argv, &mut store, 0).expect("lmpop error frame");
+            assert_eq!(out, RespFrame::Error(expected.to_string()));
+        }
+    }
+
+    #[test]
     fn zmpop_basic() {
         let mut store = Store::new();
         dispatch_argv(
@@ -34489,7 +34548,7 @@ mod tests {
             0,
         )
         .unwrap();
-        assert_eq!(out, RespFrame::BulkString(None));
+        assert_eq!(out, RespFrame::Array(None));
     }
 
     #[test]
@@ -34501,7 +34560,38 @@ mod tests {
             0,
         )
         .unwrap();
-        assert_eq!(out, RespFrame::BulkString(None));
+        assert_eq!(out, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn lpop_rpop_count_zero_on_missing_returns_null_array() {
+        let mut store = Store::new();
+        for cmd in [b"LPOP".as_slice(), b"RPOP".as_slice()] {
+            let out = dispatch_argv(
+                &[cmd.to_vec(), b"nokey".to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(out, RespFrame::Array(None));
+        }
+    }
+
+    #[test]
+    fn lpop_rpop_negative_count_match_redis_error() {
+        let mut store = Store::new();
+        for cmd in [b"LPOP".as_slice(), b"RPOP".as_slice()] {
+            let err = dispatch_argv(
+                &[cmd.to_vec(), b"nokey".to_vec(), b"-1".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err.to_resp(),
+                RespFrame::Error("ERR value is out of range, must be positive".to_string())
+            );
+        }
     }
 
     #[test]
