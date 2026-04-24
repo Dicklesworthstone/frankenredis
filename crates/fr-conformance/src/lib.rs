@@ -359,27 +359,24 @@ fn run_live_redis_diff_with_fixture(
         }
 
         let frame = case_to_frame(&case);
-        // Commands that mutate connection-local state need isolated sessions on both
-        // the runtime and live Redis sides so later cases do not inherit their mode.
+        // Commands that mutate connection-local state need isolated
+        // sessions on both the runtime and live Redis sides so later
+        // cases do not inherit their mode. Upstream achieves this by
+        // opening a fresh TCP connection — the ACL subsystem and
+        // keyspace survive in the persistent server. We emulate the
+        // same semantics with `Runtime::with_isolated_session`, which
+        // swaps in a fresh session but keeps `server` (ACL, keyspace,
+        // pubsub, …) shared with the main runtime. A brand-new
+        // Runtime would start with a virgin ACL subsystem, breaking
+        // AUTH-after-SETUSER flows in core_acl.json. (faqe)
         let use_dedicated_connection = live_oracle_case_uses_dedicated_connection(&case);
-        let mut dedicated_runtime = use_dedicated_connection.then(|| {
-            let mut isolated_runtime = runtime_for_harness_config(config);
-            configure_runtime_for_fixture(&mut isolated_runtime, fixture_name);
-            isolated_runtime
-        });
 
-        match dedicated_runtime.as_mut() {
-            Some(isolated_runtime) => isolated_runtime.check_child_processes(case.now_ms),
-            None => runtime.check_child_processes(case.now_ms),
-        };
-
-        let evidence_before = match dedicated_runtime.as_ref() {
-            Some(isolated_runtime) => isolated_runtime.evidence().events().len(),
-            None => runtime.evidence().events().len(),
-        };
-        let runtime_actual = match dedicated_runtime.as_mut() {
-            Some(isolated_runtime) => isolated_runtime.execute_frame(frame.clone(), case.now_ms),
-            None => runtime.execute_frame(frame.clone(), case.now_ms),
+        runtime.check_child_processes(case.now_ms);
+        let evidence_before = runtime.evidence().events().len();
+        let runtime_actual = if use_dedicated_connection {
+            runtime.with_isolated_session(|rt| rt.execute_frame(frame.clone(), case.now_ms))
+        } else {
+            runtime.execute_frame(frame.clone(), case.now_ms)
         };
         let redis_actual;
         let frame_ok;
@@ -439,10 +436,7 @@ fn run_live_redis_diff_with_fixture(
                 frame_ok = live_oracle_frames_match(&case, &runtime_actual, &redis_actual);
             }
         }
-        let new_events = match dedicated_runtime.as_ref() {
-            Some(isolated_runtime) => &isolated_runtime.evidence().events()[evidence_before..],
-            None => &runtime.evidence().events()[evidence_before..],
-        };
+        let new_events = &runtime.evidence().events()[evidence_before..];
         let outcome = if frame_ok {
             LogOutcome::Pass
         } else {
@@ -1937,6 +1931,105 @@ fn live_oracle_frames_match(
         || live_oracle_config_get_matches(case, runtime_actual, redis_actual)
         || live_oracle_debug_object_drift_matches(case, runtime_actual, redis_actual)
         || live_oracle_acl_cat_order_matches(case, runtime_actual, redis_actual)
+        || live_oracle_acl_log_drift_matches(case, runtime_actual, redis_actual)
+}
+
+/// `ACL LOG` entries are maps-as-flat-arrays keyed by strings like
+/// `count`, `reason`, `context`, `object`, `username`, `age-seconds`,
+/// `client-info`, `entry-id`, `timestamp-created`,
+/// `timestamp-last-updated`. The fields `age-seconds`, `client-info`,
+/// `timestamp-created`, `timestamp-last-updated` are wall-clock /
+/// per-connection volatile and diverge by design. Compare structural
+/// identity on the stable fields and accept any difference on the
+/// volatile ones. (br-frankenredis-faqe)
+fn live_oracle_acl_log_drift_matches(
+    case: &ConformanceCase,
+    runtime_actual: &RespFrame,
+    redis_actual: &RespFrame,
+) -> bool {
+    let first = case
+        .argv
+        .first()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    let second = case
+        .argv
+        .get(1)
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    if first != "acl" || second != "log" {
+        return false;
+    }
+    // Exclude `ACL LOG RESET` (SimpleString reply) and the degenerate
+    // "no such entries" case (empty array); only filter entries when
+    // the reply is a non-empty array of entries.
+    let (RespFrame::Array(Some(ours)), RespFrame::Array(Some(theirs))) =
+        (runtime_actual, redis_actual)
+    else {
+        return false;
+    };
+    if ours.len() != theirs.len() {
+        return false;
+    }
+    for (a, b) in ours.iter().zip(theirs.iter()) {
+        if !acl_log_entry_stable_fields_match(a, b) {
+            return false;
+        }
+    }
+    true
+}
+
+fn acl_log_entry_stable_fields_match(a: &RespFrame, b: &RespFrame) -> bool {
+    let Some(a_map) = flat_bulk_pairs_as_map(a) else {
+        return false;
+    };
+    let Some(b_map) = flat_bulk_pairs_as_map(b) else {
+        return false;
+    };
+    const VOLATILE_KEYS: &[&[u8]] = &[
+        b"age-seconds",
+        b"client-info",
+        b"entry-id",
+        b"timestamp-created",
+        b"timestamp-last-updated",
+    ];
+    // Require the same non-volatile key set and equal values. Missing
+    // stable keys on either side is a real divergence.
+    for (key, value) in &a_map {
+        if VOLATILE_KEYS.contains(&key.as_slice()) {
+            continue;
+        }
+        match b_map.iter().find(|(k, _)| k == key) {
+            Some((_, other)) if other == value => {}
+            _ => return false,
+        }
+    }
+    for (key, _) in &b_map {
+        if VOLATILE_KEYS.contains(&key.as_slice()) {
+            continue;
+        }
+        if !a_map.iter().any(|(k, _)| k == key) {
+            return false;
+        }
+    }
+    true
+}
+
+fn flat_bulk_pairs_as_map(frame: &RespFrame) -> Option<Vec<(Vec<u8>, RespFrame)>> {
+    let RespFrame::Array(Some(items)) = frame else {
+        return None;
+    };
+    if items.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(items.len() / 2);
+    for pair in items.chunks_exact(2) {
+        let RespFrame::BulkString(Some(key)) = &pair[0] else {
+            return None;
+        };
+        out.push((key.clone(), pair[1].clone()));
+    }
+    Some(out)
 }
 
 /// `ACL CAT <category>` returns the commands in the category as a
@@ -9297,32 +9390,7 @@ mod tests {
                 return;
             }
         };
-        // The live-oracle harness spawns a fresh Runtime for every
-        // AUTH/HELLO case (`live_oracle_case_uses_dedicated_connection`)
-        // so connection-mode mutations do not bleed between cases,
-        // but the fresh Runtime does NOT inherit the ACL subsystem
-        // state that earlier `ACL SETUSER` cases built on the shared
-        // runtime. Upstream runs against the same persistent server
-        // from a fresh TCP connection, so its ACL subsystem survives.
-        // Every AUTH-after-SETUSER case therefore sees our fresh
-        // runtime's nopass-locked default and returns the
-        // "no password configured" error instead of matching upstream.
-        // The proper fix is to share `ServerState` (ACL + keyspace)
-        // across isolated sessions in the harness; tracked on faqe.
-        // (br-frankenredis-faqe)
-        const XFAIL: &[&str] = &[
-            "acl_category_auth_reader",
-            "acl_category_reauth_default2",
-            "acl_deny_override_auth",
-            "acl_deny_override_reauth_default3",
-            "acl_log_shows_recent_failed_auth_attempts",
-            "acl_percmd_auth_as_restricted",
-            "acl_percmd_reauth_default",
-            "auth_correct_user_pass",
-            "auth_disabled_user_rejected",
-            "auth_nonexistent_user",
-            "auth_wrong_password",
-        ];
+        const XFAIL: &[&str] = &[];
         let stable: Vec<String> = fixture
             .cases
             .iter()

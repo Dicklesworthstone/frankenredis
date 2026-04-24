@@ -3759,6 +3759,24 @@ impl Runtime {
         let _ = self.handle_bgrewriteaof_requested(now_ms);
     }
 
+    /// Run `f` with `self.session` temporarily swapped for a fresh
+    /// one, then restore the prior session regardless of the result.
+    /// Used by the differential conformance harness to emulate a
+    /// fresh TCP connection for connection-mode commands (AUTH,
+    /// HELLO, SELECT, RESET, …) while keeping the shared ACL
+    /// subsystem and keyspace intact — matching the behaviour of a
+    /// new connection against the persistent vendored oracle.
+    /// (br-frankenredis-faqe)
+    pub fn with_isolated_session<F, R>(&mut self, f: F) -> R
+    where
+        F: FnOnce(&mut Runtime) -> R,
+    {
+        let saved = std::mem::take(&mut self.session);
+        let result = f(self);
+        self.session = saved;
+        result
+    }
+
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
         self.server.store.stat_total_commands_processed += 1;
         if self.session.connected_at_ms == 0 {
