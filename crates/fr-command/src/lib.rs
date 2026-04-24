@@ -1030,7 +1030,7 @@ pub fn dispatch_argv(
         Some(CommandId::Bitfield) => return bitfield_cmd(argv, store, now_ms),
         Some(CommandId::BitfieldRo) => return bitfield_ro_cmd(argv, store, now_ms),
         Some(CommandId::Memory) => return memory_cmd(argv, store, now_ms),
-        Some(CommandId::Substr) => return getrange(argv, store, now_ms),
+        Some(CommandId::Substr) => return substr(argv, store, now_ms),
         Some(CommandId::Bitop) => return bitop(argv, store, now_ms),
         Some(CommandId::Quit) => return quit(argv, store),
         Some(CommandId::Select) => return select(argv),
@@ -7530,6 +7530,20 @@ fn getrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     Ok(RespFrame::BulkString(Some(result)))
 }
 
+/// SUBSTR is a deprecated alias for GETRANGE but upstream preserves
+/// the command name in wrong-arity error replies. Forwarding through
+/// `getrange` would leak "GETRANGE" into the error wording.
+/// (br-frankenredis-68ql)
+fn substr(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    if argv.len() != 4 {
+        return Err(CommandError::WrongArity("SUBSTR"));
+    }
+    let start = parse_i64_arg(&argv[2])?;
+    let end = parse_i64_arg(&argv[3])?;
+    let result = store.getrange(&argv[1], start, end, now_ms)?;
+    Ok(RespFrame::BulkString(Some(result)))
+}
+
 fn setrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() != 4 {
         return Err(CommandError::WrongArity("SETRANGE"));
@@ -7543,8 +7557,10 @@ fn setrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     let offset_u64 = u64::try_from(offset).map_err(|_| CommandError::InvalidInteger)?;
     let added_len = argv[3].len();
     if offset_u64.saturating_add(added_len as u64) > 536_870_912 {
+        // Upstream reply: "string exceeds maximum allowed size
+        // (proto-max-bulk-len)" (br-frankenredis-68ql).
         return Ok(RespFrame::Error(
-            "ERR string exceeds maximum allowed size (512MB)".to_string(),
+            "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string(),
         ));
     }
     let offset_usize = usize::try_from(offset_u64).map_err(|_| CommandError::InvalidInteger)?;
@@ -9111,11 +9127,31 @@ fn sintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
 
 fn lcs(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // LCS key1 key2 [LEN] [IDX] [MINMATCHLEN min] [WITHMATCHLEN]
+    //
+    // Error-reply wording MUST match upstream t_string.c::lcsCommand
+    // (br-frankenredis-68ql).
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("LCS"));
     }
-    let a = store.get(&argv[1], now_ms)?.unwrap_or_default();
-    let b = store.get(&argv[2], now_ms)?.unwrap_or_default();
+    // Convert a raw WRONGTYPE from the store into upstream's
+    // LCS-specific wording. Other StoreError kinds pass through.
+    let map_type_err = |err: StoreError| -> CommandError {
+        if matches!(err, StoreError::WrongType) {
+            CommandError::Custom(
+                "ERR The specified keys must contain string values".to_string(),
+            )
+        } else {
+            CommandError::Store(err)
+        }
+    };
+    let a = store
+        .get(&argv[1], now_ms)
+        .map_err(map_type_err)?
+        .unwrap_or_default();
+    let b = store
+        .get(&argv[2], now_ms)
+        .map_err(map_type_err)?
+        .unwrap_or_default();
 
     let mut len_only = false;
     let mut idx_mode = false;
@@ -9135,10 +9171,15 @@ fn lcs(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
                 return Err(CommandError::SyntaxError);
             }
             let val = parse_i64_arg(&argv[i])?;
-            if val < 0 {
-                return Err(CommandError::SyntaxError);
-            }
-            min_match_len = usize::try_from(val).map_err(|_| CommandError::InvalidInteger)?;
+            // Upstream clamps negative MINMATCHLEN to 0 rather than
+            // rejecting — see t_string.c where `min_match_len` is
+            // read with getLongLongFromObjectOrReply and then
+            // negative values silently floor to 0.
+            min_match_len = if val < 0 {
+                0
+            } else {
+                usize::try_from(val).map_err(|_| CommandError::InvalidInteger)?
+            };
             i += 1;
         } else if argv[i].eq_ignore_ascii_case(b"WITHMATCHLEN") {
             with_match_len = true;
@@ -9146,6 +9187,15 @@ fn lcs(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         } else {
             return Err(CommandError::SyntaxError);
         }
+    }
+
+    // Upstream rejects the LEN+IDX combination with a specific
+    // message instead of silently preferring LEN.
+    if len_only && idx_mode {
+        return Ok(RespFrame::Error(
+            "ERR If you want both the length and indexes, please just use IDX."
+                .to_string(),
+        ));
     }
 
     if len_only {

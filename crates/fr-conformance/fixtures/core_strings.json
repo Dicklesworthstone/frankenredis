@@ -1787,19 +1787,85 @@
       "expect": {
         "kind": "array",
         "value": [
-          {"kind": "bulk", "value": "matches"},
-          {"kind": "array", "value": [
-            {"kind": "array", "value": [
-              {"kind": "array", "value": [{"kind": "integer", "value": 4}, {"kind": "integer", "value": 7}]},
-              {"kind": "array", "value": [{"kind": "integer", "value": 5}, {"kind": "integer", "value": 8}]}
-            ]},
-            {"kind": "array", "value": [
-              {"kind": "array", "value": [{"kind": "integer", "value": 2}, {"kind": "integer", "value": 3}]},
-              {"kind": "array", "value": [{"kind": "integer", "value": 0}, {"kind": "integer", "value": 1}]}
-            ]}
-          ]},
-          {"kind": "bulk", "value": "len"},
-          {"kind": "integer", "value": 6}
+          {
+            "kind": "bulk",
+            "value": "matches"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 4
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 7
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 5
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 8
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 2
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 3
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 1
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "len"
+          },
+          {
+            "kind": "integer",
+            "value": 6
+          }
         ]
       }
     },
@@ -1816,21 +1882,93 @@
       "expect": {
         "kind": "array",
         "value": [
-          {"kind": "bulk", "value": "matches"},
-          {"kind": "array", "value": [
-            {"kind": "array", "value": [
-              {"kind": "array", "value": [{"kind": "integer", "value": 4}, {"kind": "integer", "value": 7}]},
-              {"kind": "array", "value": [{"kind": "integer", "value": 5}, {"kind": "integer", "value": 8}]},
-              {"kind": "integer", "value": 4}
-            ]},
-            {"kind": "array", "value": [
-              {"kind": "array", "value": [{"kind": "integer", "value": 2}, {"kind": "integer", "value": 3}]},
-              {"kind": "array", "value": [{"kind": "integer", "value": 0}, {"kind": "integer", "value": 1}]},
-              {"kind": "integer", "value": 2}
-            ]}
-          ]},
-          {"kind": "bulk", "value": "len"},
-          {"kind": "integer", "value": 6}
+          {
+            "kind": "bulk",
+            "value": "matches"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 4
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 7
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 5
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 8
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 4
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 2
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 3
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 1
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 2
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "len"
+          },
+          {
+            "kind": "integer",
+            "value": 6
+          }
         ]
       }
     },
@@ -1848,15 +1986,54 @@
       "expect": {
         "kind": "array",
         "value": [
-          {"kind": "bulk", "value": "matches"},
-          {"kind": "array", "value": [
-            {"kind": "array", "value": [
-              {"kind": "array", "value": [{"kind": "integer", "value": 4}, {"kind": "integer", "value": 7}]},
-              {"kind": "array", "value": [{"kind": "integer", "value": 5}, {"kind": "integer", "value": 8}]}
-            ]}
-          ]},
-          {"kind": "bulk", "value": "len"},
-          {"kind": "integer", "value": 6}
+          {
+            "kind": "bulk",
+            "value": "matches"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 4
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 7
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 5
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 8
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "len"
+          },
+          {
+            "kind": "integer",
+            "value": 6
+          }
         ]
       }
     },
@@ -1875,16 +2052,58 @@
       "expect": {
         "kind": "array",
         "value": [
-          {"kind": "bulk", "value": "matches"},
-          {"kind": "array", "value": [
-            {"kind": "array", "value": [
-              {"kind": "array", "value": [{"kind": "integer", "value": 4}, {"kind": "integer", "value": 7}]},
-              {"kind": "array", "value": [{"kind": "integer", "value": 5}, {"kind": "integer", "value": 8}]},
-              {"kind": "integer", "value": 4}
-            ]}
-          ]},
-          {"kind": "bulk", "value": "len"},
-          {"kind": "integer", "value": 6}
+          {
+            "kind": "bulk",
+            "value": "matches"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 4
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 7
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "integer",
+                        "value": 5
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 8
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 4
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "len"
+          },
+          {
+            "kind": "integer",
+            "value": 6
+          }
         ]
       }
     },
@@ -2006,10 +2225,22 @@
       "expect": {
         "kind": "array",
         "value": [
-          {"kind": "bulk", "value": "matches"},
-          {"kind": "array", "value": []},
-          {"kind": "bulk", "value": "len"},
-          {"kind": "integer", "value": 0}
+          {
+            "kind": "bulk",
+            "value": "matches"
+          },
+          {
+            "kind": "array",
+            "value": []
+          },
+          {
+            "kind": "bulk",
+            "value": "len"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          }
         ]
       }
     },
@@ -2096,7 +2327,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+        "value": "ERR The specified keys must contain string values"
       }
     },
     {
@@ -2123,8 +2354,8 @@
         "IDX"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 6
+        "kind": "error",
+        "value": "ERR If you want both the length and indexes, please just use IDX."
       }
     },
     {
@@ -2141,10 +2372,22 @@
       "expect": {
         "kind": "array",
         "value": [
-          {"kind": "bulk", "value": "matches"},
-          {"kind": "array", "value": []},
-          {"kind": "bulk", "value": "len"},
-          {"kind": "integer", "value": 6}
+          {
+            "kind": "bulk",
+            "value": "matches"
+          },
+          {
+            "kind": "array",
+            "value": []
+          },
+          {
+            "kind": "bulk",
+            "value": "len"
+          },
+          {
+            "kind": "integer",
+            "value": 6
+          }
         ]
       }
     },
@@ -2357,7 +2600,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'getrange' command"
+        "value": "ERR wrong number of arguments for 'substr' command"
       }
     },
     {
@@ -2726,7 +2969,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR string exceeds maximum allowed size (512MB)"
+        "value": "ERR string exceeds maximum allowed size (proto-max-bulk-len)"
       }
     },
     {
@@ -3924,7 +4167,12 @@
     {
       "name": "setex_leading_plus_seconds",
       "now_ms": 500,
-      "argv": ["SETEX", "key", "+10", "val"],
+      "argv": [
+        "SETEX",
+        "key",
+        "+10",
+        "val"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -3933,7 +4181,12 @@
     {
       "name": "setex_leading_zero_seconds",
       "now_ms": 501,
-      "argv": ["SETEX", "key", "010", "val"],
+      "argv": [
+        "SETEX",
+        "key",
+        "010",
+        "val"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -3942,7 +4195,12 @@
     {
       "name": "setex_float_seconds",
       "now_ms": 502,
-      "argv": ["SETEX", "key", "10.5", "val"],
+      "argv": [
+        "SETEX",
+        "key",
+        "10.5",
+        "val"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -3951,7 +4209,12 @@
     {
       "name": "setex_empty_seconds",
       "now_ms": 503,
-      "argv": ["SETEX", "key", "", "val"],
+      "argv": [
+        "SETEX",
+        "key",
+        "",
+        "val"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -3960,7 +4223,12 @@
     {
       "name": "psetex_leading_plus_ms",
       "now_ms": 510,
-      "argv": ["PSETEX", "key", "+1000", "val"],
+      "argv": [
+        "PSETEX",
+        "key",
+        "+1000",
+        "val"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -3969,7 +4237,12 @@
     {
       "name": "psetex_leading_zero_ms",
       "now_ms": 511,
-      "argv": ["PSETEX", "key", "01000", "val"],
+      "argv": [
+        "PSETEX",
+        "key",
+        "01000",
+        "val"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -3978,7 +4251,12 @@
     {
       "name": "psetex_float_ms",
       "now_ms": 512,
-      "argv": ["PSETEX", "key", "1000.5", "val"],
+      "argv": [
+        "PSETEX",
+        "key",
+        "1000.5",
+        "val"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -3987,7 +4265,12 @@
     {
       "name": "psetex_empty_ms",
       "now_ms": 513,
-      "argv": ["PSETEX", "key", "", "val"],
+      "argv": [
+        "PSETEX",
+        "key",
+        "",
+        "val"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -3996,7 +4279,11 @@
     {
       "name": "getex_setup_key",
       "now_ms": 520,
-      "argv": ["SET", "getex_nc_key", "value"],
+      "argv": [
+        "SET",
+        "getex_nc_key",
+        "value"
+      ],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -4005,7 +4292,12 @@
     {
       "name": "getex_ex_leading_plus",
       "now_ms": 521,
-      "argv": ["GETEX", "getex_nc_key", "EX", "+10"],
+      "argv": [
+        "GETEX",
+        "getex_nc_key",
+        "EX",
+        "+10"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4014,7 +4306,12 @@
     {
       "name": "getex_ex_leading_zero",
       "now_ms": 522,
-      "argv": ["GETEX", "getex_nc_key", "EX", "010"],
+      "argv": [
+        "GETEX",
+        "getex_nc_key",
+        "EX",
+        "010"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4023,7 +4320,12 @@
     {
       "name": "getex_ex_float",
       "now_ms": 523,
-      "argv": ["GETEX", "getex_nc_key", "EX", "10.5"],
+      "argv": [
+        "GETEX",
+        "getex_nc_key",
+        "EX",
+        "10.5"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4032,7 +4334,12 @@
     {
       "name": "getex_ex_empty",
       "now_ms": 524,
-      "argv": ["GETEX", "getex_nc_key", "EX", ""],
+      "argv": [
+        "GETEX",
+        "getex_nc_key",
+        "EX",
+        ""
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4041,7 +4348,12 @@
     {
       "name": "getex_px_leading_plus",
       "now_ms": 525,
-      "argv": ["GETEX", "getex_nc_key", "PX", "+10000"],
+      "argv": [
+        "GETEX",
+        "getex_nc_key",
+        "PX",
+        "+10000"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4050,7 +4362,12 @@
     {
       "name": "getex_px_leading_zero",
       "now_ms": 526,
-      "argv": ["GETEX", "getex_nc_key", "PX", "010000"],
+      "argv": [
+        "GETEX",
+        "getex_nc_key",
+        "PX",
+        "010000"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4059,7 +4376,12 @@
     {
       "name": "getex_exat_leading_plus",
       "now_ms": 527,
-      "argv": ["GETEX", "getex_nc_key", "EXAT", "+9999999999"],
+      "argv": [
+        "GETEX",
+        "getex_nc_key",
+        "EXAT",
+        "+9999999999"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4068,7 +4390,12 @@
     {
       "name": "getex_exat_leading_zero",
       "now_ms": 528,
-      "argv": ["GETEX", "getex_nc_key", "EXAT", "09999999999"],
+      "argv": [
+        "GETEX",
+        "getex_nc_key",
+        "EXAT",
+        "09999999999"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4077,7 +4404,12 @@
     {
       "name": "getex_pxat_leading_plus",
       "now_ms": 529,
-      "argv": ["GETEX", "getex_nc_key", "PXAT", "+9999999999999"],
+      "argv": [
+        "GETEX",
+        "getex_nc_key",
+        "PXAT",
+        "+9999999999999"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
@@ -4086,7 +4418,12 @@
     {
       "name": "getex_pxat_leading_zero",
       "now_ms": 530,
-      "argv": ["GETEX", "getex_nc_key", "PXAT", "09999999999999"],
+      "argv": [
+        "GETEX",
+        "getex_nc_key",
+        "PXAT",
+        "09999999999999"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR value is not an integer or out of range"
