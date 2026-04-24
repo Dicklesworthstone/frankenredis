@@ -2449,8 +2449,9 @@ mod tests {
         ExpectedFrame, ExpectedThreat, HarnessConfig, LiveOracleConfig, ReplayFixture,
         StructuredLogEmissionContext, build_differential_report, expected_to_frame,
         live_oracle_case_expects_no_reply, live_oracle_case_uses_dedicated_connection,
-        live_oracle_case_uses_legacy_sync_snapshot, load_multi_client_fixture, run_fixture,
-        run_live_redis_diff, run_live_redis_protocol_diff, run_protocol_fixture,
+        live_oracle_case_uses_legacy_sync_snapshot, load_conformance_fixture,
+        load_multi_client_fixture, run_fixture, run_live_redis_diff,
+        run_live_redis_diff_for_cases, run_live_redis_protocol_diff, run_protocol_fixture,
         run_replay_fixture, run_replication_handshake_fixture, run_smoke,
         runtime_for_harness_config, runtime_matches_live_no_reply_case,
         runtime_matches_live_sync_snapshot_case, validate_structured_log_emission,
@@ -7565,6 +7566,25 @@ mod tests {
         }
     }
 
+    /// Blocking-command name prefixes that the single-connection live
+    /// oracle harness cannot drive — they require a second client to
+    /// push data while the first is blocked. These cases belong in
+    /// `core_blocking` / `core_blocking_multi_client` and are skipped
+    /// when the parent fixture bundles them.
+    fn is_blocking_case_name(name: &str) -> bool {
+        let n = name.to_ascii_lowercase();
+        n.contains("blpop")
+            || n.contains("brpop")
+            || n.contains("blmove")
+            || n.contains("brpoplpush")
+            || n.contains("blmpop")
+            || n.contains("bzpopmin")
+            || n.contains("bzpopmax")
+            || n.contains("xread_block")
+            || n.contains("xreadgroup_block")
+            || n.contains("wait_blocks")
+    }
+
     /// Run a `run_live_redis_diff`-style closure and treat transport errors
     /// (timeouts, broken oracle sessions, etc.) the same way `assert_live_report`
     /// treats content mismatches: surface on stderr; only panic under STRICT.
@@ -7625,6 +7645,55 @@ mod tests {
         let oracle = oracle_handle.oracle_config();
         run_live_diff_tolerant("core_hash", || {
             run_live_redis_diff(&cfg, "core_hash.json", &oracle)
+        });
+    }
+
+    /// Wire the `core_list.json` fixture through the self-spawning
+    /// vendored redis-server oracle. Covers
+    /// LPUSH/RPUSH/LRANGE/LPOP/RPOP/LMOVE/LINDEX/LLEN/LINSERT/LREM/
+    /// LSET/LTRIM and related list commands. Blocking cases (BLPOP /
+    /// BRPOP / BLMOVE / BLMPOP) are routed through `core_blocking` —
+    /// they need multi-client scheduling the single-connection live
+    /// harness can't drive. (br-frankenredis-ds9o)
+    #[test]
+    fn live_redis_core_list_matches_runtime() {
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+        let fixture = match load_conformance_fixture(&cfg, "core_list.json") {
+            Ok(f) => f,
+            Err(err) => {
+                eprintln!("[live-oracle:core_list] fixture load error: {err}");
+                return;
+            }
+        };
+        let non_blocking: Vec<String> = fixture
+            .cases
+            .iter()
+            .map(|case| case.name.clone())
+            .filter(|name| !is_blocking_case_name(name))
+            .collect();
+        let refs: Vec<&str> = non_blocking.iter().map(String::as_str).collect();
+        run_live_diff_tolerant("core_list", || {
+            run_live_redis_diff_for_cases(&cfg, "core_list.json", &refs, &oracle)
+        });
+    }
+
+    /// Wire the `core_set.json` fixture through the self-spawning
+    /// vendored redis-server oracle. Covers
+    /// SADD/SMEMBERS/SUNION/SDIFF/SINTER/SREM/SCARD/SISMEMBER/SMOVE/
+    /// SPOP/SRANDMEMBER and related set commands. (br-frankenredis-pfo5)
+    #[test]
+    fn live_redis_core_set_matches_runtime() {
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+        run_live_diff_tolerant("core_set", || {
+            run_live_redis_diff(&cfg, "core_set.json", &oracle)
         });
     }
 
