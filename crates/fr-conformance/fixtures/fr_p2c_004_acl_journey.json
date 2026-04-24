@@ -37,7 +37,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOPROTO unsupported protocol version '7'"
+        "value": "NOPROTO unsupported protocol version"
       }
     },
     {

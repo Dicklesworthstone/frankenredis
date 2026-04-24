@@ -555,7 +555,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOPROTO unsupported protocol version '4'"
+        "value": "NOPROTO unsupported protocol version"
       }
     },
     {
@@ -567,7 +567,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOPROTO unsupported protocol version '1'"
+        "value": "NOPROTO unsupported protocol version"
       }
     },
     {
@@ -1091,7 +1091,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR Protocol version is not an integer or out of range"
       }
     },
     {
@@ -1103,7 +1103,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "NOPROTO unsupported protocol version '0'"
+        "value": "NOPROTO unsupported protocol version"
       }
     },
     {

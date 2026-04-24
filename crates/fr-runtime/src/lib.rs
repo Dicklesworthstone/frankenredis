@@ -5367,14 +5367,15 @@ impl Runtime {
 
         let protocol_version = match parse_i64_arg(&argv[1]) {
             Ok(version) => version,
-            Err(err) => return err.to_resp(),
+            Err(_) => {
+                return RespFrame::Error(
+                    "ERR Protocol version is not an integer or out of range".to_string(),
+                );
+            }
         };
 
         if protocol_version != 2 && protocol_version != 3 {
-            return RespFrame::Error(format!(
-                "NOPROTO unsupported protocol version '{}'",
-                protocol_version
-            ));
+            return RespFrame::Error("NOPROTO unsupported protocol version".to_string());
         }
 
         let mut auth_credentials: Option<(&[u8], &[u8])> = None;
