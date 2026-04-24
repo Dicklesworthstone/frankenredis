@@ -7706,6 +7706,9 @@ impl Runtime {
                     .into_bytes(),
             ))
         } else if sub.eq_ignore_ascii_case("NO-EVICT") {
+            // Error-reply wording must match upstream
+            // networking.c::clientSubcommand — plain syntax error,
+            // not a hint. (br-frankenredis-w579)
             if argv.len() != 3 {
                 return client_wrong_subcommand_arity(sub);
             }
@@ -7718,7 +7721,7 @@ impl Runtime {
             } else if mode.eq_ignore_ascii_case("OFF") {
                 self.session.client_no_evict = false;
             } else {
-                return RespFrame::Error("ERR argument must be 'on' or 'off'".to_string());
+                return CommandError::SyntaxError.to_resp();
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("NO-TOUCH") {
@@ -7734,11 +7737,13 @@ impl Runtime {
             } else if mode.eq_ignore_ascii_case("OFF") {
                 self.session.client_no_touch = false;
             } else {
-                return RespFrame::Error("ERR argument must be 'on' or 'off'".to_string());
+                return CommandError::SyntaxError.to_resp();
             }
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("SETINFO") {
-            // CLIENT SETINFO <attr> <value> (Redis 7.2+)
+            // CLIENT SETINFO <attr> <value> (Redis 7.2+).
+            // Error wording must match upstream networking.c
+            // (br-frankenredis-w579).
             if argv.len() != 4 {
                 return client_wrong_subcommand_arity(sub);
             }
@@ -7751,10 +7756,9 @@ impl Runtime {
                 Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
             if attr.eq_ignore_ascii_case("LIB-NAME") || attr.eq_ignore_ascii_case("lib-name") {
-                // Redis validates: lib-name must not contain spaces or newlines
                 if val.bytes().any(|b| b <= b' ') {
                     return RespFrame::Error(
-                        "ERR lib-name can only contain characters that are allowed in CLIENT SETNAME"
+                        "ERR LIB-NAME cannot contain spaces, newlines or special characters."
                             .to_string(),
                     );
                 }
@@ -7762,7 +7766,7 @@ impl Runtime {
             } else if attr.eq_ignore_ascii_case("LIB-VER") || attr.eq_ignore_ascii_case("lib-ver") {
                 if val.bytes().any(|b| b <= b' ') {
                     return RespFrame::Error(
-                        "ERR lib-ver can only contain characters that are allowed in CLIENT SETNAME"
+                        "ERR LIB-VER cannot contain spaces, newlines or special characters."
                             .to_string(),
                     );
                 }
@@ -7918,13 +7922,20 @@ impl Runtime {
             }
         } else if sub.eq_ignore_ascii_case("PAUSE") {
             // CLIENT PAUSE timeout [WRITE|ALL]
+            // Upstream networking.c::pauseCommand rejects negative
+            // timeouts with "ERR timeout is negative".
+            // (br-frankenredis-w579)
             if argv.len() < 3 || argv.len() > 4 {
                 return client_wrong_subcommand_arity(sub);
             }
-            let timeout_ms = match parse_i64_arg(&argv[2]) {
-                Ok(ms) => ms.max(0) as u64,
+            let timeout_raw = match parse_i64_arg(&argv[2]) {
+                Ok(ms) => ms,
                 _ => return RespFrame::Error(CLIENT_PAUSE_TIMEOUT_INVALID.to_string()),
             };
+            if timeout_raw < 0 {
+                return RespFrame::Error("ERR timeout is negative".to_string());
+            }
+            let timeout_ms = timeout_raw as u64;
             let pause_all = if argv.len() == 4 {
                 let mode =
                     std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument);

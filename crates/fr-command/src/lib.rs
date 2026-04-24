@@ -12030,18 +12030,16 @@ pub fn validate_client_caching_mode(
     if !mode.eq_ignore_ascii_case("YES") && !mode.eq_ignore_ascii_case("NO") {
         return Err(CommandError::SyntaxError);
     }
-    if !tracking.enabled || (!tracking.optin && !tracking.optout) {
-        return Err(CommandError::Custom(
-            CLIENT_CACHING_REQUIRES_TRACKING.to_string(),
-        ));
-    }
+    // Upstream networking.c::clientSubcommand reports the
+    // mode-specific reply regardless of whether tracking is disabled
+    // or enabled-in-the-wrong-mode. (br-frankenredis-w579)
     if mode.eq_ignore_ascii_case("YES") {
-        if !tracking.optin {
+        if !tracking.enabled || !tracking.optin {
             return Err(CommandError::Custom(
                 CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string(),
             ));
         }
-    } else if !tracking.optout {
+    } else if !tracking.enabled || !tracking.optout {
         return Err(CommandError::Custom(
             CLIENT_CACHING_NO_REQUIRES_OPTOUT.to_string(),
         ));
@@ -12222,9 +12220,10 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         }
         let mode = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if !mode.eq_ignore_ascii_case("ON") && !mode.eq_ignore_ascii_case("OFF") {
-            return Err(CommandError::Custom(
-                "ERR argument must be 'on' or 'off'".to_string(),
-            ));
+            // Upstream networking.c::clientSubcommand emits the
+            // generic syntax-error reply (no "argument must be
+            // on/off" hint). (br-frankenredis-w579)
+            return Err(CommandError::SyntaxError);
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("SETINFO") {
@@ -12238,8 +12237,10 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         let val = std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if attr.eq_ignore_ascii_case("LIB-NAME") {
             if val.bytes().any(|b| b <= b' ') {
+                // Upstream: "LIB-NAME cannot contain spaces,
+                // newlines or special characters." (br-frankenredis-w579)
                 return Err(CommandError::Custom(
-                    "ERR lib-name can only contain characters that are allowed in CLIENT SETNAME"
+                    "ERR LIB-NAME cannot contain spaces, newlines or special characters."
                         .to_string(),
                 ));
             }
@@ -12251,7 +12252,7 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         } else if attr.eq_ignore_ascii_case("LIB-VER") {
             if val.bytes().any(|b| b <= b' ') {
                 return Err(CommandError::Custom(
-                    "ERR lib-ver can only contain characters that are allowed in CLIENT SETNAME"
+                    "ERR LIB-VER cannot contain spaces, newlines or special characters."
                         .to_string(),
                 ));
             }
@@ -12384,8 +12385,13 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         if argv.len() < 3 || argv.len() > 4 {
             return Err(client_wrong_subcommand_arity(sub));
         }
-        parse_i64_arg(&argv[2])
+        let timeout = parse_i64_arg(&argv[2])
             .map_err(|_| CommandError::Custom(CLIENT_PAUSE_TIMEOUT_INVALID.to_string()))?;
+        // Upstream networking.c::pauseCommand rejects negative
+        // timeouts with "ERR timeout is negative". (br-frankenredis-w579)
+        if timeout < 0 {
+            return Err(CommandError::Custom("ERR timeout is negative".to_string()));
+        }
         if let Some(mode_arg) = argv.get(3) {
             let mode =
                 std::str::from_utf8(mode_arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -31595,10 +31601,9 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert_eq!(
-            err,
-            CommandError::Custom("ERR argument must be 'on' or 'off'".to_string())
-        );
+        // Upstream networking.c::clientSubcommand returns the
+        // generic syntax error, not a hint. (br-frankenredis-w579)
+        assert_eq!(err, CommandError::SyntaxError);
 
         let err = dispatch_argv(
             &[
@@ -33118,6 +33123,9 @@ mod tests {
 
     #[test]
     fn client_caching_requires_optin_or_optout_modes() {
+        // Upstream emits the mode-specific reply whether tracking
+        // is disabled entirely or enabled in the wrong mode.
+        // (br-frankenredis-w579)
         let mut store = Store::new();
         assert_eq!(
             dispatch_argv(
@@ -33126,7 +33134,7 @@ mod tests {
                 0
             )
             .unwrap_err(),
-            CommandError::Custom(CLIENT_CACHING_REQUIRES_TRACKING.to_string())
+            CommandError::Custom(CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string())
         );
         dispatch_argv(
             &[b"CLIENT".to_vec(), b"TRACKING".to_vec(), b"ON".to_vec()],
@@ -33141,7 +33149,7 @@ mod tests {
                 0
             )
             .unwrap_err(),
-            CommandError::Custom(CLIENT_CACHING_REQUIRES_TRACKING.to_string())
+            CommandError::Custom(CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string())
         );
 
         dispatch_argv(
@@ -33671,8 +33679,7 @@ mod tests {
         assert_eq!(
             err,
             CommandError::Custom(
-                "ERR lib-name can only contain characters that are allowed in CLIENT SETNAME"
-                    .to_string()
+                "ERR LIB-NAME cannot contain spaces, newlines or special characters.".to_string()
             )
         );
     }

@@ -149,7 +149,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR argument must be 'on' or 'off'"
+        "value": "ERR syntax error"
       }
     },
     {
@@ -253,7 +253,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled"
+        "value": "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode."
       }
     },
     {
@@ -375,7 +375,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR argument must be 'on' or 'off'"
+        "value": "ERR syntax error"
       }
     },
     {
@@ -480,7 +480,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled"
+        "value": "ERR CLIENT CACHING NO is only valid when tracking is enabled in OPTOUT mode."
       }
     },
     {
@@ -679,7 +679,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR lib-name can only contain characters that are allowed in CLIENT SETNAME"
+        "value": "ERR LIB-NAME cannot contain spaces, newlines or special characters."
       }
     },
     {
@@ -1013,7 +1013,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR lib-ver can only contain characters that are allowed in CLIENT SETNAME"
+        "value": "ERR LIB-VER cannot contain spaces, newlines or special characters."
       }
     },
     {
@@ -1062,8 +1062,8 @@
         "-1"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR timeout is negative"
       }
     },
     {
@@ -1371,12 +1371,35 @@
       "expect": {
         "kind": "array",
         "value": [
-          {"kind": "bulk", "value": "flags"},
-          {"kind": "array", "value": [{"kind": "bulk", "value": "off"}]},
-          {"kind": "bulk", "value": "redirect"},
-          {"kind": "integer", "value": -1},
-          {"kind": "bulk", "value": "prefixes"},
-          {"kind": "array", "value": []}
+          {
+            "kind": "bulk",
+            "value": "flags"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "off"
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "redirect"
+          },
+          {
+            "kind": "integer",
+            "value": -1
+          },
+          {
+            "kind": "bulk",
+            "value": "prefixes"
+          },
+          {
+            "kind": "array",
+            "value": []
+          }
         ]
       }
     },
@@ -1461,16 +1484,43 @@
       "expect": {
         "kind": "array",
         "value": [
-          {"kind": "bulk", "value": "flags"},
-          {"kind": "array", "value": [
-            {"kind": "bulk", "value": "on"},
-            {"kind": "bulk", "value": "optin"},
-            {"kind": "bulk", "value": "caching-yes"}
-          ]},
-          {"kind": "bulk", "value": "redirect"},
-          {"kind": "integer", "value": 0},
-          {"kind": "bulk", "value": "prefixes"},
-          {"kind": "array", "value": []}
+          {
+            "kind": "bulk",
+            "value": "flags"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "on"
+              },
+              {
+                "kind": "bulk",
+                "value": "optin"
+              },
+              {
+                "kind": "bulk",
+                "value": "caching-yes"
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "redirect"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "bulk",
+            "value": "prefixes"
+          },
+          {
+            "kind": "array",
+            "value": []
+          }
         ]
       }
     },
@@ -1564,16 +1614,43 @@
       "expect": {
         "kind": "array",
         "value": [
-          {"kind": "bulk", "value": "flags"},
-          {"kind": "array", "value": [
-            {"kind": "bulk", "value": "on"},
-            {"kind": "bulk", "value": "optout"},
-            {"kind": "bulk", "value": "caching-no"}
-          ]},
-          {"kind": "bulk", "value": "redirect"},
-          {"kind": "integer", "value": 0},
-          {"kind": "bulk", "value": "prefixes"},
-          {"kind": "array", "value": []}
+          {
+            "kind": "bulk",
+            "value": "flags"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "on"
+              },
+              {
+                "kind": "bulk",
+                "value": "optout"
+              },
+              {
+                "kind": "bulk",
+                "value": "caching-no"
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "redirect"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "bulk",
+            "value": "prefixes"
+          },
+          {
+            "kind": "array",
+            "value": []
+          }
         ]
       }
     },
