@@ -66,8 +66,8 @@ crates/*/target/
 # Beads history snapshots
 .beads/.br_history/
 
-# Claude local settings
-.claude/settings.local.json
+# Claude local settings + agent scratch dir (scheduled_tasks.lock, settings.local.json, etc.)
+.claude/
 
 # Core dumps and agent config backups
 core.*
@@ -154,10 +154,17 @@ ubs_*.jsonl
 
 # Beads recovery artifacts
 .beads_recovery/
+.beads_snapshots/
 .beads/recovery/
 .beads/recovery_*/
 .beads/*.bad_*
-.beads/*.pre_rebuild_*
+.beads/*.pre_*
+
+# Redis AOF (append-only file) runtime artifact — written by fr-runtime during
+# tests/sessions; not source, never committed.
+**/appendonly.aof
+**/appendonly.aof.*
+**/appendonlydir/
 
 # Extensionless scratch output files
 /check_result_*
