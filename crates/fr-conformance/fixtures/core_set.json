@@ -912,7 +912,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR numkeys can't be non-positive value"
+        "value": "ERR numkeys should be greater than 0"
       }
     },
     {
@@ -2085,7 +2085,15 @@
     {
       "name": "sintercard_setup_s1",
       "now_ms": 1000,
-      "argv": ["SADD", "sic_s1", "a", "b", "c", "d", "e"],
+      "argv": [
+        "SADD",
+        "sic_s1",
+        "a",
+        "b",
+        "c",
+        "d",
+        "e"
+      ],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -2094,7 +2102,15 @@
     {
       "name": "sintercard_setup_s2",
       "now_ms": 1000,
-      "argv": ["SADD", "sic_s2", "c", "d", "e", "f", "g"],
+      "argv": [
+        "SADD",
+        "sic_s2",
+        "c",
+        "d",
+        "e",
+        "f",
+        "g"
+      ],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -2103,7 +2119,12 @@
     {
       "name": "sintercard_two_sets_full",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_s2"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_s2"
+      ],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -2112,7 +2133,14 @@
     {
       "name": "sintercard_with_limit_1",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_s2", "LIMIT", "1"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_s2",
+        "LIMIT",
+        "1"
+      ],
       "expect": {
         "kind": "integer",
         "value": 1
@@ -2121,7 +2149,14 @@
     {
       "name": "sintercard_with_limit_2",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_s2", "LIMIT", "2"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_s2",
+        "LIMIT",
+        "2"
+      ],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -2130,7 +2165,14 @@
     {
       "name": "sintercard_with_limit_exceeds_actual",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_s2", "LIMIT", "100"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_s2",
+        "LIMIT",
+        "100"
+      ],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -2139,7 +2181,14 @@
     {
       "name": "sintercard_with_limit_zero",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_s2", "LIMIT", "0"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_s2",
+        "LIMIT",
+        "0"
+      ],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -2148,7 +2197,12 @@
     {
       "name": "sintercard_nonexistent_key",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "nosuchset"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "nosuchset"
+      ],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2157,7 +2211,13 @@
     {
       "name": "sintercard_empty_intersection_setup",
       "now_ms": 1000,
-      "argv": ["SADD", "sic_disjoint", "x", "y", "z"],
+      "argv": [
+        "SADD",
+        "sic_disjoint",
+        "x",
+        "y",
+        "z"
+      ],
       "expect": {
         "kind": "integer",
         "value": 3
@@ -2166,7 +2226,12 @@
     {
       "name": "sintercard_empty_intersection_result",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_disjoint"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_disjoint"
+      ],
       "expect": {
         "kind": "integer",
         "value": 0
@@ -2175,7 +2240,9 @@
     {
       "name": "sintercard_wrong_arity_no_args",
       "now_ms": 1000,
-      "argv": ["SINTERCARD"],
+      "argv": [
+        "SINTERCARD"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'sintercard' command"
@@ -2184,7 +2251,10 @@
     {
       "name": "sintercard_wrong_arity_one_arg",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "1"],
+      "argv": [
+        "SINTERCARD",
+        "1"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'sintercard' command"
@@ -2193,34 +2263,53 @@
     {
       "name": "sintercard_numkeys_zero",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "0", "sic_s1"],
+      "argv": [
+        "SINTERCARD",
+        "0",
+        "sic_s1"
+      ],
       "expect": {
         "kind": "error",
-        "value": "ERR numkeys can't be non-positive value"
+        "value": "ERR numkeys should be greater than 0"
       }
     },
     {
       "name": "sintercard_numkeys_negative",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "-1", "sic_s1"],
+      "argv": [
+        "SINTERCARD",
+        "-1",
+        "sic_s1"
+      ],
       "expect": {
         "kind": "error",
-        "value": "ERR numkeys can't be non-positive value"
+        "value": "ERR numkeys should be greater than 0"
       }
     },
     {
       "name": "sintercard_numkeys_too_large",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "10", "sic_s1"],
+      "argv": [
+        "SINTERCARD",
+        "10",
+        "sic_s1"
+      ],
       "expect": {
         "kind": "error",
-        "value": "ERR syntax error"
+        "value": "ERR Number of keys can't be greater than number of args"
       }
     },
     {
       "name": "sintercard_limit_negative",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_s2", "LIMIT", "-1"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_s2",
+        "LIMIT",
+        "-1"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR LIMIT can't be negative"
@@ -2229,7 +2318,16 @@
     {
       "name": "sintercard_duplicate_limit_uses_last_value",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_s2", "LIMIT", "1", "LIMIT", "2"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_s2",
+        "LIMIT",
+        "1",
+        "LIMIT",
+        "2"
+      ],
       "expect": {
         "kind": "integer",
         "value": 2
@@ -2238,16 +2336,29 @@
     {
       "name": "sintercard_limit_non_numeric",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_s2", "LIMIT", "abc"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_s2",
+        "LIMIT",
+        "abc"
+      ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR LIMIT can't be negative"
       }
     },
     {
       "name": "sintercard_limit_missing_value",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_s2", "LIMIT"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_s2",
+        "LIMIT"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -2256,7 +2367,13 @@
     {
       "name": "sintercard_syntax_error_unknown_option",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_s2", "UNKNOWN"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_s2",
+        "UNKNOWN"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR syntax error"
@@ -2265,7 +2382,11 @@
     {
       "name": "sintercard_single_set",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "1", "sic_s1"],
+      "argv": [
+        "SINTERCARD",
+        "1",
+        "sic_s1"
+      ],
       "expect": {
         "kind": "integer",
         "value": 5
@@ -2274,7 +2395,11 @@
     {
       "name": "sintercard_wrongtype_setup",
       "now_ms": 1000,
-      "argv": ["SET", "sic_string", "value"],
+      "argv": [
+        "SET",
+        "sic_string",
+        "value"
+      ],
       "expect": {
         "kind": "simple",
         "value": "OK"
@@ -2283,7 +2408,12 @@
     {
       "name": "sintercard_wrongtype_error",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_string"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_string"
+      ],
       "expect": {
         "kind": "error",
         "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -2292,7 +2422,14 @@
     {
       "name": "sintercard_case_insensitive_limit",
       "now_ms": 1000,
-      "argv": ["SINTERCARD", "2", "sic_s1", "sic_s2", "limit", "2"],
+      "argv": [
+        "SINTERCARD",
+        "2",
+        "sic_s1",
+        "sic_s2",
+        "limit",
+        "2"
+      ],
       "expect": {
         "kind": "integer",
         "value": 2

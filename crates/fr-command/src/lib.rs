@@ -9052,19 +9052,26 @@ fn smismember(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
 
 fn sintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // SINTERCARD numkeys key [key ...] [LIMIT limit]
+    //
+    // Error-reply wording MUST match upstream byte-for-byte
+    // (br-frankenredis-ozj0). See legacy_redis_code/redis/src/t_set.c
+    // `sinterGenericCommand` + `genericSintercardCommand` for the
+    // source strings quoted below.
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("SINTERCARD"));
     }
     let numkeys_val = parse_i64_arg(&argv[1])?;
     if numkeys_val <= 0 {
         return Ok(RespFrame::Error(
-            "ERR numkeys can't be non-positive value".to_string(),
+            "ERR numkeys should be greater than 0".to_string(),
         ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     let keys_end = 2_usize.saturating_add(numkeys);
     if keys_end > argv.len() {
-        return Err(CommandError::SyntaxError);
+        return Ok(RespFrame::Error(
+            "ERR Number of keys can't be greater than number of args".to_string(),
+        ));
     }
     let keys: Vec<&[u8]> = argv[2..keys_end].iter().map(Vec::as_slice).collect();
     let mut limit: u64 = 0;
@@ -9075,7 +9082,17 @@ fn sintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             if idx >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            let val = parse_i64_arg(&argv[idx])?;
+            // Upstream routes both parse failure AND negative values
+            // through the same "LIMIT can't be negative" reply via
+            // getRangeLongFromObjectOrReply's error-string argument.
+            let val = match parse_i64_arg(&argv[idx]) {
+                Ok(v) => v,
+                Err(_) => {
+                    return Ok(RespFrame::Error(
+                        "ERR LIMIT can't be negative".to_string(),
+                    ));
+                }
+            };
             if val < 0 {
                 return Err(CommandError::Custom(
                     "ERR LIMIT can't be negative".to_string(),
