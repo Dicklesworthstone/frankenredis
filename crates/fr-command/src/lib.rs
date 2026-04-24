@@ -15200,6 +15200,18 @@ fn restore_cmd(
     } else {
         ttl_ms
     };
+    // Upstream reports BUSYKEY BEFORE payload validation. See
+    // legacy_redis_code/redis/src/cluster.c::restoreCommand which calls
+    // `lookupKeyWrite` + busy-key check before `verifyDumpPayload`.
+    // Without this precedence, a RESTORE onto an existing key with a
+    // malformed payload emits "ERR DUMP payload version or checksum are
+    // wrong" where upstream would emit BUSYKEY.
+    // (br-frankenredis-ao1i)
+    if !replace && store.exists(key, now_ms) {
+        return Ok(RespFrame::Error(
+            "BUSYKEY Target key name already exists.".to_string(),
+        ));
+    }
     match store.restore_key(key, effective_ttl, payload, replace, now_ms) {
         Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
         Err(StoreError::BusyKey) => Ok(RespFrame::Error(
@@ -15531,6 +15543,7 @@ fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
 
     // Parse optional REPLACE flag
     let mut replace = false;
+    let mut target_db: i64 = 0;
     let mut i = 3;
     while i < argv.len() {
         let arg = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -15549,10 +15562,21 @@ fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
                     "ERR DB index is out of range".to_string(),
                 ));
             }
+            target_db = db;
             i += 2;
             continue;
         }
         return Err(CommandError::SyntaxError);
+    }
+
+    // Upstream rejects same-source-same-destination-same-db with a
+    // dedicated error before even touching the store, regardless of
+    // REPLACE. See legacy_redis_code/redis/src/cluster.c::copyCommand.
+    // (br-frankenredis-ao1i)
+    if source == destination && target_db == 0 {
+        return Ok(RespFrame::Error(
+            "ERR source and destination objects are the same".to_string(),
+        ));
     }
 
     let copied = store

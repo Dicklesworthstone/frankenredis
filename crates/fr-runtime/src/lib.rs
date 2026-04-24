@@ -8991,6 +8991,15 @@ impl Runtime {
             return Err(CommandError::SyntaxError);
         }
         let destination = encode_db_key(destination_db, &argv[2]);
+        // Upstream rejects same-source-same-destination-same-db before
+        // touching the store, regardless of REPLACE. See
+        // legacy_redis_code/redis/src/cluster.c::copyCommand.
+        // (br-frankenredis-ao1i)
+        if destination_db == self.session.selected_db && argv[1] == argv[2] {
+            return Ok(RespFrame::Error(
+                "ERR source and destination objects are the same".to_string(),
+            ));
+        }
         let copied = self
             .server
             .store
