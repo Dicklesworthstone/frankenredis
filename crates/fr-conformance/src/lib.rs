@@ -9315,11 +9315,6 @@ mod tests {
             "auth_nonexistent_user",
             "auth_wrong_arity_too_many",
             "auth_wrong_password",
-            // ACL DELUSER cleanup + USERS stale-leakage: harness
-            // FLUSHALL doesn't reset the ACL subsystem.
-            "acl_deluser_cleanup_bob",
-            "acl_users_only_default_after_cleanup",
-            "acl_users_lowercase",
         ];
         let stable: Vec<String> = fixture
             .cases
