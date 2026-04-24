@@ -8,6 +8,20 @@ use std::ops::Bound::{Excluded, Included, Unbounded};
 /// Redis-compatible version string. Single source of truth for all version reporting.
 pub const REDIS_COMPAT_VERSION: &str = "7.2.0";
 
+const RDB_DUMP_VERSION: u16 = 11;
+const RDB_TYPE_LIST: u8 = 1;
+const RDB_TYPE_SET: u8 = 2;
+const RDB_TYPE_HASH: u8 = 4;
+const RDB_TYPE_ZSET_2: u8 = 5;
+const RDB_TYPE_SET_INTSET: u8 = 11;
+const RDB_TYPE_HASH_LISTPACK: u8 = 16;
+const RDB_TYPE_ZSET_LISTPACK: u8 = 17;
+const RDB_TYPE_LIST_QUICKLIST_2: u8 = 18;
+const RDB_TYPE_SET_LISTPACK: u8 = 20;
+const DUMP_VERSION_LEN: usize = 2;
+const DUMP_CRC64_LEN: usize = 8;
+const DUMP_TRAILER_LEN: usize = DUMP_VERSION_LEN + DUMP_CRC64_LEN;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BitRangeUnit {
     Byte,
@@ -9928,16 +9942,11 @@ impl Store {
     }
 
     /// Serialize a key's value for DUMP. Returns None if key doesn't exist.
-    /// Format: [type_byte][payload][8-byte TTL-ms or 0][2-byte CRC placeholder]
+    /// Format: [type_byte][payload][2-byte RDB version][8-byte CRC64].
     pub fn dump_key(&mut self, key: &[u8], now_ms: u64) -> Option<Vec<u8>> {
         self.drop_if_expired(key, now_ms);
         let entry = self.entries.get(key)?;
         let mut buf = Vec::new();
-        // Type byte
-        let ttl_ms = entry
-            .expires_at_ms
-            .map(|exp| exp.saturating_sub(now_ms))
-            .unwrap_or(0);
         match &entry.value {
             Value::String(v) => {
                 buf.push(0); // type 0 = string
@@ -9945,40 +9954,91 @@ impl Store {
                 buf.extend_from_slice(v);
             }
             Value::List(l) => {
-                buf.push(1); // type 1 = list
-                encode_length(&mut buf, l.len());
-                for item in l {
-                    encode_length(&mut buf, item.len());
-                    buf.extend_from_slice(item);
-                }
+                buf.push(RDB_TYPE_LIST_QUICKLIST_2);
+                encode_length(&mut buf, 1);
+                encode_length(&mut buf, 2);
+                let items: Vec<&[u8]> = l.iter().map(Vec::as_slice).collect();
+                encode_dump_bulk(&mut buf, &encode_listpack_strings(&items)?);
             }
             Value::Set(s) => {
-                buf.push(2); // type 2 = set
-                let members: Vec<&Vec<u8>> = s.iter().collect();
-                encode_length(&mut buf, members.len());
-                for member in members {
-                    encode_length(&mut buf, member.len());
-                    buf.extend_from_slice(member);
+                let integer_members: Option<Vec<i64>> =
+                    s.iter().map(|member| parse_i64(member).ok()).collect();
+                if s.len() <= self.set_max_intset_entries {
+                    if let Some(mut integers) = integer_members {
+                        integers.sort_unstable();
+                        buf.push(RDB_TYPE_SET_INTSET);
+                        encode_dump_bulk(&mut buf, &encode_intset(&integers)?);
+                    } else if s.len() <= self.set_max_listpack_entries
+                        && s.iter().all(|member| member.len() <= 64)
+                    {
+                        buf.push(RDB_TYPE_SET_LISTPACK);
+                        let members: Vec<&[u8]> = s.iter().map(Vec::as_slice).collect();
+                        encode_dump_bulk(&mut buf, &encode_listpack_strings(&members)?);
+                    } else {
+                        buf.push(RDB_TYPE_SET);
+                        encode_length(&mut buf, s.len());
+                        for member in s {
+                            encode_dump_bulk(&mut buf, member);
+                        }
+                    }
+                } else if s.len() <= self.set_max_listpack_entries
+                    && s.iter().all(|member| member.len() <= 64)
+                {
+                    buf.push(RDB_TYPE_SET_LISTPACK);
+                    let members: Vec<&[u8]> = s.iter().map(Vec::as_slice).collect();
+                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&members)?);
+                } else {
+                    buf.push(RDB_TYPE_SET);
+                    encode_length(&mut buf, s.len());
+                    for member in s {
+                        encode_dump_bulk(&mut buf, member);
+                    }
                 }
             }
             Value::Hash(h) => {
-                buf.push(4); // type 4 = hash
-                encode_length(&mut buf, h.len());
-                for (field, value) in h {
-                    encode_length(&mut buf, field.len());
-                    buf.extend_from_slice(field);
-                    encode_length(&mut buf, value.len());
-                    buf.extend_from_slice(value);
+                if h.len() <= self.hash_max_listpack_entries
+                    && h.iter().all(|(field, value)| {
+                        field.len() <= self.hash_max_listpack_value
+                            && value.len() <= self.hash_max_listpack_value
+                    })
+                {
+                    buf.push(RDB_TYPE_HASH_LISTPACK);
+                    let mut pairs = Vec::with_capacity(h.len() * 2);
+                    for (field, value) in h {
+                        pairs.push(field.as_slice());
+                        pairs.push(value.as_slice());
+                    }
+                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&pairs)?);
+                } else {
+                    buf.push(RDB_TYPE_HASH);
+                    encode_length(&mut buf, h.len());
+                    for (field, value) in h {
+                        encode_dump_bulk(&mut buf, field);
+                        encode_dump_bulk(&mut buf, value);
+                    }
                 }
             }
             Value::SortedSet(zs) => {
-                buf.push(5); // type 5 = sorted set
-                encode_length(&mut buf, zs.len());
-                // Keep self-generated DUMP payloads stable across restore/re-encode.
-                for (member, score) in zs.iter_asc() {
-                    encode_length(&mut buf, member.len());
-                    buf.extend_from_slice(member);
-                    buf.extend_from_slice(&score.to_le_bytes());
+                if zs.len() <= self.zset_max_listpack_entries
+                    && zs
+                        .keys()
+                        .all(|member| member.len() <= self.zset_max_listpack_value)
+                {
+                    buf.push(RDB_TYPE_ZSET_LISTPACK);
+                    let mut pairs = Vec::with_capacity(zs.len() * 2);
+                    for (member, score) in zs.iter_asc() {
+                        pairs.push(member.clone());
+                        pairs.push(score.to_string().into_bytes());
+                    }
+                    let pair_refs: Vec<&[u8]> = pairs.iter().map(Vec::as_slice).collect();
+                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&pair_refs)?);
+                } else {
+                    buf.push(RDB_TYPE_ZSET_2);
+                    encode_length(&mut buf, zs.len());
+                    for (member, score) in zs.iter_asc() {
+                        encode_dump_bulk(&mut buf, member);
+                        buf.extend_from_slice(&score.to_le_bytes());
+                    }
                 }
             }
             Value::Stream(entries) => {
@@ -9997,10 +10057,8 @@ impl Store {
                 }
             }
         }
-        // Append TTL (8 bytes LE)
-        buf.extend_from_slice(&ttl_ms.to_le_bytes());
-        // Append version byte
-        buf.push(10); // RDB version
+        // Append Redis DUMP footer: 2-byte little-endian RDB version, then CRC64.
+        buf.extend_from_slice(&RDB_DUMP_VERSION.to_le_bytes());
         // Compute and append CRC64 over all preceding bytes
         let crc = fr_persist::crc64_redis(&buf);
         buf.extend_from_slice(&crc.to_le_bytes());
@@ -10016,15 +10074,23 @@ impl Store {
         replace: bool,
         now_ms: u64,
     ) -> Result<(), StoreError> {
-        if payload.len() < 18 {
-            // Minimum: type(1) + length(1) + ttl(8) + version(1) + crc64(8) = 19,
-            // but allow some slack for empty payloads
+        if payload.len() < DUMP_TRAILER_LEN + 1 {
             return Err(StoreError::InvalidDumpPayload);
         }
+        let version_offset = payload.len() - DUMP_TRAILER_LEN;
+        let version = u16::from_le_bytes(
+            payload[version_offset..version_offset + DUMP_VERSION_LEN]
+                .try_into()
+                .map_err(|_| StoreError::InvalidDumpPayload)?,
+        );
+        if version > RDB_DUMP_VERSION {
+            return Err(StoreError::InvalidDumpPayload);
+        }
+
         // Validate CRC64: last 8 bytes are CRC over everything before them
-        let crc_offset = payload.len() - 8;
+        let crc_offset = payload.len() - DUMP_CRC64_LEN;
         let stored_crc = u64::from_le_bytes(
-            payload[crc_offset..crc_offset + 8]
+            payload[crc_offset..crc_offset + DUMP_CRC64_LEN]
                 .try_into()
                 .map_err(|_| StoreError::InvalidDumpPayload)?,
         );
@@ -10039,8 +10105,8 @@ impl Store {
         }
         let type_byte = payload[0];
         let mut cursor = 1;
-        // Data boundary: exclude trailer (8-byte TTL + 1-byte version + 8-byte CRC64)
-        let data_end = payload.len().saturating_sub(17);
+        // Data boundary: exclude trailer (2-byte version + 8-byte CRC64).
+        let data_end = payload.len() - DUMP_TRAILER_LEN;
         let value = match type_byte {
             0 => {
                 // String
@@ -10050,9 +10116,10 @@ impl Store {
                     return Err(StoreError::InvalidDumpPayload);
                 }
                 let v = payload[cursor..cursor + len].to_vec();
+                cursor += len;
                 Value::String(v)
             }
-            1 => {
+            RDB_TYPE_LIST => {
                 // List
                 let (count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
@@ -10068,7 +10135,7 @@ impl Store {
                 }
                 Value::List(list)
             }
-            2 => {
+            RDB_TYPE_SET => {
                 // Set
                 let (count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
@@ -10084,7 +10151,7 @@ impl Store {
                 }
                 Value::Set(set)
             }
-            4 => {
+            RDB_TYPE_HASH => {
                 // Hash
                 let (count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
@@ -10108,7 +10175,7 @@ impl Store {
                 }
                 Value::Hash(hash)
             }
-            5 => {
+            RDB_TYPE_ZSET_2 => {
                 // Sorted set
                 let (count, consumed) = decode_length(payload, cursor)?;
                 cursor += consumed;
@@ -10127,6 +10194,9 @@ impl Store {
                             .map_err(|_| StoreError::InvalidDumpPayload)?,
                     );
                     cursor += 8;
+                    if score.is_nan() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
                     zs.insert(member, score);
                 }
                 Value::SortedSet(zs)
@@ -10176,8 +10246,80 @@ impl Store {
                 }
                 Value::Stream(entries)
             }
+            RDB_TYPE_LIST_QUICKLIST_2 => {
+                let (node_count, consumed) = decode_length(payload, cursor)?;
+                cursor += consumed;
+                let mut list = VecDeque::new();
+                for _ in 0..node_count {
+                    let (container, consumed) = decode_length(payload, cursor)?;
+                    cursor += consumed;
+                    if container != 2 {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
+                    let (listpack, consumed) = decode_dump_bulk(payload, cursor, data_end)?;
+                    cursor += consumed;
+                    for item in decode_listpack_strings(&listpack)? {
+                        list.push_back(item);
+                    }
+                }
+                Value::List(list)
+            }
+            RDB_TYPE_HASH_LISTPACK => {
+                let (listpack, consumed) = decode_dump_bulk(payload, cursor, data_end)?;
+                cursor += consumed;
+                let entries = decode_listpack_strings(&listpack)?;
+                let mut chunks = entries.chunks_exact(2);
+                if !chunks.remainder().is_empty() {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                let mut hash = BTreeMap::new();
+                for pair in &mut chunks {
+                    hash.insert(pair[0].clone(), pair[1].clone());
+                }
+                Value::Hash(hash)
+            }
+            RDB_TYPE_SET_INTSET => {
+                let (intset, consumed) = decode_dump_bulk(payload, cursor, data_end)?;
+                cursor += consumed;
+                let mut set = BTreeSet::new();
+                for member in decode_intset_members(&intset)? {
+                    set.insert(member);
+                }
+                Value::Set(set)
+            }
+            RDB_TYPE_SET_LISTPACK => {
+                let (listpack, consumed) = decode_dump_bulk(payload, cursor, data_end)?;
+                cursor += consumed;
+                let members = decode_listpack_strings(&listpack)?;
+                let mut set = BTreeSet::new();
+                for member in members {
+                    set.insert(member);
+                }
+                Value::Set(set)
+            }
+            RDB_TYPE_ZSET_LISTPACK => {
+                let (listpack, consumed) = decode_dump_bulk(payload, cursor, data_end)?;
+                cursor += consumed;
+                let entries = decode_listpack_strings(&listpack)?;
+                let mut chunks = entries.chunks_exact(2);
+                if !chunks.remainder().is_empty() {
+                    return Err(StoreError::InvalidDumpPayload);
+                }
+                let mut zs = SortedSet::new();
+                for pair in &mut chunks {
+                    let score = std::str::from_utf8(&pair[1])
+                        .ok()
+                        .and_then(|raw| raw.parse::<f64>().ok())
+                        .ok_or(StoreError::InvalidDumpPayload)?;
+                    zs.insert(pair[0].clone(), score);
+                }
+                Value::SortedSet(zs)
+            }
             _ => return Err(StoreError::InvalidDumpPayload),
         };
+        if cursor != data_end {
+            return Err(StoreError::InvalidDumpPayload);
+        }
         let expires_at_ms = if ttl_ms > 0 {
             Some(now_ms.saturating_add(ttl_ms))
         } else {
@@ -10427,7 +10569,7 @@ impl Store {
     }
 }
 
-/// CRC16-CCITT (poly 0x1021) for DUMP payload integrity.
+/// CRC16-CCITT (poly 0x1021) helper retained for older internal fixtures.
 #[allow(dead_code)]
 fn crc16(data: &[u8]) -> u16 {
     let mut crc: u16 = 0;
@@ -10444,36 +10586,241 @@ fn crc16(data: &[u8]) -> u16 {
     crc
 }
 
-/// Encode a length as a variable-length integer (1 or 5 bytes).
+/// Encode a Redis RDB length.
 fn encode_length(buf: &mut Vec<u8>, len: usize) {
-    if len < 0x80 {
+    if len < 64 {
         buf.push(len as u8);
-    } else {
-        // Use 5 bytes: 0x80 marker followed by 4-byte little-endian value
+    } else if len < 16_384 {
+        buf.push(0x40 | ((len >> 8) as u8));
+        buf.push((len & 0xFF) as u8);
+    } else if len <= u32::MAX as usize {
         buf.push(0x80);
-        buf.extend_from_slice(&(len as u32).to_le_bytes());
+        buf.extend_from_slice(&(len as u32).to_be_bytes());
+    } else {
+        buf.push(0x81);
+        buf.extend_from_slice(&(len as u64).to_be_bytes());
     }
 }
 
-/// Decode a length from a variable-length integer.
+/// Decode a Redis RDB length.
 fn decode_length(data: &[u8], offset: usize) -> Result<(usize, usize), StoreError> {
     if offset >= data.len() {
         return Err(StoreError::InvalidDumpPayload);
     }
     let first = data[offset];
-    if first < 0x80 {
-        Ok((first as usize, 1))
-    } else if first == 0x80 {
-        if offset + 5 > data.len() {
-            return Err(StoreError::InvalidDumpPayload);
+    match (first & 0xC0) >> 6 {
+        0 => Ok(((first & 0x3F) as usize, 1)),
+        1 => {
+            let second = *data.get(offset + 1).ok_or(StoreError::InvalidDumpPayload)?;
+            let len = (((first & 0x3F) as usize) << 8) | usize::from(second);
+            Ok((len, 2))
         }
-        let mut bytes = [0u8; 4];
-        bytes.copy_from_slice(&data[offset + 1..offset + 5]);
-        Ok((u32::from_le_bytes(bytes) as usize, 5))
-    } else {
-        // Values > 0x80 that are not our 0x80 marker are invalid in this encoding
-        Err(StoreError::InvalidDumpPayload)
+        2 if first == 0x80 => {
+            if offset + 5 > data.len() {
+                return Err(StoreError::InvalidDumpPayload);
+            }
+            let mut bytes = [0u8; 4];
+            bytes.copy_from_slice(&data[offset + 1..offset + 5]);
+            Ok((u32::from_be_bytes(bytes) as usize, 5))
+        }
+        2 if first == 0x81 => {
+            if offset + 9 > data.len() {
+                return Err(StoreError::InvalidDumpPayload);
+            }
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(&data[offset + 1..offset + 9]);
+            let len = u64::from_be_bytes(bytes);
+            let Ok(len) = usize::try_from(len) else {
+                return Err(StoreError::InvalidDumpPayload);
+            };
+            Ok((len, 9))
+        }
+        _ => Err(StoreError::InvalidDumpPayload),
     }
+}
+
+fn decode_dump_bulk(
+    data: &[u8],
+    offset: usize,
+    data_end: usize,
+) -> Result<(Vec<u8>, usize), StoreError> {
+    let (len, len_bytes) = decode_length(data, offset)?;
+    let start = offset
+        .checked_add(len_bytes)
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    let end = start
+        .checked_add(len)
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    if end > data_end {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    Ok((data[start..end].to_vec(), len_bytes + len))
+}
+
+fn encode_dump_bulk(buf: &mut Vec<u8>, data: &[u8]) {
+    encode_length(buf, data.len());
+    buf.extend_from_slice(data);
+}
+
+fn encode_intset(values: &[i64]) -> Option<Vec<u8>> {
+    let width = if values.iter().all(|value| i16::try_from(*value).is_ok()) {
+        2u32
+    } else if values.iter().all(|value| i32::try_from(*value).is_ok()) {
+        4u32
+    } else {
+        8u32
+    };
+    let len = u32::try_from(values.len()).ok()?;
+    let mut out = Vec::with_capacity(8 + values.len() * usize::try_from(width).ok()?);
+    out.extend_from_slice(&width.to_le_bytes());
+    out.extend_from_slice(&len.to_le_bytes());
+    for value in values {
+        match width {
+            2 => out.extend_from_slice(&i16::try_from(*value).ok()?.to_le_bytes()),
+            4 => out.extend_from_slice(&i32::try_from(*value).ok()?.to_le_bytes()),
+            8 => out.extend_from_slice(&value.to_le_bytes()),
+            _ => unreachable!("width selected above"),
+        }
+    }
+    Some(out)
+}
+
+fn encode_listpack_strings(entries: &[&[u8]]) -> Option<Vec<u8>> {
+    let mut encoded_entries = Vec::new();
+    for entry in entries {
+        encode_listpack_entry(&mut encoded_entries, entry);
+    }
+    let total_bytes = 6usize
+        .checked_add(encoded_entries.len())
+        .and_then(|len| len.checked_add(1))?;
+    let total_bytes = u32::try_from(total_bytes).ok()?;
+    let capacity = usize::try_from(total_bytes).ok()?;
+    let mut listpack = Vec::with_capacity(capacity);
+    listpack.extend_from_slice(&total_bytes.to_le_bytes());
+    let entry_count = u16::try_from(entries.len()).unwrap_or(u16::MAX);
+    listpack.extend_from_slice(&entry_count.to_le_bytes());
+    listpack.extend_from_slice(&encoded_entries);
+    listpack.push(0xFF);
+    Some(listpack)
+}
+
+fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
+    let start = buf.len();
+    if entry.len() < 64 {
+        buf.push(0x80 | entry.len() as u8);
+    } else if entry.len() < 4096 {
+        buf.push(0xE0 | ((entry.len() >> 8) as u8 & 0x0F));
+        buf.push((entry.len() & 0xFF) as u8);
+    } else {
+        buf.push(0xF0);
+        buf.extend_from_slice(&(entry.len() as u32).to_le_bytes());
+    }
+    buf.extend_from_slice(entry);
+    let data_len = buf.len() - start;
+    encode_listpack_backlen(buf, data_len);
+}
+
+fn encode_listpack_backlen(buf: &mut Vec<u8>, len: usize) {
+    if len <= 127 {
+        buf.push(len as u8);
+    } else if len < 16_383 {
+        buf.push((len >> 7) as u8);
+        buf.push(((len & 0x7F) as u8) | 0x80);
+    } else if len < 2_097_151 {
+        buf.push((len >> 14) as u8);
+        buf.push((((len >> 7) & 0x7F) as u8) | 0x80);
+        buf.push(((len & 0x7F) as u8) | 0x80);
+    } else if len < 268_435_455 {
+        buf.push((len >> 21) as u8);
+        buf.push((((len >> 14) & 0x7F) as u8) | 0x80);
+        buf.push((((len >> 7) & 0x7F) as u8) | 0x80);
+        buf.push(((len & 0x7F) as u8) | 0x80);
+    } else {
+        buf.push((len >> 28) as u8);
+        buf.push((((len >> 21) & 0x7F) as u8) | 0x80);
+        buf.push((((len >> 14) & 0x7F) as u8) | 0x80);
+        buf.push((((len >> 7) & 0x7F) as u8) | 0x80);
+        buf.push(((len & 0x7F) as u8) | 0x80);
+    }
+}
+
+fn decode_listpack_strings(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
+    fr_persist::listpack::decode_listpack(data)
+        .map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| entry.to_bytes())
+                .collect::<Vec<_>>()
+        })
+        .map_err(|_| StoreError::InvalidDumpPayload)
+}
+
+fn decode_intset_members(data: &[u8]) -> Result<Vec<Vec<u8>>, StoreError> {
+    if data.len() < 8 {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+    let encoding = u32::from_le_bytes(
+        data[0..4]
+            .try_into()
+            .map_err(|_| StoreError::InvalidDumpPayload)?,
+    );
+    let len = u32::from_le_bytes(
+        data[4..8]
+            .try_into()
+            .map_err(|_| StoreError::InvalidDumpPayload)?,
+    ) as usize;
+    let width = match encoding {
+        2 => 2,
+        4 => 4,
+        8 => 8,
+        _ => return Err(StoreError::InvalidDumpPayload),
+    };
+    let expected_len = 8usize
+        .checked_add(
+            len.checked_mul(width)
+                .ok_or(StoreError::InvalidDumpPayload)?,
+        )
+        .ok_or(StoreError::InvalidDumpPayload)?;
+    if data.len() != expected_len {
+        return Err(StoreError::InvalidDumpPayload);
+    }
+
+    let mut members = Vec::with_capacity(len);
+    let mut cursor = 8;
+    for _ in 0..len {
+        let value = match width {
+            2 => {
+                let raw = i16::from_le_bytes(
+                    data[cursor..cursor + 2]
+                        .try_into()
+                        .map_err(|_| StoreError::InvalidDumpPayload)?,
+                );
+                cursor += 2;
+                i64::from(raw)
+            }
+            4 => {
+                let raw = i32::from_le_bytes(
+                    data[cursor..cursor + 4]
+                        .try_into()
+                        .map_err(|_| StoreError::InvalidDumpPayload)?,
+                );
+                cursor += 4;
+                i64::from(raw)
+            }
+            8 => {
+                let raw = i64::from_le_bytes(
+                    data[cursor..cursor + 8]
+                        .try_into()
+                        .map_err(|_| StoreError::InvalidDumpPayload)?,
+                );
+                cursor += 8;
+                raw
+            }
+            _ => unreachable!("width checked above"),
+        };
+        members.push(value.to_string().into_bytes());
+    }
+    Ok(members)
 }
 
 /// Minimal SHA-1 implementation (pure Rust, no unsafe).
@@ -11316,12 +11663,15 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 #[cfg(test)]
 mod tests {
     use super::{
-        BitRangeUnit, EvictionLoopFailure, EvictionLoopStatus, EvictionSafetyGateState,
-        ExpireTimeValue, HLL_REGISTERS, LatencySample, MaxmemoryPolicy, MaxmemoryPressureLevel,
-        NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT, PttlValue, ScoreBound,
-        ScoreMember, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
-        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
-        StreamPendingEntry, Value, ValueType, encode_db_key, hll_sparse_decode,
+        BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, EvictionLoopFailure,
+        EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue, HLL_REGISTERS, LatencySample,
+        MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC,
+        NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK,
+        RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
+        RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK, ScoreBound, ScoreMember, Store, StoreError,
+        StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
+        StreamGroupReadCursor, StreamGroupReadOptions, StreamPendingEntry, Value, ValueType,
+        encode_db_key, encode_length, hll_sparse_decode,
     };
 
     fn group_read_options(
@@ -14875,6 +15225,218 @@ mod tests {
     }
 
     #[test]
+    fn dump_payload_uses_redis_dump_footer() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"hello".to_vec(), Some(1_100), 100);
+        let payload = store.dump_key(b"k", 100).unwrap();
+
+        let version_offset = payload.len() - DUMP_TRAILER_LEN;
+        let crc_offset = payload.len() - DUMP_CRC64_LEN;
+        assert_eq!(payload[0], 0);
+        assert_eq!(payload[1], 5);
+        assert_eq!(&payload[2..version_offset], b"hello");
+        assert_eq!(
+            &payload[version_offset..crc_offset],
+            &RDB_DUMP_VERSION.to_le_bytes()
+        );
+        let stored_crc = u64::from_le_bytes(payload[crc_offset..].try_into().expect("crc bytes"));
+        assert_eq!(stored_crc, fr_persist::crc64_redis(&payload[..crc_offset]));
+    }
+
+    #[test]
+    fn restore_rejects_unsupported_dump_version() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"hello".to_vec(), None, 100);
+        let mut payload = store.dump_key(b"k", 100).unwrap();
+
+        let version_offset = payload.len() - DUMP_TRAILER_LEN;
+        payload[version_offset..version_offset + DUMP_VERSION_LEN]
+            .copy_from_slice(&(RDB_DUMP_VERSION + 1).to_le_bytes());
+        let crc_offset = payload.len() - DUMP_CRC64_LEN;
+        let crc = fr_persist::crc64_redis(&payload[..crc_offset]);
+        payload[crc_offset..].copy_from_slice(&crc.to_le_bytes());
+
+        let mut store2 = Store::new();
+        assert_eq!(
+            store2.restore_key(b"k", 0, &payload, false, 100),
+            Err(StoreError::InvalidDumpPayload)
+        );
+    }
+
+    fn append_dump_footer(mut body: Vec<u8>) -> Vec<u8> {
+        body.extend_from_slice(&RDB_DUMP_VERSION.to_le_bytes());
+        let crc = fr_persist::crc64_redis(&body);
+        body.extend_from_slice(&crc.to_le_bytes());
+        body
+    }
+
+    fn append_raw_dump_bulk(buf: &mut Vec<u8>, data: &[u8]) {
+        encode_length(buf, data.len());
+        buf.extend_from_slice(data);
+    }
+
+    #[test]
+    fn dump_payload_uses_upstream_container_tags() {
+        let mut store = Store::new();
+        store
+            .rpush(b"list", &[b"a".to_vec(), b"b".to_vec()], 100)
+            .unwrap();
+        store.sadd(b"set", &[b"a".to_vec()], 100).unwrap();
+        store.sadd(b"intset", &[b"1".to_vec()], 100).unwrap();
+        store
+            .hset(b"hash", b"f".to_vec(), b"v".to_vec(), 100)
+            .unwrap();
+        store.zadd(b"zset", &[(1.5, b"a".to_vec())], 100).unwrap();
+        for i in 0..129 {
+            store
+                .sadd(b"raw_set", &[format!("member-{i}").into_bytes()], 100)
+                .unwrap();
+            store
+                .hset(
+                    b"raw_hash",
+                    format!("field-{i}").into_bytes(),
+                    b"v".to_vec(),
+                    100,
+                )
+                .unwrap();
+        }
+        let raw_zset_members: Vec<(f64, Vec<u8>)> = (0..129)
+            .map(|i| (f64::from(i), format!("member-{i}").into_bytes()))
+            .collect();
+        store.zadd(b"raw_zset", &raw_zset_members, 100).unwrap();
+
+        assert_eq!(
+            store.dump_key(b"list", 100).unwrap()[0],
+            RDB_TYPE_LIST_QUICKLIST_2
+        );
+        assert_eq!(
+            store.dump_key(b"intset", 100).unwrap()[0],
+            RDB_TYPE_SET_INTSET
+        );
+        assert_eq!(
+            store.dump_key(b"set", 100).unwrap()[0],
+            RDB_TYPE_SET_LISTPACK
+        );
+        assert_eq!(
+            store.dump_key(b"hash", 100).unwrap()[0],
+            RDB_TYPE_HASH_LISTPACK
+        );
+        assert_eq!(
+            store.dump_key(b"zset", 100).unwrap()[0],
+            RDB_TYPE_ZSET_LISTPACK
+        );
+        assert_eq!(store.dump_key(b"raw_set", 100).unwrap()[0], RDB_TYPE_SET);
+        assert_eq!(store.dump_key(b"raw_hash", 100).unwrap()[0], RDB_TYPE_HASH);
+        assert_eq!(
+            store.dump_key(b"raw_zset", 100).unwrap()[0],
+            RDB_TYPE_ZSET_2
+        );
+    }
+
+    #[test]
+    fn dump_restore_accepts_upstream_compact_encodings() {
+        let upstream_string = [
+            0x00, 0x05, b'h', b'e', b'l', b'l', b'o', 0x0B, 0x00, 0x0A, 0xAD, 0x62, 0x05, 0x98,
+            0xAB, 0xC9, 0x83,
+        ];
+        let upstream_list = [
+            0x12, 0x01, 0x02, 0x0D, 0x0D, 0x00, 0x00, 0x00, 0x02, 0x00, 0x81, b'a', 0x02, 0x81,
+            b'b', 0x02, 0xFF, 0x0B, 0x00, 0x01, 0x34, 0xB7, 0xFA, 0xEE, 0xDE, 0x52, 0x38,
+        ];
+        let upstream_set = [
+            0x14, 0x0D, 0x0D, 0x00, 0x00, 0x00, 0x02, 0x00, 0x81, b'a', 0x02, 0x81, b'b', 0x02,
+            0xFF, 0x0B, 0x00, 0x0A, 0xEC, 0x0A, 0xB4, 0x49, 0xA3, 0xD6, 0x54,
+        ];
+        let upstream_hash = [
+            0x10, 0x0D, 0x0D, 0x00, 0x00, 0x00, 0x02, 0x00, 0x81, b'f', 0x02, 0x81, b'v', 0x02,
+            0xFF, 0x0B, 0x00, 0x49, 0x2E, 0x80, 0x37, 0xDE, 0xCB, 0xE1, 0x14,
+        ];
+        let upstream_zset = [
+            0x11, 0x0F, 0x0F, 0x00, 0x00, 0x00, 0x02, 0x00, 0x81, b'a', 0x02, 0x83, b'1', b'.',
+            b'5', 0x04, 0xFF, 0x0B, 0x00, 0x61, 0xD3, 0xD3, 0x6A, 0x7D, 0x11, 0x94, 0x11,
+        ];
+
+        let mut store = Store::new();
+        store
+            .restore_key(b"str", 0, &upstream_string, false, 100)
+            .unwrap();
+        store
+            .restore_key(b"list", 0, &upstream_list, false, 100)
+            .unwrap();
+        store
+            .restore_key(b"set", 0, &upstream_set, false, 100)
+            .unwrap();
+        store
+            .restore_key(b"hash", 0, &upstream_hash, false, 100)
+            .unwrap();
+        store
+            .restore_key(b"zset", 0, &upstream_zset, false, 100)
+            .unwrap();
+
+        assert_eq!(store.get(b"str", 100).unwrap(), Some(b"hello".to_vec()));
+        assert_eq!(
+            store.lrange(b"list", 0, -1, 100).unwrap(),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
+        assert!(store.sismember(b"set", b"a", 100).unwrap());
+        assert!(store.sismember(b"set", b"b", 100).unwrap());
+        assert_eq!(store.hget(b"hash", b"f", 100).unwrap(), Some(b"v".to_vec()));
+        assert_eq!(store.zscore(b"zset", b"a", 100).unwrap(), Some(1.5));
+    }
+
+    #[test]
+    fn restore_accepts_upstream_large_and_intset_encodings() {
+        let mut raw_set = vec![RDB_TYPE_SET];
+        encode_length(&mut raw_set, 2);
+        append_raw_dump_bulk(&mut raw_set, b"a");
+        append_raw_dump_bulk(&mut raw_set, b"b");
+        let raw_set = append_dump_footer(raw_set);
+
+        let mut intset = Vec::new();
+        intset.extend_from_slice(&2u32.to_le_bytes());
+        intset.extend_from_slice(&2u32.to_le_bytes());
+        intset.extend_from_slice(&1i16.to_le_bytes());
+        intset.extend_from_slice(&2i16.to_le_bytes());
+        let mut intset_set = vec![RDB_TYPE_SET_INTSET];
+        append_raw_dump_bulk(&mut intset_set, &intset);
+        let intset_set = append_dump_footer(intset_set);
+
+        let mut raw_hash = vec![RDB_TYPE_HASH];
+        encode_length(&mut raw_hash, 1);
+        append_raw_dump_bulk(&mut raw_hash, b"f");
+        append_raw_dump_bulk(&mut raw_hash, b"v");
+        let raw_hash = append_dump_footer(raw_hash);
+
+        let mut raw_zset = vec![RDB_TYPE_ZSET_2];
+        encode_length(&mut raw_zset, 1);
+        append_raw_dump_bulk(&mut raw_zset, b"a");
+        raw_zset.extend_from_slice(&1.5f64.to_le_bytes());
+        let raw_zset = append_dump_footer(raw_zset);
+
+        let mut store = Store::new();
+        store
+            .restore_key(b"raw_set", 0, &raw_set, false, 100)
+            .unwrap();
+        store
+            .restore_key(b"intset", 0, &intset_set, false, 100)
+            .unwrap();
+        store
+            .restore_key(b"raw_hash", 0, &raw_hash, false, 100)
+            .unwrap();
+        store
+            .restore_key(b"raw_zset", 0, &raw_zset, false, 100)
+            .unwrap();
+
+        assert!(store.sismember(b"raw_set", b"a", 100).unwrap());
+        assert!(store.sismember(b"intset", b"1", 100).unwrap());
+        assert_eq!(
+            store.hget(b"raw_hash", b"f", 100).unwrap(),
+            Some(b"v".to_vec())
+        );
+        assert_eq!(store.zscore(b"raw_zset", b"a", 100).unwrap(), Some(1.5));
+    }
+
+    #[test]
     fn dump_restore_list_round_trip() {
         let mut store = Store::new();
         store
@@ -16880,18 +17442,6 @@ mod tests {
             store
         }
 
-        fn dump_payload_ttl_ms(payload: &[u8]) -> u64 {
-            let ttl_offset = payload
-                .len()
-                .checked_sub(17)
-                .expect("self-generated DUMP payload must include ttl/version/crc trailer");
-            u64::from_le_bytes(
-                payload[ttl_offset..ttl_offset + 8]
-                    .try_into()
-                    .expect("self-generated DUMP payload ttl trailer must be complete"),
-            )
-        }
-
         #[test]
         fn aof_rewrite_replay_preserves_function_libraries_and_multidb_expiries() {
             let mut original = Store::new();
@@ -17146,11 +17696,11 @@ mod tests {
                 let payload = original
                     .dump_key(&key, METAMORPHIC_NOW_MS)
                     .expect("installed string key must dump");
-                let ttl_ms = dump_payload_ttl_ms(&payload);
+                let restore_ttl_ms = ttl_ms.unwrap_or(0);
 
                 let mut restored = Store::new();
                 restored
-                    .restore_key(&key, ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
+                    .restore_key(&key, restore_ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
                     .expect("self-generated string dump must restore");
                 prop_assert_eq!(
                     restored.get(&key, METAMORPHIC_NOW_MS).unwrap(),
@@ -17184,11 +17734,11 @@ mod tests {
                 let payload = original
                     .dump_key(&key, METAMORPHIC_NOW_MS)
                     .expect("installed list key must dump");
-                let ttl_ms = dump_payload_ttl_ms(&payload);
+                let restore_ttl_ms = ttl_ms.unwrap_or(0);
 
                 let mut restored = Store::new();
                 restored
-                    .restore_key(&key, ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
+                    .restore_key(&key, restore_ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
                     .expect("self-generated list dump must restore");
                 prop_assert_eq!(restored.lrange(&key, 0, -1, METAMORPHIC_NOW_MS).unwrap(), values);
 
@@ -17219,11 +17769,11 @@ mod tests {
                 let payload = original
                     .dump_key(&key, METAMORPHIC_NOW_MS)
                     .expect("installed set key must dump");
-                let ttl_ms = dump_payload_ttl_ms(&payload);
+                let restore_ttl_ms = ttl_ms.unwrap_or(0);
 
                 let mut restored = Store::new();
                 restored
-                    .restore_key(&key, ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
+                    .restore_key(&key, restore_ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
                     .expect("self-generated set dump must restore");
                 let restored_members =
                     BTreeSet::from_iter(restored.smembers(&key, METAMORPHIC_NOW_MS).unwrap());
@@ -17259,11 +17809,11 @@ mod tests {
                 let payload = original
                     .dump_key(&key, METAMORPHIC_NOW_MS)
                     .expect("installed hash key must dump");
-                let ttl_ms = dump_payload_ttl_ms(&payload);
+                let restore_ttl_ms = ttl_ms.unwrap_or(0);
 
                 let mut restored = Store::new();
                 restored
-                    .restore_key(&key, ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
+                    .restore_key(&key, restore_ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
                     .expect("self-generated hash dump must restore");
                 prop_assert_eq!(restored.hgetall(&key, METAMORPHIC_NOW_MS).unwrap(), entries);
 
@@ -17297,11 +17847,11 @@ mod tests {
                 let payload = original
                     .dump_key(&key, METAMORPHIC_NOW_MS)
                     .expect("installed sorted-set key must dump");
-                let ttl_ms = dump_payload_ttl_ms(&payload);
+                let restore_ttl_ms = ttl_ms.unwrap_or(0);
 
                 let mut restored = Store::new();
                 restored
-                    .restore_key(&key, ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
+                    .restore_key(&key, restore_ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
                     .expect("self-generated sorted-set dump must restore");
                 prop_assert_eq!(
                     restored
@@ -17345,11 +17895,11 @@ mod tests {
                 let payload = original
                     .dump_key(&key, METAMORPHIC_NOW_MS)
                     .expect("installed stream key must dump");
-                let ttl_ms = dump_payload_ttl_ms(&payload);
+                let restore_ttl_ms = ttl_ms.unwrap_or(0);
 
                 let mut restored = Store::new();
                 restored
-                    .restore_key(&key, ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
+                    .restore_key(&key, restore_ttl_ms, &payload, false, METAMORPHIC_NOW_MS)
                     .expect("self-generated stream dump must restore");
                 prop_assert_eq!(
                     restored

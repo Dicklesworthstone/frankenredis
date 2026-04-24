@@ -129,9 +129,7 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
     }
     // 13-bit signed int: 110xxxxx + 1 byte.
     if first & 0xE0 == 0xC0 {
-        let second = *data
-            .get(cursor + 1)
-            .ok_or(ListpackError::TruncatedEntry)?;
+        let second = *data.get(cursor + 1).ok_or(ListpackError::TruncatedEntry)?;
         let raw = (u16::from(first & 0x1F) << 8) | u16::from(second);
         // Sign-extend from 13 bits.
         let signed = if raw & 0x1000 != 0 {
@@ -145,9 +143,7 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
     }
     // 12-bit str: 1110xxxx + 1 byte = length, then string.
     if first & 0xF0 == 0xE0 {
-        let second = *data
-            .get(cursor + 1)
-            .ok_or(ListpackError::TruncatedEntry)?;
+        let second = *data.get(cursor + 1).ok_or(ListpackError::TruncatedEntry)?;
         let slen = ((u32::from(first & 0x0F) << 8) | u32::from(second)) as usize;
         let start = cursor + 2;
         let end = start
@@ -194,19 +190,17 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
             let raw = i16::from_le_bytes([data[cursor + 1], data[cursor + 2]]);
             let data_len = 3;
             let backlen_len = backlen_byte_count(data_len);
-            Ok((ListpackEntry::Integer(i64::from(raw)), data_len + backlen_len))
+            Ok((
+                ListpackEntry::Integer(i64::from(raw)),
+                data_len + backlen_len,
+            ))
         }
         0xF2 => {
             // 24-bit signed int: 11110010 + 3 bytes LE.
             if cursor + 4 > data.len() {
                 return Err(ListpackError::TruncatedEntry);
             }
-            let bytes = [
-                data[cursor + 1],
-                data[cursor + 2],
-                data[cursor + 3],
-                0,
-            ];
+            let bytes = [data[cursor + 1], data[cursor + 2], data[cursor + 3], 0];
             let raw_u32 = u32::from_le_bytes(bytes);
             // Sign-extend from 24 bits.
             let signed = if raw_u32 & 0x00_80_00_00 != 0 {
@@ -231,7 +225,10 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
             ]);
             let data_len = 5;
             let backlen_len = backlen_byte_count(data_len);
-            Ok((ListpackEntry::Integer(i64::from(raw)), data_len + backlen_len))
+            Ok((
+                ListpackEntry::Integer(i64::from(raw)),
+                data_len + backlen_len,
+            ))
         }
         0xF4 => {
             // 64-bit signed int: 11110100 + i64 LE.
@@ -420,7 +417,11 @@ mod tests {
 
     #[test]
     fn decode_13bit_int_positive_and_negative() {
-        let lp = assemble(&[&entry_13bit_int(4095), &entry_13bit_int(-4096), &entry_13bit_int(0)]);
+        let lp = assemble(&[
+            &entry_13bit_int(4095),
+            &entry_13bit_int(-4096),
+            &entry_13bit_int(0),
+        ]);
         let out = decode_listpack(&lp).unwrap();
         assert_eq!(
             out,
@@ -519,7 +520,10 @@ mod tests {
         let mut lp = assemble(&[&entry_7bit_uint(3)]);
         // Overwrite total_bytes with a wildly-high value.
         lp[0..4].copy_from_slice(&(1_000_000u32).to_le_bytes());
-        assert_eq!(decode_listpack(&lp), Err(ListpackError::TotalBytesOutOfRange));
+        assert_eq!(
+            decode_listpack(&lp),
+            Err(ListpackError::TotalBytesOutOfRange)
+        );
     }
 
     #[test]
