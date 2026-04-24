@@ -8122,6 +8122,14 @@ mod tests {
                 .arg("no")
                 .arg("--protected-mode")
                 .arg("no")
+                // DEBUG commands are disabled by default in Redis 7;
+                // our runtime accepts them unconditionally. Enable
+                // them on the vendored oracle so core_debug cases
+                // actually run instead of all returning the
+                // enable-debug-command lockout error.
+                // (br-frankenredis-me3i)
+                .arg("--enable-debug-command")
+                .arg("yes")
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()
@@ -9238,6 +9246,125 @@ mod tests {
         let oracle = oracle_handle.oracle_config();
         run_live_diff_tolerant("core_function", || {
             run_live_redis_diff(&cfg, "core_function.json", &oracle)
+        });
+    }
+
+    /// Wire the `core_debug.json` fixture through the self-spawning
+    /// vendored redis-server oracle. Covers DEBUG STRINGMATCH-LEN /
+    /// SET-ACTIVE-EXPIRE (on-value cases) / unknown-subcommand.
+    ///
+    /// DEBUG DIGEST / DIGEST-VALUE + DEBUG OBJECT + the case-
+    /// insensitive dispatch cases XFAIL — we don't implement the
+    /// xor-SHA1 digest algorithm, our DEBUG OBJECT reply omits the
+    /// pointer/lru/serializedlength fields, and our SET-ACTIVE-EXPIRE
+    /// error wording differs. Tracked on br-frankenredis-1pe7. Slow
+    /// or state-mutating DEBUG subcommands (SLEEP non-zero, RELOAD,
+    /// JMAP, SEGFAULT, CHANGE-REPL-ID, listpack/quicklist/ziplist
+    /// introspection) stay filtered. (br-frankenredis-me3i, 1pe7)
+    #[test]
+    fn live_redis_core_debug_matches_runtime() {
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+        let fixture = match load_conformance_fixture(&cfg, "core_debug.json") {
+            Ok(f) => f,
+            Err(err) => {
+                eprintln!("[live-oracle:core_debug] fixture load error: {err}");
+                return;
+            }
+        };
+        const XFAIL: &[&str] = &[
+            "debug_case_insensitive_digest",
+            "debug_case_insensitive_digest_value",
+            "debug_case_insensitive_reload",
+            "debug_digest_all_types",
+            "debug_digest_empty_db",
+            "debug_digest_value_all_types",
+            "debug_digest_value_empty_string",
+            "debug_digest_value_expired_key",
+            "debug_digest_value_hash_key",
+            "debug_digest_value_list_key",
+            "debug_digest_value_missing_key",
+            "debug_digest_value_mixed_exists_nonexists",
+            "debug_digest_value_mixed_types",
+            "debug_digest_value_multiple_keys",
+            "debug_digest_value_nonexistent_keys",
+            "debug_digest_value_single_key",
+            "debug_digest_value_single_nonexistent",
+            "debug_digest_value_special_chars_key",
+            "debug_digest_value_stream",
+            "debug_digest_value_wrong_arity",
+            "debug_digest_value_wrong_arity_no_keys",
+            "debug_digest_with_data",
+            "debug_digest_wrong_arity",
+            "debug_mixed_case_digest_value",
+            "debug_mixed_case_object",
+            "debug_object_case_insensitive",
+            "debug_object_embstr_encoded",
+            "debug_object_empty_string",
+            "debug_object_extra_args_error",
+            "debug_object_hash",
+            "debug_object_hyperloglog",
+            "debug_object_int_encoded_string",
+            "debug_object_intset",
+            "debug_object_large_integer",
+            "debug_object_list",
+            "debug_object_raw_encoded",
+            "debug_object_set",
+            "debug_object_special_chars_key",
+            "debug_object_stream",
+            "debug_object_string",
+            "debug_object_wrong_arity_missing_key",
+            "debug_object_wrong_arity_no_key",
+            "debug_object_zset",
+            "debug_set_active_expire_float_value",
+            "debug_set_active_expire_invalid_value",
+            "debug_set_active_expire_large_value",
+            "debug_set_active_expire_negative_value",
+            "debug_set_active_expire_wrong_arity",
+        ];
+        let stable: Vec<String> = fixture
+            .cases
+            .iter()
+            .filter(|case| {
+                let name = case.name.to_ascii_lowercase();
+                if XFAIL.contains(&name.as_str()) {
+                    return false;
+                }
+                !(name.contains("debug_sleep")
+                    || name.contains("debug_reload")
+                    || name.contains("debug_jmap")
+                    || name.contains("debug_segfault")
+                    || name.contains("debug_change_repl_id")
+                    || name.contains("debug_listpack")
+                    || name.contains("debug_quicklist")
+                    || name.contains("debug_ziplist"))
+            })
+            .map(|case| case.name.clone())
+            .collect();
+        let refs: Vec<&str> = stable.iter().map(String::as_str).collect();
+        run_live_diff_tolerant("core_debug", || {
+            run_live_redis_diff_for_cases(&cfg, "core_debug.json", &refs, &oracle)
+        });
+    }
+
+    /// Wire the `core_module_sentinel.json` fixture through the
+    /// self-spawning vendored redis-server oracle. Covers MODULE
+    /// LIST (no modules loaded in the vendored oracle) and SENTINEL
+    /// introspection (sentinel-disabled server returns the documented
+    /// "Unknown Sentinel subcommand" / "sentinel only" errors).
+    /// (br-frankenredis-2hbk)
+    #[test]
+    fn live_redis_core_module_sentinel_matches_runtime() {
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+        run_live_diff_tolerant("core_module_sentinel", || {
+            run_live_redis_diff(&cfg, "core_module_sentinel.json", &oracle)
         });
     }
 
