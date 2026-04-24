@@ -35190,6 +35190,43 @@ mod tests {
         reply
     }
 
+    fn redis_bulk_string(port: u16, argv: &[&[u8]]) -> Vec<u8> {
+        match redis_command(port, argv) {
+            RespFrame::BulkString(Some(bytes)) => bytes,
+            other => panic!("expected Redis bulk string, got {other:?}"), // ubs:ignore - test assertion
+        }
+    }
+
+    fn redis_array_bulk_strings(port: u16, argv: &[&[u8]]) -> Vec<Vec<u8>> {
+        match redis_command(port, argv) {
+            RespFrame::Array(Some(items)) => items
+                .into_iter()
+                .map(|item| match item {
+                    RespFrame::BulkString(Some(bytes)) => bytes,
+                    RespFrame::SimpleString(s) => s.into_bytes(),
+                    RespFrame::Integer(i) => i.to_string().into_bytes(),
+                    other => panic!("expected scalar Redis array item, got {other:?}"), // ubs:ignore - test assertion
+                })
+                .collect(),
+            other => panic!("expected Redis array reply, got {other:?}"), // ubs:ignore - test assertion
+        }
+    }
+
+    fn sorted_bytes(mut values: Vec<Vec<u8>>) -> Vec<Vec<u8>> {
+        values.sort();
+        values
+    }
+
+    fn sorted_bulk_pairs(flat: Vec<Vec<u8>>) -> Vec<(Vec<u8>, Vec<u8>)> {
+        assert_eq!(flat.len() % 2, 0, "flat pair list must be even");
+        let mut pairs: Vec<(Vec<u8>, Vec<u8>)> = flat
+            .chunks_exact(2)
+            .map(|pair| (pair[0].clone(), pair[1].clone()))
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
     #[test]
     fn del_like_wrong_arity_keeps_original_command_name() {
         let mut store = Store::new();
@@ -35522,6 +35559,229 @@ mod tests {
             .expect("pending summary");
         assert_eq!(pending.0, 2);
         assert_eq!(pending.3, vec![(b"alice".to_vec(), 2)]);
+    }
+
+    #[test]
+    fn migrate_all_dump_restore_types_load_in_vendored_redis_and_restore_back() {
+        let root = project_root();
+        let redis_server = root.join("legacy_redis_code/redis/src/redis-server");
+        let redis_cli = root.join("legacy_redis_code/redis/src/redis-cli");
+        if !redis_server.is_file() || !redis_cli.is_file() {
+            eprintln!(
+                "[SKIP] vendored redis-server/redis-cli unavailable under {}",
+                root.display()
+            );
+            return;
+        }
+
+        let port = pick_free_port();
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let child = std::process::Command::new(&redis_server)
+            .arg("--dir")
+            .arg(std::env::temp_dir())
+            .arg("--dbfilename")
+            .arg(format!(
+                "fr_command_migrate_all_types_{}_{}.rdb",
+                std::process::id(),
+                unique
+            ))
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--bind")
+            .arg("127.0.0.1")
+            .arg("--protected-mode")
+            .arg("no")
+            .arg("--save")
+            .arg("")
+            .arg("--appendonly")
+            .arg("no")
+            .arg("--daemonize")
+            .arg("no")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn vendored redis-server");
+        let _redis = ManagedRedis { child };
+        assert!(
+            wait_for_redis_cli(&redis_cli, port),
+            "vendored redis-server did not become ready"
+        );
+
+        let keys: [&[u8]; 6] = [b"str", b"list", b"set", b"hash", b"zset", b"stream"];
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"str".to_vec(), b"value".to_vec()],
+            &mut store,
+            100,
+        )
+        .expect("seed string");
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"list".to_vec(),
+                b"one".to_vec(),
+                b"two".to_vec(),
+                b"three".to_vec(),
+            ],
+            &mut store,
+            100,
+        )
+        .expect("seed list");
+        dispatch_argv(
+            &[
+                b"SADD".to_vec(),
+                b"set".to_vec(),
+                b"beta".to_vec(),
+                b"alpha".to_vec(),
+            ],
+            &mut store,
+            100,
+        )
+        .expect("seed set");
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"hash".to_vec(),
+                b"field1".to_vec(),
+                b"value1".to_vec(),
+                b"field2".to_vec(),
+                b"value2".to_vec(),
+            ],
+            &mut store,
+            100,
+        )
+        .expect("seed hash");
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zset".to_vec(),
+                b"1.5".to_vec(),
+                b"one".to_vec(),
+                b"-2".to_vec(),
+                b"two".to_vec(),
+            ],
+            &mut store,
+            100,
+        )
+        .expect("seed zset");
+        store
+            .xadd(
+                b"stream",
+                (1, 0),
+                &[(b"name".to_vec(), b"alice".to_vec())],
+                100,
+            )
+            .expect("seed first stream entry");
+        store
+            .xadd(
+                b"stream",
+                (2, 0),
+                &[(b"name".to_vec(), b"bob".to_vec())],
+                100,
+            )
+            .expect("seed second stream entry");
+
+        let mut migrate_argv = vec![
+            b"MIGRATE".to_vec(),
+            b"127.0.0.1".to_vec(),
+            port.to_string().into_bytes(),
+            Vec::new(),
+            b"0".to_vec(),
+            b"5000".to_vec(),
+            b"REPLACE".to_vec(),
+            b"KEYS".to_vec(),
+        ];
+        migrate_argv.extend(keys.iter().map(|key| (*key).to_vec()));
+        let request = parse_migrate_request(&migrate_argv).expect("parse migrate request");
+        let key_specs: Vec<MigrateKeySpec> = keys
+            .iter()
+            .map(|key| MigrateKeySpec {
+                source_key: (*key).to_vec(),
+                target_key: (*key).to_vec(),
+            })
+            .collect();
+
+        let outcome = execute_migrate(&request, &key_specs, &mut store, 200).expect("migrate");
+        assert_eq!(outcome.reply, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(
+            outcome.deleted_keys,
+            keys.iter().map(|key| (*key).to_vec()).collect::<Vec<_>>()
+        );
+        for key in keys {
+            assert!(!store.exists(key, 200), "source key was not deleted");
+        }
+
+        assert_eq!(
+            redis_command(port, &[b"GET", b"str"]),
+            RespFrame::BulkString(Some(b"value".to_vec()))
+        );
+        assert_eq!(
+            redis_array_bulk_strings(port, &[b"LRANGE", b"list", b"0", b"-1"]),
+            vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
+        );
+        assert_eq!(
+            sorted_bytes(redis_array_bulk_strings(port, &[b"SMEMBERS", b"set"])),
+            vec![b"alpha".to_vec(), b"beta".to_vec()]
+        );
+        assert_eq!(
+            sorted_bulk_pairs(redis_array_bulk_strings(port, &[b"HGETALL", b"hash"])),
+            vec![
+                (b"field1".to_vec(), b"value1".to_vec()),
+                (b"field2".to_vec(), b"value2".to_vec()),
+            ]
+        );
+        assert_eq!(
+            redis_array_bulk_strings(port, &[b"ZRANGE", b"zset", b"0", b"-1"]),
+            vec![b"two".to_vec(), b"one".to_vec()]
+        );
+        assert_eq!(
+            redis_command(port, &[b"XLEN", b"stream"]),
+            RespFrame::Integer(2)
+        );
+
+        let mut restored = Store::new();
+        for key in keys {
+            let dump_payload = redis_bulk_string(port, &[b"DUMP", key]);
+            restored
+                .restore_key(key, 0, &dump_payload, false, 300)
+                .unwrap_or_else(|err| {
+                    panic!(
+                        "restore Redis dump for {} into FrankenRedis: {err:?}",
+                        String::from_utf8_lossy(key)
+                    )
+                });
+        }
+        assert_eq!(restored.get(b"str", 300).unwrap(), Some(b"value".to_vec()));
+        assert_eq!(
+            restored.lrange(b"list", 0, -1, 300).unwrap(),
+            vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
+        );
+        assert_eq!(
+            sorted_bytes(restored.smembers(b"set", 300).unwrap()),
+            vec![b"alpha".to_vec(), b"beta".to_vec()]
+        );
+        assert_eq!(
+            restored.hgetall(b"hash", 300).unwrap(),
+            vec![
+                (b"field1".to_vec(), b"value1".to_vec()),
+                (b"field2".to_vec(), b"value2".to_vec()),
+            ]
+        );
+        assert_eq!(
+            restored.zrange_withscores(b"zset", 0, -1, 300).unwrap(),
+            vec![(b"two".to_vec(), -2.0), (b"one".to_vec(), 1.5)]
+        );
+        let entries = restored
+            .xrange(b"stream", (0, 0), (u64::MAX, u64::MAX), None, 300)
+            .expect("read restored stream entries");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].0, (1, 0));
+        assert_eq!(entries[0].1, vec![(b"name".to_vec(), b"alice".to_vec())]);
+        assert_eq!(entries[1].0, (2, 0));
+        assert_eq!(entries[1].1, vec![(b"name".to_vec(), b"bob".to_vec())]);
     }
 
     #[test]

@@ -10162,13 +10162,9 @@ impl Store {
                 cursor += consumed;
                 let mut list = VecDeque::with_capacity(count.min(1024));
                 for _ in 0..count {
-                    let (len, consumed) = decode_length(payload, cursor)?;
+                    let (item, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += consumed;
-                    if cursor + len > data_end {
-                        return Err(StoreError::InvalidDumpPayload);
-                    }
-                    list.push_back(payload[cursor..cursor + len].to_vec());
-                    cursor += len;
+                    list.push_back(item);
                 }
                 Value::List(list)
             }
@@ -10178,13 +10174,9 @@ impl Store {
                 cursor += consumed;
                 let mut set = BTreeSet::new();
                 for _ in 0..count {
-                    let (len, consumed) = decode_length(payload, cursor)?;
+                    let (member, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += consumed;
-                    if cursor + len > data_end {
-                        return Err(StoreError::InvalidDumpPayload);
-                    }
-                    set.insert(payload[cursor..cursor + len].to_vec());
-                    cursor += len;
+                    set.insert(member);
                 }
                 Value::Set(set)
             }
@@ -10194,20 +10186,10 @@ impl Store {
                 cursor += consumed;
                 let mut hash = BTreeMap::new();
                 for _ in 0..count {
-                    let (flen, fc) = decode_length(payload, cursor)?;
+                    let (field, fc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += fc;
-                    if cursor + flen > data_end {
-                        return Err(StoreError::InvalidDumpPayload);
-                    }
-                    let field = payload[cursor..cursor + flen].to_vec();
-                    cursor += flen;
-                    let (vlen, vc) = decode_length(payload, cursor)?;
+                    let (value, vc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += vc;
-                    if cursor + vlen > data_end {
-                        return Err(StoreError::InvalidDumpPayload);
-                    }
-                    let value = payload[cursor..cursor + vlen].to_vec();
-                    cursor += vlen;
                     hash.insert(field, value);
                 }
                 Value::Hash(hash)
@@ -10218,13 +10200,11 @@ impl Store {
                 cursor += consumed;
                 let mut zs = SortedSet::new();
                 for _ in 0..count {
-                    let (mlen, mc) = decode_length(payload, cursor)?;
+                    let (member, mc) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += mc;
-                    if cursor + mlen + 8 > data_end {
+                    if cursor + 8 > data_end {
                         return Err(StoreError::InvalidDumpPayload);
                     }
-                    let member = payload[cursor..cursor + mlen].to_vec();
-                    cursor += mlen;
                     let score = f64::from_le_bytes(
                         payload[cursor..cursor + 8]
                             .try_into()
@@ -10269,7 +10249,7 @@ impl Store {
                     if container != 2 {
                         return Err(StoreError::InvalidDumpPayload);
                     }
-                    let (listpack, consumed) = decode_dump_bulk(payload, cursor, data_end)?;
+                    let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                     cursor += consumed;
                     for item in decode_listpack_strings(&listpack)? {
                         list.push_back(item);
@@ -10278,7 +10258,7 @@ impl Store {
                 Value::List(list)
             }
             RDB_TYPE_HASH_LISTPACK => {
-                let (listpack, consumed) = decode_dump_bulk(payload, cursor, data_end)?;
+                let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
                 let entries = decode_listpack_strings(&listpack)?;
                 let mut chunks = entries.chunks_exact(2);
@@ -10292,7 +10272,7 @@ impl Store {
                 Value::Hash(hash)
             }
             RDB_TYPE_SET_INTSET => {
-                let (intset, consumed) = decode_dump_bulk(payload, cursor, data_end)?;
+                let (intset, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
                 let mut set = BTreeSet::new();
                 for member in decode_intset_members(&intset)? {
@@ -10301,7 +10281,7 @@ impl Store {
                 Value::Set(set)
             }
             RDB_TYPE_SET_LISTPACK => {
-                let (listpack, consumed) = decode_dump_bulk(payload, cursor, data_end)?;
+                let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
                 let members = decode_listpack_strings(&listpack)?;
                 let mut set = BTreeSet::new();
@@ -10311,7 +10291,7 @@ impl Store {
                 Value::Set(set)
             }
             RDB_TYPE_ZSET_LISTPACK => {
-                let (listpack, consumed) = decode_dump_bulk(payload, cursor, data_end)?;
+                let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
                 cursor += consumed;
                 let entries = decode_listpack_strings(&listpack)?;
                 let mut chunks = entries.chunks_exact(2);
@@ -15644,6 +15624,12 @@ mod tests {
             0x10, 0x0D, 0x0D, 0x00, 0x00, 0x00, 0x02, 0x00, 0x81, b'f', 0x02, 0x81, b'v', 0x02,
             0xFF, 0x0B, 0x00, 0x49, 0x2E, 0x80, 0x37, 0xDE, 0xCB, 0xE1, 0x14,
         ];
+        let upstream_lzf_hash = [
+            0x10, 0xC3, 0x21, 0x27, 0x13, 0x27, 0x00, 0x00, 0x00, 0x04, 0x00, 0x86, b'f',
+            b'i', b'e', b'l', b'd', b'1', 0x07, 0x86, b'v', b'a', b'l', b'u', b'e', 0x20,
+            0x07, 0x60, 0x0F, 0x00, 0x32, 0xA0, 0x0F, 0x02, 0x32, 0x07, 0xFF, 0x0B, 0x00,
+            0x5B, 0xCB, 0x7E, 0x31, 0x6C, 0xB5, 0xBB, 0xFD,
+        ];
         let upstream_zset = [
             0x11, 0x0F, 0x0F, 0x00, 0x00, 0x00, 0x02, 0x00, 0x81, b'a', 0x02, 0x83, b'1', b'.',
             b'5', 0x04, 0xFF, 0x0B, 0x00, 0x61, 0xD3, 0xD3, 0x6A, 0x7D, 0x11, 0x94, 0x11,
@@ -15663,6 +15649,9 @@ mod tests {
             .restore_key(b"hash", 0, &upstream_hash, false, 100)
             .unwrap();
         store
+            .restore_key(b"lzf_hash", 0, &upstream_lzf_hash, false, 100)
+            .unwrap();
+        store
             .restore_key(b"zset", 0, &upstream_zset, false, 100)
             .unwrap();
 
@@ -15674,6 +15663,14 @@ mod tests {
         assert!(store.sismember(b"set", b"a", 100).unwrap());
         assert!(store.sismember(b"set", b"b", 100).unwrap());
         assert_eq!(store.hget(b"hash", b"f", 100).unwrap(), Some(b"v".to_vec()));
+        assert_eq!(
+            store.hget(b"lzf_hash", b"field1", 100).unwrap(),
+            Some(b"value1".to_vec())
+        );
+        assert_eq!(
+            store.hget(b"lzf_hash", b"field2", 100).unwrap(),
+            Some(b"value2".to_vec())
+        );
         assert_eq!(store.zscore(b"zset", b"a", 100).unwrap(), Some(1.5));
     }
 
