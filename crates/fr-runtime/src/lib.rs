@@ -8828,10 +8828,12 @@ impl Runtime {
         argv: &[Vec<u8>],
         now_ms: u64,
     ) -> Result<RespFrame, CommandError> {
+        // Error-reply wording MUST match upstream db.c::scanGenericCommand
+        // (br-frankenredis-hjzc).
         if argv.len() < 2 {
             return Err(CommandError::WrongArity("SCAN"));
         }
-        let cursor = parse_u64_full_arg(&argv[1])?;
+        let cursor = parse_scan_cursor_arg(&argv[1])?;
 
         let mut pattern: Option<&[u8]> = None;
         let mut count: usize = 10;
@@ -8853,7 +8855,8 @@ impl Runtime {
                 let parsed =
                     parse_i64_arg(&argv[i + 1]).map_err(|_| CommandError::InvalidInteger)?;
                 if parsed <= 0 {
-                    return Err(CommandError::InvalidInteger);
+                    // Upstream emits plain "ERR syntax error" for COUNT<=0.
+                    return Err(CommandError::SyntaxError);
                 }
                 count = parsed as usize;
                 i += 2;
@@ -10336,35 +10339,35 @@ fn parse_i64_arg(arg: &[u8]) -> Result<i64, CommandError> {
     Err(CommandError::InvalidInteger)
 }
 
-fn parse_u64_full_arg(arg: &[u8]) -> Result<u64, CommandError> {
-    let slen = arg.len();
-    if slen == 0 || slen > 20 {
-        return Err(CommandError::InvalidInteger);
-    }
-    if slen == 1 && arg[0] == b'0' {
-        return Ok(0);
-    }
-    if arg[0] < b'1' || arg[0] > b'9' {
-        return Err(CommandError::InvalidInteger);
+fn parse_scan_cursor_arg(arg: &[u8]) -> Result<u64, CommandError> {
+    if arg.is_empty() || arg[0].is_ascii_whitespace() {
+        return Err(CommandError::Custom("ERR invalid cursor".to_string()));
     }
 
-    let mut v: u64 = (arg[0] - b'0') as u64;
-    for &b in &arg[1..] {
+    let (negative, digits) = match arg[0] {
+        b'+' => (false, &arg[1..]),
+        b'-' => (true, &arg[1..]),
+        _ => (false, arg),
+    };
+    if digits.is_empty() {
+        return Err(CommandError::Custom("ERR invalid cursor".to_string()));
+    }
+
+    let mut value = 0_u64;
+    for &b in digits {
         if !b.is_ascii_digit() {
-            return Err(CommandError::InvalidInteger);
+            return Err(CommandError::Custom("ERR invalid cursor".to_string()));
         }
-        if v > (u64::MAX / 10) {
-            return Err(CommandError::InvalidInteger);
-        }
-        v *= 10;
-        let digit = (b - b'0') as u64;
-        if v > (u64::MAX - digit) {
-            return Err(CommandError::InvalidInteger);
-        }
-        v += digit;
+        value = value
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(u64::from(b - b'0')))
+            .ok_or_else(|| CommandError::Custom("ERR invalid cursor".to_string()))?;
     }
 
-    Ok(v)
+    if negative {
+        return Ok(0_u64.wrapping_sub(value));
+    }
+    Ok(value)
 }
 
 fn hello_bulk(value: &str) -> RespFrame {
@@ -12212,6 +12215,39 @@ mod tests {
         assert_eq!(
             reply,
             RespFrame::Error("ERR value is not an integer or out of range".to_string())
+        );
+        let reply = rt.execute_frame(command(&[b"SCAN", b"0", b"COUNT", b"0"]), 2);
+        assert_eq!(reply, RespFrame::Error("ERR syntax error".to_string()));
+    }
+
+    #[test]
+    fn scan_cursor_parses_like_redis_cursor_arg() {
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SCAN", b"abc"]), 1),
+            RespFrame::Error("ERR invalid cursor".to_string())
+        );
+
+        let empty_scan = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"0".to_vec())),
+            RespFrame::Array(Some(Vec::new())),
+        ]));
+        assert_eq!(
+            rt.execute_frame(command(&[b"SCAN", b"-1"]), 2),
+            empty_scan
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SCAN", b"+1"]), 3),
+            empty_scan
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SCAN", b"01"]), 4),
+            empty_scan
         );
     }
 

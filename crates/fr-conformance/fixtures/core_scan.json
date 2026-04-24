@@ -440,7 +440,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR invalid cursor"
       }
     },
     {
@@ -482,7 +482,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR syntax error"
       }
     },
     {
@@ -1092,7 +1092,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR invalid cursor"
       }
     },
     {
@@ -1208,7 +1208,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR invalid cursor"
       }
     },
     {
@@ -1324,7 +1324,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR invalid cursor"
       }
     },
     {
@@ -1542,8 +1542,17 @@
         "-1"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
+          {
+            "kind": "array",
+            "value": []
+          }
+        ]
       }
     },
     {
@@ -1555,8 +1564,42 @@
         "-1"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "field1"
+              },
+              {
+                "kind": "bulk",
+                "value": "val1"
+              },
+              {
+                "kind": "bulk",
+                "value": "field2"
+              },
+              {
+                "kind": "bulk",
+                "value": "val2"
+              },
+              {
+                "kind": "bulk",
+                "value": "field3"
+              },
+              {
+                "kind": "bulk",
+                "value": "val3"
+              }
+            ]
+          }
+        ]
       }
     },
     {
@@ -1568,8 +1611,30 @@
         "-1"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "x"
+              },
+              {
+                "kind": "bulk",
+                "value": "y"
+              },
+              {
+                "kind": "bulk",
+                "value": "z"
+              }
+            ]
+          }
+        ]
       }
     },
     {
@@ -1581,8 +1646,34 @@
         "-1"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "kind": "array",
+        "value": [
+          {
+            "kind": "bulk",
+            "value": "0"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "a"
+              },
+              {
+                "kind": "bulk",
+                "value": "1"
+              },
+              {
+                "kind": "bulk",
+                "value": "b"
+              },
+              {
+                "kind": "bulk",
+                "value": "2"
+              }
+            ]
+          }
+        ]
       }
     },
     {

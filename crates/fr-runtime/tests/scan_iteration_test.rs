@@ -197,19 +197,23 @@ fn zscan_all(rt: &mut Runtime, key: &[u8], now_ms: u64) -> BTreeSet<(Vec<u8>, Ve
 }
 
 #[test]
-fn scan_rejects_noncanonical_cursor() {
+fn scan_accepts_redis_cursor_spellings_and_rejects_invalid_cursor() {
     let mut rt = Runtime::default_strict();
+    let empty_scan = RespFrame::Array(Some(vec![
+        RespFrame::BulkString(Some(b"0".to_vec())),
+        RespFrame::Array(Some(Vec::new())),
+    ]));
 
     let resp = rt.execute_frame(command(&[b"SCAN", b"+1"]), 0);
-    assert!(
-        matches!(resp, RespFrame::Error(ref msg) if msg.contains("integer")),
-        "expected integer error, got: {resp:?}"
-    );
+    assert_eq!(resp, empty_scan);
 
     let resp = rt.execute_frame(command(&[b"SCAN", b"01"]), 0);
+    assert_eq!(resp, empty_scan);
+
+    let resp = rt.execute_frame(command(&[b"SCAN", b"abc"]), 0);
     assert!(
-        matches!(resp, RespFrame::Error(ref msg) if msg.contains("integer")),
-        "expected integer error, got: {resp:?}"
+        matches!(resp, RespFrame::Error(ref msg) if msg == "ERR invalid cursor"),
+        "expected invalid cursor error, got: {resp:?}"
     );
 }
 

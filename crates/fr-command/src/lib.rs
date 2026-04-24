@@ -8813,38 +8813,6 @@ fn parse_u64_arg(arg: &[u8]) -> Result<u64, CommandError> {
     Ok(val as u64)
 }
 
-/// Parse an unsigned integer token with strict (non-canonical) rejection and full u64 range.
-fn parse_u64_full_arg(arg: &[u8]) -> Result<u64, CommandError> {
-    let slen = arg.len();
-    if slen == 0 || slen > 20 {
-        return Err(CommandError::InvalidInteger);
-    }
-    if slen == 1 && arg[0] == b'0' {
-        return Ok(0);
-    }
-    if arg[0] < b'1' || arg[0] > b'9' {
-        return Err(CommandError::InvalidInteger);
-    }
-
-    let mut v: u64 = (arg[0] - b'0') as u64;
-    for &b in &arg[1..] {
-        if !b.is_ascii_digit() {
-            return Err(CommandError::InvalidInteger);
-        }
-        if v > (u64::MAX / 10) {
-            return Err(CommandError::InvalidInteger);
-        }
-        v *= 10;
-        let digit = (b - b'0') as u64;
-        if v > (u64::MAX - digit) {
-            return Err(CommandError::InvalidInteger);
-        }
-        v += digit;
-    }
-
-    Ok(v)
-}
-
 /// Parse a LIMIT count that can be negative (Redis uses -1 to mean "unlimited").
 /// Returns None for negative values, Some(n) for non-negative.
 fn parse_limit_count_arg(arg: &[u8]) -> Result<Option<usize>, CommandError> {
@@ -12568,6 +12536,8 @@ struct ScanArgs {
 }
 
 fn parse_scan_args(argv: &[Vec<u8>], start_idx: usize) -> Result<ScanArgs, CommandError> {
+    // Error-reply wording MUST match upstream db.c::scanGenericCommand
+    // (br-frankenredis-hjzc).
     let mut pattern: Option<Vec<u8>> = None;
     let mut count: usize = 10;
     let mut type_filter: Option<Vec<u8>> = None;
@@ -12587,7 +12557,8 @@ fn parse_scan_args(argv: &[Vec<u8>], start_idx: usize) -> Result<ScanArgs, Comma
             }
             let c = parse_i64_arg(&argv[i + 1])?;
             if c <= 0 {
-                return Err(CommandError::InvalidInteger);
+                // Upstream emits plain "ERR syntax error" for COUNT <= 0.
+                return Err(CommandError::SyntaxError);
             }
             count = usize::try_from(c).map_err(|_| CommandError::InvalidInteger)?;
             i += 2;
@@ -12612,11 +12583,55 @@ fn parse_scan_args(argv: &[Vec<u8>], start_idx: usize) -> Result<ScanArgs, Comma
     })
 }
 
+enum NegativeScanCursor {
+    WrapUnsigned,
+    StartAtZero,
+}
+
+/// Parse a SCAN-family cursor with Redis's strtoul-like rules. Non-numeric
+/// input emits "ERR invalid cursor"; signed and leading-zero cursor tokens are
+/// accepted. Negative keyspace SCAN cursors wrap into the unsigned range, while
+/// compact collection scans ignore cursor state and start at 0.
+/// (br-frankenredis-hjzc)
+fn parse_scan_cursor(arg: &[u8], negative_mode: NegativeScanCursor) -> Result<u64, CommandError> {
+    if arg.is_empty() || arg[0].is_ascii_whitespace() {
+        return Err(CommandError::Custom("ERR invalid cursor".to_string()));
+    }
+
+    let (negative, digits) = match arg[0] {
+        b'+' => (false, &arg[1..]),
+        b'-' => (true, &arg[1..]),
+        _ => (false, arg),
+    };
+    if digits.is_empty() {
+        return Err(CommandError::Custom("ERR invalid cursor".to_string()));
+    }
+
+    let mut value = 0_u64;
+    for &b in digits {
+        if !b.is_ascii_digit() {
+            return Err(CommandError::Custom("ERR invalid cursor".to_string()));
+        }
+        value = value
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(u64::from(b - b'0')))
+            .ok_or_else(|| CommandError::Custom("ERR invalid cursor".to_string()))?;
+    }
+
+    if negative {
+        return Ok(match negative_mode {
+            NegativeScanCursor::WrapUnsigned => 0_u64.wrapping_sub(value),
+            NegativeScanCursor::StartAtZero => 0,
+        });
+    }
+    Ok(value)
+}
+
 fn scan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("SCAN"));
     }
-    let cursor = parse_u64_full_arg(&argv[1])?;
+    let cursor = parse_scan_cursor(&argv[1], NegativeScanCursor::WrapUnsigned)?;
 
     let args = parse_scan_args(argv, 2)?;
     let (next_cursor, keys) = store.scan(cursor, args.pattern.as_deref(), args.count, now_ms);
@@ -12650,7 +12665,7 @@ fn hscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Err(CommandError::WrongArity("HSCAN"));
     }
     let key = &argv[1];
-    let cursor = parse_u64_full_arg(&argv[2])?;
+    let cursor = parse_scan_cursor(&argv[2], NegativeScanCursor::StartAtZero)?;
 
     let args = parse_scan_args(argv, 3)?;
     let (next_cursor, pairs) = store
@@ -12683,7 +12698,7 @@ fn sscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Err(CommandError::WrongArity("SSCAN"));
     }
     let key = &argv[1];
-    let cursor = parse_u64_full_arg(&argv[2])?;
+    let cursor = parse_scan_cursor(&argv[2], NegativeScanCursor::StartAtZero)?;
 
     let args = parse_scan_args(argv, 3)?;
     let (next_cursor, members) = store
@@ -12705,7 +12720,7 @@ fn zscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Err(CommandError::WrongArity("ZSCAN"));
     }
     let key = &argv[1];
-    let cursor = parse_u64_full_arg(&argv[2])?;
+    let cursor = parse_scan_cursor(&argv[2], NegativeScanCursor::StartAtZero)?;
 
     let args = parse_scan_args(argv, 3)?;
     let (next_cursor, pairs) = store
@@ -36360,16 +36375,73 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err, CommandError::InvalidInteger);
+
+        let err = dispatch_argv(
+            &[
+                b"HSCAN".to_vec(),
+                b"h".to_vec(),
+                b"0".to_vec(),
+                b"COUNT".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, CommandError::SyntaxError);
     }
 
     #[test]
-    fn scan_cursor_rejects_noncanonical_integer() {
+    fn scan_cursor_parses_like_redis_cursor_arg() {
         let mut store = Store::new();
-        let err = dispatch_argv(&[b"SCAN".to_vec(), b"+1".to_vec()], &mut store, 0).unwrap_err();
-        assert_eq!(err, CommandError::InvalidInteger);
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("seed key");
 
-        let err = dispatch_argv(&[b"SCAN".to_vec(), b"01".to_vec()], &mut store, 0).unwrap_err();
-        assert_eq!(err, CommandError::InvalidInteger);
+        let err = dispatch_argv(&[b"SCAN".to_vec(), b"abc".to_vec()], &mut store, 0).unwrap_err();
+        assert_eq!(err, CommandError::Custom("ERR invalid cursor".to_string()));
+
+        let empty_scan = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"0".to_vec())),
+            RespFrame::Array(Some(Vec::new())),
+        ]));
+        assert_eq!(
+            dispatch_argv(&[b"SCAN".to_vec(), b"-1".to_vec()], &mut store, 0)
+                .expect("negative cursor should parse"),
+            empty_scan
+        );
+        assert_eq!(
+            dispatch_argv(&[b"SCAN".to_vec(), b"+1".to_vec()], &mut store, 0)
+                .expect("plus cursor should parse"),
+            empty_scan
+        );
+        assert_eq!(
+            dispatch_argv(&[b"SCAN".to_vec(), b"01".to_vec()], &mut store, 0)
+                .expect("leading-zero cursor should parse"),
+            empty_scan
+        );
+
+        store
+            .hset(b"h", b"field".to_vec(), b"value".to_vec(), 0)
+            .expect("hset");
+        assert_eq!(
+            dispatch_argv(
+                &[b"HSCAN".to_vec(), b"h".to_vec(), b"-1".to_vec()],
+                &mut store,
+                0
+            )
+            .expect("collection negative cursor should parse"),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"0".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"field".to_vec())),
+                    RespFrame::BulkString(Some(b"value".to_vec())),
+                ])),
+            ]))
+        );
     }
 
     #[test]
