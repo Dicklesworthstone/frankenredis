@@ -7490,13 +7490,8 @@ fn setex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if argv.len() != 4 {
         return Err(CommandError::WrongArity("SETEX"));
     }
-    let seconds = parse_i64_arg(&argv[2])?;
-    if seconds <= 0 {
-        return Err(CommandError::InvalidInteger);
-    }
-    let px = u64::try_from(seconds)
-        .unwrap_or(u64::MAX)
-        .saturating_mul(1000);
+    let seconds = parse_expire_time_arg(&argv[2], "setex")?;
+    let px = seconds.saturating_mul(1000);
     store.set(argv[1].clone(), argv[3].clone(), Some(px), now_ms);
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
@@ -7506,11 +7501,7 @@ fn psetex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 4 {
         return Err(CommandError::WrongArity("PSETEX"));
     }
-    let ms = parse_i64_arg(&argv[2])?;
-    if ms <= 0 {
-        return Err(CommandError::InvalidInteger);
-    }
-    let px = u64::try_from(ms).unwrap_or(u64::MAX);
+    let px = parse_expire_time_arg(&argv[2], "psetex")?;
     store.set(argv[1].clone(), argv[3].clone(), Some(px), now_ms);
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
@@ -24184,7 +24175,35 @@ mod tests {
             0,
         )
         .expect_err("zero ttl");
-        assert!(matches!(err, CommandError::InvalidInteger));
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR invalid expire time in 'setex' command".to_string())
+        );
+    }
+
+    #[test]
+    fn setex_and_psetex_reject_non_positive_ttl_with_redis_error() {
+        for (command, ttl) in [("SETEX", "-1"), ("PSETEX", "0"), ("PSETEX", "-1")] {
+            let mut store = Store::new();
+            let err = dispatch_argv(
+                &[
+                    command.as_bytes().to_vec(),
+                    b"k".to_vec(),
+                    ttl.as_bytes().to_vec(),
+                    b"v".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect_err("non-positive ttl");
+            assert_eq!(
+                err.to_resp(),
+                RespFrame::Error(format!(
+                    "ERR invalid expire time in '{}' command",
+                    command.to_ascii_lowercase()
+                ))
+            );
+        }
     }
 
     // ── Set algebra command tests ───────────────────────────────────────
