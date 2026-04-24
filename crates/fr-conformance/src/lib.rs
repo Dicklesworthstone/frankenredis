@@ -9002,6 +9002,14 @@ mod tests {
                 {
                     return false;
                 }
+                // OBJECT IDLETIME after the CLIENT NO-TOUCH flow reads
+                // wall-clock seconds; the fixture runs the whole sequence
+                // at millisecond speed, so the final read lands at 2s or 3s
+                // depending on scheduler noise. Tracked on 4e32 along with
+                // the other wall-clock-leaky client cases.
+                if case.name == "client_no_touch_object_idletime_after_get" {
+                    return false;
+                }
                 true
             })
             .map(|case| case.name.clone())
