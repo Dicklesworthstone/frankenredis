@@ -768,24 +768,20 @@ const RDB_TYPE_SET: u8 = 2;
 const RDB_TYPE_ZSET_2: u8 = 5; // Binary LE double scores (our encoding)
 const RDB_TYPE_HASH: u8 = 4;
 /// FrankenRedis-private type tag for hashes that carry at least one
-/// per-field TTL. Uses upstream's RDB_TYPE_HASH_METADATA number (21)
-/// for name alignment even though our on-the-wire layout is simpler —
-/// there's no upstream interop here; that lives under frankenredis-s5su
-/// / frankenredis-v8s5. Layout on disk:
-///   [u8 type=21][key:string][u32 len][(field:string, value:string,
-///                                      expires_ms:u64)]×len
+/// per-field TTL. Kept in a private high-numbered range so upstream's
+/// RDB_TYPE_STREAM_LISTPACKS_3 (21) can be decoded as a Redis stream.
+/// Layout on disk:
+///   [u8 type=100][key:string][u32 len][(field:string, value:string,
+///                                       expires_ms:u64)]×len
 /// The 0-sentinel convention: expires_ms == u64::MAX means "no TTL for
 /// this field"; any other value is the absolute ms-since-epoch deadline.
 /// (br-frankenredis-th7q)
-const RDB_TYPE_HASH_WITH_TTLS: u8 = 21;
+const RDB_TYPE_HASH_WITH_TTLS: u8 = 100;
 const RDB_TYPE_STREAM: u8 = 15; // FrankenRedis stream encoding
 /// Upstream Redis stream RDB type tags. Numbers overlap with our
-/// internal types (15 is shared with FrankenRedis stream encoding;
-/// 21 collides with RDB_TYPE_HASH_WITH_TTLS from rv89/th7q). The
-/// decoder dispatches via a context-carrying function in rdb_stream.rs —
-/// the upstream variant is selected only when the decoder is called
-/// via decode_upstream_stream_skeleton, not via the top-level
-/// decode_rdb path. (br-frankenredis-hjub)
+/// internal type 15 (FrankenRedis stream encoding). Type 19 and 21 are
+/// routed through the upstream stream decoder by the top-level RDB path.
+/// (br-frankenredis-hjub, br-frankenredis-qi6z)
 #[allow(dead_code)]
 pub(crate) const UPSTREAM_RDB_TYPE_STREAM_LISTPACKS: u8 = 15;
 #[allow(dead_code)]
@@ -845,7 +841,7 @@ pub enum RdbValue {
     /// Redis 7.4 hash with per-field TTLs. Each tuple is
     /// (field, value, Some(abs_deadline_ms)) for a TTL'd field or
     /// (field, value, None) for a field without a TTL. Encoded via
-    /// RDB_TYPE_HASH_WITH_TTLS (21). (br-frankenredis-th7q)
+    /// RDB_TYPE_HASH_WITH_TTLS (100). (br-frankenredis-th7q)
     HashWithTtls(Vec<(Vec<u8>, Vec<u8>, Option<u64>)>),
     SortedSet(Vec<(Vec<u8>, f64)>),
     /// Stream: entries + optional watermark + consumer groups.
@@ -1242,6 +1238,8 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                 | RDB_TYPE_HASH_WITH_TTLS
                 | RDB_TYPE_ZSET_2
                 | RDB_TYPE_STREAM
+                | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2
+                | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3
         );
         let is_expiry_opcode = matches!(opcode, RDB_OPCODE_EXPIRETIME_MS | 0xFD);
         let is_eviction_opcode = matches!(opcode, 0xF8 | 0xF9);
@@ -1345,7 +1343,9 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
             | RDB_TYPE_HASH
             | RDB_TYPE_HASH_WITH_TTLS
             | RDB_TYPE_ZSET_2
-            | RDB_TYPE_STREAM) => {
+            | RDB_TYPE_STREAM
+            | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2
+            | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3) => {
                 let (key, consumed) =
                     rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                 cursor += consumed;
@@ -1593,6 +1593,13 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                             });
                         }
                         RdbValue::Stream(stream_entries, watermark, groups)
+                    }
+                    UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2 | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3 => {
+                        let (value, consumed) =
+                            rdb_stream::decode_upstream_stream_skeleton(type_byte, &data[cursor..])
+                                .map_err(|_| PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        value
                     }
                     _ => return Err(PersistError::InvalidFrame),
                 };
@@ -2310,14 +2317,39 @@ mod tests {
 
     use super::{
         RDB_CHECKSUM_LEN, RDB_OPCODE_AUX, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME_MS,
-        RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_STRING, RdbEntry,
-        RdbStreamConsumerGroup, RdbStreamPendingEntry, RdbValue, crc64_redis, decode_rdb,
-        decode_rdb_prefix, encode_rdb, lzf_decompress, rdb_encode_length, rdb_encode_string,
+        RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_HASH_WITH_TTLS, RDB_TYPE_STRING,
+        RdbEntry, RdbStreamConsumerGroup, RdbStreamPendingEntry, RdbValue,
+        UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decode_rdb, decode_rdb_prefix,
+        encode_rdb, lzf_decompress, rdb_encode_length, rdb_encode_string,
     };
 
     fn append_rdb_checksum(encoded: &mut Vec<u8>) {
         let checksum = crc64_redis(encoded);
         encoded.extend_from_slice(&checksum.to_le_bytes());
+    }
+
+    fn rdb_encode_raw_stream_id(buf: &mut Vec<u8>, ms: u64, seq: u64) {
+        buf.extend_from_slice(&ms.to_be_bytes());
+        buf.extend_from_slice(&seq.to_be_bytes());
+    }
+
+    fn rdb_encode_millisecond_time(buf: &mut Vec<u8>, ms: u64) {
+        buf.extend_from_slice(&ms.to_le_bytes());
+    }
+
+    fn encode_single_raw_rdb_entry(type_byte: u8, key: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut encoded = b"REDIS0011".to_vec();
+        encoded.push(RDB_OPCODE_SELECTDB);
+        rdb_encode_length(&mut encoded, 0);
+        encoded.push(RDB_OPCODE_RESIZEDB);
+        rdb_encode_length(&mut encoded, 1);
+        rdb_encode_length(&mut encoded, 0);
+        encoded.push(type_byte);
+        rdb_encode_string(&mut encoded, key);
+        encoded.extend_from_slice(payload);
+        encoded.push(RDB_OPCODE_EOF);
+        append_rdb_checksum(&mut encoded);
+        encoded
     }
 
     #[test]
@@ -2843,6 +2875,86 @@ mod tests {
         let encoded = encode_rdb(&entries, &[]);
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
         assert_eq!(decoded, entries);
+    }
+
+    #[test]
+    fn rdb_hash_with_ttls_uses_private_non_upstream_stream_type_tag() {
+        let entries = vec![RdbEntry {
+            db: 0,
+            key: b"httl".to_vec(),
+            value: RdbValue::HashWithTtls(vec![
+                (b"persist".to_vec(), b"v0".to_vec(), None),
+                (b"expiring".to_vec(), b"v1".to_vec(), Some(123_456)),
+            ]),
+            expire_ms: None,
+        }];
+        let encoded = encode_rdb(&entries, &[]);
+
+        // Header + SELECTDB(2) + RESIZEDB(3) puts the first value type byte at 14.
+        assert_eq!(encoded[14], RDB_TYPE_HASH_WITH_TTLS);
+        assert_ne!(encoded[14], UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3);
+
+        let (decoded, _) = decode_rdb(&encoded).expect("decode");
+        assert_eq!(decoded, entries);
+    }
+
+    #[test]
+    fn rdb_decodes_upstream_type21_stream_consumer_groups() {
+        let mut payload = Vec::new();
+        rdb_encode_length(&mut payload, 0); // listpacks_count
+        rdb_encode_length(&mut payload, 0); // stream length
+        rdb_encode_length(&mut payload, 42); // last_id.ms
+        rdb_encode_length(&mut payload, 7); // last_id.seq
+        rdb_encode_length(&mut payload, 42); // first_id.ms
+        rdb_encode_length(&mut payload, 7); // first_id.seq
+        rdb_encode_length(&mut payload, 0); // max_deleted_id.ms
+        rdb_encode_length(&mut payload, 0); // max_deleted_id.seq
+        rdb_encode_length(&mut payload, 1); // entries_added
+        rdb_encode_length(&mut payload, 1); // groups_count
+
+        rdb_encode_string(&mut payload, b"g");
+        rdb_encode_length(&mut payload, 42); // group last_id.ms
+        rdb_encode_length(&mut payload, 7); // group last_id.seq
+        rdb_encode_length(&mut payload, 1); // entries_read
+        rdb_encode_length(&mut payload, 1); // global PEL count
+        rdb_encode_raw_stream_id(&mut payload, 42, 7);
+        rdb_encode_millisecond_time(&mut payload, 1000);
+        rdb_encode_length(&mut payload, 3); // delivery_count
+        rdb_encode_length(&mut payload, 1); // consumers_count
+        rdb_encode_string(&mut payload, b"alice");
+        rdb_encode_millisecond_time(&mut payload, 1100); // seen_time
+        rdb_encode_millisecond_time(&mut payload, 1200); // active_time
+        rdb_encode_length(&mut payload, 1); // consumer PEL count
+        rdb_encode_raw_stream_id(&mut payload, 42, 7);
+
+        let encoded =
+            encode_single_raw_rdb_entry(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, b"stream", &payload);
+        let (decoded, _) = decode_rdb(&encoded).expect("decode type21 stream");
+        assert_eq!(
+            decoded,
+            vec![RdbEntry {
+                db: 0,
+                key: b"stream".to_vec(),
+                value: RdbValue::Stream(
+                    Vec::new(),
+                    Some((42, 7)),
+                    vec![RdbStreamConsumerGroup {
+                        name: b"g".to_vec(),
+                        last_delivered_id_ms: 42,
+                        last_delivered_id_seq: 7,
+                        consumers: vec![b"alice".to_vec()],
+                        pending: vec![RdbStreamPendingEntry {
+                            entry_id_ms: 42,
+                            entry_id_seq: 7,
+                            consumer: b"alice".to_vec(),
+                            deliveries: 3,
+                            last_delivered_ms: 1000,
+                        }],
+                    }],
+                ),
+                expire_ms: None,
+            }]
+        );
     }
 
     #[test]

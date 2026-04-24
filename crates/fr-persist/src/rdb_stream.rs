@@ -9,13 +9,15 @@
 //! listpack is unpacked per upstream's `t_stream.c` layout (master entry +
 //! delta-encoded items with same-fields reuse) and returned as
 //! `StreamEntry` tuples in `RdbValue::Stream`. Tombstoned entries (flag
-//! bit 1) are dropped. Consumer-group population (groups/PEL) is
-//! byte-parsed but not reified — that lands in br-frankenredis-qi6z.
+//! bit 1) are dropped. Type-19/type-21 consumer-group payloads are reified
+//! into `RdbStreamConsumerGroup` values with consumer-local PEL ownership.
 //!
-//! (br-frankenredis-hjub)
+//! (br-frankenredis-hjub, br-frankenredis-qi6z)
+
+use std::collections::BTreeMap;
 
 use crate::listpack::{ListpackEntry, ListpackError, decode_listpack};
-use crate::{RdbValue, StreamEntry};
+use crate::{RdbStreamConsumerGroup, RdbStreamPendingEntry, RdbValue, StreamEntry};
 
 use super::{rdb_decode_length, rdb_decode_string};
 
@@ -46,6 +48,8 @@ pub enum UpstreamStreamError {
     InvalidFieldCount,
     /// The `lp_count` trailer disagreed with how many elements the entry consumed.
     InconsistentEntryTrailer,
+    /// A consumer-local PEL referenced an ID absent from the group's global PEL.
+    MissingGlobalPelEntry,
 }
 
 impl From<ListpackError> for UpstreamStreamError {
@@ -85,8 +89,16 @@ pub(crate) fn decode_upstream_stream_skeleton(
         if nodekey.len() != 16 {
             return Err(UpstreamStreamError::InvalidNodekeyLength);
         }
-        let master_ms = u64::from_be_bytes(nodekey[0..8].try_into().unwrap());
-        let master_seq = u64::from_be_bytes(nodekey[8..16].try_into().unwrap());
+        let master_ms = u64::from_be_bytes(
+            nodekey[0..8]
+                .try_into()
+                .map_err(|_| UpstreamStreamError::InvalidNodekeyLength)?,
+        );
+        let master_seq = u64::from_be_bytes(
+            nodekey[8..16]
+                .try_into()
+                .map_err(|_| UpstreamStreamError::InvalidNodekeyLength)?,
+        );
         cursor += c1;
         let (lp_bytes, c2) =
             rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
@@ -124,16 +136,17 @@ pub(crate) fn decode_upstream_stream_skeleton(
 
     // (7) For each group: name, last-delivered-id (ms,seq), entries_read (v2+),
     //     PEL count + entries, consumer count + per-consumer fields.
-    //     Byte-skip only — consumer-group reification is br-frankenredis-qi6z.
+    let mut groups = Vec::with_capacity(groups_count.min(256));
     for _ in 0..groups_count {
-        let (_name, c) =
+        let (name, c) =
             rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
         cursor += c;
-        for _ in 0..2 {
-            let (_v, c) =
-                rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
-            cursor += c;
-        }
+        let (last_delivered_id_ms, c) =
+            rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
+        cursor += c;
+        let (last_delivered_id_seq, c) =
+            rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
+        cursor += c;
         if is_v2_or_later {
             let (_v, c) =
                 rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
@@ -142,50 +155,96 @@ pub(crate) fn decode_upstream_stream_skeleton(
         let (pel_count, c) =
             rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
         cursor += c;
+        let mut global_pel: BTreeMap<(u64, u64), (u64, u64)> = BTreeMap::new();
         for _ in 0..pel_count {
-            if cursor + 16 + 8 > data.len() {
-                return Err(UpstreamStreamError::InvalidLength);
-            }
-            cursor += 16; // stream-id
-            cursor += 8; // delivery_time_ms (u64 LE)
-            let (_delivery_count, c) =
+            let (entry_id, c) = take_raw_stream_id(data, cursor)?;
+            cursor += c;
+            let delivery_time_ms = take_millisecond_time(data, cursor)?;
+            cursor += 8;
+            let (delivery_count, c) =
                 rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
             cursor += c;
+            global_pel.insert(entry_id, (delivery_time_ms, delivery_count as u64));
         }
         let (consumers_count, c) =
             rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
         cursor += c;
+        let mut consumers = Vec::with_capacity(consumers_count.min(256));
+        let mut pending = Vec::with_capacity(pel_count.min(4096));
         for _ in 0..consumers_count {
-            let (_cname, c) =
+            let (consumer_name, c) =
                 rdb_decode_string(&data[cursor..]).ok_or(UpstreamStreamError::InvalidString)?;
             cursor += c;
+            consumers.push(consumer_name.clone());
             if is_v2_or_later {
-                if cursor + 8 > data.len() {
-                    return Err(UpstreamStreamError::InvalidLength);
-                }
+                let _seen_time_ms = take_millisecond_time(data, cursor)?;
                 cursor += 8;
             }
             if is_v3 {
-                if cursor + 8 > data.len() {
-                    return Err(UpstreamStreamError::InvalidLength);
-                }
+                let _active_time_ms = take_millisecond_time(data, cursor)?;
                 cursor += 8;
             }
             let (cpel_count, c) =
                 rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
             cursor += c;
             for _ in 0..cpel_count {
-                if cursor + 16 > data.len() {
-                    return Err(UpstreamStreamError::InvalidLength);
-                }
-                cursor += 16;
+                let (entry_id, c) = take_raw_stream_id(data, cursor)?;
+                cursor += c;
+                let Some((last_delivered_ms, deliveries)) = global_pel.get(&entry_id) else {
+                    return Err(UpstreamStreamError::MissingGlobalPelEntry);
+                };
+                pending.push(RdbStreamPendingEntry {
+                    entry_id_ms: entry_id.0,
+                    entry_id_seq: entry_id.1,
+                    consumer: consumer_name.clone(),
+                    deliveries: *deliveries,
+                    last_delivered_ms: *last_delivered_ms,
+                });
             }
         }
+        groups.push(RdbStreamConsumerGroup {
+            name,
+            last_delivered_id_ms: last_delivered_id_ms as u64,
+            last_delivered_id_seq: last_delivered_id_seq as u64,
+            consumers,
+            pending,
+        });
     }
 
     let watermark = Some((last_id_ms as u64, last_id_seq as u64));
-    let value = RdbValue::Stream(entries, watermark, Vec::new());
+    let value = RdbValue::Stream(entries, watermark, groups);
     Ok((value, cursor))
+}
+
+fn take_raw_stream_id(
+    data: &[u8],
+    cursor: usize,
+) -> Result<((u64, u64), usize), UpstreamStreamError> {
+    if cursor + 16 > data.len() {
+        return Err(UpstreamStreamError::InvalidLength);
+    }
+    let id_ms = u64::from_be_bytes(
+        data[cursor..cursor + 8]
+            .try_into()
+            .map_err(|_| UpstreamStreamError::InvalidLength)?,
+    );
+    let id_seq = u64::from_be_bytes(
+        data[cursor + 8..cursor + 16]
+            .try_into()
+            .map_err(|_| UpstreamStreamError::InvalidLength)?,
+    );
+    Ok(((id_ms, id_seq), 16))
+}
+
+fn take_millisecond_time(data: &[u8], cursor: usize) -> Result<u64, UpstreamStreamError> {
+    if cursor + 8 > data.len() {
+        return Err(UpstreamStreamError::InvalidLength);
+    }
+    Ok(u64::from_le_bytes(
+        data[cursor..cursor + 8]
+            .try_into()
+            .map_err(|_| UpstreamStreamError::InvalidLength)?,
+    ))
 }
 
 /// Decode one macro-node listpack into (master_ms, master_seq)-relative
@@ -317,7 +376,10 @@ fn combine_u64_i64(base: u64, delta: i64) -> u64 {
 mod tests {
     use super::*;
     use crate::listpack::{LISTPACK_EOF, LISTPACK_HEADER_SIZE};
-    use crate::{UPSTREAM_RDB_TYPE_STREAM_LISTPACKS, rdb_encode_length};
+    use crate::{
+        UPSTREAM_RDB_TYPE_STREAM_LISTPACKS, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2,
+        UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, rdb_encode_length,
+    };
 
     // ── Listpack byte builders ──────────────────────────────────────
     //
@@ -382,6 +444,15 @@ mod tests {
     fn rdb_encode_raw_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
         rdb_encode_length(buf, bytes.len());
         buf.extend_from_slice(bytes);
+    }
+
+    fn rdb_encode_raw_stream_id(buf: &mut Vec<u8>, ms: u64, seq: u64) {
+        buf.extend_from_slice(&ms.to_be_bytes());
+        buf.extend_from_slice(&seq.to_be_bytes());
+    }
+
+    fn rdb_encode_millisecond_time(buf: &mut Vec<u8>, ms: u64) {
+        buf.extend_from_slice(&ms.to_le_bytes());
     }
 
     /// Build the minimal-but-valid upstream type-15 payload for an
@@ -471,6 +542,117 @@ mod tests {
         buf
     }
 
+    fn build_type21_payload_with_consumer_group() -> Vec<u8> {
+        let mut buf = Vec::new();
+        rdb_encode_length(&mut buf, 0); // listpacks_count
+        rdb_encode_length(&mut buf, 0); // stream length
+        rdb_encode_length(&mut buf, 42); // last_id.ms
+        rdb_encode_length(&mut buf, 7); // last_id.seq
+        rdb_encode_length(&mut buf, 42); // first_id.ms
+        rdb_encode_length(&mut buf, 7); // first_id.seq
+        rdb_encode_length(&mut buf, 0); // max_deleted_id.ms
+        rdb_encode_length(&mut buf, 0); // max_deleted_id.seq
+        rdb_encode_length(&mut buf, 1); // entries_added
+        rdb_encode_length(&mut buf, 1); // groups_count
+
+        rdb_encode_raw_bytes(&mut buf, b"g");
+        rdb_encode_length(&mut buf, 42); // group last_id.ms
+        rdb_encode_length(&mut buf, 7); // group last_id.seq
+        rdb_encode_length(&mut buf, 1); // entries_read
+
+        rdb_encode_length(&mut buf, 1); // global PEL count
+        rdb_encode_raw_stream_id(&mut buf, 42, 7);
+        rdb_encode_millisecond_time(&mut buf, 1000);
+        rdb_encode_length(&mut buf, 3); // delivery_count
+
+        rdb_encode_length(&mut buf, 2); // consumers_count
+        rdb_encode_raw_bytes(&mut buf, b"alice");
+        rdb_encode_millisecond_time(&mut buf, 1100); // seen_time
+        rdb_encode_millisecond_time(&mut buf, 1200); // active_time
+        rdb_encode_length(&mut buf, 1); // alice PEL count
+        rdb_encode_raw_stream_id(&mut buf, 42, 7);
+        rdb_encode_raw_bytes(&mut buf, b"bob");
+        rdb_encode_millisecond_time(&mut buf, 1300); // seen_time
+        rdb_encode_millisecond_time(&mut buf, 1400); // active_time
+        rdb_encode_length(&mut buf, 0); // bob PEL count
+
+        buf
+    }
+
+    fn build_type19_payload_with_consumer_group() -> Vec<u8> {
+        let mut buf = Vec::new();
+        rdb_encode_length(&mut buf, 0); // listpacks_count
+        rdb_encode_length(&mut buf, 0); // stream length
+        rdb_encode_length(&mut buf, 42); // last_id.ms
+        rdb_encode_length(&mut buf, 7); // last_id.seq
+        rdb_encode_length(&mut buf, 42); // first_id.ms
+        rdb_encode_length(&mut buf, 7); // first_id.seq
+        rdb_encode_length(&mut buf, 0); // max_deleted_id.ms
+        rdb_encode_length(&mut buf, 0); // max_deleted_id.seq
+        rdb_encode_length(&mut buf, 1); // entries_added
+        rdb_encode_length(&mut buf, 1); // groups_count
+
+        rdb_encode_raw_bytes(&mut buf, b"g");
+        rdb_encode_length(&mut buf, 42); // group last_id.ms
+        rdb_encode_length(&mut buf, 7); // group last_id.seq
+        rdb_encode_length(&mut buf, 1); // entries_read
+
+        rdb_encode_length(&mut buf, 1); // global PEL count
+        rdb_encode_raw_stream_id(&mut buf, 42, 7);
+        rdb_encode_millisecond_time(&mut buf, 1000);
+        rdb_encode_length(&mut buf, 3); // delivery_count
+
+        rdb_encode_length(&mut buf, 1); // consumers_count
+        rdb_encode_raw_bytes(&mut buf, b"alice");
+        rdb_encode_millisecond_time(&mut buf, 1100); // seen_time
+        rdb_encode_length(&mut buf, 1); // alice PEL count
+        rdb_encode_raw_stream_id(&mut buf, 42, 7);
+
+        buf
+    }
+
+    fn build_type21_payload_with_missing_global_pel() -> Vec<u8> {
+        let mut buf = Vec::new();
+        rdb_encode_length(&mut buf, 0); // listpacks_count
+        rdb_encode_length(&mut buf, 0); // stream length
+        rdb_encode_length(&mut buf, 42); // last_id.ms
+        rdb_encode_length(&mut buf, 7); // last_id.seq
+        rdb_encode_length(&mut buf, 42); // first_id.ms
+        rdb_encode_length(&mut buf, 7); // first_id.seq
+        rdb_encode_length(&mut buf, 0); // max_deleted_id.ms
+        rdb_encode_length(&mut buf, 0); // max_deleted_id.seq
+        rdb_encode_length(&mut buf, 1); // entries_added
+        rdb_encode_length(&mut buf, 1); // groups_count
+
+        rdb_encode_raw_bytes(&mut buf, b"g");
+        rdb_encode_length(&mut buf, 42); // group last_id.ms
+        rdb_encode_length(&mut buf, 7); // group last_id.seq
+        rdb_encode_length(&mut buf, 1); // entries_read
+        rdb_encode_length(&mut buf, 0); // global PEL count
+
+        rdb_encode_length(&mut buf, 1); // consumers_count
+        rdb_encode_raw_bytes(&mut buf, b"alice");
+        rdb_encode_millisecond_time(&mut buf, 1100); // seen_time
+        rdb_encode_millisecond_time(&mut buf, 1200); // active_time
+        rdb_encode_length(&mut buf, 1); // alice PEL count
+        rdb_encode_raw_stream_id(&mut buf, 42, 7);
+
+        buf
+    }
+
+    fn stream_parts(
+        value: RdbValue,
+    ) -> Option<(
+        Vec<StreamEntry>,
+        Option<(u64, u64)>,
+        Vec<RdbStreamConsumerGroup>,
+    )> {
+        match value {
+            RdbValue::Stream(entries, watermark, groups) => Some((entries, watermark, groups)),
+            _ => None,
+        }
+    }
+
     #[test]
     fn decode_empty_type15_returns_skeleton_stream_with_watermark() {
         let payload = build_empty_type15(12345, 7);
@@ -478,14 +660,14 @@ mod tests {
             decode_upstream_stream_skeleton(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS, &payload)
                 .expect("decode skeleton");
         assert_eq!(consumed, payload.len());
-        match value {
-            RdbValue::Stream(entries, watermark, groups) => {
-                assert!(entries.is_empty());
-                assert!(groups.is_empty());
-                assert_eq!(watermark, Some((12345, 7)));
-            }
-            other => panic!("expected Stream, got {other:?}"),
-        }
+        let stream = stream_parts(value);
+        assert!(stream.is_some(), "expected Stream");
+        let Some((entries, watermark, groups)) = stream else {
+            return;
+        };
+        assert!(entries.is_empty());
+        assert!(groups.is_empty());
+        assert_eq!(watermark, Some((12345, 7)));
     }
 
     #[test]
@@ -515,24 +697,24 @@ mod tests {
             decode_upstream_stream_skeleton(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS, &payload)
                 .expect("decode entry");
         assert_eq!(consumed, payload.len());
-        match value {
-            RdbValue::Stream(entries, watermark, groups) => {
-                assert!(groups.is_empty());
-                assert_eq!(watermark, Some((1000, 0)));
-                assert_eq!(entries.len(), 1);
-                let (ms, seq, fields) = &entries[0];
-                assert_eq!(*ms, 1005);
-                assert_eq!(*seq, 0);
-                assert_eq!(
-                    fields,
-                    &vec![
-                        (b"f1".to_vec(), b"V1".to_vec()),
-                        (b"f2".to_vec(), b"V2".to_vec()),
-                    ]
-                );
-            }
-            other => panic!("expected Stream, got {other:?}"),
-        }
+        let stream = stream_parts(value);
+        assert!(stream.is_some(), "expected Stream");
+        let Some((entries, watermark, groups)) = stream else {
+            return;
+        };
+        assert!(groups.is_empty());
+        assert_eq!(watermark, Some((1000, 0)));
+        assert_eq!(entries.len(), 1);
+        let (ms, seq, fields) = &entries[0];
+        assert_eq!(*ms, 1005);
+        assert_eq!(*seq, 0);
+        assert_eq!(
+            fields,
+            &vec![
+                (b"f1".to_vec(), b"V1".to_vec()),
+                (b"f2".to_vec(), b"V2".to_vec()),
+            ]
+        );
     }
 
     #[test]
@@ -542,19 +724,93 @@ mod tests {
         let (value, _) =
             decode_upstream_stream_skeleton(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS, &payload)
                 .expect("decode same-fields");
-        match value {
-            RdbValue::Stream(entries, _, _) => {
-                assert_eq!(entries.len(), 2, "tombstone (flag=3) must be skipped");
-                let (ms0, seq0, fields0) = &entries[0];
-                assert_eq!(*ms0, 2000);
-                assert_eq!(*seq0, 101);
-                assert_eq!(fields0, &vec![(b"only".to_vec(), b"A".to_vec())]);
-                let (ms1, seq1, fields1) = &entries[1];
-                assert_eq!(*ms1, 2000);
-                assert_eq!(*seq1, 400);
-                assert_eq!(fields1, &vec![(b"only".to_vec(), b"B".to_vec())]);
-            }
-            other => panic!("expected Stream, got {other:?}"),
-        }
+        let stream = stream_parts(value);
+        assert!(stream.is_some(), "expected Stream");
+        let Some((entries, _, _)) = stream else {
+            return;
+        };
+        assert_eq!(entries.len(), 2, "tombstone (flag=3) must be skipped");
+        let (ms0, seq0, fields0) = &entries[0];
+        assert_eq!(*ms0, 2000);
+        assert_eq!(*seq0, 101);
+        assert_eq!(fields0, &vec![(b"only".to_vec(), b"A".to_vec())]);
+        let (ms1, seq1, fields1) = &entries[1];
+        assert_eq!(*ms1, 2000);
+        assert_eq!(*seq1, 400);
+        assert_eq!(fields1, &vec![(b"only".to_vec(), b"B".to_vec())]);
+    }
+
+    #[test]
+    fn decode_type21_reifies_consumer_groups_and_pel_ownership() {
+        let payload = build_type21_payload_with_consumer_group();
+        let (value, consumed) =
+            decode_upstream_stream_skeleton(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, &payload)
+                .expect("decode type 21 consumer group");
+        assert_eq!(consumed, payload.len());
+
+        let stream = stream_parts(value);
+        assert!(stream.is_some(), "expected Stream");
+        let Some((entries, watermark, groups)) = stream else {
+            return;
+        };
+        assert!(entries.is_empty());
+        assert_eq!(watermark, Some((42, 7)));
+        assert_eq!(groups.len(), 1);
+
+        let group = &groups[0];
+        assert_eq!(group.name, b"g".to_vec());
+        assert_eq!(group.last_delivered_id_ms, 42);
+        assert_eq!(group.last_delivered_id_seq, 7);
+        assert_eq!(group.consumers, vec![b"alice".to_vec(), b"bob".to_vec()]);
+        assert_eq!(
+            group.pending,
+            vec![RdbStreamPendingEntry {
+                entry_id_ms: 42,
+                entry_id_seq: 7,
+                consumer: b"alice".to_vec(),
+                deliveries: 3,
+                last_delivered_ms: 1000,
+            }]
+        );
+    }
+
+    #[test]
+    fn decode_type19_reifies_consumer_groups_and_seen_time() {
+        let payload = build_type19_payload_with_consumer_group();
+        let (value, consumed) =
+            decode_upstream_stream_skeleton(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2, &payload)
+                .expect("decode type 19 consumer group");
+        assert_eq!(consumed, payload.len());
+
+        let stream = stream_parts(value);
+        assert!(stream.is_some(), "expected Stream");
+        let Some((entries, watermark, groups)) = stream else {
+            return;
+        };
+        assert!(entries.is_empty());
+        assert_eq!(watermark, Some((42, 7)));
+        assert_eq!(groups.len(), 1);
+
+        let group = &groups[0];
+        assert_eq!(group.name, b"g".to_vec());
+        assert_eq!(group.consumers, vec![b"alice".to_vec()]);
+        assert_eq!(
+            group.pending,
+            vec![RdbStreamPendingEntry {
+                entry_id_ms: 42,
+                entry_id_seq: 7,
+                consumer: b"alice".to_vec(),
+                deliveries: 3,
+                last_delivered_ms: 1000,
+            }]
+        );
+    }
+
+    #[test]
+    fn decode_type21_rejects_consumer_pel_without_global_entry() {
+        let payload = build_type21_payload_with_missing_global_pel();
+        let err = decode_upstream_stream_skeleton(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, &payload)
+            .unwrap_err();
+        assert_eq!(err, UpstreamStreamError::MissingGlobalPelEntry);
     }
 }
