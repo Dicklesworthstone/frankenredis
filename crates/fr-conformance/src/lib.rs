@@ -8509,15 +8509,19 @@ mod tests {
     /// GET/SET/APPEND/STRLEN/INCR/DECR/SETRANGE/GETRANGE and variants)
     /// through the self-spawning vendored redis-server oracle. Tolerant
     /// by default (divergences go to stderr); STRICT mode asserts byte
-    /// parity on every case. Absolute-time TTL observation cases
-    /// XFAIL'd: our runtime honours the fixture-pinned `now_ms` but
-    /// the upstream oracle walks wall-clock, so `EXPIRETIME` on a key
-    /// whose absolute deadline was set with a small fixture offset
-    /// returns the fixture-relative integer against the upstream's
-    /// wall-clock integer, and `GETEX EXAT`/`PXAT` with a past
-    /// deadline leaves our value intact where upstream evicts.
-    /// Shared TTL-accounting work tracked on br-frankenredis-7rp6.
-    /// (br-frankenredis-o4su, 7rp6)
+    /// parity on every case. (br-frankenredis-o4su)
+    ///
+    /// Known diverging cases under STRICT: absolute-time TTL
+    /// observation (`EXPIRETIME` / `PEXPIRETIME` / `(P)TTL` on a key
+    /// whose deadline was set with the fixture-pinned `now_ms`; the
+    /// upstream oracle walks wall-clock and returns the real absolute
+    /// integer or `-2` when past), and `INCRBYFLOAT`/`HINCRBYFLOAT`
+    /// on non-terminating-decimal inputs (we use f64 Ryu shortest
+    /// round-trip, upstream uses long-double `%.17Lf` + trim).
+    /// Both are tracked on br-frankenredis-7rp6. The fixture also
+    /// has duplicate case names that prevent per-name filtering, so
+    /// this test stays in tolerant mode rather than adding an XFAIL
+    /// skiplist.
     #[test]
     fn live_redis_core_strings_matches_runtime() {
         let cfg = HarnessConfig::default_paths();
@@ -8525,44 +8529,8 @@ mod tests {
             return;
         };
         let oracle = oracle_handle.oracle_config();
-        let fixture = match load_conformance_fixture(&cfg, "core_strings.json") {
-            Ok(f) => f,
-            Err(err) => {
-                eprintln!("[live-oracle:core_strings] fixture load error: {err}");
-                return;
-            }
-        };
-        const XFAIL: &[&str] = &[
-            // Fixture-clock vs wall-clock asymmetry: our runtime
-            // obeys the fixture's pinned `now_ms` so `EXPIRETIME` /
-            // `PEXPIRETIME` / `(P)TTL` on an absolute-time key
-            // returns the fixture-relative integer, whereas the
-            // upstream oracle walks wall-clock and returns the real
-            // absolute-time integer (or -2 when the deadline is in
-            // the past). (br-frankenredis-7rp6)
-            "pexpiretime_abskey",
-            "expiretime_abskey",
-            "pttl_whenkey_after_expireat",
-            "pexpireat_whenkey",
-            "pttl_whenkey_after_pexpireat",
-            "expiretime_whenkey",
-            "getex_verify_ttl_after_exat",
-            "getex_with_pxat",
-            "getex_verify_pttl_after_pxat",
-            "getex_with_persist",
-            "getex_verify_ttl_after_persist",
-            "set_exat_verify_ttl",
-            "set_pxat_verify_pttl",
-        ];
-        let stable: Vec<String> = fixture
-            .cases
-            .iter()
-            .map(|case| case.name.clone())
-            .filter(|name| !XFAIL.contains(&name.as_str()))
-            .collect();
-        let refs: Vec<&str> = stable.iter().map(String::as_str).collect();
         run_live_diff_tolerant("core_strings", || {
-            run_live_redis_diff_for_cases(&cfg, "core_strings.json", &refs, &oracle)
+            run_live_redis_diff(&cfg, "core_strings.json", &oracle)
         });
     }
 
