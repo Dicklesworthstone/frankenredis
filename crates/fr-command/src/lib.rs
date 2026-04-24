@@ -4407,13 +4407,17 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     let mut has_shape = false;
     let mut unit_mult = 1.0_f64;
 
-    // Parse FROMMEMBER/FROMLONLAT and BYRADIUS/BYBOX
+    // Parse FROMMEMBER/FROMLONLAT and BYRADIUS/BYBOX.
+    //
+    // Error-reply wording MUST match upstream geo.c::geosearchCommand
+    // (br-frankenredis-kro2). Upstream uses two distinct signals:
+    //  - Duplicate FROM/BY clauses (e.g. two FROMMEMBERs) → plain
+    //    "ERR syntax error".
+    //  - Missing FROM or BY clause once parsing returns → WrongArity.
     while i < argv.len() {
         if eq_ascii_command(&argv[i], b"FROMMEMBER") {
             if has_center {
-                return Ok(RespFrame::Error(
-                    "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
-                ));
+                return Err(CommandError::SyntaxError);
             }
             has_center = true;
             i += 1;
@@ -4434,9 +4438,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             }
         } else if eq_ascii_command(&argv[i], b"FROMLONLAT") {
             if has_center {
-                return Ok(RespFrame::Error(
-                    "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
-                ));
+                return Err(CommandError::SyntaxError);
             }
             has_center = true;
             if i + 2 >= argv.len() {
@@ -4453,9 +4455,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             i += 2;
         } else if eq_ascii_command(&argv[i], b"BYRADIUS") {
             if has_shape {
-                return Ok(RespFrame::Error(
-                    "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
-                ));
+                return Err(CommandError::SyntaxError);
             }
             has_shape = true;
             if i + 2 >= argv.len() {
@@ -4483,9 +4483,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             i += 2;
         } else if eq_ascii_command(&argv[i], b"BYBOX") {
             if has_shape {
-                return Ok(RespFrame::Error(
-                    "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
-                ));
+                return Err(CommandError::SyntaxError);
             }
             has_shape = true;
             if i + 3 >= argv.len() {
@@ -4522,10 +4520,11 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         i += 1;
     }
 
+    if !has_center || !has_shape {
+        return Err(CommandError::WrongArity("GEOSEARCH"));
+    }
     let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
-        return Ok(RespFrame::Error(
-            "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
-        ));
+        return Err(CommandError::WrongArity("GEOSEARCH"));
     };
 
     // Parse remaining flags
