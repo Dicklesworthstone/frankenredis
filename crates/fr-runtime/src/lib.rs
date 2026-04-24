@@ -6728,15 +6728,24 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("acllog-max-len") {
+                // Upstream config.c::configCommand SET validates via
+                // the numeric config template; the wire format is
+                // "CONFIG SET failed (possibly related to argument
+                // 'X') - argument ...". (br-frankenredis-2di1)
                 let parsed = match parse_i64_arg(&pair[1]) {
                     Ok(value) if value >= 0 => value,
                     Ok(_) => {
                         return RespFrame::Error(
-                            "ERR CONFIG SET acllog-max-len must be a non-negative integer"
+                            "ERR CONFIG SET failed (possibly related to argument 'acllog-max-len') - argument must be between 0 and 9223372036854775807 inclusive"
                                 .to_string(),
                         );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return RespFrame::Error(
+                            "ERR CONFIG SET failed (possibly related to argument 'acllog-max-len') - argument couldn't be parsed into an integer"
+                                .to_string(),
+                        );
+                    }
                 };
                 next_acllog_max_len = parsed;
                 continue;
@@ -6744,13 +6753,12 @@ impl Runtime {
             if parameter.eq_ignore_ascii_case("maxmemory") {
                 let parsed = match parse_i64_arg(&pair[1]) {
                     Ok(value) if value >= 0 => value as usize,
-                    Ok(_) => {
-                        return RespFrame::Error(format!(
-                            "ERR Invalid argument '{}' for CONFIG SET 'maxmemory'",
-                            String::from_utf8_lossy(&pair[1])
-                        ));
+                    _ => {
+                        return RespFrame::Error(
+                            "ERR CONFIG SET failed (possibly related to argument 'maxmemory') - argument must be a memory value"
+                                .to_string(),
+                        );
                     }
-                    Err(err) => return err.to_resp(),
                 };
                 next_maxmemory = Some(parsed);
                 continue;
@@ -6765,9 +6773,10 @@ impl Runtime {
                         next_maxmemory_policy = Some(policy);
                     }
                     None => {
-                        return RespFrame::Error(format!(
-                            "ERR Invalid argument '{value_str}' for CONFIG SET 'maxmemory-policy'"
-                        ));
+                        return RespFrame::Error(
+                            "ERR CONFIG SET failed (possibly related to argument 'maxmemory-policy') - argument(s) must be one of the following: volatile-lru, volatile-lfu, volatile-random, volatile-ttl, allkeys-lru, allkeys-lfu, allkeys-random, noeviction"
+                                .to_string(),
+                        );
                     }
                 }
                 continue;
@@ -6804,12 +6813,17 @@ impl Runtime {
                 let parsed = match parse_i64_arg(&pair[1]) {
                     Ok(value) if value >= 0 => value as usize,
                     Ok(_) => {
-                        return RespFrame::Error(format!(
-                            "ERR Invalid argument '{}' for CONFIG SET 'slowlog-max-len'",
-                            String::from_utf8_lossy(&pair[1])
-                        ));
+                        return RespFrame::Error(
+                            "ERR CONFIG SET failed (possibly related to argument 'slowlog-max-len') - argument must be between 0 and 9223372036854775807 inclusive"
+                                .to_string(),
+                        );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return RespFrame::Error(
+                            "ERR CONFIG SET failed (possibly related to argument 'slowlog-max-len') - argument couldn't be parsed into an integer"
+                                .to_string(),
+                        );
+                    }
                 };
                 next_slowlog_max_len = Some(parsed);
                 continue;
@@ -12574,7 +12588,8 @@ mod tests {
         assert_eq!(
             invalid,
             RespFrame::Error(
-                "ERR CONFIG SET acllog-max-len must be a non-negative integer".to_string()
+                "ERR CONFIG SET failed (possibly related to argument 'acllog-max-len') - argument must be between 0 and 9223372036854775807 inclusive"
+                    .to_string()
             )
         );
     }
@@ -16871,7 +16886,10 @@ mod tests {
         );
         assert_eq!(
             set,
-            RespFrame::Error("ERR Invalid argument '-1' for CONFIG SET 'maxmemory'".to_string())
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'maxmemory') - argument must be a memory value"
+                    .to_string()
+            )
         );
 
         let timeout = rt.execute_frame(command(&[b"CONFIG", b"GET", b"timeout"]), 1);

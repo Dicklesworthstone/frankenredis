@@ -1078,7 +1078,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid argument '-1' for CONFIG SET 'maxmemory'"
+        "value": "ERR CONFIG SET failed (possibly related to argument 'maxmemory') - argument must be a memory value"
       }
     },
     {
@@ -1092,7 +1092,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR CONFIG SET acllog-max-len must be a non-negative integer"
+        "value": "ERR CONFIG SET failed (possibly related to argument 'acllog-max-len') - argument must be between 0 and 9223372036854775807 inclusive"
       }
     },
     {
@@ -1106,7 +1106,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR CONFIG SET failed (possibly related to argument 'maxmemory') - argument must be a memory value"
       }
     },
     {
@@ -1664,7 +1664,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid argument '-1' for CONFIG SET 'slowlog-max-len'"
+        "value": "ERR CONFIG SET failed (possibly related to argument 'slowlog-max-len') - argument must be between 0 and 9223372036854775807 inclusive"
       }
     },
     {
@@ -1727,7 +1727,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR CONFIG SET failed (possibly related to argument 'maxmemory') - argument must be a memory value"
       }
     },
     {
@@ -1741,7 +1741,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR CONFIG SET failed (possibly related to argument 'acllog-max-len') - argument couldn't be parsed into an integer"
       }
     },
     {
@@ -2717,7 +2717,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid argument 'bogus-policy' for CONFIG SET 'maxmemory-policy'"
+        "value": "ERR CONFIG SET failed (possibly related to argument 'maxmemory-policy') - argument(s) must be one of the following: volatile-lru, volatile-lfu, volatile-random, volatile-ttl, allkeys-lru, allkeys-lfu, allkeys-random, noeviction"
       }
     },
     {

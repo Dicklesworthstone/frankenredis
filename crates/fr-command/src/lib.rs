@@ -11734,9 +11734,15 @@ fn config_apply_store_sets(pairs: &[Vec<u8>], store: &mut Store) -> Result<(), C
             "maxmemory-policy" => {
                 store.maxmemory_policy =
                     MaxmemoryPolicy::from_config_str(val).ok_or_else(|| {
-                        CommandError::Custom(format!(
-                            "ERR Invalid argument '{val}' for CONFIG SET 'maxmemory-policy'"
-                        ))
+                        // Upstream config.c emits the full list of
+                        // accepted enum values in the "CONFIG SET
+                        // failed (possibly related to argument X) -
+                        // argument(s) must be one of the following:
+                        // ..." template. (br-frankenredis-2di1)
+                        CommandError::Custom(
+                            "ERR CONFIG SET failed (possibly related to argument 'maxmemory-policy') - argument(s) must be one of the following: volatile-lru, volatile-lfu, volatile-random, volatile-ttl, allkeys-lru, allkeys-lfu, allkeys-random, noeviction"
+                                .to_string(),
+                        )
                     })?;
             }
             "lfu-decay-time" => {
