@@ -259,3 +259,10 @@ path = "fuzz_targets/fuzz_store_hll.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_differential_runtime"
+path = "fuzz_targets/fuzz_differential_runtime.rs"
+test = false
+doc = false
+bench = false
