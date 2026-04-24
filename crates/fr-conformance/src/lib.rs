@@ -7952,6 +7952,25 @@ mod tests {
         });
     }
 
+    /// Wire the `core_cluster.json` fixture through the self-spawning
+    /// vendored redis-server oracle. Covers CLUSTER INFO / NODES /
+    /// SLOTS / SHARDS / COUNTKEYSINSLOT / GETKEYSINSLOT and related
+    /// introspection. The vendored server runs in non-cluster-mode
+    /// here, so cluster-mutation commands are expected to return the
+    /// "This instance has cluster support disabled" reply — that is
+    /// itself part of the conformance surface. (br-frankenredis-f3pv)
+    #[test]
+    fn live_redis_core_cluster_matches_runtime() {
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+        run_live_diff_tolerant("core_cluster", || {
+            run_live_redis_diff(&cfg, "core_cluster.json", &oracle)
+        });
+    }
+
     #[test]
     fn live_redis_core_replication_stable_matches_runtime() {
         let cfg = HarnessConfig::default_paths();
