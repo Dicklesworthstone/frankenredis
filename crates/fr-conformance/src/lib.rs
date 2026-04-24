@@ -10,7 +10,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use fr_config::{DecisionAction, DriftSeverity, ThreatClass};
 use fr_persist::{AofRecord, decode_aof_stream, encode_aof_stream};
-use fr_protocol::{RespFrame, parse_frame};
+use fr_protocol::{ParserConfig, RespFrame, parse_frame, parse_frame_with_config};
+
+/// Parser config the live-oracle harness uses when reading replies
+/// from the vendored redis-server. We trust the upstream peer and
+/// enable RESP3 downgrade parsing so HELLO 3 and any subsequent RESP3
+/// reply fits into our RESP2-shaped RespFrame. Local/in-runtime
+/// parsing still uses the default config (fail-closed on RESP3).
+/// (br-frankenredis-ozcx)
+fn live_oracle_parser_config() -> ParserConfig {
+    ParserConfig {
+        allow_resp3: true,
+        ..ParserConfig::default()
+    }
+}
 use fr_repl::{HandshakeFsm, HandshakeState, HandshakeStep};
 use fr_runtime::{EvidenceEvent, Runtime};
 use serde::{Deserialize, Serialize};
@@ -815,6 +828,7 @@ pub fn run_protocol_fixture(
             max_bulk_len: 512 * 1024 * 1024,
             max_array_len: 1024 * 1024,
             max_recursion_depth: 1024,
+            ..fr_protocol::ParserConfig::default()
         };
         let actual = fr_protocol::parse_frame_with_config(&encoded, &parser_config)
             .map_err(|err| format!("runtime emitted invalid RESP frame in {}: {err}", case.name))?
@@ -1726,7 +1740,7 @@ fn read_resp_sequence_from_stream(
     loop {
         strip_leading_live_replication_keepalives(&mut buf);
         while !buf.is_empty() && frames.len() < frame_count {
-            match parse_frame(&buf) {
+            match parse_frame_with_config(&buf, &live_oracle_parser_config()) {
                 Ok(parsed) => {
                     frames.push(parsed.frame);
                     buf.drain(..parsed.consumed);
@@ -1797,7 +1811,7 @@ fn read_optional_resp_frame_from_stream(
         if buf.is_empty() {
             continue;
         }
-        match parse_frame(&buf) {
+        match parse_frame_with_config(&buf, &live_oracle_parser_config()) {
             Ok(parsed) => return Ok(Some(parsed.frame)),
             Err(fr_protocol::RespParseError::Incomplete) => {}
             Err(err) => {
@@ -8749,29 +8763,22 @@ mod tests {
         });
     }
 
-    /// `core_connection.json` is skipped under the current live
-    /// oracle harness: every subset I tried (even bare PING / TIME /
-    /// LOLWUT cases) wedges the per-case read because (a) HELLO 3
-    /// upgrades the shared TCP connection to RESP3 map replies that
-    /// fr-protocol's parser intentionally rejects (fail-closed
-    /// posture from fr_p2c_002_u007_resp3_fail_closed_prefix_matrix);
-    /// (b) QUIT closes the TCP connection, leaving every later case
-    /// in the fixture run to time out; (c) COMMAND DOCS/LIST and
-    /// LATENCY RESET return replies large enough to cross the
-    /// harness read-buffer boundary; (d) the fixture interleaves
-    /// AUTH/SELECT state changes that the single-client harness
-    /// can't clean between cases. Full coverage requires harness
-    /// upgrade (per-case TCP read timeout + stream-read + connection-
-    /// lifecycle awareness) tracked as br-frankenredis-4e32, plus
-    /// RESP3 parser support tracked as br-frankenredis-ozcx.
-    /// (br-frankenredis-4e32)
+    /// `core_connection.json` remains skipped in the live oracle.
+    /// RESP3 parsing works now via `allow_resp3` (br-frankenredis-
+    /// ozcx), but the fixture still interleaves QUIT/RESET with
+    /// COMMAND DOCS and state-mutating AUTH/SELECT cases that wedge
+    /// the single-TCP-connection harness — the per-case read
+    /// timeout + stream-read + connection-lifecycle work tracked
+    /// under br-frankenredis-4e32 is still required before the
+    /// suite can run end-to-end.
+    /// (br-frankenredis-4e32, ozcx)
     #[test]
     fn live_redis_core_connection_matches_runtime() {
         eprintln!(
-            "[live-oracle:core_connection] skipping — fixture contains \
-             HELLO/QUIT/COMMAND DOCS cases the current single-client \
-             harness cannot drive without a per-case TCP timeout \
-             (tracked as br-frankenredis-4e32)."
+            "[live-oracle:core_connection] skipping — RESP3 parser now \
+             available (ozcx) but harness still needs per-case TCP \
+             read timeout + stream-read to drive QUIT/COMMAND DOCS \
+             cases end-to-end (tracked as br-frankenredis-4e32)."
         );
     }
 

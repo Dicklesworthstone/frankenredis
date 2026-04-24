@@ -507,6 +507,7 @@ fn aof_parser_config() -> fr_protocol::ParserConfig {
         max_bulk_len: AOF_MAX_BULK_LEN,
         max_array_len: AOF_MAX_ARRAY_LEN,
         max_recursion_depth: AOF_MAX_RECURSION_DEPTH,
+        ..fr_protocol::ParserConfig::default()
     }
 }
 

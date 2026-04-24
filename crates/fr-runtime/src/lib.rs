@@ -3540,6 +3540,11 @@ impl Runtime {
                 .min(self.server.proto_max_bulk_len),
             max_array_len: self.policy.gate.max_array_len,
             max_recursion_depth: 128,
+            // Server-side parsing of CLIENT → SERVER command frames
+            // stays RESP2-only; the RESP3 downgrade helpers are
+            // reserved for trusted client-side replies (live-oracle
+            // harness). (br-frankenredis-ozcx)
+            ..fr_protocol::ParserConfig::default()
         }
     }
 

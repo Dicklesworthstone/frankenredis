@@ -76,6 +76,20 @@ pub struct ParserConfig {
     pub max_bulk_len: usize,
     pub max_array_len: usize,
     pub max_recursion_depth: usize,
+    /// Opt-in RESP3 reply parsing. The default (`false`) keeps the
+    /// fail-closed posture codified by
+    /// `fr_p2c_002_u007_resp3_fail_closed_prefix_matrix`: any RESP3
+    /// type prefix on untrusted input is rejected with
+    /// `UnsupportedResp3Type`. Trusted callers (e.g. the live-oracle
+    /// harness reading replies from the vendored redis-server after
+    /// `HELLO 3`) flip this to `true` so RESP3 frames downgrade into
+    /// RESP2-equivalent `RespFrame` shapes — map → flat Array of 2N
+    /// field/value entries, set/push → Array, bool → Integer, double
+    /// / big-number → BulkString of the ASCII form, null → BulkString
+    /// None, verbatim → BulkString (prefix stripped), attribute →
+    /// peeled before parsing the next real frame, blob-error → Error.
+    /// (br-frankenredis-ozcx)
+    pub allow_resp3: bool,
 }
 
 impl Default for ParserConfig {
@@ -84,6 +98,7 @@ impl Default for ParserConfig {
             max_bulk_len: 512 * 1024 * 1024, // 512 MiB default (Redis standard)
             max_array_len: 1024 * 1024,      // 1M elements
             max_recursion_depth: 128,
+            allow_resp3: false,
         }
     }
 }
@@ -170,11 +185,146 @@ fn parse_frame_internal(
         }
         b'$' => parse_bulk(input, next, config),
         b'*' => parse_array(input, next, depth, config),
-        b'~' | b'%' | b'#' | b',' | b'_' | b'(' | b'=' | b'|' | b'>' | b'!' => {
+        // RESP3 type prefixes. Without `config.allow_resp3`, hard-reject
+        // every RESP3 prefix to preserve the fail-closed posture
+        // codified by fr_p2c_002_u007_resp3_fail_closed_prefix_matrix.
+        // With `allow_resp3`, downgrade each type into a RESP2-shaped
+        // RespFrame so downstream RESP2-only code can consume the
+        // reply. (br-frankenredis-ozcx)
+        b'~' | b'%' | b'#' | b',' | b'_' | b'(' | b'=' | b'|' | b'>' | b'!'
+            if !config.allow_resp3 =>
+        {
             Err(RespParseError::UnsupportedResp3Type(prefix))
         }
+        b'%' => parse_resp3_map(input, next, depth, config),
+        b'~' | b'>' => parse_array(input, next, depth, config),
+        b'#' => parse_resp3_bool(input, next),
+        b',' | b'(' => {
+            let (line, consumed) = read_line(input, next)?;
+            let s = std::str::from_utf8(line)
+                .map_err(|_| RespParseError::InvalidUtf8)?
+                .to_string();
+            Ok((RespFrame::BulkString(Some(s.into_bytes())), consumed))
+        }
+        b'_' => {
+            let (_line, consumed) = read_line(input, next)?;
+            Ok((RespFrame::BulkString(None), consumed))
+        }
+        b'=' => parse_resp3_verbatim(input, next, config),
+        b'|' => {
+            // Attribute: parse the attribute map and discard it,
+            // then return the next real frame. Upstream uses this
+            // to attach per-reply metadata that RESP2 clients don't
+            // understand.
+            let (_attr, consumed) = parse_resp3_map(input, next, depth + 1, config)?;
+            parse_frame_internal(input, consumed, depth + 1, config)
+        }
+        b'!' => parse_resp3_blob_error(input, next, config),
         other => Err(RespParseError::InvalidPrefix(other)),
     }
+}
+
+fn parse_resp3_map(
+    input: &[u8],
+    start: usize,
+    depth: usize,
+    config: &ParserConfig,
+) -> Result<(RespFrame, usize), RespParseError> {
+    let (line, mut cursor) = read_line(input, start)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidMultibulkLength)?;
+    if len == -1 {
+        return Ok((RespFrame::Array(None), cursor));
+    }
+    if len < 0 {
+        return Err(RespParseError::InvalidMultibulkLength);
+    }
+    let count = usize::try_from(len).map_err(|_| RespParseError::InvalidMultibulkLength)?;
+    let pair_count = count
+        .checked_mul(2)
+        .ok_or(RespParseError::MultibulkLengthTooLarge)?;
+    if pair_count > config.max_array_len {
+        return Err(RespParseError::MultibulkLengthTooLarge);
+    }
+    let mut items = Vec::with_capacity(pair_count.min(1024));
+    for _ in 0..pair_count {
+        let (item, consumed) = parse_frame_internal(input, cursor, depth + 1, config)?;
+        items.push(item);
+        cursor = consumed;
+    }
+    Ok((RespFrame::Array(Some(items)), cursor))
+}
+
+fn parse_resp3_bool(input: &[u8], start: usize) -> Result<(RespFrame, usize), RespParseError> {
+    let (line, consumed) = read_line(input, start)?;
+    let flag = match line {
+        b"t" => 1,
+        b"f" => 0,
+        _ => return Err(RespParseError::InvalidInteger),
+    };
+    Ok((RespFrame::Integer(flag), consumed))
+}
+
+fn parse_resp3_verbatim(
+    input: &[u8],
+    start: usize,
+    config: &ParserConfig,
+) -> Result<(RespFrame, usize), RespParseError> {
+    let (line, consumed) = read_line(input, start)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
+    if len < 0 {
+        return Err(RespParseError::InvalidBulkLength);
+    }
+    let data_len = usize::try_from(len).map_err(|_| RespParseError::InvalidBulkLength)?;
+    if data_len > config.max_bulk_len {
+        return Err(RespParseError::BulkLengthTooLarge);
+    }
+    let end = consumed
+        .checked_add(data_len)
+        .and_then(|idx| idx.checked_add(2))
+        .ok_or(RespParseError::Incomplete)?;
+    if input.len() < end {
+        return Err(RespParseError::Incomplete);
+    }
+    if input[consumed + data_len] != b'\r' || input[consumed + data_len + 1] != b'\n' {
+        return Err(RespParseError::InvalidBulkLength);
+    }
+    // Verbatim string body is `<3-char-type>:<payload>` — strip the
+    // 4-byte prefix when present.
+    let mut bytes = input[consumed..consumed + data_len].to_vec();
+    if bytes.len() >= 4 && bytes[3] == b':' {
+        bytes.drain(..4);
+    }
+    Ok((RespFrame::BulkString(Some(bytes)), end))
+}
+
+fn parse_resp3_blob_error(
+    input: &[u8],
+    start: usize,
+    config: &ParserConfig,
+) -> Result<(RespFrame, usize), RespParseError> {
+    let (line, consumed) = read_line(input, start)?;
+    let len = parse_i64_strict(line).map_err(|_| RespParseError::InvalidBulkLength)?;
+    if len < 0 {
+        return Err(RespParseError::InvalidBulkLength);
+    }
+    let data_len = usize::try_from(len).map_err(|_| RespParseError::InvalidBulkLength)?;
+    if data_len > config.max_bulk_len {
+        return Err(RespParseError::BulkLengthTooLarge);
+    }
+    let end = consumed
+        .checked_add(data_len)
+        .and_then(|idx| idx.checked_add(2))
+        .ok_or(RespParseError::Incomplete)?;
+    if input.len() < end {
+        return Err(RespParseError::Incomplete);
+    }
+    if input[consumed + data_len] != b'\r' || input[consumed + data_len + 1] != b'\n' {
+        return Err(RespParseError::InvalidBulkLength);
+    }
+    let text = std::str::from_utf8(&input[consumed..consumed + data_len])
+        .map(str::to_owned)
+        .map_err(|_| RespParseError::InvalidUtf8)?;
+    Ok((RespFrame::Error(text), end))
 }
 
 fn parse_bulk(
@@ -865,6 +1015,79 @@ mod tests {
         event.assert_schema_contract();
     }
 
+    /// Opt-in RESP3 parser (br-frankenredis-ozcx). Default config
+    /// still hard-rejects every RESP3 prefix; with allow_resp3=true
+    /// each RESP3 type downgrades into a RESP2-shaped RespFrame.
+    #[test]
+    fn fr_p2c_002_u012b_resp3_allow_downgrade() {
+        let allow = ParserConfig {
+            allow_resp3: true,
+            ..ParserConfig::default()
+        };
+
+        // Default config remains fail-closed.
+        assert_eq!(
+            parse_frame(b"%1\r\n+name\r\n+alice\r\n")
+                .expect_err("fail-closed without allow_resp3"),
+            RespParseError::UnsupportedResp3Type(b'%')
+        );
+
+        // Map → flat Array of 2N entries.
+        let parsed = parse_frame_with_config(
+            b"%2\r\n+name\r\n+alice\r\n+age\r\n:30\r\n",
+            &allow,
+        )
+        .expect("map parses under allow_resp3");
+        assert_eq!(
+            parsed.frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::SimpleString("name".to_string()),
+                RespFrame::SimpleString("alice".to_string()),
+                RespFrame::SimpleString("age".to_string()),
+                RespFrame::Integer(30),
+            ]))
+        );
+
+        // Set → Array.
+        let parsed = parse_frame_with_config(b"~2\r\n+a\r\n+b\r\n", &allow).unwrap();
+        assert_eq!(
+            parsed.frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::SimpleString("a".to_string()),
+                RespFrame::SimpleString("b".to_string()),
+            ]))
+        );
+
+        // Bool → Integer 0/1.
+        let parsed = parse_frame_with_config(b"#t\r\n", &allow).unwrap();
+        assert_eq!(parsed.frame, RespFrame::Integer(1));
+        let parsed = parse_frame_with_config(b"#f\r\n", &allow).unwrap();
+        assert_eq!(parsed.frame, RespFrame::Integer(0));
+
+        // Null → BulkString(None).
+        let parsed = parse_frame_with_config(b"_\r\n", &allow).unwrap();
+        assert_eq!(parsed.frame, RespFrame::BulkString(None));
+
+        // Double → BulkString of the ASCII payload.
+        let parsed = parse_frame_with_config(b",3.14\r\n", &allow).unwrap();
+        assert_eq!(parsed.frame, RespFrame::BulkString(Some(b"3.14".to_vec())));
+
+        // Verbatim → BulkString with 4-byte "txt:" prefix stripped.
+        let parsed = parse_frame_with_config(b"=15\r\ntxt:hello world\r\n", &allow).unwrap();
+        assert_eq!(
+            parsed.frame,
+            RespFrame::BulkString(Some(b"hello world".to_vec()))
+        );
+
+        // Attribute: peel the attribute map, return the next frame.
+        let parsed = parse_frame_with_config(b"|1\r\n+meta\r\n+value\r\n+OK\r\n", &allow).unwrap();
+        assert_eq!(parsed.frame, RespFrame::SimpleString("OK".to_string()));
+
+        // Blob error → Error.
+        let parsed = parse_frame_with_config(b"!5\r\nWRONG\r\n", &allow).unwrap();
+        assert_eq!(parsed.frame, RespFrame::Error("WRONG".to_string()));
+    }
+
     #[test]
     fn fr_p2c_002_u013_bulk_limit_clamp_holds_at_boundary() {
         let config = ParserConfig {
@@ -1025,6 +1248,7 @@ mod tests {
                     max_bulk_len: 64,
                     max_array_len: 4,
                     max_recursion_depth: 2,
+                    ..ParserConfig::default()
                 };
                 let _ = parse_frame_with_config(&data, &config);
             }
