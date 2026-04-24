@@ -8436,6 +8436,58 @@ mod tests {
         });
     }
 
+    /// Wire the `core_client.json` fixture through the self-spawning
+    /// vendored redis-server oracle. Covers CLIENT GETNAME / SETNAME /
+    /// ID / INFO / NO-EVICT / NO-TOUCH / REPLY. CLIENT PAUSE /
+    /// UNPAUSE + CLIENT LIST (which enumerates every live TCP
+    /// connection and therefore diverges between a multi-connection
+    /// upstream and a single-client harness) XFAIL here.
+    /// (br-frankenredis-u8qc)
+    #[test]
+    fn live_redis_core_client_matches_runtime() {
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+        run_live_diff_tolerant("core_client", || {
+            run_live_redis_diff(&cfg, "core_client.json", &oracle)
+        });
+    }
+
+    /// Wire the `core_connection.json` fixture through the
+    /// self-spawning vendored redis-server oracle. Covers AUTH /
+    /// HELLO / SELECT / RESET / QUIT / ECHO / PING.
+    /// (br-frankenredis-4e32)
+    #[test]
+    fn live_redis_core_connection_matches_runtime() {
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+        run_live_diff_tolerant("core_connection", || {
+            run_live_redis_diff(&cfg, "core_connection.json", &oracle)
+        });
+    }
+
+    /// Wire the `core_config.json` fixture through the self-spawning
+    /// vendored redis-server oracle. Covers CONFIG GET / SET /
+    /// RESETSTAT / REWRITE. Server-specific CONFIG GET values (like
+    /// maxmemory, which depends on host RAM) fold through the
+    /// existing comparator overrides. (br-frankenredis-mly9)
+    #[test]
+    fn live_redis_core_config_matches_runtime() {
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+        run_live_diff_tolerant("core_config", || {
+            run_live_redis_diff(&cfg, "core_config.json", &oracle)
+        });
+    }
+
     /// Wire the `core_pubsub.json` fixture through the self-spawning
     /// vendored redis-server oracle. Covers the single-client
     /// PUB/SUB surface: PUBLISH without subscribers, PUBSUB
