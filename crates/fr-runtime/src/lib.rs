@@ -1866,6 +1866,8 @@ pub struct ServerState {
     pubsub_shard_subs: HashMap<Vec<u8>, HashSet<u64>>,
     /// Per-client outbox: client_id → pending messages for delivery.
     pubsub_outbox: HashMap<u64, Vec<fr_store::PubSubMessage>>,
+    /// Key → client IDs that should receive client-tracking invalidations.
+    client_tracking_observed_keys: HashMap<Vec<u8>, HashSet<u64>>,
     /// Inverse mapping: client_id → set of channels they are subscribed to.
     pubsub_client_channels: HashMap<u64, HashSet<Vec<u8>>>,
     /// Inverse mapping: client_id → set of patterns they are subscribed to.
@@ -1966,6 +1968,7 @@ impl Default for ServerState {
             pubsub_pattern_subs: HashMap::new(),
             pubsub_shard_subs: HashMap::new(),
             pubsub_outbox: HashMap::new(),
+            client_tracking_observed_keys: HashMap::new(),
             pubsub_client_channels: HashMap::new(),
             pubsub_client_patterns: HashMap::new(),
             pubsub_client_shard_channels: HashMap::new(),
@@ -2354,6 +2357,11 @@ impl ClientSession {
         self.authenticated_user
             .as_deref()
             .unwrap_or(DEFAULT_AUTH_USER)
+    }
+
+    #[must_use]
+    pub fn resp_protocol_version(&self) -> i64 {
+        self.resp_protocol_version
     }
 
     fn refresh_authentication_for_server(
@@ -3014,6 +3022,7 @@ impl Runtime {
     /// Remove a disconnected session from the CLIENT LIST registry.
     pub fn remove_client_session(&mut self, client_id: u64) {
         self.server.client_sessions.remove(&client_id);
+        self.remove_client_tracking_observer(client_id);
     }
 
     /// Track a new client connection for INFO stats.
@@ -3066,6 +3075,7 @@ impl Runtime {
     /// Clean up replication/monitor state for a disconnected client.
     pub fn cleanup_disconnected_client(&mut self, client_id: u64) {
         self.disable_monitor(client_id);
+        self.remove_client_tracking_observer(client_id);
         if self
             .server
             .replication_runtime_state
@@ -3456,6 +3466,160 @@ impl Runtime {
     /// Returns true if the current client has any active pub/sub subscriptions.
     pub fn is_in_subscription_mode(&self) -> bool {
         self.is_pubsub_client(self.session.client_id)
+    }
+
+    fn pubsub_frame_for_protocol(resp_protocol_version: i64, items: Vec<RespFrame>) -> RespFrame {
+        if resp_protocol_version == 3 {
+            RespFrame::Push(items)
+        } else {
+            RespFrame::Array(Some(items))
+        }
+    }
+
+    fn current_pubsub_frame(&self, items: Vec<RespFrame>) -> RespFrame {
+        Self::pubsub_frame_for_protocol(self.session.resp_protocol_version, items)
+    }
+
+    fn current_pubsub_sequence(&self, mut replies: Vec<RespFrame>) -> RespFrame {
+        if replies.len() == 1 {
+            replies.pop().unwrap_or(RespFrame::BulkString(None))
+        } else {
+            RespFrame::Sequence(replies)
+        }
+    }
+
+    fn current_pubsub_reply(
+        &self,
+        kind: &'static [u8],
+        channel: Option<Vec<u8>>,
+        count: usize,
+    ) -> RespFrame {
+        self.current_pubsub_frame(vec![
+            RespFrame::BulkString(Some(kind.to_vec())),
+            RespFrame::BulkString(channel),
+            RespFrame::Integer(count as i64),
+        ])
+    }
+
+    fn tracking_key_matches_prefixes(key: &[u8], tracking: &ClientTrackingState) -> bool {
+        tracking.prefixes.is_empty()
+            || tracking
+                .prefixes
+                .iter()
+                .any(|prefix| key.starts_with(prefix))
+    }
+
+    fn add_tracking_invalidation(
+        invalidations: &mut BTreeMap<u64, Vec<Vec<u8>>>,
+        target_id: u64,
+        key: &[u8],
+    ) {
+        let target_keys = invalidations.entry(target_id).or_default();
+        if !target_keys.iter().any(|existing| existing == key) {
+            target_keys.push(key.to_vec());
+        }
+    }
+
+    fn queue_client_tracking_invalidations(&mut self, keys: &[Vec<u8>]) {
+        if keys.is_empty() {
+            return;
+        }
+
+        let observed_keys: Vec<(Vec<u8>, HashSet<u64>)> = keys
+            .iter()
+            .filter_map(|key| {
+                self.server
+                    .client_tracking_observed_keys
+                    .remove(key)
+                    .map(|owners| (key.clone(), owners))
+            })
+            .collect();
+        let sessions = self.client_list_sessions();
+        let mut invalidations: BTreeMap<u64, Vec<Vec<u8>>> = BTreeMap::new();
+        for (owner_id, session) in &sessions {
+            let tracking = &session.client_tracking;
+            if !tracking.enabled || !tracking.bcast {
+                continue;
+            }
+            if tracking.noloop && *owner_id == self.session.client_id {
+                continue;
+            }
+
+            let target_id = tracking.redirect.unwrap_or(*owner_id);
+            if !sessions.contains_key(&target_id) {
+                continue;
+            }
+
+            for key in keys {
+                if Self::tracking_key_matches_prefixes(key, tracking) {
+                    Self::add_tracking_invalidation(&mut invalidations, target_id, key);
+                }
+            }
+        }
+        for (key, owner_ids) in observed_keys {
+            for owner_id in owner_ids {
+                let Some(session) = sessions.get(&owner_id) else {
+                    continue;
+                };
+                let tracking = &session.client_tracking;
+                if !tracking.enabled || tracking.bcast {
+                    continue;
+                }
+                if tracking.noloop && owner_id == self.session.client_id {
+                    continue;
+                }
+                let target_id = tracking.redirect.unwrap_or(owner_id);
+                if sessions.contains_key(&target_id) {
+                    Self::add_tracking_invalidation(&mut invalidations, target_id, &key);
+                }
+            }
+        }
+
+        for (target_id, keys) in invalidations {
+            if !keys.is_empty() {
+                self.server
+                    .pubsub_outbox
+                    .entry(target_id)
+                    .or_default()
+                    .push(fr_store::PubSubMessage::Invalidate { keys });
+            }
+        }
+    }
+
+    fn should_record_client_tracking_keys(&self) -> bool {
+        let tracking = &self.session.client_tracking;
+        tracking.enabled
+            && !tracking.bcast
+            && if tracking.optin {
+                tracking.caching == Some(true)
+            } else if tracking.optout {
+                tracking.caching != Some(false)
+            } else {
+                true
+            }
+    }
+
+    fn record_client_tracking_keys(&mut self, keys: &[Vec<u8>]) {
+        if keys.is_empty() || !self.should_record_client_tracking_keys() {
+            return;
+        }
+        let client_id = self.session.client_id;
+        for key in keys {
+            self.server
+                .client_tracking_observed_keys
+                .entry(key.clone())
+                .or_default()
+                .insert(client_id);
+        }
+    }
+
+    fn remove_client_tracking_observer(&mut self, client_id: u64) {
+        self.server
+            .client_tracking_observed_keys
+            .retain(|_, observers| {
+                observers.remove(&client_id);
+                !observers.is_empty()
+            });
     }
 
     fn pubsub_context_error(command_name: &str) -> RespFrame {
@@ -4422,6 +4586,7 @@ impl Runtime {
 
         match result {
             Ok(reply) => {
+                let cmd_keys = fr_command::command_keys(&argv);
                 if dirty_after > dirty_before {
                     // Record AOF only for non-special commands (special ones record themselves)
                     if special_command.is_none() && !handled_migrate {
@@ -4439,10 +4604,10 @@ impl Runtime {
                     // Optimized blocking: track keys modified by write commands
                     // so the event loop only checks clients waiting on these keys.
                     if !handled_migrate {
-                        let cmd_keys = fr_command::command_keys(&argv);
                         for key in &cmd_keys {
                             self.server.ready_keys.insert(key.clone());
                         }
+                        self.queue_client_tracking_invalidations(&cmd_keys);
                         // Keyspace notifications: publish events for modified keys.
                         if self.server.store.notify_keyspace_events != 0 {
                             let event = Self::command_to_keyspace_event(&argv);
@@ -4480,6 +4645,12 @@ impl Runtime {
                             self.deliver_keyspace_notifications();
                         }
                     }
+                } else if !matches!(reply, RespFrame::Error(_))
+                    && !argv
+                        .first()
+                        .is_some_and(|command| fr_command::is_write_command(command))
+                {
+                    self.record_client_tracking_keys(&cmd_keys);
                 }
                 reply
             }
@@ -5302,6 +5473,7 @@ impl Runtime {
             for key in &outcome.deleted_keys {
                 self.server.ready_keys.insert(key.clone());
             }
+            self.queue_client_tracking_invalidations(&outcome.deleted_keys);
 
             if self.server.store.notify_keyspace_events != 0 {
                 for key in &outcome.deleted_keys {
@@ -8086,6 +8258,9 @@ impl Runtime {
                     Ok(tracking) => tracking,
                     Err(err) => return err.to_resp(),
                 };
+            if !tracking.enabled || tracking.bcast {
+                self.remove_client_tracking_observer(self.session.client_id);
+            }
             self.session.client_tracking = tracking;
             RespFrame::SimpleString("OK".to_string())
         } else if sub.eq_ignore_ascii_case("CACHING") {
@@ -8492,19 +8667,9 @@ impl Runtime {
         let mut replies = Vec::new();
         for channel in &argv[1..] {
             let count = self.pubsub_subscribe(channel.clone());
-            replies.push(RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"subscribe".to_vec())),
-                RespFrame::BulkString(Some(channel.clone())),
-                RespFrame::Integer(count as i64),
-            ])));
+            replies.push(self.current_pubsub_reply(b"subscribe", Some(channel.clone()), count));
         }
-        if replies.len() == 1
-            && let Some(frame) = replies.pop()
-        {
-            frame
-        } else {
-            RespFrame::Sequence(replies)
-        }
+        self.current_pubsub_sequence(replies)
     }
 
     fn handle_unsubscribe_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -8519,39 +8684,21 @@ impl Runtime {
                 .collect();
             channels.sort();
             if channels.is_empty() {
-                return RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
-                    RespFrame::BulkString(None),
-                    RespFrame::Integer(0),
-                ]));
+                return self.current_pubsub_reply(b"unsubscribe", None, 0);
             }
             let mut replies = Vec::new();
             for ch in channels {
                 let count = self.pubsub_unsubscribe(&ch);
-                replies.push(RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
-                    RespFrame::BulkString(Some(ch)),
-                    RespFrame::Integer(count as i64),
-                ])));
+                replies.push(self.current_pubsub_reply(b"unsubscribe", Some(ch), count));
             }
-            if replies.len() == 1 {
-                return replies.pop().unwrap_or(RespFrame::BulkString(None));
-            }
-            return RespFrame::Sequence(replies);
+            return self.current_pubsub_sequence(replies);
         }
         let mut replies = Vec::new();
         for channel in &argv[1..] {
             let count = self.pubsub_unsubscribe(channel);
-            replies.push(RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"unsubscribe".to_vec())),
-                RespFrame::BulkString(Some(channel.clone())),
-                RespFrame::Integer(count as i64),
-            ])));
+            replies.push(self.current_pubsub_reply(b"unsubscribe", Some(channel.clone()), count));
         }
-        if replies.len() == 1 {
-            return replies.pop().unwrap_or(RespFrame::BulkString(None));
-        }
-        RespFrame::Sequence(replies)
+        self.current_pubsub_sequence(replies)
     }
 
     fn handle_psubscribe_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -8561,16 +8708,9 @@ impl Runtime {
         let mut replies = Vec::new();
         for pattern in &argv[1..] {
             let count = self.pubsub_psubscribe(pattern.clone());
-            replies.push(RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"psubscribe".to_vec())),
-                RespFrame::BulkString(Some(pattern.clone())),
-                RespFrame::Integer(count as i64),
-            ])));
+            replies.push(self.current_pubsub_reply(b"psubscribe", Some(pattern.clone()), count));
         }
-        if replies.len() == 1 {
-            return replies.pop().unwrap_or(RespFrame::BulkString(None));
-        }
-        RespFrame::Sequence(replies)
+        self.current_pubsub_sequence(replies)
     }
 
     fn handle_punsubscribe_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -8584,39 +8724,21 @@ impl Runtime {
                 .collect();
             patterns.sort();
             if patterns.is_empty() {
-                return RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
-                    RespFrame::BulkString(None),
-                    RespFrame::Integer(0),
-                ]));
+                return self.current_pubsub_reply(b"punsubscribe", None, 0);
             }
             let mut replies = Vec::new();
             for pat in patterns {
                 let count = self.pubsub_punsubscribe(&pat);
-                replies.push(RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
-                    RespFrame::BulkString(Some(pat)),
-                    RespFrame::Integer(count as i64),
-                ])));
+                replies.push(self.current_pubsub_reply(b"punsubscribe", Some(pat), count));
             }
-            if replies.len() == 1 {
-                return replies.pop().unwrap_or(RespFrame::BulkString(None));
-            }
-            return RespFrame::Sequence(replies);
+            return self.current_pubsub_sequence(replies);
         }
         let mut replies = Vec::new();
         for pattern in &argv[1..] {
             let count = self.pubsub_punsubscribe(pattern);
-            replies.push(RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"punsubscribe".to_vec())),
-                RespFrame::BulkString(Some(pattern.clone())),
-                RespFrame::Integer(count as i64),
-            ])));
+            replies.push(self.current_pubsub_reply(b"punsubscribe", Some(pattern.clone()), count));
         }
-        if replies.len() == 1 {
-            return replies.pop().unwrap_or(RespFrame::BulkString(None));
-        }
-        RespFrame::Sequence(replies)
+        self.current_pubsub_sequence(replies)
     }
 
     fn handle_publish_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -8779,16 +8901,9 @@ impl Runtime {
         let mut replies = Vec::new();
         for channel in &argv[1..] {
             let count = self.pubsub_ssubscribe(channel.clone());
-            replies.push(RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"ssubscribe".to_vec())),
-                RespFrame::BulkString(Some(channel.clone())),
-                RespFrame::Integer(count as i64),
-            ])));
+            replies.push(self.current_pubsub_reply(b"ssubscribe", Some(channel.clone()), count));
         }
-        if replies.len() == 1 {
-            return replies.pop().unwrap_or(RespFrame::BulkString(None));
-        }
-        RespFrame::Sequence(replies)
+        self.current_pubsub_sequence(replies)
     }
 
     fn handle_sunsubscribe_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -8802,39 +8917,21 @@ impl Runtime {
                 .collect();
             channels.sort();
             if channels.is_empty() {
-                return RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(b"sunsubscribe".to_vec())),
-                    RespFrame::BulkString(None),
-                    RespFrame::Integer(0),
-                ]));
+                return self.current_pubsub_reply(b"sunsubscribe", None, 0);
             }
             let mut replies = Vec::new();
             for ch in channels {
                 let count = self.pubsub_sunsubscribe(&ch);
-                replies.push(RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(b"sunsubscribe".to_vec())),
-                    RespFrame::BulkString(Some(ch)),
-                    RespFrame::Integer(count as i64),
-                ])));
+                replies.push(self.current_pubsub_reply(b"sunsubscribe", Some(ch), count));
             }
-            if replies.len() == 1 {
-                return replies.pop().unwrap_or(RespFrame::BulkString(None));
-            }
-            return RespFrame::Sequence(replies);
+            return self.current_pubsub_sequence(replies);
         }
         let mut replies = Vec::new();
         for channel in &argv[1..] {
             let count = self.pubsub_sunsubscribe(channel);
-            replies.push(RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"sunsubscribe".to_vec())),
-                RespFrame::BulkString(Some(channel.clone())),
-                RespFrame::Integer(count as i64),
-            ])));
+            replies.push(self.current_pubsub_reply(b"sunsubscribe", Some(channel.clone()), count));
         }
-        if replies.len() == 1 {
-            return replies.pop().unwrap_or(RespFrame::BulkString(None));
-        }
-        RespFrame::Sequence(replies)
+        self.current_pubsub_sequence(replies)
     }
 
     fn handle_spublish_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
@@ -11914,6 +12011,142 @@ mod tests {
             b"*3\r\n$9\r\nsubscribe\r\n$5\r\nalpha\r\n:1\r\n*3\r\n$9\r\nsubscribe\r\n$4\r\nbeta\r\n:2\r\n"
                 .to_vec()
         );
+    }
+
+    #[test]
+    fn resp3_pubsub_subscription_acks_encode_as_push_frames() {
+        let mut rt = Runtime::default_strict();
+        assert!(matches!(
+            rt.execute_frame(command(&[b"HELLO", b"3"]), 0),
+            RespFrame::Map(Some(_))
+        ));
+
+        let single = rt.execute_frame(command(&[b"SUBSCRIBE", b"alpha"]), 1);
+        assert_eq!(
+            single,
+            RespFrame::Push(vec![
+                RespFrame::BulkString(Some(b"subscribe".to_vec())),
+                RespFrame::BulkString(Some(b"alpha".to_vec())),
+                RespFrame::Integer(1),
+            ])
+        );
+        assert!(single.to_bytes().starts_with(b">3\r\n"));
+
+        let multi = rt.execute_frame(command(&[b"SSUBSCRIBE", b"shard-a", b"shard-b"]), 2);
+        let RespFrame::Sequence(items) = &multi else {
+            unreachable!("expected RESP sequence, got {multi:?}");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().all(|item| matches!(item, RespFrame::Push(_))));
+        assert!(multi.to_bytes().starts_with(b">3\r\n"));
+    }
+
+    #[test]
+    fn resp3_pubsub_deliveries_encode_as_push_frames_for_subscriber_protocol() {
+        let mut rt = Runtime::default_strict();
+        let subscriber = rt.new_session();
+        let publisher = rt.new_session();
+
+        let previous = rt.swap_session(subscriber);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"HELLO", b"3"]), 0),
+            RespFrame::Map(Some(_))
+        ));
+        assert!(matches!(
+            rt.execute_frame(command(&[b"SUBSCRIBE", b"alpha"]), 1),
+            RespFrame::Push(_)
+        ));
+        let subscriber = rt.swap_session(publisher);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"PUBLISH", b"alpha", b"payload"]), 2),
+            RespFrame::Integer(1)
+        );
+        let publisher = rt.swap_session(subscriber);
+        let messages = rt.drain_pending_pubsub();
+        assert_eq!(messages.len(), 1);
+        let frame = fr_command::pubsub_message_to_frame_for_protocol(
+            messages.into_iter().next().expect("message queued"),
+            rt.client_session().resp_protocol_version(),
+        );
+        assert_eq!(
+            frame,
+            RespFrame::Push(vec![
+                RespFrame::BulkString(Some(b"message".to_vec())),
+                RespFrame::BulkString(Some(b"alpha".to_vec())),
+                RespFrame::BulkString(Some(b"payload".to_vec())),
+            ])
+        );
+        assert!(frame.to_bytes().starts_with(b">3\r\n"));
+
+        let _subscriber = rt.swap_session(publisher);
+        let _ = rt.swap_session(previous);
+    }
+
+    #[test]
+    fn resp3_client_tracking_invalidation_redirects_encode_as_push_frames() {
+        let mut rt = Runtime::default_strict();
+        let redirect = rt.new_session();
+        let tracker = rt.new_session();
+        let writer = rt.new_session();
+
+        let previous = rt.swap_session(redirect);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"HELLO", b"3"]), 0),
+            RespFrame::Map(Some(_))
+        ));
+        let redirect = rt.swap_session(tracker);
+        rt.record_client_session(&redirect);
+
+        assert!(matches!(
+            rt.execute_frame(command(&[b"HELLO", b"3"]), 1),
+            RespFrame::Map(Some(_))
+        ));
+        let redirect_id = redirect.client_id.to_string();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CLIENT",
+                    b"TRACKING",
+                    b"ON",
+                    b"REDIRECT",
+                    redirect_id.as_bytes(),
+                    b"BCAST",
+                    b"PREFIX",
+                    b"foo",
+                ]),
+                2,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let tracker = rt.swap_session(writer);
+        rt.record_client_session(&tracker);
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"foo:1", b"payload"]), 3),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let messages = rt.drain_pubsub_for_client(redirect.client_id);
+        assert_eq!(
+            messages,
+            vec![fr_store::PubSubMessage::Invalidate {
+                keys: vec![b"foo:1".to_vec()],
+            }]
+        );
+        let frame = fr_command::pubsub_message_to_frame_for_protocol(
+            messages.into_iter().next().expect("invalidation queued"),
+            redirect.resp_protocol_version(),
+        );
+        assert_eq!(
+            frame,
+            RespFrame::Push(vec![
+                RespFrame::BulkString(Some(b"invalidate".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"foo:1".to_vec()))])),
+            ])
+        );
+        assert!(frame.to_bytes().starts_with(b">2\r\n"));
+
+        let _writer = rt.swap_session(previous);
     }
 
     #[test]

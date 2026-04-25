@@ -13308,6 +13308,31 @@ pub fn pubsub_message_to_frame(msg: PubSubMessage) -> RespFrame {
             RespFrame::BulkString(Some(channel)),
             RespFrame::BulkString(Some(data)),
         ])),
+        PubSubMessage::Invalidate { keys } => RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"invalidate".to_vec())),
+            RespFrame::Array(Some(
+                keys.into_iter()
+                    .map(|key| RespFrame::BulkString(Some(key)))
+                    .collect(),
+            )),
+        ])),
+    }
+}
+
+/// Convert a `PubSubMessage` to the wire shape for the negotiated RESP protocol.
+/// RESP2 clients receive Array frames; RESP3 clients receive Push frames.
+pub fn pubsub_message_to_frame_for_protocol(
+    msg: PubSubMessage,
+    resp_protocol_version: i64,
+) -> RespFrame {
+    let frame = pubsub_message_to_frame(msg);
+    if resp_protocol_version == 3 {
+        match frame {
+            RespFrame::Array(Some(items)) => RespFrame::Push(items),
+            other => other,
+        }
+    } else {
+        frame
     }
 }
 
@@ -15792,7 +15817,7 @@ mod tests {
         dispatch_argv, drain_pubsub_messages, eq_ascii_command, execute_migrate,
         format_eval_read_only_script_error, frame_to_argv, hello_bulk, hello_simple,
         is_write_command, parse_blocking_deadline_milliseconds, parse_migrate_request,
-        pubsub_message_to_frame,
+        pubsub_message_to_frame, pubsub_message_to_frame_for_protocol,
     };
 
     fn classify_command_linear(cmd: &[u8]) -> Option<CommandId> {
@@ -27892,6 +27917,47 @@ mod tests {
                 RespFrame::BulkString(Some(b"hello".to_vec())),
             ]))
         );
+    }
+
+    #[test]
+    fn pubsub_message_to_frame_for_resp3_uses_push_type() {
+        let frame = pubsub_message_to_frame_for_protocol(
+            fr_store::PubSubMessage::Message {
+                channel: b"ch1".to_vec(),
+                data: b"hello".to_vec(),
+            },
+            3,
+        );
+        assert_eq!(
+            frame,
+            RespFrame::Push(vec![
+                RespFrame::BulkString(Some(b"message".to_vec())),
+                RespFrame::BulkString(Some(b"ch1".to_vec())),
+                RespFrame::BulkString(Some(b"hello".to_vec())),
+            ])
+        );
+        assert!(frame.to_bytes().starts_with(b">3\r\n"));
+    }
+
+    #[test]
+    fn client_tracking_invalidation_to_frame_for_resp3_uses_push_type() {
+        let frame = pubsub_message_to_frame_for_protocol(
+            fr_store::PubSubMessage::Invalidate {
+                keys: vec![b"foo:1".to_vec(), b"foo:2".to_vec()],
+            },
+            3,
+        );
+        assert_eq!(
+            frame,
+            RespFrame::Push(vec![
+                RespFrame::BulkString(Some(b"invalidate".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"foo:1".to_vec())),
+                    RespFrame::BulkString(Some(b"foo:2".to_vec())),
+                ])),
+            ])
+        );
+        assert!(frame.to_bytes().starts_with(b">2\r\n"));
     }
 
     #[test]

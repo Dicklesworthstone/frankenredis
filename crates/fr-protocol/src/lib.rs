@@ -11,6 +11,7 @@ pub enum RespFrame {
     BulkString(Option<Vec<u8>>),
     Array(Option<Vec<RespFrame>>),
     Map(Option<Vec<(RespFrame, RespFrame)>>),
+    Push(Vec<RespFrame>),
     Sequence(Vec<RespFrame>),
 }
 
@@ -65,6 +66,14 @@ impl RespFrame {
                 for (key, value) in entries {
                     key.encode_into(out);
                     value.encode_into(out);
+                }
+            }
+            Self::Push(frames) => {
+                out.extend_from_slice(b">");
+                let _ = write!(out, "{}", frames.len());
+                out.extend_from_slice(b"\r\n");
+                for frame in frames {
+                    frame.encode_into(out);
                 }
             }
             Self::Sequence(frames) => {
@@ -1065,6 +1074,16 @@ mod tests {
             ]))
         );
 
+        // Push → Array.
+        let parsed = parse_frame_with_config(b">2\r\n+message\r\n+payload\r\n", &allow).unwrap();
+        assert_eq!(
+            parsed.frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::SimpleString("message".to_string()),
+                RespFrame::SimpleString("payload".to_string()),
+            ]))
+        );
+
         // Bool → Integer 0/1.
         let parsed = parse_frame_with_config(b"#t\r\n", &allow).unwrap();
         assert_eq!(parsed.frame, RespFrame::Integer(1));
@@ -1245,6 +1264,20 @@ mod tests {
         assert_eq!(
             frame.to_bytes(),
             b"%2\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn resp3_push_frames_encode_with_angle_prefix() {
+        let frame = RespFrame::Push(vec![
+            RespFrame::BulkString(Some(b"message".to_vec())),
+            RespFrame::BulkString(Some(b"channel".to_vec())),
+            RespFrame::BulkString(Some(b"payload".to_vec())),
+        ]);
+
+        assert_eq!(
+            frame.to_bytes(),
+            b">3\r\n$7\r\nmessage\r\n$7\r\nchannel\r\n$7\r\npayload\r\n".to_vec()
         );
     }
 

@@ -197,7 +197,7 @@ pub type StreamPendingSummary = (
 pub type StreamPendingRecord = (StreamId, Vec<u8>, u64, u64);
 pub type StreamAutoClaimDeleted = Vec<StreamId>;
 
-/// A Pub/Sub message queued for delivery to a subscriber.
+/// An asynchronous server message queued for delivery to a client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PubSubMessage {
     /// Direct channel subscription match: `["message", channel, data]`.
@@ -210,6 +210,8 @@ pub enum PubSubMessage {
     },
     /// Shard-channel subscription match: `["smessage", channel, data]`.
     SMessage { channel: Vec<u8>, data: Vec<u8> },
+    /// Client-side caching invalidation: `["invalidate", [keys...]]`.
+    Invalidate { keys: Vec<Vec<u8>> },
 }
 
 /// A single SLOWLOG entry recording a command that exceeded the threshold.

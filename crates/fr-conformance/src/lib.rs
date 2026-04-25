@@ -1288,6 +1288,15 @@ fn pubsub_message_to_frame(msg: &fr_store::PubSubMessage) -> RespFrame {
             RespFrame::BulkString(Some(channel.clone())),
             RespFrame::BulkString(Some(data.clone())),
         ])),
+        fr_store::PubSubMessage::Invalidate { keys } => RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"invalidate".to_vec())),
+            RespFrame::Array(Some(
+                keys.iter()
+                    .cloned()
+                    .map(|key| RespFrame::BulkString(Some(key)))
+                    .collect(),
+            )),
+        ])),
     }
 }
 
@@ -1939,6 +1948,7 @@ fn live_oracle_frames_match(
     redis_actual: &RespFrame,
 ) -> bool {
     runtime_actual == redis_actual
+        || resp3_push_array_equivalent(runtime_actual, redis_actual)
         || live_oracle_no_arg_unsubscribe_sequences_match(case, runtime_actual, redis_actual)
         || live_oracle_hgetall_field_order_matches(case, runtime_actual, redis_actual)
         || live_oracle_keys_order_matches(case, runtime_actual, redis_actual)
@@ -1953,6 +1963,30 @@ fn live_oracle_frames_match(
         || live_oracle_debug_object_drift_matches(case, runtime_actual, redis_actual)
         || live_oracle_acl_cat_order_matches(case, runtime_actual, redis_actual)
         || live_oracle_acl_log_drift_matches(case, runtime_actual, redis_actual)
+}
+
+fn resp3_push_array_equivalent(left: &RespFrame, right: &RespFrame) -> bool {
+    if left == right {
+        return true;
+    }
+    match (left, right) {
+        (RespFrame::Push(left_items), RespFrame::Array(Some(right_items)))
+        | (RespFrame::Array(Some(left_items)), RespFrame::Push(right_items)) => {
+            left_items.len() == right_items.len()
+                && left_items
+                    .iter()
+                    .zip(right_items.iter())
+                    .all(|(left, right)| resp3_push_array_equivalent(left, right))
+        }
+        (RespFrame::Sequence(left_items), RespFrame::Sequence(right_items)) => {
+            left_items.len() == right_items.len()
+                && left_items
+                    .iter()
+                    .zip(right_items.iter())
+                    .all(|(left, right)| resp3_push_array_equivalent(left, right))
+        }
+        _ => false,
+    }
 }
 
 /// `ACL LOG` entries are maps-as-flat-arrays keyed by strings like
@@ -2718,8 +2752,9 @@ fn pubsub_unsubscribe_sequence_parts(frame: &RespFrame) -> Option<PubsubUnsubscr
     let mut channels = Vec::with_capacity(items.len());
     let mut remaining_counts = Vec::with_capacity(items.len());
     for item in items {
-        let RespFrame::Array(Some(parts)) = item else {
-            return None;
+        let parts = match item {
+            RespFrame::Array(Some(parts)) | RespFrame::Push(parts) => parts,
+            _ => return None,
         };
         let [
             RespFrame::BulkString(Some(command)),
@@ -2975,7 +3010,10 @@ fn frame_matches_expected(actual: &RespFrame, expected: &ExpectedFrame) -> bool 
         ExpectedFrame::AnyInteger => matches!(actual, RespFrame::Integer(_)),
         ExpectedFrame::AnyBulk => matches!(actual, RespFrame::BulkString(Some(_))),
         ExpectedFrame::AnyArray => {
-            matches!(actual, RespFrame::Array(Some(_)) | RespFrame::Sequence(_))
+            matches!(
+                actual,
+                RespFrame::Array(Some(_)) | RespFrame::Push(_) | RespFrame::Sequence(_)
+            )
         }
         ExpectedFrame::BulkContainsAll { value } => match actual {
             RespFrame::BulkString(Some(bytes)) => {
@@ -2993,6 +3031,13 @@ fn frame_matches_expected(actual: &RespFrame, expected: &ExpectedFrame) -> bool 
         },
         ExpectedFrame::Array { value } => match actual {
             RespFrame::Array(Some(items)) => {
+                items.len() == value.len()
+                    && items
+                        .iter()
+                        .zip(value.iter())
+                        .all(|(a, e)| frame_matches_expected(a, e))
+            }
+            RespFrame::Push(items) => {
                 items.len() == value.len()
                     && items
                         .iter()

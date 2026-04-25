@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fr_config::RuntimePolicy;
-use fr_protocol::{ParserConfig, RespFrame, parse_frame};
+use fr_protocol::{ParserConfig, RespFrame, parse_frame, parse_frame_with_config};
 use fr_runtime::Runtime;
 
 /// Encode a command as RESP array of bulk strings.
@@ -181,6 +181,41 @@ impl BufferedTcpClient {
                 let consumed = parsed.consumed;
                 self.read_buf.drain(..consumed);
                 return parsed.frame;
+            }
+
+            match self.stream.read(&mut buf) {
+                Ok(0) => panic!("server closed connection unexpectedly"),
+                Ok(n) => self.read_buf.extend_from_slice(&buf[..n]),
+                Err(ref err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for server response"
+                    );
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(err) => panic!("read from server: {err}"),
+            }
+        }
+    }
+
+    fn read_resp3_response_bytes(&mut self) -> Vec<u8> {
+        let mut buf = vec![0u8; 65536];
+        let config = ParserConfig {
+            allow_resp3: true,
+            ..ParserConfig::default()
+        };
+        let deadline = Instant::now() + Duration::from_secs(20);
+
+        loop {
+            if let Ok(parsed) = parse_frame_with_config(&self.read_buf, &config) {
+                let frame = self.read_buf[..parsed.consumed].to_vec();
+                self.read_buf.drain(..parsed.consumed);
+                return frame;
             }
 
             match self.stream.read(&mut buf) {
@@ -1655,6 +1690,37 @@ fn tcp_pubsub_basic_cross_client_delivery() {
 }
 
 #[test]
+fn tcp_resp3_pubsub_delivery_uses_push_wire_frame() {
+    let port = reserve_port();
+    let _server = spawn_frankenredis(port, None);
+
+    let mut sub_client = BufferedTcpClient::connect(port);
+    sub_client.write_all(&encode_command(&[b"HELLO", b"3"]));
+    let hello = sub_client.read_resp3_response_bytes();
+    assert!(hello.starts_with(b"%"), "HELLO 3 should return a RESP3 map");
+
+    sub_client.write_all(&encode_command(&[b"SUBSCRIBE", b"channel1"]));
+    let subscribe = sub_client.read_resp3_response_bytes();
+    assert!(
+        subscribe.starts_with(b">3\r\n"),
+        "RESP3 SUBSCRIBE ack must use push framing, got {:?}",
+        String::from_utf8_lossy(&subscribe)
+    );
+
+    let mut pub_client = connect_client(port);
+    let publish = send_command(&mut pub_client, &[b"PUBLISH", b"channel1", b"hello"]);
+    assert_eq!(publish, RespFrame::Integer(1), "expected 1 subscriber");
+    let message = sub_client.read_resp3_response_bytes();
+    assert!(
+        message.starts_with(b">3\r\n"),
+        "RESP3 pub/sub delivery must use push framing, got {:?}",
+        String::from_utf8_lossy(&message)
+    );
+
+    send_shutdown_nosave(port);
+}
+
+#[test]
 fn tcp_pubsub_basic_cross_client_delivery_matches_legacy_redis_reference() {
     let expected = (
         pubsub_subscribe_frame("channel1", 1),
@@ -1668,6 +1734,61 @@ fn tcp_pubsub_basic_cross_client_delivery_matches_legacy_redis_reference() {
     let legacy = exercise_basic_pubsub_cross_client_delivery(spawn_legacy_redis);
     assert_eq!(legacy, expected);
     assert_eq!(franken, legacy);
+}
+
+#[test]
+fn tcp_resp3_tracking_invalidation_redirect_uses_push_wire_frame() {
+    let port = reserve_port();
+    let _server = spawn_frankenredis(port, None);
+
+    let mut redirect_client = BufferedTcpClient::connect(port);
+    redirect_client.write_all(&encode_command(&[b"HELLO", b"3"]));
+    let hello = redirect_client.read_resp3_response_bytes();
+    assert!(hello.starts_with(b"%"), "HELLO 3 should return a RESP3 map");
+    let redirect_id = match redirect_client.send_command(&[b"CLIENT", b"ID"]) {
+        RespFrame::Integer(id) => id.to_string(),
+        other => unreachable!("CLIENT ID should return integer, got {other:?}"),
+    };
+
+    let mut tracker_client = BufferedTcpClient::connect(port);
+    tracker_client.write_all(&encode_command(&[b"HELLO", b"3"]));
+    let hello = tracker_client.read_resp3_response_bytes();
+    assert!(hello.starts_with(b"%"), "HELLO 3 should return a RESP3 map");
+    assert_eq!(
+        tracker_client.send_command(&[
+            b"CLIENT",
+            b"TRACKING",
+            b"ON",
+            b"REDIRECT",
+            redirect_id.as_bytes(),
+        ]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    assert_eq!(
+        tracker_client.send_command(&[b"GET", b"foo:1"]),
+        RespFrame::BulkString(None)
+    );
+
+    let mut writer = connect_client(port);
+    assert_eq!(
+        send_command(&mut writer, &[b"SET", b"foo:1", b"payload"]),
+        RespFrame::SimpleString("OK".to_string())
+    );
+    let invalidation = redirect_client.read_resp3_response_bytes();
+    assert!(
+        invalidation.starts_with(b">2\r\n"),
+        "RESP3 tracking invalidation must use push framing, got {:?}",
+        String::from_utf8_lossy(&invalidation)
+    );
+    assert!(
+        invalidation
+            .windows(b"invalidate".len())
+            .any(|window| window == b"invalidate"),
+        "tracking invalidation should include invalidate payload, got {:?}",
+        String::from_utf8_lossy(&invalidation)
+    );
+
+    send_shutdown_nosave(port);
 }
 
 #[test]
