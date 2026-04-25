@@ -4882,24 +4882,37 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         return Err(CommandError::WrongArity("XADD"));
     }
 
-    // Parse optional flags before the ID: NOMKSTREAM, MAXLEN/MINID
+    // Parse optional flags before the ID: NOMKSTREAM, MAXLEN/MINID, LIMIT.
+    // Upstream t_stream.c::streamParseAddOrTrimArgsOrReply mandates:
+    //   * MAXLEN and MINID are mutually exclusive
+    //   * LIMIT requires a trimming strategy AND the approximate (~) form
+    //   * LIMIT must be >= 0
+    // (br-frankenredis-r71v)
     let mut idx = 2;
     let mut nomkstream = false;
     let mut trim_maxlen: Option<usize> = None;
-    let mut trim_maxlen_approx = false;
     let mut trim_minid: Option<StreamId> = None;
+    let mut trim_approx = false;
+    let mut limit_given = false;
+    let mut trim_limit: Option<i64> = None;
 
     while idx < argv.len() {
         if eq_ascii_command(&argv[idx], b"NOMKSTREAM") {
             nomkstream = true;
             idx += 1;
         } else if eq_ascii_command(&argv[idx], b"MAXLEN") {
+            if trim_maxlen.is_some() || trim_minid.is_some() {
+                return Ok(RespFrame::Error(
+                    "ERR syntax error, MAXLEN and MINID options at the same time are not compatible"
+                        .to_string(),
+                ));
+            }
             idx += 1;
             if idx >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
             if eq_ascii_command(&argv[idx], b"=") || eq_ascii_command(&argv[idx], b"~") {
-                trim_maxlen_approx = eq_ascii_command(&argv[idx], b"~");
+                trim_approx = eq_ascii_command(&argv[idx], b"~");
                 idx += 1;
                 if idx >= argv.len() {
                     return Err(CommandError::SyntaxError);
@@ -4914,12 +4927,18 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             trim_maxlen = Some(usize::try_from(n).map_err(|_| CommandError::InvalidInteger)?);
             idx += 1;
         } else if eq_ascii_command(&argv[idx], b"MINID") {
+            if trim_maxlen.is_some() || trim_minid.is_some() {
+                return Ok(RespFrame::Error(
+                    "ERR syntax error, MAXLEN and MINID options at the same time are not compatible"
+                        .to_string(),
+                ));
+            }
             idx += 1;
             if idx >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            // Skip optional = or ~
             if eq_ascii_command(&argv[idx], b"=") || eq_ascii_command(&argv[idx], b"~") {
+                trim_approx = eq_ascii_command(&argv[idx], b"~");
                 idx += 1;
                 if idx >= argv.len() {
                     return Err(CommandError::SyntaxError);
@@ -4931,10 +4950,37 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             };
             trim_minid = Some(min_id);
             idx += 1;
+        } else if eq_ascii_command(&argv[idx], b"LIMIT") {
+            idx += 1;
+            if idx >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let n = parse_i64_arg(&argv[idx])?;
+            if n < 0 {
+                return Ok(RespFrame::Error(
+                    "ERR The LIMIT argument must be >= 0.".to_string(),
+                ));
+            }
+            trim_limit = Some(n);
+            limit_given = true;
+            idx += 1;
         } else {
             break;
         }
     }
+
+    if limit_given && trim_maxlen.is_none() && trim_minid.is_none() {
+        return Ok(RespFrame::Error(
+            "ERR syntax error, LIMIT cannot be used without specifying a trimming strategy"
+                .to_string(),
+        ));
+    }
+    if limit_given && !trim_approx {
+        return Ok(RespFrame::Error(
+            "ERR syntax error, LIMIT cannot be used without the special ~ option".to_string(),
+        ));
+    }
+    let _ = trim_limit;
 
     // argv[idx] should now be the ID, followed by field-value pairs
     if idx >= argv.len() {
@@ -5005,13 +5051,19 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
 
     store.xadd(&argv[1], id, &fields, now_ms)?;
 
-    // Apply inline trimming after the add
+    // Apply inline trimming after the add. Approximate trimming
+    // (~) is best-effort: upstream lazily skips trimming when the
+    // trailing radix-tree node isn't full, and we model that as a
+    // no-op. Exact trimming (= or absent qualifier) always
+    // executes. (br-frankenredis-r71v)
     if let Some(max_len) = trim_maxlen
-        && !trim_maxlen_approx
+        && !trim_approx
     {
         let _ = store.xtrim(&argv[1], max_len, now_ms);
     }
-    if let Some(min_id) = trim_minid {
+    if let Some(min_id) = trim_minid
+        && !trim_approx
+    {
         let _ = store.xtrim_minid(&argv[1], min_id, now_ms);
     }
 
@@ -21285,6 +21337,129 @@ mod tests {
         let len = dispatch_argv(&[b"XLEN".to_vec(), b"stream".to_vec()], &mut store, 0)
             .expect("xlen after approx");
         assert_eq!(len, RespFrame::Integer(4));
+    }
+
+    #[test]
+    fn xadd_maxlen_minid_combo_rejected_with_upstream_wording() {
+        let mut store = Store::new();
+        let reply = dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"10".to_vec(),
+                b"MINID".to_vec(),
+                b"1-0".to_vec(),
+                b"*".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd combo");
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR syntax error, MAXLEN and MINID options at the same time are not compatible"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn xadd_limit_requires_trim_strategy_and_approx() {
+        let mut store = Store::new();
+        // LIMIT without MAXLEN/MINID
+        let reply = dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"LIMIT".to_vec(),
+                b"5".to_vec(),
+                b"*".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd limit only");
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR syntax error, LIMIT cannot be used without specifying a trimming strategy"
+                    .to_string()
+            )
+        );
+
+        // LIMIT with exact (=) MAXLEN — must reject
+        let reply = dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"=".to_vec(),
+                b"10".to_vec(),
+                b"LIMIT".to_vec(),
+                b"5".to_vec(),
+                b"*".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd limit exact");
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR syntax error, LIMIT cannot be used without the special ~ option".to_string()
+            )
+        );
+
+        // LIMIT with approx (~) MAXLEN — accepted
+        let reply = dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"~".to_vec(),
+                b"10".to_vec(),
+                b"LIMIT".to_vec(),
+                b"5".to_vec(),
+                b"1-0".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd limit approx");
+        assert_eq!(reply, RespFrame::BulkString(Some(b"1-0".to_vec())));
+
+        // LIMIT negative — must reject
+        let reply = dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s2".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"~".to_vec(),
+                b"10".to_vec(),
+                b"LIMIT".to_vec(),
+                b"-1".to_vec(),
+                b"1-0".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd limit negative");
+        assert_eq!(
+            reply,
+            RespFrame::Error("ERR The LIMIT argument must be >= 0.".to_string())
+        );
     }
 
     #[test]
