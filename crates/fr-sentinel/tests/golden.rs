@@ -1,4 +1,4 @@
-use fr_sentinel::discovery::{parse_replica_info_from_master, HelloMessage};
+use fr_sentinel::discovery::{HelloMessage, parse_replica_info_from_master};
 use fr_sentinel::health::parse_info_response;
 use std::fs;
 use std::path::Path;

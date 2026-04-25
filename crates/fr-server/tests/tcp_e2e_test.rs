@@ -2369,10 +2369,8 @@ fn tcp_sentinel_failover_integration() {
     let replica2_port = reserve_port();
 
     let _original_master = spawn_frankenredis_with_config_file(original_master_port, None);
-    let _replica1 =
-        spawn_frankenredis_with_config_file(replica1_port, Some(original_master_port));
-    let _replica2 =
-        spawn_frankenredis_with_config_file(replica2_port, Some(original_master_port));
+    let _replica1 = spawn_frankenredis_with_config_file(replica1_port, Some(original_master_port));
+    let _replica2 = spawn_frankenredis_with_config_file(replica2_port, Some(original_master_port));
 
     // Wait for replicas to connect and sync
     let deadline = Instant::now() + Duration::from_secs(5);

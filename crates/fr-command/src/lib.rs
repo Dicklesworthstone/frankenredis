@@ -695,7 +695,7 @@ impl CommandError {
                     command.to_ascii_lowercase(),
                     subcommand.to_ascii_lowercase()
                 ))
-            },
+            }
             CommandError::UnknownSubcommand {
                 command,
                 subcommand,
@@ -882,14 +882,30 @@ pub fn dispatch_argv(
         Some(CommandId::Hincrby) => return hincrby(argv, store, now_ms),
         Some(CommandId::Hsetnx) => return hsetnx_cmd(argv, store, now_ms),
         Some(CommandId::Hstrlen) => return hstrlen(argv, store, now_ms),
-        Some(CommandId::Hexpire) => return hexpire_cmd(argv, store, now_ms, HExpireForm::Seconds, false),
-        Some(CommandId::Hpexpire) => return hexpire_cmd(argv, store, now_ms, HExpireForm::Milliseconds, false),
-        Some(CommandId::Hexpireat) => return hexpire_cmd(argv, store, now_ms, HExpireForm::Seconds, true),
-        Some(CommandId::Hpexpireat) => return hexpire_cmd(argv, store, now_ms, HExpireForm::Milliseconds, true),
-        Some(CommandId::Httl) => return httl_cmd(argv, store, now_ms, HashFieldTtlUnit::Seconds, false),
-        Some(CommandId::Hpttl) => return httl_cmd(argv, store, now_ms, HashFieldTtlUnit::Milliseconds, false),
-        Some(CommandId::Hexpiretime) => return httl_cmd(argv, store, now_ms, HashFieldTtlUnit::Seconds, true),
-        Some(CommandId::Hpexpiretime) => return httl_cmd(argv, store, now_ms, HashFieldTtlUnit::Milliseconds, true),
+        Some(CommandId::Hexpire) => {
+            return hexpire_cmd(argv, store, now_ms, HExpireForm::Seconds, false);
+        }
+        Some(CommandId::Hpexpire) => {
+            return hexpire_cmd(argv, store, now_ms, HExpireForm::Milliseconds, false);
+        }
+        Some(CommandId::Hexpireat) => {
+            return hexpire_cmd(argv, store, now_ms, HExpireForm::Seconds, true);
+        }
+        Some(CommandId::Hpexpireat) => {
+            return hexpire_cmd(argv, store, now_ms, HExpireForm::Milliseconds, true);
+        }
+        Some(CommandId::Httl) => {
+            return httl_cmd(argv, store, now_ms, HashFieldTtlUnit::Seconds, false);
+        }
+        Some(CommandId::Hpttl) => {
+            return httl_cmd(argv, store, now_ms, HashFieldTtlUnit::Milliseconds, false);
+        }
+        Some(CommandId::Hexpiretime) => {
+            return httl_cmd(argv, store, now_ms, HashFieldTtlUnit::Seconds, true);
+        }
+        Some(CommandId::Hpexpiretime) => {
+            return httl_cmd(argv, store, now_ms, HashFieldTtlUnit::Milliseconds, true);
+        }
         Some(CommandId::Hpersist) => return hpersist_cmd(argv, store, now_ms),
         Some(CommandId::Hgetex) => return hgetex_cmd(argv, store, now_ms),
         Some(CommandId::Hgetdel) => return hgetdel_cmd(argv, store, now_ms),
@@ -2695,8 +2711,7 @@ fn parse_hash_field_ttl_flags_and_fields_header(
     let mut cond = HashFieldTtlCondition::None;
     let mut idx = after_value_idx;
     if idx < argv.len() {
-        let tok = std::str::from_utf8(&argv[idx])
-            .map_err(|_| CommandError::InvalidUtf8Argument)?;
+        let tok = std::str::from_utf8(&argv[idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         let matched = if tok.eq_ignore_ascii_case("NX") {
             cond = HashFieldTtlCondition::Nx;
             true
@@ -2720,8 +2735,7 @@ fn parse_hash_field_ttl_flags_and_fields_header(
     if idx >= argv.len() {
         return Err(CommandError::WrongArity(command_name));
     }
-    let token = std::str::from_utf8(&argv[idx])
-        .map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let token = std::str::from_utf8(&argv[idx]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if !token.eq_ignore_ascii_case("FIELDS") {
         return Err(CommandError::SyntaxError);
     }
@@ -2815,17 +2829,25 @@ fn hexpire_cmd(
     let mut replies = Vec::with_capacity(numfields);
     for f_idx in 0..numfields {
         let field = argv[fields_start + f_idx].as_slice();
-        let outcome =
-            store.hash_field_set_abs_expiry_with_event(key, field, deadline_ms, cond, now_ms, event);
+        let outcome = store.hash_field_set_abs_expiry_with_event(
+            key,
+            field,
+            deadline_ms,
+            cond,
+            now_ms,
+            event,
+        );
         let code = match outcome {
             HashFieldTtlSet::Applied => 1,
             HashFieldTtlSet::AppliedAlreadyExpired => 2,
             HashFieldTtlSet::ConditionNotMet => 0,
             HashFieldTtlSet::FieldMissing => -2,
             HashFieldTtlSet::KeyMissing => -2,
-            HashFieldTtlSet::WrongType => return Err(CommandError::Custom(
-                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-            )),
+            HashFieldTtlSet::WrongType => {
+                return Err(CommandError::Custom(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
+                ));
+            }
         };
         replies.push(RespFrame::Integer(code));
     }
@@ -2840,8 +2862,7 @@ fn parse_hash_field_ttl_fields_only_header(
     if argv.len() < 5 {
         return Err(CommandError::WrongArity(command_name));
     }
-    let token = std::str::from_utf8(&argv[2])
-        .map_err(|_| CommandError::InvalidUtf8Argument)?;
+    let token = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if !token.eq_ignore_ascii_case("FIELDS") {
         return Err(CommandError::SyntaxError);
     }
@@ -2882,9 +2903,11 @@ fn httl_cmd(
             HashFieldTtl::NoTtl => -1,
             HashFieldTtl::FieldMissing => -2,
             HashFieldTtl::KeyMissing => -2,
-            HashFieldTtl::WrongType => return Err(CommandError::Custom(
-                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-            )),
+            HashFieldTtl::WrongType => {
+                return Err(CommandError::Custom(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
+                ));
+            }
             // Expired field is surfaced the same as FieldMissing at the wire
             // (upstream reaps the field before reporting); part 3 wires the
             // actual lazy-delete so this branch becomes observable.
@@ -2902,11 +2925,7 @@ fn httl_cmd(
 /// present, also updates the per-field TTL for each requested field using
 /// the upstream-matching semantics (set to the provided deadline, or drop
 /// with PERSIST).
-fn hgetex_cmd(
-    argv: &[Vec<u8>],
-    store: &mut Store,
-    now_ms: u64,
-) -> Result<RespFrame, CommandError> {
+fn hgetex_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     // Minimum: HGETEX key FIELDS n f1 → 5 args. No TTL flag is allowed too.
     if argv.len() < 5 {
         return Err(CommandError::WrongArity("HGETEX"));
@@ -2923,8 +2942,8 @@ fn hgetex_cmd(
     }
     let (ttl_action, fields_token_idx) = {
         if argv.len() >= 5 {
-            let tok = std::str::from_utf8(&argv[2])
-                .map_err(|_| CommandError::InvalidUtf8Argument)?;
+            let tok =
+                std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
             if tok.eq_ignore_ascii_case("FIELDS") {
                 (TtlAction::None, 2)
             } else if tok.eq_ignore_ascii_case("PERSIST") {
@@ -3044,8 +3063,7 @@ fn hgetdel_cmd(
     store: &mut Store,
     now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
-    let (fields_start, numfields) =
-        parse_hash_field_ttl_fields_only_header(argv, "HGETDEL")?;
+    let (fields_start, numfields) = parse_hash_field_ttl_fields_only_header(argv, "HGETDEL")?;
     let key = argv[1].as_slice();
 
     let mut replies = Vec::with_capacity(numfields);
@@ -3077,8 +3095,7 @@ fn hpersist_cmd(
     store: &mut Store,
     _now_ms: u64,
 ) -> Result<RespFrame, CommandError> {
-    let (fields_start, numfields) =
-        parse_hash_field_ttl_fields_only_header(argv, "HPERSIST")?;
+    let (fields_start, numfields) = parse_hash_field_ttl_fields_only_header(argv, "HPERSIST")?;
     let key = argv[1].as_slice();
 
     let mut replies = Vec::with_capacity(numfields);
@@ -3092,9 +3109,11 @@ fn hpersist_cmd(
             HashFieldPersistResult::NoTtl => -1,
             HashFieldPersistResult::FieldMissing => -2,
             HashFieldPersistResult::KeyMissing => -2,
-            HashFieldPersistResult::WrongType => return Err(CommandError::Custom(
-                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
-            )),
+            HashFieldPersistResult::WrongType => {
+                return Err(CommandError::Custom(
+                    "WRONGTYPE Operation against a key holding the wrong kind of value".to_string(),
+                ));
+            }
         };
         replies.push(RespFrame::Integer(code));
     }
@@ -6521,10 +6540,8 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        let host = std::str::from_utf8(&argv[2])
-            .map_err(|_| CommandError::InvalidUtf8Argument)?;
-        let port = std::str::from_utf8(&argv[3])
-            .map_err(|_| CommandError::InvalidUtf8Argument)?;
+        let host = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        let port = std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if parse_i64_arg(&argv[3]).is_err() {
             return Err(CommandError::Custom(format!(
                 "ERR Invalid node address specified: {host}:{port}"
@@ -6533,8 +6550,8 @@ fn cluster_cmd(
         if let Some(bus_port) = argv.get(4)
             && parse_i64_arg(bus_port).is_err()
         {
-            let bus_port_str = std::str::from_utf8(bus_port)
-                .map_err(|_| CommandError::InvalidUtf8Argument)?;
+            let bus_port_str =
+                std::str::from_utf8(bus_port).map_err(|_| CommandError::InvalidUtf8Argument)?;
             return Err(CommandError::Custom(format!(
                 "ERR Invalid base port specified: {bus_port_str}"
             )));
@@ -6551,11 +6568,9 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        let node_id = std::str::from_utf8(&argv[2])
-            .map_err(|_| CommandError::InvalidUtf8Argument)?;
-        return Err(CommandError::Custom(format!(
-            "ERR Unknown node {node_id}"
-        )));
+        let node_id =
+            std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        return Err(CommandError::Custom(format!("ERR Unknown node {node_id}")));
     }
     if sub.eq_ignore_ascii_case("REPLICAS") {
         // CLUSTER REPLICAS <node-id> — upstream returns the replica array or
@@ -6566,8 +6581,8 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        let _node_id = std::str::from_utf8(&argv[2])
-            .map_err(|_| CommandError::InvalidUtf8Argument)?;
+        let _node_id =
+            std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         return Err(CommandError::Custom(
             "ERR The specified node is not known or can't be a replica".to_string(),
         ));
@@ -6581,10 +6596,9 @@ fn cluster_cmd(
             return Err(cluster_disabled_error());
         }
         if let Some(flag) = argv.get(2) {
-            let flag_str = std::str::from_utf8(flag)
-                .map_err(|_| CommandError::InvalidUtf8Argument)?;
-            if !flag_str.eq_ignore_ascii_case("FORCE")
-                && !flag_str.eq_ignore_ascii_case("TAKEOVER")
+            let flag_str =
+                std::str::from_utf8(flag).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            if !flag_str.eq_ignore_ascii_case("FORCE") && !flag_str.eq_ignore_ascii_case("TAKEOVER")
             {
                 return Err(CommandError::SyntaxError);
             }
@@ -8072,15 +8086,14 @@ fn hincrbyfloat(
         return Err(CommandError::WrongArity("HINCRBYFLOAT"));
     }
     let delta = parse_f64_arg(&argv[3])?;
-    let new_val =
-        store
-            .hincrbyfloat(&argv[1], &argv[2], delta, now_ms)
-            .map_err(|err| match err {
-                StoreError::IncrFloatNaN => {
-                    CommandError::Custom("ERR value is NaN or Infinity".to_string())
-                }
-                other => CommandError::Store(other),
-            })?;
+    let new_val = store
+        .hincrbyfloat(&argv[1], &argv[2], delta, now_ms)
+        .map_err(|err| match err {
+            StoreError::IncrFloatNaN => {
+                CommandError::Custom("ERR value is NaN or Infinity".to_string())
+            }
+            other => CommandError::Store(other),
+        })?;
     Ok(RespFrame::BulkString(Some(
         new_val.to_string().into_bytes(),
     )))
@@ -9075,9 +9088,7 @@ fn sintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             let val = match parse_i64_arg(&argv[idx]) {
                 Ok(v) => v,
                 Err(_) => {
-                    return Ok(RespFrame::Error(
-                        "ERR LIMIT can't be negative".to_string(),
-                    ));
+                    return Ok(RespFrame::Error("ERR LIMIT can't be negative".to_string()));
                 }
             };
             if val < 0 {
@@ -9108,9 +9119,7 @@ fn lcs(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
     // LCS-specific wording. Other StoreError kinds pass through.
     let map_type_err = |err: StoreError| -> CommandError {
         if matches!(err, StoreError::WrongType) {
-            CommandError::Custom(
-                "ERR The specified keys must contain string values".to_string(),
-            )
+            CommandError::Custom("ERR The specified keys must contain string values".to_string())
         } else {
             CommandError::Store(err)
         }
@@ -9164,8 +9173,7 @@ fn lcs(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
     // message instead of silently preferring LEN.
     if len_only && idx_mode {
         return Ok(RespFrame::Error(
-            "ERR If you want both the length and indexes, please just use IDX."
-                .to_string(),
+            "ERR If you want both the length and indexes, please just use IDX.".to_string(),
         ));
     }
 
@@ -18233,7 +18241,10 @@ mod tests {
             100,
         )
         .expect("hpttl");
-        assert_eq!(hpttl, RespFrame::Array(Some(vec![RespFrame::Integer(1500)])));
+        assert_eq!(
+            hpttl,
+            RespFrame::Array(Some(vec![RespFrame::Integer(1500)]))
+        );
     }
 
     #[test]
@@ -18344,7 +18355,10 @@ mod tests {
             0,
         )
         .expect("hexpire nx first");
-        assert_eq!(nx_first, RespFrame::Array(Some(vec![RespFrame::Integer(1)])));
+        assert_eq!(
+            nx_first,
+            RespFrame::Array(Some(vec![RespFrame::Integer(1)]))
+        );
         // Second NX → blocked.
         let nx_second = dispatch_argv(
             &[
@@ -18360,7 +18374,10 @@ mod tests {
             0,
         )
         .expect("hexpire nx second");
-        assert_eq!(nx_second, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+        assert_eq!(
+            nx_second,
+            RespFrame::Array(Some(vec![RespFrame::Integer(0)]))
+        );
         // GT shorter → blocked.
         let gt_shorter = dispatch_argv(
             &[
@@ -18376,7 +18393,10 @@ mod tests {
             0,
         )
         .expect("hexpire gt shorter");
-        assert_eq!(gt_shorter, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+        assert_eq!(
+            gt_shorter,
+            RespFrame::Array(Some(vec![RespFrame::Integer(0)]))
+        );
         // GT longer → applies.
         let gt_longer = dispatch_argv(
             &[
@@ -18392,7 +18412,10 @@ mod tests {
             0,
         )
         .expect("hexpire gt longer");
-        assert_eq!(gt_longer, RespFrame::Array(Some(vec![RespFrame::Integer(1)])));
+        assert_eq!(
+            gt_longer,
+            RespFrame::Array(Some(vec![RespFrame::Integer(1)]))
+        );
         // LT shorter → applies.
         let lt_shorter = dispatch_argv(
             &[
@@ -18408,7 +18431,10 @@ mod tests {
             0,
         )
         .expect("hexpire lt shorter");
-        assert_eq!(lt_shorter, RespFrame::Array(Some(vec![RespFrame::Integer(1)])));
+        assert_eq!(
+            lt_shorter,
+            RespFrame::Array(Some(vec![RespFrame::Integer(1)]))
+        );
         // XX on a never-set-again field: seed f2 and attempt XX.
         let xx_blocked = dispatch_argv(
             &[
@@ -18424,7 +18450,10 @@ mod tests {
             0,
         )
         .expect("hexpire xx blocked");
-        assert_eq!(xx_blocked, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+        assert_eq!(
+            xx_blocked,
+            RespFrame::Array(Some(vec![RespFrame::Integer(0)]))
+        );
     }
 
     #[test]
@@ -18468,10 +18497,7 @@ mod tests {
         .expect("hpttl missing key");
         assert_eq!(
             missing,
-            RespFrame::Array(Some(vec![
-                RespFrame::Integer(-2),
-                RespFrame::Integer(-2),
-            ]))
+            RespFrame::Array(Some(vec![RespFrame::Integer(-2), RespFrame::Integer(-2),]))
         );
     }
 
@@ -18898,9 +18924,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             zero,
-            CommandError::Custom(
-                "ERR Parameter `numFields` should be greater than 0".to_string()
-            )
+            CommandError::Custom("ERR Parameter `numFields` should be greater than 0".to_string())
         );
         // Negative seconds.
         let negative = dispatch_argv(
@@ -18918,9 +18942,7 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             negative,
-            CommandError::Custom(
-                "ERR invalid expire time in 'hexpire' command".to_string()
-            )
+            CommandError::Custom("ERR invalid expire time in 'hexpire' command".to_string())
         );
     }
 
@@ -25126,7 +25148,10 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert_eq!(err.to_resp(), RespFrame::Error("ERR syntax error".to_string()));
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
     }
 
     #[test]
@@ -28036,11 +28061,7 @@ mod tests {
         let mut store = Store::new();
         for numkeys in [b"-1".as_slice(), b"0".as_slice()] {
             let out = dispatch_argv(
-                &[
-                    b"ZINTERCARD".to_vec(),
-                    numkeys.to_vec(),
-                    b"z1".to_vec(),
-                ],
+                &[b"ZINTERCARD".to_vec(), numkeys.to_vec(), b"z1".to_vec()],
                 &mut store,
                 0,
             )
@@ -31037,19 +31058,38 @@ mod tests {
         // still surfaces the precise arity error.
         let mut store = Store::new();
         for argv in [
-            vec![b"CLUSTER".to_vec(), b"MEET".to_vec(), b"127.0.0.1".to_vec(), b"6380".to_vec()],
+            vec![
+                b"CLUSTER".to_vec(),
+                b"MEET".to_vec(),
+                b"127.0.0.1".to_vec(),
+                b"6380".to_vec(),
+            ],
             vec![b"CLUSTER".to_vec(), b"FORGET".to_vec(), b"node".to_vec()],
             vec![b"CLUSTER".to_vec(), b"REPLICATE".to_vec(), b"node".to_vec()],
             vec![b"CLUSTER".to_vec(), b"REPLICAS".to_vec(), b"node".to_vec()],
             vec![b"CLUSTER".to_vec(), b"FAILOVER".to_vec()],
             vec![b"CLUSTER".to_vec(), b"ADDSLOTS".to_vec(), b"0".to_vec()],
             vec![b"CLUSTER".to_vec(), b"DELSLOTS".to_vec(), b"0".to_vec()],
-            vec![b"CLUSTER".to_vec(), b"ADDSLOTSRANGE".to_vec(), b"0".to_vec(), b"10".to_vec()],
-            vec![b"CLUSTER".to_vec(), b"DELSLOTSRANGE".to_vec(), b"0".to_vec(), b"10".to_vec()],
+            vec![
+                b"CLUSTER".to_vec(),
+                b"ADDSLOTSRANGE".to_vec(),
+                b"0".to_vec(),
+                b"10".to_vec(),
+            ],
+            vec![
+                b"CLUSTER".to_vec(),
+                b"DELSLOTSRANGE".to_vec(),
+                b"0".to_vec(),
+                b"10".to_vec(),
+            ],
             vec![b"CLUSTER".to_vec(), b"FLUSHSLOTS".to_vec()],
             vec![b"CLUSTER".to_vec(), b"SAVECONFIG".to_vec()],
             vec![b"CLUSTER".to_vec(), b"BUMPEPOCH".to_vec()],
-            vec![b"CLUSTER".to_vec(), b"SET-CONFIG-EPOCH".to_vec(), b"1".to_vec()],
+            vec![
+                b"CLUSTER".to_vec(),
+                b"SET-CONFIG-EPOCH".to_vec(),
+                b"1".to_vec(),
+            ],
             vec![b"CLUSTER".to_vec(), b"SLOTSTATE".to_vec()],
         ] {
             let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
@@ -31065,16 +31105,50 @@ mod tests {
         let wrong = [
             // too few args
             (vec![b"CLUSTER".to_vec(), b"MEET".to_vec()], "MEET"),
-            (vec![b"CLUSTER".to_vec(), b"MEET".to_vec(), b"127.0.0.1".to_vec()], "MEET"),
+            (
+                vec![b"CLUSTER".to_vec(), b"MEET".to_vec(), b"127.0.0.1".to_vec()],
+                "MEET",
+            ),
             (vec![b"CLUSTER".to_vec(), b"FORGET".to_vec()], "FORGET"),
-            (vec![b"CLUSTER".to_vec(), b"REPLICATE".to_vec()], "REPLICATE"),
+            (
+                vec![b"CLUSTER".to_vec(), b"REPLICATE".to_vec()],
+                "REPLICATE",
+            ),
             (vec![b"CLUSTER".to_vec(), b"REPLICAS".to_vec()], "REPLICAS"),
             (vec![b"CLUSTER".to_vec(), b"ADDSLOTS".to_vec()], "ADDSLOTS"),
             (vec![b"CLUSTER".to_vec(), b"DELSLOTS".to_vec()], "DELSLOTS"),
-            (vec![b"CLUSTER".to_vec(), b"ADDSLOTSRANGE".to_vec(), b"0".to_vec()], "ADDSLOTSRANGE"),
-            (vec![b"CLUSTER".to_vec(), b"FLUSHSLOTS".to_vec(), b"extra".to_vec()], "FLUSHSLOTS"),
-            (vec![b"CLUSTER".to_vec(), b"SAVECONFIG".to_vec(), b"extra".to_vec()], "SAVECONFIG"),
-            (vec![b"CLUSTER".to_vec(), b"BUMPEPOCH".to_vec(), b"extra".to_vec()], "BUMPEPOCH"),
+            (
+                vec![
+                    b"CLUSTER".to_vec(),
+                    b"ADDSLOTSRANGE".to_vec(),
+                    b"0".to_vec(),
+                ],
+                "ADDSLOTSRANGE",
+            ),
+            (
+                vec![
+                    b"CLUSTER".to_vec(),
+                    b"FLUSHSLOTS".to_vec(),
+                    b"extra".to_vec(),
+                ],
+                "FLUSHSLOTS",
+            ),
+            (
+                vec![
+                    b"CLUSTER".to_vec(),
+                    b"SAVECONFIG".to_vec(),
+                    b"extra".to_vec(),
+                ],
+                "SAVECONFIG",
+            ),
+            (
+                vec![
+                    b"CLUSTER".to_vec(),
+                    b"BUMPEPOCH".to_vec(),
+                    b"extra".to_vec(),
+                ],
+                "BUMPEPOCH",
+            ),
             // uneven range pairs
             (
                 vec![
@@ -31102,7 +31176,12 @@ mod tests {
         // MEET accepts host + numeric port (+ optional bus port).
         assert_eq!(
             dispatch_argv(
-                &[b"CLUSTER".to_vec(), b"MEET".to_vec(), b"127.0.0.1".to_vec(), b"6380".to_vec()],
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"MEET".to_vec(),
+                    b"127.0.0.1".to_vec(),
+                    b"6380".to_vec()
+                ],
                 &mut store,
                 0,
             )
@@ -31127,7 +31206,12 @@ mod tests {
 
         // MEET invalid port → upstream-matching error.
         let err = dispatch_argv(
-            &[b"CLUSTER".to_vec(), b"MEET".to_vec(), b"127.0.0.1".to_vec(), b"port".to_vec()],
+            &[
+                b"CLUSTER".to_vec(),
+                b"MEET".to_vec(),
+                b"127.0.0.1".to_vec(),
+                b"port".to_vec(),
+            ],
             &mut store,
             0,
         )
@@ -31140,7 +31224,11 @@ mod tests {
         // FORGET / REPLICATE / REPLICAS on unknown node → upstream wording.
         assert_eq!(
             dispatch_argv(
-                &[b"CLUSTER".to_vec(), b"FORGET".to_vec(), b"unknownnode".to_vec()],
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"FORGET".to_vec(),
+                    b"unknownnode".to_vec()
+                ],
                 &mut store,
                 0,
             )
@@ -31149,7 +31237,11 @@ mod tests {
         );
         assert_eq!(
             dispatch_argv(
-                &[b"CLUSTER".to_vec(), b"REPLICATE".to_vec(), b"unknownnode".to_vec()],
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"REPLICATE".to_vec(),
+                    b"unknownnode".to_vec()
+                ],
                 &mut store,
                 0,
             )
@@ -31158,7 +31250,11 @@ mod tests {
         );
         assert_eq!(
             dispatch_argv(
-                &[b"CLUSTER".to_vec(), b"REPLICAS".to_vec(), b"unknownnode".to_vec()],
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"REPLICAS".to_vec(),
+                    b"unknownnode".to_vec()
+                ],
                 &mut store,
                 0,
             )
@@ -31171,9 +31267,7 @@ mod tests {
         // FAILOVER on master → upstream error about directing to a replica.
         assert_eq!(
             dispatch_argv(&[b"CLUSTER".to_vec(), b"FAILOVER".to_vec()], &mut store, 0).unwrap_err(),
-            CommandError::Custom(
-                "ERR You should send CLUSTER FAILOVER to a replica".to_string()
-            )
+            CommandError::Custom("ERR You should send CLUSTER FAILOVER to a replica".to_string())
         );
         // FAILOVER with invalid flag → syntax error.
         assert_eq!(
@@ -31189,7 +31283,12 @@ mod tests {
         // ADDSLOTS / DELSLOTS accept valid slots; reject out-of-range.
         assert_eq!(
             dispatch_argv(
-                &[b"CLUSTER".to_vec(), b"ADDSLOTS".to_vec(), b"0".to_vec(), b"16383".to_vec()],
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"ADDSLOTS".to_vec(),
+                    b"0".to_vec(),
+                    b"16383".to_vec()
+                ],
                 &mut store,
                 0,
             )
@@ -31226,22 +31325,39 @@ mod tests {
 
         // FLUSHSLOTS on empty db → OK.
         assert_eq!(
-            dispatch_argv(&[b"CLUSTER".to_vec(), b"FLUSHSLOTS".to_vec()], &mut store, 0).unwrap(),
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"FLUSHSLOTS".to_vec()],
+                &mut store,
+                0
+            )
+            .unwrap(),
             RespFrame::SimpleString("OK".to_string())
         );
         // Populate db0 and retry: upstream-matching DB-not-empty error.
-        dispatch_argv(&[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()], &mut store, 0).unwrap();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
         assert_eq!(
-            dispatch_argv(&[b"CLUSTER".to_vec(), b"FLUSHSLOTS".to_vec()], &mut store, 0)
-                .unwrap_err(),
-            CommandError::Custom(
-                "ERR DB must be empty to perform CLUSTER FLUSHSLOTS.".to_string()
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"FLUSHSLOTS".to_vec()],
+                &mut store,
+                0
             )
+            .unwrap_err(),
+            CommandError::Custom("ERR DB must be empty to perform CLUSTER FLUSHSLOTS.".to_string())
         );
 
         // SAVECONFIG + BUMPEPOCH simple replies.
         assert_eq!(
-            dispatch_argv(&[b"CLUSTER".to_vec(), b"SAVECONFIG".to_vec()], &mut store, 0).unwrap(),
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"SAVECONFIG".to_vec()],
+                &mut store,
+                0
+            )
+            .unwrap(),
             RespFrame::SimpleString("OK".to_string())
         );
         assert_eq!(
@@ -31252,7 +31368,11 @@ mod tests {
         // SET-CONFIG-EPOCH / SLOTSTATE still blanket-errored (follow-up).
         assert_eq!(
             dispatch_argv(
-                &[b"CLUSTER".to_vec(), b"SET-CONFIG-EPOCH".to_vec(), b"5".to_vec()],
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"SET-CONFIG-EPOCH".to_vec(),
+                    b"5".to_vec()
+                ],
                 &mut store,
                 0,
             )

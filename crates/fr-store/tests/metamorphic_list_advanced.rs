@@ -72,14 +72,14 @@ proptest! {
     ) {
         prop_assume!(val1 != val2 && val1 != val3 && val1 != val4);
         let mut store = fresh_store();
-        
+
         // Setup: list has [val1, val2]
         store.rpush(&key, &[val1.clone(), val2.clone()], 0).unwrap();
-        
+
         // Insert before: [val3, val1, val2]
         let len1 = store.linsert_before(&key, &val1, val3.clone(), 0).unwrap();
         prop_assert_eq!(len1, 3);
-        
+
         // Insert after: [val3, val1, val4, val2]
         let len2 = store.linsert_after(&key, &val1, val4.clone(), 0).unwrap();
         prop_assert_eq!(len2, 4);

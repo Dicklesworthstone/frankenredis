@@ -1,4 +1,4 @@
-use fr_config::{parse_redis_config_bytes, split_config_line_args_bytes, parse_tls_protocols};
+use fr_config::{parse_redis_config_bytes, parse_tls_protocols, split_config_line_args_bytes};
 use std::fs;
 use std::path::Path;
 
@@ -143,4 +143,3 @@ fn golden_tls_protocols_invalid() {
 fn golden_tls_protocols_empty() {
     parse_tls_and_snapshot("tls_protocols_empty", "");
 }
-

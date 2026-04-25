@@ -59,8 +59,7 @@ const ACL_UNKNOWN_SUBCOMMAND_ERROR: &str =
 // Upstream acl.c::aclCommand emits this sentence for `ACL SAVE`
 // and `ACL LOAD` when the server started without an `aclfile`
 // configuration directive. (br-frankenredis-faqe)
-const ACL_FILE_NOT_CONFIGURED_ERR: &str =
-    "ERR This Redis instance is not configured to use an ACL file. You may want to specify users via the ACL SETUSER command and then issue a CONFIG REWRITE (assuming you have a Redis configuration file set) in order to store users in the Redis configuration.";
+const ACL_FILE_NOT_CONFIGURED_ERR: &str = "ERR This Redis instance is not configured to use an ACL file. You may want to specify users via the ACL SETUSER command and then issue a CONFIG REWRITE (assuming you have a Redis configuration file set) in order to store users in the Redis configuration.";
 const DEFAULT_ACLLOG_MAX_LEN: i64 = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1009,11 +1008,7 @@ impl AuthState {
         result
     }
 
-    fn apply_setuser_rules(
-        &mut self,
-        username: Vec<u8>,
-        rules: &[&[u8]],
-    ) -> Result<(), String> {
+    fn apply_setuser_rules(&mut self, username: Vec<u8>, rules: &[&[u8]]) -> Result<(), String> {
         let is_default = username == DEFAULT_AUTH_USER;
         let acl_pubsub_default = self.acl_pubsub_default;
         let user = self.acl_users.entry(username).or_insert_with(|| {
@@ -12355,18 +12350,9 @@ mod tests {
             RespFrame::BulkString(Some(b"0".to_vec())),
             RespFrame::Array(Some(Vec::new())),
         ]));
-        assert_eq!(
-            rt.execute_frame(command(&[b"SCAN", b"-1"]), 2),
-            empty_scan
-        );
-        assert_eq!(
-            rt.execute_frame(command(&[b"SCAN", b"+1"]), 3),
-            empty_scan
-        );
-        assert_eq!(
-            rt.execute_frame(command(&[b"SCAN", b"01"]), 4),
-            empty_scan
-        );
+        assert_eq!(rt.execute_frame(command(&[b"SCAN", b"-1"]), 2), empty_scan);
+        assert_eq!(rt.execute_frame(command(&[b"SCAN", b"+1"]), 3), empty_scan);
+        assert_eq!(rt.execute_frame(command(&[b"SCAN", b"01"]), 4), empty_scan);
     }
 
     #[test]
@@ -12418,31 +12404,45 @@ mod tests {
         // every per-field deadline round-tripped through type 21.
         let mut rt = Runtime::default_strict();
         rt.execute_frame(
-            command(&[b"HSET", b"h", b"alive", b"a", b"doomed", b"b", b"keep", b"c"]),
+            command(&[
+                b"HSET", b"h", b"alive", b"a", b"doomed", b"b", b"keep", b"c",
+            ]),
             0,
         );
         rt.execute_frame(
-            command(&[b"HPEXPIREAT", b"h", b"1700000500500", b"FIELDS", b"1", b"alive"]),
+            command(&[
+                b"HPEXPIREAT",
+                b"h",
+                b"1700000500500",
+                b"FIELDS",
+                b"1",
+                b"alive",
+            ]),
             0,
         );
         rt.execute_frame(
-            command(&[b"HPEXPIREAT", b"h", b"1800000000000", b"FIELDS", b"1", b"doomed"]),
+            command(&[
+                b"HPEXPIREAT",
+                b"h",
+                b"1800000000000",
+                b"FIELDS",
+                b"1",
+                b"doomed",
+            ]),
             0,
         );
 
         let entries = store_to_rdb_entries(&mut rt.server.store, 0);
-        let hash_entry = entries
-            .iter()
-            .find(|e| e.key == b"h")
-            .expect("hash entry");
+        let hash_entry = entries.iter().find(|e| e.key == b"h").expect("hash entry");
         match &hash_entry.value {
             RdbValue::HashWithTtls(fields) => {
-                let map: std::collections::BTreeMap<Vec<u8>, Option<u64>> = fields
-                    .iter()
-                    .map(|(f, _, ttl)| (f.clone(), *ttl))
-                    .collect();
+                let map: std::collections::BTreeMap<Vec<u8>, Option<u64>> =
+                    fields.iter().map(|(f, _, ttl)| (f.clone(), *ttl)).collect();
                 assert_eq!(map.get(b"alive".as_slice()), Some(&Some(1_700_000_500_500)));
-                assert_eq!(map.get(b"doomed".as_slice()), Some(&Some(1_800_000_000_000)));
+                assert_eq!(
+                    map.get(b"doomed".as_slice()),
+                    Some(&Some(1_800_000_000_000))
+                );
                 assert_eq!(map.get(b"keep".as_slice()), Some(&None));
             }
             other => panic!("expected HashWithTtls, got {other:?}"),
@@ -12475,11 +12475,11 @@ mod tests {
             RespFrame::Array(Some(vec![RespFrame::Integer(1_800_000_000_000)]))
         );
         // `keep` has no TTL — HTTL returns -1.
-        let httl_keep = rt2.execute_frame(
-            command(&[b"HTTL", b"h", b"FIELDS", b"1", b"keep"]),
-            0,
+        let httl_keep = rt2.execute_frame(command(&[b"HTTL", b"h", b"FIELDS", b"1", b"keep"]), 0);
+        assert_eq!(
+            httl_keep,
+            RespFrame::Array(Some(vec![RespFrame::Integer(-1)]))
         );
-        assert_eq!(httl_keep, RespFrame::Array(Some(vec![RespFrame::Integer(-1)])));
     }
 
     #[test]
@@ -12488,10 +12488,7 @@ mod tests {
         // RDB_TYPE_HASH (4) encoding, so older RDB readers continue
         // working. (br-frankenredis-th7q)
         let mut rt = Runtime::default_strict();
-        rt.execute_frame(
-            command(&[b"HSET", b"plain", b"f1", b"v1", b"f2", b"v2"]),
-            0,
-        );
+        rt.execute_frame(command(&[b"HSET", b"plain", b"f1", b"v1", b"f2", b"v2"]), 0);
         let entries = store_to_rdb_entries(&mut rt.server.store, 0);
         let entry = entries.iter().find(|e| e.key == b"plain").unwrap();
         assert!(
@@ -13426,7 +13423,8 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"YES"]), 1),
             RespFrame::Error(
-                "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode.".to_string()
+                "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode."
+                    .to_string()
             )
         );
         assert_eq!(
@@ -13869,15 +13867,11 @@ mod tests {
         );
         assert_eq!(
             rt.execute_frame(command(&[b"SLOWLOG", b"GET", b"1", b"extra"]), 2),
-            RespFrame::Error(
-                "ERR wrong number of arguments for 'slowlog|get' command".to_string()
-            )
+            RespFrame::Error("ERR wrong number of arguments for 'slowlog|get' command".to_string())
         );
         assert_eq!(
             rt.execute_frame(command(&[b"SLOWLOG", b"LEN", b"extra"]), 3),
-            RespFrame::Error(
-                "ERR wrong number of arguments for 'slowlog|len' command".to_string()
-            )
+            RespFrame::Error("ERR wrong number of arguments for 'slowlog|len' command".to_string())
         );
         assert_eq!(
             rt.execute_frame(command(&[b"SLOWLOG", b"RESET", b"extra"]), 4),
@@ -16705,9 +16699,7 @@ mod tests {
         let reply = rt.execute_frame(command(&[b"CONFIG", b"HELP", b"extra"]), 0);
         assert_eq!(
             reply,
-            RespFrame::Error(
-                "ERR wrong number of arguments for 'config|help' command".to_string()
-            )
+            RespFrame::Error("ERR wrong number of arguments for 'config|help' command".to_string())
         );
     }
 
@@ -18429,7 +18421,9 @@ mod tests {
             command(&[b"ACL", b"DRYRUN", b"reset_test", b"DEL", b"k"]),
             1,
         );
-        assert!(matches!(&reply, RespFrame::BulkString(Some(b)) if std::str::from_utf8(b).map(|s| s.contains("no permissions")).unwrap_or(false)));
+        assert!(
+            matches!(&reply, RespFrame::BulkString(Some(b)) if std::str::from_utf8(b).map(|s| s.contains("no permissions")).unwrap_or(false))
+        );
 
         // Apply allcommands
         assert_eq!(

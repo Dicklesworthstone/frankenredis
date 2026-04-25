@@ -153,9 +153,9 @@ fn send_and_capture(port: u16, argv: &[&[u8]]) -> Vec<u8> {
                     return buf;
                 }
                 Err(fr_protocol::RespParseError::Incomplete) => {}
-                Err(err) => panic!(
-                    "parse_frame failed on partial buffer for argv={argv:?}: {err:?}"
-                ),
+                Err(err) => {
+                    panic!("parse_frame failed on partial buffer for argv={argv:?}: {err:?}")
+                }
             }
         }
         if Instant::now() > deadline {
@@ -177,9 +177,8 @@ fn send_and_capture(port: u16, argv: &[&[u8]]) -> Vec<u8> {
 }
 
 fn assert_roundtrip(label: &str, bytes: &[u8]) {
-    let parsed = parse_frame(bytes).unwrap_or_else(|err| {
-        panic!("{label}: parse_frame failed: {err:?} on {bytes:?}")
-    });
+    let parsed = parse_frame(bytes)
+        .unwrap_or_else(|err| panic!("{label}: parse_frame failed: {err:?} on {bytes:?}"));
     assert_eq!(
         parsed.consumed,
         bytes.len(),
@@ -193,9 +192,8 @@ fn assert_roundtrip(label: &str, bytes: &[u8]) {
         bytes,
         "{label}: re-encode diverged from oracle bytes"
     );
-    let reparsed = parse_frame(&reencoded).unwrap_or_else(|err| {
-        panic!("{label}: re-parse of our own encoded bytes failed: {err:?}")
-    });
+    let reparsed = parse_frame(&reencoded)
+        .unwrap_or_else(|err| panic!("{label}: re-parse of our own encoded bytes failed: {err:?}"));
     assert_eq!(
         reparsed.frame, parsed.frame,
         "{label}: structural equality broken across re-parse"
@@ -215,13 +213,24 @@ fn live_oracle_roundtrip_canonical_corpus() {
     // Seed state for commands that read existing keys.
     // Each (label, argv) tuple is a fresh request on a fresh connection.
     let seed: &[(&str, &[&[u8]])] = &[
-        ("seed:DEL", &[b"DEL", b"k:str", b"k:int", b"k:list", b"k:hash", b"k:set", b"k:zset"]),
+        (
+            "seed:DEL",
+            &[
+                b"DEL", b"k:str", b"k:int", b"k:list", b"k:hash", b"k:set", b"k:zset",
+            ],
+        ),
         ("seed:SET str", &[b"SET", b"k:str", b"hello"]),
         ("seed:SET int", &[b"SET", b"k:int", b"42"]),
         ("seed:RPUSH list", &[b"RPUSH", b"k:list", b"a", b"b", b"c"]),
-        ("seed:HSET hash", &[b"HSET", b"k:hash", b"f1", b"v1", b"f2", b"v2"]),
+        (
+            "seed:HSET hash",
+            &[b"HSET", b"k:hash", b"f1", b"v1", b"f2", b"v2"],
+        ),
         ("seed:SADD set", &[b"SADD", b"k:set", b"x", b"y", b"z"]),
-        ("seed:ZADD zset", &[b"ZADD", b"k:zset", b"1", b"a", b"2", b"b", b"3", b"c"]),
+        (
+            "seed:ZADD zset",
+            &[b"ZADD", b"k:zset", b"1", b"a", b"2", b"b", b"3", b"c"],
+        ),
     ];
     for (label, argv) in seed {
         let bytes = send_and_capture(oracle.port, argv);
@@ -241,7 +250,10 @@ fn live_oracle_roundtrip_canonical_corpus() {
         ("PING", &[b"PING"]),
         ("PING with arg", &[b"PING", b"hello"]),
         ("SET OK", &[b"SET", b"k:str", b"hello"]),
-        ("SET with NX-already-exists-nil", &[b"SET", b"k:str", b"new", b"NX"]),
+        (
+            "SET with NX-already-exists-nil",
+            &[b"SET", b"k:str", b"new", b"NX"],
+        ),
         ("CLIENT SETNAME", &[b"CLIENT", b"SETNAME", b"cc-redis-test"]),
         ("CLIENT GETNAME", &[b"CLIENT", b"GETNAME"]),
         ("ECHO", &[b"ECHO", b"round-trip-me"]),
@@ -257,7 +269,10 @@ fn live_oracle_roundtrip_canonical_corpus() {
         ("INCR", &[b"INCR", b"k:int"]),
         ("INCRBY", &[b"INCRBY", b"k:int", b"7"]),
         ("DECR", &[b"DECR", b"k:int"]),
-        ("EXISTS multiple", &[b"EXISTS", b"k:str", b"k:int", b"k:missing"]),
+        (
+            "EXISTS multiple",
+            &[b"EXISTS", b"k:str", b"k:int", b"k:missing"],
+        ),
         ("TTL no-expire", &[b"TTL", b"k:str"]),
         ("TTL missing", &[b"TTL", b"k:never"]),
         ("PTTL no-expire", &[b"PTTL", b"k:str"]),
@@ -269,7 +284,10 @@ fn live_oracle_roundtrip_canonical_corpus() {
         ("ZCARD", &[b"ZCARD", b"k:zset"]),
         ("PERSIST no-ttl", &[b"PERSIST", b"k:str"]),
         ("EXPIRE", &[b"EXPIRE", b"k:str", b"60"]),
-        ("EXPIRE with XX flag absent", &[b"EXPIRE", b"k:str", b"30", b"XX"]),
+        (
+            "EXPIRE with XX flag absent",
+            &[b"EXPIRE", b"k:str", b"30", b"XX"],
+        ),
         // Bulk strings
         ("GET existing", &[b"GET", b"k:str"]),
         ("GET missing", &[b"GET", b"k:missing"]),
@@ -285,24 +303,42 @@ fn live_oracle_roundtrip_canonical_corpus() {
         // Arrays
         ("LRANGE full", &[b"LRANGE", b"k:list", b"0", b"-1"]),
         ("LRANGE empty window", &[b"LRANGE", b"k:list", b"10", b"20"]),
-        ("LRANGE negative window", &[b"LRANGE", b"k:list", b"-2", b"-1"]),
+        (
+            "LRANGE negative window",
+            &[b"LRANGE", b"k:list", b"-2", b"-1"],
+        ),
         ("HGETALL", &[b"HGETALL", b"k:hash"]),
         ("HKEYS", &[b"HKEYS", b"k:hash"]),
         ("HVALS", &[b"HVALS", b"k:hash"]),
-        ("HMGET present+missing", &[b"HMGET", b"k:hash", b"f1", b"f2", b"nofield"]),
+        (
+            "HMGET present+missing",
+            &[b"HMGET", b"k:hash", b"f1", b"f2", b"nofield"],
+        ),
         ("SMEMBERS", &[b"SMEMBERS", b"k:set"]),
         ("SINTER single", &[b"SINTER", b"k:set"]),
         ("ZRANGE", &[b"ZRANGE", b"k:zset", b"0", b"-1"]),
-        ("ZRANGE WITHSCORES", &[b"ZRANGE", b"k:zset", b"0", b"-1", b"WITHSCORES"]),
-        ("ZRANGEBYSCORE inf", &[b"ZRANGEBYSCORE", b"k:zset", b"-inf", b"+inf"]),
+        (
+            "ZRANGE WITHSCORES",
+            &[b"ZRANGE", b"k:zset", b"0", b"-1", b"WITHSCORES"],
+        ),
+        (
+            "ZRANGEBYSCORE inf",
+            &[b"ZRANGEBYSCORE", b"k:zset", b"-inf", b"+inf"],
+        ),
         ("KEYS glob", &[b"KEYS", b"k:*"]),
         ("OBJECT ENCODING str", &[b"OBJECT", b"ENCODING", b"k:str"]),
-        ("OBJECT ENCODING missing", &[b"OBJECT", b"ENCODING", b"k:missing"]),
+        (
+            "OBJECT ENCODING missing",
+            &[b"OBJECT", b"ENCODING", b"k:missing"],
+        ),
         ("CONFIG GET fixed", &[b"CONFIG", b"GET", b"maxmemory"]),
         ("DEBUG OBJECT missing", &[b"DEBUG", b"OBJECT", b"k:missing"]),
         // Nil-bulk & nil-array edges
         ("LPOP missing", &[b"LPOP", b"k:never-list"]),
-        ("RPOPLPUSH missing", &[b"RPOPLPUSH", b"k:never-list", b"k:never-list-2"]),
+        (
+            "RPOPLPUSH missing",
+            &[b"RPOPLPUSH", b"k:never-list", b"k:never-list-2"],
+        ),
     ];
 
     for (label, argv) in corpus {

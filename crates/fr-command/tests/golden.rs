@@ -1,4 +1,6 @@
-use fr_command::{parse_client_tracking_state, parse_migrate_request, command_keys, command_key_indexes};
+use fr_command::{
+    command_key_indexes, command_keys, parse_client_tracking_state, parse_migrate_request,
+};
 use std::fs;
 use std::path::Path;
 
@@ -195,8 +197,11 @@ fn keys_and_snapshot(test_name: &str, args: &[&str]) {
     let argv = to_argv(args);
     let keys = command_keys(&argv);
     let indexes = command_key_indexes(&argv);
-    
-    let keys_str: Vec<String> = keys.into_iter().map(|k| String::from_utf8_lossy(&k[..]).into_owned()).collect();
+
+    let keys_str: Vec<String> = keys
+        .into_iter()
+        .map(|k| String::from_utf8_lossy(&k[..]).into_owned())
+        .collect();
     let actual = format!("Keys: {:#?}\nIndexes: {:#?}", keys_str, indexes);
     assert_golden(test_name, &actual);
 }
@@ -213,16 +218,43 @@ fn golden_keys_mset() {
 
 #[test]
 fn golden_keys_zinterstore() {
-    keys_and_snapshot("keys_zinterstore", &["ZINTERSTORE", "out", "2", "zset1", "zset2", "WEIGHTS", "2", "3"]);
+    keys_and_snapshot(
+        "keys_zinterstore",
+        &[
+            "ZINTERSTORE",
+            "out",
+            "2",
+            "zset1",
+            "zset2",
+            "WEIGHTS",
+            "2",
+            "3",
+        ],
+    );
 }
 
 #[test]
 fn golden_keys_eval() {
-    keys_and_snapshot("keys_eval", &["EVAL", "return 1", "2", "key1", "key2", "arg1"]);
+    keys_and_snapshot(
+        "keys_eval",
+        &["EVAL", "return 1", "2", "key1", "key2", "arg1"],
+    );
 }
 
 #[test]
 fn golden_keys_xreadgroup() {
-    keys_and_snapshot("keys_xreadgroup", &["XREADGROUP", "GROUP", "g1", "c1", "STREAMS", "stream1", "stream2", ">", ">"]);
+    keys_and_snapshot(
+        "keys_xreadgroup",
+        &[
+            "XREADGROUP",
+            "GROUP",
+            "g1",
+            "c1",
+            "STREAMS",
+            "stream1",
+            "stream2",
+            ">",
+            ">",
+        ],
+    );
 }
-

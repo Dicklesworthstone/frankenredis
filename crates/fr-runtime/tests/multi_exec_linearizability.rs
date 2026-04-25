@@ -82,16 +82,12 @@ fn m1_plain_multi_exec_applies_batch_and_returns_per_command_replies() {
         run_as(&mut rt, &mut a, cmd(&[b"SET", b"k", b"1"]), 1),
         queued()
     );
-    assert_eq!(
-        run_as(&mut rt, &mut a, cmd(&[b"GET", b"k"]), 2),
-        queued()
-    );
+    assert_eq!(run_as(&mut rt, &mut a, cmd(&[b"GET", b"k"]), 2), queued());
     assert_eq!(
         run_as(&mut rt, &mut a, cmd(&[b"EXEC"]), 3),
-        RespFrame::Array(Some(vec![
-            ok(),
-            RespFrame::BulkString(Some(b"1".to_vec())),
-        ]))
+        RespFrame::Array(Some(
+            vec![ok(), RespFrame::BulkString(Some(b"1".to_vec())),]
+        ))
     );
 }
 
@@ -136,10 +132,7 @@ fn m3_watch_aborts_when_other_client_modifies_watched_key() {
     );
 
     // A's EXEC must return (nil) — the transaction aborts entirely.
-    assert_eq!(
-        run_as(&mut rt, &mut a, cmd(&[b"EXEC"]), 4),
-        exec_aborted()
-    );
+    assert_eq!(run_as(&mut rt, &mut a, cmd(&[b"EXEC"]), 4), exec_aborted());
 
     // Value on k must be B's write, not A's.
     assert_eq!(
@@ -241,10 +234,7 @@ fn mr_watch_monotonic_single_write_equivalent_to_many() {
         let mut a = Some(rt.new_session());
         let mut b = Some(rt.new_session());
 
-        assert_eq!(
-            run_as(&mut rt, &mut a, cmd(&[b"WATCH", b"key"]), 0),
-            ok()
-        );
+        assert_eq!(run_as(&mut rt, &mut a, cmd(&[b"WATCH", b"key"]), 0), ok());
         assert_eq!(run_as(&mut rt, &mut a, cmd(&[b"MULTI"]), 1), ok());
         assert_eq!(
             run_as(&mut rt, &mut a, cmd(&[b"SET", b"key", b"A"]), 2),
@@ -253,7 +243,12 @@ fn mr_watch_monotonic_single_write_equivalent_to_many() {
         for i in 0..n {
             let v = format!("b-{i}");
             assert_eq!(
-                run_as(&mut rt, &mut b, cmd(&[b"SET", b"key", v.as_bytes()]), (3 + i) as u64),
+                run_as(
+                    &mut rt,
+                    &mut b,
+                    cmd(&[b"SET", b"key", v.as_bytes()]),
+                    (3 + i) as u64
+                ),
                 ok()
             );
         }
@@ -279,10 +274,7 @@ fn mr_watch_idempotent_repeated_watch_same_key() {
         run_as(&mut rt, &mut a, cmd(&[b"SET", b"k", b"A"]), 3),
         queued()
     );
-    assert_eq!(
-        run_as(&mut rt, &mut b, cmd(&[b"SET", b"k", b"B"]), 4),
-        ok()
-    );
+    assert_eq!(run_as(&mut rt, &mut b, cmd(&[b"SET", b"k", b"B"]), 4), ok());
     // Repeated WATCHes on the same key still produce exactly one abort.
     assert_eq!(run_as(&mut rt, &mut a, cmd(&[b"EXEC"]), 5), exec_aborted());
 }
@@ -341,10 +333,7 @@ fn mr_discard_clears_queue_and_releases_watch() {
     );
 
     // k must not have been set.
-    assert_eq!(
-        run_as(&mut rt, &mut a, cmd(&[b"GET", b"k"]), 5),
-        nil_bulk()
-    );
+    assert_eq!(run_as(&mut rt, &mut a, cmd(&[b"GET", b"k"]), 5), nil_bulk());
 }
 
 /// Regression guard: EXEC outside MULTI returns the canonical error.

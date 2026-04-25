@@ -1027,17 +1027,13 @@ mod tests {
 
         // Default config remains fail-closed.
         assert_eq!(
-            parse_frame(b"%1\r\n+name\r\n+alice\r\n")
-                .expect_err("fail-closed without allow_resp3"),
+            parse_frame(b"%1\r\n+name\r\n+alice\r\n").expect_err("fail-closed without allow_resp3"),
             RespParseError::UnsupportedResp3Type(b'%')
         );
 
         // Map → flat Array of 2N entries.
-        let parsed = parse_frame_with_config(
-            b"%2\r\n+name\r\n+alice\r\n+age\r\n:30\r\n",
-            &allow,
-        )
-        .expect("map parses under allow_resp3");
+        let parsed = parse_frame_with_config(b"%2\r\n+name\r\n+alice\r\n+age\r\n:30\r\n", &allow)
+            .expect("map parses under allow_resp3");
         assert_eq!(
             parsed.frame,
             RespFrame::Array(Some(vec![

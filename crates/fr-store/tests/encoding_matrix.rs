@@ -62,9 +62,7 @@ fn hash_encoding_listpack_at_threshold_entries() {
     let mut store = Store::new();
     for i in 0..128_u32 {
         let field = format!("f{i}").into_bytes();
-        store
-            .hset(b"h", field, b"v".to_vec(), NOW)
-            .expect("hset");
+        store.hset(b"h", field, b"v".to_vec(), NOW).expect("hset");
     }
     assert_eq!(store.object_encoding(b"h", NOW), Some("listpack"));
 }
@@ -74,9 +72,7 @@ fn hash_encoding_hashtable_one_entry_past_threshold() {
     let mut store = Store::new();
     for i in 0..129_u32 {
         let field = format!("f{i}").into_bytes();
-        store
-            .hset(b"h", field, b"v".to_vec(), NOW)
-            .expect("hset");
+        store.hset(b"h", field, b"v".to_vec(), NOW).expect("hset");
     }
     assert_eq!(store.object_encoding(b"h", NOW), Some("hashtable"));
 }
@@ -128,9 +124,7 @@ fn set_encoding_listpack_beyond_intset_entries_even_when_integers() {
     // 513 all-integer members → still more than set_max_intset_entries (512).
     // Upstream falls back to listpack when cardinality <= set_max_listpack_entries
     // (128) — but here we're past both, so we expect hashtable.
-    let members: Vec<Vec<u8>> = (1..=513_i64)
-        .map(|n| n.to_string().into_bytes())
-        .collect();
+    let members: Vec<Vec<u8>> = (1..=513_i64).map(|n| n.to_string().into_bytes()).collect();
     store.sadd(b"s", &members, NOW).expect("sadd");
     assert_eq!(store.object_encoding(b"s", NOW), Some("hashtable"));
 }
@@ -138,9 +132,7 @@ fn set_encoding_listpack_beyond_intset_entries_even_when_integers() {
 #[test]
 fn set_encoding_hashtable_one_past_listpack_threshold_noninteger_members() {
     let mut store = Store::new();
-    let mut members: Vec<Vec<u8>> = (0..128_u32)
-        .map(|i| format!("m{i}").into_bytes())
-        .collect();
+    let mut members: Vec<Vec<u8>> = (0..128_u32).map(|i| format!("m{i}").into_bytes()).collect();
     members.push(b"mX".to_vec()); // 129 non-integer members
     store.sadd(b"s", &members, NOW).expect("sadd");
     assert_eq!(store.object_encoding(b"s", NOW), Some("hashtable"));
@@ -149,9 +141,7 @@ fn set_encoding_hashtable_one_past_listpack_threshold_noninteger_members() {
 #[test]
 fn set_encoding_listpack_at_threshold_entries_noninteger_members() {
     let mut store = Store::new();
-    let members: Vec<Vec<u8>> = (0..128_u32)
-        .map(|i| format!("m{i}").into_bytes())
-        .collect();
+    let members: Vec<Vec<u8>> = (0..128_u32).map(|i| format!("m{i}").into_bytes()).collect();
     store.sadd(b"s", &members, NOW).expect("sadd");
     assert_eq!(store.object_encoding(b"s", NOW), Some("listpack"));
 }
@@ -195,9 +185,7 @@ fn zset_encoding_skiplist_when_any_member_exceeds_64_bytes() {
 #[test]
 fn list_encoding_listpack_at_threshold_entries() {
     let mut store = Store::new();
-    let values: Vec<Vec<u8>> = (0..128_u32)
-        .map(|i| format!("v{i}").into_bytes())
-        .collect();
+    let values: Vec<Vec<u8>> = (0..128_u32).map(|i| format!("v{i}").into_bytes()).collect();
     store.rpush(b"l", &values, NOW).expect("rpush");
     assert_eq!(store.object_encoding(b"l", NOW), Some("listpack"));
 }
@@ -205,9 +193,7 @@ fn list_encoding_listpack_at_threshold_entries() {
 #[test]
 fn list_encoding_quicklist_one_past_threshold_entries() {
     let mut store = Store::new();
-    let values: Vec<Vec<u8>> = (0..129_u32)
-        .map(|i| format!("v{i}").into_bytes())
-        .collect();
+    let values: Vec<Vec<u8>> = (0..129_u32).map(|i| format!("v{i}").into_bytes()).collect();
     store.rpush(b"l", &values, NOW).expect("rpush");
     assert_eq!(store.object_encoding(b"l", NOW), Some("quicklist"));
 }
@@ -234,11 +220,12 @@ fn mr_enc_mono_hash_does_not_downgrade_on_insert_sweep() {
     let mut transitions: Vec<(usize, &'static str)> = Vec::new();
     for i in 0..140_u32 {
         let field = format!("f{i}").into_bytes();
-        store
-            .hset(b"h", field, b"v".to_vec(), NOW)
-            .expect("hset");
+        store.hset(b"h", field, b"v".to_vec(), NOW).expect("hset");
         let enc = store.object_encoding(b"h", NOW).expect("hash encoding");
-        if transitions.last().is_none_or(|(_, last_enc)| *last_enc != enc) {
+        if transitions
+            .last()
+            .is_none_or(|(_, last_enc)| *last_enc != enc)
+        {
             transitions.push((i as usize + 1, enc));
         }
     }

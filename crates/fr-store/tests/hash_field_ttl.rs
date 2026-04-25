@@ -5,17 +5,15 @@
 //! (br-frankenredis-wwz3)
 
 use fr_store::{
-    HashFieldPersistResult, HashFieldTtl, HashFieldTtlCondition, HashFieldTtlSet,
-    HashFieldTtlUnit, Store,
+    HashFieldPersistResult, HashFieldTtl, HashFieldTtlCondition, HashFieldTtlSet, HashFieldTtlUnit,
+    Store,
 };
 
 const NOW: u64 = 1_700_000_000_000; // 2023-11-14
 
 fn seed_hash(store: &mut Store, key: &[u8], fields: &[(&[u8], &[u8])]) {
     for (f, v) in fields {
-        store
-            .hset(key, f.to_vec(), v.to_vec(), NOW)
-            .expect("hset");
+        store.hset(key, f.to_vec(), v.to_vec(), NOW).expect("hset");
     }
 }
 
@@ -26,13 +24,8 @@ fn hash_field_ttl_set_unconditional_then_read_ms() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"f", b"v")]);
 
-    let set = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    let set =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::None, NOW);
     assert_eq!(set, HashFieldTtlSet::Applied);
 
     let ttl = store.hash_field_ttl(b"h", b"f", NOW, HashFieldTtlUnit::Milliseconds, false);
@@ -54,7 +47,11 @@ fn hash_field_ttl_read_seconds_rounds_remaining_up() {
         NOW,
     );
     let ttl = store.hash_field_ttl(b"h", b"f", NOW, HashFieldTtlUnit::Seconds, false);
-    assert_eq!(ttl, HashFieldTtl::Remaining(1), "600ms should round up to 1s");
+    assert_eq!(
+        ttl,
+        HashFieldTtl::Remaining(1),
+        "600ms should round up to 1s"
+    );
 
     let abs = store.hash_field_ttl(b"h", b"f", NOW, HashFieldTtlUnit::Seconds, true);
     // Absolute seconds truncates: floor((NOW+600) / 1000).
@@ -107,13 +104,8 @@ fn hash_field_ttl_wrong_type_is_surfaced_distinctly() {
     let mut store = Store::new();
     store.set(b"s".to_vec(), b"a string".to_vec(), None, NOW);
 
-    let set = store.hash_field_set_abs_expiry(
-        b"s",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    let set =
+        store.hash_field_set_abs_expiry(b"s", b"f", NOW + 60_000, HashFieldTtlCondition::None, NOW);
     assert_eq!(set, HashFieldTtlSet::WrongType);
 
     let ttl = store.hash_field_ttl(b"s", b"f", NOW, HashFieldTtlUnit::Milliseconds, false);
@@ -130,22 +122,12 @@ fn hash_field_ttl_nx_applies_only_when_no_ttl() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"f", b"v")]);
 
-    let first = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::Nx,
-        NOW,
-    );
+    let first =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::Nx, NOW);
     assert_eq!(first, HashFieldTtlSet::Applied);
 
-    let second = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 120_000,
-        HashFieldTtlCondition::Nx,
-        NOW,
-    );
+    let second =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 120_000, HashFieldTtlCondition::Nx, NOW);
     assert_eq!(second, HashFieldTtlSet::ConditionNotMet);
 
     // The original TTL stands.
@@ -158,29 +140,13 @@ fn hash_field_ttl_xx_applies_only_when_ttl_exists() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"f", b"v")]);
 
-    let blocked = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::Xx,
-        NOW,
-    );
+    let blocked =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::Xx, NOW);
     assert_eq!(blocked, HashFieldTtlSet::ConditionNotMet);
 
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 30_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
-    let allowed = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::Xx,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"f", NOW + 30_000, HashFieldTtlCondition::None, NOW);
+    let allowed =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::Xx, NOW);
     assert_eq!(allowed, HashFieldTtlSet::Applied);
 }
 
@@ -190,22 +156,11 @@ fn hash_field_ttl_gt_requires_existing_and_stricter_deadline() {
     seed_hash(&mut store, b"h", &[(b"f", b"v")]);
 
     // No existing TTL → GT is a no-op.
-    let no_prior = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::Gt,
-        NOW,
-    );
+    let no_prior =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::Gt, NOW);
     assert_eq!(no_prior, HashFieldTtlSet::ConditionNotMet);
 
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::None, NOW);
 
     let shorter = store.hash_field_set_abs_expiry(
         b"h",
@@ -216,13 +171,8 @@ fn hash_field_ttl_gt_requires_existing_and_stricter_deadline() {
     );
     assert_eq!(shorter, HashFieldTtlSet::ConditionNotMet);
 
-    let longer = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 120_000,
-        HashFieldTtlCondition::Gt,
-        NOW,
-    );
+    let longer =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 120_000, HashFieldTtlCondition::Gt, NOW);
     assert_eq!(longer, HashFieldTtlSet::Applied);
 }
 
@@ -232,31 +182,16 @@ fn hash_field_ttl_lt_applies_when_no_existing_or_stricter_deadline() {
     seed_hash(&mut store, b"h", &[(b"f", b"v")]);
 
     // No existing TTL → LT applies (anything is less than "infinity").
-    let no_prior = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::Lt,
-        NOW,
-    );
+    let no_prior =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::Lt, NOW);
     assert_eq!(no_prior, HashFieldTtlSet::Applied);
 
-    let longer = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 120_000,
-        HashFieldTtlCondition::Lt,
-        NOW,
-    );
+    let longer =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 120_000, HashFieldTtlCondition::Lt, NOW);
     assert_eq!(longer, HashFieldTtlSet::ConditionNotMet);
 
-    let shorter = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 30_000,
-        HashFieldTtlCondition::Lt,
-        NOW,
-    );
+    let shorter =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW + 30_000, HashFieldTtlCondition::Lt, NOW);
     assert_eq!(shorter, HashFieldTtlSet::Applied);
 }
 
@@ -267,13 +202,8 @@ fn hash_field_ttl_set_to_past_deadline_reports_already_expired() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"f", b"v")]);
 
-    let set = store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW - 1,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    let set =
+        store.hash_field_set_abs_expiry(b"h", b"f", NOW - 1, HashFieldTtlCondition::None, NOW);
     assert_eq!(set, HashFieldTtlSet::AppliedAlreadyExpired);
     assert!(store.hash_field_is_expired(b"h", b"f", NOW));
 }
@@ -290,13 +220,7 @@ fn hash_field_persist_reports_no_ttl_when_never_set() {
 fn hash_field_persist_clears_existing_ttl_and_is_idempotent() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"f", b"v")]);
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::None, NOW);
 
     assert_eq!(
         store.hash_field_persist(b"h", b"f"),
@@ -326,15 +250,13 @@ fn hash_field_ttl_read_without_prior_set_returns_no_ttl() {
 #[test]
 fn hash_field_ttl_clear_for_key_removes_every_field_entry() {
     let mut store = Store::new();
-    seed_hash(&mut store, b"h", &[(b"f1", b"v1"), (b"f2", b"v2"), (b"f3", b"v3")]);
+    seed_hash(
+        &mut store,
+        b"h",
+        &[(b"f1", b"v1"), (b"f2", b"v2"), (b"f3", b"v3")],
+    );
     for f in [b"f1".as_slice(), b"f2".as_slice(), b"f3".as_slice()] {
-        store.hash_field_set_abs_expiry(
-            b"h",
-            f,
-            NOW + 60_000,
-            HashFieldTtlCondition::None,
-            NOW,
-        );
+        store.hash_field_set_abs_expiry(b"h", f, NOW + 60_000, HashFieldTtlCondition::None, NOW);
     }
     assert_eq!(store.hash_field_ttl_carrier_count(), 1);
 
@@ -415,8 +337,16 @@ fn hash_field_set_with_event_emits_hexpire_on_applied() {
 
     let events = collect_event_pairs(&mut store);
     // Expect both __keyspace@0__:h → hexpire and __keyevent@0__:hexpire → h.
-    assert!(events.iter().any(|(c, k)| c == "__keyspace@0__:h" && k == "hexpire"));
-    assert!(events.iter().any(|(c, k)| c == "__keyevent@0__:hexpire" && k == "h"));
+    assert!(
+        events
+            .iter()
+            .any(|(c, k)| c == "__keyspace@0__:h" && k == "hexpire")
+    );
+    assert!(
+        events
+            .iter()
+            .any(|(c, k)| c == "__keyevent@0__:hexpire" && k == "h")
+    );
 }
 
 #[test]
@@ -443,13 +373,7 @@ fn hash_field_set_with_event_suppresses_event_on_condition_miss() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"f", b"v")]);
     // Set initial TTL so an NX attempt blocks.
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::None, NOW);
     enable_all_keyspace_events(&mut store);
     let outcome = store.hash_field_set_abs_expiry_with_event(
         b"h",
@@ -461,20 +385,17 @@ fn hash_field_set_with_event_suppresses_event_on_condition_miss() {
     );
     assert_eq!(outcome, HashFieldTtlSet::ConditionNotMet);
     let events = collect_event_pairs(&mut store);
-    assert!(events.is_empty(), "no event on blocked condition: {events:?}");
+    assert!(
+        events.is_empty(),
+        "no event on blocked condition: {events:?}"
+    );
 }
 
 #[test]
 fn hash_field_persist_with_event_emits_hpersist_on_clear() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"f", b"v")]);
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::None, NOW);
     enable_all_keyspace_events(&mut store);
     let outcome = store.hash_field_persist_with_event(b"h", b"f");
     assert_eq!(outcome, HashFieldPersistResult::Persisted);
@@ -502,13 +423,7 @@ fn object_encoding_reports_listpack_ex_for_hash_with_any_field_ttl() {
     // No TTL yet → plain listpack.
     assert_eq!(store.object_encoding(b"h", NOW), Some("listpack"));
 
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::None, NOW);
     assert_eq!(store.object_encoding(b"h", NOW), Some("listpack_ex"));
 }
 
@@ -516,9 +431,7 @@ fn object_encoding_reports_listpack_ex_for_hash_with_any_field_ttl() {
 fn object_encoding_reports_hashtable_ex_when_big_hash_has_field_ttl() {
     let mut store = Store::new();
     // Seed >128 entries to push over the listpack threshold.
-    let fields: Vec<Vec<u8>> = (0..140_u32)
-        .map(|i| format!("f{i}").into_bytes())
-        .collect();
+    let fields: Vec<Vec<u8>> = (0..140_u32).map(|i| format!("f{i}").into_bytes()).collect();
     for f in &fields {
         store
             .hset(b"h", f.clone(), b"v".to_vec(), NOW)
@@ -547,13 +460,7 @@ fn object_encoding_reports_hashtable_ex_when_big_hash_has_field_ttl() {
 fn hget_reaps_expired_field_returning_none() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"alive", b"v"), (b"doomed", b"v")]);
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"doomed",
-        NOW - 1,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"doomed", NOW - 1, HashFieldTtlCondition::None, NOW);
     // Past-deadline write already marked the field as reaped in the
     // field_expires map; the first read (via hget on the doomed field)
     // must drop it from the hash too.
@@ -572,20 +479,8 @@ fn hgetall_hkeys_hvals_hide_expired_fields() {
         b"h",
         &[(b"keep", b"k"), (b"drop1", b"d"), (b"drop2", b"d")],
     );
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"drop1",
-        NOW - 1,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"drop2",
-        NOW - 5,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"drop1", NOW - 1, HashFieldTtlCondition::None, NOW);
+    store.hash_field_set_abs_expiry(b"h", b"drop2", NOW - 5, HashFieldTtlCondition::None, NOW);
 
     let all = store.hgetall(b"h", NOW).expect("hgetall");
     assert_eq!(all, vec![(b"keep".to_vec(), b"k".to_vec())]);
@@ -603,13 +498,7 @@ fn hgetall_hkeys_hvals_hide_expired_fields() {
 fn hmget_returns_none_for_fields_that_have_just_expired() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"alive", b"v"), (b"dead", b"v")]);
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"dead",
-        NOW - 1,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"dead", NOW - 1, HashFieldTtlCondition::None, NOW);
     let got = store
         .hmget(b"h", &[b"alive", b"dead", b"nope"], NOW)
         .expect("hmget");
@@ -620,13 +509,7 @@ fn hmget_returns_none_for_fields_that_have_just_expired() {
 fn hexists_treats_expired_field_as_missing() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"dead", b"v")]);
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"dead",
-        NOW - 1,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"dead", NOW - 1, HashFieldTtlCondition::None, NOW);
     assert!(!store.hexists(b"h", b"dead", NOW).expect("hexists"));
 }
 
@@ -634,13 +517,7 @@ fn hexists_treats_expired_field_as_missing() {
 fn reaping_last_field_deletes_the_whole_hash_key() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"only", b"v")]);
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"only",
-        NOW - 1,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"only", NOW - 1, HashFieldTtlCondition::None, NOW);
     // HLEN triggers a sweep that reaps the only field and should also
     // drop the hash key itself.
     let len = store.hlen(b"h", NOW).expect("hlen");
@@ -655,13 +532,7 @@ fn reaping_last_field_deletes_the_whole_hash_key() {
 fn hdel_clears_the_per_field_ttl_entry() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"f", b"v")]);
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"f", NOW + 60_000, HashFieldTtlCondition::None, NOW);
     assert_eq!(store.hash_field_ttl_carrier_count(), 1);
     // HDEL drops the field AND its TTL entry.
     let removed = store.hdel(b"h", &[&b"f"[..]], NOW).expect("hdel");
@@ -673,20 +544,8 @@ fn hdel_clears_the_per_field_ttl_entry() {
 fn whole_key_removal_clears_all_field_ttls() {
     let mut store = Store::new();
     seed_hash(&mut store, b"h", &[(b"f1", b"v"), (b"f2", b"v")]);
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"f1",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
-    store.hash_field_set_abs_expiry(
-        b"h",
-        b"f2",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h", b"f1", NOW + 60_000, HashFieldTtlCondition::None, NOW);
+    store.hash_field_set_abs_expiry(b"h", b"f2", NOW + 60_000, HashFieldTtlCondition::None, NOW);
     assert_eq!(store.hash_field_ttl_carrier_count(), 1);
     assert_eq!(store.del(&[b"h".to_vec()], NOW), 1);
     assert_eq!(store.hash_field_ttl_carrier_count(), 0);
@@ -701,20 +560,8 @@ fn hash_field_ttl_carrier_count_tracks_distinct_keys() {
 
     assert_eq!(store.hash_field_ttl_carrier_count(), 0);
 
-    store.hash_field_set_abs_expiry(
-        b"h1",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
-    store.hash_field_set_abs_expiry(
-        b"h2",
-        b"f",
-        NOW + 60_000,
-        HashFieldTtlCondition::None,
-        NOW,
-    );
+    store.hash_field_set_abs_expiry(b"h1", b"f", NOW + 60_000, HashFieldTtlCondition::None, NOW);
+    store.hash_field_set_abs_expiry(b"h2", b"f", NOW + 60_000, HashFieldTtlCondition::None, NOW);
     assert_eq!(store.hash_field_ttl_carrier_count(), 2);
 
     store.hash_field_persist(b"h1", b"f");

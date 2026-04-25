@@ -320,24 +320,14 @@ fn aof_roundtrip_hexpire_family_reconstructs_per_field_ttls() {
         0,
     );
     rt.execute_frame(
-        command(&[
-            b"HEXPIREAT",
-            b"h",
-            b"9999999999",
-            b"FIELDS",
-            b"1",
-            b"f_at",
-        ]),
+        command(&[b"HEXPIREAT", b"h", b"9999999999", b"FIELDS", b"1", b"f_at"]),
         0,
     );
     rt.execute_frame(
         command(&[b"HPEXPIRE", b"h", b"5000", b"FIELDS", b"1", b"f_pers"]),
         0,
     );
-    rt.execute_frame(
-        command(&[b"HPERSIST", b"h", b"FIELDS", b"1", b"f_pers"]),
-        0,
-    );
+    rt.execute_frame(command(&[b"HPERSIST", b"h", b"FIELDS", b"1", b"f_pers"]), 0);
 
     assert_eq!(
         rt.execute_frame(command(&[b"SAVE"]), 1),
@@ -357,17 +347,11 @@ fn aof_roundtrip_hexpire_family_reconstructs_per_field_ttls() {
         RespFrame::BulkString(Some(b"v_s".to_vec()))
     );
     assert_eq!(
-        rt2.execute_frame(
-            command(&[b"HTTL", b"h", b"FIELDS", b"1", b"f_s"]),
-            0,
-        ),
+        rt2.execute_frame(command(&[b"HTTL", b"h", b"FIELDS", b"1", b"f_s"]), 0,),
         RespFrame::Array(Some(vec![RespFrame::Integer(600)]))
     );
     assert_eq!(
-        rt2.execute_frame(
-            command(&[b"HPTTL", b"h", b"FIELDS", b"1", b"f_ms"]),
-            0,
-        ),
+        rt2.execute_frame(command(&[b"HPTTL", b"h", b"FIELDS", b"1", b"f_ms"]), 0,),
         RespFrame::Array(Some(vec![RespFrame::Integer(30_000)]))
     );
     assert_eq!(
@@ -378,17 +362,11 @@ fn aof_roundtrip_hexpire_family_reconstructs_per_field_ttls() {
         RespFrame::Array(Some(vec![RespFrame::Integer(9_999_999_999)]))
     );
     assert_eq!(
-        rt2.execute_frame(
-            command(&[b"HTTL", b"h", b"FIELDS", b"1", b"f_pers"]),
-            0,
-        ),
+        rt2.execute_frame(command(&[b"HTTL", b"h", b"FIELDS", b"1", b"f_pers"]), 0,),
         RespFrame::Array(Some(vec![RespFrame::Integer(-1)]))
     );
     assert_eq!(
-        rt2.execute_frame(
-            command(&[b"HTTL", b"h", b"FIELDS", b"1", b"nope"]),
-            0,
-        ),
+        rt2.execute_frame(command(&[b"HTTL", b"h", b"FIELDS", b"1", b"nope"]), 0,),
         RespFrame::Array(Some(vec![RespFrame::Integer(-2)]))
     );
 

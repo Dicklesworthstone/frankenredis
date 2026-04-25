@@ -21,7 +21,7 @@ proptest! {
 
         let mut store = fresh_store();
         store.sadd(&src, std::slice::from_ref(&member), 0).unwrap();
-        
+
         let other_vec: Vec<Vec<u8>> = other_members.into_iter().filter(|m| m != &member).collect();
         if !other_vec.is_empty() {
             store.sadd(&src, &other_vec, 0).unwrap();
@@ -84,7 +84,7 @@ proptest! {
         if let Some(popped) = store.spop(&key, 0).unwrap() {
             let card_after = store.scard(&key, 0).unwrap();
             prop_assert_eq!(card_after, card_before - 1);
-            
+
             let still_member = store.sismember(&key, &popped, 0).unwrap();
             prop_assert!(!still_member);
         } else {
@@ -107,7 +107,7 @@ proptest! {
 
         let popped = store.spop_count(&key, count, 0).unwrap();
         let expected_popped_count = std::cmp::min(card_before, count);
-        
+
         prop_assert_eq!(popped.len(), expected_popped_count);
 
         let card_after = store.scard(&key, 0).unwrap();
@@ -134,7 +134,7 @@ proptest! {
         if let Some(rand_member) = store.srandmember(&key, 0).unwrap() {
             let card_after = store.scard(&key, 0).unwrap();
             prop_assert_eq!(card_after, card_before);
-            
+
             let is_member = store.sismember(&key, &rand_member, 0).unwrap();
             prop_assert!(is_member);
         } else {
@@ -157,7 +157,7 @@ proptest! {
 
         let rand_members = store.srandmember_count(&key, count, 0).unwrap();
         let expected_count = std::cmp::min(card_before, count as usize);
-        
+
         prop_assert_eq!(rand_members.len(), expected_count);
 
         // Should contain unique elements since count > 0
@@ -168,7 +168,7 @@ proptest! {
             let is_member = store.sismember(&key, &rm, 0).unwrap();
             prop_assert!(is_member);
         }
-        
+
         let card_after = store.scard(&key, 0).unwrap();
         prop_assert_eq!(card_after, card_before);
     }

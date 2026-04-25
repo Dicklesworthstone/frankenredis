@@ -17,11 +17,11 @@ proptest! {
     ) {
         let mut store = fresh_store();
         store.sadd(&key, std::slice::from_ref(&member), 0).unwrap();
-        
+
         let retrieved = store.sismember(&key, &member, 0).unwrap();
         prop_assert!(retrieved);
     }
-    
+
     // MR2: SREM idempotency and completeness
     #[test]
     fn mr_srem_idempotency(
@@ -30,17 +30,17 @@ proptest! {
     ) {
         let mut store = fresh_store();
         store.sadd(&key, std::slice::from_ref(&member), 0).unwrap();
-        
+
         let deleted1 = store.srem(&key, &[&member], 0).unwrap();
         let deleted2 = store.srem(&key, &[&member], 0).unwrap();
-        
+
         prop_assert_eq!(deleted1, 1);
         prop_assert_eq!(deleted2, 0);
-        
+
         let retrieved = store.sismember(&key, &member, 0).unwrap();
         prop_assert!(!retrieved);
     }
-    
+
     // MR3: SUNIONSTORE Commutativity
     #[test]
     fn mr_sunionstore_commutative(
@@ -56,7 +56,7 @@ proptest! {
         let mut store1 = fresh_store();
         let a_vec: Vec<Vec<u8>> = members_a.iter().cloned().collect();
         let b_vec: Vec<Vec<u8>> = members_b.iter().cloned().collect();
-        
+
         store1.sadd(&key_a, &a_vec, 0).unwrap();
         store1.sadd(&key_b, &b_vec, 0).unwrap();
         store1.sunionstore(&dest1, &[&key_a, &key_b], 0).unwrap();
@@ -71,7 +71,7 @@ proptest! {
 
         prop_assert_eq!(res1, res2);
     }
-    
+
     // MR4: SINTERSTORE Commutativity
     #[test]
     fn mr_sinterstore_commutative(
@@ -87,7 +87,7 @@ proptest! {
         let mut store1 = fresh_store();
         let a_vec: Vec<Vec<u8>> = members_a.iter().cloned().collect();
         let b_vec: Vec<Vec<u8>> = members_b.iter().cloned().collect();
-        
+
         store1.sadd(&key_a, &a_vec, 0).unwrap();
         store1.sadd(&key_b, &b_vec, 0).unwrap();
         store1.sinterstore(&dest1, &[&key_a, &key_b], 0).unwrap();
@@ -102,7 +102,7 @@ proptest! {
 
         prop_assert_eq!(res1, res2);
     }
-    
+
     // MR5: SINTERSTORE bounds
     #[test]
     fn mr_sinterstore_bounds(
@@ -117,10 +117,10 @@ proptest! {
         let mut store = fresh_store();
         let a_vec: Vec<Vec<u8>> = members_a.iter().cloned().collect();
         let b_vec: Vec<Vec<u8>> = members_b.iter().cloned().collect();
-        
+
         store.sadd(&key_a, &a_vec, 0).unwrap();
         store.sadd(&key_b, &b_vec, 0).unwrap();
-        
+
         let card_a = store.scard(&key_a, 0).unwrap();
         let card_b = store.scard(&key_b, 0).unwrap();
 
@@ -129,7 +129,7 @@ proptest! {
 
         prop_assert!(card_i <= card_a.min(card_b));
     }
-    
+
     // MR6: SUNIONSTORE bounds
     #[test]
     fn mr_sunionstore_bounds(
@@ -144,10 +144,10 @@ proptest! {
         let mut store = fresh_store();
         let a_vec: Vec<Vec<u8>> = members_a.iter().cloned().collect();
         let b_vec: Vec<Vec<u8>> = members_b.iter().cloned().collect();
-        
+
         store.sadd(&key_a, &a_vec, 0).unwrap();
         store.sadd(&key_b, &b_vec, 0).unwrap();
-        
+
         let card_a = store.scard(&key_a, 0).unwrap();
         let card_b = store.scard(&key_b, 0).unwrap();
 
