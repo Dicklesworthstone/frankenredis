@@ -15285,6 +15285,9 @@ mod tests {
         let nodes = rt.execute_frame(command(&[b"CLUSTER", b"NODES"]), 0);
         assert_eq!(nodes, cluster_disabled);
 
+        let links = rt.execute_frame(command(&[b"CLUSTER", b"LINKS"]), 0);
+        assert_eq!(links, cluster_disabled);
+
         let keyslot = rt.execute_frame(command(&[b"CLUSTER", b"KEYSLOT", b"foo"]), 0);
         assert_eq!(keyslot, cluster_disabled);
 
@@ -15372,6 +15375,15 @@ mod tests {
                 ]))])),
             ]))]))
         );
+    }
+
+    #[test]
+    fn cluster_links_returns_empty_topology_when_cluster_is_enabled() {
+        let mut rt = Runtime::default_strict();
+        rt.server.store.cluster_enabled = true;
+
+        let links = rt.execute_frame(command(&[b"CLUSTER", b"LINKS"]), 0);
+        assert_eq!(links, RespFrame::Array(Some(vec![])));
     }
 
     #[test]

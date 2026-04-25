@@ -6452,6 +6452,100 @@ fn cluster_reset_with_keys_error() -> CommandError {
     )
 }
 
+fn parse_cluster_slot_arg(arg: &[u8]) -> Result<u16, CommandError> {
+    let slot = parse_i64_arg(arg)
+        .map_err(|_| CommandError::Custom("ERR Invalid or out of range slot".to_string()))?;
+    if !(0..=16383).contains(&slot) {
+        return Err(CommandError::Custom(
+            "ERR Invalid or out of range slot".to_string(),
+        ));
+    }
+    Ok(slot as u16)
+}
+
+fn cluster_slot_specified_multiple_times_error(slot: u16) -> CommandError {
+    CommandError::Custom(format!("ERR Slot {slot} specified multiple times"))
+}
+
+fn cluster_slot_busy_error(slot: u16) -> CommandError {
+    CommandError::Custom(format!("ERR Slot {slot} is already busy"))
+}
+
+fn cluster_slot_unassigned_error(slot: u16) -> CommandError {
+    CommandError::Custom(format!("ERR Slot {slot} is already unassigned"))
+}
+
+fn cluster_invalid_node_address(host: &str, port: &str) -> CommandError {
+    CommandError::Custom(format!("ERR Invalid node address specified: {host}:{port}"))
+}
+
+fn cluster_invalid_base_port(port: &str) -> CommandError {
+    CommandError::Custom(format!("ERR Invalid base port specified: {port}"))
+}
+
+fn cluster_invalid_bus_port(port: &str) -> CommandError {
+    CommandError::Custom(format!("ERR Invalid bus port specified: {port}"))
+}
+
+fn cluster_parse_port_arg(arg: &[u8]) -> Option<i64> {
+    let s = std::str::from_utf8(arg).ok()?;
+    s.parse::<i64>().ok()
+}
+
+fn cluster_collect_explicit_slots(argv: &[Vec<u8>]) -> Result<BTreeSet<u16>, CommandError> {
+    let mut slots = BTreeSet::new();
+    for slot_arg in argv {
+        let slot = parse_cluster_slot_arg(slot_arg)?;
+        if !slots.insert(slot) {
+            return Err(cluster_slot_specified_multiple_times_error(slot));
+        }
+    }
+    Ok(slots)
+}
+
+fn cluster_collect_slot_ranges(argv: &[Vec<u8>]) -> Result<BTreeSet<u16>, CommandError> {
+    let mut slots = BTreeSet::new();
+    let mut i = 0;
+    while i + 1 < argv.len() {
+        let start = parse_cluster_slot_arg(&argv[i])?;
+        let end = parse_cluster_slot_arg(&argv[i + 1])?;
+        if start > end {
+            return Err(CommandError::Custom(format!(
+                "ERR start slot number {start} is greater than end slot number {end}"
+            )));
+        }
+        for slot in start..=end {
+            if !slots.insert(slot) {
+                return Err(cluster_slot_specified_multiple_times_error(slot));
+            }
+        }
+        i += 2;
+    }
+    Ok(slots)
+}
+
+fn cluster_slot_range_frames(slots: &BTreeSet<u16>) -> Vec<RespFrame> {
+    let mut frames = Vec::new();
+    let mut iter = slots.iter().copied();
+    let Some(mut start) = iter.next() else {
+        return frames;
+    };
+    let mut end = start;
+    for slot in iter {
+        if end.checked_add(1) == Some(slot) {
+            end = slot;
+        } else {
+            frames.push(RespFrame::Integer(i64::from(start)));
+            frames.push(RespFrame::Integer(i64::from(end)));
+            start = slot;
+            end = slot;
+        }
+    }
+    frames.push(RespFrame::Integer(i64::from(start)));
+    frames.push(RespFrame::Integer(i64::from(end)));
+    frames
+}
+
 fn cluster_shards_reply(store: &Store) -> RespFrame {
     let node = RespFrame::Array(Some(vec![
         hello_bulk("id"),
@@ -6459,9 +6553,9 @@ fn cluster_shards_reply(store: &Store) -> RespFrame {
         hello_bulk("port"),
         RespFrame::Integer(i64::from(store.server_port)),
         hello_bulk("ip"),
-        hello_bulk("127.0.0.1"),
+        hello_bulk(""),
         hello_bulk("endpoint"),
-        hello_bulk("127.0.0.1"),
+        hello_bulk(""),
         hello_bulk("role"),
         hello_bulk("master"),
         hello_bulk("replication-offset"),
@@ -6471,7 +6565,9 @@ fn cluster_shards_reply(store: &Store) -> RespFrame {
     ]));
     let shard = RespFrame::Array(Some(vec![
         hello_bulk("slots"),
-        RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(16383)])),
+        RespFrame::Array(Some(cluster_slot_range_frames(
+            &store.cluster_assigned_slots,
+        ))),
         hello_bulk("nodes"),
         RespFrame::Array(Some(vec![node])),
     ]));
@@ -6493,12 +6589,20 @@ fn cluster_cmd(
         || sub.eq_ignore_ascii_case("INFO")
         || sub.eq_ignore_ascii_case("SLOTS")
         || sub.eq_ignore_ascii_case("NODES")
-        || sub.eq_ignore_ascii_case("LINKS")
     {
         if argv.len() != 2 {
             return Err(cluster_wrong_subcommand_arity(sub));
         }
         return Err(cluster_disabled_error());
+    }
+    if sub.eq_ignore_ascii_case("LINKS") {
+        if argv.len() != 2 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        return Ok(RespFrame::Array(Some(vec![])));
     }
     if sub.eq_ignore_ascii_case("MYID") {
         if argv.len() != 2 {
@@ -6603,6 +6707,7 @@ fn cluster_cmd(
         if store.dbsize_in_db(db_index) != 0 {
             return Err(cluster_reset_with_keys_error());
         }
+        store.cluster_assigned_slots.clear();
         return Ok(RespFrame::SimpleString("OK".to_string()));
     }
     // ── CLUSTER admin subcommands (first-pass per br-frankenredis-jsr7) ──
@@ -6626,19 +6731,21 @@ fn cluster_cmd(
         }
         let host = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         let port = std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        if parse_i64_arg(&argv[3]).is_err() {
-            return Err(CommandError::Custom(format!(
-                "ERR Invalid node address specified: {host}:{port}"
-            )));
+        let Some(parsed_port) = cluster_parse_port_arg(&argv[3]) else {
+            return Err(cluster_invalid_base_port(port));
+        };
+        if !(1..=65535).contains(&parsed_port) || host.parse::<std::net::IpAddr>().is_err() {
+            return Err(cluster_invalid_node_address(host, port));
         }
-        if let Some(bus_port) = argv.get(4)
-            && parse_i64_arg(bus_port).is_err()
-        {
+        if let Some(bus_port) = argv.get(4) {
             let bus_port_str =
                 std::str::from_utf8(bus_port).map_err(|_| CommandError::InvalidUtf8Argument)?;
-            return Err(CommandError::Custom(format!(
-                "ERR Invalid base port specified: {bus_port_str}"
-            )));
+            let Some(parsed_bus_port) = cluster_parse_port_arg(bus_port) else {
+                return Err(cluster_invalid_bus_port(bus_port_str));
+            };
+            if !(1..=65535).contains(&parsed_bus_port) {
+                return Err(cluster_invalid_node_address(host, port));
+            }
         }
         // Accept but do not yet actually start a cluster handshake — a real
         // node registry is a separate work item.
@@ -6654,6 +6761,16 @@ fn cluster_cmd(
         }
         let node_id =
             std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if sub.eq_ignore_ascii_case("FORGET") && node_id == store.server_run_id {
+            return Err(CommandError::Custom(
+                "ERR I tried hard but I can't forget myself...".to_string(),
+            ));
+        }
+        if sub.eq_ignore_ascii_case("REPLICATE") && node_id == store.server_run_id {
+            return Err(CommandError::Custom(
+                "ERR Can't replicate myself".to_string(),
+            ));
+        }
         return Err(CommandError::Custom(format!("ERR Unknown node {node_id}")));
     }
     if sub.eq_ignore_ascii_case("REPLICAS") {
@@ -6665,8 +6782,11 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        let _node_id =
+        let node_id =
             std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if node_id == store.server_run_id {
+            return Ok(RespFrame::Array(Some(vec![])));
+        }
         return Err(CommandError::Custom(
             "ERR The specified node is not known or can't be a replica".to_string(),
         ));
@@ -6702,15 +6822,26 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        for slot_arg in &argv[2..] {
-            let slot = parse_i64_arg(slot_arg)?;
-            if !(0..=16383).contains(&slot) {
-                return Err(CommandError::Custom(
-                    "ERR Invalid or out of range slot".to_string(),
-                ));
+        let slots = cluster_collect_explicit_slots(&argv[2..])?;
+        if sub.eq_ignore_ascii_case("ADDSLOTS") {
+            for slot in &slots {
+                if store.cluster_assigned_slots.contains(slot) {
+                    return Err(cluster_slot_busy_error(*slot));
+                }
+            }
+            for slot in slots {
+                store.cluster_assigned_slots.insert(slot);
+            }
+        } else {
+            for slot in &slots {
+                if !store.cluster_assigned_slots.contains(slot) {
+                    return Err(cluster_slot_unassigned_error(*slot));
+                }
+            }
+            for slot in slots {
+                store.cluster_assigned_slots.remove(&slot);
             }
         }
-        // Accept no-op — a real slot-ownership map is a separate concern.
         return Ok(RespFrame::SimpleString("OK".to_string()));
     }
     if sub.eq_ignore_ascii_case("ADDSLOTSRANGE") || sub.eq_ignore_ascii_case("DELSLOTSRANGE") {
@@ -6721,21 +6852,25 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        let mut i = 2;
-        while i + 1 < argv.len() {
-            let start = parse_i64_arg(&argv[i])?;
-            let end = parse_i64_arg(&argv[i + 1])?;
-            if !(0..=16383).contains(&start) || !(0..=16383).contains(&end) {
-                return Err(CommandError::Custom(
-                    "ERR Invalid or out of range slot".to_string(),
-                ));
+        let slots = cluster_collect_slot_ranges(&argv[2..])?;
+        if sub.eq_ignore_ascii_case("ADDSLOTSRANGE") {
+            for slot in &slots {
+                if store.cluster_assigned_slots.contains(slot) {
+                    return Err(cluster_slot_busy_error(*slot));
+                }
             }
-            if start > end {
-                return Err(CommandError::Custom(format!(
-                    "ERR start slot number {start} is greater than end slot number {end}"
-                )));
+            for slot in slots {
+                store.cluster_assigned_slots.insert(slot);
             }
-            i += 2;
+        } else {
+            for slot in &slots {
+                if !store.cluster_assigned_slots.contains(slot) {
+                    return Err(cluster_slot_unassigned_error(*slot));
+                }
+            }
+            for slot in slots {
+                store.cluster_assigned_slots.remove(&slot);
+            }
         }
         return Ok(RespFrame::SimpleString("OK".to_string()));
     }
@@ -6752,6 +6887,7 @@ fn cluster_cmd(
                 "ERR DB must be empty to perform CLUSTER FLUSHSLOTS.".to_string(),
             ));
         }
+        store.cluster_assigned_slots.clear();
         return Ok(RespFrame::SimpleString("OK".to_string()));
     }
     if sub.eq_ignore_ascii_case("SAVECONFIG") {
@@ -6795,7 +6931,11 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        let node_id = String::from_utf8_lossy(&argv[2]);
+        let node_id =
+            std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if node_id == store.server_run_id {
+            return Ok(RespFrame::Integer(0));
+        }
         return Err(CommandError::Custom(format!("ERR Unknown node {node_id}")));
     }
     Err(cluster_unknown_subcommand_error(sub))
@@ -31237,6 +31377,29 @@ mod tests {
     }
 
     #[test]
+    fn cluster_count_failure_reports_enabled_unknown_node_matches_redis_error() {
+        let mut store = Store::new();
+        store.cluster_enabled = true;
+
+        let err = dispatch_argv(
+            &[
+                b"CLUSTER".to_vec(),
+                b"COUNT-FAILURE-REPORTS".to_vec(),
+                b"0000000000000000000000000000000000000000".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR Unknown node 0000000000000000000000000000000000000000".to_string()
+            )
+        );
+    }
+
+    #[test]
     fn cluster_known_subcommand_wrong_arity_matches_redis_error() {
         let mut store = Store::new();
         let err =
@@ -31329,7 +31492,7 @@ mod tests {
             out,
             RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"slots".to_vec())),
-                RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(16383)])),
+                RespFrame::Array(Some(vec![])),
                 RespFrame::BulkString(Some(b"nodes".to_vec())),
                 RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"id".to_vec())),
@@ -31337,9 +31500,53 @@ mod tests {
                     RespFrame::BulkString(Some(b"port".to_vec())),
                     RespFrame::Integer(i64::from(store.server_port)),
                     RespFrame::BulkString(Some(b"ip".to_vec())),
-                    RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                    RespFrame::BulkString(Some(Vec::new())),
                     RespFrame::BulkString(Some(b"endpoint".to_vec())),
-                    RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                    RespFrame::BulkString(Some(Vec::new())),
+                    RespFrame::BulkString(Some(b"role".to_vec())),
+                    RespFrame::BulkString(Some(b"master".to_vec())),
+                    RespFrame::BulkString(Some(b"replication-offset".to_vec())),
+                    RespFrame::Integer(0),
+                    RespFrame::BulkString(Some(b"health".to_vec())),
+                    RespFrame::BulkString(Some(b"online".to_vec())),
+                ]))])),
+            ]))]))
+        );
+
+        dispatch_argv(
+            &[
+                b"CLUSTER".to_vec(),
+                b"ADDSLOTSRANGE".to_vec(),
+                b"0".to_vec(),
+                b"5".to_vec(),
+                b"10".to_vec(),
+                b"12".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(&[b"CLUSTER".to_vec(), b"SHARDS".to_vec()], &mut store, 0).unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"slots".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(0),
+                    RespFrame::Integer(5),
+                    RespFrame::Integer(10),
+                    RespFrame::Integer(12),
+                ])),
+                RespFrame::BulkString(Some(b"nodes".to_vec())),
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"id".to_vec())),
+                    RespFrame::BulkString(Some(store.server_run_id.as_bytes().to_vec())),
+                    RespFrame::BulkString(Some(b"port".to_vec())),
+                    RespFrame::Integer(i64::from(store.server_port)),
+                    RespFrame::BulkString(Some(b"ip".to_vec())),
+                    RespFrame::BulkString(Some(Vec::new())),
+                    RespFrame::BulkString(Some(b"endpoint".to_vec())),
+                    RespFrame::BulkString(Some(Vec::new())),
                     RespFrame::BulkString(Some(b"role".to_vec())),
                     RespFrame::BulkString(Some(b"master".to_vec())),
                     RespFrame::BulkString(Some(b"replication-offset".to_vec())),
@@ -31502,6 +31709,7 @@ mod tests {
             vec![b"CLUSTER".to_vec(), b"FLUSHSLOTS".to_vec()],
             vec![b"CLUSTER".to_vec(), b"SAVECONFIG".to_vec()],
             vec![b"CLUSTER".to_vec(), b"BUMPEPOCH".to_vec()],
+            vec![b"CLUSTER".to_vec(), b"LINKS".to_vec()],
             vec![
                 b"CLUSTER".to_vec(),
                 b"SET-CONFIG-EPOCH".to_vec(),
@@ -31621,7 +31829,12 @@ mod tests {
             RespFrame::SimpleString("OK".to_string())
         );
 
-        // MEET invalid port → upstream-matching error.
+        assert_eq!(
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"LINKS".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::Array(Some(vec![]))
+        );
+
+        // MEET invalid host/port/bus-port surfaces match the Redis 7.2.4 oracle.
         let err = dispatch_argv(
             &[
                 b"CLUSTER".to_vec(),
@@ -31635,10 +31848,66 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
-            CommandError::Custom("ERR Invalid node address specified: 127.0.0.1:port".to_string())
+            CommandError::Custom("ERR Invalid base port specified: port".to_string())
+        );
+        let err = dispatch_argv(
+            &[
+                b"CLUSTER".to_vec(),
+                b"MEET".to_vec(),
+                b"127.0.0.1".to_vec(),
+                b"6380".to_vec(),
+                b"bus".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Invalid bus port specified: bus".to_string())
+        );
+        let err = dispatch_argv(
+            &[
+                b"CLUSTER".to_vec(),
+                b"MEET".to_vec(),
+                b"bad-host".to_vec(),
+                b"6380".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Invalid node address specified: bad-host:6380".to_string())
+        );
+        let err = dispatch_argv(
+            &[
+                b"CLUSTER".to_vec(),
+                b"MEET".to_vec(),
+                b"127.0.0.1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Invalid node address specified: 127.0.0.1:0".to_string())
         );
 
         // FORGET / REPLICATE / REPLICAS on unknown node → upstream wording.
+        let own_id = store.server_run_id.as_bytes().to_vec();
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"FORGET".to_vec(), own_id.clone()],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR I tried hard but I can't forget myself...".to_string())
+        );
         assert_eq!(
             dispatch_argv(
                 &[
@@ -31651,6 +31920,15 @@ mod tests {
             )
             .unwrap_err(),
             CommandError::Custom("ERR Unknown node unknownnode".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"REPLICATE".to_vec(), own_id.clone()],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Can't replicate myself".to_string())
         );
         assert_eq!(
             dispatch_argv(
@@ -31667,6 +31945,15 @@ mod tests {
         );
         assert_eq!(
             dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"REPLICAS".to_vec(), own_id.clone()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::Array(Some(vec![]))
+        );
+        assert_eq!(
+            dispatch_argv(
                 &[
                     b"CLUSTER".to_vec(),
                     b"REPLICAS".to_vec(),
@@ -31679,6 +31966,19 @@ mod tests {
             CommandError::Custom(
                 "ERR The specified node is not known or can't be a replica".to_string()
             )
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"COUNT-FAILURE-REPORTS".to_vec(),
+                    own_id
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::Integer(0)
         );
 
         // FAILOVER on master → upstream error about directing to a replica.
@@ -31697,7 +31997,7 @@ mod tests {
             CommandError::SyntaxError
         );
 
-        // ADDSLOTS / DELSLOTS accept valid slots; reject out-of-range.
+        // ADDSLOTS / DELSLOTS update the single-node slot assignment surface.
         assert_eq!(
             dispatch_argv(
                 &[
@@ -31714,6 +32014,47 @@ mod tests {
         );
         assert_eq!(
             dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"ADDSLOTS".to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Slot 0 is already busy".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"ADDSLOTS".to_vec(),
+                    b"1".to_vec(),
+                    b"1".to_vec()
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Slot 1 specified multiple times".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"DELSLOTS".to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"DELSLOTS".to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Slot 0 is already unassigned".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
                 &[b"CLUSTER".to_vec(), b"ADDSLOTS".to_vec(), b"16384".to_vec()],
                 &mut store,
                 0,
@@ -31722,7 +32063,63 @@ mod tests {
             CommandError::Custom("ERR Invalid or out of range slot".to_string())
         );
 
-        // ADDSLOTSRANGE: start > end → upstream wording.
+        // ADDSLOTSRANGE / DELSLOTSRANGE expand to contiguous slot sets.
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"ADDSLOTSRANGE".to_vec(),
+                    b"10".to_vec(),
+                    b"12".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"ADDSLOTSRANGE".to_vec(),
+                    b"10".to_vec(),
+                    b"11".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Slot 10 is already busy".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"DELSLOTSRANGE".to_vec(),
+                    b"10".to_vec(),
+                    b"12".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"DELSLOTSRANGE".to_vec(),
+                    b"10".to_vec(),
+                    b"12".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Slot 10 is already unassigned".to_string())
+        );
         assert_eq!(
             dispatch_argv(
                 &[
