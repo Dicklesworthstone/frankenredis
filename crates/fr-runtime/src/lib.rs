@@ -9759,6 +9759,15 @@ slave_priority:{}\r\n",
     }
 
     fn handle_failover_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
+        // Upstream replication.c::failoverCommand rejects in cluster
+        // mode FIRST, before any other validation. (br-frankenredis-s12v)
+        if self.server.store.cluster_enabled {
+            return RespFrame::Error(
+                "ERR FAILOVER not allowed in cluster mode. \
+                 Use CLUSTER FAILOVER command instead."
+                    .to_string(),
+            );
+        }
         if matches!(
             self.server.replication_runtime_state.role,
             ReplicationRoleState::Replica { .. }
@@ -14373,6 +14382,31 @@ mod tests {
                 RespFrame::BulkString(Some(b"connect".to_vec())),
                 RespFrame::Integer(-1),
             ]))
+        );
+    }
+
+    #[test]
+    fn failover_is_rejected_in_cluster_mode_with_upstream_wording() {
+        // Upstream replication.c::failoverCommand rejects FAILOVER
+        // before every other check when cluster mode is enabled.
+        // (br-frankenredis-s12v)
+        let mut rt = Runtime::default_strict();
+        rt.server.store.cluster_enabled = true;
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER"]), 0),
+            RespFrame::Error(
+                "ERR FAILOVER not allowed in cluster mode. Use CLUSTER FAILOVER command instead."
+                    .to_string()
+            )
+        );
+        // The cluster check must beat ABORT-arg parsing and the
+        // replica-role check.
+        assert_eq!(
+            rt.execute_frame(command(&[b"FAILOVER", b"ABORT"]), 1),
+            RespFrame::Error(
+                "ERR FAILOVER not allowed in cluster mode. Use CLUSTER FAILOVER command instead."
+                    .to_string()
+            )
         );
     }
 
