@@ -18536,6 +18536,54 @@ mod tests {
     }
 
     #[test]
+    fn acl_explicit_allow_overrides_category_deny() {
+        // Upstream `+@all -@dangerous +flushdb`: every command in
+        // @all is allowed except the @dangerous category, but the
+        // explicit `+flushdb` re-grants FLUSHDB. Per-command rules
+        // beat category rules. (br-frankenredis-r81v)
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL",
+                    b"SETUSER",
+                    b"flushdb_ok",
+                    b"on",
+                    b">pass",
+                    b"+@all",
+                    b"-@dangerous",
+                    b"+flushdb",
+                    b"allkeys",
+                ]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // FLUSHDB explicitly re-allowed via +flushdb
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"DRYRUN", b"flushdb_ok", b"FLUSHDB"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Other @dangerous commands remain denied
+        let reply = rt.execute_frame(command(&[b"ACL", b"DRYRUN", b"flushdb_ok", b"FLUSHALL"]), 2);
+        assert!(
+            matches!(&reply, RespFrame::BulkString(Some(b)) if std::str::from_utf8(b).map(|s| s.contains("no permissions")).unwrap_or(false)),
+            "FLUSHALL should remain denied via -@dangerous, got: {reply:?}"
+        );
+
+        // Read-side commands still allowed via +@all base
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"DRYRUN", b"flushdb_ok", b"GET", b"k"]),
+                3
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+    }
+
+    #[test]
     fn acl_getuser_reflects_per_command_permissions() {
         let mut rt = Runtime::default_strict();
         assert_eq!(
