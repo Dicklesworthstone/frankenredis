@@ -4358,6 +4358,19 @@ fn resp_to_lua(frame: &RespFrame) -> LuaValue {
             }
             LuaValue::Table(t)
         }
+        // RESP3 Map: Lua scripts have no native map type, so we
+        // flatten as a key-value alternating array, mirroring how
+        // upstream's redis-server materializes a RESP3 map for a
+        // RESP2 Lua callsite. (br-frankenredis-r80v / r72v)
+        RespFrame::Map(None) => LuaValue::Bool(false),
+        RespFrame::Map(Some(pairs)) => {
+            let t = LuaTable::new();
+            for (i, (k, v)) in pairs.iter().enumerate() {
+                t.set(LuaValue::Number((2 * i + 1) as f64), resp_to_lua(k));
+                t.set(LuaValue::Number((2 * i + 2) as f64), resp_to_lua(v));
+            }
+            LuaValue::Table(t)
+        }
     }
 }
 

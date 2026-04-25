@@ -6783,6 +6783,21 @@ fn cluster_cmd(
         // than think a no-op succeeded. (jsr7 follow-up)
         return Err(cluster_disabled_error());
     }
+    if sub.eq_ignore_ascii_case("COUNT-FAILURE-REPORTS") {
+        // Upstream cluster.c::clusterCommand: when cluster mode is on,
+        // looks up the node-id and replies with the failure-report
+        // count or `-Unknown node <id>`. With cluster mode off the
+        // standard "This instance has cluster support disabled" applies.
+        // (br-frankenredis-r84v)
+        if argv.len() != 3 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
+        let node_id = String::from_utf8_lossy(&argv[2]);
+        return Err(CommandError::Custom(format!("ERR Unknown node {node_id}")));
+    }
     Err(cluster_unknown_subcommand_error(sub))
 }
 
@@ -31109,6 +31124,49 @@ mod tests {
         assert_eq!(
             err,
             CommandError::Custom("ERR unknown subcommand 'NOPE'. Try CLUSTER HELP.".to_string())
+        );
+    }
+
+    #[test]
+    fn cluster_count_failure_reports_disabled_returns_cluster_disabled_error() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"CLUSTER".to_vec(),
+                b"COUNT-FAILURE-REPORTS".to_vec(),
+                b"abc123".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        // When cluster mode is off, upstream returns the standard
+        // disabled error for COUNT-FAILURE-REPORTS like every other
+        // CLUSTER subcommand. (br-frankenredis-r84v)
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR This instance has cluster support disabled".to_string())
+        );
+    }
+
+    #[test]
+    fn cluster_count_failure_reports_wrong_arity_matches_redis_error() {
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"CLUSTER".to_vec(), b"COUNT-FAILURE-REPORTS".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        // Upstream's command-table arity check fires before the
+        // subcommand body, producing the
+        // "'cluster|<sub>' command" wording. (br-frankenredis-r84v)
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR wrong number of arguments for 'cluster|count-failure-reports' command"
+                    .to_string()
+            )
         );
     }
 
