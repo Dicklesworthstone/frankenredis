@@ -10487,22 +10487,28 @@ fn hello_bulk(value: &str) -> RespFrame {
 }
 
 fn build_hello_response(protocol_version: i64, client_id: u64) -> RespFrame {
-    RespFrame::Array(Some(vec![
-        hello_bulk("server"),
-        hello_bulk("redis"),
-        hello_bulk("version"),
-        hello_bulk(fr_store::REDIS_COMPAT_VERSION),
-        hello_bulk("proto"),
-        RespFrame::Integer(protocol_version),
-        hello_bulk("id"),
-        RespFrame::Integer(client_id as i64),
-        hello_bulk("mode"),
-        hello_bulk("standalone"),
-        hello_bulk("role"),
-        hello_bulk("master"),
-        hello_bulk("modules"),
-        RespFrame::Array(Some(Vec::new())),
-    ]))
+    let fields = vec![
+        (hello_bulk("server"), hello_bulk("redis")),
+        (
+            hello_bulk("version"),
+            hello_bulk(fr_store::REDIS_COMPAT_VERSION),
+        ),
+        (hello_bulk("proto"), RespFrame::Integer(protocol_version)),
+        (hello_bulk("id"), RespFrame::Integer(client_id as i64)),
+        (hello_bulk("mode"), hello_bulk("standalone")),
+        (hello_bulk("role"), hello_bulk("master")),
+        (hello_bulk("modules"), RespFrame::Array(Some(Vec::new()))),
+    ];
+    if protocol_version == 3 {
+        RespFrame::Map(Some(fields))
+    } else {
+        let mut flat = Vec::with_capacity(fields.len() * 2);
+        for (key, value) in fields {
+            flat.push(key);
+            flat.push(value);
+        }
+        RespFrame::Array(Some(flat))
+    }
 }
 
 /// Convert Store entries to RDB entries for snapshot persistence.
@@ -10822,10 +10828,10 @@ mod tests {
         ACL_FILE_NOT_CONFIGURED_ERR, AOF_DISK_ERROR_WRITE_DENIED, AclPubsubDefault, ClientSession,
         ClientUnblockMode, ClusterClientMode, ClusterSubcommand, DEFAULT_AUTH_USER,
         RDB_DISK_ERROR_WRITE_DENIED, Runtime, ServerState, acl_list_entries_from_rules,
-        canonical_static_config_param, canonicalize_acl_rules, classify_cluster_subcommand,
-        classify_cluster_subcommand_linear, classify_runtime_special_command,
-        classify_runtime_special_command_linear, client_wrong_subcommand_arity, sha256_hex_bytes,
-        store_to_rdb_entries, wrong_arity_error,
+        build_hello_response, canonical_static_config_param, canonicalize_acl_rules,
+        classify_cluster_subcommand, classify_cluster_subcommand_linear,
+        classify_runtime_special_command, classify_runtime_special_command_linear,
+        client_wrong_subcommand_arity, sha256_hex_bytes, store_to_rdb_entries, wrong_arity_error,
     };
 
     fn command(parts: &[&[u8]]) -> RespFrame {
@@ -11542,25 +11548,8 @@ mod tests {
             command(&[b"HELLO", b"3", b"AUTH", b"default", b"secret"]),
             0,
         );
-        assert_eq!(
-            ok,
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"server".to_vec())),
-                RespFrame::BulkString(Some(b"redis".to_vec())),
-                RespFrame::BulkString(Some(b"version".to_vec())),
-                RespFrame::BulkString(Some(b"7.2.0".to_vec())),
-                RespFrame::BulkString(Some(b"proto".to_vec())),
-                RespFrame::Integer(3),
-                RespFrame::BulkString(Some(b"id".to_vec())),
-                RespFrame::Integer(rt.session.client_id as i64),
-                RespFrame::BulkString(Some(b"mode".to_vec())),
-                RespFrame::BulkString(Some(b"standalone".to_vec())),
-                RespFrame::BulkString(Some(b"role".to_vec())),
-                RespFrame::BulkString(Some(b"master".to_vec())),
-                RespFrame::BulkString(Some(b"modules".to_vec())),
-                RespFrame::Array(Some(Vec::new())),
-            ]))
-        );
+        assert_eq!(ok, build_hello_response(3, rt.session.client_id));
+        assert!(ok.to_bytes().starts_with(b"%7\r\n"));
         assert!(rt.is_authenticated());
     }
 
@@ -11615,25 +11604,8 @@ mod tests {
         rt.add_user(b"alice".to_vec(), b"secret2".to_vec());
 
         let out = rt.execute_frame(command(&[b"HELLO", b"3", b"AUTH", b"alice", b"secret2"]), 0);
-        assert_eq!(
-            out,
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"server".to_vec())),
-                RespFrame::BulkString(Some(b"redis".to_vec())),
-                RespFrame::BulkString(Some(b"version".to_vec())),
-                RespFrame::BulkString(Some(b"7.2.0".to_vec())),
-                RespFrame::BulkString(Some(b"proto".to_vec())),
-                RespFrame::Integer(3),
-                RespFrame::BulkString(Some(b"id".to_vec())),
-                RespFrame::Integer(rt.session.client_id as i64),
-                RespFrame::BulkString(Some(b"mode".to_vec())),
-                RespFrame::BulkString(Some(b"standalone".to_vec())),
-                RespFrame::BulkString(Some(b"role".to_vec())),
-                RespFrame::BulkString(Some(b"master".to_vec())),
-                RespFrame::BulkString(Some(b"modules".to_vec())),
-                RespFrame::Array(Some(Vec::new())),
-            ]))
-        );
+        assert_eq!(out, build_hello_response(3, rt.session.client_id));
+        assert!(out.to_bytes().starts_with(b"%7\r\n"));
         assert!(rt.is_authenticated());
     }
 
@@ -11712,25 +11684,8 @@ mod tests {
         rt.session.selected_db = 5;
 
         let hello = rt.execute_frame(command(&[b"HELLO", b"3", b"SETNAME", b"alpha"]), 0);
-        assert_eq!(
-            hello,
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"server".to_vec())),
-                RespFrame::BulkString(Some(b"redis".to_vec())),
-                RespFrame::BulkString(Some(b"version".to_vec())),
-                RespFrame::BulkString(Some(b"7.2.0".to_vec())),
-                RespFrame::BulkString(Some(b"proto".to_vec())),
-                RespFrame::Integer(3),
-                RespFrame::BulkString(Some(b"id".to_vec())),
-                RespFrame::Integer(rt.session.client_id as i64),
-                RespFrame::BulkString(Some(b"mode".to_vec())),
-                RespFrame::BulkString(Some(b"standalone".to_vec())),
-                RespFrame::BulkString(Some(b"role".to_vec())),
-                RespFrame::BulkString(Some(b"master".to_vec())),
-                RespFrame::BulkString(Some(b"modules".to_vec())),
-                RespFrame::Array(Some(Vec::new())),
-            ]))
-        );
+        assert_eq!(hello, build_hello_response(3, rt.session.client_id));
+        assert!(hello.to_bytes().starts_with(b"%7\r\n"));
 
         let client_list = rt.execute_frame(command(&[b"CLIENT", b"LIST"]), 1);
         let info = match client_list {
@@ -11776,7 +11731,8 @@ mod tests {
             ]),
             0,
         );
-        assert!(matches!(reply, RespFrame::Array(Some(_))));
+        assert!(matches!(reply, RespFrame::Map(Some(_))));
+        assert!(reply.to_bytes().starts_with(b"%7\r\n"));
         assert_eq!(rt.session.client_name, Some(b"client2".to_vec()));
         assert_eq!(rt.session.resp_protocol_version, 3);
     }
@@ -11847,22 +11803,7 @@ mod tests {
         );
         assert_eq!(
             rt.execute_frame(command(&[b"HELLO", b"3", b"SETNAME", b"alpha"]), 1),
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"server".to_vec())),
-                RespFrame::BulkString(Some(b"redis".to_vec())),
-                RespFrame::BulkString(Some(b"version".to_vec())),
-                RespFrame::BulkString(Some(b"7.2.0".to_vec())),
-                RespFrame::BulkString(Some(b"proto".to_vec())),
-                RespFrame::Integer(3),
-                RespFrame::BulkString(Some(b"id".to_vec())),
-                RespFrame::Integer(rt.session.client_id as i64),
-                RespFrame::BulkString(Some(b"mode".to_vec())),
-                RespFrame::BulkString(Some(b"standalone".to_vec())),
-                RespFrame::BulkString(Some(b"role".to_vec())),
-                RespFrame::BulkString(Some(b"master".to_vec())),
-                RespFrame::BulkString(Some(b"modules".to_vec())),
-                RespFrame::Array(Some(Vec::new())),
-            ]))
+            build_hello_response(3, rt.session.client_id)
         );
         assert_eq!(
             rt.execute_frame(

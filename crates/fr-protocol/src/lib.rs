@@ -10,6 +10,7 @@ pub enum RespFrame {
     Integer(i64),
     BulkString(Option<Vec<u8>>),
     Array(Option<Vec<RespFrame>>),
+    Map(Option<Vec<(RespFrame, RespFrame)>>),
     Sequence(Vec<RespFrame>),
 }
 
@@ -54,6 +55,16 @@ impl RespFrame {
                 out.extend_from_slice(b"\r\n");
                 for frame in frames {
                     frame.encode_into(out);
+                }
+            }
+            Self::Map(None) => out.extend_from_slice(b"%-1\r\n"),
+            Self::Map(Some(entries)) => {
+                out.extend_from_slice(b"%");
+                let _ = write!(out, "{}", entries.len());
+                out.extend_from_slice(b"\r\n");
+                for (key, value) in entries {
+                    key.encode_into(out);
+                    value.encode_into(out);
                 }
             }
             Self::Sequence(frames) => {
@@ -1215,6 +1226,25 @@ mod tests {
             frame.to_bytes(),
             b"*3\r\n$9\r\nsubscribe\r\n$3\r\nch1\r\n:1\r\n*3\r\n$9\r\nsubscribe\r\n$3\r\nch2\r\n:2\r\n"
                 .to_vec()
+        );
+    }
+
+    #[test]
+    fn resp3_map_frames_encode_with_percent_prefix() {
+        let frame = RespFrame::Map(Some(vec![
+            (
+                RespFrame::BulkString(Some(b"server".to_vec())),
+                RespFrame::BulkString(Some(b"redis".to_vec())),
+            ),
+            (
+                RespFrame::BulkString(Some(b"proto".to_vec())),
+                RespFrame::Integer(3),
+            ),
+        ]));
+
+        assert_eq!(
+            frame.to_bytes(),
+            b"%2\r\n$6\r\nserver\r\n$5\r\nredis\r\n$5\r\nproto\r\n:3\r\n".to_vec()
         );
     }
 

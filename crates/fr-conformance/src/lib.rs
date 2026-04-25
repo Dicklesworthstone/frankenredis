@@ -2400,10 +2400,10 @@ fn live_oracle_hello_id_drift_matches(
     if first != "hello" {
         return false;
     }
-    let RespFrame::Array(Some(ours)) = runtime_actual else {
+    let Some(ours) = flat_array_or_map_entries(runtime_actual) else {
         return false;
     };
-    let RespFrame::Array(Some(theirs)) = redis_actual else {
+    let Some(theirs) = flat_array_or_map_entries(redis_actual) else {
         return false;
     };
     if ours.len() != theirs.len() {
@@ -2432,6 +2432,21 @@ fn live_oracle_hello_id_drift_matches(
         }
     }
     true
+}
+
+fn flat_array_or_map_entries(frame: &RespFrame) -> Option<Vec<&RespFrame>> {
+    match frame {
+        RespFrame::Array(Some(items)) => Some(items.iter().collect()),
+        RespFrame::Map(Some(entries)) => {
+            let mut flat = Vec::with_capacity(entries.len() * 2);
+            for (key, value) in entries {
+                flat.push(key);
+                flat.push(value);
+            }
+            Some(flat)
+        }
+        _ => None,
+    }
 }
 
 /// SCAN / HSCAN / SSCAN / ZSCAN replies are `[cursor, [items…]]` where
@@ -2981,6 +2996,14 @@ fn frame_matches_expected(actual: &RespFrame, expected: &ExpectedFrame) -> bool 
                 items.len() == value.len()
                     && items
                         .iter()
+                        .zip(value.iter())
+                        .all(|(a, e)| frame_matches_expected(a, e))
+            }
+            RespFrame::Map(Some(entries)) => {
+                entries.len() * 2 == value.len()
+                    && entries
+                        .iter()
+                        .flat_map(|(key, value)| [key, value])
                         .zip(value.iter())
                         .all(|(a, e)| frame_matches_expected(a, e))
             }
@@ -5357,29 +5380,27 @@ mod tests {
             command_frame(&["HELLO", "3", "AUTH", "default", "secret"]),
             520,
         );
-        match hello_reply {
-            RespFrame::Array(Some(parts)) => {
-                assert_eq!(parts.len(), 14);
-                assert_eq!(parts[0], RespFrame::BulkString(Some(b"server".to_vec())));
-                assert_eq!(parts[1], RespFrame::BulkString(Some(b"redis".to_vec())));
-                assert_eq!(parts[2], RespFrame::BulkString(Some(b"version".to_vec())));
-                assert_eq!(parts[3], RespFrame::BulkString(Some(b"7.2.0".to_vec())));
-                assert_eq!(parts[4], RespFrame::BulkString(Some(b"proto".to_vec())));
-                assert_eq!(parts[5], RespFrame::Integer(3));
-                assert_eq!(parts[6], RespFrame::BulkString(Some(b"id".to_vec())));
-                assert!(matches!(parts[7], RespFrame::Integer(_)));
-                assert_eq!(parts[8], RespFrame::BulkString(Some(b"mode".to_vec())));
-                assert_eq!(
-                    parts[9],
-                    RespFrame::BulkString(Some(b"standalone".to_vec()))
-                );
-                assert_eq!(parts[10], RespFrame::BulkString(Some(b"role".to_vec())));
-                assert_eq!(parts[11], RespFrame::BulkString(Some(b"master".to_vec())));
-                assert_eq!(parts[12], RespFrame::BulkString(Some(b"modules".to_vec())));
-                assert_eq!(parts[13], RespFrame::Array(Some(Vec::new())));
-            }
-            other => panic!("HELLO AUTH path returned unexpected frame: {other:?}"),
-        }
+        let Some(parts) = super::flat_array_or_map_entries(&hello_reply) else {
+            panic!("HELLO AUTH path returned unexpected frame: {hello_reply:?}");
+        };
+        assert_eq!(parts.len(), 14);
+        assert_eq!(parts[0], &RespFrame::BulkString(Some(b"server".to_vec())));
+        assert_eq!(parts[1], &RespFrame::BulkString(Some(b"redis".to_vec())));
+        assert_eq!(parts[2], &RespFrame::BulkString(Some(b"version".to_vec())));
+        assert_eq!(parts[3], &RespFrame::BulkString(Some(b"7.2.0".to_vec())));
+        assert_eq!(parts[4], &RespFrame::BulkString(Some(b"proto".to_vec())));
+        assert_eq!(parts[5], &RespFrame::Integer(3));
+        assert_eq!(parts[6], &RespFrame::BulkString(Some(b"id".to_vec())));
+        assert!(matches!(parts[7], RespFrame::Integer(_)));
+        assert_eq!(parts[8], &RespFrame::BulkString(Some(b"mode".to_vec())));
+        assert_eq!(
+            parts[9],
+            &RespFrame::BulkString(Some(b"standalone".to_vec()))
+        );
+        assert_eq!(parts[10], &RespFrame::BulkString(Some(b"role".to_vec())));
+        assert_eq!(parts[11], &RespFrame::BulkString(Some(b"master".to_vec())));
+        assert_eq!(parts[12], &RespFrame::BulkString(Some(b"modules".to_vec())));
+        assert_eq!(parts[13], &RespFrame::Array(Some(Vec::new())));
 
         let auth_set =
             auth_path.execute_frame(command_frame(&["SET", "fr:p2c:004:mm:key", "value"]), 521);

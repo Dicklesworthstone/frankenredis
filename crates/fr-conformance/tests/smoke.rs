@@ -2194,21 +2194,31 @@ fn load_named_conformance_cases(
 }
 
 fn hello_field<'a>(reply: &'a RespFrame, key: &str) -> &'a RespFrame {
-    let fields = match reply {
-        RespFrame::Array(Some(fields)) => fields,
-        other => panic!("expected HELLO array reply, got {other:?}"),
-    };
-    fields
-        .chunks_exact(2)
-        .find_map(|pair| match pair {
-            [RespFrame::BulkString(Some(field_name)), value]
-                if field_name.eq_ignore_ascii_case(key.as_bytes()) =>
-            {
-                Some(value)
-            }
-            _ => None,
-        })
-        .unwrap_or_else(|| panic!("HELLO reply missing field '{key}'"))
+    match reply {
+        RespFrame::Array(Some(fields)) => fields
+            .chunks_exact(2)
+            .find_map(|pair| match pair {
+                [RespFrame::BulkString(Some(field_name)), value]
+                    if field_name.eq_ignore_ascii_case(key.as_bytes()) =>
+                {
+                    Some(value)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("HELLO reply missing field '{key}'")),
+        RespFrame::Map(Some(fields)) => fields
+            .iter()
+            .find_map(|(field_name, value)| match field_name {
+                RespFrame::BulkString(Some(field_name))
+                    if field_name.eq_ignore_ascii_case(key.as_bytes()) =>
+                {
+                    Some(value)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("HELLO reply missing field '{key}'")),
+        other => panic!("expected HELLO array/map reply, got {other:?}"),
+    }
 }
 
 fn empty_array(frame: &RespFrame) -> bool {
