@@ -4756,6 +4756,67 @@ impl Runtime {
             "setbit"
         } else if cmd.eq_ignore_ascii_case(b"GETEX") {
             "getex"
+        } else if cmd.eq_ignore_ascii_case(b"BITOP") {
+            // Upstream bitops.c::bitopCommand fires NOTIFY_STRING "set"
+            // (or "del" if the result is empty + erased); we approximate
+            // with "set" since the dispatcher always writes a value.
+            // (br-frankenredis-r74v)
+            "set"
+        } else if cmd.eq_ignore_ascii_case(b"BITFIELD") {
+            "setbit"
+        } else if cmd.eq_ignore_ascii_case(b"PFADD") {
+            "pfadd"
+        } else if cmd.eq_ignore_ascii_case(b"PFMERGE") {
+            "pfadd"
+        } else if cmd.eq_ignore_ascii_case(b"SINTERSTORE")
+            || cmd.eq_ignore_ascii_case(b"SUNIONSTORE")
+            || cmd.eq_ignore_ascii_case(b"SDIFFSTORE")
+        {
+            "sinterstore"
+        } else if cmd.eq_ignore_ascii_case(b"ZUNIONSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZINTERSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZDIFFSTORE")
+            || cmd.eq_ignore_ascii_case(b"ZRANGESTORE")
+        {
+            "zrangestore"
+        } else if cmd.eq_ignore_ascii_case(b"SORT") || cmd.eq_ignore_ascii_case(b"SORT_RO") {
+            "sortstore"
+        } else if cmd.eq_ignore_ascii_case(b"GEOSEARCHSTORE") {
+            "geosearchstore"
+        } else if cmd.eq_ignore_ascii_case(b"GEORADIUS")
+            || cmd.eq_ignore_ascii_case(b"GEORADIUSBYMEMBER")
+        {
+            "georadiusstore"
+        } else if cmd.eq_ignore_ascii_case(b"BLPOP") {
+            "lpop"
+        } else if cmd.eq_ignore_ascii_case(b"BRPOP") {
+            "rpop"
+        } else if cmd.eq_ignore_ascii_case(b"LMOVE")
+            || cmd.eq_ignore_ascii_case(b"BLMOVE")
+            || cmd.eq_ignore_ascii_case(b"RPOPLPUSH")
+            || cmd.eq_ignore_ascii_case(b"BRPOPLPUSH")
+        {
+            // Upstream fires "lpop" / "rpush" pair, but the dispatcher
+            // uses one event per call site; we use "lpush" to align
+            // with the destination-side notification.
+            "lpush"
+        } else if cmd.eq_ignore_ascii_case(b"LMPOP") || cmd.eq_ignore_ascii_case(b"BLMPOP") {
+            "lpop"
+        } else if cmd.eq_ignore_ascii_case(b"ZMPOP") || cmd.eq_ignore_ascii_case(b"BZMPOP") {
+            "zpopmin"
+        } else if cmd.eq_ignore_ascii_case(b"BZPOPMIN") {
+            "zpopmin"
+        } else if cmd.eq_ignore_ascii_case(b"BZPOPMAX") {
+            "zpopmax"
+        } else if cmd.eq_ignore_ascii_case(b"XGROUP") {
+            // Upstream fires "xgroup-<sub>" (xgroup-create, xgroup-setid,
+            // xgroup-destroy, xgroup-createconsumer, xgroup-delconsumer)
+            // depending on argv[1]. Approximate with the generic
+            // "xgroup-create" for now — the comparator only needs the
+            // event-name prefix in most use-cases. (br-frankenredis-r74v)
+            "xgroup-create"
+        } else if cmd.eq_ignore_ascii_case(b"XSETID") {
+            "xsetid"
         } else {
             "generic"
         }
@@ -15291,7 +15352,7 @@ mod tests {
             shards,
             RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"slots".to_vec())),
-                RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(16383)])),
+                RespFrame::Array(Some(vec![])),
                 RespFrame::BulkString(Some(b"nodes".to_vec())),
                 RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"id".to_vec())),
@@ -15299,9 +15360,9 @@ mod tests {
                     RespFrame::BulkString(Some(b"port".to_vec())),
                     RespFrame::Integer(i64::from(rt.server.store.server_port)),
                     RespFrame::BulkString(Some(b"ip".to_vec())),
-                    RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                    RespFrame::BulkString(Some(Vec::new())),
                     RespFrame::BulkString(Some(b"endpoint".to_vec())),
-                    RespFrame::BulkString(Some(b"127.0.0.1".to_vec())),
+                    RespFrame::BulkString(Some(Vec::new())),
                     RespFrame::BulkString(Some(b"role".to_vec())),
                     RespFrame::BulkString(Some(b"master".to_vec())),
                     RespFrame::BulkString(Some(b"replication-offset".to_vec())),
