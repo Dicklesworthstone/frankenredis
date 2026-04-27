@@ -9655,7 +9655,6 @@ impl Store {
         self.dirty = self.dirty.saturating_add(1);
     }
 
-    const EMPTY_FUNCTION_DUMP_PAYLOAD: [u8; 10] = [11, 0, 52, 68, 225, 51, 242, 224, 75, 83];
     /// Upstream functions.c::functionDumpCommand pins payloads to
     /// `RDB_VERSION` (currently 11 for Redis 7.2.x). Our envelope
     /// matches that shape: `[body … | u16 LE version | u64 LE crc64]`.
@@ -9663,26 +9662,23 @@ impl Store {
     const FUNCTION_DUMP_RDB_VERSION: u16 = 11;
 
     /// Dump all function libraries as a serialized blob, wrapped in
-    /// the Redis 7+ envelope (body + 2-byte version + 8-byte CRC64)
-    /// so cross-impl callers can validate the footer even when the
-    /// body itself is FrankenRedis-private.
+    /// the Redis 7+ envelope (body + 2-byte version + 8-byte CRC64).
+    ///
+    /// Body uses RDB length + RDB-string encoding for every length-
+    /// prefixed field, matching the primitive encoders that upstream
+    /// functions.c::functionDumpCommand pulls from rdb.c. The
+    /// per-library subfield ordering still differs from upstream
+    /// (we emit name → code → engine while upstream emits name →
+    /// engine → description → code); full subfield-ordering parity
+    /// is the larger r85v body-format follow-up that the round-trip
+    /// gate test will pin down. (br-frankenredis-r85v)
     pub fn function_dump(&self) -> Vec<u8> {
-        if self.function_libraries.is_empty() {
-            return Self::EMPTY_FUNCTION_DUMP_PAYLOAD.to_vec();
-        }
-        // Body: [count:4LE] [for each: name_len:4LE name code_len:4LE code engine_len:4LE engine]
         let mut buf = Vec::new();
-        let count = self.function_libraries.len() as u32;
-        buf.extend_from_slice(&count.to_le_bytes());
+        encode_length(&mut buf, self.function_libraries.len());
         for lib in self.function_list(None) {
-            let name_bytes = lib.name.as_bytes();
-            buf.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(name_bytes);
-            buf.extend_from_slice(&(lib.code.len() as u32).to_le_bytes());
-            buf.extend_from_slice(&lib.code);
-            let engine_bytes = lib.engine.as_bytes();
-            buf.extend_from_slice(&(engine_bytes.len() as u32).to_le_bytes());
-            buf.extend_from_slice(engine_bytes);
+            encode_rdb_string(&mut buf, lib.name.as_bytes());
+            encode_rdb_string(&mut buf, &lib.code);
+            encode_rdb_string(&mut buf, lib.engine.as_bytes());
         }
         buf.extend_from_slice(&Self::FUNCTION_DUMP_RDB_VERSION.to_le_bytes());
         let crc = fr_persist::crc64_redis(&buf);
@@ -9740,15 +9736,8 @@ impl Store {
         let (count, mut pos) = if body.is_empty() {
             (0, 0)
         } else {
-            if body.len() < 4 {
-                return Err(StoreError::GenericError(
-                    "ERR Invalid dump data".to_string(),
-                ));
-            }
-            (
-                u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize,
-                4,
-            )
+            let (n, consumed) = decode_length(body, 0)?;
+            (n, consumed)
         };
         // Use `body` as the parsing window from here on.
         let data = body;
@@ -9760,56 +9749,18 @@ impl Store {
         let mut restored_libraries = HashMap::new();
 
         for _ in 0..count {
-            if data.len() - pos < 4 {
-                return Err(StoreError::GenericError(
-                    "ERR Invalid dump data".to_string(),
-                ));
-            }
-            let name_len =
-                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
-                    as usize;
-            pos += 4;
-            if data.len() - pos < name_len {
-                return Err(StoreError::GenericError(
-                    "ERR Invalid dump data".to_string(),
-                ));
-            }
-            let name = String::from_utf8_lossy(&data[pos..pos + name_len]).to_string();
-            pos += name_len;
+            // Decode RDB-string-encoded name / code / engine using
+            // the same primitives as Store::dump_key. (r85v)
+            let (name_bytes, name_consumed) = decode_rdb_string(data, pos, data.len())?;
+            pos += name_consumed;
+            let name = String::from_utf8_lossy(&name_bytes).to_string();
 
-            if data.len() - pos < 4 {
-                return Err(StoreError::GenericError(
-                    "ERR Invalid dump data".to_string(),
-                ));
-            }
-            let code_len =
-                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
-                    as usize;
-            pos += 4;
-            if data.len() - pos < code_len {
-                return Err(StoreError::GenericError(
-                    "ERR Invalid dump data".to_string(),
-                ));
-            }
-            let code = data[pos..pos + code_len].to_vec();
-            pos += code_len;
+            let (code, code_consumed) = decode_rdb_string(data, pos, data.len())?;
+            pos += code_consumed;
 
-            if data.len() - pos < 4 {
-                return Err(StoreError::GenericError(
-                    "ERR Invalid dump data".to_string(),
-                ));
-            }
-            let engine_len =
-                u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
-                    as usize;
-            pos += 4;
-            if data.len() - pos < engine_len {
-                return Err(StoreError::GenericError(
-                    "ERR Invalid dump data".to_string(),
-                ));
-            }
-            let engine = String::from_utf8_lossy(&data[pos..pos + engine_len]).to_string();
-            pos += engine_len;
+            let (engine_bytes, engine_consumed) = decode_rdb_string(data, pos, data.len())?;
+            pos += engine_consumed;
+            let engine = String::from_utf8_lossy(&engine_bytes).to_string();
 
             if append && !seen_names.insert(name.clone()) {
                 return Err(StoreError::GenericError(format!(
