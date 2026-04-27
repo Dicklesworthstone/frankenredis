@@ -9573,15 +9573,29 @@ impl Store {
             }
         }
 
+        // Upstream functions.c validates the meta header in this
+        // order:
+        //   1. engine token present (else "Missing library metadata")
+        //   2. engine name registered (else "Engine 'X' not found")
+        //   3. lib name present (else "Library name was not given")
+        //   4. lib name charset (else "Library names can only ...")
+        // Match that ordering so peers and conformance fixtures see
+        // the same error precedence. (br-frankenredis-r85v)
+        if engine.is_empty() {
+            return Err(StoreError::GenericError(
+                "ERR Missing library metadata".to_string(),
+            ));
+        }
+        if engine != "LUA" {
+            return Err(StoreError::GenericError(format!(
+                "ERR Engine '{engine}' not found"
+            )));
+        }
         if lib_name.is_empty() {
             return Err(StoreError::GenericError(
                 "ERR Library name was not given".to_string(),
             ));
         }
-        // Upstream functions.c::functionsVerifyName restricts
-        // library names to ASCII letters, digits, and underscore.
-        // Anything outside that set is rejected with the canonical
-        // wording. (br-frankenredis-r85v)
         if !lib_name
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'_')
@@ -9592,22 +9606,6 @@ impl Store {
                  long"
                     .to_string(),
             ));
-        }
-        if engine.is_empty() {
-            return Err(StoreError::GenericError(
-                "ERR Missing library metadata".to_string(),
-            ));
-        }
-        // Upstream functions.c::functionsCreateWithLibraryCtx (the
-        // emit site is functions.c:983) returns
-        // "Engine '<name>' not found" when the meta header points
-        // at an unregistered engine. Today only LUA is wired in;
-        // accept-and-silently-treat-as-LUA hid invalid engines.
-        // (br-frankenredis-r85v)
-        if engine != "LUA" {
-            return Err(StoreError::GenericError(format!(
-                "ERR Engine '{engine}' not found"
-            )));
         }
 
         if !replace && self.function_libraries.contains_key(&lib_name) {
@@ -16709,6 +16707,55 @@ mod tests {
         store
             .function_load(lua_code, false)
             .expect("lua engine must load");
+    }
+
+    #[test]
+    fn function_load_meta_header_validation_order_matches_upstream() {
+        // Upstream functions.c validates the meta header as
+        // engine-present → engine-registered → name-present →
+        // name-charset. Confirm our gates fire in the same order
+        // so a script with multiple defects surfaces the upstream-
+        // expected error first. (br-frankenredis-r85v)
+        let mut store = Store::new();
+
+        // No engine, no name → "Missing library metadata".
+        let err = store
+            .function_load(b"#!\nx", false)
+            .expect_err("missing engine must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError("ERR Missing library metadata".to_string())
+        );
+
+        // Bad engine + bad name → engine error fires first.
+        let err = store
+            .function_load(b"#!python name=lib-bad\nx", false)
+            .expect_err("bad engine must error first");
+        assert_eq!(
+            err,
+            StoreError::GenericError("ERR Engine 'PYTHON' not found".to_string())
+        );
+
+        // Good engine + missing name → name-not-given fires.
+        let err = store
+            .function_load(b"#!lua\nx", false)
+            .expect_err("missing name must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError("ERR Library name was not given".to_string())
+        );
+
+        // Good engine + bad-charset name → charset error fires.
+        let err = store
+            .function_load(b"#!lua name=lib-bad\nx", false)
+            .expect_err("bad name charset must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
