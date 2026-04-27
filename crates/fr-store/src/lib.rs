@@ -9583,6 +9583,17 @@ impl Store {
                 "ERR Missing library metadata".to_string(),
             ));
         }
+        // Upstream functions.c::functionsCreateWithLibraryCtx (the
+        // emit site is functions.c:983) returns
+        // "Engine '<name>' not found" when the meta header points
+        // at an unregistered engine. Today only LUA is wired in;
+        // accept-and-silently-treat-as-LUA hid invalid engines.
+        // (br-frankenredis-r85v)
+        if engine != "LUA" {
+            return Err(StoreError::GenericError(format!(
+                "ERR Engine '{engine}' not found"
+            )));
+        }
 
         if !replace && self.function_libraries.contains_key(&lib_name) {
             return Err(StoreError::GenericError(format!(
@@ -16596,6 +16607,30 @@ mod tests {
             .expect("self-generated FUNCTION DUMP payload must restore");
 
         assert_eq!(function_library_snapshot(&restored), expected);
+    }
+
+    #[test]
+    fn function_load_rejects_unregistered_engine_with_upstream_wording() {
+        // Upstream functions.c::functionsCreateWithLibraryCtx emits
+        // "Engine '<name>' not found" when the meta header refers
+        // to an engine that wasn't registered. We only model LUA;
+        // any other engine name must hit the same gate, not silently
+        // load. (br-frankenredis-r85v)
+        let mut store = Store::new();
+        let code = b"#!python name=lib\nprint('not lua')";
+        let err = store
+            .function_load(code, false)
+            .expect_err("non-lua engine must be rejected");
+        assert_eq!(
+            err,
+            StoreError::GenericError("ERR Engine 'PYTHON' not found".to_string())
+        );
+
+        // Plain LUA still loads.
+        let lua_code = b"#!lua name=ok\nredis.register_function('fn', function() return 1 end)";
+        store
+            .function_load(lua_code, false)
+            .expect("lua engine must load");
     }
 
     #[test]
