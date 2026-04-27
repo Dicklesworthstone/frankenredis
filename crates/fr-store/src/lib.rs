@@ -11806,26 +11806,51 @@ fn extract_function_metadata(line: &str) -> Option<(String, Option<String>)> {
         //              description='d', callback=fn, ...}
         if let Some(brace) = rest.find('{') {
             let after = &rest[brace + 1..];
-            let mut name = None;
-            let mut description = None;
-            if let Some(fn_idx) = after.find("function_name") {
-                let rest2 = &after[fn_idx..];
-                if let Some(eq) = rest2.find('=') {
-                    let after_eq = rest2[eq + 1..].trim_start();
-                    name = extract_quoted_string(after_eq);
-                }
-            }
-            if let Some(desc_idx) = after.find("description") {
-                let rest2 = &after[desc_idx..];
-                if let Some(eq) = rest2.find('=') {
-                    let after_eq = rest2[eq + 1..].trim_start();
-                    description = extract_quoted_string(after_eq);
-                }
-            }
+            // Match key tokens with the `=` attached so that a
+            // function_name VALUE containing the substring
+            // `description` (e.g. function_name='describe_user')
+            // doesn't bleed into the description slot. Tolerate
+            // optional whitespace around `=`. (br-frankenredis-r85v)
+            let name = extract_table_field(after, "function_name");
+            let description = extract_table_field(after, "description");
             if let Some(name) = name {
                 return Some((name, description));
             }
         }
+    }
+    None
+}
+
+/// Find `<key> *= *<quoted-string>` in a Lua-table-form argument
+/// list and return the quoted value. Skips field assignments where
+/// the key matches `<key>` only as a substring of another
+/// identifier (e.g. `function_name` contains `description` only as
+/// a value-side substring, never as a key). (br-frankenredis-r85v)
+fn extract_table_field(buf: &str, key: &str) -> Option<String> {
+    let bytes = buf.as_bytes();
+    let key_bytes = key.as_bytes();
+    let mut i = 0;
+    while i + key_bytes.len() <= bytes.len() {
+        if &bytes[i..i + key_bytes.len()] == key_bytes {
+            // Boundary check on the LEFT — previous byte must not
+            // be an ident char (letter/digit/underscore).
+            let left_ok =
+                i == 0 || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+            // Boundary check on the RIGHT — first non-whitespace
+            // byte after key must be `=`.
+            let mut j = i + key_bytes.len();
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if left_ok && j < bytes.len() && bytes[j] == b'=' {
+                let value_start = j + 1;
+                let after_eq = buf[value_start..].trim_start();
+                if let Some(v) = extract_quoted_string(after_eq) {
+                    return Some(v);
+                }
+            }
+        }
+        i += 1;
     }
     None
 }
@@ -16684,6 +16709,29 @@ mod tests {
         store
             .function_load(lua_code, false)
             .expect("lua engine must load");
+    }
+
+    #[test]
+    fn function_load_table_form_does_not_confuse_value_substring_with_key() {
+        // Regression: when function_name='describe_user', the
+        // `description` substring inside the value used to bleed
+        // into the description slot via a naive find('description').
+        // The new key-boundary parser ignores substring matches
+        // that aren't real `key=` tokens. (br-frankenredis-r85v)
+        let mut store = Store::new();
+        let code = b"#!lua name=lib_dbu\nredis.register_function{function_name='describe_user', callback=function() return 1 end}";
+        store.function_load(code, false).expect("library must load");
+
+        let lib = store
+            .function_libraries
+            .get("lib_dbu")
+            .expect("library present");
+        assert_eq!(lib.functions.len(), 1);
+        assert_eq!(lib.functions[0].name, "describe_user");
+        assert_eq!(
+            lib.functions[0].description, None,
+            "description must remain None when the table omits the field"
+        );
     }
 
     #[test]
