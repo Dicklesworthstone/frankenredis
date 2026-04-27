@@ -9779,6 +9779,75 @@ mod tests {
         }
     }
 
+    fn send_function_flush(stream: &mut std::net::TcpStream) {
+        let flush = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"FUNCTION".to_vec())),
+            RespFrame::BulkString(Some(b"FLUSH".to_vec())),
+            RespFrame::BulkString(Some(b"SYNC".to_vec())),
+        ]));
+        send_frame(stream, &flush).expect("send FUNCTION FLUSH");
+        let reply = read_resp_frame_from_stream(stream).expect("read FUNCTION FLUSH reply");
+        match reply {
+            RespFrame::SimpleString(ref s) if s == "OK" => {}
+            other => panic!("oracle FUNCTION FLUSH returned unexpected reply: {other:?}"),
+        }
+    }
+
+    fn send_function_load(stream: &mut std::net::TcpStream, code: &[u8], replace: bool) {
+        let mut argv = vec![
+            RespFrame::BulkString(Some(b"FUNCTION".to_vec())),
+            RespFrame::BulkString(Some(b"LOAD".to_vec())),
+        ];
+        if replace {
+            argv.push(RespFrame::BulkString(Some(b"REPLACE".to_vec())));
+        }
+        argv.push(RespFrame::BulkString(Some(code.to_vec())));
+        send_frame(stream, &RespFrame::Array(Some(argv))).expect("send FUNCTION LOAD");
+        let reply = read_resp_frame_from_stream(stream).expect("read FUNCTION LOAD reply");
+        match reply {
+            RespFrame::BulkString(Some(_)) => {}
+            other => panic!("oracle FUNCTION LOAD returned unexpected reply: {other:?}"),
+        }
+    }
+
+    fn send_function_restore_payload(stream: &mut std::net::TcpStream, payload: &[u8], kind: &str) {
+        let restore = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"FUNCTION".to_vec())),
+            RespFrame::BulkString(Some(b"RESTORE".to_vec())),
+            RespFrame::BulkString(Some(payload.to_vec())),
+            RespFrame::BulkString(Some(b"FLUSH".to_vec())),
+        ]));
+        send_frame(stream, &restore).expect("send FUNCTION RESTORE");
+        let reply = read_resp_frame_from_stream(stream).expect("read FUNCTION RESTORE reply");
+        match reply {
+            RespFrame::SimpleString(ref s) if s == "OK" => {}
+            other => panic!("oracle rejected {kind} FUNCTION DUMP payload: {other:?}"),
+        }
+    }
+
+    fn send_function_dump(stream: &mut std::net::TcpStream) -> Vec<u8> {
+        let dump = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"FUNCTION".to_vec())),
+            RespFrame::BulkString(Some(b"DUMP".to_vec())),
+        ]));
+        send_frame(stream, &dump).expect("send FUNCTION DUMP");
+        let reply = read_resp_frame_from_stream(stream).expect("read FUNCTION DUMP reply");
+        match reply {
+            RespFrame::BulkString(Some(p)) => p,
+            other => panic!("oracle FUNCTION DUMP returned unexpected reply: {other:?}"),
+        }
+    }
+
+    fn send_fcall(stream: &mut std::net::TcpStream, function_name: &[u8]) -> RespFrame {
+        let fcall = RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(b"FCALL".to_vec())),
+            RespFrame::BulkString(Some(function_name.to_vec())),
+            RespFrame::BulkString(Some(b"0".to_vec())),
+        ]));
+        send_frame(stream, &fcall).expect("send FCALL");
+        read_resp_frame_from_stream(stream).expect("read FCALL reply")
+    }
+
     fn send_rpush(stream: &mut std::net::TcpStream, key: &[u8], value: &[u8]) {
         let f = RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(b"RPUSH".to_vec())),
@@ -10696,6 +10765,65 @@ mod tests {
                 String::from_utf8_lossy(key),
             );
         }
+    }
+
+    /// Cross-impl FUNCTION DUMP/RESTORE round-trip gate.
+    ///
+    /// Upstream Redis stores each library in the FUNCTION DUMP body
+    /// as `RDB_OPCODE_FUNCTION2` followed by one RDB raw string
+    /// containing the library code. This test proves both directions:
+    /// our `Store::function_dump` restores into vendored Redis and
+    /// executes via `FCALL`, and the vendored `FUNCTION DUMP` restores
+    /// back into our store with the same library code. (r85v)
+    #[test]
+    fn live_redis_function_dump_restore_roundtrip_matches_upstream() {
+        use fr_store::Store;
+
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+        let mut stream = connect_live_redis(&oracle)
+            .expect("connect to vendored redis for FUNCTION DUMP roundtrip");
+
+        let code = b"#!lua name=rtlib\n\
+            redis.register_function('rtfn', function(keys, args) return 'from_function_dump' end)\n";
+
+        let mut store = Store::new();
+        store
+            .function_load(code, false)
+            .expect("seed function library must load");
+        let payload = store.function_dump();
+
+        send_function_flush(&mut stream);
+        send_function_restore_payload(&mut stream, &payload, "our");
+        assert_eq!(
+            send_fcall(&mut stream, b"rtfn"),
+            RespFrame::BulkString(Some(b"from_function_dump".to_vec())),
+            "oracle FCALL mismatch after our FUNCTION DUMP -> RESTORE"
+        );
+
+        send_function_flush(&mut stream);
+        send_function_load(&mut stream, code, false);
+        let oracle_payload = send_function_dump(&mut stream);
+        let mut restored = Store::new();
+        restored
+            .function_restore(&oracle_payload, "FLUSH")
+            .expect("restore oracle FUNCTION DUMP payload");
+
+        let libs = restored.function_list(None);
+        assert_eq!(libs.len(), 1);
+        assert_eq!(libs[0].name, "rtlib");
+        assert_eq!(libs[0].engine, "LUA");
+        assert_eq!(libs[0].code, code);
+        assert_eq!(libs[0].functions.len(), 1);
+        assert_eq!(libs[0].functions[0].name, "rtfn");
+
+        send_function_flush(&mut stream);
+        stream
+            .shutdown(std::net::Shutdown::Both)
+            .expect("shutdown FUNCTION DUMP oracle connection");
     }
 
     #[test]

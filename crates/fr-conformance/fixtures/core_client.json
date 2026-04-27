@@ -1245,7 +1245,7 @@
       }
     },
     {
-      "name": "client_info_after_reset_clears_setinfo",
+      "name": "client_info_after_reset_preserves_setinfo",
       "now_ms": 223,
       "argv": [
         "CLIENT",
@@ -1254,8 +1254,8 @@
       "expect": {
         "kind": "bulk_contains_all",
         "value": [
-          "lib-name= ",
-          "lib-ver= ",
+          "lib-name=mylib",
+          "lib-ver=1.0.0",
           "resp=2"
         ]
       }

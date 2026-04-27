@@ -22,6 +22,7 @@ const RDB_TYPE_STREAM_LISTPACKS: u8 = fr_persist::UPSTREAM_RDB_TYPE_STREAM_LISTP
 const RDB_TYPE_STREAM_LISTPACKS_2: u8 = fr_persist::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2;
 const RDB_TYPE_SET_LISTPACK: u8 = 20;
 const RDB_TYPE_STREAM_LISTPACKS_3: u8 = fr_persist::UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3;
+const RDB_OPCODE_FUNCTION2: u8 = 245;
 const DUMP_VERSION_LEN: usize = 2;
 const DUMP_CRC64_LEN: usize = 8;
 const DUMP_TRAILER_LEN: usize = DUMP_VERSION_LEN + DUMP_CRC64_LEN;
@@ -9702,35 +9703,16 @@ impl Store {
     /// Dump all function libraries as a serialized blob, wrapped in
     /// the Redis 7+ envelope (body + 2-byte version + 8-byte CRC64).
     ///
-    /// Body uses RDB length + RDB-string encoding for every length-
-    /// prefixed field, matching the primitive encoders that upstream
-    /// functions.c::functionDumpCommand pulls from rdb.c. The
-    /// per-library subfield ordering still differs from upstream
-    /// (we emit name → code → engine while upstream emits name →
-    /// engine → description → code); full subfield-ordering parity
-    /// is the larger r85v body-format follow-up that the round-trip
-    /// gate test will pin down. (br-frankenredis-r85v)
+    /// Body uses the exact upstream `rdbSaveFunctions` shape: one
+    /// `RDB_OPCODE_FUNCTION2` byte followed by an RDB raw string
+    /// containing the library code, repeated once per library. The
+    /// function metadata is reconstructed by reloading that code.
+    /// (br-frankenredis-r85v)
     pub fn function_dump(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        encode_length(&mut buf, self.function_libraries.len());
         for lib in self.function_list(None) {
-            encode_rdb_string(&mut buf, lib.name.as_bytes());
+            buf.push(RDB_OPCODE_FUNCTION2);
             encode_rdb_string(&mut buf, &lib.code);
-            encode_rdb_string(&mut buf, lib.engine.as_bytes());
-            // Description is optional in upstream's FunctionLibInfo
-            // and we surface it via FUNCTION LIST; previously it was
-            // silently dropped on dump/restore. Prefix with a 1-byte
-            // presence flag (0 = None, 1 = Some) followed by the
-            // rdb-string when present. (br-frankenredis-r85v)
-            match &lib.description {
-                Some(desc) => {
-                    buf.push(1);
-                    encode_rdb_string(&mut buf, desc.as_bytes());
-                }
-                None => {
-                    buf.push(0);
-                }
-            }
         }
         buf.extend_from_slice(&Self::FUNCTION_DUMP_RDB_VERSION.to_le_bytes());
         let crc = fr_persist::crc64_redis(&buf);
@@ -9784,92 +9766,42 @@ impl Store {
                 "ERR DUMP payload version or checksum are wrong".to_string(),
             ));
         }
-        let body = &data[..footer_offset];
-        let (count, mut pos) = if body.is_empty() {
-            (0, 0)
-        } else {
-            let (n, consumed) = decode_length(body, 0)?;
-            (n, consumed)
-        };
-        // Use `body` as the parsing window from here on.
-        let data = body;
-        let mut seen_names: HashSet<String> = if append {
-            self.function_libraries.keys().cloned().collect()
-        } else {
-            HashSet::new()
-        };
-        let mut restored_libraries = HashMap::new();
-
-        for _ in 0..count {
-            // Decode RDB-string-encoded name / code / engine using
-            // the same primitives as Store::dump_key. (r85v)
-            let (name_bytes, name_consumed) = decode_rdb_string(data, pos, data.len())?;
-            pos += name_consumed;
-            let name = String::from_utf8_lossy(&name_bytes).to_string();
-
-            let (code, code_consumed) = decode_rdb_string(data, pos, data.len())?;
-            pos += code_consumed;
-
-            let (engine_bytes, engine_consumed) = decode_rdb_string(data, pos, data.len())?;
-            pos += engine_consumed;
-            let engine = String::from_utf8_lossy(&engine_bytes).to_string();
-
-            // Description presence flag (br-frankenredis-r85v).
-            if pos >= data.len() {
+        let data = &data[..footer_offset];
+        let mut pos = 0;
+        let mut incoming = Store::new();
+        while pos < data.len() {
+            let opcode = data[pos];
+            pos += 1;
+            if opcode == 246 {
                 return Err(StoreError::GenericError(
-                    "ERR Invalid dump data".to_string(),
+                    "ERR Pre-GA function format not supported".to_string(),
                 ));
             }
-            let description = match data[pos] {
-                0 => {
-                    pos += 1;
-                    None
-                }
-                1 => {
-                    pos += 1;
-                    let (desc_bytes, desc_consumed) = decode_rdb_string(data, pos, data.len())?;
-                    pos += desc_consumed;
-                    Some(String::from_utf8_lossy(&desc_bytes).to_string())
-                }
-                _ => {
-                    return Err(StoreError::GenericError(
-                        "ERR Invalid dump data".to_string(),
-                    ));
-                }
-            };
-
-            if append && !seen_names.insert(name.clone()) {
-                return Err(StoreError::GenericError(format!(
-                    "ERR Library '{name}' already exists"
-                )));
+            if opcode != RDB_OPCODE_FUNCTION2 {
+                return Err(StoreError::GenericError(
+                    "ERR given type is not a function".to_string(),
+                ));
             }
+            let (code, consumed) = decode_rdb_string(data, pos, data.len()).map_err(|err| {
+                if matches!(err, StoreError::InvalidDumpPayload) {
+                    StoreError::GenericError("ERR Invalid dump data".to_string())
+                } else {
+                    err
+                }
+            })?;
+            pos += consumed;
+            incoming.function_load(&code, false)?;
+        }
 
-            // Re-parse functions from code
-            let mut functions = Vec::new();
-            let code_str = String::from_utf8_lossy(&code);
-            for line in code_str.lines() {
-                let trimmed = line.trim();
-                if trimmed.contains("register_function")
-                    && let Some((fn_name, fn_desc)) = extract_function_metadata(trimmed)
-                {
-                    functions.push(FunctionEntry {
-                        name: fn_name,
-                        description: fn_desc,
-                        flags: Vec::new(),
-                    });
+        let restored_libraries = incoming.function_libraries;
+        if append {
+            for name in restored_libraries.keys() {
+                if self.function_libraries.contains_key(name) {
+                    return Err(StoreError::GenericError(format!(
+                        "ERR Library '{name}' already exists"
+                    )));
                 }
             }
-
-            restored_libraries.insert(
-                name.clone(),
-                FunctionLibrary {
-                    name,
-                    engine,
-                    description,
-                    code,
-                    functions,
-                },
-            );
         }
 
         if flush {
@@ -11997,12 +11929,13 @@ mod tests {
         BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, EvictionLoopFailure,
         EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue, HLL_REGISTERS, LatencySample,
         MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC,
-        NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK,
-        RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
-        RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK,
-        ScoreBound, ScoreMember, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
-        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
-        StreamPendingEntry, Value, ValueType, encode_db_key, encode_length, hll_sparse_decode,
+        NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH,
+        RDB_TYPE_HASH_LISTPACK, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET, RDB_TYPE_SET_INTSET,
+        RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET_2,
+        RDB_TYPE_ZSET_LISTPACK, ScoreBound, ScoreMember, Store, StoreError, StreamAutoClaimOptions,
+        StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
+        StreamGroupReadOptions, StreamPendingEntry, Value, ValueType, decode_rdb_string,
+        encode_db_key, encode_length, hll_sparse_decode,
     };
 
     fn group_read_options(
@@ -16662,6 +16595,28 @@ mod tests {
     }
 
     #[test]
+    fn function_dump_body_uses_upstream_function2_records() {
+        let mut original = Store::new();
+        let library = sample_function_library("seedlib", "alpha", "beta");
+        original
+            .function_load(&library, false)
+            .expect("seed library must load");
+
+        let dumped = original.function_dump();
+        let body_end = dumped.len() - 10;
+        let body = &dumped[..body_end];
+
+        assert_eq!(
+            body[0], RDB_OPCODE_FUNCTION2,
+            "FUNCTION DUMP body must start with upstream FUNCTION2 opcode"
+        );
+        let (code, consumed) =
+            decode_rdb_string(body, 1, body.len()).expect("decode function library code");
+        assert_eq!(1 + consumed, body.len());
+        assert_eq!(code, library);
+    }
+
+    #[test]
     fn function_load_rejects_invalid_library_name_chars_with_upstream_wording() {
         // Upstream functions.c::functionsVerifyName restricts
         // library names to [A-Za-z0-9_] and rejects everything
@@ -16846,22 +16801,17 @@ mod tests {
     }
 
     #[test]
-    fn function_dump_restore_roundtrip_preserves_description_field() {
-        // Previously the description field was silently dropped on
-        // dump → restore. The body now carries a presence-flag +
-        // optional rdb-string for description so the round-trip
-        // preserves it. (br-frankenredis-r85v)
+    fn function_dump_restore_roundtrip_preserves_function_description_from_code() {
+        // Upstream FUNCTION DUMP persists library code only; function
+        // descriptions survive because restoring reloads the same
+        // `redis.register_function{..., description=...}` code.
+        // (br-frankenredis-r85v)
         let mut original = Store::new();
-        let library = sample_function_library("desclib", "fn1", "fn2");
+        let library = b"#!lua name=desclib\n\
+            redis.register_function{function_name='fn1', description='the description', callback=function(keys, args) return 1 end}\n";
         original
-            .function_load(&library, false)
+            .function_load(library, false)
             .expect("seed library must load");
-        // Inject a description directly (FUNCTION LOAD doesn't yet
-        // parse a description shebang, so we set the field via the
-        // store's internal mutation hook for tests).
-        if let Some(lib) = original.function_libraries.get_mut("desclib") {
-            lib.description = Some("the description".to_string());
-        }
 
         let dumped = original.function_dump();
         let mut restored = Store::new();
@@ -16873,7 +16823,12 @@ mod tests {
             .function_libraries
             .get("desclib")
             .expect("library should be present");
-        assert_eq!(lib.description.as_deref(), Some("the description"));
+        assert_eq!(lib.functions.len(), 1);
+        assert_eq!(lib.functions[0].name, "fn1");
+        assert_eq!(
+            lib.functions[0].description.as_deref(),
+            Some("the description")
+        );
     }
 
     #[test]
