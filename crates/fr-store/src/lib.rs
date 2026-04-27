@@ -9616,13 +9616,27 @@ impl Store {
 
         // Parse function registrations from the code, capturing the
         // optional `description` field from the table-form
-        // invocation. (br-frankenredis-r85v)
+        // invocation. Upstream functions.c::functionLibCreateFunction
+        // applies functionsVerifyName to each function name and
+        // rejects empty / non-[A-Za-z0-9_] names. Match that gate
+        // so a library code chunk with a malformed register_function
+        // call surfaces the upstream error instead of recording an
+        // invalid function entry. (br-frankenredis-r85v)
         let mut functions = Vec::new();
         for line in code_str.lines() {
             let trimmed = line.trim();
             if trimmed.contains("register_function")
                 && let Some((name, description)) = extract_function_metadata(trimmed)
             {
+                if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
+                    return Err(StoreError::GenericError(
+                        "ERR Library names can only contain letters, numbers, \
+                         or underscores(_) and must be at least one character \
+                         long"
+                            .to_string(),
+                    ));
+                }
                 functions.push(FunctionEntry {
                     name,
                     description,
@@ -16707,6 +16721,32 @@ mod tests {
         store
             .function_load(lua_code, false)
             .expect("lua engine must load");
+    }
+
+    #[test]
+    fn function_load_rejects_invalid_function_name_chars() {
+        // Upstream functions.c::functionLibCreateFunction (line 249)
+        // applies functionsVerifyName to per-function names. A
+        // forged register_function call with a hyphen must fail
+        // loudly, not record an invalid function entry.
+        // (br-frankenredis-r85v)
+        let mut store = Store::new();
+        let code =
+            b"#!lua name=lib_fnv\nredis.register_function('bad-name', function() return 1 end)";
+        let err = store
+            .function_load(code, false)
+            .expect_err("invalid function name must be rejected");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long"
+                    .to_string()
+            )
+        );
+        assert!(
+            !store.function_libraries.contains_key("lib_fnv"),
+            "library must not be registered when a function name is invalid"
+        );
     }
 
     #[test]
