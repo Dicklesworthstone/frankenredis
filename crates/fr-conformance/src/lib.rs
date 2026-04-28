@@ -10977,19 +10977,15 @@ mod tests {
             connect_live_redis(&oracle).expect("connect to vendored redis for rdb corpus harvest");
         flushall(&mut conn).expect("flushall on oracle");
 
-        fn send_owned(
-            conn: &mut std::net::TcpStream,
-            argv: Vec<Vec<u8>>,
-            ctx: &str,
-        ) {
+        fn send_owned(conn: &mut std::net::TcpStream, argv: Vec<Vec<u8>>, ctx: &str) {
             let frame = RespFrame::Array(Some(
                 argv.into_iter()
                     .map(|a| RespFrame::BulkString(Some(a)))
                     .collect(),
             ));
             send_frame(conn, &frame).unwrap_or_else(|e| panic!("send {ctx}: {e}"));
-            let reply = read_resp_frame_from_stream(conn)
-                .unwrap_or_else(|e| panic!("read {ctx}: {e}"));
+            let reply =
+                read_resp_frame_from_stream(conn).unwrap_or_else(|e| panic!("read {ctx}: {e}"));
             match reply {
                 RespFrame::SimpleString(_)
                 | RespFrame::Integer(_)
@@ -11007,7 +11003,7 @@ mod tests {
         // recognizes (RDB_TYPE_SET=2, RDB_TYPE_HASH=4, RDB_TYPE_ZSET_2=5,
         // RDB_TYPE_STREAM_LISTPACKS_3=21). Compact encodings (intset,
         // listpack, quicklist) — type bytes 11/16/17/18/20 — surface a
-        // separate gap tracked by br-frankenredis-uw9c.
+        // separate gap tracked by br-frankenredis-aqgx.
         for (param, value) in &[
             ("hash-max-listpack-entries", "0"),
             ("hash-max-listpack-value", "0"),
@@ -11025,13 +11021,24 @@ mod tests {
 
         // RDB_TYPE_STRING (0): raw bytes + integer-encoded (selected
         // automatically by upstream from numeric content).
-        send_owned(&mut conn, argv(&[b"SET", b"str_raw", b"hello world"]), "set_raw");
+        send_owned(
+            &mut conn,
+            argv(&[b"SET", b"str_raw", b"hello world"]),
+            "set_raw",
+        );
         send_owned(&mut conn, argv(&[b"SET", b"str_int", b"4242"]), "set_int");
 
         // RDB_TYPE_SET (2): non-integer members + threshold pinned to 0.
         send_owned(
             &mut conn,
-            argv(&[b"SADD", b"set_hashtable", b"alpha", b"beta", b"gamma", b"delta"]),
+            argv(&[
+                b"SADD",
+                b"set_hashtable",
+                b"alpha",
+                b"beta",
+                b"gamma",
+                b"delta",
+            ]),
             "sadd_ht",
         );
 
@@ -11045,7 +11052,16 @@ mod tests {
         // RDB_TYPE_ZSET_2 (5): threshold pinned to 0.
         send_owned(
             &mut conn,
-            argv(&[b"ZADD", b"zset_skiplist", b"1.0", b"a", b"2.5", b"b", b"7.25", b"c"]),
+            argv(&[
+                b"ZADD",
+                b"zset_skiplist",
+                b"1.0",
+                b"a",
+                b"2.5",
+                b"b",
+                b"7.25",
+                b"c",
+            ]),
             "zadd_skiplist",
         );
 
@@ -11094,8 +11110,7 @@ mod tests {
         // value equality (some shapes — listpack-encoded strings,
         // intset, stream consumer groups — are tested for shape parity
         // elsewhere); this gate only asserts decode-clean-ness.
-        let recovered_keys: BTreeSet<Vec<u8>> =
-            entries.iter().map(|e| e.key.clone()).collect();
+        let recovered_keys: BTreeSet<Vec<u8>> = entries.iter().map(|e| e.key.clone()).collect();
         let expected_keys: &[&[u8]] = &[
             b"str_raw",
             b"str_int",
