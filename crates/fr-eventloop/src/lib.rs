@@ -300,7 +300,12 @@ pub fn plan_fd_setsize_growth(
     requested_fd: usize,
     max_setsize: usize,
 ) -> Result<usize, FdRegistrationError> {
-    let required_setsize = requested_fd.saturating_add(1);
+    let Some(required_setsize) = requested_fd.checked_add(1) else {
+        return Err(FdRegistrationError::FdResizeFailure {
+            requested_fd,
+            max_setsize,
+        });
+    };
     if required_setsize > max_setsize {
         return Err(FdRegistrationError::FdResizeFailure {
             requested_fd,
@@ -711,6 +716,20 @@ mod tests {
             FdRegistrationError::FdResizeFailure {
                 requested_fd: 2_048,
                 max_setsize: 1_024
+            }
+        );
+        assert_eq!(err.reason_code(), "eventloop.fd_resize_failure");
+    }
+
+    #[test]
+    fn fr_p2c_001_u004_fd_resize_rejects_impossible_max_descriptor() {
+        let err = plan_fd_setsize_growth(64, usize::MAX, usize::MAX)
+            .expect_err("usize::MAX fd cannot fit in any setsize");
+        assert_eq!(
+            err,
+            FdRegistrationError::FdResizeFailure {
+                requested_fd: usize::MAX,
+                max_setsize: usize::MAX
             }
         );
         assert_eq!(err.reason_code(), "eventloop.fd_resize_failure");
