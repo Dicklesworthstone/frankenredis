@@ -10811,7 +10811,7 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
                             .collect()
                     })
                     .unwrap_or_default();
-                RdbValue::Stream(stream_entries, watermark, groups)
+                RdbValue::Stream(stream_entries, watermark, groups, None)
             }
         };
         entries.push(RdbEntry {
@@ -10913,7 +10913,7 @@ fn apply_rdb_entries_to_store(
                     );
                 }
             }
-            RdbValue::Stream(stream_entries, watermark, groups) => {
+            RdbValue::Stream(stream_entries, watermark, groups, _metadata) => {
                 for (ms, seq, fields) in stream_entries {
                     let field_pairs: Vec<(Vec<u8>, Vec<u8>)> =
                         fields.iter().map(|(k, v)| (k.clone(), v.clone())).collect();

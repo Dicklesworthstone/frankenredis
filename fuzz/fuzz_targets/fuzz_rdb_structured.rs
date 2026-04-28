@@ -3,7 +3,10 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use fr_persist::decode_rdb;
+use fr_persist::{
+    RdbStreamConsumerGroup, RdbStreamPendingEntry, StreamEntry, crc64_redis, decode_rdb,
+    encode_upstream_stream_listpacks3_payload,
+};
 
 const RDB_MAGIC: &[u8] = b"REDIS";
 const RDB_VERSION: &[u8] = b"0011";
@@ -18,6 +21,7 @@ const RDB_TYPE_LIST: u8 = 1;
 const RDB_TYPE_SET: u8 = 2;
 const RDB_TYPE_HASH: u8 = 4;
 const RDB_TYPE_ZSET_2: u8 = 5;
+const RDB_TYPE_STREAM_LISTPACKS_3: u8 = 21;
 
 #[derive(Debug, Arbitrary)]
 struct FuzzRdb {
@@ -69,10 +73,31 @@ enum RdbEntryFuzz {
         key: SmallString,
         members: Vec<(SmallString, f64)>,
     },
+    Stream {
+        key: SmallString,
+        entries: Vec<StreamEntryFuzz>,
+        group: Option<StreamGroupFuzz>,
+    },
     WithExpiry {
         expiry_ms: u64,
         entry: Box<RdbEntryFuzz>,
     },
+}
+
+#[derive(Debug, Arbitrary)]
+struct StreamEntryFuzz {
+    ms: u16,
+    seq: u8,
+    fields: Vec<(SmallString, SmallString)>,
+}
+
+#[derive(Debug, Arbitrary)]
+struct StreamGroupFuzz {
+    name: SmallString,
+    consumer: SmallString,
+    pending_index: u8,
+    deliveries: u8,
+    last_delivered_ms: u32,
 }
 
 impl FuzzRdb {
@@ -110,8 +135,8 @@ impl FuzzRdb {
         // EOF
         buf.push(RDB_OPCODE_EOF);
 
-        // CRC64 placeholder (8 bytes of zeros - decoder may skip or validate)
-        buf.extend_from_slice(&[0u8; 8]);
+        let crc = crc64_redis(&buf);
+        buf.extend_from_slice(&crc.to_le_bytes());
 
         buf
     }
@@ -185,11 +210,117 @@ impl RdbEntryFuzz {
                     buf.extend_from_slice(&score.to_le_bytes());
                 }
             }
+            RdbEntryFuzz::Stream {
+                key,
+                entries,
+                group,
+            } => {
+                if key.data.is_empty() {
+                    return;
+                }
+                let stream_entries = build_stream_entries(entries);
+                let watermark = stream_entries
+                    .last()
+                    .map(|entry| (entry.0, entry.1))
+                    .or(Some((0, 0)));
+                let groups = build_stream_groups(group.as_ref(), &stream_entries);
+                let Some(payload) =
+                    encode_upstream_stream_listpacks3_payload(&stream_entries, watermark, &groups)
+                else {
+                    return;
+                };
+                buf.push(RDB_TYPE_STREAM_LISTPACKS_3);
+                let key = capped_non_empty(key, b"stream", 32);
+                buf.push(key.len() as u8);
+                buf.extend_from_slice(&key);
+                buf.extend_from_slice(&payload);
+            }
             RdbEntryFuzz::WithExpiry { .. } => {
                 // Should not reach here - handled in encode()
             }
         }
     }
+}
+
+fn capped_non_empty(input: &SmallString, fallback: &[u8], max_len: usize) -> Vec<u8> {
+    let capped = input
+        .data
+        .iter()
+        .take(max_len)
+        .copied()
+        .collect::<Vec<_>>();
+    if capped.is_empty() {
+        fallback.to_vec()
+    } else {
+        capped
+    }
+}
+
+fn build_stream_entries(entries: &[StreamEntryFuzz]) -> Vec<StreamEntry> {
+    let mut out = entries
+        .iter()
+        .take(8)
+        .enumerate()
+        .map(|(index, entry)| {
+            let fields = build_stream_fields(&entry.fields);
+            (
+                u64::from(entry.ms) + u64::try_from(index).expect("small stream index"),
+                u64::from(entry.seq),
+                fields,
+            )
+        })
+        .collect::<Vec<_>>();
+    if out.is_empty() {
+        out.push((1, 0, vec![(b"f".to_vec(), b"v".to_vec())]));
+    }
+    out.sort_by_key(|entry| (entry.0, entry.1));
+    out
+}
+
+fn build_stream_fields(fields: &[(SmallString, SmallString)]) -> Vec<(Vec<u8>, Vec<u8>)> {
+    let mut out = fields
+        .iter()
+        .take(4)
+        .enumerate()
+        .map(|(index, (field, value))| {
+            let fallback_field = format!("f{index}");
+            (
+                capped_non_empty(field, fallback_field.as_bytes(), 32),
+                capped_non_empty(value, b"v", 64),
+            )
+        })
+        .collect::<Vec<_>>();
+    if out.is_empty() {
+        out.push((b"f".to_vec(), b"v".to_vec()));
+    }
+    out
+}
+
+fn build_stream_groups(
+    group: Option<&StreamGroupFuzz>,
+    entries: &[StreamEntry],
+) -> Vec<RdbStreamConsumerGroup> {
+    let Some(group) = group else {
+        return Vec::new();
+    };
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let consumer = capped_non_empty(&group.consumer, b"consumer", 32);
+    let pending_entry = &entries[usize::from(group.pending_index) % entries.len()];
+    vec![RdbStreamConsumerGroup {
+        name: capped_non_empty(&group.name, b"group", 32),
+        last_delivered_id_ms: pending_entry.0,
+        last_delivered_id_seq: pending_entry.1,
+        consumers: vec![consumer.clone()],
+        pending: vec![RdbStreamPendingEntry {
+            entry_id_ms: pending_entry.0,
+            entry_id_seq: pending_entry.1,
+            consumer,
+            deliveries: u64::from(group.deliveries).saturating_add(1),
+            last_delivered_ms: u64::from(group.last_delivered_ms),
+        }],
+    }]
 }
 
 fuzz_target!(|input: FuzzRdb| {

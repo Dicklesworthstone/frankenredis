@@ -106,7 +106,7 @@ proptest! {
                         prop_assert!((sa - sb).abs() < 1e-10, "zset score mismatch: {} vs {}", sa, sb);
                     }
                 }
-                (RdbValue::Stream(_, _, _), RdbValue::Stream(_, _, _)) => {
+                (RdbValue::Stream(_, _, _, _), RdbValue::Stream(_, _, _, _)) => {
                     // Stream encoding has known incompatibilities, skip detailed comparison
                 }
                 (a, b) => {
@@ -216,7 +216,7 @@ proptest! {
                     }
                 }
             }
-            (RdbValue::Stream(_, _, _), RdbValue::Stream(_, _, _)) => {
+            (RdbValue::Stream(_, _, _, _), RdbValue::Stream(_, _, _, _)) => {
                 // Stream encoding has known incompatibilities
             }
             _ => {

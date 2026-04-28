@@ -19,7 +19,9 @@
 use std::collections::BTreeMap;
 
 use crate::listpack::{ListpackEntry, ListpackError, decode_listpack};
-use crate::{RdbStreamConsumerGroup, RdbStreamPendingEntry, RdbValue, StreamEntry};
+use crate::{
+    RdbStreamConsumerGroup, RdbStreamMetadata, RdbStreamPendingEntry, RdbValue, StreamEntry,
+};
 
 use super::{rdb_decode_length, rdb_decode_string};
 
@@ -416,7 +418,11 @@ pub(crate) fn decode_upstream_stream_skeleton(
     }
 
     let watermark = Some((last_id_ms as u64, last_id_seq as u64));
-    let value = RdbValue::Stream(entries, watermark, groups);
+    let metadata = RdbStreamMetadata {
+        upstream_type_byte: type_byte,
+        upstream_payload: data[..cursor].to_vec(),
+    };
+    let value = RdbValue::Stream(entries, watermark, groups, Some(metadata));
     Ok((value, cursor))
 }
 
@@ -851,7 +857,7 @@ mod tests {
 
     fn stream_parts(value: RdbValue) -> Option<StreamParts> {
         match value {
-            RdbValue::Stream(entries, watermark, groups) => Some((entries, watermark, groups)),
+            RdbValue::Stream(entries, watermark, groups, _) => Some((entries, watermark, groups)),
             _ => None,
         }
     }

@@ -3422,13 +3422,13 @@ mod tests {
     use super::{
         CaseOutcome, ConformanceCase, DIFFERENTIAL_REPORT_SCHEMA_VERSION, EvidenceEvent,
         ExpectedFrame, ExpectedThreat, HarnessConfig, LiveOracleConfig, ReplayFixture,
-        StructuredLogEmissionContext, build_differential_report, connect_live_redis,
-        expected_to_frame, flushall, live_oracle_case_expects_no_reply,
-        live_oracle_case_uses_dedicated_connection, live_oracle_case_uses_legacy_sync_snapshot,
-        load_conformance_fixture, load_multi_client_fixture, read_resp_frame_from_stream,
-        run_fixture, run_live_redis_diff, run_live_redis_diff_excluding,
-        run_live_redis_diff_for_cases, run_live_redis_protocol_diff, run_protocol_fixture,
-        run_replay_fixture, run_replication_handshake_fixture, run_smoke,
+        StructuredLogEmissionContext, build_differential_report, canonical_bulk_string_array,
+        canonical_hgetall_pairs, connect_live_redis, expected_to_frame, flushall,
+        live_oracle_case_expects_no_reply, live_oracle_case_uses_dedicated_connection,
+        live_oracle_case_uses_legacy_sync_snapshot, load_conformance_fixture,
+        load_multi_client_fixture, read_resp_frame_from_stream, run_fixture, run_live_redis_diff,
+        run_live_redis_diff_excluding, run_live_redis_diff_for_cases, run_live_redis_protocol_diff,
+        run_protocol_fixture, run_replay_fixture, run_replication_handshake_fixture, run_smoke,
         runtime_for_harness_config, runtime_matches_live_no_reply_case,
         runtime_matches_live_sync_snapshot_case, send_frame, validate_structured_log_emission,
         validate_threat_expectation,
@@ -8415,6 +8415,29 @@ mod tests {
             if std::env::var_os("FR_CONFORMANCE_SKIP_LIVE_ORACLE").is_some() {
                 return None;
             }
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()?
+                .as_nanos();
+            let tmp_dir =
+                std::env::temp_dir().join(format!("fr_live_oracle_{ts}_{}", std::process::id()));
+            fs::create_dir_all(&tmp_dir).ok()?;
+            Self::spawn_with(oracle_root, &tmp_dir)
+        }
+
+        /// Spawn a vendored redis-server pointed at an externally-provided
+        /// data directory. Used by the r73v cross-impl `--loadrdb` gate
+        /// to boot a fresh upstream instance against a re-emitted
+        /// `dump.rdb`. The caller owns and cleans up the directory.
+        /// (br-frankenredis-r73v sub-task a)
+        fn spawn_in_dir(oracle_root: &std::path::Path, data_dir: &std::path::Path) -> Option<Self> {
+            if std::env::var_os("FR_CONFORMANCE_SKIP_LIVE_ORACLE").is_some() {
+                return None;
+            }
+            Self::spawn_with(oracle_root, data_dir)
+        }
+
+        fn spawn_with(oracle_root: &std::path::Path, tmp_dir: &std::path::Path) -> Option<Self> {
             let binary = oracle_root.join("src").join("redis-server");
             if !binary.exists() {
                 return None;
@@ -8425,19 +8448,13 @@ mod tests {
                 drop(listener);
                 port
             };
-            let ts = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .ok()?
-                .as_nanos();
-            let tmp_dir = std::env::temp_dir().join(format!("fr_live_oracle_{ts}_{port}"));
-            fs::create_dir_all(&tmp_dir).ok()?;
             let child = std::process::Command::new(&binary)
                 .arg("--port")
                 .arg(port.to_string())
                 .arg("--bind")
                 .arg("127.0.0.1")
                 .arg("--dir")
-                .arg(&tmp_dir)
+                .arg(tmp_dir)
                 .arg("--appendonly")
                 .arg("no")
                 .arg("--save")
@@ -8458,14 +8475,16 @@ mod tests {
                 .stderr(std::process::Stdio::null())
                 .spawn()
                 .ok()?;
-            // Wait for the port to accept connections (max 3 seconds).
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            // Wait for the port to accept connections. Boot can take
+            // longer when redis is loading a re-emitted dump.rdb at
+            // startup; bump the deadline to 6s to absorb that.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
             while std::time::Instant::now() < deadline {
                 if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
                     return Some(Self {
                         child,
                         port,
-                        _tmp_dir: tmp_dir,
+                        _tmp_dir: tmp_dir.to_path_buf(),
                     });
                 }
                 std::thread::sleep(std::time::Duration::from_millis(50));
@@ -8475,6 +8494,82 @@ mod tests {
             let _ = child.kill();
             let _ = child.wait();
             None
+        }
+
+        fn spawn_with_dump(
+            oracle_root: &std::path::Path,
+            dump: &[u8],
+            context: &str,
+        ) -> Result<Option<Self>, String> {
+            if std::env::var_os("FR_CONFORMANCE_SKIP_LIVE_ORACLE").is_some() {
+                return Ok(None);
+            }
+            let binary = oracle_root.join("src").join("redis-server");
+            if !binary.exists() {
+                return Ok(None);
+            }
+            let port = {
+                let listener = std::net::TcpListener::bind("127.0.0.1:0")
+                    .map_err(|err| format!("bind redis loadback port: {err}"))?;
+                let port = listener
+                    .local_addr()
+                    .map_err(|err| format!("read redis loadback port: {err}"))?
+                    .port();
+                drop(listener);
+                port
+            };
+            let ts = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|err| format!("clock moved backwards: {err}"))?
+                .as_nanos();
+            let tmp_dir =
+                std::env::temp_dir().join(format!("fr_live_oracle_loadback_{context}_{ts}_{port}"));
+            fs::create_dir_all(&tmp_dir)
+                .map_err(|err| format!("create redis loadback dir {}: {err}", tmp_dir.display()))?;
+            fs::write(tmp_dir.join("dump.rdb"), dump)
+                .map_err(|err| format!("write redis loadback dump.rdb: {err}"))?;
+
+            let child = std::process::Command::new(&binary)
+                .arg("--port")
+                .arg(port.to_string())
+                .arg("--bind")
+                .arg("127.0.0.1")
+                .arg("--dir")
+                .arg(&tmp_dir)
+                .arg("--dbfilename")
+                .arg("dump.rdb")
+                .arg("--appendonly")
+                .arg("no")
+                .arg("--save")
+                .arg("")
+                .arg("--daemonize")
+                .arg("no")
+                .arg("--protected-mode")
+                .arg("no")
+                .arg("--enable-debug-command")
+                .arg("yes")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|err| format!("spawn vendored redis-server for {context}: {err}"))?;
+
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            let mut child = child;
+            while std::time::Instant::now() < deadline {
+                if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                    return Ok(Some(Self {
+                        child,
+                        port,
+                        _tmp_dir: tmp_dir,
+                    }));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            Err(format!(
+                "vendored redis-server did not load re-emitted dump.rdb for {context}"
+            ))
         }
 
         fn oracle_config(&self) -> LiveOracleConfig {
@@ -10966,7 +11061,7 @@ mod tests {
     /// (br-frankenredis-8w1e / br-frankenredis-aqgx)
     #[test]
     fn live_redis_rdb_corpus_decodes_cleanly() {
-        use fr_persist::decode_rdb;
+        use fr_persist::{RdbValue, decode_rdb, encode_rdb};
 
         let cfg = HarnessConfig::default_paths();
         let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
@@ -10979,7 +11074,7 @@ mod tests {
             connect_live_redis(&oracle).expect("connect to vendored redis for rdb corpus harvest");
         flushall(&mut conn).expect("flushall on oracle");
 
-        fn send_owned(conn: &mut std::net::TcpStream, argv: Vec<Vec<u8>>, ctx: &str) {
+        fn send_owned(conn: &mut std::net::TcpStream, argv: Vec<Vec<u8>>, ctx: &str) -> RespFrame {
             let frame = RespFrame::Array(Some(
                 argv.into_iter()
                     .map(|a| RespFrame::BulkString(Some(a)))
@@ -10991,13 +11086,29 @@ mod tests {
             match reply {
                 RespFrame::SimpleString(_)
                 | RespFrame::Integer(_)
-                | RespFrame::BulkString(Some(_)) => {}
+                | RespFrame::BulkString(Some(_))
+                | RespFrame::Array(Some(_))
+                | RespFrame::Array(None) => reply,
                 RespFrame::Error(err) => panic!("{ctx}: oracle returned error: {err}"),
                 other => panic!("{ctx}: unexpected reply: {other:?}"),
             }
         }
         fn argv(parts: &[&[u8]]) -> Vec<Vec<u8>> {
             parts.iter().map(|p| p.to_vec()).collect()
+        }
+        fn frame_contains_bulk(frame: &RespFrame, needle: &[u8]) -> bool {
+            match frame {
+                RespFrame::BulkString(Some(bytes)) => {
+                    bytes.windows(needle.len()).any(|w| w == needle)
+                }
+                RespFrame::SimpleString(value) | RespFrame::Error(value) => {
+                    value.as_bytes().windows(needle.len()).any(|w| w == needle)
+                }
+                RespFrame::Array(Some(items)) => {
+                    items.iter().any(|item| frame_contains_bulk(item, needle))
+                }
+                _ => false,
+            }
         }
 
         // RDB_TYPE_STRING (0): raw bytes + integer-encoded (selected
@@ -11087,6 +11198,135 @@ mod tests {
             "xgroup_create",
         );
 
+        // br-frankenredis-ian4: upstream-produced stream RDB corpus.
+        //
+        // A single dump with 20 stream keys gives the re-emission gate
+        // broad coverage without paying for 20 redis-server processes:
+        // empty-ish streams, multi-field entries, multiple groups,
+        // multiple consumers, pending entries, and deleted pending
+        // entries all flow through the same upstream dump.rdb decode.
+        let stream_fixture_count = 20_u64;
+        for fixture in 0..stream_fixture_count {
+            let key = format!("stream_corpus:{fixture}");
+            let first_id = format!("{}-0", 10_000 + fixture);
+            let second_id = format!("{}-1", 10_000 + fixture);
+            let first_value = format!("fixture-{fixture}-first");
+            let second_value = format!("fixture-{fixture}-second");
+            let extra_value = format!("fixture-{fixture}-extra");
+            let group = format!("group-{fixture}");
+
+            send_owned(
+                &mut conn,
+                vec![
+                    b"XADD".to_vec(),
+                    key.as_bytes().to_vec(),
+                    first_id.as_bytes().to_vec(),
+                    b"field".to_vec(),
+                    first_value.as_bytes().to_vec(),
+                ],
+                "stream_corpus_xadd_first",
+            );
+            send_owned(
+                &mut conn,
+                vec![
+                    b"XADD".to_vec(),
+                    key.as_bytes().to_vec(),
+                    second_id.as_bytes().to_vec(),
+                    b"field".to_vec(),
+                    second_value.as_bytes().to_vec(),
+                    b"extra".to_vec(),
+                    extra_value.as_bytes().to_vec(),
+                ],
+                "stream_corpus_xadd_second",
+            );
+
+            if fixture % 2 == 0 {
+                send_owned(
+                    &mut conn,
+                    vec![
+                        b"XGROUP".to_vec(),
+                        b"CREATE".to_vec(),
+                        key.as_bytes().to_vec(),
+                        group.as_bytes().to_vec(),
+                        b"0".to_vec(),
+                    ],
+                    "stream_corpus_xgroup_create",
+                );
+                send_owned(
+                    &mut conn,
+                    vec![
+                        b"XREADGROUP".to_vec(),
+                        b"GROUP".to_vec(),
+                        group.as_bytes().to_vec(),
+                        b"alice".to_vec(),
+                        b"COUNT".to_vec(),
+                        b"1".to_vec(),
+                        b"STREAMS".to_vec(),
+                        key.as_bytes().to_vec(),
+                        b">".to_vec(),
+                    ],
+                    "stream_corpus_xreadgroup_alice",
+                );
+                if fixture % 4 == 0 {
+                    send_owned(
+                        &mut conn,
+                        vec![
+                            b"XREADGROUP".to_vec(),
+                            b"GROUP".to_vec(),
+                            group.as_bytes().to_vec(),
+                            b"bob".to_vec(),
+                            b"COUNT".to_vec(),
+                            b"1".to_vec(),
+                            b"STREAMS".to_vec(),
+                            key.as_bytes().to_vec(),
+                            b">".to_vec(),
+                        ],
+                        "stream_corpus_xreadgroup_bob",
+                    );
+                }
+                if fixture % 5 == 0 {
+                    send_owned(
+                        &mut conn,
+                        vec![
+                            b"XDEL".to_vec(),
+                            key.as_bytes().to_vec(),
+                            first_id.as_bytes().to_vec(),
+                        ],
+                        "stream_corpus_xdel_pending",
+                    );
+                }
+                if fixture % 6 == 0 {
+                    let group2 = format!("group-{fixture}-second");
+                    send_owned(
+                        &mut conn,
+                        vec![
+                            b"XGROUP".to_vec(),
+                            b"CREATE".to_vec(),
+                            key.as_bytes().to_vec(),
+                            group2.as_bytes().to_vec(),
+                            b"0".to_vec(),
+                        ],
+                        "stream_corpus_xgroup_create_second",
+                    );
+                    send_owned(
+                        &mut conn,
+                        vec![
+                            b"XREADGROUP".to_vec(),
+                            b"GROUP".to_vec(),
+                            group2.as_bytes().to_vec(),
+                            b"carol".to_vec(),
+                            b"COUNT".to_vec(),
+                            b"2".to_vec(),
+                            b"STREAMS".to_vec(),
+                            key.as_bytes().to_vec(),
+                            b">".to_vec(),
+                        ],
+                        "stream_corpus_xreadgroup_carol",
+                    );
+                }
+            }
+        }
+
         // Trigger synchronous SAVE — writes <data_dir>/dump.rdb. The
         // SAVE command works regardless of the auto-snapshot config.
         send_owned(&mut conn, argv(&[b"SAVE"]), "save");
@@ -11146,6 +11386,372 @@ mod tests {
             "expected aux 'redis-ver' from upstream-produced rdb, got: {:?}",
             aux.keys().collect::<Vec<_>>()
         );
+
+        let stream_corpus_keys: BTreeSet<Vec<u8>> = (0..stream_fixture_count)
+            .map(|fixture| format!("stream_corpus:{fixture}").into_bytes())
+            .collect();
+        let decoded_stream_corpus = entries
+            .iter()
+            .filter(|entry| stream_corpus_keys.contains(&entry.key))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            decoded_stream_corpus.len(),
+            stream_fixture_count as usize,
+            "expected all ian4 stream corpus keys to decode"
+        );
+        for entry in decoded_stream_corpus {
+            match &entry.value {
+                RdbValue::Stream(stream_entries, watermark, groups, _) => {
+                    assert!(
+                        !stream_entries.is_empty(),
+                        "decoded stream corpus entry {:?} had no live entries",
+                        String::from_utf8_lossy(&entry.key)
+                    );
+                    assert!(
+                        watermark.is_some(),
+                        "decoded stream corpus entry {:?} lost watermark",
+                        String::from_utf8_lossy(&entry.key)
+                    );
+                    if entry.key.ends_with(b":0") {
+                        assert!(
+                            !groups.is_empty(),
+                            "decoded stream corpus entry 0 lost consumer groups"
+                        );
+                    }
+                }
+                other => panic!(
+                    "expected stream value for corpus key {:?}, got {other:?}",
+                    String::from_utf8_lossy(&entry.key)
+                ),
+            }
+        }
+
+        let aux_refs = aux
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let reemitted = encode_rdb(&entries, &aux_refs);
+        let loadback = VendoredRedis::spawn_with_dump(
+            &cfg.oracle_root,
+            &reemitted,
+            "ian4_stream_corpus_reemit",
+        )
+        .expect("spawn vendored redis with re-emitted stream corpus")
+        .expect("vendored redis-server should be available after source oracle spawned");
+        let loadback_oracle = loadback.oracle_config();
+        let mut loadback_conn = connect_live_redis(&loadback_oracle)
+            .expect("connect to vendored redis loaded from re-emitted rdb");
+
+        for fixture in 0..stream_fixture_count {
+            let key = format!("stream_corpus:{fixture}");
+            let second_value = format!("fixture-{fixture}-second");
+            let extra_value = format!("fixture-{fixture}-extra");
+            let xinfo = send_owned(
+                &mut loadback_conn,
+                vec![
+                    b"XINFO".to_vec(),
+                    b"STREAM".to_vec(),
+                    key.as_bytes().to_vec(),
+                    b"FULL".to_vec(),
+                ],
+                "loadback_xinfo_stream_full",
+            );
+            assert!(
+                frame_contains_bulk(&xinfo, second_value.as_bytes()),
+                "re-emitted RDB loadback lost second entry for {key}: {xinfo:?}"
+            );
+            assert!(
+                frame_contains_bulk(&xinfo, extra_value.as_bytes()),
+                "re-emitted RDB loadback lost multi-field entry for {key}: {xinfo:?}"
+            );
+            if fixture % 2 == 0 {
+                let group = format!("group-{fixture}");
+                assert!(
+                    frame_contains_bulk(&xinfo, group.as_bytes()),
+                    "re-emitted RDB loadback lost group metadata for {key}: {xinfo:?}"
+                );
+            }
+        }
+    }
+
+    /// Sub-task (a) of br-frankenredis-r73v: verify a `dump.rdb`
+    /// produced by upstream redis-server, decoded by
+    /// `fr_persist::decode_rdb`, then **re-emitted** via
+    /// `fr_persist::encode_rdb`, can be loaded back by a second
+    /// upstream redis-server and yield the same in-memory state.
+    ///
+    /// This is the "cross-impl round-trip" gate — Pattern 3 from
+    /// /testing-conformance-harnesses applied at the file level
+    /// rather than the wire level (which DUMP/RESTORE already covers,
+    /// see live_redis_stream_dump_restore_roundtrip_matches_upstream).
+    ///
+    /// Flow:
+    ///   1. Spawn `oracle_a`; populate non-stream / non-private-tag
+    ///      shapes (string/list/set/hash/zset) with thresholds pinned
+    ///      so they land on the canonical type tags fr-persist emits.
+    ///   2. Read pre-state (per-key shape probes: GET/LLEN/SCARD/SMEMBERS
+    ///      sorted/HGETALL canonicalized/ZRANGE WITHSCORES) on oracle_a.
+    ///   3. `SAVE` on oracle_a → `<tmp_a>/dump.rdb`.
+    ///   4. `fr_persist::decode_rdb(bytes_a)` → entries.
+    ///   5. `fr_persist::encode_rdb(entries)` → bytes_b.
+    ///   6. Drop bytes_b at `<tmp_b>/dump.rdb`.
+    ///   7. Spawn `oracle_b` rooted at `<tmp_b>` (it boots → loads our
+    ///      re-emitted file).
+    ///   8. Read post-state on oracle_b and compare to pre-state.
+    ///
+    /// Streams (RDB_TYPE_STREAM=15 fr-persist private encoding) and
+    /// HashWithTtls (type 100, FrankenRedis private) are **excluded** —
+    /// their cross-impl gate is owned by br-frankenredis-ian4 (file-level
+    /// stream corpus + upstream STREAM_LISTPACKS_3 encoder loadback).
+    /// (br-frankenredis-r73v sub-task a)
+    #[test]
+    fn live_redis_rdb_reemit_loadrdb_matches_upstream() {
+        use fr_persist::{decode_rdb, encode_rdb};
+
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_a) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle_a_cfg = oracle_a.oracle_config();
+        let dump_path_a = oracle_a.data_dir().join("dump.rdb");
+
+        let mut conn_a =
+            connect_live_redis(&oracle_a_cfg).expect("connect to oracle_a for r73v reemit");
+        flushall(&mut conn_a).expect("flushall on oracle_a");
+
+        fn argv(parts: &[&[u8]]) -> Vec<Vec<u8>> {
+            parts.iter().map(|p| p.to_vec()).collect()
+        }
+        fn send_simple(conn: &mut std::net::TcpStream, parts: Vec<Vec<u8>>, ctx: &str) {
+            let frame = RespFrame::Array(Some(
+                parts
+                    .into_iter()
+                    .map(|a| RespFrame::BulkString(Some(a)))
+                    .collect(),
+            ));
+            send_frame(conn, &frame).unwrap_or_else(|e| panic!("send {ctx}: {e}"));
+            let reply =
+                read_resp_frame_from_stream(conn).unwrap_or_else(|e| panic!("read {ctx}: {e}"));
+            if let RespFrame::Error(err) = reply {
+                panic!("{ctx}: oracle returned error: {err}");
+            }
+        }
+        fn query(conn: &mut std::net::TcpStream, parts: Vec<Vec<u8>>, ctx: &str) -> RespFrame {
+            let frame = RespFrame::Array(Some(
+                parts
+                    .into_iter()
+                    .map(|a| RespFrame::BulkString(Some(a)))
+                    .collect(),
+            ));
+            send_frame(conn, &frame).unwrap_or_else(|e| panic!("send {ctx}: {e}"));
+            read_resp_frame_from_stream(conn).unwrap_or_else(|e| panic!("read {ctx}: {e}"))
+        }
+
+        // Pin thresholds so seeded data lands on the canonical (non-compact)
+        // RDB type tags that fr-persist::encode_rdb emits today
+        // (RDB_TYPE_STRING/LIST/SET/HASH/ZSET_2). Upstream redis-server
+        // accepts these on read regardless of which type bytes it would
+        // *prefer* to emit.
+        for (param, value) in &[
+            ("hash-max-listpack-entries", "0"),
+            ("hash-max-listpack-value", "0"),
+            ("set-max-listpack-entries", "0"),
+            ("set-max-intset-entries", "0"),
+            ("zset-max-listpack-entries", "0"),
+            ("zset-max-listpack-value", "0"),
+            // Force list-max-listpack-size to 0 so RPUSH lands on
+            // RDB_TYPE_LIST_QUICKLIST_2 with PLAIN nodes? Upstream still
+            // emits quicklist for lists irrespective of this setting, so
+            // we don't try to coerce list encoding here. (See list_small
+            // probe below — fr-persist::encode_rdb emits RDB_TYPE_LIST
+            // (1) which upstream accepts.)
+        ] {
+            send_simple(
+                &mut conn_a,
+                argv(&[b"CONFIG", b"SET", param.as_bytes(), value.as_bytes()]),
+                &format!("config set {param}"),
+            );
+        }
+
+        // String (raw + integer-encoded).
+        send_simple(
+            &mut conn_a,
+            argv(&[b"SET", b"str_raw", b"hello world"]),
+            "set_raw",
+        );
+        send_simple(&mut conn_a, argv(&[b"SET", b"str_int", b"4242"]), "set_int");
+        // List.
+        send_simple(
+            &mut conn_a,
+            argv(&[b"RPUSH", b"list_small", b"alpha", b"beta", b"gamma"]),
+            "rpush",
+        );
+        // Set with both integer and string members (forces RDB_TYPE_SET).
+        send_simple(
+            &mut conn_a,
+            argv(&[b"SADD", b"set_mixed", b"1", b"two", b"3", b"four"]),
+            "sadd",
+        );
+        // Hash (small but threshold-pinned to 0 → RDB_TYPE_HASH).
+        send_simple(
+            &mut conn_a,
+            argv(&[b"HSET", b"hash_obj", b"f1", b"v1", b"f2", b"v2"]),
+            "hset",
+        );
+        // Sorted set with mixed scores.
+        send_simple(
+            &mut conn_a,
+            argv(&[
+                b"ZADD",
+                b"zset_obj",
+                b"1.0",
+                b"a",
+                b"2.5",
+                b"b",
+                b"7.25",
+                b"c",
+            ]),
+            "zadd",
+        );
+
+        // Pre-state probes (per-key, deterministic comparisons).
+        // SMEMBERS / HGETALL come back hash-ordered, so canonicalise the
+        // arrays element-wise after decoding into plain Vec<Vec<u8>>.
+        let pre_str_raw = query(&mut conn_a, argv(&[b"GET", b"str_raw"]), "pre get str_raw");
+        let pre_str_int = query(&mut conn_a, argv(&[b"GET", b"str_int"]), "pre get str_int");
+        let pre_list_len = query(
+            &mut conn_a,
+            argv(&[b"LLEN", b"list_small"]),
+            "pre llen list_small",
+        );
+        let pre_list_range = query(
+            &mut conn_a,
+            argv(&[b"LRANGE", b"list_small", b"0", b"-1"]),
+            "pre lrange list_small",
+        );
+        let pre_set_card = query(
+            &mut conn_a,
+            argv(&[b"SCARD", b"set_mixed"]),
+            "pre scard set_mixed",
+        );
+        let pre_set_members = canonical_bulk_string_array(&query(
+            &mut conn_a,
+            argv(&[b"SMEMBERS", b"set_mixed"]),
+            "pre smembers set_mixed",
+        ))
+        .expect("pre smembers should be a bulk-string array");
+        let pre_hash_pairs = canonical_hgetall_pairs(&query(
+            &mut conn_a,
+            argv(&[b"HGETALL", b"hash_obj"]),
+            "pre hgetall hash_obj",
+        ))
+        .expect("pre hgetall should be an even-length bulk array");
+        let pre_zset = query(
+            &mut conn_a,
+            argv(&[b"ZRANGE", b"zset_obj", b"0", b"-1", b"WITHSCORES"]),
+            "pre zrange zset_obj",
+        );
+
+        // Trigger SAVE on oracle_a — produces dump.rdb_a.
+        send_simple(&mut conn_a, argv(&[b"SAVE"]), "save_a");
+        let bytes_a = std::fs::read(&dump_path_a).unwrap_or_else(|e| {
+            panic!(
+                "failed to read oracle_a dump.rdb at {}: {e}",
+                dump_path_a.display()
+            )
+        });
+        assert!(bytes_a.starts_with(b"REDIS"));
+
+        // Decode → re-encode through fr-persist.
+        let (entries, _aux) = decode_rdb(&bytes_a)
+            .unwrap_or_else(|e| panic!("fr_persist::decode_rdb rejected oracle_a dump.rdb: {e:?}"));
+        let bytes_b = encode_rdb(&entries, &[]);
+        assert!(bytes_b.starts_with(b"REDIS"));
+
+        // Drop a separate dump.rdb for oracle_b to load from. Use a
+        // dedicated sub-directory so the loadrdb path discovers a fresh
+        // file with no stale wal/aof companions.
+        let tmp_b_dir = std::env::temp_dir().join(format!(
+            "fr_r73v_reemit_b_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        fs::create_dir_all(&tmp_b_dir).expect("create tmp_b_dir");
+        let dump_path_b = tmp_b_dir.join("dump.rdb");
+        std::fs::write(&dump_path_b, &bytes_b).expect("write reemitted dump.rdb_b");
+
+        // Boot oracle_b pointed at tmp_b_dir; its startup loadrdb step
+        // will pick up our re-emitted file. Drop oracle_a first so the
+        // ports we asked for don't collide on a cramped CI box.
+        drop(oracle_a);
+
+        let oracle_b = VendoredRedis::spawn_in_dir(&cfg.oracle_root, &tmp_b_dir)
+            .expect("spawn oracle_b at re-emitted dump.rdb dir");
+        let oracle_b_cfg = oracle_b.oracle_config();
+        let mut conn_b =
+            connect_live_redis(&oracle_b_cfg).expect("connect to oracle_b for r73v reemit");
+
+        // Post-state on oracle_b.
+        let post_str_raw = query(&mut conn_b, argv(&[b"GET", b"str_raw"]), "post get str_raw");
+        let post_str_int = query(&mut conn_b, argv(&[b"GET", b"str_int"]), "post get str_int");
+        let post_list_len = query(
+            &mut conn_b,
+            argv(&[b"LLEN", b"list_small"]),
+            "post llen list_small",
+        );
+        let post_list_range = query(
+            &mut conn_b,
+            argv(&[b"LRANGE", b"list_small", b"0", b"-1"]),
+            "post lrange list_small",
+        );
+        let post_set_card = query(
+            &mut conn_b,
+            argv(&[b"SCARD", b"set_mixed"]),
+            "post scard set_mixed",
+        );
+        let post_set_members = canonical_bulk_string_array(&query(
+            &mut conn_b,
+            argv(&[b"SMEMBERS", b"set_mixed"]),
+            "post smembers set_mixed",
+        ))
+        .expect("post smembers should be a bulk-string array");
+        let post_hash_pairs = canonical_hgetall_pairs(&query(
+            &mut conn_b,
+            argv(&[b"HGETALL", b"hash_obj"]),
+            "post hgetall hash_obj",
+        ))
+        .expect("post hgetall should be an even-length bulk array");
+        let post_zset = query(
+            &mut conn_b,
+            argv(&[b"ZRANGE", b"zset_obj", b"0", b"-1", b"WITHSCORES"]),
+            "post zrange zset_obj",
+        );
+
+        assert_eq!(pre_str_raw, post_str_raw, "str_raw drifted across re-emit");
+        assert_eq!(pre_str_int, post_str_int, "str_int drifted across re-emit");
+        assert_eq!(pre_list_len, post_list_len, "LLEN drifted across re-emit");
+        assert_eq!(
+            pre_list_range, post_list_range,
+            "LRANGE drifted across re-emit"
+        );
+        assert_eq!(pre_set_card, post_set_card, "SCARD drifted across re-emit");
+        assert_eq!(
+            pre_set_members, post_set_members,
+            "SMEMBERS drifted across re-emit (sorted comparison)"
+        );
+        assert_eq!(
+            pre_hash_pairs, post_hash_pairs,
+            "HGETALL drifted across re-emit (sorted-by-field comparison)"
+        );
+        assert_eq!(
+            pre_zset, post_zset,
+            "ZRANGE WITHSCORES drifted across re-emit"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_b_dir);
     }
 
     #[test]

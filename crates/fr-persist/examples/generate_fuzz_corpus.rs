@@ -71,6 +71,7 @@ fn generate_rdb_corpus(dir: &Path) {
             vec![(1000, 0, vec![(b"f".to_vec(), b"v".to_vec())])],
             Some((1000, 0)),
             Vec::new(),
+            None,
         ),
         expire_ms: None,
     }];

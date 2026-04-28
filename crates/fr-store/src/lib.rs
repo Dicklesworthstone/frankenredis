@@ -10259,7 +10259,8 @@ impl Store {
                 )
                 .ok_or(StoreError::InvalidDumpPayload)?;
                 cursor += consumed;
-                let fr_persist::RdbValue::Stream(stream_entries, watermark, groups) = stream_value
+                let fr_persist::RdbValue::Stream(stream_entries, watermark, groups, _) =
+                    stream_value
                 else {
                     return Err(StoreError::InvalidDumpPayload);
                 };

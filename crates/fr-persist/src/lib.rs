@@ -844,6 +844,13 @@ pub struct RdbStreamConsumerGroup {
     pub pending: Vec<RdbStreamPendingEntry>,
 }
 
+/// Upstream stream RDB payload retained for exact file-level re-emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RdbStreamMetadata {
+    pub upstream_type_byte: u8,
+    pub upstream_payload: Vec<u8>,
+}
+
 /// Value types supported in our RDB format.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RdbValue {
@@ -862,6 +869,7 @@ pub enum RdbValue {
         Vec<StreamEntry>,
         Option<(u64, u64)>,
         Vec<RdbStreamConsumerGroup>,
+        Option<RdbStreamMetadata>,
     ),
 }
 
@@ -1051,8 +1059,15 @@ pub fn encode_rdb(entries: &[RdbEntry], aux: &[(&str, &str)]) -> Vec<u8> {
                     buf.extend_from_slice(&score.to_le_bytes());
                 }
             }
-            RdbValue::Stream(stream_entries, watermark, groups) => {
-                encode_stream_rdb_value(&mut buf, &entry.key, stream_entries, *watermark, groups);
+            RdbValue::Stream(stream_entries, watermark, groups, metadata) => {
+                encode_stream_rdb_value(
+                    &mut buf,
+                    &entry.key,
+                    stream_entries,
+                    *watermark,
+                    groups,
+                    metadata,
+                );
             }
         }
         debug_assert!(index < sorted_entries.len());
@@ -1072,7 +1087,15 @@ fn encode_stream_rdb_value(
     stream_entries: &[StreamEntry],
     watermark: Option<(u64, u64)>,
     groups: &[RdbStreamConsumerGroup],
+    metadata: &Option<RdbStreamMetadata>,
 ) {
+    if let Some(metadata) = metadata {
+        buf.push(metadata.upstream_type_byte);
+        rdb_encode_string(buf, key);
+        buf.extend_from_slice(&metadata.upstream_payload);
+        return;
+    }
+
     #[cfg(feature = "upstream-stream-rdb")]
     {
         if can_encode_upstream_stream_losslessly(stream_entries, watermark, groups)
@@ -1767,7 +1790,7 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                                 pending,
                             });
                         }
-                        RdbValue::Stream(stream_entries, watermark, groups)
+                        RdbValue::Stream(stream_entries, watermark, groups, None)
                     }
                     UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2 | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3 => {
                         let (value, consumed) =
@@ -2595,9 +2618,10 @@ mod tests {
         RDB_CHECKSUM_LEN, RDB_OPCODE_AUX, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME_MS,
         RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_WITH_TTLS,
         RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STRING,
-        RDB_TYPE_ZSET_LISTPACK, RdbEntry, RdbStreamConsumerGroup, RdbStreamPendingEntry, RdbValue,
-        UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decode_intset_members, decode_rdb,
-        decode_rdb_prefix, encode_rdb, lzf_decompress, rdb_encode_length, rdb_encode_string,
+        RDB_TYPE_ZSET_LISTPACK, RdbEntry, RdbStreamConsumerGroup, RdbStreamMetadata,
+        RdbStreamPendingEntry, RdbValue, UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis,
+        decode_intset_members, decode_rdb, decode_rdb_prefix, encode_rdb, lzf_decompress,
+        rdb_encode_length, rdb_encode_string,
     };
 
     fn append_rdb_checksum(encoded: &mut Vec<u8>) {
@@ -3454,6 +3478,7 @@ mod tests {
                 ],
                 Some((1001, 0)),
                 Vec::new(),
+                None,
             ),
             expire_ms: None,
         }];
@@ -3467,7 +3492,7 @@ mod tests {
         let entries = vec![RdbEntry {
             db: 0,
             key: b"emptystream".to_vec(),
-            value: RdbValue::Stream(vec![], None, Vec::new()),
+            value: RdbValue::Stream(vec![], None, Vec::new(), None),
             expire_ms: None,
         }];
         let encoded = encode_rdb(&entries, &[]);
@@ -3484,6 +3509,7 @@ mod tests {
                 vec![(5000, 1, vec![(b"field".to_vec(), b"value".to_vec())])],
                 Some((5000, 1)),
                 Vec::new(),
+                None,
             ),
             expire_ms: Some(9_999_999),
         }];
@@ -3525,6 +3551,7 @@ mod tests {
                         },
                     ],
                 }],
+                None,
             ),
             expire_ms: None,
         }];
@@ -3555,6 +3582,7 @@ mod tests {
                         last_delivered_ms: 5000,
                     }],
                 }],
+                None,
             ),
             expire_ms: None,
         }];
@@ -3565,7 +3593,24 @@ mod tests {
         assert_eq!(encoded[14], UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3);
 
         let (decoded, _) = decode_rdb(&encoded).expect("decode");
-        assert_eq!(decoded, entries);
+        assert_eq!(decoded.len(), 1);
+        let RdbValue::Stream(decoded_entries, decoded_watermark, decoded_groups, metadata) =
+            &decoded[0].value
+        else {
+            panic!("expected decoded stream");
+        };
+        let RdbValue::Stream(expected_entries, expected_watermark, expected_groups, _) =
+            &entries[0].value
+        else {
+            panic!("expected source stream");
+        };
+        assert_eq!(decoded_entries, expected_entries);
+        assert_eq!(decoded_watermark, expected_watermark);
+        assert_eq!(decoded_groups, expected_groups);
+        assert!(
+            metadata.is_some(),
+            "upstream stream decode should retain raw payload metadata"
+        );
     }
 
     #[cfg(feature = "upstream-stream-rdb")]
@@ -3624,6 +3669,7 @@ mod tests {
                         ],
                         Some((ms, 1)),
                         groups,
+                        None,
                     ),
                     expire_ms: None,
                 }
@@ -3772,6 +3818,10 @@ mod tests {
                             last_delivered_ms: 1000,
                         }],
                     }],
+                    Some(RdbStreamMetadata {
+                        upstream_type_byte: UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3,
+                        upstream_payload: payload.clone(),
+                    }),
                 ),
                 expire_ms: None,
             }]
@@ -3787,6 +3837,7 @@ mod tests {
                 vec![(1000, 0, vec![(b"msg".to_vec(), b"hello".to_vec())])],
                 Some((1000, 0)),
                 Vec::new(),
+                None,
             ),
             expire_ms: None,
         }];
@@ -3832,6 +3883,7 @@ mod tests {
                     vec![(100, 0, vec![(b"k".to_vec(), b"v".to_vec())])],
                     Some((100, 0)),
                     Vec::new(),
+                    None,
                 ),
                 expire_ms: Some(1_000_000),
             },
@@ -4091,7 +4143,7 @@ mod tests {
             let entries = vec![RdbEntry {
                 db: 0,
                 key: b"mystream".to_vec(),
-                value: RdbValue::Stream(vec![], None, Vec::new()),
+                value: RdbValue::Stream(vec![], None, Vec::new(), None),
                 expire_ms: None,
             }];
             let encoded = encode_rdb(&entries, &[]);
@@ -4232,7 +4284,7 @@ mod tests {
                     prop::collection::vec(stream_consumer_group_strategy(), 0..=2),
                 )
                     .prop_map(|(entries, watermark, groups)| {
-                        RdbValue::Stream(entries, watermark, groups)
+                        RdbValue::Stream(entries, watermark, groups, None)
                     }),
             ]
         }
@@ -4408,7 +4460,7 @@ mod tests {
                     prop::collection::vec(stream_consumer_group_strategy(), 0..=2),
                 )
                     .prop_map(|(entries, watermark, groups)| {
-                        RdbValue::Stream(entries, watermark, groups)
+                        RdbValue::Stream(entries, watermark, groups, None)
                     }),
             ]
         }
