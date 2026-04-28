@@ -1,8 +1,8 @@
 #![no_main]
 
-use libfuzzer_sys::fuzz_target;
 use arbitrary::{Arbitrary, Unstructured};
 use fr_command::{parse_client_tracking_state, parse_migrate_request};
+use libfuzzer_sys::fuzz_target;
 
 #[derive(Debug, Arbitrary)]
 struct FuzzInput {

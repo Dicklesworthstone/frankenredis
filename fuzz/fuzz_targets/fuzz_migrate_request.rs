@@ -36,21 +36,44 @@ enum ValidOptionStep {
     Copy,
     Replace,
     Auth(Vec<u8>),
-    Auth2 { username: Vec<u8>, password: Vec<u8> },
+    Auth2 {
+        username: Vec<u8>,
+        password: Vec<u8>,
+    },
 }
 
 #[derive(Debug, Arbitrary)]
 enum InvalidMigrateCase {
-    TooShort { args: Vec<Vec<u8>> },
-    InvalidHostUtf8 { tail: Vec<u8> },
-    InvalidPort { token: Vec<u8> },
-    InvalidDb { token: Vec<u8> },
-    InvalidTimeout { token: Vec<u8> },
+    TooShort {
+        args: Vec<Vec<u8>>,
+    },
+    InvalidHostUtf8 {
+        tail: Vec<u8>,
+    },
+    InvalidPort {
+        token: Vec<u8>,
+    },
+    InvalidDb {
+        token: Vec<u8>,
+    },
+    InvalidTimeout {
+        token: Vec<u8>,
+    },
     MissingAuthArg,
-    MissingAuth2Args { username_only: bool, username: Vec<u8> },
-    UnknownOption { token: Vec<u8> },
-    InvalidOptionUtf8 { tail: Vec<u8> },
-    KeysRequiresEmptyKey { key_arg: Vec<u8>, keys: Vec<Vec<u8>> },
+    MissingAuth2Args {
+        username_only: bool,
+        username: Vec<u8>,
+    },
+    UnknownOption {
+        token: Vec<u8>,
+    },
+    InvalidOptionUtf8 {
+        tail: Vec<u8>,
+    },
+    KeysRequiresEmptyKey {
+        key_arg: Vec<u8>,
+        keys: Vec<Vec<u8>>,
+    },
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -169,7 +192,12 @@ fn expected_request(case: &ValidMigrateCase) -> MigrateRequest {
     }
 
     let keys = if case.keys_mode {
-        case.keys.iter().take(MAX_KEYS).cloned().map(limit_arg_len).collect()
+        case.keys
+            .iter()
+            .take(MAX_KEYS)
+            .cloned()
+            .map(limit_arg_len)
+            .collect()
     } else {
         let key_arg = limit_arg_len(case.key_arg.clone());
         if key_arg.is_empty() {

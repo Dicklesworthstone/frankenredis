@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 
-use fr_server::{split_inline_args, try_parse_inline, should_try_inline_parsing};
+use fr_server::{should_try_inline_parsing, split_inline_args, try_parse_inline};
 
 #[derive(Debug, Arbitrary)]
 enum FuzzInput {
@@ -60,7 +60,13 @@ impl StructuredInline {
             match arg {
                 InlineArg::Unquoted(bytes) => {
                     for &b in bytes {
-                        if b != b' ' && b != b'\t' && b != b'"' && b != b'\'' && b != b'\r' && b != b'\n' {
+                        if b != b' '
+                            && b != b'\t'
+                            && b != b'"'
+                            && b != b'\''
+                            && b != b'\r'
+                            && b != b'\n'
+                        {
                             out.push(b);
                         }
                     }

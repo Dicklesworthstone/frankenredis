@@ -243,12 +243,7 @@ impl RdbEntryFuzz {
 }
 
 fn capped_non_empty(input: &SmallString, fallback: &[u8], max_len: usize) -> Vec<u8> {
-    let capped = input
-        .data
-        .iter()
-        .take(max_len)
-        .copied()
-        .collect::<Vec<_>>();
+    let capped = input.data.iter().take(max_len).copied().collect::<Vec<_>>();
     if capped.is_empty() {
         fallback.to_vec()
     } else {
@@ -264,7 +259,7 @@ fn build_stream_entries(entries: &[StreamEntryFuzz]) -> Vec<StreamEntry> {
         .map(|(index, entry)| {
             let fields = build_stream_fields(&entry.fields);
             (
-                u64::from(entry.ms) + u64::try_from(index).expect("small stream index"),
+                u64::from(entry.ms) + index as u64,
                 u64::from(entry.seq),
                 fields,
             )
@@ -323,6 +318,88 @@ fn build_stream_groups(
     }]
 }
 
+fn upstream_loadback_is_required() -> bool {
+    std::env::var_os("REQUIRE_UPSTREAM_RDB_LOAD").is_some()
+}
+
+fn redis_server_binary() -> std::path::PathBuf {
+    if let Some(path) = std::env::var_os("REDIS_SERVER") {
+        return path.into();
+    }
+    let repo_root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let direct = repo_root.join("legacy_redis_code/redis/src/redis-server");
+    if direct.exists() {
+        return direct;
+    }
+    repo_root.join("../legacy_redis_code/redis/src/redis-server")
+}
+
+fn assert_upstream_loads_rdb(encoded: &[u8]) {
+    let binary = redis_server_binary();
+    assert!(
+        binary.exists(),
+        "REQUIRE_UPSTREAM_RDB_LOAD=1 but redis-server is missing at {}",
+        binary.display()
+    );
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind upstream loadback port");
+    let port = listener
+        .local_addr()
+        .expect("read upstream loadback port")
+        .port();
+    drop(listener);
+
+    let timestamp_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO)
+        .as_nanos();
+    let data_dir = std::env::temp_dir().join(format!(
+        "fr_fuzz_rdb_loadback_{}_{}_{}",
+        std::process::id(),
+        port,
+        timestamp_nanos
+    ));
+    std::fs::create_dir_all(&data_dir).expect("create upstream loadback dir");
+    std::fs::write(data_dir.join("dump.rdb"), encoded).expect("write upstream loadback dump");
+
+    let mut child = std::process::Command::new(&binary)
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--bind")
+        .arg("127.0.0.1")
+        .arg("--dir")
+        .arg(&data_dir)
+        .arg("--dbfilename")
+        .arg("dump.rdb")
+        .arg("--appendonly")
+        .arg("no")
+        .arg("--save")
+        .arg("")
+        .arg("--daemonize")
+        .arg("no")
+        .arg("--protected-mode")
+        .arg("no")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn redis-server for upstream RDB loadback");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if let Some(status) = child.try_wait().expect("poll redis-server loadback") {
+            panic!("redis-server rejected structured RDB during loadback: {status}");
+        }
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("redis-server did not become ready after structured RDB loadback");
+}
+
 fuzz_target!(|input: FuzzRdb| {
     // Limit complexity
     if input.aux_fields.len() > 10 || input.entries.len() > 50 {
@@ -335,5 +412,7 @@ fuzz_target!(|input: FuzzRdb| {
     }
 
     // Decode the structured input - should not panic
-    let _ = decode_rdb(&encoded);
+    if decode_rdb(&encoded).is_ok() && upstream_loadback_is_required() {
+        assert_upstream_loads_rdb(&encoded);
+    }
 });

@@ -22,21 +22,11 @@ enum StructuredStep {
     ReplyOff,
     ReplySkip,
     ReplyMissingMode,
-    ReplyExtraArg {
-        mode: StructuredMode,
-        tail: Vec<u8>,
-    },
-    ReplyInvalidMode {
-        token: Vec<u8>,
-    },
-    Echo {
-        payload: Vec<u8>,
-    },
+    ReplyExtraArg { mode: StructuredMode, tail: Vec<u8> },
+    ReplyInvalidMode { token: Vec<u8> },
+    Echo { payload: Vec<u8> },
     Ping,
-    OtherClientSubcommand {
-        subcommand: Vec<u8>,
-        value: Vec<u8>,
-    },
+    OtherClientSubcommand { subcommand: Vec<u8>, value: Vec<u8> },
 }
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
@@ -69,11 +59,7 @@ fn fuzz_raw_command_stream(data: &[u8]) {
 }
 
 fn fuzz_structured_sequence(sequence: StructuredSequence) {
-    let commands: Vec<Vec<Vec<u8>>> = sequence
-        .steps
-        .into_iter()
-        .map(render_step)
-        .collect();
+    let commands: Vec<Vec<Vec<u8>>> = sequence.steps.into_iter().map(render_step).collect();
     if commands.is_empty() {
         return;
     }

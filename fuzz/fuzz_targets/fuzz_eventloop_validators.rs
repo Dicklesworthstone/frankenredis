@@ -5,8 +5,8 @@ use fr_eventloop::{
     AcceptPathError, BarrierOrderError, BootstrapError, CallbackDispatchOrder, EventLoopMode,
     EventLoopPhase, FdRegistrationError, LoopBootstrap, PendingWriteError, PhaseReplayError,
     ReadPathError, ReadinessCallback, TickBudget, apply_tls_accept_rate_limit,
-    plan_fd_setsize_growth, plan_readiness_callback_order, plan_tick, replay_phase_trace,
-    run_tick, validate_accept_path, validate_ae_barrier_order, validate_bootstrap,
+    plan_fd_setsize_growth, plan_readiness_callback_order, plan_tick, replay_phase_trace, run_tick,
+    validate_accept_path, validate_ae_barrier_order, validate_bootstrap,
     validate_fd_registration_bounds, validate_pending_write_delivery, validate_read_path,
 };
 use libfuzzer_sys::fuzz_target;
@@ -184,7 +184,8 @@ fn fuzz_barrier_case(case: StructuredBarrierCase) {
         observed,
     );
     assert_eq!(
-        actual, expected,
+        actual,
+        expected,
         "AE_BARRIER validation drifted for inputs {:?}",
         (
             case.readable_ready,
@@ -295,7 +296,8 @@ fn fuzz_accept_path_case(case: StructuredAcceptPathCase) {
     let current_clients = usize::from(case.current_clients);
     let max_clients = usize::from(case.max_clients);
     let actual = validate_accept_path(current_clients, max_clients, case.read_handler_bound);
-    let expected = model_validate_accept_path(current_clients, max_clients, case.read_handler_bound);
+    let expected =
+        model_validate_accept_path(current_clients, max_clients, case.read_handler_bound);
     assert_eq!(
         actual, expected,
         "accept-path validation drifted for current={current_clients} max={max_clients} bound={}",
@@ -596,12 +598,7 @@ fn model_validate_pending_write_delivery(
 
     let mut seen = BTreeSet::new();
     let mut prev_index = None;
-    model_validate_delivery_slice(
-        flushed_now,
-        &queue_positions,
-        &mut seen,
-        &mut prev_index,
-    )?;
+    model_validate_delivery_slice(flushed_now, &queue_positions, &mut seen, &mut prev_index)?;
     model_validate_delivery_slice(
         pending_after_flush,
         &queue_positions,

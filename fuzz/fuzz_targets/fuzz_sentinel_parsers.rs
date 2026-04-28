@@ -1,7 +1,7 @@
 #![no_main]
-use libfuzzer_sys::fuzz_target;
 use fr_sentinel::discovery::{HelloMessage, parse_replica_info_from_master};
 use fr_sentinel::health::parse_info_response;
+use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() > 1_000_000 {
