@@ -10944,10 +10944,11 @@ mod tests {
     /// every RDB type tag `fr-persist::decode_rdb` is expected to
     /// accept, and verify each loads cleanly.
     ///
-    /// Spawns the vendored redis-server, populates ten distinct shapes
-    /// — each crafted to land on a specific RDB type byte — issues a
-    /// synchronous `SAVE`, reads `dump.rdb` from `--dir`, and pushes
-    /// the bytes through `fr_persist::decode_rdb`. The shapes exercise:
+    /// Spawns the vendored redis-server, populates eleven distinct
+    /// shapes — each crafted to land on a specific RDB type byte —
+    /// issues a synchronous `SAVE`, reads `dump.rdb` from `--dir`, and
+    /// pushes the bytes through `fr_persist::decode_rdb`. The shapes
+    /// exercise:
     ///
     /// * `RDB_TYPE_STRING` (0) raw + integer-encoded
     /// * `RDB_TYPE_LIST_QUICKLIST_2` (18)
@@ -10958,10 +10959,11 @@ mod tests {
     /// * `RDB_TYPE_STREAM_LISTPACKS_3` (21) with a consumer group
     ///
     /// Acceptance: `decode_rdb` returns Ok with one entry per seeded
-    /// key; the auxiliary fields parse without error. This is the
-    /// minimal "load upstream-produced .rdb cleanly" half of r73v
-    /// step 1; the re-emit + `redis-server --loadrdb` cross-impl gate
-    /// is tracked separately. (br-frankenredis-8w1e)
+    /// key; the auxiliary fields parse without error. The compact
+    /// encoding decoders (tags 11/16/17/18/20) landed in
+    /// br-frankenredis-aqgx; the re-emit + `redis-server --loadrdb`
+    /// cross-impl gate is tracked separately by br-frankenredis-ian4.
+    /// (br-frankenredis-8w1e / br-frankenredis-aqgx)
     #[test]
     fn live_redis_rdb_corpus_decodes_cleanly() {
         use fr_persist::decode_rdb;
@@ -10998,27 +11000,6 @@ mod tests {
             parts.iter().map(|p| p.to_vec()).collect()
         }
 
-        // Pin every encoding-threshold to 0 so seeded structures land on
-        // the non-compact RDB type tags fr-persist::decode_rdb already
-        // recognizes (RDB_TYPE_SET=2, RDB_TYPE_HASH=4, RDB_TYPE_ZSET_2=5,
-        // RDB_TYPE_STREAM_LISTPACKS_3=21). Compact encodings (intset,
-        // listpack, quicklist) — type bytes 11/16/17/18/20 — surface a
-        // separate gap tracked by br-frankenredis-aqgx.
-        for (param, value) in &[
-            ("hash-max-listpack-entries", "0"),
-            ("hash-max-listpack-value", "0"),
-            ("set-max-listpack-entries", "0"),
-            ("set-max-intset-entries", "0"),
-            ("zset-max-listpack-entries", "0"),
-            ("zset-max-listpack-value", "0"),
-        ] {
-            send_owned(
-                &mut conn,
-                argv(&[b"CONFIG", b"SET", param.as_bytes(), value.as_bytes()]),
-                &format!("config set {param}"),
-            );
-        }
-
         // RDB_TYPE_STRING (0): raw bytes + integer-encoded (selected
         // automatically by upstream from numeric content).
         send_owned(
@@ -11028,42 +11009,66 @@ mod tests {
         );
         send_owned(&mut conn, argv(&[b"SET", b"str_int", b"4242"]), "set_int");
 
-        // RDB_TYPE_SET (2): non-integer members + threshold pinned to 0.
+        // RDB_TYPE_LIST_QUICKLIST_2 (18): upstream always uses quicklist
+        // for lists, regardless of size. Small lists pack into a single
+        // listpack-payload node (container=2 PACKED).
+        send_owned(
+            &mut conn,
+            argv(&[b"RPUSH", b"list_small", b"a", b"b", b"c"]),
+            "rpush_small",
+        );
+
+        // RDB_TYPE_SET_INTSET (11): all-integer members below the
+        // set-max-intset-entries (512) threshold.
+        send_owned(
+            &mut conn,
+            argv(&[b"SADD", b"set_intset", b"1", b"2", b"3", b"4", b"5"]),
+            "sadd_intset",
+        );
+        // RDB_TYPE_SET_LISTPACK (20): non-integer members below the
+        // set-max-listpack-entries (128) threshold.
+        send_owned(
+            &mut conn,
+            argv(&[b"SADD", b"set_listpack", b"alpha", b"beta", b"gamma"]),
+            "sadd_listpack",
+        );
+        // RDB_TYPE_SET (2): >128 non-integer members forces hashtable.
+        let mut sadd_big: Vec<Vec<u8>> = vec![b"SADD".to_vec(), b"set_hashtable".to_vec()];
+        for i in 0..150_u32 {
+            sadd_big.push(format!("m{i:04}").into_bytes());
+        }
+        send_owned(&mut conn, sadd_big, "sadd_big");
+
+        // RDB_TYPE_HASH_LISTPACK (16): small hash inside the
+        // hash-max-listpack-entries (512) threshold.
+        send_owned(
+            &mut conn,
+            argv(&[b"HSET", b"hash_lp", b"f1", b"v1", b"f2", b"v2"]),
+            "hset_small",
+        );
+        // RDB_TYPE_HASH (4): >512 fields forces hashtable.
+        let mut hset_big: Vec<Vec<u8>> = vec![b"HSET".to_vec(), b"hash_ht".to_vec()];
+        for i in 0..520_u32 {
+            hset_big.push(format!("f{i:04}").into_bytes());
+            hset_big.push(b"v".to_vec());
+        }
+        send_owned(&mut conn, hset_big, "hset_big");
+
+        // RDB_TYPE_ZSET_LISTPACK (17): small zset.
         send_owned(
             &mut conn,
             argv(&[
-                b"SADD",
-                b"set_hashtable",
-                b"alpha",
-                b"beta",
-                b"gamma",
-                b"delta",
+                b"ZADD", b"zset_lp", b"1.0", b"a", b"2.5", b"b", b"7.25", b"c",
             ]),
-            "sadd_ht",
+            "zadd_small",
         );
-
-        // RDB_TYPE_HASH (4): threshold pinned to 0.
-        send_owned(
-            &mut conn,
-            argv(&[b"HSET", b"hash_ht", b"f1", b"v1", b"f2", b"v2"]),
-            "hset_ht",
-        );
-
-        // RDB_TYPE_ZSET_2 (5): threshold pinned to 0.
-        send_owned(
-            &mut conn,
-            argv(&[
-                b"ZADD",
-                b"zset_skiplist",
-                b"1.0",
-                b"a",
-                b"2.5",
-                b"b",
-                b"7.25",
-                b"c",
-            ]),
-            "zadd_skiplist",
-        );
+        // RDB_TYPE_ZSET_2 (5): >128 members forces skiplist.
+        let mut zadd_big: Vec<Vec<u8>> = vec![b"ZADD".to_vec(), b"zset_skiplist".to_vec()];
+        for i in 0..150_u32 {
+            zadd_big.push(format!("{i}").into_bytes());
+            zadd_big.push(format!("m{i:04}").into_bytes());
+        }
+        send_owned(&mut conn, zadd_big, "zadd_big");
 
         // RDB_TYPE_STREAM_LISTPACKS_3 (21): stream + consumer group.
         send_owned(
@@ -11114,8 +11119,13 @@ mod tests {
         let expected_keys: &[&[u8]] = &[
             b"str_raw",
             b"str_int",
+            b"list_small",
+            b"set_intset",
+            b"set_listpack",
             b"set_hashtable",
+            b"hash_lp",
             b"hash_ht",
+            b"zset_lp",
             b"zset_skiplist",
             b"stream1",
         ];

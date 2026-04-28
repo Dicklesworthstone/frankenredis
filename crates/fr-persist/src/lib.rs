@@ -781,6 +781,16 @@ const RDB_TYPE_HASH: u8 = 4;
 /// (br-frankenredis-th7q)
 const RDB_TYPE_HASH_WITH_TTLS: u8 = 100;
 const RDB_TYPE_STREAM: u8 = 15; // FrankenRedis stream encoding
+/// Upstream Redis compact-encoding type tags. fr-persist decodes these so a
+/// dump.rdb produced by `redis-server` (which prefers compact forms for
+/// small data structures) can be loaded without truncation. Encoder side
+/// for these tags lives in fr-store::dump_key (DUMP/RESTORE).
+/// (br-frankenredis-aqgx)
+const RDB_TYPE_SET_INTSET: u8 = 11;
+const RDB_TYPE_HASH_LISTPACK: u8 = 16;
+const RDB_TYPE_ZSET_LISTPACK: u8 = 17;
+const RDB_TYPE_LIST_QUICKLIST_2: u8 = 18;
+const RDB_TYPE_SET_LISTPACK: u8 = 20;
 /// Upstream Redis stream RDB type tags. Numbers overlap with our
 /// internal type 15 (FrankenRedis stream encoding). Type 19 and 21 are
 /// routed through the upstream stream decoder by the top-level RDB path.
@@ -1175,6 +1185,55 @@ fn encode_private_stream_rdb_value(
 /// Decode an RDB length. Returns `(length, bytes_consumed)` or `None` on
 /// insufficient data. Note: this function returns `None` for special encodings (type 3)
 /// since they represent string values, not lengths.
+/// Decode an upstream-encoded Redis intset (as it appears wrapped inside an
+/// RDB string for `RDB_TYPE_SET_INTSET`). The wire format is
+/// `[encoding:u32 LE][len:u32 LE][element:encoding-bytes × len]` with
+/// `encoding ∈ {2, 4, 8}` selecting the per-element width in bytes
+/// (mirrors `intset.h`). Returns the elements as their canonical decimal
+/// string form so they round-trip through `RdbValue::Set(Vec<Vec<u8>>)`.
+/// (br-frankenredis-aqgx)
+fn decode_intset_members(data: &[u8]) -> Option<Vec<Vec<u8>>> {
+    if data.len() < 8 {
+        return None;
+    }
+    let encoding = u32::from_le_bytes(data[0..4].try_into().ok()?);
+    let len = u32::from_le_bytes(data[4..8].try_into().ok()?) as usize;
+    let width = match encoding {
+        2 => 2,
+        4 => 4,
+        8 => 8,
+        _ => return None,
+    };
+    let expected_len = 8usize.checked_add(len.checked_mul(width)?)?;
+    if data.len() != expected_len {
+        return None;
+    }
+    let mut members = Vec::with_capacity(len);
+    let mut cursor = 8;
+    for _ in 0..len {
+        let value = match width {
+            2 => {
+                let raw = i16::from_le_bytes(data[cursor..cursor + 2].try_into().ok()?);
+                cursor += 2;
+                i64::from(raw)
+            }
+            4 => {
+                let raw = i32::from_le_bytes(data[cursor..cursor + 4].try_into().ok()?);
+                cursor += 4;
+                i64::from(raw)
+            }
+            8 => {
+                let raw = i64::from_le_bytes(data[cursor..cursor + 8].try_into().ok()?);
+                cursor += 8;
+                raw
+            }
+            _ => unreachable!("width is one of 2, 4, 8"),
+        };
+        members.push(value.to_string().into_bytes());
+    }
+    Some(members)
+}
+
 fn rdb_decode_length(data: &[u8]) -> Option<(usize, usize)> {
     let first = *data.first()?;
     let encoding = (first & 0xC0) >> 6;
@@ -1346,6 +1405,11 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                 | RDB_TYPE_STREAM
                 | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2
                 | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3
+                | RDB_TYPE_SET_INTSET
+                | RDB_TYPE_HASH_LISTPACK
+                | RDB_TYPE_ZSET_LISTPACK
+                | RDB_TYPE_LIST_QUICKLIST_2
+                | RDB_TYPE_SET_LISTPACK
         );
         let is_expiry_opcode = matches!(opcode, RDB_OPCODE_EXPIRETIME_MS | 0xFD);
         let is_eviction_opcode = matches!(opcode, 0xF8 | 0xF9);
@@ -1451,7 +1515,12 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
             | RDB_TYPE_ZSET_2
             | RDB_TYPE_STREAM
             | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_2
-            | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3) => {
+            | UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3
+            | RDB_TYPE_SET_INTSET
+            | RDB_TYPE_HASH_LISTPACK
+            | RDB_TYPE_ZSET_LISTPACK
+            | RDB_TYPE_LIST_QUICKLIST_2
+            | RDB_TYPE_SET_LISTPACK) => {
                 let (key, consumed) =
                     rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
                 cursor += consumed;
@@ -1706,6 +1775,107 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                                 .map_err(|_| PersistError::InvalidFrame)?;
                         cursor += consumed;
                         value
+                    }
+                    RDB_TYPE_SET_INTSET => {
+                        // Payload is a string-wrapped binary intset blob.
+                        let (intset, consumed) =
+                            rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        let members =
+                            decode_intset_members(&intset).ok_or(PersistError::InvalidFrame)?;
+                        RdbValue::Set(members)
+                    }
+                    RDB_TYPE_SET_LISTPACK => {
+                        let (listpack, consumed) =
+                            rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        let members = listpack::decode_listpack(&listpack)
+                            .map_err(|_| PersistError::InvalidFrame)?
+                            .into_iter()
+                            .map(|entry| entry.to_bytes())
+                            .collect();
+                        RdbValue::Set(members)
+                    }
+                    RDB_TYPE_HASH_LISTPACK => {
+                        // Listpack of f1, v1, f2, v2, ... pairs.
+                        let (listpack, consumed) =
+                            rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        let entries: Vec<Vec<u8>> = listpack::decode_listpack(&listpack)
+                            .map_err(|_| PersistError::InvalidFrame)?
+                            .into_iter()
+                            .map(|entry| entry.to_bytes())
+                            .collect();
+                        if !entries.len().is_multiple_of(2) {
+                            return Err(PersistError::InvalidFrame);
+                        }
+                        let mut fields = Vec::with_capacity(entries.len() / 2);
+                        let mut chunks = entries.chunks_exact(2);
+                        for pair in &mut chunks {
+                            fields.push((pair[0].clone(), pair[1].clone()));
+                        }
+                        RdbValue::Hash(fields)
+                    }
+                    RDB_TYPE_ZSET_LISTPACK => {
+                        // Listpack of m1, score1, m2, score2, ... where each
+                        // score is encoded as a decimal string (upstream
+                        // calls listpackAppend with the textual score).
+                        let (listpack, consumed) =
+                            rdb_decode_string(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        let entries: Vec<Vec<u8>> = listpack::decode_listpack(&listpack)
+                            .map_err(|_| PersistError::InvalidFrame)?
+                            .into_iter()
+                            .map(|entry| entry.to_bytes())
+                            .collect();
+                        if !entries.len().is_multiple_of(2) {
+                            return Err(PersistError::InvalidFrame);
+                        }
+                        let mut members = Vec::with_capacity(entries.len() / 2);
+                        let mut chunks = entries.chunks_exact(2);
+                        for pair in &mut chunks {
+                            let score = std::str::from_utf8(&pair[1])
+                                .ok()
+                                .and_then(|s| s.parse::<f64>().ok())
+                                .ok_or(PersistError::InvalidFrame)?;
+                            members.push((pair[0].clone(), score));
+                        }
+                        RdbValue::SortedSet(members)
+                    }
+                    RDB_TYPE_LIST_QUICKLIST_2 => {
+                        // node_count nodes, each: (container:length,
+                        // listpack:string). Upstream's container is 1 for
+                        // PLAIN nodes (raw string elements) and 2 for
+                        // PACKED nodes (listpack-of-elements). We accept
+                        // both; a PLAIN node carries exactly one element.
+                        let (node_count, consumed) =
+                            rdb_decode_length(&data[cursor..]).ok_or(PersistError::InvalidFrame)?;
+                        cursor += consumed;
+                        let mut items = Vec::with_capacity(node_count.min(1024));
+                        for _ in 0..node_count {
+                            let (container, consumed) = rdb_decode_length(&data[cursor..])
+                                .ok_or(PersistError::InvalidFrame)?;
+                            cursor += consumed;
+                            let (node_blob, consumed) = rdb_decode_string(&data[cursor..])
+                                .ok_or(PersistError::InvalidFrame)?;
+                            cursor += consumed;
+                            match container {
+                                1 => {
+                                    // PLAIN: the blob is the element itself.
+                                    items.push(node_blob);
+                                }
+                                2 => {
+                                    // PACKED: the blob is a listpack.
+                                    for entry in listpack::decode_listpack(&node_blob)
+                                        .map_err(|_| PersistError::InvalidFrame)?
+                                    {
+                                        items.push(entry.to_bytes());
+                                    }
+                                }
+                                _ => return Err(PersistError::InvalidFrame),
+                            }
+                        }
+                        RdbValue::List(items)
                     }
                     _ => return Err(PersistError::InvalidFrame),
                 };
@@ -2423,10 +2593,11 @@ mod tests {
 
     use super::{
         RDB_CHECKSUM_LEN, RDB_OPCODE_AUX, RDB_OPCODE_EOF, RDB_OPCODE_EXPIRETIME_MS,
-        RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_HASH_WITH_TTLS, RDB_TYPE_STRING,
-        RdbEntry, RdbStreamConsumerGroup, RdbStreamPendingEntry, RdbValue,
-        UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decode_rdb, decode_rdb_prefix,
-        encode_rdb, lzf_decompress, rdb_encode_length, rdb_encode_string,
+        RDB_OPCODE_RESIZEDB, RDB_OPCODE_SELECTDB, RDB_TYPE_HASH_LISTPACK, RDB_TYPE_HASH_WITH_TTLS,
+        RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK, RDB_TYPE_STRING,
+        RDB_TYPE_ZSET_LISTPACK, RdbEntry, RdbStreamConsumerGroup, RdbStreamPendingEntry, RdbValue,
+        UPSTREAM_RDB_TYPE_STREAM_LISTPACKS_3, crc64_redis, decode_intset_members, decode_rdb,
+        decode_rdb_prefix, encode_rdb, lzf_decompress, rdb_encode_length, rdb_encode_string,
     };
 
     fn append_rdb_checksum(encoded: &mut Vec<u8>) {
@@ -2877,6 +3048,323 @@ mod tests {
     #[test]
     fn crc64_matches_redis_reference_vector() {
         assert_eq!(crc64_redis(b"123456789"), 0xe9c6_d914_c4b8_d9ca);
+    }
+
+    // ── Compact-encoding RDB decoder tests (br-frankenredis-aqgx) ──────
+
+    /// Encode a small listpack of byte-string entries, mirroring
+    /// upstream `listpack.c::lpAppend`. Test-only — production callers
+    /// live in `fr-store::dump_key`.
+    fn build_listpack_for_test(entries: &[&[u8]]) -> Vec<u8> {
+        fn push_backlen(buf: &mut Vec<u8>, len: usize) {
+            if len <= 127 {
+                buf.push(len as u8);
+            } else if len < 16_383 {
+                buf.push((len >> 7) as u8);
+                buf.push(((len & 0x7F) as u8) | 0x80);
+            } else {
+                // Tests stay small enough that we never need >2-byte backlen.
+                unreachable!("test listpack entries should not exceed 2-byte backlen");
+            }
+        }
+        let mut entry_bytes = Vec::new();
+        for entry in entries {
+            let start = entry_bytes.len();
+            // 6-bit literal string: tag 0x80 | len for len < 64.
+            assert!(
+                entry.len() < 64,
+                "test helper only supports literal-string entries < 64 bytes"
+            );
+            entry_bytes.push(0x80 | entry.len() as u8);
+            entry_bytes.extend_from_slice(entry);
+            let data_len = entry_bytes.len() - start;
+            push_backlen(&mut entry_bytes, data_len);
+        }
+        let total_bytes = (6 + entry_bytes.len() + 1) as u32;
+        let entry_count = u16::try_from(entries.len()).unwrap_or(u16::MAX);
+        let mut out = Vec::with_capacity(total_bytes as usize);
+        out.extend_from_slice(&total_bytes.to_le_bytes());
+        out.extend_from_slice(&entry_count.to_le_bytes());
+        out.extend_from_slice(&entry_bytes);
+        out.push(0xFF);
+        out
+    }
+
+    fn build_intset_for_test(values: &[i64]) -> Vec<u8> {
+        // Pick the narrowest encoding that fits everything.
+        let needs_64 = values
+            .iter()
+            .any(|v| !(i32::MIN as i64..=i32::MAX as i64).contains(v));
+        let needs_32 = !needs_64
+            && values
+                .iter()
+                .any(|v| !(i16::MIN as i64..=i16::MAX as i64).contains(v));
+        let (encoding, width) = if needs_64 {
+            (8u32, 8usize)
+        } else if needs_32 {
+            (4u32, 4usize)
+        } else {
+            (2u32, 2usize)
+        };
+        let mut out = Vec::with_capacity(8 + values.len() * width);
+        out.extend_from_slice(&encoding.to_le_bytes());
+        out.extend_from_slice(&(values.len() as u32).to_le_bytes());
+        // Upstream sorts intset members; the decoder doesn't require it,
+        // but real upstream-produced blobs always come sorted.
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        for v in sorted {
+            match width {
+                2 => out.extend_from_slice(&(v as i16).to_le_bytes()),
+                4 => out.extend_from_slice(&(v as i32).to_le_bytes()),
+                8 => out.extend_from_slice(&v.to_le_bytes()),
+                _ => unreachable!(),
+            }
+        }
+        out
+    }
+
+    /// Wrap a raw payload as a length-prefixed RDB string and append it
+    /// to `buf` (the form used by RDB compact-encoding type tags).
+    fn append_rdb_wrapped_string(buf: &mut Vec<u8>, data: &[u8]) {
+        rdb_encode_length(buf, data.len());
+        buf.extend_from_slice(data);
+    }
+
+    fn finalize_rdb_blob(payload: &mut Vec<u8>) -> Vec<u8> {
+        payload.push(RDB_OPCODE_EOF);
+        let checksum = crc64_redis(payload);
+        payload.extend_from_slice(&checksum.to_le_bytes());
+        std::mem::take(payload)
+    }
+
+    #[test]
+    fn rdb_decodes_compact_set_intset() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_SET_INTSET);
+        rdb_encode_string(&mut blob, b"si");
+        let intset = build_intset_for_test(&[1, 2, 3, 5]);
+        append_rdb_wrapped_string(&mut blob, &intset);
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        let (entries, _) = decode_rdb(&bytes).expect("decode set_intset");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].key, b"si");
+        match &entries[0].value {
+            RdbValue::Set(members) => {
+                let mut got: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+                got.sort();
+                assert_eq!(got, vec![b"1" as &[u8], b"2", b"3", b"5"]);
+            }
+            other => panic!("expected RdbValue::Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rdb_decodes_compact_set_listpack() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_SET_LISTPACK);
+        rdb_encode_string(&mut blob, b"slp");
+        let lp = build_listpack_for_test(&[b"alpha", b"beta", b"gamma"]);
+        append_rdb_wrapped_string(&mut blob, &lp);
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        let (entries, _) = decode_rdb(&bytes).expect("decode set_listpack");
+        match &entries[0].value {
+            RdbValue::Set(members) => {
+                let mut got: Vec<&[u8]> = members.iter().map(Vec::as_slice).collect();
+                got.sort();
+                assert_eq!(got, vec![b"alpha" as &[u8], b"beta", b"gamma"]);
+            }
+            other => panic!("expected RdbValue::Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rdb_decodes_compact_hash_listpack() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_HASH_LISTPACK);
+        rdb_encode_string(&mut blob, b"hlp");
+        let lp = build_listpack_for_test(&[b"f1", b"v1", b"f2", b"v2"]);
+        append_rdb_wrapped_string(&mut blob, &lp);
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        let (entries, _) = decode_rdb(&bytes).expect("decode hash_listpack");
+        match &entries[0].value {
+            RdbValue::Hash(fields) => {
+                assert_eq!(
+                    fields,
+                    &vec![
+                        (b"f1".to_vec(), b"v1".to_vec()),
+                        (b"f2".to_vec(), b"v2".to_vec()),
+                    ]
+                );
+            }
+            other => panic!("expected RdbValue::Hash, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rdb_decodes_compact_hash_listpack_rejects_odd_entry_count() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_HASH_LISTPACK);
+        rdb_encode_string(&mut blob, b"bad");
+        let lp = build_listpack_for_test(&[b"f1", b"v1", b"orphan"]);
+        append_rdb_wrapped_string(&mut blob, &lp);
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        assert!(matches!(
+            decode_rdb(&bytes),
+            Err(PersistError::InvalidFrame)
+        ));
+    }
+
+    #[test]
+    fn rdb_decodes_compact_zset_listpack() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_ZSET_LISTPACK);
+        rdb_encode_string(&mut blob, b"zlp");
+        // Listpack is (member, score-as-string) pairs. Upstream stores
+        // scores via lpAppend with the textual representation, e.g.
+        // "1", "2.5", or "7.25".
+        let lp = build_listpack_for_test(&[b"a", b"1", b"b", b"2.5", b"c", b"7.25"]);
+        append_rdb_wrapped_string(&mut blob, &lp);
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        let (entries, _) = decode_rdb(&bytes).expect("decode zset_listpack");
+        match &entries[0].value {
+            RdbValue::SortedSet(members) => {
+                assert_eq!(members.len(), 3);
+                assert_eq!(members[0].0, b"a");
+                assert!((members[0].1 - 1.0).abs() < f64::EPSILON);
+                assert_eq!(members[1].0, b"b");
+                assert!((members[1].1 - 2.5).abs() < f64::EPSILON);
+                assert_eq!(members[2].0, b"c");
+                assert!((members[2].1 - 7.25).abs() < f64::EPSILON);
+            }
+            other => panic!("expected RdbValue::SortedSet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rdb_decodes_compact_zset_listpack_rejects_non_numeric_score() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_ZSET_LISTPACK);
+        rdb_encode_string(&mut blob, b"bad");
+        let lp = build_listpack_for_test(&[b"a", b"not_a_number"]);
+        append_rdb_wrapped_string(&mut blob, &lp);
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        assert!(matches!(
+            decode_rdb(&bytes),
+            Err(PersistError::InvalidFrame)
+        ));
+    }
+
+    #[test]
+    fn rdb_decodes_compact_list_quicklist_2_packed_node() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_LIST_QUICKLIST_2);
+        rdb_encode_string(&mut blob, b"lq");
+        // 1 node, container=2 (PACKED listpack), payload = listpack of "a","b","c".
+        rdb_encode_length(&mut blob, 1);
+        rdb_encode_length(&mut blob, 2);
+        let lp = build_listpack_for_test(&[b"a", b"b", b"c"]);
+        append_rdb_wrapped_string(&mut blob, &lp);
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        let (entries, _) = decode_rdb(&bytes).expect("decode list_quicklist_2 packed");
+        match &entries[0].value {
+            RdbValue::List(items) => {
+                assert_eq!(items, &vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+            }
+            other => panic!("expected RdbValue::List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rdb_decodes_compact_list_quicklist_2_plain_node() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_LIST_QUICKLIST_2);
+        rdb_encode_string(&mut blob, b"lq_plain");
+        // 1 node, container=1 (PLAIN), payload = the element bytes themselves.
+        rdb_encode_length(&mut blob, 1);
+        rdb_encode_length(&mut blob, 1);
+        rdb_encode_string(&mut blob, b"single_plain_element");
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        let (entries, _) = decode_rdb(&bytes).expect("decode list_quicklist_2 plain");
+        match &entries[0].value {
+            RdbValue::List(items) => {
+                assert_eq!(items, &vec![b"single_plain_element".to_vec()]);
+            }
+            other => panic!("expected RdbValue::List, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rdb_decodes_compact_list_quicklist_2_rejects_unknown_container() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(b"REDIS0011");
+        blob.push(RDB_TYPE_LIST_QUICKLIST_2);
+        rdb_encode_string(&mut blob, b"bad");
+        rdb_encode_length(&mut blob, 1);
+        rdb_encode_length(&mut blob, 99); // not 1 or 2
+        let lp = build_listpack_for_test(&[b"x"]);
+        append_rdb_wrapped_string(&mut blob, &lp);
+        let bytes = finalize_rdb_blob(&mut blob);
+
+        assert!(matches!(
+            decode_rdb(&bytes),
+            Err(PersistError::InvalidFrame)
+        ));
+    }
+
+    #[test]
+    fn intset_helper_decoder_handles_each_width() {
+        // 16-bit
+        let blob_16 = build_intset_for_test(&[-1, 0, 1, 32_000]);
+        let got = decode_intset_members(&blob_16).expect("16-bit intset");
+        assert_eq!(
+            got,
+            vec![
+                b"-1".to_vec(),
+                b"0".to_vec(),
+                b"1".to_vec(),
+                b"32000".to_vec()
+            ]
+        );
+
+        // 32-bit (force >= 16-bit range)
+        let blob_32 = build_intset_for_test(&[-100_000, 0, 100_000]);
+        let got = decode_intset_members(&blob_32).expect("32-bit intset");
+        assert_eq!(
+            got,
+            vec![b"-100000".to_vec(), b"0".to_vec(), b"100000".to_vec()]
+        );
+
+        // 64-bit (force >= 32-bit range)
+        let blob_64 = build_intset_for_test(&[i64::MIN, 0, i64::MAX]);
+        let got = decode_intset_members(&blob_64).expect("64-bit intset");
+        assert_eq!(
+            got,
+            vec![
+                i64::MIN.to_string().into_bytes(),
+                b"0".to_vec(),
+                i64::MAX.to_string().into_bytes(),
+            ]
+        );
+
+        // Truncated buffer must reject.
+        assert!(decode_intset_members(&[0; 4]).is_none());
     }
 
     #[test]
