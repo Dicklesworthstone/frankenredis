@@ -67,7 +67,7 @@ fn cmd_myid(state: &SentinelState) -> RespFrame {
 }
 
 fn cmd_masters(state: &SentinelState) -> RespFrame {
-    let masters: Vec<RespFrame> = state.masters.values().map(instance_to_info_array).collect();
+    let masters = sorted_instance_info_arrays(state.masters.values());
     RespFrame::Array(Some(masters))
 }
 
@@ -89,8 +89,7 @@ fn cmd_replicas(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     let name = String::from_utf8_lossy(args[0]);
     match state.get_master(&name) {
         Some(master) => {
-            let replicas: Vec<RespFrame> =
-                master.slaves.values().map(instance_to_info_array).collect();
+            let replicas = sorted_instance_info_arrays(master.slaves.values());
             RespFrame::Array(Some(replicas))
         }
         None => RespFrame::Error(format!("ERR No such master with that name: {}", name)),
@@ -104,11 +103,7 @@ fn cmd_sentinels(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
     let name = String::from_utf8_lossy(args[0]);
     match state.get_master(&name) {
         Some(master) => {
-            let sentinels: Vec<RespFrame> = master
-                .sentinels
-                .values()
-                .map(instance_to_info_array)
-                .collect();
+            let sentinels = sorted_instance_info_arrays(master.sentinels.values());
             RespFrame::Array(Some(sentinels))
         }
         None => RespFrame::Error(format!("ERR No such master with that name: {}", name)),
@@ -332,6 +327,14 @@ fn cmd_help() -> RespFrame {
     ))
 }
 
+fn sorted_instance_info_arrays<'a>(
+    instances: impl Iterator<Item = &'a crate::SentinelRedisInstance>,
+) -> Vec<RespFrame> {
+    let mut instances: Vec<_> = instances.collect();
+    instances.sort_by(|left, right| left.name.cmp(&right.name));
+    instances.into_iter().map(instance_to_info_array).collect()
+}
+
 fn instance_to_info_array(instance: &crate::SentinelRedisInstance) -> RespFrame {
     let mut pairs = vec![
         RespFrame::BulkString(Some(b"name".to_vec())),
@@ -414,6 +417,50 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{InstanceFlags, SentinelAddr, SentinelRedisInstance};
+
+    fn sentinel_instance(
+        name: &str,
+        hostname: &str,
+        port: u16,
+        flags: InstanceFlags,
+    ) -> SentinelRedisInstance {
+        let mut instance =
+            SentinelRedisInstance::new_master(name, SentinelAddr::new(hostname, port), 0);
+        instance.flags = flags;
+        instance
+    }
+
+    fn list_reply_names(frame: RespFrame) -> Vec<String> {
+        let RespFrame::Array(Some(instances)) = frame else {
+            return Vec::new();
+        };
+        instances
+            .into_iter()
+            .filter_map(|instance| {
+                let RespFrame::Array(Some(fields)) = instance else {
+                    return None;
+                };
+                fields
+                    .chunks_exact(2)
+                    .find_map(|pair| match (&pair[0], &pair[1]) {
+                        (RespFrame::BulkString(Some(key)), RespFrame::BulkString(Some(value)))
+                            if key == b"name" =>
+                        {
+                            String::from_utf8(value.clone()).ok()
+                        }
+                        _ => None,
+                    })
+            })
+            .collect()
+    }
+
+    fn array_len(frame: &RespFrame) -> Option<usize> {
+        match frame {
+            RespFrame::Array(Some(items)) => Some(items.len()),
+            _ => None,
+        }
+    }
 
     #[test]
     fn test_myid() {
@@ -432,11 +479,52 @@ mod tests {
         assert!(matches!(result, RespFrame::SimpleString(_)));
 
         let result = dispatch_sentinel_command(&mut state, &[b"MASTERS"]);
-        if let RespFrame::Array(Some(arr)) = result {
-            assert_eq!(arr.len(), 1);
-        } else {
-            panic!("Expected array");
+        assert_eq!(array_len(&result), Some(1));
+    }
+
+    #[test]
+    fn sentinel_list_replies_are_sorted_by_instance_name() {
+        let mut state = SentinelState::new();
+        for name in ["gamma", "alpha", "beta"] {
+            let result = dispatch_sentinel_command(
+                &mut state,
+                &[b"MONITOR", name.as_bytes(), b"127.0.0.1", b"6379", b"2"],
+            );
+            assert!(matches!(result, RespFrame::SimpleString(_)));
         }
+
+        let master_exists = state.masters.contains_key("beta");
+        let Some(master) = state.get_master_mut("beta") else {
+            assert!(master_exists, "beta master exists");
+            return;
+        };
+        for name in ["replica-c", "replica-a", "replica-b"] {
+            let replica = sentinel_instance(name, "127.0.0.1", 6380, InstanceFlags::SLAVE);
+            master.slaves.insert(name.to_string(), replica);
+        }
+        for name in ["sentinel-c", "sentinel-a", "sentinel-b"] {
+            let sentinel = sentinel_instance(name, "127.0.0.1", 26379, InstanceFlags::SENTINEL);
+            master.sentinels.insert(name.to_string(), sentinel);
+        }
+
+        assert_eq!(
+            list_reply_names(dispatch_sentinel_command(&mut state, &[b"MASTERS"])),
+            ["alpha", "beta", "gamma"]
+        );
+        assert_eq!(
+            list_reply_names(dispatch_sentinel_command(
+                &mut state,
+                &[b"REPLICAS", b"beta"]
+            )),
+            ["replica-a", "replica-b", "replica-c"]
+        );
+        assert_eq!(
+            list_reply_names(dispatch_sentinel_command(
+                &mut state,
+                &[b"SENTINELS", b"beta"]
+            )),
+            ["sentinel-a", "sentinel-b", "sentinel-c"]
+        );
     }
 
     #[test]
@@ -449,11 +537,7 @@ mod tests {
 
         let result =
             dispatch_sentinel_command(&mut state, &[b"GET-MASTER-ADDR-BY-NAME", b"mymaster"]);
-        if let RespFrame::Array(Some(arr)) = result {
-            assert_eq!(arr.len(), 2);
-        } else {
-            panic!("Expected array");
-        }
+        assert_eq!(array_len(&result), Some(2));
     }
 
     #[test]
@@ -470,7 +554,11 @@ mod tests {
         );
         assert!(matches!(result, RespFrame::SimpleString(_)));
 
-        let master = state.get_master("mymaster").unwrap();
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
         assert_eq!(master.down_after_period, 5000);
     }
 
@@ -485,7 +573,11 @@ mod tests {
         let result = dispatch_sentinel_command(&mut state, &[b"FAILOVER", b"mymaster"]);
         assert!(matches!(result, RespFrame::SimpleString(_)));
 
-        let master = state.get_master("mymaster").unwrap();
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
         assert!(master.flags.contains(crate::InstanceFlags::FORCE_FAILOVER));
         assert_eq!(master.failover_state, crate::FailoverState::WaitStart);
     }
@@ -505,10 +597,6 @@ mod tests {
     fn test_help() {
         let mut state = SentinelState::new();
         let result = dispatch_sentinel_command(&mut state, &[b"HELP"]);
-        if let RespFrame::Array(Some(arr)) = result {
-            assert!(!arr.is_empty());
-        } else {
-            panic!("Expected array");
-        }
+        assert!(array_len(&result).is_some_and(|len| len > 0));
     }
 }

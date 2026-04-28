@@ -1089,7 +1089,16 @@ pub fn dispatch_argv(
         Some(CommandId::Migrate) => return migrate_cmd(argv, store, now_ms),
         Some(CommandId::Failover) => return failover_cmd(argv, store),
         Some(CommandId::Module) => return module_cmd(argv, store),
-        Some(CommandId::Sentinel) => return sentinel_cmd(argv, store),
+        // Upstream `server.sentinel_mode` gate: SENTINEL is only
+        // registered when the server is started with --sentinel.
+        // Vanilla redis-server returns "ERR unknown command
+        // 'SENTINEL', with args beginning with: ...". When sentinel
+        // mode is off, fall through to the unknown-command path so we
+        // match that error verbatim. (br-frankenredis-pq3z)
+        Some(CommandId::Sentinel) if store.sentinel_mode => {
+            return sentinel_cmd(argv, store);
+        }
+        Some(CommandId::Sentinel) => {}
         Some(CommandId::Pfdebug) => return pfdebug_cmd(argv, store, now_ms),
         Some(CommandId::Pfselftest) => return pfselftest_cmd(argv, store),
         None => {}
@@ -26509,8 +26518,41 @@ mod tests {
     }
 
     #[test]
+    fn sentinel_command_unknown_unless_sentinel_mode_set() {
+        // Vanilla (non-sentinel) server: SENTINEL must error with the
+        // "ERR unknown command 'SENTINEL'" reply that upstream's
+        // unregistered command path produces. Without this gate, the
+        // core_module_sentinel conformance fixture trips on every
+        // SENTINEL subcommand because we'd be answering with the
+        // dispatcher's wired responses where upstream rejects the
+        // command at the registration layer. (br-frankenredis-pq3z)
+        let mut store = Store::new();
+        assert!(!store.sentinel_mode);
+        let err = dispatch_argv(&[b"SENTINEL".to_vec(), b"MASTERS".to_vec()], &mut store, 0)
+            .expect_err("SENTINEL must be an unknown command outside sentinel mode");
+        match err {
+            CommandError::UnknownCommand {
+                ref command,
+                ref args_preview,
+            } => {
+                assert_eq!(command, "SENTINEL");
+                assert_eq!(args_preview.as_deref(), Some("'MASTERS' "));
+            }
+            other => panic!("expected UnknownCommand, got {other:?}"),
+        }
+
+        // Once sentinel mode is opted into, the same dispatch must
+        // succeed (i.e. the gate doesn't silently swallow real calls).
+        store.sentinel_mode = true;
+        let reply = dispatch_argv(&[b"SENTINEL".to_vec(), b"MASTERS".to_vec()], &mut store, 0)
+            .expect("SENTINEL MASTERS in sentinel mode should dispatch");
+        assert!(matches!(reply, RespFrame::Array(_)));
+    }
+
+    #[test]
     fn sentinel_master_rejects_extra_arguments() {
         let mut store = Store::new();
+        store.sentinel_mode = true;
         let reply = dispatch_argv(
             &[
                 b"SENTINEL".to_vec(),
@@ -26533,6 +26575,7 @@ mod tests {
     #[test]
     fn sentinel_without_subcommand_uses_sentinel_arity_error() {
         let mut store = Store::new();
+        store.sentinel_mode = true;
         let reply = dispatch_argv(&[b"SENTINEL".to_vec()], &mut store, 0)
             .expect("bare sentinel should return a Redis error frame");
         assert_eq!(
@@ -26544,6 +26587,7 @@ mod tests {
     #[test]
     fn sentinel_failover_rejects_extra_arguments() {
         let mut store = Store::new();
+        store.sentinel_mode = true;
         let reply = dispatch_argv(
             &[
                 b"SENTINEL".to_vec(),
@@ -26566,6 +26610,7 @@ mod tests {
     #[test]
     fn sentinel_help_rejects_extra_arguments() {
         let mut store = Store::new();
+        store.sentinel_mode = true;
         let reply = dispatch_argv(
             &[b"SENTINEL".to_vec(), b"HELP".to_vec(), b"extra".to_vec()],
             &mut store,
@@ -26583,6 +26628,7 @@ mod tests {
     #[test]
     fn sentinel_masters_rejects_extra_arguments() {
         let mut store = Store::new();
+        store.sentinel_mode = true;
         let reply = dispatch_argv(
             &[b"SENTINEL".to_vec(), b"MASTERS".to_vec(), b"extra".to_vec()],
             &mut store,
@@ -26600,6 +26646,7 @@ mod tests {
     #[test]
     fn sentinel_monitor_state_persists_through_command_dispatch() {
         let mut store = Store::new();
+        store.sentinel_mode = true;
         let monitor = dispatch_argv(
             &[
                 b"SENTINEL".to_vec(),

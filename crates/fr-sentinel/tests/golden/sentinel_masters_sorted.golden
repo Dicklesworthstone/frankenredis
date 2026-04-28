@@ -1,0 +1,2 @@
+alpha 127.0.0.1:6380 flags=master quorum=1
+zeta 127.0.0.2:6379 flags=master quorum=2
