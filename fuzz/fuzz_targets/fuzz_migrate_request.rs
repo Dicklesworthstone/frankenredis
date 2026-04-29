@@ -50,9 +50,17 @@ enum InvalidMigrateCase {
     InvalidHostUtf8 {
         tail: Vec<u8>,
     },
-    InvalidPort {
-        token: Vec<u8>,
-    },
+    // NOTE: there is no `InvalidPort` variant. Upstream Redis
+    // `migrateCommand` deliberately returns NOKEY (and skips port
+    // validation) when the source key doesn't exist, so
+    // parse_migrate_request preserves the raw `port_arg` bytes
+    // and validation is deferred to dispatch. The
+    // `migrate_missing_key_skips_port_validation_like_redis`
+    // test pins this contract. (Earlier revisions of this fuzz
+    // harness had an `InvalidPort` variant that asserted
+    // `parse_migrate_request → Err(InvalidInteger)`, which was
+    // unreachable with the current parser and would crash
+    // libfuzzer the first time arbitrary picked it.)
     InvalidDb {
         token: Vec<u8>,
     },
@@ -246,16 +254,6 @@ fn render_invalid_case(case: InvalidMigrateCase) -> (Vec<Vec<u8>>, CommandError)
                 b"5000".to_vec(),
             ),
             CommandError::InvalidUtf8Argument,
-        ),
-        InvalidMigrateCase::InvalidPort { token } => (
-            base_valid_argv(
-                b"localhost".to_vec(),
-                invalid_integer_token(token),
-                b"key".to_vec(),
-                b"0".to_vec(),
-                b"5000".to_vec(),
-            ),
-            CommandError::InvalidInteger,
         ),
         InvalidMigrateCase::InvalidDb { token } => (
             base_valid_argv(

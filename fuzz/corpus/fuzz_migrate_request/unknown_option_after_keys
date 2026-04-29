@@ -1,0 +1,8 @@
+localhost
+6379
+
+0
+5000
+KEYS
+k1
+BOGUS

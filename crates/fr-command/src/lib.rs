@@ -29224,6 +29224,172 @@ mod tests {
     ///      expected `RespFrame` so the corpus locks the eval
     ///      result.
     /// Lock the contract for the structured corpus seeds in
+    /// `fuzz/corpus/fuzz_migrate_request/`. The fuzz target's
+    /// `raw_argv` pre-pends `MIGRATE` to the seed body, then
+    /// splits on `\\n`/`\\r`/`\\0` into argv tokens. The
+    /// accept-class invariant is canonical round-trip:
+    /// parse → canonical-render → reparse → same struct.
+    ///
+    /// The seed generator
+    /// (`fuzz/scripts/gen_migrate_request_seeds.py`) covers each
+    /// MIGRATE option combination + every documented rejection
+    /// branch. This test locks: every accept seed parses; every
+    /// reject seed surfaces an Err; specific reject cases hit the
+    /// canonical wording.
+    #[test]
+    fn fuzz_migrate_request_corpus_matches_documented_contract() {
+        use crate::parse_migrate_request;
+        use std::path::Path;
+
+        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fuzz/corpus/fuzz_migrate_request");
+        if !corpus_root.exists() {
+            return;
+        }
+
+        // The harness's raw_argv splits on \n / \r / 0 WITHOUT
+        // filtering empties (the empty key arg in KEYS mode
+        // depends on this). Strip a single trailing empty segment
+        // (from the seed's trailing newline) so seeds remain
+        // human-readable text files.
+        fn argv_from(body: &[u8]) -> Vec<Vec<u8>> {
+            let mut argv = vec![b"MIGRATE".to_vec()];
+            let mut segments: Vec<&[u8]> = body
+                .split(|byte| matches!(*byte, b'\n' | b'\r' | 0))
+                .collect();
+            if let Some(last) = segments.last()
+                && last.is_empty()
+            {
+                segments.pop();
+            }
+            for segment in segments {
+                argv.push(segment.to_vec());
+            }
+            argv
+        }
+
+        fn read_argv(corpus_root: &Path, name: &str) -> Vec<Vec<u8>> {
+            let bytes = std::fs::read(corpus_root.join(name))
+                .unwrap_or_else(|err| panic!("read seed {name}: {err}"));
+            argv_from(&bytes)
+        }
+
+        let accepts: &[&str] = &[
+            "minimal_no_options",
+            "with_copy",
+            "with_replace",
+            "with_copy_and_replace",
+            "with_auth",
+            "with_auth2",
+            "with_auth_and_replace",
+            "with_auth2_and_copy",
+            "keys_mode_two_keys",
+            "keys_mode_single_key",
+            "keys_mode_with_auth",
+            "keys_mode_with_auth2_and_replace",
+            "ipv4_host",
+            "ipv6_loopback_host",
+            "hostname_with_dots",
+            "db_index_max",
+            "negative_timeout_clamps",
+            "zero_timeout_clamps",
+            "large_timeout",
+            "auth_password_with_special_chars",
+            "keys_mode_long_list",
+            // The trailing token after KEYS is NOT an option; it
+            // becomes another key (KEYS consumes everything left).
+            "unknown_option_after_keys",
+            // Port is intentionally NOT validated at parse time —
+            // upstream Redis migrateCommand skips port validation
+            // when the key is missing (returns NOKEY first), so
+            // parse_migrate_request preserves the raw `port_arg`
+            // bytes and validation is deferred to dispatch. See
+            // `migrate_missing_key_skips_port_validation_like_redis`.
+            "invalid_port",
+        ];
+        assert!(
+            accepts.len() >= 14,
+            "fuzz_migrate_request accept seeds must have >= 14 entries"
+        );
+        for name in accepts {
+            let argv = read_argv(&corpus_root, name);
+            parse_migrate_request(&argv)
+                .unwrap_or_else(|err| panic!("seed {name} must parse: {err:?}"));
+        }
+
+        // Pinned semantic checks for representative seeds.
+
+        // negative_timeout_clamps: timeout_ms <= 0 must clamp to
+        // 1000ms per Redis spec (timeout 0 means default 1s).
+        let argv = read_argv(&corpus_root, "negative_timeout_clamps");
+        let request = parse_migrate_request(&argv).unwrap();
+        assert_eq!(
+            request.timeout,
+            std::time::Duration::from_millis(1000),
+            "negative timeout must clamp to 1000ms"
+        );
+        let argv = read_argv(&corpus_root, "zero_timeout_clamps");
+        let request = parse_migrate_request(&argv).unwrap();
+        assert_eq!(
+            request.timeout,
+            std::time::Duration::from_millis(1000),
+            "zero timeout must clamp to 1000ms"
+        );
+
+        // KEYS mode collects the trailing keys.
+        let argv = read_argv(&corpus_root, "keys_mode_two_keys");
+        let request = parse_migrate_request(&argv).unwrap();
+        assert_eq!(request.keys, vec![b"k1".to_vec(), b"k2".to_vec()]);
+
+        // AUTH2 captures both username and password.
+        let argv = read_argv(&corpus_root, "with_auth2");
+        let request = parse_migrate_request(&argv).unwrap();
+        assert_eq!(request.auth_username, Some(b"user".to_vec()));
+        assert_eq!(request.auth_password, Some(b"password".to_vec()));
+
+        // COPY + REPLACE flags pass through.
+        let argv = read_argv(&corpus_root, "with_copy_and_replace");
+        let request = parse_migrate_request(&argv).unwrap();
+        assert!(request.copy);
+        assert!(request.replace);
+
+        // Reject-class.
+        let rejects: &[&str] = &[
+            "too_few_args",
+            "invalid_db_index",
+            "invalid_timeout",
+            "auth_missing_password",
+            "auth2_missing_username_and_password",
+            "auth2_missing_password",
+            "keys_with_non_empty_key_arg",
+            "unknown_option",
+            // unknown_option_after_keys is intentionally NOT a
+            // reject: once KEYS is hit, the parser consumes all
+            // remaining argv as keys (matches upstream Redis
+            // semantics), so trailing tokens are interpreted as
+            // additional key names rather than option tokens.
+        ];
+        for name in rejects {
+            let argv = read_argv(&corpus_root, name);
+            assert!(
+                parse_migrate_request(&argv).is_err(),
+                "seed {name} must reject (got Ok)"
+            );
+        }
+
+        // KEYS with a non-empty key arg must surface the canonical
+        // upstream wording.
+        let argv = read_argv(&corpus_root, "keys_with_non_empty_key_arg");
+        let err = parse_migrate_request(&argv)
+            .expect_err("KEYS with non-empty key must reject");
+        let detail = format!("{err:?}");
+        assert!(
+            detail.contains("KEYS") && detail.contains("empty"),
+            "KEYS-non-empty-key-arg wording must mention KEYS+empty: {detail}"
+        );
+    }
+
+    /// Lock the contract for the structured corpus seeds in
     /// `fuzz/corpus/fuzz_client_tracking/`. The fuzz target parses
     /// each input via `argv_from_raw` (whitespace-split tokens)
     /// and feeds the argv through `parse_client_tracking_state`.

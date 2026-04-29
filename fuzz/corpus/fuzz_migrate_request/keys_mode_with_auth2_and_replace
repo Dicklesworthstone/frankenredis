@@ -1,0 +1,12 @@
+localhost
+6379
+
+0
+5000
+REPLACE
+AUTH2
+u
+p
+KEYS
+k1
+k2

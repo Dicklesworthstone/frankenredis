@@ -1,0 +1,11 @@
+localhost
+6379
+
+0
+5000
+AUTH
+secret
+KEYS
+k1
+k2
+k3

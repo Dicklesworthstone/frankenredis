@@ -1,0 +1,7 @@
+localhost
+6379
+nonempty
+0
+5000
+KEYS
+k1
