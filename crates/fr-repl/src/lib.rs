@@ -249,7 +249,7 @@ pub fn decide_psync(
     requested_replid: &str,
     requested_offset: ReplOffset,
 ) -> PsyncDecision {
-    if requested_replid != backlog.replid {
+    if !requested_replid.eq_ignore_ascii_case(&backlog.replid) {
         return PsyncDecision::FullResync {
             rejection: PsyncRejection::ReplidMismatch,
         };
@@ -376,6 +376,25 @@ mod tests {
     }
 
     #[test]
+    fn psync_replid_match_is_ascii_case_insensitive_like_redis() {
+        let backlog = BacklogWindow {
+            replid: "abcdef1234567890abcdef1234567890abcdef12".to_string(),
+            start_offset: ReplOffset(100),
+            end_offset: ReplOffset(200),
+        };
+        assert_eq!(
+            decide_psync(
+                &backlog,
+                "ABCDEF1234567890ABCDEF1234567890ABCDEF12",
+                ReplOffset(150),
+            ),
+            PsyncDecision::Continue {
+                requested_offset: ReplOffset(150)
+            }
+        );
+    }
+
+    #[test]
     fn fr_p2c_006_u002_psync_rejects_replid_mismatch() {
         let backlog = BacklogWindow {
             replid: "replid-a".to_string(),
@@ -494,7 +513,7 @@ mod tests {
     ///      doesn't get stuck on phantom successes if the parser
     ///      ever drifts.
     #[test]
-    fn fuzz_psync_reply_corpus_matches_documented_contract() {
+    fn fuzz_psync_reply_corpus_matches_documented_contract() -> Result<(), String> {
         use std::path::Path;
 
         let corpus_root =
@@ -502,21 +521,24 @@ mod tests {
         if !corpus_root.exists() {
             // Corpus is committed; skip if a packaged checkout
             // strips the fuzz tree.
-            return;
+            return Ok(());
         }
 
         // Each seed file is `<mode-byte><body>`. Strip the leading
         // mode byte (always 0x00 for these seeds — selects the raw
         // path) before feeding to parse_psync_reply.
-        fn read_body(corpus_root: &Path, name: &str) -> String {
+        fn read_body(corpus_root: &Path, name: &str) -> Result<String, String> {
             let bytes = std::fs::read(corpus_root.join(name))
-                .unwrap_or_else(|err| panic!("read seed {name}: {err}"));
-            assert!(!bytes.is_empty(), "seed {name} is empty");
-            assert_eq!(
-                bytes[0], 0x00,
-                "seed {name} mode byte must be 0x00 (raw_psync_reply path)",
-            );
-            String::from_utf8_lossy(&bytes[1..]).into_owned()
+                .map_err(|err| format!("read seed {name}: {err}"))?;
+            if bytes.is_empty() {
+                return Err(format!("seed {name} is empty"));
+            }
+            if bytes[0] != 0x00 {
+                return Err(format!(
+                    "seed {name} mode byte must be 0x00 (raw_psync_reply path)"
+                ));
+            }
+            Ok(String::from_utf8_lossy(&bytes[1..]).into_owned())
         }
 
         // ── Accept-class seeds: must produce the listed reply.
@@ -561,9 +583,8 @@ mod tests {
         }
 
         for (name, expected) in accepts {
-            let body = read_body(&corpus_root, name);
-            let parsed =
-                parse_psync_reply(&body).unwrap_or_else(|err| panic!("seed {name}: {err:?}"));
+            let body = read_body(&corpus_root, name)?;
+            let parsed = parse_psync_reply(&body).map_err(|err| format!("seed {name}: {err:?}"))?;
             assert_eq!(&parsed, expected, "seed {name} parse mismatch");
             // Canonical round-trip property the fuzz target asserts.
             assert_eq!(
@@ -602,29 +623,17 @@ mod tests {
             "first_token_empty_after_resp_prefix.txt",
         ];
         for name in rejects {
-            let body = read_body(&corpus_root, name);
-            let err = parse_psync_reply(&body)
-                .unwrap_err_or_else_keep_compat(&format!("seed {name} must reject"));
+            let body = read_body(&corpus_root, name)?;
+            let err = match parse_psync_reply(&body) {
+                Ok(reply) => return Err(format!("seed {name} must reject: got Ok({reply:?})")),
+                Err(err) => err,
+            };
             assert!(
                 matches!(err, ReplError::PsyncReplyStateMismatch { .. }),
                 "seed {name} surfaced unexpected error variant: {err:?}",
             );
         }
-    }
-
-    /// Tiny helper kept inside the test module — Result has no
-    /// `unwrap_err_or_else_keep_compat`; this just makes the panic
-    /// message richer than the default `unwrap_err`.
-    trait UnwrapErrWithMsg<T, E> {
-        fn unwrap_err_or_else_keep_compat(self, msg: &str) -> E;
-    }
-    impl<T: std::fmt::Debug, E> UnwrapErrWithMsg<T, E> for Result<T, E> {
-        fn unwrap_err_or_else_keep_compat(self, msg: &str) -> E {
-            match self {
-                Ok(v) => panic!("{msg}: but got Ok({v:?})"),
-                Err(e) => e,
-            }
-        }
+        Ok(())
     }
 
     #[test]
