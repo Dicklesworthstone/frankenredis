@@ -17811,6 +17811,113 @@ mod tests {
     /// asserts) and every reject seed returns `None`. Locks the
     /// seeds against parser drift in case-sensitivity or class
     /// alphabet.
+    /// Lock the contract for the structured corpus seeds in
+    /// `fuzz/corpus/fuzz_dump_restore/`. The fuzz harness derives a
+    /// `DumpRestoreInput` enum (Valid or Raw) from the input bytes
+    /// and exercises both `Store::dump_key` round-trips and
+    /// `Store::restore_key` error paths. The seed generator
+    /// (`fuzz/scripts/gen_dump_restore_seeds.py`) writes byte-level
+    /// DUMP envelopes covering each meaningful branch:
+    ///
+    ///   - String / List / Set / Hash / ZSET_2 valid round-trips
+    ///   - Truncated / corrupted-CRC / future-version envelopes
+    ///   - Unknown type bytes
+    ///   - Length-prefix overruns the body
+    ///
+    /// The test verifies:
+    ///   1. Every accept seed restores cleanly into a fresh store.
+    ///   2. The dump-then-redump round-trip is byte-identical (same
+    ///      property `fuzz_valid_roundtrip` asserts).
+    ///   3. Every reject seed surfaces an Err without panicking.
+    #[test]
+    fn fuzz_dump_restore_corpus_matches_documented_contract() {
+        use crate::Store;
+        use std::path::Path;
+
+        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fuzz/corpus/fuzz_dump_restore");
+        if !corpus_root.exists() {
+            return;
+        }
+
+        fn read_seed(corpus_root: &Path, name: &str) -> Vec<u8> {
+            std::fs::read(corpus_root.join(name))
+                .unwrap_or_else(|err| panic!("read seed {name}: {err}"))
+        }
+
+        // Accept-class: each must restore cleanly AND the
+        // dump-then-redump round-trip must be byte-identical.
+        let accepts: &[&str] = &[
+            "dump_string_short_ascii",
+            "dump_string_empty",
+            "dump_string_binary_with_nul",
+            "dump_string_64_bytes_just_over_threshold",
+            "dump_string_300_bytes",
+            "dump_list_single_element",
+            "dump_list_three_elements",
+            "dump_set_single_member",
+            "dump_set_three_members",
+            "dump_hash_single_field",
+            "dump_hash_three_fields",
+            "dump_zset2_single_member",
+            "dump_zset2_three_members",
+            "dump_zset2_negative_scores",
+        ];
+        assert!(
+            accepts.len() >= 14,
+            "fuzz_dump_restore accept seeds must have >= 14 entries"
+        );
+        for name in accepts {
+            let payload = read_seed(&corpus_root, name);
+            let mut store = Store::new();
+            store
+                .restore_key(b"k", 0, &payload, false, 100)
+                .unwrap_or_else(|err| panic!("seed {name} must restore: {err:?}"));
+
+            // Dump→redump round-trip identity.
+            let redumped = store
+                .dump_key(b"k", 100)
+                .unwrap_or_else(|| panic!("seed {name} must redump after restore"));
+            let mut store2 = Store::new();
+            store2
+                .restore_key(b"k", 0, &redumped, false, 100)
+                .unwrap_or_else(|err| {
+                    panic!("seed {name} re-dumped payload must re-restore: {err:?}")
+                });
+            let redumped2 = store2
+                .dump_key(b"k", 100)
+                .unwrap_or_else(|| panic!("seed {name} must redump twice"));
+            assert_eq!(
+                redumped, redumped2,
+                "seed {name} dump-then-redump must be byte-identical"
+            );
+        }
+
+        // Reject-class: each must surface an Err. We don't pin the
+        // exact StoreError variant — different shapes hit different
+        // branches (InvalidDumpPayload for header / CRC / version
+        // failures; the unknown-type-byte and length-overrun paths
+        // also surface InvalidDumpPayload via decode_rdb_string).
+        let rejects: &[&str] = &[
+            "dump_truncated_below_minimum",
+            "dump_truncated_zero_bytes",
+            "dump_corrupted_crc",
+            "dump_future_version",
+            "dump_unknown_type_byte",
+            "dump_string_length_overruns_body",
+            "dump_type_byte_only_no_body",
+            "dump_list_count_overruns_body",
+        ];
+        for name in rejects {
+            let payload = read_seed(&corpus_root, name);
+            let mut store = Store::new();
+            assert!(
+                store.restore_key(b"k", 0, &payload, false, 100).is_err(),
+                "seed {name} must reject (got Ok)"
+            );
+        }
+    }
+
     #[test]
     fn fuzz_keyspace_events_corpus_matches_documented_contract() {
         use crate::{
