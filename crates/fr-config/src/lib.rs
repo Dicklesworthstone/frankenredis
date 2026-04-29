@@ -157,11 +157,14 @@ pub enum ConfigFileParseErrorReason {
     InvalidQuotedToken,
 }
 
+const INVALID_QUOTED_TOKEN_REASON: ConfigFileParseErrorReason =
+    ConfigFileParseErrorReason::InvalidQuotedToken;
+
 impl ConfigFileParseError {
     #[must_use]
     pub fn reason_code(&self) -> &'static str {
         match self.reason {
-            ConfigFileParseErrorReason::InvalidQuotedToken => "configfile.invalid_quoted_token",
+            INVALID_QUOTED_TOKEN_REASON => "configfile.invalid_quoted_token",
         }
     }
 }
@@ -169,7 +172,7 @@ impl ConfigFileParseError {
 impl fmt::Display for ConfigFileParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.reason {
-            ConfigFileParseErrorReason::InvalidQuotedToken => write!(
+            INVALID_QUOTED_TOKEN_REASON => write!(
                 f,
                 "{} at line {}: unbalanced quotes or quote followed by non-whitespace",
                 self.reason_code(),
@@ -1539,18 +1542,17 @@ mod tests {
     ///   3. Reject seeds (unterminated quotes, dangling backslash)
     ///      surface a `ConfigFileParseError` without panicking.
     #[test]
-    fn fuzz_config_file_corpus_matches_documented_contract() {
+    fn fuzz_config_file_corpus_matches_documented_contract() -> Result<(), String> {
         use std::path::Path;
 
-        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fuzz/corpus/fuzz_config_file");
+        let corpus_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/fuzz_config_file");
         if !corpus_root.exists() {
-            return;
+            return Ok(());
         }
 
-        fn read_seed(corpus_root: &Path, name: &str) -> Vec<u8> {
-            std::fs::read(corpus_root.join(name))
-                .unwrap_or_else(|err| panic!("read seed {name}: {err}"))
+        fn read_seed(corpus_root: &Path, name: &str) -> Result<Vec<u8>, String> {
+            std::fs::read(corpus_root.join(name)).map_err(|err| format!("read seed {name}: {err}"))
         }
 
         // Accept-class: every seed must parse and every directive
@@ -1594,39 +1596,40 @@ mod tests {
             "fuzz_config_file accept seeds must have >= 14 entries"
         );
         for name in accepts {
-            let body = read_seed(&corpus_root, name);
+            let body = read_seed(&corpus_root, name)?;
             let parsed = parse_redis_config_bytes(&body)
-                .unwrap_or_else(|err| panic!("seed {name} must parse: {err:?}"));
+                .map_err(|err| format!("seed {name} must parse: {err:?}"))?;
             for directive in &parsed.directives {
                 assert!(
                     !directive.name.is_empty(),
                     "seed {name}: directive name must not be empty"
                 );
                 assert!(
-                    directive
-                        .name
-                        .iter()
-                        .all(|byte| !byte.is_ascii_uppercase()),
+                    directive.name.iter().all(|byte| !byte.is_ascii_uppercase()),
                     "seed {name}: directive names must be ASCII-lowercased"
                 );
             }
         }
 
         // Pinned outcomes for representative seeds.
-        let parsed = parse_redis_config_bytes(&read_seed(&corpus_root, "empty.conf")).unwrap();
+        let parsed = parse_redis_config_bytes(&read_seed(&corpus_root, "empty.conf")?).unwrap();
         assert!(parsed.directives.is_empty());
 
-        let parsed = parse_redis_config_bytes(&read_seed(&corpus_root, "only_comment.conf")).unwrap();
-        assert!(parsed.directives.is_empty(), "comments must yield 0 directives");
+        let parsed =
+            parse_redis_config_bytes(&read_seed(&corpus_root, "only_comment.conf")?).unwrap();
+        assert!(
+            parsed.directives.is_empty(),
+            "comments must yield 0 directives"
+        );
 
         let parsed =
-            parse_redis_config_bytes(&read_seed(&corpus_root, "single_directive.conf")).unwrap();
+            parse_redis_config_bytes(&read_seed(&corpus_root, "single_directive.conf")?).unwrap();
         assert_eq!(parsed.directives.len(), 1);
         assert_eq!(parsed.directives[0].name, b"port");
         assert_eq!(parsed.directives[0].args, vec![b"6379".to_vec()]);
 
         let parsed =
-            parse_redis_config_bytes(&read_seed(&corpus_root, "directive_with_three_args.conf"))
+            parse_redis_config_bytes(&read_seed(&corpus_root, "directive_with_three_args.conf")?)
                 .unwrap();
         assert_eq!(parsed.directives.len(), 1);
         assert_eq!(parsed.directives[0].name, b"save");
@@ -1637,38 +1640,32 @@ mod tests {
 
         // Mixed-case name MUST lowercase per upstream sdstolower.
         let parsed =
-            parse_redis_config_bytes(&read_seed(&corpus_root, "mixed_case_directive_name.conf"))
+            parse_redis_config_bytes(&read_seed(&corpus_root, "mixed_case_directive_name.conf")?)
                 .unwrap();
         assert_eq!(parsed.directives[0].name, b"appendonly");
 
         // Hex escape inside double-quote decodes to the byte value.
-        let parsed = parse_redis_config_bytes(&read_seed(
-            &corpus_root,
-            "double_quoted_hex_escape.conf",
-        ))
-        .unwrap();
+        let parsed =
+            parse_redis_config_bytes(&read_seed(&corpus_root, "double_quoted_hex_escape.conf")?)
+                .unwrap();
         assert_eq!(parsed.directives[0].name, b"requirepass");
         assert_eq!(parsed.directives[0].args, vec![b"pass".to_vec()]);
 
         // tls-protocols quoted multi-token stays as ONE arg.
-        let parsed = parse_redis_config_bytes(&read_seed(
-            &corpus_root,
-            "double_quoted_with_spaces.conf",
-        ))
-        .unwrap();
+        let parsed =
+            parse_redis_config_bytes(&read_seed(&corpus_root, "double_quoted_with_spaces.conf")?)
+                .unwrap();
         assert_eq!(parsed.directives[0].args, vec![b"TLSv1.2 TLSv1.3".to_vec()]);
 
         // Empty quoted string is an empty arg (not absent).
-        let parsed = parse_redis_config_bytes(&read_seed(
-            &corpus_root,
-            "empty_double_quoted_arg.conf",
-        ))
-        .unwrap();
+        let parsed =
+            parse_redis_config_bytes(&read_seed(&corpus_root, "empty_double_quoted_arg.conf")?)
+                .unwrap();
         assert_eq!(parsed.directives[0].args, vec![Vec::<u8>::new()]);
 
         // Many-directive stress: count must match.
         let parsed =
-            parse_redis_config_bytes(&read_seed(&corpus_root, "many_directives.conf")).unwrap();
+            parse_redis_config_bytes(&read_seed(&corpus_root, "many_directives.conf")?).unwrap();
         assert_eq!(parsed.directives.len(), 12);
 
         // ── Reject-class: parser must surface ConfigFileParseError.
@@ -1678,11 +1675,12 @@ mod tests {
             "backslash_at_eof_in_double_quote.conf",
         ];
         for name in rejects {
-            let body = read_seed(&corpus_root, name);
+            let body = read_seed(&corpus_root, name)?;
             assert!(
                 parse_redis_config_bytes(&body).is_err(),
                 "seed {name} must reject (got Ok)"
             );
         }
+        Ok(())
     }
 }
