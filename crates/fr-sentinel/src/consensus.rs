@@ -24,12 +24,23 @@ pub fn evaluate_o_down(
 ) -> ODownResult {
     let quorum = master.quorum;
 
-    let valid_votes: Vec<&ODownVote> = votes
+    let mut valid_votes: std::collections::HashMap<&str, &ODownVote> =
+        std::collections::HashMap::new();
+    for vote in votes
         .iter()
         .filter(|v| now.saturating_sub(v.vote_time) < ASK_PERIOD_MS * 5)
-        .collect();
+    {
+        valid_votes
+            .entry(vote.sentinel_runid.as_str())
+            .and_modify(|existing| {
+                if vote.vote_time >= existing.vote_time {
+                    *existing = vote;
+                }
+            })
+            .or_insert(vote);
+    }
 
-    let votes_for_down = valid_votes.iter().filter(|v| v.is_down).count() as u32;
+    let votes_for_down = valid_votes.values().filter(|v| v.is_down).count() as u32;
     let total_votes = valid_votes.len() as u32;
 
     let self_thinks_down = master.is_s_down();
@@ -83,11 +94,14 @@ pub fn evaluate_leader_election(
 ) -> LeaderElectionResult {
     let votes_needed = (sentinel_count / 2) + 1;
 
-    let valid_votes: Vec<&LeaderVote> = votes.iter().filter(|v| v.epoch == current_epoch).collect();
-
+    let mut votes_by_voter: std::collections::HashMap<&str, &str> =
+        std::collections::HashMap::new();
+    for vote in votes.iter().filter(|v| v.epoch == current_epoch) {
+        votes_by_voter.insert(vote.voter_runid.as_str(), vote.leader_runid.as_str());
+    }
     let mut vote_counts: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
-    for vote in &valid_votes {
-        *vote_counts.entry(vote.leader_runid.as_str()).or_insert(0) += 1;
+    for leader_runid in votes_by_voter.values() {
+        *vote_counts.entry(leader_runid).or_insert(0) += 1;
     }
 
     let my_votes = *vote_counts.get(my_runid).unwrap_or(&0);
@@ -213,6 +227,31 @@ mod tests {
     }
 
     #[test]
+    fn o_down_counts_each_sentinel_vote_once() {
+        let mut master =
+            SentinelRedisInstance::new_master("mymaster", SentinelAddr::new("127.0.0.1", 6379), 3);
+        master.flags.insert(InstanceFlags::S_DOWN);
+
+        let votes = vec![
+            ODownVote {
+                sentinel_runid: "s1".to_string(),
+                is_down: true,
+                vote_time: 1000,
+            },
+            ODownVote {
+                sentinel_runid: "s1".to_string(),
+                is_down: true,
+                vote_time: 2000,
+            },
+        ];
+        let result = evaluate_o_down(&master, &votes, 3000);
+
+        assert!(!result.should_mark_o_down);
+        assert_eq!(result.votes_for_down, 1);
+        assert_eq!(result.total_votes, 1);
+    }
+
+    #[test]
     fn o_down_not_marked_without_s_down() {
         let master = make_master();
 
@@ -288,6 +327,31 @@ mod tests {
         let result = evaluate_leader_election("s1", 1, 5, &votes);
         assert!(result.winner.is_none());
         assert!(!result.is_winner);
+    }
+
+    #[test]
+    fn leader_election_counts_each_voter_once() {
+        let votes = vec![
+            LeaderVote {
+                voter_runid: "s1".to_string(),
+                leader_runid: "candidate".to_string(),
+                epoch: 1,
+            },
+            LeaderVote {
+                voter_runid: "s1".to_string(),
+                leader_runid: "candidate".to_string(),
+                epoch: 1,
+            },
+            LeaderVote {
+                voter_runid: "s1".to_string(),
+                leader_runid: "candidate".to_string(),
+                epoch: 1,
+            },
+        ];
+
+        let result = evaluate_leader_election("candidate", 1, 5, &votes);
+        assert!(result.winner.is_none());
+        assert_eq!(result.votes_received, 1);
     }
 
     #[test]
