@@ -2696,8 +2696,7 @@ impl Store {
         let first_keep_mask: u8 = 0xFFu8 >> s_bit_in_byte;
         let last_keep_mask: u8 = 0xFFu8 << (7 - e_bit_in_byte);
 
-        for byte_offset in s_byte..=e_byte {
-            let raw = bytes[byte_offset];
+        for (byte_offset, &raw) in bytes.iter().enumerate().take(e_byte + 1).skip(s_byte) {
             let first_byte = byte_offset == s_byte;
             let last_byte = byte_offset == e_byte;
 
@@ -14269,12 +14268,7 @@ mod tests {
         let mut store = Store::new();
         for i in 0..10u64 {
             store
-                .xadd(
-                    b"s",
-                    (1000 + i, 0),
-                    &[(b"f".to_vec(), vec![i as u8])],
-                    0,
-                )
+                .xadd(b"s", (1000 + i, 0), &[(b"f".to_vec(), vec![i as u8])], 0)
                 .unwrap();
         }
         // Without LIMIT: trims all the way down to max_len=2 (8
@@ -14308,12 +14302,7 @@ mod tests {
         let mut store = Store::new();
         for i in 0..10u64 {
             store
-                .xadd(
-                    b"s",
-                    (1000 + i, 0),
-                    &[(b"f".to_vec(), vec![i as u8])],
-                    0,
-                )
+                .xadd(b"s", (1000 + i, 0), &[(b"f".to_vec(), vec![i as u8])], 0)
                 .unwrap();
         }
         // MINID=1006 would normally remove ids (1000..=1005) = 6
@@ -14334,12 +14323,7 @@ mod tests {
         let mut store = Store::new();
         for i in 0..5u64 {
             store
-                .xadd(
-                    b"s",
-                    (1000 + i, 0),
-                    &[(b"f".to_vec(), vec![i as u8])],
-                    0,
-                )
+                .xadd(b"s", (1000 + i, 0), &[(b"f".to_vec(), vec![i as u8])], 0)
                 .unwrap();
         }
         let removed = store.xtrim(b"s", 1, Some(0), 0).unwrap();
@@ -15400,7 +15384,12 @@ mod tests {
     fn bitpos_finds_first_set_bit() {
         let mut store = Store::new();
         store.set(b"k".to_vec(), vec![0x00, 0x80], None, 0); // bit 8 set (MSB of byte 1)
-        assert_eq!(store.bitpos(b"k", true, None, None, BitRangeUnit::Byte, 0).unwrap(), 8);
+        assert_eq!(
+            store
+                .bitpos(b"k", true, None, None, BitRangeUnit::Byte, 0)
+                .unwrap(),
+            8
+        );
     }
 
     #[test]
@@ -15408,7 +15397,12 @@ mod tests {
         let mut store = Store::new();
         store.set(b"k".to_vec(), vec![0xff, 0xff], None, 0); // all bits set
         // Without explicit end, returns position past end
-        assert_eq!(store.bitpos(b"k", false, None, None, BitRangeUnit::Byte, 0).unwrap(), 16);
+        assert_eq!(
+            store
+                .bitpos(b"k", false, None, None, BitRangeUnit::Byte, 0)
+                .unwrap(),
+            16
+        );
     }
 
     /// Redis 7.0+ BITPOS BIT modifier: start/end are interpreted as
@@ -17584,8 +17578,8 @@ mod tests {
     fn fuzz_function_restore_corpus_matches_documented_contract() {
         use std::path::Path;
 
-        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fuzz/corpus/fuzz_function_restore");
+        let corpus_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/fuzz_function_restore");
         if !corpus_root.exists() {
             // Corpus is generated and committed; skip if a checkout
             // strips the fuzz tree (e.g. `cargo package`).
@@ -17731,14 +17725,14 @@ mod tests {
     fn fuzz_keyspace_events_corpus_matches_documented_contract() {
         use crate::{
             NOTIFY_ALL, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_HASH,
-            NOTIFY_KEY_MISS, NOTIFY_KEYEVENT, NOTIFY_KEYSPACE, NOTIFY_LIST, NOTIFY_NEW,
-            NOTIFY_SET, NOTIFY_STREAM, NOTIFY_STRING, NOTIFY_ZSET, keyspace_events_parse,
+            NOTIFY_KEY_MISS, NOTIFY_KEYEVENT, NOTIFY_KEYSPACE, NOTIFY_LIST, NOTIFY_NEW, NOTIFY_SET,
+            NOTIFY_STREAM, NOTIFY_STRING, NOTIFY_ZSET, keyspace_events_parse,
             keyspace_events_to_string,
         };
         use std::path::Path;
 
-        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fuzz/corpus/fuzz_keyspace_events");
+        let corpus_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/fuzz_keyspace_events");
         if !corpus_root.exists() {
             return;
         }
@@ -17753,9 +17747,14 @@ mod tests {
         // Empty input → 0; per-char accept; AKE → ALL+K+E etc.
         let accepts: &[(&str, u32)] = &[
             ("empty.txt", 0),
-            ("canonical_AKE.txt", NOTIFY_ALL | NOTIFY_KEYSPACE | NOTIFY_KEYEVENT),
-            ("KEA_alternate_ordering.txt",
-             NOTIFY_ALL | NOTIFY_KEYSPACE | NOTIFY_KEYEVENT),
+            (
+                "canonical_AKE.txt",
+                NOTIFY_ALL | NOTIFY_KEYSPACE | NOTIFY_KEYEVENT,
+            ),
+            (
+                "KEA_alternate_ordering.txt",
+                NOTIFY_ALL | NOTIFY_KEYSPACE | NOTIFY_KEYEVENT,
+            ),
             // K alone, E alone, KE without class chars — the parser
             // KEEPS the K/E bits in the bitmap. The "disable all"
             // post-pass only fires when class bits are set but
@@ -17766,19 +17765,32 @@ mod tests {
             // is what we lock here.)
             ("K_alone_no_class_disables.txt", NOTIFY_KEYSPACE),
             ("E_alone_no_class_disables.txt", NOTIFY_KEYEVENT),
-            ("KE_no_class_disables.txt", NOTIFY_KEYSPACE | NOTIFY_KEYEVENT),
+            (
+                "KE_no_class_disables.txt",
+                NOTIFY_KEYSPACE | NOTIFY_KEYEVENT,
+            ),
             ("Kg_generic_only.txt", NOTIFY_KEYSPACE | NOTIFY_GENERIC),
-            ("Egn_generic_plus_new.txt",
-             NOTIFY_KEYEVENT | NOTIFY_GENERIC | NOTIFY_NEW),
-            ("KEm_key_miss.txt",
-             NOTIFY_KEYSPACE | NOTIFY_KEYEVENT | NOTIFY_KEY_MISS),
-            ("KEt_stream.txt",
-             NOTIFY_KEYSPACE | NOTIFY_KEYEVENT | NOTIFY_STREAM),
-            ("KEn_new_key_redis7.txt",
-             NOTIFY_KEYSPACE | NOTIFY_KEYEVENT | NOTIFY_NEW),
+            (
+                "Egn_generic_plus_new.txt",
+                NOTIFY_KEYEVENT | NOTIFY_GENERIC | NOTIFY_NEW,
+            ),
+            (
+                "KEm_key_miss.txt",
+                NOTIFY_KEYSPACE | NOTIFY_KEYEVENT | NOTIFY_KEY_MISS,
+            ),
+            (
+                "KEt_stream.txt",
+                NOTIFY_KEYSPACE | NOTIFY_KEYEVENT | NOTIFY_STREAM,
+            ),
+            (
+                "KEn_new_key_redis7.txt",
+                NOTIFY_KEYSPACE | NOTIFY_KEYEVENT | NOTIFY_NEW,
+            ),
             // KEA + redundant `$` — A already includes string class.
-            ("KEA_dollar_idempotent.txt",
-             NOTIFY_ALL | NOTIFY_KEYSPACE | NOTIFY_KEYEVENT),
+            (
+                "KEA_dollar_idempotent.txt",
+                NOTIFY_ALL | NOTIFY_KEYSPACE | NOTIFY_KEYEVENT,
+            ),
             ("K_string_class.txt", NOTIFY_KEYSPACE | NOTIFY_STRING),
             ("E_list_class.txt", NOTIFY_KEYEVENT | NOTIFY_LIST),
             ("K_set_class.txt", NOTIFY_KEYSPACE | NOTIFY_SET),
@@ -17791,20 +17803,32 @@ mod tests {
             ("K_new_class.txt", NOTIFY_KEYSPACE | NOTIFY_NEW),
             // `KEg$lshzxetmn` enumerates every class char alongside
             // K + E. Equals union of all class bits + K + E.
-            ("KE_all_per_class_chars.txt",
-             NOTIFY_KEYSPACE | NOTIFY_KEYEVENT
-                 | NOTIFY_GENERIC | NOTIFY_STRING | NOTIFY_LIST | NOTIFY_SET
-                 | NOTIFY_HASH | NOTIFY_ZSET | NOTIFY_EXPIRED | NOTIFY_EVICTED
-                 | NOTIFY_STREAM | NOTIFY_KEY_MISS | NOTIFY_NEW),
-            ("KEA_with_explicit_redundants.txt",
-             NOTIFY_ALL | NOTIFY_KEYSPACE | NOTIFY_KEYEVENT
-                 | NOTIFY_KEY_MISS | NOTIFY_NEW),
+            (
+                "KE_all_per_class_chars.txt",
+                NOTIFY_KEYSPACE
+                    | NOTIFY_KEYEVENT
+                    | NOTIFY_GENERIC
+                    | NOTIFY_STRING
+                    | NOTIFY_LIST
+                    | NOTIFY_SET
+                    | NOTIFY_HASH
+                    | NOTIFY_ZSET
+                    | NOTIFY_EXPIRED
+                    | NOTIFY_EVICTED
+                    | NOTIFY_STREAM
+                    | NOTIFY_KEY_MISS
+                    | NOTIFY_NEW,
+            ),
+            (
+                "KEA_with_explicit_redundants.txt",
+                NOTIFY_ALL | NOTIFY_KEYSPACE | NOTIFY_KEYEVENT | NOTIFY_KEY_MISS | NOTIFY_NEW,
+            ),
         ];
 
         for (name, expected) in accepts {
             let body = read_seed(&corpus_root, name);
-            let parsed = keyspace_events_parse(&body)
-                .unwrap_or_else(|| panic!("seed {name} must parse"));
+            let parsed =
+                keyspace_events_parse(&body).unwrap_or_else(|| panic!("seed {name} must parse"));
             assert_eq!(
                 parsed, *expected,
                 "seed {name} parse flags mismatch (got {parsed:#x}, expected {expected:#x})"

@@ -685,7 +685,10 @@ mod tests {
         // proving the injection is neutralized.
         let parsed = parse_frame(&bytes).expect("sanitized frame must parse");
         assert_eq!(parsed.consumed, bytes.len());
-        assert_eq!(parsed.frame, RespFrame::Error("ERR x  INJECTED".to_string()));
+        assert_eq!(
+            parsed.frame,
+            RespFrame::Error("ERR x  INJECTED".to_string())
+        );
 
         let ss = RespFrame::SimpleString("OK\r\nSMUGGLED".to_string());
         let ss_bytes = ss.to_bytes();

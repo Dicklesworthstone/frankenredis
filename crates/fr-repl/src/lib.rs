@@ -475,8 +475,8 @@ mod tests {
     fn fuzz_psync_reply_corpus_matches_documented_contract() {
         use std::path::Path;
 
-        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fuzz/corpus/fuzz_psync_reply");
+        let corpus_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/fuzz_psync_reply");
         if !corpus_root.exists() {
             // Corpus is committed; skip if a packaged checkout
             // strips the fuzz tree.

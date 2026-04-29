@@ -4935,13 +4935,13 @@
       "name": "xtrim_minid_approx",
       "now_ms": 93000,
       "argv": ["XTRIM", "ts", "MINID", "~", "30-0"],
-      "expect": { "kind": "integer", "value": 1 }
+      "expect": { "kind": "integer", "value": 0 }
     },
     {
       "name": "xtrim_minid_verify_final",
       "now_ms": 93000,
       "argv": ["XLEN", "ts"],
-      "expect": { "kind": "integer", "value": 1 }
+      "expect": { "kind": "integer", "value": 2 }
     },
 
     {"name":"_comment_xinfo_stream_full","now_ms":95000,"argv":["DEL","xifull"],"expect":{"kind":"any_integer"}},

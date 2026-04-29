@@ -8946,8 +8946,6 @@ mod tests {
             "xsetid_verify_auto_id",
             "xtrim_invalid_integer_error",
             "xtrim_maxlen_two",
-            "xtrim_minid_approx",
-            "xtrim_minid_verify_final",
             // XCLAIM delivery_count accounting: our XCLAIM increments
             // to 2 where upstream keeps at 1 after a single claim.
             // Separate behavior fix; tracked on xy1q.
