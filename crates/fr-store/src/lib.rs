@@ -17789,29 +17789,6 @@ mod tests {
     }
 
     /// Lock the contract for the structured corpus seeds in
-    /// `fuzz/corpus/fuzz_keyspace_events/`. The fuzz harness runs
-    /// every input through both `fuzz_raw_keyspace_events` and
-    /// `fuzz_structured_keyspace_events`; both call into
-    /// `keyspace_events_parse`. The seed generator
-    /// (`fuzz/scripts/gen_keyspace_events_seeds.py`) crafts the
-    /// raw-path inputs that hit each documented branch of the
-    /// parser:
-    ///
-    ///   - empty / no-class disables / canonical AKE
-    ///   - K-only / E-only / KE without class chars (returns 0 per
-    ///     the "K/E without any class disables all" rule)
-    ///   - each individual class char (`g $ l s h z x e t m n`)
-    ///   - Redis 6.0 `m` (key-miss) and Redis 7.0 `n` (NEW) bits
-    ///   - `A` superset + redundant explicit class chars
-    ///   - reject paths: lowercase k, unknown chars, snowman, etc.
-    ///
-    /// This test verifies every accept seed returns the exact
-    /// expected flag set (and round-trips through the canonical
-    /// rendering, which is the property the fuzz target itself
-    /// asserts) and every reject seed returns `None`. Locks the
-    /// seeds against parser drift in case-sensitivity or class
-    /// alphabet.
-    /// Lock the contract for the structured corpus seeds in
     /// `fuzz/corpus/fuzz_dump_restore/`. The fuzz harness derives a
     /// `DumpRestoreInput` enum (Valid or Raw) from the input bytes
     /// and exercises both `Store::dump_key` round-trips and
@@ -17834,8 +17811,8 @@ mod tests {
         use crate::Store;
         use std::path::Path;
 
-        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fuzz/corpus/fuzz_dump_restore");
+        let corpus_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/fuzz_dump_restore");
         if !corpus_root.exists() {
             return;
         }

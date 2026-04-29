@@ -48,9 +48,9 @@ pub enum ListpackError {
     MissingTerminator,
     /// Unknown encoding byte.
     InvalidEncoding(u8),
-    /// Entry body or backlen points past the listpack end.
+    /// Entry body or backlen is truncated.
     TruncatedEntry,
-    /// Backlen byte run exceeds the 5-byte maximum.
+    /// Backlen byte run is malformed or does not match the entry length.
     InvalidBacklen,
     /// String entry's declared length would overflow usize.
     StringLengthOverflow,
@@ -109,8 +109,8 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
     if first & 0x80 == 0 {
         let value = i64::from(first & 0x7F);
         let data_len = 1;
-        let backlen_len = backlen_byte_count(data_len);
-        return Ok((ListpackEntry::Integer(value), data_len + backlen_len));
+        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        return Ok((ListpackEntry::Integer(value), entry_len));
     }
     // 6-bit str: 10xxxxxx, length in low 6 bits, string follows.
     if first & 0xC0 == 0x80 {
@@ -124,8 +124,8 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
         }
         let bytes = data[start..end].to_vec();
         let data_len = 1 + slen;
-        let backlen_len = backlen_byte_count(data_len);
-        return Ok((ListpackEntry::String(bytes), data_len + backlen_len));
+        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        return Ok((ListpackEntry::String(bytes), entry_len));
     }
     // 13-bit signed int: 110xxxxx + 1 byte.
     if first & 0xE0 == 0xC0 {
@@ -138,8 +138,8 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
             raw as i64
         };
         let data_len = 2;
-        let backlen_len = backlen_byte_count(data_len);
-        return Ok((ListpackEntry::Integer(signed), data_len + backlen_len));
+        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        return Ok((ListpackEntry::Integer(signed), entry_len));
     }
     // 12-bit str: 1110xxxx + 1 byte = length, then string.
     if first & 0xF0 == 0xE0 {
@@ -154,8 +154,8 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
         }
         let bytes = data[start..end].to_vec();
         let data_len = 2 + slen;
-        let backlen_len = backlen_byte_count(data_len);
-        return Ok((ListpackEntry::String(bytes), data_len + backlen_len));
+        let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+        return Ok((ListpackEntry::String(bytes), entry_len));
     }
     // Remaining: 0xF0..=0xF4 / 0xFF.
     match first {
@@ -179,8 +179,8 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
             }
             let bytes = data[start..end].to_vec();
             let data_len = 5 + slen;
-            let backlen_len = backlen_byte_count(data_len);
-            Ok((ListpackEntry::String(bytes), data_len + backlen_len))
+            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            Ok((ListpackEntry::String(bytes), entry_len))
         }
         0xF1 => {
             // 16-bit signed int: 11110001 + u16 LE.
@@ -189,11 +189,8 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
             }
             let raw = i16::from_le_bytes([data[cursor + 1], data[cursor + 2]]);
             let data_len = 3;
-            let backlen_len = backlen_byte_count(data_len);
-            Ok((
-                ListpackEntry::Integer(i64::from(raw)),
-                data_len + backlen_len,
-            ))
+            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            Ok((ListpackEntry::Integer(i64::from(raw)), entry_len))
         }
         0xF2 => {
             // 24-bit signed int: 11110010 + 3 bytes LE.
@@ -209,8 +206,8 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
                 raw_u32 as i64
             };
             let data_len = 4;
-            let backlen_len = backlen_byte_count(data_len);
-            Ok((ListpackEntry::Integer(signed), data_len + backlen_len))
+            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            Ok((ListpackEntry::Integer(signed), entry_len))
         }
         0xF3 => {
             // 32-bit signed int: 11110011 + i32 LE.
@@ -224,11 +221,8 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
                 data[cursor + 4],
             ]);
             let data_len = 5;
-            let backlen_len = backlen_byte_count(data_len);
-            Ok((
-                ListpackEntry::Integer(i64::from(raw)),
-                data_len + backlen_len,
-            ))
+            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            Ok((ListpackEntry::Integer(i64::from(raw)), entry_len))
         }
         0xF4 => {
             // 64-bit signed int: 11110100 + i64 LE.
@@ -246,11 +240,54 @@ fn decode_entry(data: &[u8], cursor: usize) -> Result<(ListpackEntry, usize), Li
                 data[cursor + 8],
             ]);
             let data_len = 9;
-            let backlen_len = backlen_byte_count(data_len);
-            Ok((ListpackEntry::Integer(raw), data_len + backlen_len))
+            let entry_len = entry_len_with_backlen(data, cursor, data_len)?;
+            Ok((ListpackEntry::Integer(raw), entry_len))
         }
         _ => Err(ListpackError::InvalidEncoding(first)),
     }
+}
+
+fn entry_len_with_backlen(
+    data: &[u8],
+    cursor: usize,
+    data_len: usize,
+) -> Result<usize, ListpackError> {
+    let backlen_len = backlen_byte_count(data_len);
+    let backlen_start = cursor
+        .checked_add(data_len)
+        .ok_or(ListpackError::TruncatedEntry)?;
+    let backlen_end = backlen_start
+        .checked_add(backlen_len)
+        .ok_or(ListpackError::TruncatedEntry)?;
+    if backlen_end > data.len() {
+        return Err(ListpackError::TruncatedEntry);
+    }
+
+    let mut decoded = 0usize;
+    let mut shift = 0u32;
+    let mut terminated = false;
+    for index in (backlen_start..backlen_end).rev() {
+        let byte = data[index];
+        let chunk = usize::from(byte & 0x7F)
+            .checked_shl(shift)
+            .ok_or(ListpackError::InvalidBacklen)?;
+        decoded = decoded
+            .checked_add(chunk)
+            .ok_or(ListpackError::InvalidBacklen)?;
+        if byte & 0x80 == 0 {
+            if index != backlen_start {
+                return Err(ListpackError::InvalidBacklen);
+            }
+            terminated = true;
+            break;
+        }
+        shift += 7;
+    }
+
+    if !terminated || decoded != data_len {
+        return Err(ListpackError::InvalidBacklen);
+    }
+    Ok(data_len + backlen_len)
 }
 
 /// How many backlen bytes follow an entry whose encoding+data occupies
@@ -507,6 +544,15 @@ mod tests {
         let mut lp = assemble(&[&entry_7bit_uint(3)]);
         *lp.last_mut().unwrap() = 0xAB;
         assert_eq!(decode_listpack(&lp), Err(ListpackError::MissingTerminator));
+    }
+
+    #[test]
+    fn mismatched_backlen_rejected() {
+        let mut lp = assemble(&[&entry_6bit_str(b"hello")]);
+        let backlen_idx = lp.len() - 2;
+        assert_eq!(lp[backlen_idx], 6);
+        lp[backlen_idx] = 1;
+        assert_eq!(decode_listpack(&lp), Err(ListpackError::InvalidBacklen));
     }
 
     #[test]
