@@ -1,0 +1,2 @@
+FR_OPTION_SEED
+ACCEPT|EVAL return{#KEYS,#ARGV} 2 k1 k2 a1

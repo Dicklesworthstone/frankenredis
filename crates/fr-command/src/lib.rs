@@ -29261,6 +29261,184 @@ mod tests {
         }
     }
 
+    /// Lock the text corpus used by `fuzz_command_option_parsers`.
+    ///
+    /// Seeds start with `FR_OPTION_SEED` and then contain one
+    /// `ACCEPT|...` or `REJECT|...` command per line. The fuzz
+    /// target has a fast path for this format so these human-readable
+    /// seeds exercise deep option-parser branches immediately before
+    /// libFuzzer mutates into the arbitrary structured path.
+    #[test]
+    fn fuzz_command_option_parsers_corpus_matches_documented_contract() -> Result<(), String> {
+        use std::collections::BTreeSet;
+        use std::path::Path;
+
+        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fuzz/corpus/fuzz_command_option_parsers");
+        if !corpus_root.exists() {
+            return Ok(());
+        }
+
+        fn read_seed(corpus_root: &Path, name: &str, expected: &str) -> Vec<Vec<u8>> {
+            let body = std::fs::read_to_string(corpus_root.join(name))
+                .unwrap_or_else(|err| panic!("read seed {name}: {err}"));
+            let mut lines = body.lines();
+            assert_eq!(
+                lines.next(),
+                Some("FR_OPTION_SEED"),
+                "seed {name} must start with the text corpus header"
+            );
+            for line in lines {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let (kind, argv_text) = line
+                    .split_once('|')
+                    .unwrap_or_else(|| panic!("seed {name} must contain KIND|argv"));
+                assert_eq!(kind, expected, "seed {name} has wrong expectation kind");
+                return argv_text
+                    .split_ascii_whitespace()
+                    .map(|token| token.as_bytes().to_vec())
+                    .collect();
+            }
+            panic!("seed {name} must contain one command line")
+        }
+
+        fn seeded_option_store(now_ms: u64) -> Store {
+            let mut store = Store::new();
+            store.set(b"scan:str".to_vec(), b"v".to_vec(), None, now_ms);
+            let _ = store.hset(b"h", b"field1".to_vec(), b"value1".to_vec(), now_ms);
+            let _ = store.hset(b"h", b"field2".to_vec(), b"value2".to_vec(), now_ms);
+            let _ = store.lpush(b"scan:list", &[b"item".to_vec()], now_ms);
+            let _ = store.zadd(
+                b"zset",
+                &[
+                    (1.0, b"alpha".to_vec()),
+                    (2.0, b"beta".to_vec()),
+                    (3.0, b"gamma".to_vec()),
+                    (4.0, b"delta".to_vec()),
+                ],
+                now_ms,
+            );
+            let _ = store.zadd(
+                b"zs1",
+                &[(1.0, b"a".to_vec()), (3.0, b"c".to_vec())],
+                now_ms,
+            );
+            let _ = store.zadd(
+                b"zs2",
+                &[(2.0, b"b".to_vec()), (4.0, b"c".to_vec())],
+                now_ms,
+            );
+            let _ = store.xadd(b"s", (1, 0), &[(b"f".to_vec(), b"1".to_vec())], now_ms);
+            let _ = store.xadd(b"s", (2, 0), &[(b"f".to_vec(), b"2".to_vec())], now_ms);
+            let _ = store.xgroup_create(b"s", b"g", (0, 0), false, now_ms);
+            let geo_seed = vec![
+                b"GEOADD".to_vec(),
+                b"geo".to_vec(),
+                b"13.361389".to_vec(),
+                b"38.115556".to_vec(),
+                b"palermo".to_vec(),
+                b"15.087269".to_vec(),
+                b"37.502669".to_vec(),
+                b"catania".to_vec(),
+            ];
+            let _ = dispatch_argv(&geo_seed, &mut store, now_ms);
+            let _ = store.lpush(b"source", &[b"payload".to_vec()], now_ms);
+            store
+        }
+
+        fn is_rejection_for_seed(result: &Result<RespFrame, CommandError>) -> bool {
+            matches!(result, Err(_) | Ok(RespFrame::Error(_)))
+        }
+
+        let accepts: &[&str] = &[
+            "zrange_withscores_limit.seed",
+            "zrange_limit_then_withscores.seed",
+            "geo_count_any_withcoord.seed",
+            "geo_desc_withdist_hash.seed",
+            "xread_bare_ms.seed",
+            "xrange_bare_bounds.seed",
+            "xgroup_setid_explicit.seed",
+            "zunionstore_weights_aggregate.seed",
+            "scan_match_count_type.seed",
+            "hscan_match_count.seed",
+            "eval_no_keys.seed",
+            "eval_two_keys.seed",
+            "brpoplpush_decimal_timeout.seed",
+        ];
+        assert!(
+            accepts.len() >= 10,
+            "command option parser corpus must include >= 10 accept seeds"
+        );
+        let mut now_ms = 1_u64;
+        for name in accepts {
+            let argv = read_seed(&corpus_root, name, "ACCEPT");
+            let mut store = seeded_option_store(now_ms);
+            let result = dispatch_argv(&argv, &mut store, now_ms);
+            assert!(
+                !is_rejection_for_seed(&result),
+                "seed {name} must accept: argv={argv:?}, result={result:?}"
+            );
+            now_ms = now_ms.saturating_add(7);
+        }
+
+        let rejects: &[&str] = &[
+            "zrange_missing_limit_count.seed",
+            "geo_count_zero.seed",
+            "geo_missing_count_value.seed",
+            "xread_invalid_id.seed",
+            "xgroup_setid_invalid.seed",
+            "zunionstore_missing_weight.seed",
+            "zunionstore_invalid_aggregate.seed",
+            "scan_missing_match.seed",
+            "hscan_zero_count.seed",
+            "eval_negative_numkeys.seed",
+            "brpoplpush_nan_timeout.seed",
+        ];
+        for name in rejects {
+            let argv = read_seed(&corpus_root, name, "REJECT");
+            let mut store = seeded_option_store(now_ms);
+            let before = store.state_digest();
+            let result = dispatch_argv(&argv, &mut store, now_ms);
+            assert!(
+                is_rejection_for_seed(&result),
+                "seed {name} must reject: argv={argv:?}, result={result:?}"
+            );
+            assert_eq!(
+                before,
+                store.state_digest(),
+                "reject seed {name} must not mutate store"
+            );
+            now_ms = now_ms.saturating_add(7);
+        }
+
+        let listed: BTreeSet<&str> = accepts.iter().chain(rejects.iter()).copied().collect();
+        for entry in std::fs::read_dir(&corpus_root)
+            .map_err(|err| format!("read fuzz_command_option_parsers corpus: {err}"))?
+        {
+            let entry =
+                entry.map_err(|err| format!("read fuzz_command_option_parsers entry: {err}"))?;
+            if !entry
+                .file_type()
+                .map_err(|err| format!("read seed file type: {err}"))?
+                .is_file()
+            {
+                continue;
+            }
+            let name = entry.file_name().into_string().map_err(|name| {
+                format!("fuzz_command_option_parsers seed filename is not UTF-8: {name:?}")
+            })?;
+            assert!(
+                listed.contains(name.as_str()),
+                "seed {name} must be listed as accept or reject"
+            );
+        }
+
+        Ok(())
+    }
+
     #[test]
     fn eval_executes_lua() {
         let mut store = Store::new();

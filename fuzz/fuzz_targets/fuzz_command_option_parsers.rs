@@ -9,6 +9,7 @@ use libfuzzer_sys::fuzz_target;
 const MAX_INPUT_LEN: usize = 4_096;
 const MAX_CASES: usize = 64;
 const MAX_BLOB_LEN: usize = 32;
+const TEXT_SEED_HEADER: &str = "FR_OPTION_SEED";
 
 #[derive(Debug, Arbitrary)]
 struct FuzzInput {
@@ -213,6 +214,11 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
+    if data.starts_with(TEXT_SEED_HEADER.as_bytes()) {
+        fuzz_text_seed(data);
+        return;
+    }
+
     let mut unstructured = Unstructured::new(data);
     let Ok(input) = FuzzInput::arbitrary(&mut unstructured) else {
         return;
@@ -220,6 +226,53 @@ fuzz_target!(|data: &[u8]| {
 
     fuzz_command_option_parsers(input);
 });
+
+fn fuzz_text_seed(data: &[u8]) {
+    let Ok(text) = std::str::from_utf8(data) else {
+        return;
+    };
+    let mut now_ms = 1_u64;
+    for line in text.lines().skip(1).take(MAX_CASES) {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((expectation, argv_text)) = line.split_once('|') else {
+            continue;
+        };
+        let argv: Vec<Vec<u8>> = argv_text
+            .split_ascii_whitespace()
+            .take(32)
+            .map(|token| token.as_bytes().to_vec())
+            .collect();
+        if argv.is_empty() {
+            continue;
+        }
+
+        let mut store = seeded_store(now_ms, true);
+        let before = store.state_digest();
+        let result = dispatch_argv(&argv, &mut store, now_ms);
+        match expectation {
+            "ACCEPT" => assert!(
+                !is_rejection(&result),
+                "seed command should be accepted: argv={argv:?}, result={result:?}"
+            ),
+            "REJECT" => {
+                assert!(
+                    is_rejection(&result),
+                    "seed command should reject: argv={argv:?}, result={result:?}"
+                );
+                assert_eq!(
+                    before,
+                    store.state_digest(),
+                    "rejected seed command must not mutate store: argv={argv:?}"
+                );
+            }
+            _ => {}
+        }
+        now_ms = now_ms.saturating_add(7);
+    }
+}
 
 fn fuzz_command_option_parsers(input: FuzzInput) {
     let mut now_ms = 1_u64;
