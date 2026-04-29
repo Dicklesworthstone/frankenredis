@@ -524,12 +524,12 @@ fn decode_stream_listpack(
             }
         }
 
-        // lp_count trailer: total listpack elements from (flags) through the
-        // last value. We don't validate the exact number because our
-        // forward walk already pinned it; we only confirm it's present and
-        // non-negative.
+        // lp_count trailer: total listpack elements from flags through the
+        // last value. Upstream rejects streams when this count drifts because
+        // reverse iteration uses it to seek the previous entry.
         let lp_count = take_int(lp, &mut idx)?;
-        if lp_count < 0 {
+        let expected_lp_count = expected_entry_lp_count(field_count, same_fields)?;
+        if lp_count != expected_lp_count {
             return Err(UpstreamStreamError::InconsistentEntryTrailer);
         }
 
@@ -541,6 +541,22 @@ fn decode_stream_listpack(
         out.push((ms, seq, fields));
     }
     Ok(())
+}
+
+fn expected_entry_lp_count(
+    field_count: usize,
+    same_fields: bool,
+) -> Result<i64, UpstreamStreamError> {
+    let fixed_fields = 3usize; // flags + ms_delta + seq_delta
+    let total = if same_fields {
+        field_count.checked_add(fixed_fields)
+    } else {
+        field_count
+            .checked_mul(2)
+            .and_then(|dynamic_fields| dynamic_fields.checked_add(fixed_fields + 1))
+    };
+    let total = total.ok_or(UpstreamStreamError::InvalidFieldCount)?;
+    i64::try_from(total).map_err(|_| UpstreamStreamError::InvalidFieldCount)
 }
 
 fn take_int(lp: &[ListpackEntry], idx: &mut usize) -> Result<i64, UpstreamStreamError> {
@@ -696,7 +712,7 @@ mod tests {
     ///
     /// Master fields: ["f1", "f2"]; then one entry with flags=0, ms_delta=5,
     /// seq_delta=0, field_count=2, fields=("f1","V1"), ("f2","V2"),
-    /// lp_count=10.
+    /// lp_count=8.
     fn build_unique_fields_listpack() -> Vec<u8> {
         let entries: Vec<Vec<u8>> = vec![
             lp_u7(1),      // count = 1
@@ -713,7 +729,32 @@ mod tests {
             lp_str(b"V1"),
             lp_str(b"f2"),
             lp_str(b"V2"),
-            lp_u7(10), // lp_count trailer
+            lp_u7(8), // lp_count trailer
+        ];
+        assemble_listpack(&entries)
+    }
+
+    /// Same shape as build_unique_fields_listpack, but with a corrupted
+    /// lp_count trailer. Upstream's streamValidateListpackIntegrity rejects
+    /// this as malformed because reverse iteration would seek to the wrong
+    /// entry boundary.
+    fn build_inconsistent_lp_count_listpack() -> Vec<u8> {
+        let entries: Vec<Vec<u8>> = vec![
+            lp_u7(1),      // count = 1
+            lp_u7(0),      // deleted = 0
+            lp_u7(2),      // master_field_count = 2
+            lp_str(b"f1"), // master field 1
+            lp_str(b"f2"), // master field 2
+            lp_u7(0),      // master terminator
+            lp_u7(0),      // entry.flags
+            lp_u7(5),      // ms_delta
+            lp_u7(0),      // seq_delta
+            lp_u7(2),      // per-entry field_count
+            lp_str(b"f1"),
+            lp_str(b"V1"),
+            lp_str(b"f2"),
+            lp_str(b"V2"),
+            lp_u7(10), // wrong: expected 8
         ];
         assemble_listpack(&entries)
     }
@@ -731,13 +772,13 @@ mod tests {
             lp_u7(0),                                 // ms_delta=0
             lp_u7(1),                                 // seq_delta=1
             lp_str(b"A"),                             // value for master field 0
-            lp_u7(6),                                 // lp_count
+            lp_u7(4),                                 // lp_count
             // Entry 2: deleted + same-fields.
             lp_u7((STREAM_ITEM_FLAG_SAMEFIELDS | STREAM_ITEM_FLAG_DELETED) as u8), // flags=3
             lp_u7(0),                                                              // ms_delta=0
             lp_u7(2),                                                              // seq_delta=2
             lp_str(b"X"), // value (still present for tombstone)
-            lp_u7(6),     // lp_count
+            lp_u7(4),     // lp_count
             // Entry 3: live, unique fields (flags=0), using i16 for a
             // larger seq delta.
             lp_u7(0),    // flags=0
@@ -746,7 +787,7 @@ mod tests {
             lp_u7(1),    // per-entry field_count
             lp_str(b"only"),
             lp_str(b"B"),
-            lp_u7(7), // lp_count
+            lp_u7(6), // lp_count
         ];
         assemble_listpack(&entries)
     }
@@ -1123,6 +1164,15 @@ mod tests {
                 (b"f2".to_vec(), b"V2".to_vec()),
             ]
         );
+    }
+
+    #[test]
+    fn decode_rejects_inconsistent_entry_trailer_count() {
+        let lp = build_inconsistent_lp_count_listpack();
+        let payload = build_type15_payload_with_listpack(&lp, 1000, 0);
+        let err = decode_upstream_stream_skeleton(UPSTREAM_RDB_TYPE_STREAM_LISTPACKS, &payload)
+            .unwrap_err();
+        assert_eq!(err, UpstreamStreamError::InconsistentEntryTrailer);
     }
 
     #[test]
