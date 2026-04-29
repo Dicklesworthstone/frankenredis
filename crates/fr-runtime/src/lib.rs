@@ -1626,6 +1626,7 @@ struct ReplicaState {
     listening_port: u16,
     ip_address: Option<String>,
     last_ack_timestamp_ms: u64,
+    psync2_capable: bool,
 }
 
 #[allow(dead_code)]
@@ -10146,7 +10147,12 @@ slave_priority:{}\r\n",
                     .ensure_replica(self.session.client_id)
                     .ip_address = Some(String::from_utf8_lossy(&argv[idx + 1]).into_owned());
             } else if option.eq_ignore_ascii_case("capa") {
-                // Ignore capability tokens we do not model explicitly.
+                if argv[idx + 1].eq_ignore_ascii_case(b"psync2") {
+                    self.server
+                        .replication_runtime_state
+                        .ensure_replica(self.session.client_id)
+                        .psync2_capable = true;
+                }
             } else {
                 return RespFrame::Error(format!("ERR Unrecognized REPLCONF option: {option}"));
             }
@@ -10179,6 +10185,12 @@ slave_priority:{}\r\n",
 
         let primary_offset = self.server.replication_ack_state.primary_offset;
         let backlog = self.server.replication_runtime_state.backlog.clone();
+        let replica_psync2_capable = self
+            .server
+            .replication_runtime_state
+            .replicas
+            .get(&self.session.client_id)
+            .is_some_and(|replica| replica.psync2_capable);
         let continued_offset = if requested_replid == "?" || requested_offset < 0 {
             None
         } else {
@@ -10194,7 +10206,11 @@ slave_priority:{}\r\n",
 
         let response = if continued_offset.is_some() {
             self.server.store.stat_sync_partial_ok += 1;
-            RespFrame::SimpleString("CONTINUE".to_string())
+            if replica_psync2_capable {
+                RespFrame::SimpleString(format!("CONTINUE {}", backlog.replid))
+            } else {
+                RespFrame::SimpleString("CONTINUE".to_string())
+            }
         } else {
             // Track whether this was a failed partial attempt or a fresh full sync.
             if requested_replid != "?" && requested_offset >= 0 {
@@ -14604,6 +14620,30 @@ mod tests {
                 2
             ),
             RespFrame::SimpleString(format!("FULLRESYNC {} {}", replid, live_offset))
+        );
+    }
+
+    #[test]
+    fn replication_psync2_capability_advertises_continue_replid_like_redis() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLCONF", b"capa", b"psync2"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"rep:key", b"value"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        let replid = rt.server.replication_runtime_state.backlog.replid.clone();
+        let live_offset = rt.replication_primary_offset().0.to_string();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"PSYNC", replid.as_bytes(), live_offset.as_bytes()]),
+                2
+            ),
+            RespFrame::SimpleString(format!("CONTINUE {replid}"))
         );
     }
 

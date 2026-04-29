@@ -1980,7 +1980,10 @@ pub(crate) fn replication_follow_up_bytes(
         let snapshot = runtime.encoded_rdb_snapshot(now_ms);
         return Some(encode_replication_snapshot(snapshot.as_slice()));
     }
-    if line == "CONTINUE" {
+    if matches!(
+        fr_repl::parse_psync_reply(line),
+        Ok(fr_repl::PsyncReply::Continue { .. })
+    ) {
         let offset = psync_requested_offset(frame)?;
         return Some(runtime.encoded_aof_stream_from_offset(offset));
     }
@@ -3169,6 +3172,13 @@ mod tests {
 
         let follow_up = replication_follow_up_bytes(&mut runtime, &frame, &response, 3)
             .expect("psync continue should emit backlog");
+        let psync2_response = RespFrame::SimpleString(
+            "CONTINUE 0000000000000000000000000000000000000000".to_string(),
+        );
+        assert_eq!(
+            replication_follow_up_bytes(&mut runtime, &frame, &psync2_response, 3),
+            Some(follow_up.clone())
+        );
         let mut replica = fr_runtime::Runtime::default_strict();
         let backlog = replica
             .replay_aof_stream(&follow_up, 10)
