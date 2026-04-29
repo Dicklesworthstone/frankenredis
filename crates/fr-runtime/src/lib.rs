@@ -2074,6 +2074,16 @@ impl ServerState {
             dispatch_argv(&record.argv, &mut replayed_store, replay_now_ms)
                 .map_err(|_| PersistError::InvalidFrame)?;
         }
+        // Preserve flags that the boot path set on `self.store` BEFORE
+        // load_aof was invoked — `replayed_store` is a fresh
+        // `Store::new()` with all defaults, so swapping it in wholesale
+        // would clobber e.g. `aof_enabled = true` that
+        // `set_aof_path` just established. Without this, WAITAOF after
+        // a successful AOF load erroneously trips
+        // "ERR WAITAOF cannot be used when numlocal is set but
+        // appendonly is disabled." even on servers booted with --aof.
+        // (br-frankenredis-7epx)
+        replayed_store.set_aof_enabled(self.store.aof_enabled);
         self.store = replayed_store;
         self.aof_records = records;
         Ok(count)
@@ -2568,6 +2578,19 @@ impl Runtime {
         self.server.aof_records = records;
         self.server.aof_selected_db = self.session.selected_db;
         self.session.selected_db = original_db;
+        // Preserve flags that the boot path established on `original_store`
+        // before the AOF replay swapped in a fresh `Store::new()` (e.g.
+        // `aof_enabled = true` from `set_aof_path`). Without this, the
+        // post-replay store's aof_enabled defaults to false, so WAITAOF
+        // on a server booted with --aof erroneously trips
+        // "ERR WAITAOF cannot be used when numlocal is set but
+        // appendonly is disabled." The error path above (line ~2570)
+        // already restores `original_store` wholesale; we just need to
+        // mirror the relevant flag onto the success-path store.
+        // (br-frankenredis-7epx)
+        self.server
+            .store
+            .set_aof_enabled(original_store.aof_enabled);
         Ok(count)
     }
 

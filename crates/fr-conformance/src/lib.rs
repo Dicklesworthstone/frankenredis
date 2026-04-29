@@ -11517,7 +11517,13 @@ mod tests {
 
         let mut conn_a =
             connect_live_redis(&oracle_a_cfg).expect("connect to oracle_a for r73v reemit");
-        flushall(&mut conn_a).expect("flushall on oracle_a");
+        // Skip the FLUSHALL — the freshly spawned vendored redis-server
+        // starts with an empty keyspace and we don't load a config file
+        // that could pre-populate it. Avoiding the extra round-trip
+        // also avoids a sporadic "Connection reset by peer" we saw
+        // under heavy `cargo test --workspace` parallelism, where the
+        // vendored child sometimes wasn't ready for a write/read cycle
+        // immediately after the bind-port-then-connect handshake.
 
         fn argv(parts: &[&[u8]]) -> Vec<Vec<u8>> {
             parts.iter().map(|p| p.to_vec()).collect()

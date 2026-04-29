@@ -106,11 +106,22 @@ fn client_pause_wrong_arity() {
 
 #[test]
 fn client_pause_invalid_timeout() {
+    // Upstream `timeout.c::getTimeoutFromObjectOrReply` rejects negative
+    // millisecond timeouts with `ERR timeout is negative` — see
+    // legacy_redis_code/redis/src/timeout.c:187. The previous shape of
+    // this test asserted that -1 was clamped to 0 (unpause); that
+    // claim was wrong against upstream and was the last red workspace
+    // test once the SENTINEL gate (b/r-frankenredis-bzdp) and
+    // MEMORY STATS shape (br-frankenredis-sia3) tests were corrected.
+    // (br-frankenredis-rtgw)
     let mut rt = Runtime::default_strict();
 
-    // -1 is clamped to 0 (unpause), so it's actually OK — not an error
     let neg = rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"-1"]), 0);
-    assert_eq!(neg, RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(
+        neg,
+        RespFrame::Error("ERR timeout is negative".to_string()),
+        "CLIENT PAUSE with negative timeout must reject like upstream",
+    );
 
     let notnum = rt.execute_frame(command(&[b"CLIENT", b"PAUSE", b"abc"]), 0);
     assert!(matches!(notnum, RespFrame::Error(_)));
