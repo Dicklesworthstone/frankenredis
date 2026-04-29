@@ -30,6 +30,8 @@ struct RawProtocolListCase {
 
 #[derive(Debug, Clone, Arbitrary)]
 enum RawProtocolToken {
+    TlsV1(u8),
+    TlsV1_1(u8),
     TlsV1_2(u8),
     TlsV1_3(u8),
     Invalid(Vec<u8>),
@@ -84,6 +86,8 @@ struct RawTlsConfig {
 
 #[derive(Debug, Clone, Copy, Arbitrary)]
 enum RawProtocolChoice {
+    TlsV1,
+    TlsV1_1,
     TlsV1_2,
     TlsV1_3,
 }
@@ -292,6 +296,9 @@ fn render_protocol_list_case(case: &RawProtocolListCase) -> (String, Vec<TlsProt
         if index > 0 {
             let separator_seed = case.separators.get(index - 1).copied().unwrap_or_default();
             rendered.push_str(required_separator(separator_seed));
+            if separator_seed % 5 != 0 {
+                is_valid = false;
+            }
         }
 
         let (text, protocol) = render_protocol_token(token);
@@ -308,6 +315,9 @@ fn render_protocol_list_case(case: &RawProtocolListCase) -> (String, Vec<TlsProt
     }
 
     rendered.push_str(optional_separator(case.trailing_separator));
+    if case.leading_separator % 5 == 2 || case.trailing_separator % 5 == 2 {
+        is_valid = false;
+    }
 
     if !saw_entry || expected.is_empty() {
         is_valid = false;
@@ -318,27 +328,27 @@ fn render_protocol_list_case(case: &RawProtocolListCase) -> (String, Vec<TlsProt
 
 fn render_valid_protocol_list(case: &RawProtocolListCase) -> (String, Vec<TlsProtocol>) {
     let mut rendered = String::new();
-    rendered.push_str(optional_separator(case.leading_separator));
+    rendered.push_str(valid_optional_separator(case.leading_separator));
 
     let mut expected = Vec::new();
     let mut count = 0usize;
 
     for (index, token) in case.entries.iter().take(MAX_PROTOCOL_ENTRIES).enumerate() {
         if index > 0 {
-            let separator_seed = case.separators.get(index - 1).copied().unwrap_or_default();
-            rendered.push_str(required_separator(separator_seed));
+            rendered.push(' ');
         }
 
         let protocol = match token {
+            RawProtocolToken::TlsV1(_) => TlsProtocol::TlsV1,
+            RawProtocolToken::TlsV1_1(_) => TlsProtocol::TlsV1_1,
             RawProtocolToken::TlsV1_2(_) => TlsProtocol::TlsV1_2,
             RawProtocolToken::TlsV1_3(_) => TlsProtocol::TlsV1_3,
-            RawProtocolToken::Invalid(_) => {
-                if index % 2 == 0 {
-                    TlsProtocol::TlsV1_2
-                } else {
-                    TlsProtocol::TlsV1_3
-                }
-            }
+            RawProtocolToken::Invalid(_) => match index % 4 {
+                0 => TlsProtocol::TlsV1,
+                1 => TlsProtocol::TlsV1_1,
+                2 => TlsProtocol::TlsV1_2,
+                _ => TlsProtocol::TlsV1_3,
+            },
         };
         rendered.push_str(render_protocol_alias(protocol, index as u8));
         if !expected.contains(&protocol) {
@@ -352,12 +362,20 @@ fn render_valid_protocol_list(case: &RawProtocolListCase) -> (String, Vec<TlsPro
         expected.push(TlsProtocol::TlsV1_2);
     }
 
-    rendered.push_str(optional_separator(case.trailing_separator));
+    rendered.push_str(valid_optional_separator(case.trailing_separator));
     (rendered, expected)
 }
 
 fn render_protocol_token(token: &RawProtocolToken) -> (String, Option<TlsProtocol>) {
     match token {
+        RawProtocolToken::TlsV1(seed) => (
+            render_protocol_alias(TlsProtocol::TlsV1, *seed).to_string(),
+            Some(TlsProtocol::TlsV1),
+        ),
+        RawProtocolToken::TlsV1_1(seed) => (
+            render_protocol_alias(TlsProtocol::TlsV1_1, *seed).to_string(),
+            Some(TlsProtocol::TlsV1_1),
+        ),
         RawProtocolToken::TlsV1_2(seed) => (
             render_protocol_alias(TlsProtocol::TlsV1_2, *seed).to_string(),
             Some(TlsProtocol::TlsV1_2),
@@ -530,6 +548,8 @@ fn sanitize_protocol_choices(choices: &[RawProtocolChoice]) -> Vec<TlsProtocol> 
     let mut protocols = Vec::new();
     for choice in choices.iter().take(MAX_PROTOCOL_ENTRIES) {
         let protocol = match choice {
+            RawProtocolChoice::TlsV1 => TlsProtocol::TlsV1,
+            RawProtocolChoice::TlsV1_1 => TlsProtocol::TlsV1_1,
             RawProtocolChoice::TlsV1_2 => TlsProtocol::TlsV1_2,
             RawProtocolChoice::TlsV1_3 => TlsProtocol::TlsV1_3,
         };
@@ -549,13 +569,15 @@ fn auth_mode(seed: u8) -> TlsAuthClients {
 }
 
 fn render_protocol_alias(protocol: TlsProtocol, seed: u8) -> &'static str {
-    match (protocol, seed % 3) {
+    match (protocol, seed % 2) {
+        (TlsProtocol::TlsV1, 0) => "TLSv1",
+        (TlsProtocol::TlsV1, _) => "tlsv1",
+        (TlsProtocol::TlsV1_1, 0) => "TLSv1.1",
+        (TlsProtocol::TlsV1_1, _) => "tlsv1.1",
         (TlsProtocol::TlsV1_2, 0) => "TLSv1.2",
-        (TlsProtocol::TlsV1_2, 1) => "tls1.2",
-        (TlsProtocol::TlsV1_2, _) => "TLSv1_2",
+        (TlsProtocol::TlsV1_2, _) => "tlsv1.2",
         (TlsProtocol::TlsV1_3, 0) => "TLSv1.3",
-        (TlsProtocol::TlsV1_3, 1) => "tls1.3",
-        (TlsProtocol::TlsV1_3, _) => "TLSv1_3",
+        (TlsProtocol::TlsV1_3, _) => "tlsv1.3",
     }
 }
 
@@ -739,6 +761,15 @@ fn optional_separator(seed: u8) -> &'static str {
         1 => " ",
         2 => ",",
         3 => "\t",
+        _ => "\n",
+    }
+}
+
+fn valid_optional_separator(seed: u8) -> &'static str {
+    match seed % 4 {
+        0 => "",
+        1 => " ",
+        2 => "\t",
         _ => "\n",
     }
 }

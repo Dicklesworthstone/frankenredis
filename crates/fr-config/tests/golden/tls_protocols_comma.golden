@@ -1,4 +1,3 @@
-[
-    TlsV1_2,
-    TlsV1_3,
-]
+Error: ProtocolsParseContractViolation(
+    "unsupported protocol 'TLSv1.2,TLSv1.3'",
+)
