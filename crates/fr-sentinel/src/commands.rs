@@ -154,21 +154,34 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
 
     let mut i = 1;
     while i + 1 < args.len() {
-        let option = String::from_utf8_lossy(args[i]).to_ascii_lowercase();
+        let option_raw = String::from_utf8_lossy(args[i]);
+        let option = option_raw.to_ascii_lowercase();
         let value = String::from_utf8_lossy(args[i + 1]);
 
         match option.as_str() {
             "down-after-milliseconds" => {
-                master.down_after_period = value.parse().unwrap_or(master.down_after_period);
+                master.down_after_period = match parse_positive_u64(&value, &option_raw) {
+                    Ok(parsed) => parsed,
+                    Err(error) => return error,
+                };
             }
             "failover-timeout" => {
-                master.failover_timeout = value.parse().unwrap_or(master.failover_timeout);
+                master.failover_timeout = match parse_positive_u64(&value, &option_raw) {
+                    Ok(parsed) => parsed,
+                    Err(error) => return error,
+                };
             }
             "parallel-syncs" => {
-                master.parallel_syncs = value.parse().unwrap_or(master.parallel_syncs);
+                master.parallel_syncs = match parse_positive_u32(&value, &option_raw) {
+                    Ok(parsed) => parsed,
+                    Err(error) => return error,
+                };
             }
             "quorum" => {
-                master.quorum = value.parse().unwrap_or(master.quorum);
+                master.quorum = match parse_positive_u32(&value, &option_raw) {
+                    Ok(parsed) => parsed,
+                    Err(error) => return error,
+                };
             }
             "auth-pass" => {
                 master.auth_pass = Some(value.into_owned());
@@ -183,6 +196,28 @@ fn cmd_set(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
         i += 2;
     }
     RespFrame::SimpleString("OK".into())
+}
+
+fn parse_positive_u64(value: &str, option: &str) -> Result<u64, RespFrame> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|parsed| *parsed > 0)
+        .ok_or_else(|| invalid_sentinel_set_argument(value, option))
+}
+
+fn parse_positive_u32(value: &str, option: &str) -> Result<u32, RespFrame> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|parsed| *parsed > 0)
+        .ok_or_else(|| invalid_sentinel_set_argument(value, option))
+}
+
+fn invalid_sentinel_set_argument(value: &str, option: &str) -> RespFrame {
+    RespFrame::Error(format!(
+        "ERR Invalid argument '{value}' for SENTINEL SET '{option}'"
+    ))
 }
 
 fn cmd_reset(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
@@ -560,6 +595,59 @@ mod tests {
             return;
         };
         assert_eq!(master.down_after_period, 5000);
+    }
+
+    #[test]
+    fn sentinel_set_rejects_invalid_positive_integer_options() {
+        let mut state = SentinelState::new();
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"mymaster", b"127.0.0.1", b"6379", b"2"],
+        );
+        let before = {
+            let master = state.get_master("mymaster");
+            assert!(master.is_some(), "mymaster exists");
+            let Some(master) = master else {
+                return;
+            };
+            (
+                master.down_after_period,
+                master.failover_timeout,
+                master.parallel_syncs,
+                master.quorum,
+            )
+        };
+
+        for (option, value) in [
+            (
+                b"down-after-milliseconds".as_slice(),
+                b"not-a-number".as_slice(),
+            ),
+            (b"failover-timeout".as_slice(), b"0".as_slice()),
+            (b"parallel-syncs".as_slice(), b"-1".as_slice()),
+            (b"quorum".as_slice(), b"0".as_slice()),
+        ] {
+            let result =
+                dispatch_sentinel_command(&mut state, &[b"SET", b"mymaster", option, value]);
+            assert!(
+                matches!(result, RespFrame::Error(ref message) if message.contains("Invalid argument"))
+            );
+        }
+
+        let master = state.get_master("mymaster");
+        assert!(master.is_some(), "mymaster exists");
+        let Some(master) = master else {
+            return;
+        };
+        assert_eq!(
+            (
+                master.down_after_period,
+                master.failover_timeout,
+                master.parallel_syncs,
+                master.quorum,
+            ),
+            before
+        );
     }
 
     #[test]
