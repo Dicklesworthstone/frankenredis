@@ -1664,7 +1664,54 @@ fn encode_listpack_backlen(buf: &mut Vec<u8>, len: usize) {
     }
 }
 
+fn parse_listpack_integer(entry: &[u8]) -> Option<i64> {
+    if entry.is_empty() || entry.len() >= 21 {
+        return None;
+    }
+    let value = std::str::from_utf8(entry).ok()?.parse::<i64>().ok()?;
+    if value.to_string().as_bytes() == entry {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
+    let start = buf.len();
+    if (0..=127).contains(&value) {
+        buf.push(value as u8);
+    } else if (-4096..=4095).contains(&value) {
+        let encoded = if value < 0 {
+            ((1_i64 << 13) + value) as u16
+        } else {
+            value as u16
+        };
+        buf.push(((encoded >> 8) as u8) | 0xC0);
+        buf.push((encoded & 0xFF) as u8);
+    } else if let Ok(value) = i16::try_from(value) {
+        buf.push(0xF1);
+        buf.extend_from_slice(&value.to_le_bytes());
+    } else if (-8_388_608..=8_388_607).contains(&value) {
+        let bytes = (value as i32).to_le_bytes();
+        buf.push(0xF2);
+        buf.extend_from_slice(&bytes[..3]);
+    } else if let Ok(value) = i32::try_from(value) {
+        buf.push(0xF3);
+        buf.extend_from_slice(&value.to_le_bytes());
+    } else {
+        buf.push(0xF4);
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+    let data_len = buf.len() - start;
+    encode_listpack_backlen(buf, data_len);
+}
+
 fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
+    if let Some(value) = parse_listpack_integer(entry) {
+        encode_listpack_integer_entry(buf, value);
+        return;
+    }
+
     let start = buf.len();
     if entry.len() < 64 {
         buf.push(0x80 | entry.len() as u8);
@@ -1681,8 +1728,10 @@ fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
 }
 
 /// Encode a flat list of byte-strings as an upstream-compatible
-/// listpack body (header + entries + 0xFF terminator). Returns `None`
-/// when the total wire size doesn't fit in a u32.
+/// listpack body (header + entries + 0xFF terminator). Canonical
+/// integer-looking strings are emitted with the same compact integer
+/// encodings `lpAppend` would choose upstream. Returns `None` when
+/// the total wire size doesn't fit in a u32.
 fn encode_listpack_strings_blob(entries: &[&[u8]]) -> Option<Vec<u8>> {
     let mut encoded = Vec::new();
     for entry in entries {
@@ -3996,6 +4045,22 @@ mod tests {
         None
     }
 
+    fn compact_listpack_payload_for_key(encoded: &[u8], key: &[u8]) -> Option<Vec<u8>> {
+        let mut wire_key = Vec::new();
+        rdb_encode_length(&mut wire_key, key.len());
+        wire_key.extend_from_slice(key);
+        let mut idx = 0;
+        while idx + wire_key.len() <= encoded.len() {
+            if encoded[idx..idx + wire_key.len()] == wire_key[..] {
+                let cursor = idx + wire_key.len();
+                let (payload, _) = rdb_decode_string(&encoded[cursor..])?;
+                return Some(payload);
+            }
+            idx += 1;
+        }
+        None
+    }
+
     #[test]
     fn encode_rdb_default_options_emit_canonical_type_tags() {
         let entries = vec![
@@ -4133,6 +4198,91 @@ mod tests {
                 "expected sorted set after compact zset decode"
             ),
         }
+    }
+
+    #[test]
+    fn encode_rdb_compact_listpacks_integer_encode_numeric_strings_like_redis() {
+        let entries = vec![
+            RdbEntry {
+                db: 0,
+                key: b"s_listpack".to_vec(),
+                value: RdbValue::Set(vec![b"alpha".to_vec(), b"127".to_vec(), b"4095".to_vec()]),
+                expire_ms: None,
+            },
+            RdbEntry {
+                db: 0,
+                key: b"h_listpack".to_vec(),
+                value: RdbValue::Hash(vec![
+                    (b"field".to_vec(), b"127".to_vec()),
+                    (b"4095".to_vec(), b"value".to_vec()),
+                ]),
+                expire_ms: None,
+            },
+            RdbEntry {
+                db: 0,
+                key: b"z_listpack".to_vec(),
+                value: RdbValue::SortedSet(vec![
+                    (b"127".to_vec(), 1.0),
+                    (b"member".to_vec(), 4095.0),
+                    (b"other".to_vec(), 2.5),
+                ]),
+                expire_ms: None,
+            },
+        ];
+
+        let encoded = encode_rdb(&entries, &[]);
+        assert_eq!(
+            type_byte_for_key(&encoded, b"s_listpack"),
+            Some(RDB_TYPE_SET_LISTPACK)
+        );
+        assert_eq!(
+            type_byte_for_key(&encoded, b"h_listpack"),
+            Some(RDB_TYPE_HASH_LISTPACK)
+        );
+        assert_eq!(
+            type_byte_for_key(&encoded, b"z_listpack"),
+            Some(RDB_TYPE_ZSET_LISTPACK)
+        );
+
+        let set_payload = compact_listpack_payload_for_key(&encoded, b"s_listpack")
+            .expect("set listpack payload");
+        let set_entries = crate::listpack::decode_listpack(&set_payload).expect("decode set lp");
+        assert_eq!(
+            set_entries,
+            vec![
+                crate::listpack::ListpackEntry::String(b"alpha".to_vec()),
+                crate::listpack::ListpackEntry::Integer(127),
+                crate::listpack::ListpackEntry::Integer(4095),
+            ]
+        );
+
+        let hash_payload = compact_listpack_payload_for_key(&encoded, b"h_listpack")
+            .expect("hash listpack payload");
+        let hash_entries = crate::listpack::decode_listpack(&hash_payload).expect("decode hash lp");
+        assert_eq!(
+            hash_entries,
+            vec![
+                crate::listpack::ListpackEntry::String(b"field".to_vec()),
+                crate::listpack::ListpackEntry::Integer(127),
+                crate::listpack::ListpackEntry::Integer(4095),
+                crate::listpack::ListpackEntry::String(b"value".to_vec()),
+            ]
+        );
+
+        let zset_payload = compact_listpack_payload_for_key(&encoded, b"z_listpack")
+            .expect("zset listpack payload");
+        let zset_entries = crate::listpack::decode_listpack(&zset_payload).expect("decode zset lp");
+        assert_eq!(
+            zset_entries,
+            vec![
+                crate::listpack::ListpackEntry::Integer(127),
+                crate::listpack::ListpackEntry::Integer(1),
+                crate::listpack::ListpackEntry::String(b"other".to_vec()),
+                crate::listpack::ListpackEntry::String(b"2.5".to_vec()),
+                crate::listpack::ListpackEntry::String(b"member".to_vec()),
+                crate::listpack::ListpackEntry::Integer(4095),
+            ]
+        );
     }
 
     #[test]
