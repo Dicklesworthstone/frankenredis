@@ -3746,6 +3746,95 @@ mod tests {
         assert!(decode_intset_members(&[0; 4]).is_none());
     }
 
+    /// Acceptance gate for the fuzz_rdb_decoder corpus seeds added in
+    /// `fuzz/scripts/gen_compact_rdb_seeds.py`. Each well-formed seed
+    /// must decode cleanly into the expected `RdbValue` shape; each
+    /// adversarial seed must be rejected with `PersistError::InvalidFrame`
+    /// without panicking.
+    ///
+    /// The corpus lives under `fuzz/corpus/fuzz_rdb_decoder/compact_*`
+    /// — that's the directory libfuzzer reads when running
+    /// `cargo fuzz run fuzz_rdb_decoder`. The script that emits these
+    /// is idempotent and re-runnable; this test is the safety net so a
+    /// future decoder change can't silently make a previously-handled
+    /// seed regress.
+    /// (br-frankenredis-aqgx fuzz follow-up)
+    #[test]
+    fn compact_corpus_seeds_decode_or_reject_cleanly() {
+        let corpus_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fuzz/corpus/fuzz_rdb_decoder");
+        if !corpus_root.exists() {
+            // Fuzz corpus not present in this checkout — skip rather
+            // than fail. (Some clean-room build environments strip the
+            // fuzz/ tree.)
+            eprintln!(
+                "[SKIP] fuzz corpus dir {} not present",
+                corpus_root.display()
+            );
+            return;
+        }
+
+        // Well-formed compact seeds: must decode cleanly to the matching
+        // RdbValue shape.
+        let well_formed = [
+            ("compact_intset_small_16bit", "Set", 5usize),
+            ("compact_intset_32bit", "Set", 3),
+            ("compact_intset_64bit", "Set", 3),
+            ("compact_set_listpack", "Set", 3),
+            ("compact_set_listpack_single", "Set", 1),
+            ("compact_hash_listpack", "Hash", 3),
+            ("compact_zset_listpack", "SortedSet", 4),
+            ("compact_quicklist2_packed", "List", 5),
+            ("compact_quicklist2_plain", "List", 1),
+            ("compact_quicklist2_mixed", "List", 3),
+        ];
+
+        for (name, expected_kind, expected_len) in well_formed {
+            let path = corpus_root.join(name);
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("read corpus seed {}: {e}", path.display()));
+            let (entries, _aux) =
+                decode_rdb(&bytes).unwrap_or_else(|e| panic!("seed {name} should decode: {e:?}"));
+            assert_eq!(entries.len(), 1, "seed {name} should produce 1 entry");
+            let (kind, len) = match &entries[0].value {
+                RdbValue::String(_) => ("String", 1),
+                RdbValue::List(items) => ("List", items.len()),
+                RdbValue::Set(members) => ("Set", members.len()),
+                RdbValue::Hash(fields) => ("Hash", fields.len()),
+                RdbValue::SortedSet(members) => ("SortedSet", members.len()),
+                _ => ("Other", 0),
+            };
+            assert_eq!(
+                kind, expected_kind,
+                "seed {name} decoded to wrong RdbValue kind: got {kind}, expected {expected_kind}"
+            );
+            assert_eq!(
+                len, expected_len,
+                "seed {name} decoded to wrong cardinality: got {len}, expected {expected_len}"
+            );
+        }
+
+        // Adversarial seeds: must be rejected (Err) without panic.
+        let adversarial = [
+            "compact_intset_truncated",
+            "compact_intset_invalid_encoding",
+            "compact_hash_listpack_odd",
+            "compact_zset_listpack_non_numeric",
+            "compact_quicklist2_unknown_container",
+            "compact_listpack_truncated",
+        ];
+
+        for name in adversarial {
+            let path = corpus_root.join(name);
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|e| panic!("read corpus seed {}: {e}", path.display()));
+            assert!(
+                decode_rdb(&bytes).is_err(),
+                "adversarial seed {name} should be rejected by decode_rdb",
+            );
+        }
+    }
+
     #[test]
     fn rdb_rejects_invalid_magic() {
         assert!(decode_rdb(b"NOTREDIS").is_err());
