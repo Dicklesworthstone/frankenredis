@@ -48,6 +48,8 @@ pub enum ListpackError {
     MissingTerminator,
     /// Unknown encoding byte.
     InvalidEncoding(u8),
+    /// `total_bytes` in header is smaller than the supplied buffer.
+    TotalBytesMismatch,
     /// Entry body or backlen is truncated.
     TruncatedEntry,
     /// Backlen byte run is malformed or does not match the entry length.
@@ -65,6 +67,9 @@ impl fmt::Display for ListpackError {
             Self::TotalBytesOutOfRange => f.write_str("listpack total-bytes header exceeds buffer"),
             Self::MissingTerminator => f.write_str("listpack missing 0xFF terminator"),
             Self::InvalidEncoding(b) => write!(f, "listpack invalid encoding byte 0x{b:02x}"),
+            Self::TotalBytesMismatch => {
+                f.write_str("listpack total-bytes header does not match buffer length")
+            }
             Self::TruncatedEntry => f.write_str("listpack entry body runs past end"),
             Self::InvalidBacklen => f.write_str("listpack backlen exceeds 5 bytes"),
             Self::StringLengthOverflow => f.write_str("listpack string length overflows usize"),
@@ -96,10 +101,14 @@ pub fn parse_header(data: &[u8]) -> Result<(u32, u16), ListpackError> {
     }
     let total_bytes = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     let num_elements = u16::from_le_bytes([data[4], data[5]]);
-    if (total_bytes as usize) > data.len() {
+    let total_len = total_bytes as usize;
+    if total_len > data.len() {
         return Err(ListpackError::TotalBytesOutOfRange);
     }
-    if data[(total_bytes as usize).saturating_sub(1)] != LISTPACK_EOF {
+    if total_len != data.len() {
+        return Err(ListpackError::TotalBytesMismatch);
+    }
+    if data[total_len - 1] != LISTPACK_EOF {
         return Err(ListpackError::MissingTerminator);
     }
     Ok((total_bytes, num_elements))
@@ -578,6 +587,13 @@ mod tests {
             decode_listpack(&lp),
             Err(ListpackError::TotalBytesOutOfRange)
         );
+    }
+
+    #[test]
+    fn total_bytes_smaller_than_buffer_rejected() {
+        let mut lp = assemble(&[&entry_7bit_uint(3)]);
+        lp.push(0);
+        assert_eq!(decode_listpack(&lp), Err(ListpackError::TotalBytesMismatch));
     }
 
     #[test]
