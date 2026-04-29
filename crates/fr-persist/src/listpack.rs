@@ -54,6 +54,8 @@ pub enum ListpackError {
     InvalidBacklen,
     /// String entry's declared length would overflow usize.
     StringLengthOverflow,
+    /// Header element count is not the unknown sentinel and does not match the entries scanned.
+    ElementCountMismatch,
 }
 
 impl fmt::Display for ListpackError {
@@ -66,6 +68,9 @@ impl fmt::Display for ListpackError {
             Self::TruncatedEntry => f.write_str("listpack entry body runs past end"),
             Self::InvalidBacklen => f.write_str("listpack backlen exceeds 5 bytes"),
             Self::StringLengthOverflow => f.write_str("listpack string length overflows usize"),
+            Self::ElementCountMismatch => {
+                f.write_str("listpack element count header does not match entries")
+            }
         }
     }
 }
@@ -308,7 +313,7 @@ fn backlen_byte_count(data_len: usize) -> usize {
 /// even when the header's num_elements is the LISTPACK_HDR_NUMELE_UNKNOWN
 /// sentinel — the 0xFF terminator is authoritative.
 pub fn decode_listpack(data: &[u8]) -> Result<Vec<ListpackEntry>, ListpackError> {
-    let (total_bytes, _num_elements) = parse_header(data)?;
+    let (total_bytes, num_elements) = parse_header(data)?;
     let end = (total_bytes as usize) - 1; // terminator is at total_bytes - 1
     let mut cursor = LISTPACK_HEADER_SIZE;
     let mut entries = Vec::new();
@@ -324,6 +329,9 @@ pub fn decode_listpack(data: &[u8]) -> Result<Vec<ListpackEntry>, ListpackError>
     }
     if cursor != end {
         return Err(ListpackError::MissingTerminator);
+    }
+    if num_elements != LISTPACK_HDR_NUMELE_UNKNOWN && entries.len() != usize::from(num_elements) {
+        return Err(ListpackError::ElementCountMismatch);
     }
     Ok(entries)
 }
@@ -569,6 +577,22 @@ mod tests {
         assert_eq!(
             decode_listpack(&lp),
             Err(ListpackError::TotalBytesOutOfRange)
+        );
+    }
+
+    #[test]
+    fn element_count_mismatch_rejected_unless_unknown_sentinel() {
+        let mut lp = assemble(&[&entry_7bit_uint(3), &entry_7bit_uint(5)]);
+        lp[4..6].copy_from_slice(&1u16.to_le_bytes());
+        assert_eq!(
+            decode_listpack(&lp),
+            Err(ListpackError::ElementCountMismatch)
+        );
+
+        lp[4..6].copy_from_slice(&LISTPACK_HDR_NUMELE_UNKNOWN.to_le_bytes());
+        assert_eq!(
+            decode_listpack(&lp).unwrap(),
+            vec![ListpackEntry::Integer(3), ListpackEntry::Integer(5)]
         );
     }
 
