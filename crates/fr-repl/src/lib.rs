@@ -200,6 +200,8 @@ pub enum PsyncReply {
     FullResync { replid: String, offset: ReplOffset },
 }
 
+const REDIS_RUN_ID_BYTES: usize = 40;
+
 pub fn parse_psync_reply(line: &str) -> Result<PsyncReply, ReplError> {
     let mut parts = line.split_ascii_whitespace();
     let Some(kind) = parts.next() else {
@@ -225,6 +227,11 @@ pub fn parse_psync_reply(line: &str) -> Result<PsyncReply, ReplError> {
             state: HandshakeState::PsyncSent,
         });
     };
+    if replid.len() != REDIS_RUN_ID_BYTES {
+        return Err(ReplError::PsyncReplyStateMismatch {
+            state: HandshakeState::PsyncSent,
+        });
+    }
     let offset = offset_text
         .parse::<u64>()
         .map_err(|_| ReplError::PsyncReplyStateMismatch {
@@ -439,16 +446,31 @@ mod tests {
 
     #[test]
     fn parse_psync_reply_accepts_continue_and_fullresync() {
+        let replid = "1111111111111111111111111111111111111111";
         assert_eq!(parse_psync_reply("CONTINUE"), Ok(PsyncReply::Continue));
         assert_eq!(
-            parse_psync_reply("CONTINUE 1111111111111111111111111111111111111111"),
+            parse_psync_reply(&format!("CONTINUE {replid}")),
             Ok(PsyncReply::Continue)
         );
         assert_eq!(
-            parse_psync_reply("FULLRESYNC replid-a 42"),
+            parse_psync_reply(&format!("FULLRESYNC {replid} 42")),
             Ok(PsyncReply::FullResync {
-                replid: "replid-a".to_string(),
+                replid: replid.to_string(),
                 offset: ReplOffset(42),
+            })
+        );
+        assert_eq!(
+            parse_psync_reply(&format!("\tFULLRESYNC \t  {replid}\t\t100\r\n")),
+            Ok(PsyncReply::FullResync {
+                replid: replid.to_string(),
+                offset: ReplOffset(100),
+            })
+        );
+        assert_eq!(
+            parse_psync_reply("FULLRESYNC repl-id_with.dashes123456789012345678901 7"),
+            Ok(PsyncReply::FullResync {
+                replid: "repl-id_with.dashes123456789012345678901".to_string(),
+                offset: ReplOffset(7),
             })
         );
     }
@@ -525,48 +547,6 @@ mod tests {
                     offset: ReplOffset(u64::MAX),
                 },
             ),
-            (
-                "fullresync_multi_whitespace_separators.txt",
-                PsyncReply::FullResync {
-                    replid: "abc".to_string(),
-                    offset: ReplOffset(100),
-                },
-            ),
-            (
-                "fullresync_with_newlines_between_tokens.txt",
-                PsyncReply::FullResync {
-                    replid: "abcd".to_string(),
-                    offset: ReplOffset(42),
-                },
-            ),
-            (
-                "fullresync_one_char_replid.txt",
-                PsyncReply::FullResync {
-                    replid: "a".to_string(),
-                    offset: ReplOffset(0),
-                },
-            ),
-            (
-                "fullresync_long_replid.txt",
-                PsyncReply::FullResync {
-                    replid: "a".repeat(200),
-                    offset: ReplOffset(0),
-                },
-            ),
-            (
-                "fullresync_numeric_replid.txt",
-                PsyncReply::FullResync {
-                    replid: "12345".to_string(),
-                    offset: ReplOffset(100),
-                },
-            ),
-            (
-                "fullresync_replid_with_punctuation.txt",
-                PsyncReply::FullResync {
-                    replid: "repl-id_with.dashes".to_string(),
-                    offset: ReplOffset(100),
-                },
-            ),
         ];
 
         // Mirror the harness' canonical-round-trip property: any
@@ -603,6 +583,12 @@ mod tests {
             "continue_lowercase.txt",
             "continue_mixedcase.txt",
             "fullresync_lowercase.txt",
+            "fullresync_multi_whitespace_separators.txt",
+            "fullresync_with_newlines_between_tokens.txt",
+            "fullresync_one_char_replid.txt",
+            "fullresync_long_replid.txt",
+            "fullresync_numeric_replid.txt",
+            "fullresync_replid_with_punctuation.txt",
             "fullresync_missing_replid_and_offset.txt",
             "fullresync_missing_offset.txt",
             "fullresync_offset_negative.txt",
@@ -645,6 +631,7 @@ mod tests {
     fn parse_psync_reply_rejects_invalid_shape() {
         assert!(parse_psync_reply("CONTINUE replid extra").is_err());
         assert!(parse_psync_reply("FULLRESYNC only-two").is_err());
+        assert!(parse_psync_reply("FULLRESYNC short 42").is_err());
         assert!(parse_psync_reply("FULLRESYNC replid nope").is_err());
         assert!(parse_psync_reply("FULLRESYNC replid 42 extra").is_err());
         assert!(parse_psync_reply("ERR nope").is_err());

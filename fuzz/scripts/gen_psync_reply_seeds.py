@@ -21,14 +21,13 @@ The seeds target the **shape boundaries** of `parse_psync_reply`
   - canonical `CONTINUE` and `CONTINUE <replid>` (PSYNC2)
   - canonical `FULLRESYNC <replid> <offset>`
   - lower / mixed case (must reject — kind is case-sensitive)
-  - leading / trailing / interior whitespace (split_ascii_whitespace
-    swallows runs, so `\\t`, `\\r\\n`, multi-space all coalesce)
+  - leading / trailing whitespace around accepted CONTINUE shapes
   - missing replid / missing offset
   - non-numeric / negative / overflow offsets
   - extra token after the offset
   - non-CONTINUE / non-FULLRESYNC first token
-  - 40-byte hex replid (the upstream typical form)
-  - very-short / very-long replid boundary
+  - exactly 40-byte FULLRESYNC replids (the Redis run ID width)
+  - very-short / very-long FULLRESYNC replid rejection boundaries
 
 Each seed is `<mode-byte><body>`. mode_byte is 0 (so `mode % 2 == 0`
 selects the raw path).
@@ -71,6 +70,8 @@ def main() -> None:
         # ── Whitespace tolerance under split_ascii_whitespace ────
         seed("continue_leading_tab.txt", b"\tCONTINUE"),
         seed("continue_trailing_crlf.txt", b"CONTINUE\r\n"),
+        # These two keep the whitespace shape in the raw corpus, but
+        # must now reject because FULLRESYNC replids are fixed at 40 bytes.
         seed("fullresync_multi_whitespace_separators.txt",
              b"FULLRESYNC \t  abc\t\t100\r\n"),
         seed("fullresync_with_newlines_between_tokens.txt",
@@ -99,7 +100,7 @@ def main() -> None:
         # ── Wrong first token ─────────────────────────────────────
         seed("first_token_unknown.txt", b"GREETINGS abc 100"),
         seed("first_token_empty_after_resp_prefix.txt", b"+CONTINUE"),
-        # ── Replid edge cases ────────────────────────────────────
+        # ── Replid edge cases: all reject unless exactly 40 bytes ─
         seed("fullresync_one_char_replid.txt", b"FULLRESYNC a 0"),
         seed("fullresync_long_replid.txt",
              b"FULLRESYNC " + b"a" * 200 + b" 0"),

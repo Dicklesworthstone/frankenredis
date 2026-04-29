@@ -110,7 +110,7 @@ fn fuzz_structured_psync_reply(case: StructuredPsyncReplyCase) {
             );
         }
         StructuredPsyncReplyCase::FullResync(case) => {
-            let replid = sanitize_token(case.replid.clone(), "replid");
+            let replid = sanitize_replid_40(case.replid.clone());
             let rendered = render_fullresync(&case, &replid);
             let expected = PsyncReply::FullResync {
                 replid: replid.clone(),
@@ -184,14 +184,14 @@ fn render_invalid_fullresync(case: InvalidFullResyncCase) -> String {
     match case {
         InvalidFullResyncCase::MissingReplid => "FULLRESYNC".to_string(),
         InvalidFullResyncCase::MissingOffset { replid } => {
-            format!("FULLRESYNC {}", sanitize_token(replid, "replid"))
+            format!("FULLRESYNC {}", sanitize_replid_40(replid))
         }
         InvalidFullResyncCase::InvalidOffset {
             replid,
             offset_text,
         } => format!(
             "FULLRESYNC {} {}",
-            sanitize_token(replid, "replid"),
+            sanitize_replid_40(replid),
             sanitize_token(offset_text, "offset")
         ),
         InvalidFullResyncCase::ExtraToken {
@@ -200,7 +200,7 @@ fn render_invalid_fullresync(case: InvalidFullResyncCase) -> String {
             extra,
         } => format!(
             "FULLRESYNC {} {} {}",
-            sanitize_token(replid, "replid"),
+            sanitize_replid_40(replid),
             offset,
             sanitize_token(extra, "extra")
         ),
@@ -246,5 +246,33 @@ fn sanitize_token(bytes: Vec<u8>, fallback: &str) -> String {
         fallback.to_string()
     } else {
         token
+    }
+}
+
+fn sanitize_replid_40(bytes: Vec<u8>) -> String {
+    let mut replid = String::with_capacity(40);
+    for byte in bytes {
+        let hi = byte >> 4;
+        let lo = byte & 0x0f;
+        replid.push(hex_char(hi));
+        if replid.len() == 40 {
+            return replid;
+        }
+        replid.push(hex_char(lo));
+        if replid.len() == 40 {
+            return replid;
+        }
+    }
+    while replid.len() < 40 {
+        replid.push('0');
+    }
+    replid
+}
+
+fn hex_char(nibble: u8) -> char {
+    match nibble {
+        0..=9 => char::from(b'0' + nibble),
+        10..=15 => char::from(b'a' + (nibble - 10)),
+        _ => unreachable!("nibble is masked to four bits"),
     }
 }

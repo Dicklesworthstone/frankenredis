@@ -15033,6 +15033,27 @@ mod tests {
     }
 
     #[test]
+    fn replication_fullresync_rejects_non_redis_width_replid_without_mutating_store() {
+        let mut primary = Runtime::default_strict();
+        let snapshot = primary.encoded_rdb_snapshot(0);
+
+        let mut replica = Runtime::default_strict();
+        assert_eq!(
+            replica.execute_frame(command(&[b"SET", b"keep", b"old"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        let err = replica
+            .apply_replication_sync_payload("FULLRESYNC short 99", &snapshot, 1)
+            .expect_err("malformed FULLRESYNC replid must fail closed");
+        assert_eq!(err, PersistError::InvalidFrame);
+        assert_eq!(
+            replica.execute_frame(command(&[b"GET", b"keep"]), 2),
+            RespFrame::BulkString(Some(b"old".to_vec()))
+        );
+    }
+
+    #[test]
     fn replication_continue_apply_replays_backlog_tail() {
         let mut primary = Runtime::default_strict();
         assert_eq!(
