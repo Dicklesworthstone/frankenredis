@@ -120,15 +120,26 @@ fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
         Ok(p) => p,
         Err(_) => return RespFrame::Error("ERR Invalid port number".into()),
     };
-    let quorum: u32 = match String::from_utf8_lossy(args[3]).parse() {
+    let quorum_raw = String::from_utf8_lossy(args[3]);
+    let quorum = match parse_monitor_quorum(&quorum_raw) {
         Ok(q) => q,
-        Err(_) => return RespFrame::Error("ERR Invalid quorum number".into()),
+        Err(error) => return error,
     };
 
     match state.monitor(name.as_ref(), ip.as_ref(), port, quorum) {
         Ok(()) => RespFrame::SimpleString("OK".into()),
         Err(e) => RespFrame::Error(e.into()),
     }
+}
+
+fn parse_monitor_quorum(value: &str) -> Result<u32, RespFrame> {
+    let parsed = value
+        .parse::<i64>()
+        .map_err(|_| RespFrame::Error("ERR Invalid quorum number".into()))?;
+    if parsed <= 0 {
+        return Err(RespFrame::Error("ERR Quorum must be 1 or greater.".into()));
+    }
+    u32::try_from(parsed).map_err(|_| RespFrame::Error("ERR Invalid quorum number".into()))
 }
 
 fn cmd_remove(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
@@ -515,6 +526,40 @@ mod tests {
 
         let result = dispatch_sentinel_command(&mut state, &[b"MASTERS"]);
         assert_eq!(array_len(&result), Some(1));
+    }
+
+    #[test]
+    fn sentinel_monitor_rejects_non_positive_quorum() {
+        let mut state = SentinelState::new();
+        let zero = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"zero", b"127.0.0.1", b"6379", b"0"],
+        );
+        assert_eq!(
+            zero,
+            RespFrame::Error("ERR Quorum must be 1 or greater.".into())
+        );
+        assert!(state.get_master("zero").is_none());
+
+        let negative = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"negative", b"127.0.0.1", b"6379", b"-1"],
+        );
+        assert_eq!(
+            negative,
+            RespFrame::Error("ERR Quorum must be 1 or greater.".into())
+        );
+        assert!(state.get_master("negative").is_none());
+
+        let malformed = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"malformed", b"127.0.0.1", b"6379", b"NaN"],
+        );
+        assert_eq!(
+            malformed,
+            RespFrame::Error("ERR Invalid quorum number".into())
+        );
+        assert!(state.get_master("malformed").is_none());
     }
 
     #[test]
