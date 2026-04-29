@@ -5659,16 +5659,39 @@ impl Runtime {
             return RespFrame::Error("ERR syntax error".to_string());
         }
 
-        let (username, password) = if argv.len() == 2 {
-            (DEFAULT_AUTH_USER, argv[1].as_slice())
-        } else {
+        let two_arg_form = argv.len() == 3;
+        let (username, password) = if two_arg_form {
             (argv[1].as_slice(), argv[2].as_slice())
+        } else {
+            (DEFAULT_AUTH_USER, argv[1].as_slice())
         };
 
         match self.authenticate_user(username, password) {
             Ok(()) => RespFrame::SimpleString("OK".to_string()),
             Err(AuthFailure::NotConfigured) => {
-                RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string())
+                // The "AUTH <password> called without any password
+                // configured for the default user" error only
+                // surfaces in the 1-arg form per upstream
+                // server.c::authCommand. The 2-arg form
+                // (`AUTH <user> <pass>`) goes through ACLGetUserByName
+                // + ACLAuthenticateUser, which return WRONGPASS for
+                // unknown users / wrong passwords regardless of
+                // whether requirepass is configured. fr-runtime's
+                // authenticate_user short-circuits on
+                // !auth_required(), so we translate NotConfigured to
+                // WRONGPASS here when the caller used the 2-arg form.
+                // (br-frankenredis-5qln)
+                if two_arg_form {
+                    self.record_acl_log_event(
+                        "auth",
+                        "AUTH".to_string(),
+                        username.to_vec(),
+                        now_ms,
+                    );
+                    RespFrame::Error(WRONGPASS_ERROR.to_string())
+                } else {
+                    RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string())
+                }
             }
             Err(AuthFailure::WrongPass) => {
                 self.record_acl_log_event("auth", "AUTH".to_string(), username.to_vec(), now_ms);
@@ -11923,6 +11946,35 @@ mod tests {
         let out = rt.execute_frame(command(&[b"AUTH", b"alice", b"secret2"]), 0);
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
         assert!(rt.is_authenticated());
+    }
+
+    #[test]
+    fn auth_two_arg_unknown_user_returns_wrongpass_when_no_requirepass() {
+        let mut rt = Runtime::default_strict();
+        assert!(rt.is_authenticated());
+
+        let out = rt.execute_frame(command(&[b"AUTH", b"baduser", b"password"]), 0);
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "WRONGPASS invalid username-password pair or user is disabled.".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn auth_one_arg_keeps_not_configured_error_when_no_requirepass() {
+        let mut rt = Runtime::default_strict();
+        assert!(rt.is_authenticated());
+
+        let out = rt.execute_frame(command(&[b"AUTH", b"password"]), 0);
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
