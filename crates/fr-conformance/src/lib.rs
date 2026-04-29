@@ -10941,6 +10941,139 @@ mod tests {
             .expect("shutdown FUNCTION DUMP oracle connection");
     }
 
+    /// Cross-impl BITPOS BIT-modifier conformance gate.
+    ///
+    /// Redis 7.0 added the `BITPOS key bit [start [end [BYTE | BIT]]]`
+    /// dialect: when the trailing `BIT` modifier is present, `start`
+    /// and `end` are interpreted as bit indices into the value
+    /// instead of byte indices. Frankenredis previously rejected the
+    /// 5-arg-after-key form (`argv.len() == 6`) with a `WrongArity`
+    /// error, blocking 7.0 clients from using `BIT` at all.
+    ///
+    /// This test fixes a curated set of patterns and BITPOS variants
+    /// (covering: no range, start only, start+end default BYTE,
+    /// explicit BYTE, BIT with positive bounds, BIT with negative
+    /// bounds, BIT spanning multiple bytes, BIT looking for clear
+    /// bit, malformed unit token) and asserts that the runtime's
+    /// reply is byte-equal to the vendored redis-server reply for
+    /// every variant. That gives both a regression gate against the
+    /// past WrongArity rejection and a forward-compat gate against
+    /// any future drift in the bit-precise sub-byte mask logic.
+    #[test]
+    fn live_redis_bitpos_bit_modifier_matches_upstream() {
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+
+        let mut runtime = runtime_for_harness_config(&cfg);
+        let mut stream = connect_live_redis(&oracle)
+            .expect("connect to vendored redis for BITPOS BIT-modifier diff");
+        flushall(&mut stream).expect("flushall on oracle");
+
+        // Three patterns chosen so each BITPOS variant has a
+        // non-trivial answer. We seed the same value on both sides
+        // before issuing each BITPOS variant so the diff is purely
+        // about command parsing + bit math, not about prior state.
+        let patterns: &[(&str, &[u8])] = &[
+            // bit 8 = MSB of byte 1 — used for set-bit search.
+            ("rt_bp_lone_msb", &[0x00, 0x80]),
+            // all bits set — exercises both the past-end fallback
+            // (no end + bit=0) and the "no zero bit in range" path.
+            ("rt_bp_all_ones", &[0xff, 0xff]),
+            // only bit 3 set in byte 0 — exercises bit-precise
+            // sub-byte masking.
+            ("rt_bp_bit3_only", &[0b0001_0000]),
+            // only bit 23 set (last bit of a 3-byte value) —
+            // exercises bit-precise masks across the LAST byte.
+            ("rt_bp_bit23_only", &[0x00, 0x00, 0b0000_0001]),
+            // only bit 6 clear — exercises clear-bit search inside
+            // a sub-byte BIT-mode range.
+            ("rt_bp_bit6_clear", &[0b1111_1101]),
+        ];
+
+        // Each BITPOS variant runs against every applicable pattern.
+        // We list the variant once and use the same argv for both
+        // sides so any drift between them is the test signal.
+        let variants: &[(&str, &[&str])] = &[
+            // No range: pure key+bit.
+            ("set_no_range", &["BITPOS", "<KEY>", "1"]),
+            ("clr_no_range", &["BITPOS", "<KEY>", "0"]),
+            // Start only.
+            ("set_start_only", &["BITPOS", "<KEY>", "1", "0"]),
+            // Start + end, default BYTE semantics.
+            ("set_start_end_byte_default", &["BITPOS", "<KEY>", "1", "0", "1"]),
+            // Explicit BYTE modifier (must match default).
+            ("set_explicit_byte", &["BITPOS", "<KEY>", "1", "0", "1", "BYTE"]),
+            ("set_explicit_byte_lower", &["BITPOS", "<KEY>", "1", "0", "1", "byte"]),
+            // BIT modifier, sub-byte search.
+            ("set_bit_mode_subbyte", &["BITPOS", "<KEY>", "1", "0", "3", "BIT"]),
+            ("set_bit_mode_subbyte_lower", &["BITPOS", "<KEY>", "1", "0", "3", "bit"]),
+            ("clr_bit_mode_subbyte", &["BITPOS", "<KEY>", "0", "0", "7", "BIT"]),
+            // BIT modifier with negative indices.
+            ("set_bit_mode_negative", &["BITPOS", "<KEY>", "1", "-8", "-1", "BIT"]),
+            // BIT modifier spanning multiple bytes (covers byte
+            // crossings in our masking).
+            ("set_bit_mode_full_span", &["BITPOS", "<KEY>", "1", "4", "23", "BIT"]),
+            ("set_bit_mode_excludes_last", &["BITPOS", "<KEY>", "1", "4", "22", "BIT"]),
+            // No zero bit in range — past-end fallback only when
+            // end was NOT supplied.
+            ("clr_with_explicit_end_no_fallback", &["BITPOS", "<KEY>", "0", "0", "1"]),
+            // Bad unit token must produce a syntax error on both
+            // sides; the exact wording is what matters here.
+            ("set_bad_unit_token", &["BITPOS", "<KEY>", "1", "0", "1", "QUUX"]),
+        ];
+
+        for (key, value) in patterns {
+            // Seed both sides with SET key <bytes>.
+            let set_frame = RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"SET".to_vec())),
+                RespFrame::BulkString(Some(key.as_bytes().to_vec())),
+                RespFrame::BulkString(Some(value.to_vec())),
+            ]));
+            let now_ms = 100u64;
+            let runtime_set = runtime.execute_frame(set_frame.clone(), now_ms);
+            assert!(
+                matches!(&runtime_set, RespFrame::SimpleString(s) if s == "OK"),
+                "runtime SET failed for key {key}: {runtime_set:?}"
+            );
+            send_frame(&mut stream, &set_frame).expect("send SET to oracle");
+            let oracle_set =
+                read_resp_frame_from_stream(&mut stream).expect("read SET reply from oracle");
+            assert_eq!(
+                runtime_set, oracle_set,
+                "SET reply mismatch on seed for key {key}"
+            );
+
+            // Run each BITPOS variant with the seeded key
+            // substituted into the argv template.
+            for (variant_name, argv_template) in variants {
+                let argv: Vec<String> = argv_template
+                    .iter()
+                    .map(|tok| if *tok == "<KEY>" { (*key).to_string() } else { (*tok).to_string() })
+                    .collect();
+                let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+                let frame = command_frame(&argv_refs);
+
+                let runtime_reply = runtime.execute_frame(frame.clone(), now_ms);
+                send_frame(&mut stream, &frame).expect("send BITPOS to oracle");
+                let oracle_reply = read_resp_frame_from_stream(&mut stream)
+                    .expect("read BITPOS reply from oracle");
+
+                assert_eq!(
+                    runtime_reply, oracle_reply,
+                    "BITPOS variant {variant_name} on key {key} (bytes={value:?}): \
+                     runtime emitted {runtime_reply:?}, oracle emitted {oracle_reply:?}",
+                );
+            }
+        }
+
+        stream
+            .shutdown(std::net::Shutdown::Both)
+            .expect("shutdown BITPOS oracle connection");
+    }
+
     #[test]
     fn live_redis_protocol_negative_matches_runtime() {
         let cfg = HarnessConfig::default_paths();

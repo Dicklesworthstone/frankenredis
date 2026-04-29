@@ -114,7 +114,7 @@ proptest! {
         let count = store
             .bitcount(&key, None, None, BitRangeUnit::Byte, 0)
             .unwrap();
-        let pos1 = store.bitpos(&key, true, None, None, 0).unwrap();
+        let pos1 = store.bitpos(&key, true, None, None, BitRangeUnit::Byte, 0).unwrap();
 
         if count > 0 {
             prop_assert!(pos1 >= 0);

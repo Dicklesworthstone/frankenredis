@@ -8197,7 +8197,17 @@ fn bitcount(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
 }
 
 fn bitpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() < 3 || argv.len() > 5 {
+    // Upstream t_string.c::bitposCommand:
+    //   BITPOS key bit [start [end [BYTE | BIT]]]
+    // The trailing BYTE|BIT modifier (Redis 7.0+) is only legal when
+    // BOTH start AND end are supplied; the parser dispatches strictly
+    // on argc:
+    //   argc == 3 → no range
+    //   argc == 4 → start only
+    //   argc == 5 → start + end (BYTE semantics)
+    //   argc == 6 → start + end + BIT|BYTE modifier
+    //   anything else → syntax error
+    if argv.len() < 3 || argv.len() > 6 {
         return Err(CommandError::WrongArity("BITPOS"));
     }
     let bit_val = parse_i64_arg(&argv[2])?;
@@ -8216,7 +8226,18 @@ fn bitpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     } else {
         None
     };
-    let pos = store.bitpos(&argv[1], bit_val == 1, start, end, now_ms)?;
+    let unit = if argv.len() == 6 {
+        if argv[5].eq_ignore_ascii_case(b"bit") {
+            BitRangeUnit::Bit
+        } else if argv[5].eq_ignore_ascii_case(b"byte") {
+            BitRangeUnit::Byte
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    } else {
+        BitRangeUnit::Byte
+    };
+    let pos = store.bitpos(&argv[1], bit_val == 1, start, end, unit, now_ms)?;
     Ok(RespFrame::Integer(pos))
 }
 

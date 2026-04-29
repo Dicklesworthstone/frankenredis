@@ -2627,6 +2627,7 @@ impl Store {
         bit: bool,
         start: Option<i64>,
         end: Option<i64>,
+        unit: BitRangeUnit,
         now_ms: u64,
     ) -> Result<i64, StoreError> {
         if !self.record_keyspace_lookup(key, now_ms) {
@@ -2648,40 +2649,100 @@ impl Store {
         if bytes.is_empty() {
             return if bit { Ok(-1) } else { Ok(0) };
         }
-        let len = bytes.len() as i64;
+
+        // Normalize start/end into the chosen unit's index space
+        // (bit-or-byte). After this block, both indices are
+        // non-negative and clamped to [0, total_len-1].
+        let total_len = match unit {
+            BitRangeUnit::Byte => bytes.len() as i64,
+            BitRangeUnit::Bit => (bytes.len() as i64).saturating_mul(8),
+        };
         let has_end = end.is_some();
-        let s = match start {
-            Some(s) if s < 0 => (len + s).max(0) as usize,
-            Some(s) => s as usize,
+        let s_idx = match start {
+            Some(s) if s < 0 => (total_len + s).max(0),
+            Some(s) => s,
             None => 0,
         };
-        let e = match end {
-            Some(e) if e < 0 => (len + e).max(0),
+        let mut e_idx = match end {
+            Some(e) if e < 0 => (total_len + e).max(0),
             Some(e) => e,
-            None => len - 1,
+            None => total_len - 1,
         };
-        if s as i64 > e || s >= bytes.len() {
+        if s_idx > e_idx || s_idx >= total_len {
             return Ok(-1);
         }
-        let end_idx_excl = (e.min(len - 1) as usize).min(bytes.len() - 1) + 1;
-        let slice = &bytes[s..end_idx_excl];
-        for (byte_offset, &byte) in slice.iter().enumerate() {
-            if bit {
-                if byte != 0 {
-                    let bit_offset = byte.leading_zeros();
-                    return Ok(((s + byte_offset) * 8 + bit_offset as usize) as i64);
+        if e_idx >= total_len {
+            e_idx = total_len - 1;
+        }
+
+        // Convert (s_idx, e_idx) into a byte-range with first/last
+        // byte masks. In BYTE mode the mask covers the whole byte
+        // (s_bit_in_byte=0, e_bit_in_byte=7); in BIT mode the masks
+        // narrow to the user-requested bit window.
+        let (s_byte, s_bit_in_byte, e_byte, e_bit_in_byte) = match unit {
+            BitRangeUnit::Byte => (s_idx as usize, 0u8, e_idx as usize, 7u8),
+            BitRangeUnit::Bit => (
+                (s_idx / 8) as usize,
+                (s_idx % 8) as u8,
+                (e_idx / 8) as usize,
+                (e_idx % 8) as u8,
+            ),
+        };
+
+        // First/last byte keep-masks (1 in the bits inside the
+        // requested range, 0 outside). `0xFFu8 >> n` and `0xFFu8 <<
+        // (7 - n)` are well-defined for n in 0..=7 — the Bit-mode
+        // arithmetic above guarantees that domain.
+        let first_keep_mask: u8 = 0xFFu8 >> s_bit_in_byte;
+        let last_keep_mask: u8 = 0xFFu8 << (7 - e_bit_in_byte);
+
+        for byte_offset in s_byte..=e_byte {
+            let raw = bytes[byte_offset];
+            let first_byte = byte_offset == s_byte;
+            let last_byte = byte_offset == e_byte;
+
+            // Apply masks per direction. Looking for 1: zero the
+            // out-of-range bits so they're skipped (`& keep_mask`).
+            // Looking for 0: set the out-of-range bits to 1 so they
+            // can't trip the search (`| !keep_mask`).
+            let masked = if bit {
+                let mut m = raw;
+                if first_byte {
+                    m &= first_keep_mask;
                 }
+                if last_byte {
+                    m &= last_keep_mask;
+                }
+                m
             } else {
-                if byte != 0xFF {
-                    let bit_offset = (!byte).leading_zeros();
-                    return Ok(((s + byte_offset) * 8 + bit_offset as usize) as i64);
+                let mut m = raw;
+                if first_byte {
+                    m |= !first_keep_mask;
                 }
+                if last_byte {
+                    m |= !last_keep_mask;
+                }
+                m
+            };
+
+            if bit && masked != 0 {
+                let bit_in_byte = masked.leading_zeros() as usize;
+                return Ok((byte_offset * 8 + bit_in_byte) as i64);
+            }
+            if !bit && masked != 0xFF {
+                let bit_in_byte = (!masked).leading_zeros() as usize;
+                return Ok((byte_offset * 8 + bit_in_byte) as i64);
             }
         }
-        // If searching for 0 with no explicit end, and all bits in range are 1,
-        // return the position just past the last byte of the string
+
+        // Upstream bitposCommand: when looking for a clear bit and
+        // the caller did NOT supply an explicit end, the right of
+        // the string is treated as zero-padded — return the bit
+        // position just past the last covered byte. Same behavior in
+        // BIT mode since `end` defaulting to `total_len - 1`
+        // (the last bit) carries the same "not user-supplied" signal.
         if !bit && !has_end {
-            return Ok((end_idx_excl * 8) as i64);
+            return Ok(((e_byte + 1) * 8) as i64);
         }
         Ok(-1)
     }
@@ -15235,7 +15296,7 @@ mod tests {
     fn bitpos_finds_first_set_bit() {
         let mut store = Store::new();
         store.set(b"k".to_vec(), vec![0x00, 0x80], None, 0); // bit 8 set (MSB of byte 1)
-        assert_eq!(store.bitpos(b"k", true, None, None, 0).unwrap(), 8);
+        assert_eq!(store.bitpos(b"k", true, None, None, BitRangeUnit::Byte, 0).unwrap(), 8);
     }
 
     #[test]
@@ -15243,7 +15304,149 @@ mod tests {
         let mut store = Store::new();
         store.set(b"k".to_vec(), vec![0xff, 0xff], None, 0); // all bits set
         // Without explicit end, returns position past end
-        assert_eq!(store.bitpos(b"k", false, None, None, 0).unwrap(), 16);
+        assert_eq!(store.bitpos(b"k", false, None, None, BitRangeUnit::Byte, 0).unwrap(), 16);
+    }
+
+    /// Redis 7.0+ BITPOS BIT modifier: start/end are interpreted as
+    /// bit indices instead of byte indices. Frankenredis previously
+    /// rejected the 5-arg-after-key form (`argv.len() == 6`) with a
+    /// WrongArity error, blocking 7.0 clients from this dialect. The
+    /// fix added a `BitRangeUnit` parameter that mirrors the
+    /// existing BITCOUNT path.
+    #[test]
+    fn bitpos_bit_unit_finds_set_bit_in_subbyte_range() {
+        let mut store = Store::new();
+        // bytes[0] = 0b00010000 — bit 3 set (the only set bit).
+        // BIT-mode search for `1` in [bit 0, bit 3] must report 3.
+        store.set(b"k".to_vec(), vec![0b0001_0000], None, 0);
+        assert_eq!(
+            store
+                .bitpos(b"k", true, Some(0), Some(3), BitRangeUnit::Bit, 0)
+                .unwrap(),
+            3
+        );
+        // Same byte but search restricted to [0, 2] (excludes bit 3):
+        // no set bit in range → -1.
+        assert_eq!(
+            store
+                .bitpos(b"k", true, Some(0), Some(2), BitRangeUnit::Bit, 0)
+                .unwrap(),
+            -1
+        );
+        // Search [4, 7] also has no set bit → -1.
+        assert_eq!(
+            store
+                .bitpos(b"k", true, Some(4), Some(7), BitRangeUnit::Bit, 0)
+                .unwrap(),
+            -1
+        );
+    }
+
+    #[test]
+    fn bitpos_bit_unit_finds_clear_bit_in_subbyte_range() {
+        let mut store = Store::new();
+        // bytes[0] = 0b11111101 — only bit 6 is clear.
+        // BIT-mode search for `0` in [4, 7] must report 6.
+        store.set(b"k".to_vec(), vec![0b1111_1101], None, 0);
+        assert_eq!(
+            store
+                .bitpos(b"k", false, Some(4), Some(7), BitRangeUnit::Bit, 0)
+                .unwrap(),
+            6
+        );
+        // Search [0, 5] (excludes the only zero at bit 6) → -1
+        // because end is explicit, no past-end fallback.
+        assert_eq!(
+            store
+                .bitpos(b"k", false, Some(0), Some(5), BitRangeUnit::Bit, 0)
+                .unwrap(),
+            -1
+        );
+    }
+
+    #[test]
+    fn bitpos_bit_unit_negative_indices_are_relative_to_total_bits() {
+        let mut store = Store::new();
+        // 2 bytes = 16 bits. bytes[1] = 0b00000010 → bit 14 set.
+        store.set(b"k".to_vec(), vec![0x00, 0b0000_0010], None, 0);
+        // Negative bit indices: -1 = last bit (15), -8 = bit 8.
+        // Search [bit 8, last bit] for `1` → bit 14.
+        assert_eq!(
+            store
+                .bitpos(b"k", true, Some(-8), Some(-1), BitRangeUnit::Bit, 0)
+                .unwrap(),
+            14
+        );
+    }
+
+    #[test]
+    fn bitpos_bit_unit_spans_multiple_bytes() {
+        let mut store = Store::new();
+        // 3 bytes; only the very last bit is set.
+        // bytes = [0x00, 0x00, 0b0000_0001] → bit 23 set.
+        store.set(b"k".to_vec(), vec![0x00, 0x00, 0b0000_0001], None, 0);
+        // BIT-mode search [4, 23] must report 23.
+        assert_eq!(
+            store
+                .bitpos(b"k", true, Some(4), Some(23), BitRangeUnit::Bit, 0)
+                .unwrap(),
+            23
+        );
+        // BIT-mode search [4, 22] must report -1 (last bit excluded).
+        assert_eq!(
+            store
+                .bitpos(b"k", true, Some(4), Some(22), BitRangeUnit::Bit, 0)
+                .unwrap(),
+            -1
+        );
+    }
+
+    /// BIT mode with no end omits the past-end-of-string fallback in
+    /// the same way BYTE mode does — when the caller did not supply
+    /// `end_given`, looking for `0` in an all-1s range returns the
+    /// bit position just past the last covered byte. Verifying the
+    /// fallback uses bit semantics keeps `(e_byte + 1) * 8` honest
+    /// for both units.
+    #[test]
+    fn bitpos_bit_unit_no_end_zero_search_returns_past_end() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), vec![0xff, 0xff], None, 0);
+        assert_eq!(
+            store
+                .bitpos(b"k", false, Some(0), None, BitRangeUnit::Bit, 0)
+                .unwrap(),
+            16
+        );
+    }
+
+    /// Backwards-compat: the BYTE path must continue to behave exactly
+    /// as before, including the past-end fallback when end is omitted.
+    #[test]
+    fn bitpos_byte_unit_back_compat_holds_after_unit_param_added() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), vec![0x00, 0x80, 0x00], None, 0);
+        // Looking for 1 anywhere → bit 8 (MSB of byte 1).
+        assert_eq!(
+            store
+                .bitpos(b"k", true, None, None, BitRangeUnit::Byte, 0)
+                .unwrap(),
+            8
+        );
+        // Looking for 1 in just byte 0 → -1.
+        assert_eq!(
+            store
+                .bitpos(b"k", true, Some(0), Some(0), BitRangeUnit::Byte, 0)
+                .unwrap(),
+            -1
+        );
+        // Looking for 0 with no end and all bytes are 0xff → past end.
+        store.set(b"all1".to_vec(), vec![0xff, 0xff, 0xff], None, 0);
+        assert_eq!(
+            store
+                .bitpos(b"all1", false, None, None, BitRangeUnit::Byte, 0)
+                .unwrap(),
+            24
+        );
     }
 
     // ── Extended List store tests ───────────────────────────────────────
