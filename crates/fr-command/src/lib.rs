@@ -29299,18 +29299,18 @@ mod tests {
     /// The seed generator
     /// (`fuzz/scripts/gen_migrate_request_seeds.py`) covers each
     /// MIGRATE option combination + every documented rejection
-    /// branch. This test locks: every accept seed parses; every
-    /// reject seed surfaces an Err; specific reject cases hit the
-    /// canonical wording.
+    /// branch. This test locks: every corpus file is classified;
+    /// every accept seed parses; every reject seed surfaces an Err;
+    /// specific reject cases hit the canonical wording.
     #[test]
-    fn fuzz_migrate_request_corpus_matches_documented_contract() {
+    fn fuzz_migrate_request_corpus_matches_documented_contract() -> Result<(), String> {
         use crate::parse_migrate_request;
         use std::path::Path;
 
         let corpus_root =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/fuzz_migrate_request");
         if !corpus_root.exists() {
-            return;
+            return Ok(());
         }
 
         // The harness's raw_argv splits on \n / \r / 0 WITHOUT
@@ -29362,6 +29362,8 @@ mod tests {
             "large_timeout",
             "auth_password_with_special_chars",
             "keys_mode_long_list",
+            "auth2_replace.txt",
+            "basic_keys_mode.txt",
             // The trailing token after KEYS is NOT an option; it
             // becomes another key (KEYS consumes everything left).
             "unknown_option_after_keys",
@@ -29429,6 +29431,7 @@ mod tests {
             "auth2_missing_password",
             "keys_with_non_empty_key_arg",
             "unknown_option",
+            "missing_auth2_password.txt",
             // unknown_option_after_keys is intentionally NOT a
             // reject: once KEYS is hit, the parser consumes all
             // remaining argv as keys (matches upstream Redis
@@ -29443,6 +29446,28 @@ mod tests {
             );
         }
 
+        let listed_seeds: std::collections::BTreeSet<&str> =
+            accepts.iter().chain(rejects.iter()).copied().collect();
+        for entry in std::fs::read_dir(&corpus_root)
+            .map_err(|err| format!("read fuzz_migrate_request corpus: {err}"))?
+        {
+            let entry = entry.map_err(|err| format!("read fuzz_migrate_request entry: {err}"))?;
+            if !entry
+                .file_type()
+                .map_err(|err| format!("read fuzz_migrate_request seed file type: {err}"))?
+                .is_file()
+            {
+                continue;
+            }
+            let name = entry.file_name().into_string().map_err(|name| {
+                format!("fuzz_migrate_request seed filename is not UTF-8: {name:?}")
+            })?;
+            assert!(
+                listed_seeds.contains(name.as_str()),
+                "fuzz_migrate_request seed {name} must be listed as accept or reject"
+            );
+        }
+
         // KEYS with a non-empty key arg must surface the canonical
         // upstream wording.
         let argv = read_argv(&corpus_root, "keys_with_non_empty_key_arg");
@@ -29452,6 +29477,7 @@ mod tests {
             detail.contains("KEYS") && detail.contains("empty"),
             "KEYS-non-empty-key-arg wording must mention KEYS+empty: {detail}"
         );
+        Ok(())
     }
 
     /// Lock the contract for the structured corpus seeds in
