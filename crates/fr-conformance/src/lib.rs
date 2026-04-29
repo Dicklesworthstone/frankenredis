@@ -11003,26 +11003,59 @@ mod tests {
             // Start only.
             ("set_start_only", &["BITPOS", "<KEY>", "1", "0"]),
             // Start + end, default BYTE semantics.
-            ("set_start_end_byte_default", &["BITPOS", "<KEY>", "1", "0", "1"]),
+            (
+                "set_start_end_byte_default",
+                &["BITPOS", "<KEY>", "1", "0", "1"],
+            ),
             // Explicit BYTE modifier (must match default).
-            ("set_explicit_byte", &["BITPOS", "<KEY>", "1", "0", "1", "BYTE"]),
-            ("set_explicit_byte_lower", &["BITPOS", "<KEY>", "1", "0", "1", "byte"]),
+            (
+                "set_explicit_byte",
+                &["BITPOS", "<KEY>", "1", "0", "1", "BYTE"],
+            ),
+            (
+                "set_explicit_byte_lower",
+                &["BITPOS", "<KEY>", "1", "0", "1", "byte"],
+            ),
             // BIT modifier, sub-byte search.
-            ("set_bit_mode_subbyte", &["BITPOS", "<KEY>", "1", "0", "3", "BIT"]),
-            ("set_bit_mode_subbyte_lower", &["BITPOS", "<KEY>", "1", "0", "3", "bit"]),
-            ("clr_bit_mode_subbyte", &["BITPOS", "<KEY>", "0", "0", "7", "BIT"]),
+            (
+                "set_bit_mode_subbyte",
+                &["BITPOS", "<KEY>", "1", "0", "3", "BIT"],
+            ),
+            (
+                "set_bit_mode_subbyte_lower",
+                &["BITPOS", "<KEY>", "1", "0", "3", "bit"],
+            ),
+            (
+                "clr_bit_mode_subbyte",
+                &["BITPOS", "<KEY>", "0", "0", "7", "BIT"],
+            ),
             // BIT modifier with negative indices.
-            ("set_bit_mode_negative", &["BITPOS", "<KEY>", "1", "-8", "-1", "BIT"]),
+            (
+                "set_bit_mode_negative",
+                &["BITPOS", "<KEY>", "1", "-8", "-1", "BIT"],
+            ),
             // BIT modifier spanning multiple bytes (covers byte
             // crossings in our masking).
-            ("set_bit_mode_full_span", &["BITPOS", "<KEY>", "1", "4", "23", "BIT"]),
-            ("set_bit_mode_excludes_last", &["BITPOS", "<KEY>", "1", "4", "22", "BIT"]),
+            (
+                "set_bit_mode_full_span",
+                &["BITPOS", "<KEY>", "1", "4", "23", "BIT"],
+            ),
+            (
+                "set_bit_mode_excludes_last",
+                &["BITPOS", "<KEY>", "1", "4", "22", "BIT"],
+            ),
             // No zero bit in range — past-end fallback only when
             // end was NOT supplied.
-            ("clr_with_explicit_end_no_fallback", &["BITPOS", "<KEY>", "0", "0", "1"]),
+            (
+                "clr_with_explicit_end_no_fallback",
+                &["BITPOS", "<KEY>", "0", "0", "1"],
+            ),
             // Bad unit token must produce a syntax error on both
             // sides; the exact wording is what matters here.
-            ("set_bad_unit_token", &["BITPOS", "<KEY>", "1", "0", "1", "QUUX"]),
+            (
+                "set_bad_unit_token",
+                &["BITPOS", "<KEY>", "1", "0", "1", "QUUX"],
+            ),
         ];
 
         for (key, value) in patterns {
@@ -11051,7 +11084,13 @@ mod tests {
             for (variant_name, argv_template) in variants {
                 let argv: Vec<String> = argv_template
                     .iter()
-                    .map(|tok| if *tok == "<KEY>" { (*key).to_string() } else { (*tok).to_string() })
+                    .map(|tok| {
+                        if *tok == "<KEY>" {
+                            (*key).to_string()
+                        } else {
+                            (*tok).to_string()
+                        }
+                    })
                     .collect();
                 let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
                 let frame = command_frame(&argv_refs);
@@ -11105,8 +11144,8 @@ mod tests {
         let oracle = oracle_handle.oracle_config();
 
         let mut runtime = runtime_for_harness_config(&cfg);
-        let mut stream = connect_live_redis(&oracle)
-            .expect("connect to vendored redis for XTRIM LIMIT diff");
+        let mut stream =
+            connect_live_redis(&oracle).expect("connect to vendored redis for XTRIM LIMIT diff");
         flushall(&mut stream).expect("flushall on oracle");
 
         // Drive a concrete sequence: seed a stream of 10 entries on
@@ -11130,12 +11169,8 @@ mod tests {
                 let xadd = command_frame(&["XADD", key, &id, "f", "v"]);
                 let runtime_reply = runtime.execute_frame(xadd.clone(), 1);
                 send_frame(stream, &xadd).expect("send XADD seed");
-                let oracle_reply =
-                    read_resp_frame_from_stream(stream).expect("read XADD reply");
-                assert_eq!(
-                    runtime_reply, oracle_reply,
-                    "XADD seed drift for id {id}"
-                );
+                let oracle_reply = read_resp_frame_from_stream(stream).expect("read XADD reply");
+                assert_eq!(runtime_reply, oracle_reply, "XADD seed drift for id {id}");
             }
         };
 
@@ -11163,25 +11198,70 @@ mod tests {
         }
         let cases: &[(&str, &[&str], Class)] = &[
             // Exact (deterministic) trim counts.
-            ("maxlen_default_exact", &["XTRIM", "rt_xtl", "MAXLEN", "3"], Class::Exact),
-            ("maxlen_explicit_exact", &["XTRIM", "rt_xtl", "MAXLEN", "=", "3"], Class::Exact),
-            ("minid_default_exact", &["XTRIM", "rt_xtl", "MINID", "1005-0"], Class::Exact),
+            (
+                "maxlen_default_exact",
+                &["XTRIM", "rt_xtl", "MAXLEN", "3"],
+                Class::Exact,
+            ),
+            (
+                "maxlen_explicit_exact",
+                &["XTRIM", "rt_xtl", "MAXLEN", "=", "3"],
+                Class::Exact,
+            ),
+            (
+                "minid_default_exact",
+                &["XTRIM", "rt_xtl", "MINID", "1005-0"],
+                Class::Exact,
+            ),
             // Approximate forms: don't bind the integer reply,
             // only that both sides accepted the call without
             // raising an error.
-            ("maxlen_approx_no_limit", &["XTRIM", "rt_xtl", "MAXLEN", "~", "3"], Class::ApproxOk),
-            ("maxlen_approx_limit_2", &["XTRIM", "rt_xtl", "MAXLEN", "~", "3", "LIMIT", "2"], Class::ApproxOk),
-            ("maxlen_approx_limit_0", &["XTRIM", "rt_xtl", "MAXLEN", "~", "3", "LIMIT", "0"], Class::ApproxOk),
-            ("minid_approx_no_limit", &["XTRIM", "rt_xtl", "MINID", "~", "1005-0"], Class::ApproxOk),
-            ("minid_approx_limit_2", &["XTRIM", "rt_xtl", "MINID", "~", "1005-0", "LIMIT", "2"], Class::ApproxOk),
-            ("minid_approx_limit_high", &["XTRIM", "rt_xtl", "MINID", "~", "1005-0", "LIMIT", "9999"], Class::ApproxOk),
+            (
+                "maxlen_approx_no_limit",
+                &["XTRIM", "rt_xtl", "MAXLEN", "~", "3"],
+                Class::ApproxOk,
+            ),
+            (
+                "maxlen_approx_limit_2",
+                &["XTRIM", "rt_xtl", "MAXLEN", "~", "3", "LIMIT", "2"],
+                Class::ApproxOk,
+            ),
+            (
+                "maxlen_approx_limit_0",
+                &["XTRIM", "rt_xtl", "MAXLEN", "~", "3", "LIMIT", "0"],
+                Class::ApproxOk,
+            ),
+            (
+                "minid_approx_no_limit",
+                &["XTRIM", "rt_xtl", "MINID", "~", "1005-0"],
+                Class::ApproxOk,
+            ),
+            (
+                "minid_approx_limit_2",
+                &["XTRIM", "rt_xtl", "MINID", "~", "1005-0", "LIMIT", "2"],
+                Class::ApproxOk,
+            ),
+            (
+                "minid_approx_limit_high",
+                &["XTRIM", "rt_xtl", "MINID", "~", "1005-0", "LIMIT", "9999"],
+                Class::ApproxOk,
+            ),
             // Errors: exact wording must match upstream.
-            ("limit_with_equals_modifier_rejected",
-             &["XTRIM", "rt_xtl", "MAXLEN", "=", "3", "LIMIT", "2"], Class::Error),
-            ("limit_without_strategy_modifier_rejected",
-             &["XTRIM", "rt_xtl", "MAXLEN", "3", "LIMIT", "2"], Class::Error),
-            ("unknown_strategy_rejected",
-             &["XTRIM", "rt_xtl", "QUUX", "3"], Class::Error),
+            (
+                "limit_with_equals_modifier_rejected",
+                &["XTRIM", "rt_xtl", "MAXLEN", "=", "3", "LIMIT", "2"],
+                Class::Error,
+            ),
+            (
+                "limit_without_strategy_modifier_rejected",
+                &["XTRIM", "rt_xtl", "MAXLEN", "3", "LIMIT", "2"],
+                Class::Error,
+            ),
+            (
+                "unknown_strategy_rejected",
+                &["XTRIM", "rt_xtl", "QUUX", "3"],
+                Class::Error,
+            ),
         ];
 
         for (case_name, argv, class) in cases {
@@ -11190,8 +11270,7 @@ mod tests {
             let frame = command_frame(argv);
             let runtime_reply = runtime.execute_frame(frame.clone(), 1);
             send_frame(&mut stream, &frame).expect("send XTRIM variant");
-            let oracle_reply =
-                read_resp_frame_from_stream(&mut stream).expect("read XTRIM reply");
+            let oracle_reply = read_resp_frame_from_stream(&mut stream).expect("read XTRIM reply");
 
             match class {
                 Class::Exact | Class::Error => {
@@ -11229,8 +11308,7 @@ mod tests {
         // must apply during the implicit trim.
         seed_stream(&mut runtime, &mut stream, "rt_xal");
         let xadd_with_limit = command_frame(&[
-            "XADD", "rt_xal", "MAXLEN", "~", "3", "LIMIT", "2",
-            "*", "f", "tail",
+            "XADD", "rt_xal", "MAXLEN", "~", "3", "LIMIT", "2", "*", "f", "tail",
         ]);
         let runtime_xadd_reply = runtime.execute_frame(xadd_with_limit.clone(), 1);
         send_frame(&mut stream, &xadd_with_limit).expect("send XADD with LIMIT");
@@ -11259,6 +11337,114 @@ mod tests {
         stream
             .shutdown(std::net::Shutdown::Both)
             .expect("shutdown XTRIM oracle connection");
+    }
+
+    /// Cross-impl zset algebra option-parser conformance gate.
+    ///
+    /// Redis parses `ZUNION`/`ZINTER` options in a loop, so
+    /// `WITHSCORES` can appear before or between `WEIGHTS` and
+    /// `AGGREGATE`. `ZDIFF` only accepts `WITHSCORES`, and
+    /// `ZDIFFSTORE` accepts no trailing options. This gate diffs
+    /// those parser contracts against vendored Redis because a
+    /// permissive parser can silently ignore malformed option tails.
+    #[test]
+    fn live_redis_zset_algebra_option_parser_matches_upstream() {
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+
+        let mut runtime = runtime_for_harness_config(&cfg);
+        let mut stream = connect_live_redis(&oracle)
+            .expect("connect to vendored redis for zset algebra option diff");
+        flushall(&mut stream).expect("flushall on oracle");
+
+        let run_both = |runtime: &mut Runtime, stream: &mut std::net::TcpStream, argv: &[&str]| {
+            let frame = command_frame(argv);
+            let runtime_reply = runtime.execute_frame(frame.clone(), 1);
+            send_frame(stream, &frame).expect("send zset algebra command");
+            let oracle_reply =
+                read_resp_frame_from_stream(stream).expect("read zset algebra reply");
+            (runtime_reply, oracle_reply)
+        };
+        let seed_zsets = |runtime: &mut Runtime, stream: &mut std::net::TcpStream| {
+            for argv in [
+                &["FLUSHDB"][..],
+                &["ZADD", "za", "1", "a", "2", "b"][..],
+                &["ZADD", "zb", "3", "b", "4", "c"][..],
+            ] {
+                let (runtime_reply, oracle_reply) = run_both(runtime, stream, argv);
+                assert_eq!(
+                    runtime_reply, oracle_reply,
+                    "zset algebra seed drift for argv={argv:?}"
+                );
+            }
+        };
+
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "zunion_withscores_before_aggregate",
+                &["ZUNION", "2", "za", "zb", "WITHSCORES", "AGGREGATE", "MAX"],
+            ),
+            (
+                "zinter_weights_withscores_then_aggregate",
+                &[
+                    "ZINTER",
+                    "2",
+                    "za",
+                    "zb",
+                    "WEIGHTS",
+                    "2",
+                    "3",
+                    "WITHSCORES",
+                    "AGGREGATE",
+                    "MIN",
+                ],
+            ),
+            (
+                "zunion_rejects_trailing_after_withscores",
+                &["ZUNION", "2", "za", "zb", "WITHSCORES", "BOGUS"],
+            ),
+            (
+                "zinter_rejects_invalid_aggregate",
+                &["ZINTER", "2", "za", "zb", "AGGREGATE", "MEDIAN"],
+            ),
+            (
+                "zdiff_rejects_weights",
+                &["ZDIFF", "2", "za", "zb", "WEIGHTS", "1", "1"],
+            ),
+            (
+                "zdiffstore_rejects_trailing_withscores",
+                &["ZDIFFSTORE", "zdst", "2", "za", "zb", "WITHSCORES"],
+            ),
+            (
+                "zunionstore_rejects_invalid_aggregate",
+                &[
+                    "ZUNIONSTORE",
+                    "zust",
+                    "2",
+                    "za",
+                    "zb",
+                    "AGGREGATE",
+                    "MEDIAN",
+                ],
+            ),
+        ];
+
+        for (case_name, argv) in cases {
+            seed_zsets(&mut runtime, &mut stream);
+            let (runtime_reply, oracle_reply) = run_both(&mut runtime, &mut stream, argv);
+            assert_eq!(
+                runtime_reply, oracle_reply,
+                "zset algebra option parser drift for {case_name} argv={argv:?}: \
+                 runtime={runtime_reply:?}, oracle={oracle_reply:?}"
+            );
+        }
+
+        stream
+            .shutdown(std::net::Shutdown::Both)
+            .expect("shutdown zset algebra oracle connection");
     }
 
     #[test]
