@@ -1,0 +1,1 @@
+sentinel.local,26380,00000000000000000000000000000000000000ab,42,cache-master,redis-primary.internal,6380,9

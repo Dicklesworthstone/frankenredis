@@ -1,0 +1,7 @@
+# Server
+redis_version:7.2.0
+role:master
+role:master:with-extra-colon
+connected_slaves:0
+unknown_line_without_colon
+slave0:ip=,port=0,state=online,offset=nope,lag=0

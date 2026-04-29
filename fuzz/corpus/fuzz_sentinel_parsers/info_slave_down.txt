@@ -1,0 +1,8 @@
+# Replication
+role:slave
+master_host:10.0.0.1
+master_port:6379
+master_link_status:down
+master_link_down_since_seconds:42
+slave_repl_offset:99
+replica_priority:50

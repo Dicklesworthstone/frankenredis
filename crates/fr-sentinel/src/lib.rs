@@ -449,4 +449,74 @@ mod tests {
     fn failover_state_default() {
         assert_eq!(FailoverState::default(), FailoverState::None);
     }
+
+    #[test]
+    fn fuzz_sentinel_parsers_corpus_matches_documented_contract() {
+        use crate::discovery::{HelloMessage, parse_replica_info_from_master};
+        use crate::{Role, health::parse_info_response};
+        use std::{fs, path::Path};
+
+        let corpus_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/fuzz_sentinel_parsers");
+        if !corpus_root.exists() {
+            return;
+        }
+
+        for entry in fs::read_dir(&corpus_root).expect("read fuzz_sentinel_parsers corpus") {
+            let path = entry.expect("read corpus dir entry").path();
+            if !path.is_file() {
+                continue;
+            }
+            let body = fs::read_to_string(&path).unwrap_or_else(|err| {
+                panic!(
+                    "sentinel parser seed {} must be UTF-8: {err}",
+                    path.display()
+                )
+            });
+            let _ = HelloMessage::parse(&body);
+            let _ = parse_replica_info_from_master(&body);
+            let _ = parse_info_response(&body);
+        }
+
+        let hello = fs::read_to_string(corpus_root.join("hello_valid_ipv4.txt"))
+            .expect("read valid hello seed");
+        assert_eq!(
+            HelloMessage::parse(hello.trim_end()).map(|msg| (msg.sentinel_port, msg.master_port)),
+            Some((26379, 6379))
+        );
+        assert!(HelloMessage::parse(&read_seed(&corpus_root, "hello_invalid_port.txt")).is_none());
+        assert!(HelloMessage::parse(&read_seed(&corpus_root, "hello_extra_field.txt")).is_none());
+
+        let replicas =
+            parse_replica_info_from_master(&read_seed(&corpus_root, "info_master_replicas.txt"));
+        assert_eq!(
+            replicas
+                .iter()
+                .map(|replica| (replica.ip.as_str(), replica.port, replica.slave_repl_offset))
+                .collect::<Vec<_>>(),
+            vec![("10.0.0.10", 6379, 12345), ("10.0.0.11", 6380, 12340)]
+        );
+
+        let partial_replicas = parse_replica_info_from_master(&read_seed(
+            &corpus_root,
+            "info_replica_missing_ip_or_port.txt",
+        ));
+        assert_eq!(partial_replicas.len(), 1);
+        assert_eq!(partial_replicas[0].ip, "10.0.0.12");
+        assert_eq!(partial_replicas[0].port, 6382);
+
+        let slave = parse_info_response(&read_seed(&corpus_root, "info_slave_down.txt"));
+        assert_eq!(slave.role, Some(Role::Slave));
+        assert_eq!(slave.master_link_status, Some(false));
+        assert_eq!(slave.master_link_down_since, Some(42_000));
+
+        let noisy = parse_info_response(&read_seed(&corpus_root, "info_noise_colons.txt"));
+        assert_eq!(noisy.role, Some(Role::Master));
+        assert_eq!(noisy.connected_slaves, Some(0));
+    }
+
+    fn read_seed(root: &std::path::Path, name: &str) -> String {
+        std::fs::read_to_string(root.join(name))
+            .unwrap_or_else(|err| panic!("read sentinel fuzz seed {name}: {err}"))
+    }
 }

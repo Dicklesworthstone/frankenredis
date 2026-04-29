@@ -1,0 +1,9 @@
+# Replication
+role:slave
+master_host:10.0.0.1
+master_port:6379
+master_link_status:up
+master_link_down_since_seconds:0
+slave_repl_offset:54321
+slave_priority:100
+run_id:replica-runid-1

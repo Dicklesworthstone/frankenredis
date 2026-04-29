@@ -1,0 +1,8 @@
+# Replication
+role:slave
+master_host:10.0.0.1
+master_port:notaport
+master_link_status:up
+master_link_down_since_seconds:notanumber
+slave_repl_offset:notanoffset
+slave_priority:notapriority

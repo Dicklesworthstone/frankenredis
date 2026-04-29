@@ -1,0 +1,5 @@
+# Replication
+role:master
+connected_slaves:1
+master_repl_offset:18446744073709551615
+slave0:ip=255.255.255.255,port=65535,state=online,offset=18446744073709551615,lag=0
