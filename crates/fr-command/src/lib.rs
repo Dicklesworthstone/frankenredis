@@ -29223,6 +29223,7 @@ mod tests {
     ///   2. Representative deterministic seeds produce the exact
     ///      expected `RespFrame` so the corpus locks the eval
     ///      result.
+    ///
     /// Lock the contract for the structured corpus seeds in
     /// `fuzz/corpus/fuzz_migrate_request/`. The fuzz target's
     /// `raw_argv` pre-pends `MIGRATE` to the seed body, then
@@ -29241,8 +29242,8 @@ mod tests {
         use crate::parse_migrate_request;
         use std::path::Path;
 
-        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fuzz/corpus/fuzz_migrate_request");
+        let corpus_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/fuzz_migrate_request");
         if !corpus_root.exists() {
             return;
         }
@@ -29380,8 +29381,7 @@ mod tests {
         // KEYS with a non-empty key arg must surface the canonical
         // upstream wording.
         let argv = read_argv(&corpus_root, "keys_with_non_empty_key_arg");
-        let err = parse_migrate_request(&argv)
-            .expect_err("KEYS with non-empty key must reject");
+        let err = parse_migrate_request(&argv).expect_err("KEYS with non-empty key must reject");
         let detail = format!("{err:?}");
         assert!(
             detail.contains("KEYS") && detail.contains("empty"),
@@ -29405,8 +29405,8 @@ mod tests {
         use crate::parse_client_tracking_state;
         use std::path::Path;
 
-        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fuzz/corpus/fuzz_client_tracking");
+        let corpus_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/fuzz_client_tracking");
         if !corpus_root.exists() {
             return;
         }
@@ -29458,6 +29458,7 @@ mod tests {
             "tracking_mixed_case.txt",
             "tracking_uppercase_prefix_value.txt",
             "tracking_on_bcast_prefix_with_colon.txt",
+            "tracking_on_bcast_empty_prefix.txt",
         ];
         assert!(
             accepts.len() >= 14,
@@ -29468,6 +29469,28 @@ mod tests {
             parse_client_tracking_state(&argv)
                 .unwrap_or_else(|err| panic!("seed {name} must parse: {err:?}"));
         }
+
+        let quoted_empty_prefix = read_argv(&corpus_root, "tracking_on_bcast_empty_prefix.txt");
+        let state = parse_client_tracking_state(&quoted_empty_prefix)
+            .expect("quoted empty-prefix seed must parse");
+        assert!(
+            state.prefixes.contains(b"\"\"".as_slice()),
+            "raw corpus seed uses literal quote bytes because argv_from_raw has no quoting"
+        );
+
+        let state = parse_client_tracking_state(&[
+            b"CLIENT".to_vec(),
+            b"TRACKING".to_vec(),
+            b"ON".to_vec(),
+            b"BCAST".to_vec(),
+            b"PREFIX".to_vec(),
+            Vec::new(),
+        ])
+        .expect("real empty PREFIX argv must parse");
+        assert!(
+            state.prefixes.contains(&Vec::<u8>::new()),
+            "explicit argv path must lock true empty-prefix semantics"
+        );
 
         // Reject-class: each must surface an error.
         let rejects: &[&str] = &[
@@ -29500,8 +29523,7 @@ mod tests {
             "BCAST+OPTIN error wording must mention BCAST: {err:?}"
         );
 
-        let prefix_no_bcast =
-            read_argv(&corpus_root, "tracking_on_prefix_without_bcast.txt");
+        let prefix_no_bcast = read_argv(&corpus_root, "tracking_on_prefix_without_bcast.txt");
         let err = parse_client_tracking_state(&prefix_no_bcast)
             .expect_err("PREFIX-without-BCAST must reject");
         assert!(
@@ -29536,8 +29558,8 @@ mod tests {
         use fr_store::ClientReplyState;
         use std::path::Path;
 
-        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fuzz/corpus/fuzz_client_reply");
+        let corpus_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/fuzz_client_reply");
         if !corpus_root.exists() {
             return;
         }

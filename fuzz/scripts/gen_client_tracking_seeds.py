@@ -112,6 +112,9 @@ def main() -> None:
             "tracking_on_bcast_prefix_with_colon.txt",
             b"CLIENT TRACKING ON BCAST PREFIX user:\n",
         ),
+        # Raw fuzz argv parsing has no quote semantics and cannot
+        # encode a zero-length token; the crate contract test covers
+        # a real empty PREFIX through an explicit argv vector.
         seed(
             "tracking_on_bcast_empty_prefix.txt",
             b"CLIENT TRACKING ON BCAST PREFIX \"\"\n",
