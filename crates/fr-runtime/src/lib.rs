@@ -20494,8 +20494,8 @@ user bob reset off nopass +@all
     fn fuzz_acl_rules_corpus_matches_documented_contract() {
         use std::path::Path;
 
-        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fuzz/corpus/fuzz_acl_rules");
+        let corpus_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fuzz/corpus/fuzz_acl_rules");
         if !corpus_root.exists() {
             return;
         }
@@ -20597,8 +20597,7 @@ user bob reset off nopass +@all
         // parser's first-token check rejects it. This is the
         // canonical "ERR /ACL file contains invalid format" path.
         let body = read_seed(&corpus_root, "garbage_one_line.acl");
-        let err = canonicalize_acl_rules(&body)
-            .expect_err("garbage_one_line.acl must reject");
+        let err = canonicalize_acl_rules(&body).expect_err("garbage_one_line.acl must reject");
         assert!(
             err.contains("invalid format"),
             "garbage_one_line.acl error should match 'invalid format' wording: {err}"
