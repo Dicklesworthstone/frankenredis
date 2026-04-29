@@ -1,0 +1,1 @@
+user iris reset on nopass +@all -keys -flushall ~*

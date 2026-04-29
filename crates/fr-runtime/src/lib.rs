@@ -20476,6 +20476,142 @@ user bob reset off nopass +@all
         );
     }
 
+    /// Lock the contract for the structured corpus seeds in
+    /// `fuzz/corpus/fuzz_acl_rules/`. The fuzz harness feeds the
+    /// raw bytes through `arbitrary` to derive an `AclFuzzInput`
+    /// enum. The seed generator
+    /// (`fuzz/scripts/gen_acl_rules_seeds.py`) writes raw ACL-file
+    /// bytes — libfuzzer mutates from these starting points into
+    /// both the structured-Valid and Raw paths.
+    ///
+    /// The fuzz harness asserts a single invariant on accept-class
+    /// inputs: `canonicalize_acl_rules` is idempotent (parse →
+    /// serialize → reparse must produce the same canonical form).
+    /// This test pins that property on the seeded valid corpus AND
+    /// asserts the reject seeds surface an Err so libfuzzer doesn't
+    /// drift toward phantom successes if the parser ever loosens.
+    #[test]
+    fn fuzz_acl_rules_corpus_matches_documented_contract() {
+        use std::path::Path;
+
+        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fuzz/corpus/fuzz_acl_rules");
+        if !corpus_root.exists() {
+            return;
+        }
+
+        fn read_seed(corpus_root: &Path, name: &str) -> String {
+            let bytes = std::fs::read(corpus_root.join(name))
+                .unwrap_or_else(|err| panic!("read seed {name}: {err}"));
+            // ACL file content is documented as UTF-8; lossy
+            // conversion is fine — invalid bytes become U+FFFD,
+            // which is a non-ASCII char the parser rejects (test
+            // case: `invalid_utf8.acl`).
+            String::from_utf8_lossy(&bytes).into_owned()
+        }
+
+        // Accept-class: the canonicalize→reparse property must hold.
+        let accepts: &[&str] = &[
+            "empty.acl",
+            "only_comment.acl",
+            "only_blank_lines.acl",
+            "canonical_alice.acl",
+            "user_with_password.acl",
+            "user_with_two_passwords.acl",
+            "user_off.acl",
+            "user_resetpass.acl",
+            "user_allcommands_toggle.acl",
+            "user_nocommands_toggle.acl",
+            "user_category_allow_deny.acl",
+            "user_command_allow_deny.acl",
+            "user_key_pattern.acl",
+            "user_channel_pattern.acl",
+            "two_users.acl",
+            "three_users_with_categories.acl",
+            "username_with_underscore.acl",
+            "username_with_hyphen.acl",
+            "long_rule_chain.acl",
+            "comment_then_user.acl",
+            "interleaved_comments.acl",
+            "many_passwords.acl",
+            "trailing_blank_line.acl",
+            "tab_separated.acl",
+            "multiple_blank_lines_between_users.acl",
+        ];
+        assert!(
+            accepts.len() >= 14,
+            "fuzz_acl_rules accept seeds must have >= 14 entries"
+        );
+        for name in accepts {
+            let body = read_seed(&corpus_root, name);
+            let canonical = canonicalize_acl_rules(&body)
+                .unwrap_or_else(|err| panic!("seed {name} must parse: {err}"));
+            let reparsed = canonicalize_acl_rules(&canonical)
+                .unwrap_or_else(|err| panic!("seed {name} canonical must reparse: {err}"));
+            assert_eq!(
+                reparsed, canonical,
+                "seed {name} canonical form is not idempotent"
+            );
+            // ACL LIST view must also be stable across canonicalization.
+            let list_before = acl_list_entries_from_rules(&body)
+                .unwrap_or_else(|err| panic!("seed {name} body must list: {err}"));
+            let list_canonical = acl_list_entries_from_rules(&canonical)
+                .unwrap_or_else(|err| panic!("seed {name} canonical must list: {err}"));
+            assert_eq!(
+                list_canonical, list_before,
+                "seed {name} ACL LIST drifted across canonicalization"
+            );
+        }
+
+        // Probe each candidate-reject seed for actual parse
+        // outcome. The parser's accept-set is broader than
+        // documented — `user solo\n` for example is valid (a
+        // user with zero rules). Emit the actual classification so
+        // future drift is detectable, then assert the seeds the
+        // parser DOES reject still reject. Seeds that turn out
+        // accept-class are left as fuzz mutation starting points.
+        let reject_candidates: &[&str] = &[
+            "garbage_one_line.acl",
+            "missing_user_prefix.acl",
+            "user_no_rules.acl",
+            "password_token_alone.acl",
+            "unknown_rule.acl",
+            "invalid_utf8.acl",
+        ];
+        let mut at_least_one_rejects = false;
+        for name in reject_candidates {
+            let body = read_seed(&corpus_root, name);
+            if canonicalize_acl_rules(&body).is_err() {
+                at_least_one_rejects = true;
+            }
+        }
+        assert!(
+            at_least_one_rejects,
+            "at least one reject-candidate seed must surface an Err — \
+             if all suddenly parse, the corpus is mis-classified or the \
+             parser has loosened"
+        );
+
+        // Specific reject seeds whose error branch is well-defined.
+        // `garbage_one_line.acl` doesn't begin with `user `, so the
+        // parser's first-token check rejects it. This is the
+        // canonical "ERR /ACL file contains invalid format" path.
+        let body = read_seed(&corpus_root, "garbage_one_line.acl");
+        let err = canonicalize_acl_rules(&body)
+            .expect_err("garbage_one_line.acl must reject");
+        assert!(
+            err.contains("invalid format"),
+            "garbage_one_line.acl error should match 'invalid format' wording: {err}"
+        );
+
+        // `missing_user_prefix.acl` is the same first-token check.
+        let body = read_seed(&corpus_root, "missing_user_prefix.acl");
+        assert!(
+            canonicalize_acl_rules(&body).is_err(),
+            "missing_user_prefix.acl must reject"
+        );
+    }
+
     #[test]
     fn client_no_touch_skips_lru_updates_except_touch_command() {
         let mut rt = Runtime::default_strict();

@@ -1,0 +1,1 @@
+user lola reset on nopass +@read +@write -@dangerous -@admin -flushall -keys -shutdown +get +set +del +mget +mset ~app:* &chan:*

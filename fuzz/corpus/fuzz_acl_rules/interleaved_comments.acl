@@ -1,0 +1,4 @@
+# first user
+user nora reset on nopass +@all ~*
+# second user
+user oscar reset off nopass +@read ~*

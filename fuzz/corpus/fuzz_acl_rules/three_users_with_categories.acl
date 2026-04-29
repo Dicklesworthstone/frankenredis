@@ -1,0 +1,3 @@
+user reader reset on nopass +@read -@admin ~*
+user writer reset on >wp +@write -@dangerous ~*
+user admin reset on >ap +@all ~*
