@@ -209,7 +209,11 @@ fn expected_request(case: &ValidMigrateCase) -> MigrateRequest {
 
     MigrateRequest {
         host: String::from_utf8(host_bytes(&case.host)).expect("host must be valid utf8"),
-        port: case.port,
+        // The struct field is `port_arg: Vec<u8>` (the raw argv[2]
+        // bytes — parse_migrate_request preserves the lexical form
+        // so MIGRATE can re-emit it verbatim downstream). The fuzz
+        // case's u16 port renders to its decimal ASCII bytes.
+        port_arg: case.port.to_string().into_bytes(),
         destination_db: i64::from(case.destination_db),
         timeout: Duration::from_millis(normalize_timeout_ms(i64::from(case.timeout_ms))),
         copy: case
@@ -321,7 +325,7 @@ fn canonical_migrate_argv(request: &MigrateRequest) -> Vec<Vec<u8>> {
     let mut argv = vec![
         b"MIGRATE".to_vec(),
         request.host.as_bytes().to_vec(),
-        request.port.to_string().into_bytes(),
+        request.port_arg.clone(),
     ];
 
     if request.keys.len() <= 1 {

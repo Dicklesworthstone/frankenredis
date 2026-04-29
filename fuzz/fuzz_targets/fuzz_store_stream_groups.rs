@@ -196,7 +196,10 @@ fn apply_stream_op(store: &mut Store, next_stream_id: &mut u64, op: StreamOp, no
             let _ = store.xdel(STREAM_KEY, &ids, now_ms);
         }
         StreamOp::Trim { max_len } => {
-            let _ = store.xtrim(STREAM_KEY, usize::from(max_len % 8), now_ms);
+            // Store::xtrim now takes an `Option<usize>` LIMIT
+            // parameter (Redis 6.2 dialect); pass None to preserve
+            // the prior fuzz behavior (full trim down to max_len).
+            let _ = store.xtrim(STREAM_KEY, usize::from(max_len % 8), None, now_ms);
         }
         StreamOp::GroupCreate {
             group,

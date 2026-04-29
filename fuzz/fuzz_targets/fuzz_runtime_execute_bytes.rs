@@ -102,6 +102,10 @@ fn default_runtime_parser_config() -> ParserConfig {
         max_bulk_len: 8 * 1024 * 1024,
         max_array_len: 1024,
         max_recursion_depth: 128,
+        // The runtime's wire-side parser is fail-closed on RESP3
+        // prefixes from untrusted input (matches the production
+        // parser default).
+        allow_resp3: false,
     }
 }
 

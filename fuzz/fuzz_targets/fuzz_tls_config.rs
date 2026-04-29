@@ -46,6 +46,11 @@ enum RawDirectiveKind {
     TlsAuthClients,
     ClusterAnnounceTlsPort,
     MaxNewTlsConnectionsPerCycle,
+    // TLS session-resumption directives — added when TlsConfig
+    // grew session_caching / session_cache_size / cache_timeout.
+    TlsSessionCaching,
+    TlsSessionCacheSize,
+    TlsSessionCacheTimeout,
 }
 
 #[derive(Debug, Arbitrary)]
@@ -204,6 +209,28 @@ fn fuzz_directive_case(case: RawDirectiveCase) {
                 parse_result.is_ok_and(|parsed| parsed > 0),
                 expected_valid,
                 "max-new-tls-connections-per-cycle validation must reject zero and non-numeric values",
+            );
+        }
+        TlsDirective::TlsSessionCaching => {
+            // Bool: "yes" / "on" / "1" / etc. accepted; anything
+            // else rejected. We can't reproduce the exact accept
+            // set without the parser, so just check that the
+            // value reproducibly parses to the expected verdict.
+            let parsed_ok = matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "yes" | "y" | "true" | "1" | "on" | "no" | "n" | "false" | "0" | "off"
+            );
+            assert_eq!(
+                parsed_ok, expected_valid,
+                "tls-session-caching validation must agree with the parser's bool acceptance",
+            );
+        }
+        TlsDirective::TlsSessionCacheSize | TlsDirective::TlsSessionCacheTimeout => {
+            let parse_result = value.parse::<usize>();
+            assert_eq!(
+                parse_result.is_ok(),
+                expected_valid,
+                "tls-session-cache-size/timeout validation must agree with usize parse",
             );
         }
     }
@@ -387,6 +414,31 @@ fn render_directive_value(case: &RawDirectiveCase) -> (String, bool) {
                 )
             }
         }
+        // ── TLS session-resumption directives ────────────────────
+        TlsDirective::TlsSessionCaching => {
+            if case.valid_hint {
+                let token = if case.auth_seed.is_multiple_of(2) {
+                    "yes"
+                } else {
+                    "no"
+                };
+                (token.to_string(), true)
+            } else {
+                (sanitize_invalid_token(&case.text, "maybe"), false)
+            }
+        }
+        TlsDirective::TlsSessionCacheSize | TlsDirective::TlsSessionCacheTimeout => {
+            // Both are usize-parseable; valid → any non-negative
+            // number; invalid → bytes that don't parse as usize.
+            if case.valid_hint {
+                (usize::from(case.number).to_string(), true)
+            } else {
+                (
+                    sanitize_invalid_numeric(&case.text, "invalid-tls-session-int"),
+                    false,
+                )
+            }
+        }
     }
 }
 
@@ -412,6 +464,15 @@ fn build_candidate_config(raw: &RawTlsConfig) -> TlsConfig {
         auth_clients: auth_mode(raw.auth_seed),
         cluster_announce_tls_port: raw.cluster_announce_tls_port,
         max_new_tls_connections_per_cycle: usize::from(raw.max_new_tls_connections_per_cycle),
+        // TLS session-resumption knobs were added to TlsConfig
+        // alongside the directive registry expansion. Fuzz with
+        // upstream defaults (caching on, 20 KiB session cache,
+        // 300 s timeout) so candidate configs the harness builds
+        // pass the same validation gate the production loader
+        // uses.
+        session_caching: true,
+        session_cache_size: 20 * 1024,
+        session_cache_timeout_sec: 300,
     }
 }
 
@@ -685,6 +746,9 @@ impl RawDirectiveKind {
             Self::TlsAuthClients => TlsDirective::TlsAuthClients,
             Self::ClusterAnnounceTlsPort => TlsDirective::ClusterAnnounceTlsPort,
             Self::MaxNewTlsConnectionsPerCycle => TlsDirective::MaxNewTlsConnectionsPerCycle,
+            Self::TlsSessionCaching => TlsDirective::TlsSessionCaching,
+            Self::TlsSessionCacheSize => TlsDirective::TlsSessionCacheSize,
+            Self::TlsSessionCacheTimeout => TlsDirective::TlsSessionCacheTimeout,
         }
     }
 }

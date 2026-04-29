@@ -95,6 +95,7 @@ name = "fr-command"
 version = "0.1.0"
 dependencies = [
  "fr-protocol",
+ "fr-sentinel",
  "fr-store",
 ]
 
@@ -168,6 +169,7 @@ version = "0.1.0"
 dependencies = [
  "fr-expire",
  "fr-persist",
+ "fr-sentinel",
  "libc",
 ]
 

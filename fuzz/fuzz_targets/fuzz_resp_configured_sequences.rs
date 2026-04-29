@@ -192,11 +192,11 @@ fn profile_for_frame(frame: &RespFrame) -> FrameProfile {
             max_bulk_len: bytes.len(),
             ..FrameProfile::default()
         },
-        RespFrame::Array(None) => FrameProfile {
+        RespFrame::Array(None) | RespFrame::Map(None) => FrameProfile {
             max_depth: 1,
             ..FrameProfile::default()
         },
-        RespFrame::Array(Some(items)) => {
+        RespFrame::Array(Some(items)) | RespFrame::Push(items) => {
             let mut profile = FrameProfile {
                 max_array_len: items.len(),
                 max_depth: 1,
@@ -207,6 +207,27 @@ fn profile_for_frame(frame: &RespFrame) -> FrameProfile {
                 profile.max_bulk_len = profile.max_bulk_len.max(nested.max_bulk_len);
                 profile.max_array_len = profile.max_array_len.max(nested.max_array_len);
                 profile.max_depth = profile.max_depth.max(nested.max_depth.saturating_add(1));
+            }
+            profile
+        }
+        // RESP3 maps profile as 2N flat entries (key+value pairs)
+        // because that's how parse_resp3_map downgrades them
+        // when allow_resp3 is set; mirrors the parser's bound on
+        // pair_count = count * 2 (br-frankenredis-ozcx).
+        RespFrame::Map(Some(entries)) => {
+            let mut profile = FrameProfile {
+                max_array_len: entries.len().saturating_mul(2),
+                max_depth: 1,
+                ..FrameProfile::default()
+            };
+            for (key, value) in entries {
+                for child in [key, value] {
+                    let nested = profile_for_frame(child);
+                    profile.max_bulk_len = profile.max_bulk_len.max(nested.max_bulk_len);
+                    profile.max_array_len = profile.max_array_len.max(nested.max_array_len);
+                    profile.max_depth =
+                        profile.max_depth.max(nested.max_depth.saturating_add(1));
+                }
             }
             profile
         }
@@ -229,6 +250,11 @@ fn loose_config(profile: FrameProfile) -> ParserConfig {
         max_bulk_len: profile.max_bulk_len.saturating_add(8),
         max_array_len: profile.max_array_len.saturating_add(2),
         max_recursion_depth: profile.max_depth.saturating_add(1),
+        // The harness encodes RESP2-shaped fixtures by default;
+        // accept RESP3 too so the encoder/decoder roundtrips exercise
+        // the documented RESP3-downgrade path when frames include
+        // Map/Push variants.
+        allow_resp3: true,
     }
 }
 
