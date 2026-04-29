@@ -159,6 +159,8 @@ ubs_*.jsonl
 .beads/recovery_*/
 .beads/*.bad_*
 .beads/*.pre_*
+.beads/*.backup_*
+.beads/*.corrupt_*
 .beads/beads.db.rebuild_*
 .beads/beads.db.stale_*
 .beads.recovery_*/
