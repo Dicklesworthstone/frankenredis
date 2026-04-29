@@ -125,11 +125,18 @@ fn cmd_monitor(state: &mut SentinelState, args: &[&[u8]]) -> RespFrame {
         Ok(q) => q,
         Err(error) => return error,
     };
+    if !monitor_address_is_allowed(state, &ip) {
+        return RespFrame::Error("ERR Invalid IP address or hostname specified".into());
+    }
 
     match state.monitor(name.as_ref(), ip.as_ref(), port, quorum) {
         Ok(()) => RespFrame::SimpleString("OK".into()),
         Err(e) => RespFrame::Error(e.into()),
     }
+}
+
+fn monitor_address_is_allowed(state: &SentinelState, value: &str) -> bool {
+    state.resolve_hostnames || value.parse::<std::net::IpAddr>().is_ok()
 }
 
 fn parse_monitor_quorum(value: &str) -> Result<u32, RespFrame> {
@@ -560,6 +567,30 @@ mod tests {
             RespFrame::Error("ERR Invalid quorum number".into())
         );
         assert!(state.get_master("malformed").is_none());
+    }
+
+    #[test]
+    fn sentinel_monitor_rejects_hostname_when_resolution_is_disabled() {
+        let mut state = SentinelState::new();
+        assert!(!state.resolve_hostnames);
+
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"badhost", b"example.local", b"6379", b"1"],
+        );
+        assert_eq!(
+            result,
+            RespFrame::Error("ERR Invalid IP address or hostname specified".into())
+        );
+        assert!(state.get_master("badhost").is_none());
+
+        state.resolve_hostnames = true;
+        let result = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"host-ok", b"example.local", b"6379", b"1"],
+        );
+        assert_eq!(result, RespFrame::SimpleString("OK".into()));
+        assert!(state.get_master("host-ok").is_some());
     }
 
     #[test]
