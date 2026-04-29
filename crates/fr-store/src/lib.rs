@@ -17254,6 +17254,149 @@ mod tests {
         assert_eq!(restored.function_dump(), empty_dump);
     }
 
+    /// Lock the contract for the structured corpus seeds in
+    /// `fuzz/corpus/fuzz_function_restore/`. The fuzz harness
+    /// dispatches the first byte three ways (`% 3`):
+    ///
+    ///     0 → fuzz_raw_function_source
+    ///     2 → fuzz_raw_function_restore (body[0] = policy_selector)
+    ///
+    /// The seed generator (`fuzz/scripts/gen_function_restore_seeds.py`)
+    /// crafts payloads that exercise each branch of those code paths.
+    /// This test verifies that
+    ///
+    ///   1. The "valid envelope" seeds actually round-trip through
+    ///      `function_restore`, so libfuzzer starts from a corpus that
+    ///      reaches deep into the parser instead of dying at the
+    ///      version/CRC gate.
+    ///   2. The "expected-failure" seeds produce the exact upstream
+    ///      error wording, so libfuzzer mutations that drift toward
+    ///      these payloads don't get the harness stuck on a phantom
+    ///      success.
+    #[test]
+    fn fuzz_function_restore_corpus_matches_documented_contract() {
+        use std::path::Path;
+
+        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fuzz/corpus/fuzz_function_restore");
+        if !corpus_root.exists() {
+            // Corpus is generated and committed; skip if a checkout
+            // strips the fuzz tree (e.g. `cargo package`).
+            return;
+        }
+
+        // ── Strip the 2-byte mode+policy header that the fuzz harness
+        //    consumes before calling function_restore.
+        fn restore_payload(seed_bytes: &[u8]) -> &[u8] {
+            assert!(seed_bytes.len() >= 2, "restore seed too short");
+            assert_eq!(
+                seed_bytes[0], 0x02,
+                "restore seed mode byte must be 0x02 (mode % 3 == 2)"
+            );
+            &seed_bytes[2..]
+        }
+
+        fn read_seed(corpus_root: &Path, name: &str) -> Vec<u8> {
+            std::fs::read(corpus_root.join(name))
+                .unwrap_or_else(|err| panic!("read seed {name}: {err}"))
+        }
+
+        // Valid single-library payload must restore under every
+        // legitimate policy.
+        for (seed_name, policy) in [
+            ("restore_valid_single_lib_replace.dump", "REPLACE"),
+            ("restore_valid_single_lib_flush.dump", "FLUSH"),
+            ("restore_valid_two_libs_append.dump", "APPEND"),
+            ("restore_empty_libraries_marker_append.dump", "APPEND"),
+        ] {
+            let seed = read_seed(&corpus_root, seed_name);
+            let payload = restore_payload(&seed);
+            let mut store = Store::new();
+            store
+                .function_restore(payload, policy)
+                .unwrap_or_else(|err| panic!("seed {seed_name} must restore cleanly: {err:?}"));
+        }
+
+        // The BOGUS-policy seed wraps the same valid envelope but
+        // selects an unsupported policy string ("BOGUS") via
+        // body[0] % 4 == 3. Upstream functions.c rejects this with
+        // the exact wording below, regardless of payload validity.
+        let bogus = read_seed(&corpus_root, "restore_valid_single_lib_bogus_policy.dump");
+        let bogus_payload = restore_payload(&bogus);
+        let err = Store::new()
+            .function_restore(bogus_payload, "BOGUS")
+            .expect_err("BOGUS policy must be rejected");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Wrong restore policy given, value should be either FLUSH, APPEND or REPLACE."
+                    .to_string()
+            )
+        );
+
+        // ── Expected-failure restore seeds ──────────────────────────
+        // Each should surface upstream-shaped error text, never panic.
+        let cases: &[(&str, &str)] = &[
+            (
+                "restore_pre_ga_opcode.dump",
+                "ERR Pre-GA function format not supported",
+            ),
+            (
+                "restore_unknown_opcode.dump",
+                "ERR given type is not a function",
+            ),
+            (
+                "restore_future_rdb_version.dump",
+                "ERR DUMP payload version or checksum are wrong",
+            ),
+            (
+                "restore_corrupted_crc.dump",
+                "ERR DUMP payload version or checksum are wrong",
+            ),
+            (
+                "restore_truncated_below_footer.dump",
+                "ERR Invalid dump data",
+            ),
+            (
+                "restore_inner_load_fails_missing_header.dump",
+                "ERR Missing library metadata",
+            ),
+        ];
+        for (seed_name, expected_msg) in cases {
+            let seed = read_seed(&corpus_root, seed_name);
+            let payload = restore_payload(&seed);
+            let err = Store::new()
+                .function_restore(payload, "APPEND")
+                .expect_err(&format!("seed {seed_name} must reject"));
+            assert_eq!(
+                err,
+                StoreError::GenericError(expected_msg.to_string()),
+                "seed {seed_name} surfaced unexpected error",
+            );
+        }
+
+        // ── Mode-0 source seeds: a few sanity checks on the harness
+        //    contract. The first byte gates the dispatch; body bytes
+        //    are fed straight into function_load. Verify the valid
+        //    seed loads and the headerless seed surfaces the right
+        //    wording.
+        let valid_source = read_seed(&corpus_root, "source_call_form_simple.lua");
+        assert_eq!(valid_source[0], 0x00, "source seed mode byte must be 0x00");
+        let mut store = Store::new();
+        store
+            .function_load(&valid_source[1..], false)
+            .expect("source_call_form_simple.lua must load");
+
+        let bad_source = read_seed(&corpus_root, "source_no_shebang.lua");
+        let err = Store::new()
+            .function_load(&bad_source[1..], false)
+            .expect_err("source_no_shebang.lua must reject");
+        assert_eq!(
+            err,
+            StoreError::GenericError("ERR Missing library metadata".to_string()),
+        );
+    }
+
     // ── Golden artifact tests ──────────────────────────────────────────
     mod golden {
         use crate::{
