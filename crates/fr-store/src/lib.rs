@@ -7159,13 +7159,9 @@ impl Store {
                     for id in &remove_ids {
                         entries.remove(id);
                     }
-                    if let Some(groups) = self.stream_groups.get_mut(key) {
-                        for group_state in groups.values_mut() {
-                            for id in &remove_ids {
-                                group_state.pending.remove(id);
-                            }
-                        }
-                    }
+                    // Match Redis stream semantics: trimming removes
+                    // stream entries, but pending-entry-list rows remain
+                    // until XAUTOCLAIM surfaces them as deleted IDs.
                     if to_remove > 0 {
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
@@ -7214,13 +7210,9 @@ impl Store {
                     for id in &remove_ids {
                         entries.remove(id);
                     }
-                    if let Some(groups) = self.stream_groups.get_mut(key) {
-                        for group_state in groups.values_mut() {
-                            for id in &remove_ids {
-                                group_state.pending.remove(id);
-                            }
-                        }
-                    }
+                    // Match Redis stream semantics: trimming removes
+                    // stream entries, but pending-entry-list rows remain
+                    // until XAUTOCLAIM surfaces them as deleted IDs.
                     if removed > 0 {
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
@@ -14826,6 +14818,104 @@ mod tests {
                 next_start: (0, 0),
                 ids: vec![(1000, 0), (1000, 2)],
                 deleted_ids: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn stream_xtrim_preserves_pending_for_xautoclaim_deleted_ids() {
+        fn seed_pending_store() -> Store {
+            let mut store = Store::new();
+            for (id, value) in [((1000, 0), b"v0"), ((1000, 1), b"v1")] {
+                store
+                    .xadd(b"s", id, &[(b"f".to_vec(), value.to_vec())], 0)
+                    .unwrap();
+            }
+            assert!(store.xgroup_create(b"s", b"g1", (0, 0), false, 0).unwrap());
+            let read = store
+                .xreadgroup(
+                    b"s",
+                    b"g1",
+                    b"c1",
+                    group_read_options(StreamGroupReadCursor::NewEntries, false, Some(2)),
+                    10,
+                )
+                .unwrap()
+                .expect("seed pending");
+            assert_eq!(read.len(), 2);
+            store
+        }
+
+        let mut maxlen_store = seed_pending_store();
+        assert_eq!(maxlen_store.xtrim(b"s", 0, None, 20).unwrap(), 2);
+        assert_eq!(
+            maxlen_store
+                .xpending_summary(b"s", b"g1", 30)
+                .unwrap()
+                .expect("pending summary")
+                .0,
+            2,
+            "XTRIM MAXLEN must leave PEL rows for XAUTOCLAIM deleted_ids"
+        );
+        let maxlen_claim = maxlen_store
+            .xautoclaim(
+                b"s",
+                b"g1",
+                b"c2",
+                (0, 0),
+                StreamAutoClaimOptions {
+                    min_idle_time_ms: 0,
+                    count: 10,
+                    justid: false,
+                },
+                40,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            maxlen_claim,
+            StreamAutoClaimReply::Entries {
+                next_start: (0, 0),
+                entries: Vec::new(),
+                deleted_ids: vec![(1000, 0), (1000, 1)],
+            }
+        );
+
+        let mut minid_store = seed_pending_store();
+        assert_eq!(
+            minid_store.xtrim_minid(b"s", (1000, 1), None, 20).unwrap(),
+            1
+        );
+        assert_eq!(
+            minid_store
+                .xpending_summary(b"s", b"g1", 30)
+                .unwrap()
+                .expect("pending summary")
+                .0,
+            2,
+            "XTRIM MINID must leave PEL rows for XAUTOCLAIM deleted_ids"
+        );
+        let minid_claim = minid_store
+            .xautoclaim(
+                b"s",
+                b"g1",
+                b"c2",
+                (0, 0),
+                StreamAutoClaimOptions {
+                    min_idle_time_ms: 0,
+                    count: 10,
+                    justid: false,
+                },
+                40,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(
+            minid_claim,
+            StreamAutoClaimReply::Entries {
+                next_start: (0, 0),
+                entries: vec![((1000, 1), vec![(b"f".to_vec(), b"v1".to_vec())])],
+                deleted_ids: vec![(1000, 0)],
             }
         );
     }

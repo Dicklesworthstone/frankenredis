@@ -119,7 +119,8 @@ proptest! {
             prop_assert!(is_member, "SADD member then SISMEMBER must be true");
         }
 
-        prop_assert_eq!(store.scard(&key, 0).unwrap(), members.len());
+        let unique_members = members.iter().collect::<std::collections::BTreeSet<_>>().len();
+        prop_assert_eq!(store.scard(&key, 0).unwrap(), unique_members);
     }
 
     // MR5: Hash field roundtrip - HSET then HGET must return same value
