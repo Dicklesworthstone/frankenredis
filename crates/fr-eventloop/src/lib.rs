@@ -991,4 +991,131 @@ mod tests {
         assert_eq!(plan.start_db_index, 0);
         assert_eq!(plan.next_db_index, 0);
     }
+
+    /// Lock the contract for the structured corpus seeds in
+    /// `fuzz/corpus/fuzz_eventloop_validators/`. The fuzz target's
+    /// `fuzz_raw_phase_trace` converts each input byte to an
+    /// `EventLoopPhase` via `byte % 5` and asserts
+    /// `replay_phase_trace == model_replay_phase_trace`.
+    ///
+    /// The seed generator
+    /// (`fuzz/scripts/gen_eventloop_validators_seeds.py`) crafts
+    /// byte streams hitting every meaningful phase ordering:
+    /// canonical / truncated / out-of-order / repetitions /
+    /// alternations / boundary lengths / ASCII-mapped sequences.
+    ///
+    /// Verifies every seed's `replay_phase_trace(trace)` runs to
+    /// completion without panicking — same no-panic invariant the
+    /// fuzz target ultimately depends on. Pinned outcomes for the
+    /// canonical 1-iteration / 2-iteration / empty traces.
+    /// Asserts ≥14 seeds against silent regression.
+    #[test]
+    fn fuzz_eventloop_validators_corpus_matches_documented_contract() {
+        use std::path::Path;
+
+        let corpus_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fuzz/corpus/fuzz_eventloop_validators");
+        if !corpus_root.exists() {
+            return;
+        }
+
+        // Mirror the harness's phase_from_byte: byte % 5 → phase.
+        fn phase_from_byte(byte: u8) -> EventLoopPhase {
+            match byte % 5 {
+                0 => EventLoopPhase::BeforeSleep,
+                1 => EventLoopPhase::Poll,
+                2 => EventLoopPhase::FileDispatch,
+                3 => EventLoopPhase::TimeDispatch,
+                _ => EventLoopPhase::AfterSleep,
+            }
+        }
+
+        const MAX_TRACE_LEN: usize = 64;
+
+        let entries: Vec<String> = std::fs::read_dir(&corpus_root)
+            .expect("read fuzz_eventloop_validators corpus")
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let name = entry.file_name().into_string().ok()?;
+                if name.ends_with(".bin") {
+                    Some(name)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(
+            entries.len() >= 14,
+            "fuzz_eventloop_validators corpus must have >= 14 .bin seeds; got {}",
+            entries.len()
+        );
+
+        for name in &entries {
+            let bytes = std::fs::read(corpus_root.join(name))
+                .unwrap_or_else(|err| panic!("read seed {name}: {err}"));
+            let trace: Vec<EventLoopPhase> = bytes
+                .iter()
+                .take(MAX_TRACE_LEN)
+                .map(|byte| phase_from_byte(*byte))
+                .collect();
+            // The replay function must not panic regardless of
+            // input. We don't bind the result — the harness's
+            // shadow-model assertion checks deeper equality, but
+            // here we just verify the no-panic property.
+            let _ = replay_phase_trace(&trace);
+        }
+
+        // Pinned outcome: canonical loop iteration replays cleanly.
+        let canonical_trace = vec![
+            EventLoopPhase::BeforeSleep,
+            EventLoopPhase::Poll,
+            EventLoopPhase::FileDispatch,
+            EventLoopPhase::TimeDispatch,
+            EventLoopPhase::AfterSleep,
+        ];
+        assert!(
+            replay_phase_trace(&canonical_trace).is_ok(),
+            "canonical loop iteration must replay without error"
+        );
+
+        // Two full iterations also clean.
+        let two_iterations: Vec<EventLoopPhase> = canonical_trace
+            .iter()
+            .chain(canonical_trace.iter())
+            .copied()
+            .collect();
+        assert!(
+            replay_phase_trace(&two_iterations).is_ok(),
+            "two canonical iterations must replay without error"
+        );
+
+        // Empty trace: replay rejects with EmptyTrace per the
+        // documented contract — the loop must enter BeforeSleep
+        // at least once.
+        assert!(
+            matches!(
+                replay_phase_trace(&[]),
+                Err(PhaseReplayError::EmptyTrace)
+            ),
+            "empty trace must surface EmptyTrace error"
+        );
+
+        // Single BeforeSleep without follow-up: PartialTick.
+        assert!(
+            matches!(
+                replay_phase_trace(&[EventLoopPhase::BeforeSleep]),
+                Err(PhaseReplayError::PartialTick { .. })
+            ),
+            "BeforeSleep alone must surface PartialTick"
+        );
+
+        // First phase != BeforeSleep: MissingMainLoopEntry.
+        assert!(
+            matches!(
+                replay_phase_trace(&[EventLoopPhase::Poll]),
+                Err(PhaseReplayError::MissingMainLoopEntry { .. })
+            ),
+            "non-BeforeSleep first phase must surface MissingMainLoopEntry"
+        );
+    }
 }
