@@ -12982,8 +12982,14 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         }
     } else if sub.eq_ignore_ascii_case("PAUSE") {
         // CLIENT PAUSE timeout [WRITE|ALL]
+        // Upstream emits the subcommand-specific arity error rather
+        // than the wrong-arity reply when too many trailing args are
+        // supplied. (br-frankenredis-clipausearity)
         if argv.len() < 3 || argv.len() > 4 {
-            return Err(client_wrong_subcommand_arity(sub));
+            return Err(CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments for 'PAUSE'. Try CLIENT HELP."
+                    .to_string(),
+            ));
         }
         let timeout = parse_i64_arg(&argv[2])
             .map_err(|_| CommandError::Custom(CLIENT_PAUSE_TIMEOUT_INVALID.to_string()))?;
@@ -13056,10 +13062,12 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         if argv.len() != 3 && argv.len() != 4 {
             return Err(client_wrong_subcommand_arity(sub));
         }
-        let target_id = parse_i64_arg(&argv[2])?;
-        if target_id <= 0 {
-            return Err(CommandError::InvalidInteger);
-        }
+        // Upstream networking.c::clientCommand UNBLOCK accepts any
+        // parseable integer (including 0 and negatives) and simply
+        // returns 0 when no client matches; only non-numeric IDs
+        // surface the integer-out-of-range error.
+        // (br-frankenredis-cliunblockid)
+        let _target_id = parse_i64_arg(&argv[2])?;
         if let Some(mode_arg) = argv.get(3) {
             let mode =
                 std::str::from_utf8(mode_arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -34246,7 +34254,14 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert_eq!(err, client_wrong_subcommand_arity("PAUSE"));
+        // (br-frankenredis-clipausearity)
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments for 'PAUSE'. Try CLIENT HELP."
+                    .to_string()
+            )
+        );
 
         let err = dispatch_argv(
             &[
@@ -36674,13 +36689,23 @@ mod tests {
         .unwrap();
         assert_eq!(out, RespFrame::Integer(0));
 
-        let err = dispatch_argv(
+        // (br-frankenredis-cliunblockid) — upstream silently
+        // returns 0 for UNBLOCK 0 / negatives since no client can
+        // match; only non-numeric IDs surface InvalidInteger.
+        let zero_ok = dispatch_argv(
             &[b"CLIENT".to_vec(), b"UNBLOCK".to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
-        .unwrap_err();
-        assert_eq!(err, CommandError::InvalidInteger);
+        .unwrap();
+        assert_eq!(zero_ok, RespFrame::Integer(0));
+        let neg_ok = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"UNBLOCK".to_vec(), b"-1".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(neg_ok, RespFrame::Integer(0));
 
         let err = dispatch_argv(
             &[
@@ -36708,8 +36733,23 @@ mod tests {
             .expect_err("client unblock arity");
         assert_eq!(arity, client_wrong_subcommand_arity("UNBLOCK"));
 
-        let invalid_id = dispatch_argv(
+        // (br-frankenredis-cliunblockid) — UNBLOCK 0 / negatives are
+        // valid integers; arity + integer validation runs before
+        // the script-noscript guard, so they reach the noscript
+        // path inside scripts. Non-numeric IDs surface
+        // InvalidInteger first since validation precedes the guard.
+        let id_zero_in_script = dispatch_argv(
             &[b"CLIENT".to_vec(), b"UNBLOCK".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("client unblock id=0 in script gets script-noscript");
+        assert_eq!(
+            id_zero_in_script,
+            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
+        );
+        let invalid_id = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"UNBLOCK".to_vec(), b"abc".to_vec()],
             &mut store,
             0,
         )
