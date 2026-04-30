@@ -1369,7 +1369,7 @@
       ],
       "expect": {
         "kind": "bulk",
-        "value": "\nO#*+- .oO#*+- .O#*+- .oO#*+- .o#*+- .oO#\n*+- .oO#*+- .oO#+- .oO#*+- .oO#*- .oO#*+\n+ .oO#*+- .oO#*+-.oO#*+- .oO#*+- oO#*+- \n .O#*+- .oO#*+- .o#*+- .oO#*+- .oO*+- .o\noO#+- .oO#*+- .oO#*- .oO#*+- .oO#*+ .oO#\n#*+-.oO#*+- .oO#*+- oO#*+- .oO#*+- .O#*+\n+- .o#*+- .oO#*+- .oO*+- .oO#*+- .oO#+- \n .oO#*- .oO#*+- .oO#*+ .oO#*+- .oO#*+-.o\noO#*+- oO#*+- .oO#*+- .O#*+- .oO#*+- .o#\n#*+- .oO*+- .oO#*+- .oO#+- .oO#*+- .oO#*\n+- .oO#*+ .oO#*+- .oO#*+-.oO#*+- .oO#*+-\n .oO#*+- .O#*+- .oO#*+- .o#*+- .oO#*+- .\n\nFrankenRedis ver. 0.1.0 -- LOLWUT v1\n"
+        "value": "Redis ver. 7.2.0\n"
       }
     },
     {
@@ -1382,7 +1382,7 @@
       ],
       "expect": {
         "kind": "bulk",
-        "value": "\noO#*+- .oO*+- .oO#*+- .oO#+- .oO#*+- .oO\n#*+- .oO#*+ .oO#*+- .oO#*+-.oO#*+- .oO#*\n+- .oO#*+- .O#*+- .oO#*+- .o#*+- .oO#*+-\n .oO#*+- .oO#+- .oO#*+- .oO#*- .oO#*+- .\noO#*+- .oO#*+-.oO#*+- .oO#*+- oO#*+- .oO\n#*+- .oO#*+- .o#*+- .oO#*+- .oO*+- .oO#*\n+- .oO#*+- .oO#*- .oO#*+- .oO#*+ .oO#*+-\n-.oO#*+- .oO#*+- oO#*+- .oO#*+- .O#*+- .\n.o#*+- .oO#*+- .oO*+- .oO#*+- .oO#+- .oO\nO#*- .oO#*+- .oO#*+ .oO#*+- .oO#*+-.oO#*\n*+- oO#*+- .oO#*+- .O#*+- .oO#*+- .o#*+-\n- .oO*+- .oO#*+- .oO#+- .oO#*+- .oO#*- .\n\nFrankenRedis ver. 0.1.0 -- LOLWUT v6\n"
+        "value": "Redis ver. 7.2.0\n"
       }
     },
     {

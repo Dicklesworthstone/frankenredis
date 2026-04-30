@@ -1317,7 +1317,7 @@
       ],
       "expect": {
         "kind": "bulk",
-        "value": "Sam, I have no memory problems"
+        "value": "Hi Sam, this instance is empty or is using very little memory, my issues detector can't be used in these conditions. Please, leave for your mission on Earth and fill it with some data. The new Sam and I will be back to our programming as soon as I finished rebooting.\n"
       }
     },
     {
@@ -2717,7 +2717,7 @@
       ],
       "expect": {
         "kind": "bulk",
-        "value": "Sam, I have no memory problems"
+        "value": "Hi Sam, this instance is empty or is using very little memory, my issues detector can't be used in these conditions. Please, leave for your mission on Earth and fill it with some data. The new Sam and I will be back to our programming as soon as I finished rebooting.\n"
       }
     },
     {

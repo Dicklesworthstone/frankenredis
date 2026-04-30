@@ -6437,63 +6437,35 @@ fn xsetid_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
 
 fn lolwut_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     // LOLWUT [VERSION version]
-    let version = if argv.len() == 1 {
-        1
-    } else {
+    // Upstream Redis 7.2 dispatches via REDIS_VERSION major:
+    //   5.x → lolwut5 (Schotter), 6.x → lolwut6 (braille),
+    //   otherwise (incl. 7.x) → lolwutUnstableCommand which emits
+    //   "Redis ver. <REDIS_VERSION>\n".
+    // fr currently ports only the unstable branch; VERSION 5/6
+    // arguments are accepted (so clients don't error out) but emit
+    // the same single-line body. (br-frankenredis-m5nf)
+    if argv.len() >= 2 {
         let ver_kw =
             std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if ver_kw.eq_ignore_ascii_case("VERSION") {
             if argv.len() < 3 {
                 return Err(CommandError::WrongArity("LOLWUT"));
             }
-            let ver = parse_i64_arg(&argv[2])?;
-            let ver = u32::try_from(ver).map_err(|_| CommandError::InvalidInteger)?;
+            // Validate the version integer and any version-specific
+            // trailing args, matching upstream's getLongFromObject
+            // path.
+            parse_i64_arg(&argv[2])?;
             for arg in &argv[3..] {
                 parse_i64_arg(arg)?;
             }
-            ver
         } else {
             for arg in &argv[1..] {
                 parse_i64_arg(arg)?;
             }
-            1
         }
-    };
-    let art = generate_lolwut_art(version);
-    Ok(RespFrame::BulkString(Some(art.into_bytes())))
-}
-
-fn generate_lolwut_art(version: u32) -> String {
-    // Generate deterministic ASCII art based on version number
-    let width = 40;
-    let height = 12;
-    let mut lines = Vec::with_capacity(height + 2);
-    lines.push(String::new());
-    let seed = version.wrapping_mul(2654435761);
-    for row in 0..height {
-        let mut line = String::with_capacity(width);
-        for col in 0..width {
-            let v = seed
-                .wrapping_add((row as u32).wrapping_mul(31))
-                .wrapping_add((col as u32).wrapping_mul(17));
-            let ch = match (v >> 4) % 8 {
-                0 => ' ',
-                1 => '.',
-                2 => 'o',
-                3 => 'O',
-                4 => '#',
-                5 => '*',
-                6 => '+',
-                _ => '-',
-            };
-            line.push(ch);
-        }
-        lines.push(line);
     }
-    lines.push(String::new());
-    lines.push(format!("FrankenRedis ver. 0.1.0 -- LOLWUT v{version}"));
-    lines.push(String::new());
-    lines.join("\n")
+    let body = format!("Redis ver. {}\n", fr_store::REDIS_COMPAT_VERSION);
+    Ok(RespFrame::BulkString(Some(body.into_bytes())))
 }
 
 // ── WAITAOF ─────────────────────────────────────────────────────────
@@ -6892,9 +6864,12 @@ fn cluster_cmd(
         }
         return Err(CommandError::Custom(format!("ERR Unknown node {node_id}")));
     }
-    if sub.eq_ignore_ascii_case("REPLICAS") {
+    if sub.eq_ignore_ascii_case("REPLICAS") || sub.eq_ignore_ascii_case("SLAVES") {
         // CLUSTER REPLICAS <node-id> — upstream returns the replica array or
         // "The specified node is not known or can't be a replica" error.
+        // SLAVES is upstream's deprecated alias for REPLICAS — see
+        // legacy_redis_code/redis/src/commands/cluster-slaves.json.
+        // (br-frankenredis-gcmq)
         if argv.len() != 3 {
             return Err(cluster_wrong_subcommand_arity(sub));
         }
@@ -13488,9 +13463,23 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         if argv.len() != 2 {
             return Err(CommandError::SyntaxError);
         }
-        Ok(RespFrame::BulkString(Some(
-            b"Sam, I have no memory problems".to_vec(),
-        )))
+        // Mirror upstream object.c::getMemoryDoctorReport. Upstream's
+        // "empty" branch fires when total_allocated < 5 MB; fr does
+        // not track allocated bytes (no jemalloc, no zmalloc_used),
+        // so the most faithful default is the empty-instance branch
+        // until the database is large enough that the (5 MB ≈ 50k
+        // keys at ~64 B/key) threshold would have been crossed
+        // upstream. The verbose multi-bullet "issues" branch
+        // (peak/frag/RSS/script-cache) is left as a future
+        // follow-up; fr does not yet surface those metrics.
+        // (br-frankenredis-yj7h)
+        const APPROX_5MB_KEY_THRESHOLD: usize = 50_000;
+        let body: &[u8] = if store.dbsize(now_ms) >= APPROX_5MB_KEY_THRESHOLD {
+            b"Hi Sam, I can't find any memory issue in your instance. I can only account for what occurs on this base.\n"
+        } else {
+            b"Hi Sam, this instance is empty or is using very little memory, my issues detector can't be used in these conditions. Please, leave for your mission on Earth and fill it with some data. The new Sam and I will be back to our programming as soon as I finished rebooting.\n"
+        };
+        Ok(RespFrame::BulkString(Some(body.to_vec())))
     } else if sub.eq_ignore_ascii_case("MALLOC-STATS") {
         if argv.len() != 2 {
             return Err(CommandError::SyntaxError);
@@ -32760,15 +32749,29 @@ mod tests {
 
     #[test]
     fn lolwut_returns_version() {
+        // Pins the upstream-aligned single-line "Redis ver. <version>\n"
+        // body emitted by the unstable-version branch (lolwut.c::
+        // lolwutUnstableCommand). (br-frankenredis-m5nf)
         let mut store = Store::new();
         let out = dispatch_argv(&[b"LOLWUT".to_vec()], &mut store, 0).unwrap();
-        match out {
-            RespFrame::BulkString(Some(data)) => {
-                let text = String::from_utf8_lossy(&data);
-                assert!(text.contains("FrankenRedis"));
-            }
-            other => panic!("expected bulk string, got {other:?}"), // ubs:ignore — AI triage
-        }
+        let expected = format!("Redis ver. {}\n", fr_store::REDIS_COMPAT_VERSION);
+        assert_eq!(out, RespFrame::BulkString(Some(expected.into_bytes())));
+    }
+
+    #[test]
+    fn lolwut_version_argument_returns_same_text() {
+        // VERSION 5 / 6 don't yet port the Schotter/braille art —
+        // they fall through to the same unstable-branch body so
+        // clients don't error out. (br-frankenredis-m5nf)
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"LOLWUT".to_vec(), b"VERSION".to_vec(), b"5".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let expected = format!("Redis ver. {}\n", fr_store::REDIS_COMPAT_VERSION);
+        assert_eq!(out, RespFrame::BulkString(Some(expected.into_bytes())));
     }
 
     // ── WAITAOF test ────────────────────────────────────────────────
