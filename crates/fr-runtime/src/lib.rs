@@ -7309,14 +7309,15 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("repl-backlog-size") {
-                let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 0 => value as u64,
-                    Ok(_) => {
+                // (br-frankenredis-ky4n follow-up) — accept memtoull
+                // suffix forms for memory-typed configs.
+                let parsed = match parse_memory_size_arg(&pair[1]) {
+                    Ok(value) => value,
+                    Err(()) => {
                         return RespFrame::Error(
                             "ERR Invalid argument for CONFIG SET 'repl-backlog-size'".to_string(),
                         );
                     }
-                    Err(err) => return err.to_resp(),
                 };
                 next_repl_backlog_size = Some(parsed);
                 static_override_updates.push(("repl-backlog-size".to_string(), parsed.to_string()));
@@ -7557,15 +7558,15 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("client-query-buffer-limit") {
-                let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 0 => value as usize,
-                    Ok(_) => {
+                // (br-frankenredis-ky4n follow-up)
+                let parsed = match parse_memory_size_arg(&pair[1]) {
+                    Ok(value) => value as usize,
+                    Err(()) => {
                         return RespFrame::Error(
                             "ERR Invalid argument for CONFIG SET 'client-query-buffer-limit'"
                                 .to_string(),
                         );
                     }
-                    Err(err) => return err.to_resp(),
                 };
                 next_query_buffer_limit = Some(parsed);
                 static_override_updates
@@ -7573,14 +7574,14 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("proto-max-bulk-len") {
-                let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 0 => value as usize,
-                    Ok(_) => {
+                // (br-frankenredis-ky4n follow-up)
+                let parsed = match parse_memory_size_arg(&pair[1]) {
+                    Ok(value) => value as usize,
+                    Err(()) => {
                         return RespFrame::Error(
                             "ERR Invalid argument for CONFIG SET 'proto-max-bulk-len'".to_string(),
                         );
                     }
-                    Err(err) => return err.to_resp(),
                 };
                 next_proto_max_bulk_len = Some(parsed);
                 static_override_updates
@@ -7588,15 +7589,15 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("client-output-buffer-limit") {
-                let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 0 => value as usize,
-                    Ok(_) => {
+                // (br-frankenredis-ky4n follow-up)
+                let parsed = match parse_memory_size_arg(&pair[1]) {
+                    Ok(value) => value as usize,
+                    Err(()) => {
                         return RespFrame::Error(
                             "ERR Invalid argument for CONFIG SET 'client-output-buffer-limit'"
                                 .to_string(),
                         );
                     }
-                    Err(err) => return err.to_resp(),
                 };
                 next_output_buffer_limit = Some(parsed);
                 static_override_updates
