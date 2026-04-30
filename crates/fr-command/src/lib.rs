@@ -12739,9 +12739,15 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             } else if argv.len() >= 4 && argv[2].eq_ignore_ascii_case(b"ID") {
                 let mut payload = Vec::new();
                 for id_arg in &argv[3..] {
-                    let parsed_id = parse_i64_arg(id_arg)?;
+                    // (br-frankenredis-lkoh) — upstream wording for
+                    // both CLIENT LIST ID and CLIENT KILL ID.
+                    let parsed_id = parse_i64_arg(id_arg).map_err(|_| {
+                        CommandError::Custom("ERR client-id should be greater than 0".to_string())
+                    })?;
                     if parsed_id <= 0 {
-                        return Err(CommandError::Custom("ERR Invalid client ID".to_string()));
+                        return Err(CommandError::Custom(
+                            "ERR client-id should be greater than 0".to_string(),
+                        ));
                     }
                     if parsed_id as u64 == store.dispatch_client_ctx.client_id {
                         payload.extend_from_slice(&info_line);
@@ -12846,9 +12852,14 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                     std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
 
                 if opt.eq_ignore_ascii_case("ID") && i + 1 < argv.len() {
+                    // (br-frankenredis-lkoh)
                     let id = match parse_i64_arg(&argv[i + 1]) {
                         Ok(id) if id > 0 => id as u64,
-                        _ => return Err(CommandError::Custom("ERR Invalid client ID".to_string())),
+                        _ => {
+                            return Err(CommandError::Custom(
+                                "ERR client-id should be greater than 0".to_string(),
+                            ));
+                        }
                     };
                     filter_id = Some(id);
                     i += 2;
@@ -12875,6 +12886,15 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                         .to_string();
                     filter_addr = Some(addr);
                     i += 2;
+                } else if opt.eq_ignore_ascii_case("LADDR") && i + 1 < argv.len() {
+                    // CLIENT KILL LADDR <ip:port> filters by the local
+                    // (server-side) socket address. We don't track a
+                    // distinct laddr per client at the dispatch layer,
+                    // so the filter never matches our single dispatch
+                    // session; return 0 like upstream does when no
+                    // clients match. (br-frankenredis-lkoh)
+                    i += 2;
+                    return Ok(RespFrame::Integer(0));
                 } else if opt.eq_ignore_ascii_case("SKIPME") && i + 1 < argv.len() {
                     let val = std::str::from_utf8(&argv[i + 1])
                         .map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -12883,9 +12903,8 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
                     } else if val.eq_ignore_ascii_case("no") {
                         skipme = false;
                     } else {
-                        return Err(CommandError::Custom(
-                            "ERR argument must be 'yes' or 'no'".to_string(),
-                        ));
+                        // (br-frankenredis-lkoh)
+                        return Err(CommandError::SyntaxError);
                     }
                     i += 2;
                 } else {
@@ -34252,10 +34271,8 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert_eq!(
-            kill_shape,
-            CommandError::Custom("ERR argument must be 'yes' or 'no'".to_string())
-        );
+        // (br-frankenredis-lkoh)
+        assert_eq!(kill_shape, CommandError::SyntaxError);
 
         let pause_shape = dispatch_argv(
             &[
@@ -36790,9 +36807,10 @@ mod tests {
             0,
         )
         .unwrap_err();
+        // (br-frankenredis-lkoh)
         assert_eq!(
             err,
-            CommandError::Custom("ERR Invalid client ID".to_string())
+            CommandError::Custom("ERR client-id should be greater than 0".to_string())
         );
     }
 
