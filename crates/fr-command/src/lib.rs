@@ -3780,9 +3780,19 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::SyntaxError);
     }
 
-    // LIMIT only valid with BYSCORE or BYLEX
+    // Upstream t_zset.c::zrangeGenericCommand uses verbose syntax-error
+    // wording for LIMIT-without-shape and WITHSCORES+BYLEX, matching
+    // these exact strings. (br-frankenredis-zrangeshape)
     if limit_offset.is_some() && !byscore && !bylex {
-        return Err(CommandError::SyntaxError);
+        return Err(CommandError::Custom(
+            "ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX"
+                .to_string(),
+        ));
+    }
+    if withscores && bylex {
+        return Err(CommandError::Custom(
+            "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
+        ));
     }
 
     if byscore {
@@ -3804,6 +3814,10 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     } else if bylex {
         let min_lex = &argv[2];
         let max_lex = &argv[3];
+        // Upstream t_zset.c::zrangeGenericCommand validates the lex
+        // bounds via zslParseLexRange before any range walk. (br-frankenredis-zrangeshape)
+        validate_lex_bound(min_lex)?;
+        validate_lex_bound(max_lex)?;
         let (lo, hi) = if rev {
             (max_lex.as_slice(), min_lex.as_slice())
         } else {
