@@ -3209,11 +3209,14 @@ fn rpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
 }
 
 fn parse_list_pop_count_arg(arg: &[u8]) -> Result<usize, CommandError> {
-    match parse_i64_arg(arg)? {
-        count if count >= 0 => usize::try_from(count).map_err(|_| CommandError::InvalidInteger),
-        _ => Err(CommandError::Custom(
-            "ERR value is out of range, must be positive".to_string(),
-        )),
+    // Upstream t_list.c::popGenericCommand emits the same
+    // "value is out of range, must be positive" error for both
+    // unparseable integers and explicit-negative counts.
+    // (br-frankenredis-lpopary)
+    let bad = || CommandError::Custom("ERR value is out of range, must be positive".to_string());
+    match parse_i64_arg(arg).map_err(|_| bad())? {
+        count if count >= 0 => usize::try_from(count).map_err(|_| bad()),
+        _ => Err(bad()),
     }
 }
 
@@ -8459,11 +8462,16 @@ fn lpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             if i >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            let m = parse_i64_arg(&argv[i])?;
+            // Upstream t_list.c::lposCommand uses the
+            // 'MAXLEN can't be negative' error for both unparseable
+            // integers and explicit-negative values.
+            // (br-frankenredis-lposmaxlen)
+            let bad = || CommandError::Custom("ERR MAXLEN can't be negative".to_string());
+            let m = parse_i64_arg(&argv[i]).map_err(|_| bad())?;
             if m < 0 {
-                return Ok(RespFrame::Error("ERR MAXLEN can't be negative".to_string()));
+                return Err(bad());
             }
-            maxlen = usize::try_from(m).map_err(|_| CommandError::InvalidInteger)?;
+            maxlen = usize::try_from(m).map_err(|_| bad())?;
         } else {
             return Err(CommandError::SyntaxError);
         }
