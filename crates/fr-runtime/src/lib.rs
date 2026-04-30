@@ -5675,22 +5675,23 @@ impl Runtime {
             (DEFAULT_AUTH_USER, argv[1].as_slice())
         };
 
-        match self.authenticate_user(username, password) {
-            Ok(()) => RespFrame::SimpleString("OK".to_string()),
-            Err(AuthFailure::NotConfigured) => {
-                // The "AUTH <password> called without any password
-                // configured for the default user" error only
-                // surfaces in the 1-arg form per upstream
-                // server.c::authCommand. The 2-arg form
-                // (`AUTH <user> <pass>`) goes through ACLGetUserByName
-                // + ACLAuthenticateUser, which return WRONGPASS for
-                // unknown users / wrong passwords regardless of
-                // whether requirepass is configured. fr-runtime's
-                // authenticate_user short-circuits on
-                // !auth_required(), so we translate NotConfigured to
-                // WRONGPASS here when the caller used the 2-arg form.
-                // (br-frankenredis-5qln)
-                if two_arg_form {
+        // Upstream server.c::authCommand:
+        //   - 2-arg form: ACLGetUserByName + ACLAuthenticateUser
+        //     regardless of whether requirepass is configured. An
+        //     existing user with nopass passes any password (returns
+        //     OK); an unknown user or wrong password yields
+        //     WRONGPASS.
+        //   - 1-arg form: when !auth_required() (no requirepass and
+        //     default has nopass), returns the NotConfigured error;
+        //     otherwise behaves like the 2-arg form on `default`.
+        // (br-frankenredis-5qln)
+        if two_arg_form {
+            match self.authenticate_user_by_acl(username, password) {
+                Ok(()) => {
+                    self.session.authenticated_user = Some(username.to_vec());
+                    RespFrame::SimpleString("OK".to_string())
+                }
+                Err(AuthFailure::WrongPass) => {
                     self.record_acl_log_event(
                         "auth",
                         "AUTH".to_string(),
@@ -5698,15 +5699,50 @@ impl Runtime {
                         now_ms,
                     );
                     RespFrame::Error(WRONGPASS_ERROR.to_string())
-                } else {
-                    RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string())
+                }
+                Err(AuthFailure::NotConfigured) => {
+                    // unreachable in 2-arg path (authenticate_user_by_acl
+                    // never returns NotConfigured), but stay safe.
+                    RespFrame::Error(WRONGPASS_ERROR.to_string())
                 }
             }
-            Err(AuthFailure::WrongPass) => {
-                self.record_acl_log_event("auth", "AUTH".to_string(), username.to_vec(), now_ms);
-                RespFrame::Error(WRONGPASS_ERROR.to_string())
+        } else {
+            match self.authenticate_user(username, password) {
+                Ok(()) => RespFrame::SimpleString("OK".to_string()),
+                Err(AuthFailure::NotConfigured) => {
+                    RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string())
+                }
+                Err(AuthFailure::WrongPass) => {
+                    self.record_acl_log_event(
+                        "auth",
+                        "AUTH".to_string(),
+                        username.to_vec(),
+                        now_ms,
+                    );
+                    RespFrame::Error(WRONGPASS_ERROR.to_string())
+                }
             }
         }
+    }
+
+    /// 2-arg AUTH semantics: validate username + password against
+    /// the ACL irrespective of requirepass state. Mirrors upstream
+    /// acl.c::ACLAuthenticateUser. (br-frankenredis-5qln)
+    fn authenticate_user_by_acl(
+        &mut self,
+        username: &[u8],
+        password: &[u8],
+    ) -> Result<(), AuthFailure> {
+        let Some(acl_user) = self.server.auth_state.acl_users.get(username) else {
+            return Err(AuthFailure::WrongPass);
+        };
+        if !acl_user.enabled {
+            return Err(AuthFailure::WrongPass);
+        }
+        if !acl_user.check_password(password) {
+            return Err(AuthFailure::WrongPass);
+        }
+        Ok(())
     }
 
     fn client_name_is_valid(name: &[u8]) -> bool {
