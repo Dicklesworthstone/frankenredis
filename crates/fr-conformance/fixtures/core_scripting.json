@@ -567,11 +567,26 @@
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "integer", "value": 1 },
-          { "kind": "integer", "value": 1 },
-          { "kind": "integer", "value": 1 },
-          { "kind": "integer", "value": 1 },
-          { "kind": "integer", "value": 1 }
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          }
         ]
       }
     },
@@ -1571,7 +1586,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #1 to 'concat' (table expected, got number)"
+        "value": "ERR bad argument #1 to 'concat' (table expected, got number) script: 414e1980611373ed68b7a9da71899208a1d90ffc, on @user_script:1."
       }
     },
     {
@@ -1584,7 +1599,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #3 to 'concat' (number expected, got string)"
+        "value": "ERR bad argument #3 to 'concat' (number expected, got string) script: 5de4a30753683595b9969964f40b39dbda6e67d6, on @user_script:1."
       }
     },
     {
@@ -1597,7 +1612,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #4 to 'concat' (number expected, got string)"
+        "value": "ERR bad argument #4 to 'concat' (number expected, got string) script: 8be0a210df5e2d4db781cbaac45ed2495f6ab3ac, on @user_script:1."
       }
     },
     {
@@ -1636,7 +1651,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #1 to 'select' (index out of range)"
+        "value": "ERR bad argument #1 to 'select' (index out of range) script: 0484320ce867a23e621bb5c436db2841454ca75b, on @user_script:1."
       }
     },
     {
@@ -1777,7 +1792,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #1 to 'insert' (table expected, got number)"
+        "value": "ERR bad argument #1 to 'insert' (table expected, got number) script: f63f37620c8e389bbb9417e340c1d45747ce6ddc, on @user_script:1."
       }
     },
     {
@@ -1790,7 +1805,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #2 to 'insert' (position out of bounds)"
+        "value": "ERR bad argument #2 to 'insert' (position out of bounds) script: e5fba7e36cfc9ac025ed70ad9f12cca3828d53e5, on @user_script:1."
       }
     },
     {
@@ -1803,7 +1818,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #2 to 'insert' (number expected, got string)"
+        "value": "ERR bad argument #2 to 'insert' (number expected, got string) script: b71b73854945f5077dbdd612451df2fb07552230, on @user_script:1."
       }
     },
     {
@@ -1829,7 +1844,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #1 to 'remove' (table expected, got number)"
+        "value": "ERR bad argument #1 to 'remove' (table expected, got number) script: 8ae9ded7c617fcab18cb308ee4efcf5ceb46aea4, on @user_script:1."
       }
     },
     {
@@ -1842,7 +1857,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #2 to 'remove' (number expected, got string)"
+        "value": "ERR bad argument #2 to 'remove' (number expected, got string) script: ac450261d2f39b89d24700c1005f46df3ec72e32, on @user_script:1."
       }
     },
     {
@@ -2246,7 +2261,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #1 to 'rawget' (table expected, got number)"
+        "value": "ERR bad argument #1 to 'rawget' (table expected, got number) script: 40396758d168e0bc50cceafcb5325cc40544a4a8, on @user_script:1."
       }
     },
     {
@@ -2259,7 +2274,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #1 to 'rawset' (table expected, got number)"
+        "value": "ERR bad argument #1 to 'rawset' (table expected, got number) script: 30e7df52429b46510d184a153a071e6d5f4eed64, on @user_script:1."
       }
     },
     {
@@ -3052,7 +3067,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #1 to 'next' (table expected, got number)"
+        "value": "ERR bad argument #1 to 'next' (table expected, got number) script: 249bb8e2e724e06c6bf1c329587ee3770cf15155, on @user_script:1."
       }
     },
     {
@@ -3065,7 +3080,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: invalid key to 'next'"
+        "value": "ERR invalid key to 'next' script: 2de83d1cc48d6b4206fa5e10f6de650aabb44ac5, on @user_script:1."
       }
     },
     {
@@ -3078,7 +3093,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #1 to 'pairs' (table expected, got number)"
+        "value": "ERR bad argument #1 to 'pairs' (table expected, got number) script: 080b001990b6f45d24083df12db11bb3c5bada39, on @user_script:1."
       }
     },
     {
@@ -3091,7 +3106,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #1 to 'ipairs' (table expected, got number)"
+        "value": "ERR bad argument #1 to 'ipairs' (table expected, got number) script: 246849f8c1fe52e52ec68609b3f564718a0e155f, on @user_script:1."
       }
     },
     {
@@ -3117,7 +3132,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #1 to 'unpack' (table expected, got number)"
+        "value": "ERR bad argument #1 to 'unpack' (table expected, got number) script: 2cb1f123953bf9391e8c808214cb3c4bdeaebd1d, on @user_script:1."
       }
     },
     {
@@ -3130,7 +3145,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #2 to 'unpack' (number expected, got string)"
+        "value": "ERR bad argument #2 to 'unpack' (number expected, got string) script: a1476faf81976e0f3252f015262bf1f0a948d8e6, on @user_script:1."
       }
     },
     {
@@ -3143,7 +3158,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: bad argument #3 to 'unpack' (number expected, got string)"
+        "value": "ERR bad argument #3 to 'unpack' (number expected, got string) script: 93096f5125abde5ef21b97a90c28c86a4f34e34e, on @user_script:1."
       }
     },
     {
@@ -3764,7 +3779,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: XREAD command is not allowed with BLOCK option from scripts"
+        "value": "ERR XREAD command is not allowed with BLOCK option from scripts script: 86e7d269636ee5b5acd5c77a27465179112514ca, on @user_script:1."
       }
     },
     {
@@ -3778,7 +3793,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Error running script: XREADGROUP command is not allowed with BLOCK option from scripts"
+        "value": "ERR XREADGROUP command is not allowed with BLOCK option from scripts script: c93fc5c950a7a222ab6546690eb7cfd090c83327, on @user_script:1."
       }
     }
   ]

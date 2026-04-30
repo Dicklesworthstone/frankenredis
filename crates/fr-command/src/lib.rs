@@ -12635,13 +12635,76 @@ fn eval_script_error_reply(script: &[u8], error: String) -> RespFrame {
         // Upstream script_lua.c uses
         // "Error compiling script (new function): user_script:1:
         //  <lua-message>" for parse-time errors. (br-frankenredis-fo1s)
-        let _ = script;
         RespFrame::Error(format!(
             "ERR Error compiling script (new function): user_script:1: {error}"
         ))
     } else {
-        RespFrame::Error(format!("ERR Error running script: {error}"))
+        // Upstream script_lua.c::luaCallFunction wraps every runtime
+        // error in the form `<msg> script: <sha1>, on <source>:<line>.`
+        // where <msg> already carries an error code (luaPushErrorBuff
+        // prepends "ERR " when the bubbled error has none). Our bare
+        // error strings come without a code, so prepend "ERR " unless
+        // the caller already emitted a known upper-case code (e.g.
+        // WRONGTYPE, NOAUTH, NOPERM). (br-frankenredis-fdys)
+        let body = if error_has_resp_code_prefix(&error) {
+            error
+        } else {
+            format!("ERR {error}")
+        };
+        RespFrame::Error(format!(
+            "{body} script: {}, on @user_script:1.",
+            sha1_hex_public(script)
+        ))
     }
+}
+
+/// Decide whether an error message already carries a RESP error
+/// code, mirroring what upstream's luaPushErrorBuff does for the
+/// "-CODE msg" branch. Uses an explicit allowlist of upstream codes
+/// rather than a generic "all-uppercase first word" heuristic — Redis
+/// command names ("XREAD", "ZADD", …) are also all-uppercase but
+/// upstream wraps their textual errors with `addReplyErrorFormat`
+/// which auto-prepends an "ERR " code (so the first word in the
+/// final message is *not* a code).
+fn error_has_resp_code_prefix(msg: &str) -> bool {
+    let Some((head, _rest)) = msg.split_once(' ') else {
+        return false;
+    };
+    matches!(
+        head,
+        "ERR"
+            | "WRONGTYPE"
+            | "WRONGPASS"
+            | "BUSY"
+            | "BUSYKEY"
+            | "BUSYGROUP"
+            | "EXECABORT"
+            | "IDLEEXIST"
+            | "LOADING"
+            | "MASTERDOWN"
+            | "MISCONF"
+            | "NOAUTH"
+            | "NOGROUP"
+            | "NOMASTERLINK"
+            | "NOPERM"
+            | "NOPROTO"
+            | "NOQUORUM"
+            | "NOREPLICAS"
+            | "NOSCRIPT"
+            | "OOM"
+            | "READONLY"
+            | "TIMEOUT"
+            | "TRYAGAIN"
+            | "UNBLOCKED"
+            | "UNKILLABLE"
+            | "WAIT"
+            | "XADD"
+            | "CROSSSLOT"
+            | "MOVED"
+            | "ASK"
+            | "CLUSTERDOWN"
+            | "ABORT"
+    )
 }
 
 pub fn client_tracking_getredir_value(state: &ClientTrackingState) -> i64 {
@@ -30813,7 +30876,7 @@ mod tests {
         assert_eq!(
             missing_arg,
             RespFrame::Error(
-                "ERR Error running script: redis.set_repl() requires one argument.".to_string()
+                "ERR redis.set_repl() requires one argument. script: 9504533b41060c143a92eb2f8878e77d33b6dc33, on @user_script:1.".to_string()
             )
         );
 
@@ -30830,7 +30893,7 @@ mod tests {
         assert_eq!(
             invalid_flags,
             RespFrame::Error(
-                "ERR Error running script: Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.".to_string()
+                "ERR Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE. script: e081d0c5dbda472e6f65ca721d725d769d2291f3, on @user_script:1.".to_string()
             )
         );
     }

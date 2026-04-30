@@ -3597,12 +3597,18 @@ impl<'a> LuaState<'a> {
                         RespFrame::Error(msg) => msg,
                         _ => format!("{e:?}"),
                     };
-                    // Upstream script_lua.c::luaRedisGenericCommand
-                    // rewrites the unknown-command surface from
-                    // dispatch into "Unknown Redis command called
-                    // from script" before bubbling up. (br-frankenredis-fo1s)
+                    // Upstream script_lua.c::luaRedisGenericCommand →
+                    // scriptVerifyCommandArity rewrites unknown-command
+                    // and wrong-arity surfaces into script-context
+                    // wording before bubbling up. (br-frankenredis-fo1s,
+                    // br-frankenredis-fdys)
                     let err_msg = if err_msg.starts_with("ERR unknown command ") {
                         "Unknown Redis command called from script".to_string()
+                    } else if err_msg.starts_with("ERR wrong number of arguments")
+                        || err_msg
+                            .starts_with("ERR Unknown subcommand or wrong number of arguments")
+                    {
+                        "Wrong number of args calling Redis command from script".to_string()
                     } else {
                         err_msg
                     };
