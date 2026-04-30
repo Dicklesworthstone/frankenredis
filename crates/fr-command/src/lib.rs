@@ -6300,28 +6300,61 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         .map(|(id, fields)| stream_record_to_frame(id, fields))
         .unwrap_or(RespFrame::BulkString(None));
 
-    Ok(RespFrame::Array(Some(vec![
-        RespFrame::BulkString(Some(b"length".to_vec())),
-        RespFrame::Integer(len_i64),
-        RespFrame::BulkString(Some(b"radix-tree-keys".to_vec())),
-        RespFrame::Integer(radix_tree_keys),
-        RespFrame::BulkString(Some(b"radix-tree-nodes".to_vec())),
-        RespFrame::Integer(radix_tree_nodes),
-        RespFrame::BulkString(Some(b"last-generated-id".to_vec())),
-        RespFrame::BulkString(Some(last_generated_id)),
-        RespFrame::BulkString(Some(b"max-deleted-entry-id".to_vec())),
-        RespFrame::BulkString(Some(max_deleted_entry_id)),
-        RespFrame::BulkString(Some(b"entries-added".to_vec())),
-        RespFrame::Integer(len_i64),
-        RespFrame::BulkString(Some(b"recorded-first-entry-id".to_vec())),
-        RespFrame::BulkString(Some(recorded_first_entry_id)),
-        RespFrame::BulkString(Some(b"groups".to_vec())),
-        RespFrame::Integer(group_count),
-        RespFrame::BulkString(Some(b"first-entry".to_vec())),
-        first_entry,
-        RespFrame::BulkString(Some(b"last-entry".to_vec())),
-        last_entry,
-    ])))
+    // Upstream t_stream.c::xinfoCommand uses addReplyMapLen for
+    // the non-FULL form. Emit RespFrame::Map for RESP3 callers,
+    // alternating-array for RESP2. (br-frankenredis-f6z6)
+    let pairs: Vec<(RespFrame, RespFrame)> = vec![
+        (
+            RespFrame::BulkString(Some(b"length".to_vec())),
+            RespFrame::Integer(len_i64),
+        ),
+        (
+            RespFrame::BulkString(Some(b"radix-tree-keys".to_vec())),
+            RespFrame::Integer(radix_tree_keys),
+        ),
+        (
+            RespFrame::BulkString(Some(b"radix-tree-nodes".to_vec())),
+            RespFrame::Integer(radix_tree_nodes),
+        ),
+        (
+            RespFrame::BulkString(Some(b"last-generated-id".to_vec())),
+            RespFrame::BulkString(Some(last_generated_id)),
+        ),
+        (
+            RespFrame::BulkString(Some(b"max-deleted-entry-id".to_vec())),
+            RespFrame::BulkString(Some(max_deleted_entry_id)),
+        ),
+        (
+            RespFrame::BulkString(Some(b"entries-added".to_vec())),
+            RespFrame::Integer(len_i64),
+        ),
+        (
+            RespFrame::BulkString(Some(b"recorded-first-entry-id".to_vec())),
+            RespFrame::BulkString(Some(recorded_first_entry_id)),
+        ),
+        (
+            RespFrame::BulkString(Some(b"groups".to_vec())),
+            RespFrame::Integer(group_count),
+        ),
+        (
+            RespFrame::BulkString(Some(b"first-entry".to_vec())),
+            first_entry,
+        ),
+        (
+            RespFrame::BulkString(Some(b"last-entry".to_vec())),
+            last_entry,
+        ),
+    ];
+    if store.dispatch_client_ctx.resp_protocol_version == 3 {
+        Ok(RespFrame::Map(Some(pairs)))
+    } else {
+        let mut flat = Vec::with_capacity(pairs.len() * 2);
+        for (k, v) in pairs {
+            flat.push(k);
+            flat.push(v);
+        }
+        Ok(RespFrame::Array(Some(flat)))
+    }
 }
 
 fn xrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
