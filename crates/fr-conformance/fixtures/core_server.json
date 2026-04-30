@@ -792,7 +792,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid arguments for 'COMMAND GETKEYS'"
+        "value": "ERR wrong number of arguments for 'command|getkeys' command"
       }
     },
     {
@@ -3289,7 +3289,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid arguments for 'COMMAND GETKEYSANDFLAGS'"
+        "value": "ERR wrong number of arguments for 'command|getkeysandflags' command"
       }
     },
     {
@@ -3315,7 +3315,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR Invalid arguments for 'COMMAND GETKEYS'"
+        "value": "ERR wrong number of arguments for 'command|getkeys' command"
       }
     },
     {

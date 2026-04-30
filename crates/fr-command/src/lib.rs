@@ -11733,8 +11733,11 @@ fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     } else if sub.eq_ignore_ascii_case("GETKEYS") {
         // COMMAND GETKEYS <command> [args...]
         if argv.len() < 3 {
+            // Upstream's commands.def declares COMMAND|GETKEYS with
+            // arity = -3, so the WrongArity reply uses the
+            // subcommand-form name. (br-frankenredis-cmdgka)
             return Ok(RespFrame::Error(
-                "ERR Invalid arguments for 'COMMAND GETKEYS'".to_string(),
+                "ERR wrong number of arguments for 'command|getkeys' command".to_string(),
             ));
         }
         match command_key_references(&argv[2..]) {
@@ -11749,8 +11752,9 @@ fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     } else if sub.eq_ignore_ascii_case("GETKEYSANDFLAGS") {
         // COMMAND GETKEYSANDFLAGS <command> [args...]
         if argv.len() < 3 {
+            // (br-frankenredis-cmdgka)
             return Ok(RespFrame::Error(
-                "ERR Invalid arguments for 'COMMAND GETKEYSANDFLAGS'".to_string(),
+                "ERR wrong number of arguments for 'command|getkeysandflags' command".to_string(),
             ));
         }
         match command_key_references(&argv[2..]) {
@@ -35503,7 +35507,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             out,
-            RespFrame::Error("ERR Invalid arguments for 'COMMAND GETKEYSANDFLAGS'".to_string())
+            RespFrame::Error(
+                "ERR wrong number of arguments for 'command|getkeysandflags' command".to_string()
+            )
         );
     }
 
