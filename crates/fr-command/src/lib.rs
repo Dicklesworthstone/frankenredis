@@ -10510,6 +10510,12 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             "pubsub_shardchannels:{}\r\n",
             store.subscribed_shard_channels.len()
         ));
+        // Upstream Redis 7.2 also emits pubsubshard_channels (legacy
+        // alias for pubsub_shardchannels). (br-frankenredis-infostats)
+        info.push_str(&format!(
+            "pubsubshard_channels:{}\r\n",
+            store.subscribed_shard_channels.len()
+        ));
         info.push_str("latest_fork_usec:0\r\n");
         info.push_str("total_forks:0\r\n");
         info.push_str("migrate_cached_sockets:0\r\n");
@@ -10518,6 +10524,8 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("active_defrag_misses:0\r\n");
         info.push_str("active_defrag_key_hits:0\r\n");
         info.push_str("active_defrag_key_misses:0\r\n");
+        info.push_str("total_active_defrag_time:0\r\n");
+        info.push_str("current_active_defrag_time:0\r\n");
         info.push_str("tracking_total_keys:0\r\n");
         info.push_str("tracking_total_items:0\r\n");
         info.push_str("tracking_total_prefixes:0\r\n");
@@ -10542,8 +10550,17 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("io_threaded_writes_processed:0\r\n");
         info.push_str("reply_buffer_shrinks:0\r\n");
         info.push_str("reply_buffer_expands:0\r\n");
+        info.push_str("eventloop_cycles:0\r\n");
+        info.push_str("eventloop_duration_sum:0\r\n");
+        info.push_str("eventloop_duration_cmd_sum:0\r\n");
+        info.push_str("instantaneous_eventloop_cycles_per_sec:0\r\n");
+        info.push_str("instantaneous_eventloop_duration_usec:0\r\n");
+        info.push_str("acl_access_denied_auth:0\r\n");
+        info.push_str("acl_access_denied_cmd:0\r\n");
+        info.push_str("acl_access_denied_key:0\r\n");
+        info.push_str("acl_access_denied_channel:0\r\n");
         info.push_str("current_eviction_exceeded_time:0\r\n");
-        info.push_str("current_active_defrag_time:0\r\n");
+        info.push_str("total_eviction_exceeded_time:0\r\n");
         info.push_str("\r\n");
     }
 
