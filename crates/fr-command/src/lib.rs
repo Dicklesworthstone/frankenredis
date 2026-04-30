@@ -30190,6 +30190,36 @@ mod tests {
     }
 
     #[test]
+    fn eval_redis_error_reply_prepends_err_code_when_missing() {
+        // Mirror upstream script_lua.c::luaRedisErrorReplyCommand +
+        // luaPushErrorBuff: redis.error_reply("err") gets a default
+        // ERR code; '-CODE msg' bodies parse the code; '-NOMSG' (no
+        // space) falls back to ERR + the entire body as message.
+        // Verified byte-for-byte against vendored redis 7.2.4 in
+        // crates/fr-conformance live oracle. (br-frankenredis-xvlj)
+        let cases: &[(&str, &str)] = &[
+            ("return redis.error_reply('err')", "ERR err"),
+            ("return redis.error_reply('-CUSTOM hi')", "CUSTOM hi"),
+            ("return redis.error_reply('NOMSG')", "ERR NOMSG"),
+            ("return redis.error_reply('-NOMSG')", "ERR NOMSG"),
+            (
+                "return redis.error_reply('NOAUTH custom message')",
+                "ERR NOAUTH custom message",
+            ),
+        ];
+        let mut store = Store::new();
+        for (script, expected) in cases {
+            let out = dispatch_argv(
+                &[b"EVAL".to_vec(), script.as_bytes().to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("eval");
+            assert_eq!(out, RespFrame::Error((*expected).to_string()), "{script}");
+        }
+    }
+
+    #[test]
     fn eval_with_shebang_no_writes_flag_rejects_writes() {
         let mut store = Store::new();
         // EVAL on a script that begins with `#!lua flags=no-writes`

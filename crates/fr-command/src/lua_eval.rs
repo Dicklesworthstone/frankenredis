@@ -2465,13 +2465,10 @@ impl<'a> LuaState<'a> {
                     .first()
                     .map(|a| a.to_display_string())
                     .unwrap_or_default();
-                let msg_str = String::from_utf8_lossy(&msg).to_string();
+                let final_msg = lua_format_error_reply_payload(&msg);
                 Ok(vec![LuaValue::Table({
                     let t = LuaTable::new();
-                    t.set(
-                        LuaValue::Str(b"err".to_vec()),
-                        LuaValue::Str(msg_str.into_bytes()),
-                    );
+                    t.set(LuaValue::Str(b"err".to_vec()), LuaValue::Str(final_msg));
                     t
                 })])
             }
@@ -3630,6 +3627,32 @@ fn command_error_string(err: CommandError) -> String {
         RespFrame::Error(msg) => msg,
         other => format!("{other:?}"),
     }
+}
+
+/// Mirror upstream script_lua.c::luaPushErrorBuff: derive a
+/// `<CODE> <msg>` body for the {err=...} table that
+/// luaReplyToRedisReply emits. Upstream prepends '-' to the raw
+/// argument when missing; if the body has no space after the code,
+/// the entire body becomes the message and the code defaults to
+/// "ERR". Trailing CR/LF are trimmed. (br-frankenredis-xvlj)
+fn lua_format_error_reply_payload(input: &[u8]) -> Vec<u8> {
+    let body: &[u8] = if input.first() == Some(&b'-') {
+        &input[1..]
+    } else {
+        input
+    };
+    let (code, msg): (&[u8], &[u8]) = match body.iter().position(|&b| b == b' ') {
+        Some(idx) if input.first() == Some(&b'-') => (&body[..idx], &body[idx + 1..]),
+        _ => (b"ERR", body),
+    };
+    let mut out = Vec::with_capacity(code.len() + 1 + msg.len());
+    out.extend_from_slice(code);
+    out.push(b' ');
+    out.extend_from_slice(msg);
+    while matches!(out.last(), Some(b'\r' | b'\n')) {
+        out.pop();
+    }
+    out
 }
 
 fn script_command_intercept(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
