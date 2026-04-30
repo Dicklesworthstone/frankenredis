@@ -239,6 +239,15 @@ pub enum ScoreBound {
     Exclusive(f64),
 }
 
+/// Numerical f64 of a score bound, used to detect inverted ranges
+/// (start > end) without panicking the BTreeMap range walker.
+#[inline]
+fn score_bound_value(bound: ScoreBound) -> f64 {
+    match bound {
+        ScoreBound::Inclusive(s) | ScoreBound::Exclusive(s) => s,
+    }
+}
+
 impl ScoreBound {
     /// Check if `score` satisfies this bound as a minimum (lower bound).
     pub fn check_min(self, score: f64) -> bool {
@@ -6112,6 +6121,10 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(Vec::new());
         }
+        // (br-frankenredis-ot1z)
+        if score_bound_value(min) > score_bound_value(max) {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
@@ -6147,6 +6160,12 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         if !self.record_keyspace_lookup(key, now_ms) {
+            return Ok(Vec::new());
+        }
+        // Upstream behavior for an inverted score range (min > max)
+        // is to return an empty range; BTreeMap::range panics if
+        // start > end, so guard early. (br-frankenredis-ot1z)
+        if score_bound_value(min) > score_bound_value(max) {
             return Ok(Vec::new());
         }
         match self.entries.get_mut(key) {
