@@ -6926,14 +6926,16 @@ fn cluster_cmd(
         ));
     }
     if sub.eq_ignore_ascii_case("FAILOVER") {
-        // CLUSTER FAILOVER [FORCE | TAKEOVER]
-        if argv.len() > 3 {
+        // CLUSTER FAILOVER [FORCE | TAKEOVER]+ — upstream accepts
+        // either or both flags in any order, so allow up to two
+        // trailing modifiers. (br-frankenredis-nzaw)
+        if argv.len() > 4 {
             return Err(cluster_wrong_subcommand_arity(sub));
         }
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        if let Some(flag) = argv.get(2) {
+        for flag in &argv[2..] {
             let flag_str =
                 std::str::from_utf8(flag).map_err(|_| CommandError::InvalidUtf8Argument)?;
             if !flag_str.eq_ignore_ascii_case("FORCE") && !flag_str.eq_ignore_ascii_case("TAKEOVER")
@@ -7051,6 +7053,22 @@ fn cluster_cmd(
         // Real config-epoch / slot-state machinery not yet implemented;
         // keep the blanket disabled error so clients fail-loud rather
         // than think a no-op succeeded. (jsr7 follow-up)
+        return Err(cluster_disabled_error());
+    }
+    if sub.eq_ignore_ascii_case("SETSLOT") {
+        // CLUSTER SETSLOT <slot> STABLE
+        // CLUSTER SETSLOT <slot> NODE <node-id>
+        // CLUSTER SETSLOT <slot> MIGRATING <node-id>
+        // CLUSTER SETSLOT <slot> IMPORTING <node-id>
+        // Real slot-migration machinery not yet implemented; mirror
+        // upstream's "cluster support disabled" reply when cluster
+        // mode is off. (br-frankenredis-nzaw)
+        if argv.len() != 4 && argv.len() != 5 {
+            return Err(cluster_wrong_subcommand_arity(sub));
+        }
+        if !store.cluster_enabled {
+            return Err(cluster_disabled_error());
+        }
         return Err(cluster_disabled_error());
     }
     if sub.eq_ignore_ascii_case("COUNT-FAILURE-REPORTS") {
