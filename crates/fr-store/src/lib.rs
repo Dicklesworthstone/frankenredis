@@ -2301,10 +2301,21 @@ impl Store {
             Some(entry) => match &entry.value {
                 Value::String(v) => {
                     let len = v.len() as i64;
+                    // Upstream t_string.c::getrangeCommand normalizes
+                    // negative offsets relative to length and clamps
+                    // BOTH start and end at 0 — fr previously only
+                    // clamped start, so a fully-negative range like
+                    // (-100, -90) on a length-6 string left end=-84
+                    // and the 's > e' guard wrongly returned empty
+                    // instead of the clamped slice [0..=0].
+                    // (br-frankenredis-grangneg)
                     let mut s = if start < 0 { len + start } else { start };
-                    let e = if end < 0 { len + end } else { end };
+                    let mut e = if end < 0 { len + end } else { end };
                     if s < 0 {
                         s = 0;
+                    }
+                    if e < 0 {
+                        e = 0;
                     }
                     if s > e || len == 0 || s >= len {
                         Ok(Vec::new())
