@@ -10350,7 +10350,47 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             format_bytes_human(maxmemory)
         ));
         info.push_str(&format!("maxmemory_policy:{policy_str}\r\n"));
+        // Allocator-derived stats (placeholders since fr uses the
+        // Rust system allocator). Upstream Redis 7.2 always emits
+        // these, even with libc malloc — values are 0 / 1.0 then.
+        // (br-frankenredis-infomemory)
+        info.push_str(&format!("allocator_allocated:{used_memory}\r\n"));
+        info.push_str(&format!("allocator_active:{used_memory}\r\n"));
+        info.push_str(&format!("allocator_resident:{used_memory_rss}\r\n"));
+        info.push_str("total_system_memory:0\r\n");
+        info.push_str("total_system_memory_human:0B\r\n");
+        info.push_str("used_memory_lua:0\r\n");
+        info.push_str("used_memory_vm_eval:0\r\n");
+        info.push_str("used_memory_lua_human:0B\r\n");
+        info.push_str("used_memory_scripts_eval:0\r\n");
+        info.push_str("number_of_cached_scripts:0\r\n");
+        info.push_str("number_of_functions:0\r\n");
+        info.push_str("number_of_libraries:0\r\n");
+        info.push_str("used_memory_vm_functions:0\r\n");
+        info.push_str("used_memory_vm_total:0\r\n");
+        info.push_str("used_memory_vm_total_human:0B\r\n");
+        info.push_str("used_memory_functions:0\r\n");
+        info.push_str("used_memory_scripts:0\r\n");
+        info.push_str("used_memory_scripts_human:0B\r\n");
+        info.push_str("maxmemory_reservation:0\r\n");
+        info.push_str("maxmemory_reservation_human:0B\r\n");
+        info.push_str("maxmemory_desired:0\r\n");
+        info.push_str("maxmemory_desired_human:0B\r\n");
+        info.push_str("allocator_frag_ratio:1.00\r\n");
+        info.push_str("allocator_frag_bytes:0\r\n");
+        info.push_str("allocator_rss_ratio:1.00\r\n");
+        info.push_str("allocator_rss_bytes:0\r\n");
+        info.push_str("rss_overhead_ratio:1.00\r\n");
+        info.push_str("rss_overhead_bytes:0\r\n");
         info.push_str(&format!("mem_fragmentation_ratio:{frag_ratio:.2}\r\n"));
+        info.push_str("mem_fragmentation_bytes:0\r\n");
+        info.push_str("mem_not_counted_for_evict:0\r\n");
+        info.push_str("mem_replication_backlog:0\r\n");
+        info.push_str("mem_total_replication_buffers:0\r\n");
+        info.push_str("mem_clients_slaves:0\r\n");
+        info.push_str("mem_clients_normal:0\r\n");
+        info.push_str("mem_cluster_links:0\r\n");
+        info.push_str("mem_aof_buffer:0\r\n");
         info.push_str("mem_allocator:rust-alloc\r\n");
         info.push_str("active_defrag_running:0\r\n");
         info.push_str("lazyfree_pending_objects:0\r\n");
@@ -10422,6 +10462,12 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             }
         ));
         info.push_str("aof_last_cow_size:0\r\n");
+        info.push_str("aof_rewrites:0\r\n");
+        info.push_str("aof_rewrites_consecutive_failures:0\r\n");
+        info.push_str("module_fork_in_progress:0\r\n");
+        info.push_str("module_fork_last_cow_size:0\r\n");
+        info.push_str("rdb_last_load_keys_expired:0\r\n");
+        info.push_str("rdb_last_load_keys_loaded:0\r\n");
         info.push_str("\r\n");
     }
 
