@@ -12828,14 +12828,18 @@ pub fn parse_client_tracking_state(argv: &[Vec<u8>]) -> Result<ClientTrackingSta
             CLIENT_TRACKING_PREFIX_REQUIRES_BCAST.to_string(),
         ));
     }
-    if optin && optout {
-        return Err(CommandError::Custom(
-            CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT.to_string(),
-        ));
-    }
+    // Upstream networking.c checks the BCAST conflict before the
+    // mutual-exclusion of OPTIN/OPTOUT, so when all three are set
+    // the user-visible error is BCAST_OPT_CONFLICT, not the generic
+    // OPTIN/OPTOUT one. (br-frankenredis-trbcast)
     if bcast && (optin || optout) {
         return Err(CommandError::Custom(
             CLIENT_TRACKING_BCAST_OPT_CONFLICT.to_string(),
+        ));
+    }
+    if optin && optout {
+        return Err(CommandError::Custom(
+            CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT.to_string(),
         ));
     }
 
