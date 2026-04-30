@@ -6477,6 +6477,18 @@ impl Runtime {
             let pattern = raw_pattern.to_ascii_lowercase();
             self.collect_config_entries(&pattern, &mut entries);
         }
+        // RESP3 callers receive a Map (key → value); RESP2 callers
+        // continue to receive the alternating-key/value Array form.
+        // Upstream config.c::configGetCommand uses addReplyMapLen.
+        // (br-frankenredis-9itc partial)
+        if self.session.resp_protocol_version == 3 {
+            let mut pairs = Vec::with_capacity(entries.len() / 2);
+            let mut iter = entries.into_iter();
+            while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
+                pairs.push((k, v));
+            }
+            return RespFrame::Map(Some(pairs));
+        }
         RespFrame::Array(Some(entries))
     }
 
