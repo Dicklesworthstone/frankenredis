@@ -8557,14 +8557,24 @@ fn bitpos(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() < 3 {
         return Err(CommandError::WrongArity("BITPOS"));
     }
-    if argv.len() > 6 {
-        return Err(CommandError::SyntaxError);
-    }
     let bit_val = parse_i64_arg(&argv[2])?;
     if bit_val != 0 && bit_val != 1 {
         return Err(CommandError::Custom(
             "ERR The bit argument must be 1 or 0.".to_string(),
         ));
+    }
+    // Upstream t_string.c::bitposCommand looks up the key BEFORE
+    // parsing trailing args — a missing key short-circuits to
+    // (bit ? -1 : 0). So 'BITPOS nokey 1 0 -1 NOSUCH' returns -1
+    // even though NOSUCH would be a syntax error if the key
+    // existed. (br-frankenredis-bitposkey)
+    match store.key_type(&argv[1], now_ms) {
+        None => return Ok(RespFrame::Integer(if bit_val == 1 { -1 } else { 0 })),
+        Some("string") => {}
+        Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
+    }
+    if argv.len() > 6 {
+        return Err(CommandError::SyntaxError);
     }
     let start = if argv.len() >= 4 {
         Some(parse_i64_arg(&argv[3])?)
@@ -26296,7 +26306,18 @@ mod tests {
 
     #[test]
     fn bitpos_too_many_arguments_is_syntax_error() {
+        // Upstream t_string.c::bitposCommand looks up the key BEFORE
+        // parsing trailing args, so this assertion needs a present
+        // key to actually exercise the syntax-error branch.
+        // (br-frankenredis-bitposkey)
         let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"bm".to_vec(), b"hello".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("SET bm");
+
         let err = dispatch_argv(
             &[
                 b"BITPOS".to_vec(),
