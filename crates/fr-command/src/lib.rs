@@ -13278,7 +13278,11 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     }
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if sub.eq_ignore_ascii_case("ENCODING") {
-        if argv.len() < 3 {
+        // Upstream object.c::objectCommand requires exactly 3 args
+        // (the subcommand + the single key argument). Trailing
+        // extras must surface as a wrong-arity error rather than
+        // being silently ignored. (br-frankenredis-objarity)
+        if argv.len() != 3 {
             return Err(CommandError::WrongSubcommandArity {
                 command: "OBJECT",
                 subcommand: sub.to_string(),
@@ -13290,7 +13294,8 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             None => Ok(RespFrame::BulkString(None)), // Redis returns null for nonexistent keys
         }
     } else if sub.eq_ignore_ascii_case("REFCOUNT") {
-        if argv.len() < 3 {
+        // (br-frankenredis-objarity)
+        if argv.len() != 3 {
             return Err(CommandError::WrongSubcommandArity {
                 command: "OBJECT",
                 subcommand: sub.to_string(),

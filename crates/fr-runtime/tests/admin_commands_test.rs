@@ -223,11 +223,12 @@ fn latency_doctor_returns_bulk_string() {
 
 #[test]
 fn latency_graph_without_samples_returns_error() {
+    // (br-frankenredis-latgrapherr)
     let mut rt = Runtime::default_strict();
     let graph = rt.execute_frame(command(&[b"LATENCY", b"GRAPH", b"command"]), 0);
     assert_eq!(
         graph,
-        RespFrame::Error("No samples available for event 'command'".to_string())
+        RespFrame::Error("ERR No samples available for event 'command'".to_string())
     );
 }
 
