@@ -7563,13 +7563,19 @@ fn function_cmd(
                 std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
             if arg.eq_ignore_ascii_case("LIBRARYNAME") {
                 i += 1;
-                if i < argv.len() {
-                    let pat = std::str::from_utf8(&argv[i])
-                        .map_err(|_| CommandError::InvalidUtf8Argument)?;
-                    pattern = Some(pat.to_string());
+                if i >= argv.len() {
+                    return Err(CommandError::SyntaxError);
                 }
+                let pat = std::str::from_utf8(&argv[i])
+                    .map_err(|_| CommandError::InvalidUtf8Argument)?;
+                pattern = Some(pat.to_string());
             } else if arg.eq_ignore_ascii_case("WITHCODE") {
                 with_code = true;
+            } else {
+                // Upstream functions.c::functionListCommand emits
+                // 'ERR Unknown argument <token>' for any token
+                // outside LIBRARYNAME / WITHCODE. (br-frankenredis-funclist)
+                return Err(CommandError::Custom(format!("ERR Unknown argument {arg}")));
             }
             i += 1;
         }
@@ -7677,6 +7683,15 @@ fn function_cmd(
             ])),
         ])))
     } else if sub.eq_ignore_ascii_case("DUMP") {
+        // Upstream commands.def declares FUNCTION DUMP with arity = 2,
+        // so any extra arg trips the table-level WrongArity check
+        // before functions.c::functionDumpCommand runs. (br-frankenredis-funcdump)
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "FUNCTION",
+                subcommand: "DUMP".to_string(),
+            });
+        }
         if store.script_nesting_level >= 1 {
             return Err(script_noscript_command_error());
         }
@@ -15106,11 +15121,15 @@ fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             .collect();
         Ok(RespFrame::Array(Some(results)))
     } else if sub.eq_ignore_ascii_case("FLUSH") {
+        // Upstream commands.def declares SCRIPT FLUSH with arity = -2
+        // (variadic), and eval.c::scriptCommand validates the mode
+        // arg via a single equality check, surfacing the same
+        // 'SCRIPT FLUSH only support SYNC|ASYNC option' for *any*
+        // unrecognised tail — including extra args. (br-frankenredis-scrflush)
         if argv.len() > 3 {
-            return Err(CommandError::WrongSubcommandArity {
-                command: "SCRIPT",
-                subcommand: "FLUSH".to_string(),
-            });
+            return Err(CommandError::Custom(
+                "ERR SCRIPT FLUSH only support SYNC|ASYNC option".to_string(),
+            ));
         }
         if argv.len() == 3 {
             let mode =
@@ -31225,6 +31244,9 @@ mod tests {
                     subcommand: "EXISTS".to_string(),
                 },
             ),
+            // Upstream emits the FLUSH-mode wording for any
+            // unrecognised tail beyond `[SYNC|ASYNC]`, including
+            // extra args. (br-frankenredis-scrflush)
             (
                 vec![
                     b"SCRIPT".to_vec(),
@@ -31232,10 +31254,9 @@ mod tests {
                     b"SYNC".to_vec(),
                     b"EXTRA".to_vec(),
                 ],
-                CommandError::WrongSubcommandArity {
-                    command: "SCRIPT",
-                    subcommand: "FLUSH".to_string(),
-                },
+                CommandError::Custom(
+                    "ERR SCRIPT FLUSH only support SYNC|ASYNC option".to_string(),
+                ),
             ),
             (
                 vec![b"SCRIPT".to_vec(), b"DEBUG".to_vec()],
