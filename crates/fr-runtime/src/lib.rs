@@ -5442,26 +5442,35 @@ impl Runtime {
         };
         let lib_name = session.client_lib_name.as_deref().unwrap_or("");
         let lib_ver = session.client_lib_ver.as_deref().unwrap_or("");
+        let redir = client_tracking_getredir_value(&session.client_tracking);
+        // Field order matches upstream Redis 7.2 networking.c::catClientInfoString:
+        //   id addr laddr fd name age idle flags db sub psub ssub multi qbuf qbuf-free
+        //   argv-mem multi-mem rbs rbp obl oll omem tot-mem events cmd user redir resp lib-name lib-ver
+        // Notes: (1) the `watch=N` field upstream emitted in earlier
+        // releases was dropped in 7.2; (2) fr does not track per-client
+        // input/output-buffer accounting, so argv-mem/multi-mem/rbs/rbp
+        // are always 0 — consistent with fr's existing 0-value fields
+        // (qbuf, qbuf-free, obl, oll, omem, tot-mem). (br-frankenredis-4upy)
         format!(
-            "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} age={} idle={} db={} sub={} psub={} ssub={} multi={} watch={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} lib-name={} lib-ver={} resp={} flags={}\r\n",
+            "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\r\n",
             session.client_id,
             peer,
             self.server.store.server_port,
             name,
             age_seconds,
             idle_seconds,
+            flags,
             session.selected_db,
             channel_subs,
             pattern_subs,
             shard_subs,
             multi_count,
-            session.transaction_state.watched_keys.len(),
             session.last_command_name,
             String::from_utf8_lossy(session.current_user_name()),
+            redir,
+            session.resp_protocol_version,
             lib_name,
             lib_ver,
-            session.resp_protocol_version,
-            flags,
         )
     }
 
@@ -14119,6 +14128,67 @@ mod tests {
             !filtered.contains("name=alpha"),
             "current client should not be in peer-only filter: {filtered}"
         );
+    }
+
+    #[test]
+    fn client_list_field_order_matches_upstream_redis_72() {
+        // Pins the exact field order emitted by client_info_line_for_session.
+        // Upstream networking.c::catClientInfoString format string at
+        // legacy_redis_code/redis/src/networking.c:2818 reads:
+        //   id addr laddr fd name age idle flags db sub psub ssub multi
+        //   qbuf qbuf-free argv-mem multi-mem rbs rbp obl oll omem tot-mem
+        //   events cmd user redir resp lib-name lib-ver
+        // (br-frankenredis-4upy)
+        let mut rt = Runtime::default_strict();
+        let info = match rt.execute_frame(command(&[b"CLIENT", b"INFO"]), 1) {
+            RespFrame::BulkString(Some(info)) => String::from_utf8(info).expect("utf8"),
+            other => unreachable!("unexpected CLIENT INFO response: {other:?}"),
+        };
+        let trimmed = info.trim_end_matches("\r\n");
+
+        let expected_keys = [
+            "id",
+            "addr",
+            "laddr",
+            "fd",
+            "name",
+            "age",
+            "idle",
+            "flags",
+            "db",
+            "sub",
+            "psub",
+            "ssub",
+            "multi",
+            "qbuf",
+            "qbuf-free",
+            "argv-mem",
+            "multi-mem",
+            "rbs",
+            "rbp",
+            "obl",
+            "oll",
+            "omem",
+            "tot-mem",
+            "events",
+            "cmd",
+            "user",
+            "redir",
+            "resp",
+            "lib-name",
+            "lib-ver",
+        ];
+        let observed_keys: Vec<&str> = trimmed
+            .split(' ')
+            .filter_map(|tok| tok.split_once('=').map(|(k, _)| k))
+            .collect();
+        assert_eq!(observed_keys, expected_keys, "{trimmed}");
+
+        // The `watch=N` field upstream emitted in earlier releases was
+        // dropped in 7.2.
+        assert!(!trimmed.contains("watch="), "{trimmed}");
+        // CLIENT TRACKING is off by default → redir should be -1.
+        assert!(trimmed.contains("redir=-1 "), "{trimmed}");
     }
 
     #[test]

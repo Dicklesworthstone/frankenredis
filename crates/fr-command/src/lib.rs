@@ -12214,26 +12214,30 @@ fn client_info_line(store: &Store, sub: &str) -> Vec<u8> {
     let user = String::from_utf8_lossy(&ctx.authenticated_user);
     let lib_name = ctx.client_lib_name.as_deref().unwrap_or("");
     let lib_ver = ctx.client_lib_ver.as_deref().unwrap_or("");
+    let redir = client_tracking_getredir_value(&ctx.client_tracking);
+    // Field order matches upstream Redis 7.2 networking.c::catClientInfoString.
+    // See client_info_line_for_session in fr-runtime for the rationale.
+    // (br-frankenredis-4upy)
     format!(
-        "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} age={} idle={} db={} sub={} psub={} ssub={} multi={} watch={} qbuf=0 qbuf-free=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user={} lib-name={} lib-ver={} resp={} flags={}\r\n",
+        "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user={} redir={} resp={} lib-name={} lib-ver={}\r\n",
         ctx.client_id,
         ctx.peer_addr,
         store.server_port,
         name,
         ctx.age_seconds,
         ctx.idle_seconds,
+        ctx.flags,
         ctx.db_index,
         ctx.channel_subscriptions,
         ctx.pattern_subscriptions,
         ctx.shard_subscriptions,
         ctx.multi_count,
-        ctx.watch_count,
         sub.to_ascii_lowercase(),
         user,
+        redir,
+        ctx.resp_protocol_version,
         lib_name,
         lib_ver,
-        ctx.resp_protocol_version,
-        ctx.flags,
     )
     .into_bytes()
 }
@@ -36216,11 +36220,17 @@ mod tests {
         assert!(info.contains("psub=1 "), "{info}");
         assert!(info.contains("ssub=4 "), "{info}");
         assert!(info.contains("multi=3 "), "{info}");
-        assert!(info.contains("watch=2 "), "{info}");
+        // Upstream Redis 7.2 dropped the `watch=N` field from CLIENT INFO.
+        assert!(!info.contains("watch="), "{info}");
+        assert!(info.contains("argv-mem=0 "), "{info}");
+        assert!(info.contains("multi-mem=0 "), "{info}");
+        assert!(info.contains("rbs=0 "), "{info}");
+        assert!(info.contains("rbp=0 "), "{info}");
         assert!(info.contains("user=alice "), "{info}");
-        assert!(info.contains("lib-name=redis-rs "), "{info}");
-        assert!(info.contains("lib-ver=1.2.3 "), "{info}");
+        assert!(info.contains("redir=-1 "), "{info}");
         assert!(info.contains("resp=3 "), "{info}");
+        assert!(info.contains("lib-name=redis-rs "), "{info}");
+        assert!(info.ends_with("lib-ver=1.2.3\r\n"), "{info}");
     }
 
     #[test]

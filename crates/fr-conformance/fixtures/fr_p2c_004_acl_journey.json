@@ -142,7 +142,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR AUTH <password> called without any password configured for the default user. Are you sure your configuration is correct?"
+        "value": "WRONGPASS invalid username-password pair or user is disabled."
       }
     },
     {
