@@ -5312,40 +5312,88 @@ fn stream_record_to_frame(id: StreamId, fields: Vec<(Vec<u8>, Vec<u8>)>) -> Resp
     ]))
 }
 
+/// Build the per-group info frame. Upstream Redis 7.2
+/// t_stream.c::xinfoCommand emits this as a Map in RESP3 and an
+/// alternating-array in RESP2. (br-frankenredis-f6z6)
 fn stream_group_info_to_frame(
     name: Vec<u8>,
     consumers: usize,
     pending: usize,
     last_delivered_id: StreamId,
+    resp_protocol_version: i64,
 ) -> RespFrame {
-    RespFrame::Array(Some(vec![
-        RespFrame::BulkString(Some(b"name".to_vec())),
-        RespFrame::BulkString(Some(name)),
-        RespFrame::BulkString(Some(b"consumers".to_vec())),
-        RespFrame::Integer(i64::try_from(consumers).unwrap_or(i64::MAX)),
-        RespFrame::BulkString(Some(b"pending".to_vec())),
-        RespFrame::Integer(i64::try_from(pending).unwrap_or(i64::MAX)),
-        RespFrame::BulkString(Some(b"last-delivered-id".to_vec())),
-        RespFrame::BulkString(Some(format_stream_id(last_delivered_id))),
-        RespFrame::BulkString(Some(b"entries-read".to_vec())),
-        RespFrame::BulkString(None),
-        RespFrame::BulkString(Some(b"lag".to_vec())),
-        RespFrame::BulkString(None),
-    ]))
+    let pairs: Vec<(RespFrame, RespFrame)> = vec![
+        (
+            RespFrame::BulkString(Some(b"name".to_vec())),
+            RespFrame::BulkString(Some(name)),
+        ),
+        (
+            RespFrame::BulkString(Some(b"consumers".to_vec())),
+            RespFrame::Integer(i64::try_from(consumers).unwrap_or(i64::MAX)),
+        ),
+        (
+            RespFrame::BulkString(Some(b"pending".to_vec())),
+            RespFrame::Integer(i64::try_from(pending).unwrap_or(i64::MAX)),
+        ),
+        (
+            RespFrame::BulkString(Some(b"last-delivered-id".to_vec())),
+            RespFrame::BulkString(Some(format_stream_id(last_delivered_id))),
+        ),
+        (
+            RespFrame::BulkString(Some(b"entries-read".to_vec())),
+            RespFrame::BulkString(None),
+        ),
+        (
+            RespFrame::BulkString(Some(b"lag".to_vec())),
+            RespFrame::BulkString(None),
+        ),
+    ];
+    if resp_protocol_version == 3 {
+        RespFrame::Map(Some(pairs))
+    } else {
+        let mut flat = Vec::with_capacity(pairs.len() * 2);
+        for (k, v) in pairs {
+            flat.push(k);
+            flat.push(v);
+        }
+        RespFrame::Array(Some(flat))
+    }
 }
 
-fn stream_consumer_info_to_frame(info: (Vec<u8>, usize, u64)) -> RespFrame {
+/// (br-frankenredis-f6z6)
+fn stream_consumer_info_to_frame(
+    info: (Vec<u8>, usize, u64),
+    resp_protocol_version: i64,
+) -> RespFrame {
     let (name, pending_count, idle_ms) = info;
-    RespFrame::Array(Some(vec![
-        RespFrame::BulkString(Some(b"name".to_vec())),
-        RespFrame::BulkString(Some(name)),
-        RespFrame::BulkString(Some(b"pending".to_vec())),
-        RespFrame::Integer(i64::try_from(pending_count).unwrap_or(i64::MAX)),
-        RespFrame::BulkString(Some(b"idle".to_vec())),
-        RespFrame::Integer(i64::try_from(idle_ms).unwrap_or(i64::MAX)),
-        RespFrame::BulkString(Some(b"inactive".to_vec())),
-        RespFrame::Integer(i64::try_from(idle_ms).unwrap_or(i64::MAX)),
-    ]))
+    let pairs: Vec<(RespFrame, RespFrame)> = vec![
+        (
+            RespFrame::BulkString(Some(b"name".to_vec())),
+            RespFrame::BulkString(Some(name)),
+        ),
+        (
+            RespFrame::BulkString(Some(b"pending".to_vec())),
+            RespFrame::Integer(i64::try_from(pending_count).unwrap_or(i64::MAX)),
+        ),
+        (
+            RespFrame::BulkString(Some(b"idle".to_vec())),
+            RespFrame::Integer(i64::try_from(idle_ms).unwrap_or(i64::MAX)),
+        ),
+        (
+            RespFrame::BulkString(Some(b"inactive".to_vec())),
+            RespFrame::Integer(i64::try_from(idle_ms).unwrap_or(i64::MAX)),
+        ),
+    ];
+    if resp_protocol_version == 3 {
+        RespFrame::Map(Some(pairs))
+    } else {
+        let mut flat = Vec::with_capacity(pairs.len() * 2);
+        for (k, v) in pairs {
+            flat.push(k);
+            flat.push(v);
+        }
+        RespFrame::Array(Some(flat))
+    }
 }
 
 fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -6129,9 +6177,10 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             Err(StoreError::KeyNotFound) => return Err(CommandError::NoSuchKey),
             Err(err) => return Err(CommandError::Store(err)),
         };
+        let resp = store.dispatch_client_ctx.resp_protocol_version;
         let out = consumers
             .into_iter()
-            .map(stream_consumer_info_to_frame)
+            .map(|info| stream_consumer_info_to_frame(info, resp))
             .collect();
         return Ok(RespFrame::Array(Some(out)));
     }
@@ -6145,6 +6194,7 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         let Some(groups) = store.xinfo_groups(&argv[2], now_ms)? else {
             return Err(CommandError::NoSuchKey);
         };
+        let resp = store.dispatch_client_ctx.resp_protocol_version;
         let mut out = Vec::with_capacity(groups.len());
         for (name, consumers, pending, last_delivered_id) in groups {
             out.push(stream_group_info_to_frame(
@@ -6152,6 +6202,7 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                 consumers,
                 pending,
                 last_delivered_id,
+                resp,
             ));
         }
         return Ok(RespFrame::Array(Some(out)));
@@ -6248,9 +6299,10 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                 .ok()
                 .flatten()
                 .unwrap_or_default();
+            let resp_v = store.dispatch_client_ctx.resp_protocol_version;
             let consumer_frames: Vec<RespFrame> = consumers_info
                 .into_iter()
-                .map(stream_consumer_info_to_frame)
+                .map(|info| stream_consumer_info_to_frame(info, resp_v))
                 .collect();
             group_frames.push(RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"name".to_vec())),
