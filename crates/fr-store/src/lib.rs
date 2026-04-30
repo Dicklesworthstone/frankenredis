@@ -9869,10 +9869,14 @@ impl Store {
         // version + 8-byte CRC64) before parsing the body. The
         // empty-libraries marker is itself a valid envelope so it
         // round-trips through the same path. (br-frankenredis-r83v)
+        // Upstream cluster.c::verifyDumpPayload emits a single error
+        // "DUMP payload version or checksum are wrong" for any of:
+        // too-short envelope, version-newer-than-RDB_VERSION, or
+        // CRC64 mismatch. (br-frankenredis-ngn0)
         const FOOTER_LEN: usize = 10;
         if data.len() < FOOTER_LEN {
             return Err(StoreError::GenericError(
-                "ERR Invalid dump data".to_string(),
+                "ERR DUMP payload version or checksum are wrong".to_string(),
             ));
         }
         let footer_offset = data.len() - FOOTER_LEN;
@@ -17789,8 +17793,11 @@ mod tests {
                 "ERR DUMP payload version or checksum are wrong",
             ),
             (
+                // (br-frankenredis-ngn0) — upstream verifyDumpPayload
+                // emits the same DUMP-version/checksum error for the
+                // too-short-envelope branch.
                 "restore_truncated_below_footer.dump",
-                "ERR Invalid dump data",
+                "ERR DUMP payload version or checksum are wrong",
             ),
             (
                 "restore_inner_load_fails_missing_header.dump",

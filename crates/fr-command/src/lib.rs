@@ -7544,8 +7544,13 @@ fn function_cmd(
             Err(e) => Err(CommandError::Store(e)),
         }
     } else if sub.eq_ignore_ascii_case("FLUSH") {
+        // (br-frankenredis-ngn0) — upstream functions.c::functionsCommand
+        // emits the FLUSH-specific subcommand error, not a generic
+        // wrong-arity reply.
         if argv.len() > 3 {
-            return Err(CommandError::WrongArity("FUNCTION"));
+            return Err(CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments for 'FLUSH'. Try FUNCTION HELP.".to_string(),
+            ));
         }
         if argv.len() == 3 {
             let mode =
