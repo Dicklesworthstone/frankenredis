@@ -5953,21 +5953,40 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     };
 
     if sub.eq_ignore_ascii_case("CREATE") {
-        if argv.len() != 5 && argv.len() != 6 {
-            return Err(CommandError::WrongSubcommandArity {
-                command: "XGROUP",
-                subcommand: sub.to_string(),
-            });
-        }
-
-        let mkstream = if argv.len() == 6 {
-            if !eq_ascii_command(&argv[5], b"MKSTREAM") {
-                return Err(CommandError::SyntaxError);
-            }
-            true
-        } else {
-            false
+        // XGROUP CREATE key groupname id|$ [MKSTREAM] [ENTRIESREAD entries-read]
+        // Upstream xgroupCommand parses MKSTREAM and ENTRIESREAD as
+        // independent option tokens (in any order) and dispatches
+        // addReplySubcommandSyntaxError for any unrecognised tail.
+        // (br-frankenredis-xgroupcreate)
+        let create_subcommand_syntax = || {
+            CommandError::Custom(format!(
+                "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try XGROUP HELP."
+            ))
         };
+        if argv.len() < 5 {
+            return Err(create_subcommand_syntax());
+        }
+        let mut mkstream = false;
+        let mut i = 5;
+        while i < argv.len() {
+            if eq_ascii_command(&argv[i], b"MKSTREAM") {
+                mkstream = true;
+                i += 1;
+            } else if eq_ascii_command(&argv[i], b"ENTRIESREAD") {
+                if i + 1 >= argv.len() {
+                    return Err(create_subcommand_syntax());
+                }
+                // Upstream parses the entries-read value via
+                // getLongLongFromObjectOrReply ('value is not an
+                // integer or out of range' on bad input). The actual
+                // tracked value isn't yet stored in fr's xgroup model,
+                // so we currently validate but ignore it.
+                let _ = parse_i64_arg(&argv[i + 1])?;
+                i += 2;
+            } else {
+                return Err(create_subcommand_syntax());
+            }
+        }
 
         let start_id = if eq_ascii_command(&argv[4], b"$") {
             store.xlast_id(&argv[2], now_ms)?.unwrap_or((0, 0))
@@ -25113,13 +25132,15 @@ mod tests {
             0,
         )
         .expect_err("xgroup arity");
-        assert!(matches!(
+        // Upstream emits the addReplySubcommandSyntaxError wording
+        // for any unrecognised CREATE shape. (br-frankenredis-xgroupcreate)
+        assert_eq!(
             arity,
-            CommandError::WrongSubcommandArity {
-                command: "XGROUP",
-                ..
-            }
-        ));
+            CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments for 'CREATE'. Try XGROUP HELP."
+                    .to_string()
+            )
+        );
 
         store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
         let wrongtype = dispatch_argv(
