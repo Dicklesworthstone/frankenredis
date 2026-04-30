@@ -9977,11 +9977,15 @@ fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("LMPOP"));
     }
-    let numkeys_val = parse_i64_arg(&argv[1])?;
+    // (br-frankenredis-blmpcount) — upstream emits the same wording
+    // for both unparseable and non-positive numkeys/count values.
+    let bad_numkeys = || RespFrame::Error("ERR numkeys should be greater than 0".to_string());
+    let numkeys_val = match parse_i64_arg(&argv[1]) {
+        Ok(v) => v,
+        Err(_) => return Ok(bad_numkeys()),
+    };
     if numkeys_val <= 0 {
-        return Ok(RespFrame::Error(
-            "ERR numkeys should be greater than 0".to_string(),
-        ));
+        return Ok(bad_numkeys());
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     let keys_end = 2_usize.saturating_add(numkeys);
@@ -9996,6 +10000,7 @@ fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     } else {
         return Err(CommandError::SyntaxError);
     };
+    let bad_count = || RespFrame::Error("ERR count should be greater than 0".to_string());
     let mut count: usize = 1;
     let mut idx = keys_end + 1;
     if idx < argv.len() {
@@ -10004,11 +10009,12 @@ fn lmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             if idx >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            let val = parse_i64_arg(&argv[idx])?;
+            let val = match parse_i64_arg(&argv[idx]) {
+                Ok(v) => v,
+                Err(_) => return Ok(bad_count()),
+            };
             if val <= 0 {
-                return Ok(RespFrame::Error(
-                    "ERR count should be greater than 0".to_string(),
-                ));
+                return Ok(bad_count());
             }
             count = usize::try_from(val).map_err(|_| CommandError::InvalidInteger)?;
         } else {
@@ -10051,11 +10057,14 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("ZMPOP"));
     }
-    let numkeys_val = parse_i64_arg(&argv[1])?;
+    // (br-frankenredis-blmpcount)
+    let bad_numkeys = || RespFrame::Error("ERR numkeys should be greater than 0".to_string());
+    let numkeys_val = match parse_i64_arg(&argv[1]) {
+        Ok(v) => v,
+        Err(_) => return Ok(bad_numkeys()),
+    };
     if numkeys_val <= 0 {
-        return Ok(RespFrame::Error(
-            "ERR numkeys should be greater than 0".to_string(),
-        ));
+        return Ok(bad_numkeys());
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     let keys_end = 2_usize.saturating_add(numkeys);
@@ -10070,6 +10079,7 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     } else {
         return Err(CommandError::SyntaxError);
     };
+    let bad_count = || RespFrame::Error("ERR count should be greater than 0".to_string());
     let mut count: usize = 1;
     let mut idx = keys_end + 1;
     if idx < argv.len() {
@@ -10078,9 +10088,12 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             if idx >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            let val = parse_i64_arg(&argv[idx])?;
+            let val = match parse_i64_arg(&argv[idx]) {
+                Ok(v) => v,
+                Err(_) => return Ok(bad_count()),
+            };
             if val <= 0 {
-                return Err(CommandError::SyntaxError);
+                return Ok(bad_count());
             }
             count = usize::try_from(val).map_err(|_| CommandError::InvalidInteger)?;
         } else {
@@ -15980,15 +15993,19 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("BLMPOP"));
     }
     let _deadline_ms = parse_blocking_deadline_seconds(&argv[1], now_ms)?;
-    let numkeys_val = parse_i64_arg(&argv[2])?;
+    // Upstream t_list.c::lmpopGenericCommand (used by both LMPOP
+    // and BLMPOP via blmpopCommand → lmpopGenericCommand) emits
+    // "numkeys should be greater than 0" through
+    // getRangeLongFromObjectOrReply for both unparseable and
+    // explicit-non-positive values. (br-frankenredis-04mo,
+    // br-frankenredis-blmpcount)
+    let bad_numkeys = || RespFrame::Error("ERR numkeys should be greater than 0".to_string());
+    let numkeys_val = match parse_i64_arg(&argv[2]) {
+        Ok(v) => v,
+        Err(_) => return Ok(bad_numkeys()),
+    };
     if numkeys_val <= 0 {
-        // Upstream t_list.c::lmpopGenericCommand (used by both LMPOP
-        // and BLMPOP via blmpopCommand → lmpopGenericCommand) emits
-        // "numkeys should be greater than 0" through
-        // getRangeLongFromObjectOrReply. (br-frankenredis-04mo)
-        return Ok(RespFrame::Error(
-            "ERR numkeys should be greater than 0".to_string(),
-        ));
+        return Ok(bad_numkeys());
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 3_usize.saturating_add(numkeys).saturating_add(1) {
@@ -16004,6 +16021,9 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     } else {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     };
+    // Upstream uses 'count should be greater than 0' for both
+    // unparseable and non-positive COUNT values.
+    let bad_count = || RespFrame::Error("ERR count should be greater than 0".to_string());
     let mut count: usize = 1;
     let mut idx = direction_idx + 1;
     while idx < argv.len() {
@@ -16013,11 +16033,12 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             if idx >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
-            let count_val = parse_i64_arg(&argv[idx])?;
+            let count_val = match parse_i64_arg(&argv[idx]) {
+                Ok(v) => v,
+                Err(_) => return Ok(bad_count()),
+            };
             if count_val <= 0 {
-                return Ok(RespFrame::Error(
-                    "ERR COUNT value of 0 is not allowed".to_string(),
-                ));
+                return Ok(bad_count());
             }
             count = usize::try_from(count_val).map_err(|_| CommandError::InvalidInteger)?;
         } else {
@@ -16173,11 +16194,14 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("BZMPOP"));
     }
     let _deadline_ms = parse_blocking_deadline_seconds(&argv[1], now_ms)?;
-    let numkeys_val = parse_i64_arg(&argv[2])?;
+    // (br-frankenredis-blmpcount)
+    let bad_numkeys = || RespFrame::Error("ERR numkeys should be greater than 0".to_string());
+    let numkeys_val = match parse_i64_arg(&argv[2]) {
+        Ok(v) => v,
+        Err(_) => return Ok(bad_numkeys()),
+    };
     if numkeys_val <= 0 {
-        return Ok(RespFrame::Error(
-            "ERR numkeys should be greater than 0".to_string(),
-        ));
+        return Ok(bad_numkeys());
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 3_usize.saturating_add(numkeys).saturating_add(1) {
@@ -16193,6 +16217,7 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     } else {
         return Ok(RespFrame::Error("ERR syntax error".to_string()));
     };
+    let bad_count = || RespFrame::Error("ERR count should be greater than 0".to_string());
     let mut count: usize = 1;
     let mut idx = direction_idx + 1;
     while idx < argv.len() {
@@ -16202,11 +16227,12 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             if idx >= argv.len() {
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
-            let count_val = parse_i64_arg(&argv[idx])?;
+            let count_val = match parse_i64_arg(&argv[idx]) {
+                Ok(v) => v,
+                Err(_) => return Ok(bad_count()),
+            };
             if count_val <= 0 {
-                return Ok(RespFrame::Error(
-                    "ERR COUNT value of 0 is not allowed".to_string(),
-                ));
+                return Ok(bad_count());
             }
             count = usize::try_from(count_val).map_err(|_| CommandError::InvalidInteger)?;
         } else {
