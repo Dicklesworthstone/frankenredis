@@ -12401,6 +12401,17 @@ fn eval_script_error_reply(script: &[u8], error: String) -> RespFrame {
         RespFrame::Error(format_eval_noscript_error(script))
     } else if error == READ_ONLY_SCRIPT_WRITE_ERROR {
         RespFrame::Error(format_eval_read_only_script_error(script))
+    } else if error.starts_with("unexpected symbol near ")
+        || error.starts_with("unexpected character ")
+        || error.contains("syntax error")
+    {
+        // Upstream script_lua.c uses
+        // "Error compiling script (new function): user_script:1:
+        //  <lua-message>" for parse-time errors. (br-frankenredis-fo1s)
+        let _ = script;
+        RespFrame::Error(format!(
+            "ERR Error compiling script (new function): user_script:1: {error}"
+        ))
     } else {
         RespFrame::Error(format!("ERR Error running script: {error}"))
     }

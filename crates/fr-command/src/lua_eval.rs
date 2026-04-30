@@ -759,7 +759,9 @@ impl<'a> Lexer<'a> {
                     self.pos += 1;
                     Ok(Token::TildeEq)
                 } else {
-                    Err("unexpected character '~'".to_string())
+                    // (br-frankenredis-fo1s) — match upstream Lua's
+                    // "unexpected symbol near '~'" wording.
+                    Err("unexpected symbol near '~'".to_string())
                 }
             }
             b'<' => {
@@ -812,7 +814,9 @@ impl<'a> Lexer<'a> {
             }
             _ => {
                 self.pos += 1;
-                Err(format!("unexpected character '{}'", b as char))
+                // (br-frankenredis-fo1s) — match upstream Lua's
+                // "unexpected symbol near '<char>'" wording.
+                Err(format!("unexpected symbol near '{}'", b as char))
             }
         }
     }
@@ -3592,6 +3596,15 @@ impl<'a> LuaState<'a> {
                     let err_msg = match e.to_resp() {
                         RespFrame::Error(msg) => msg,
                         _ => format!("{e:?}"),
+                    };
+                    // Upstream script_lua.c::luaRedisGenericCommand
+                    // rewrites the unknown-command surface from
+                    // dispatch into "Unknown Redis command called
+                    // from script" before bubbling up. (br-frankenredis-fo1s)
+                    let err_msg = if err_msg.starts_with("ERR unknown command ") {
+                        "Unknown Redis command called from script".to_string()
+                    } else {
+                        err_msg
                     };
                     Err(err_msg)
                 }
