@@ -8692,22 +8692,23 @@ impl Runtime {
         };
         if sub.eq_ignore_ascii_case("GET") {
             if argv.len() > 3 {
-                return CommandError::WrongSubcommandArity {
-                    command: "SLOWLOG",
-                    subcommand: "GET".to_string(),
-                }
-                .to_resp();
+                // Upstream slowlog.c::slowlogCommand emits the
+                // standard subcommand-arity wording for GET trailers.
+                // (br-frankenredis-slgary)
+                return RespFrame::Error(
+                    "ERR unknown subcommand or wrong number of arguments for 'GET'. Try SLOWLOG HELP.".to_string(),
+                );
             }
+            // Upstream uses 'count should be greater than or equal
+            // to -1' for both unparseable and explicit-< -1 counts.
+            // (br-frankenredis-slgcount)
+            let bad_count =
+                || RespFrame::Error("ERR count should be greater than or equal to -1".to_string());
             let count = if argv.len() == 3 {
                 match parse_i64_arg(&argv[2]) {
                     Ok(-1) => self.server.store.slowlog_len(),
                     Ok(c) if c >= 0 => c as usize,
-                    Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR count should be greater than or equal to -1".to_string(),
-                        );
-                    }
-                    Err(_) => return CommandError::InvalidInteger.to_resp(),
+                    _ => return bad_count(),
                 }
             } else {
                 10
@@ -14591,9 +14592,13 @@ mod tests {
             rt.execute_frame(command(&[b"SLOWLOG", b"GET", b"-2"]), 1),
             RespFrame::Error("ERR count should be greater than or equal to -1".to_string())
         );
+        // (br-frankenredis-slgary)
         assert_eq!(
             rt.execute_frame(command(&[b"SLOWLOG", b"GET", b"1", b"extra"]), 2),
-            RespFrame::Error("ERR wrong number of arguments for 'slowlog|get' command".to_string())
+            RespFrame::Error(
+                "ERR unknown subcommand or wrong number of arguments for 'GET'. Try SLOWLOG HELP."
+                    .to_string()
+            )
         );
         assert_eq!(
             rt.execute_frame(command(&[b"SLOWLOG", b"LEN", b"extra"]), 3),
