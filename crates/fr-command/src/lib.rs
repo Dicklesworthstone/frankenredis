@@ -11096,7 +11096,11 @@ fn command_matches_acl_category(name: &str, flags: &str, category: &str) -> bool
         "read" => flag_list.contains(&"readonly"),
         "write" => flag_list.contains(&"write"),
         "fast" => flag_list.contains(&"fast"),
-        "slow" => flag_list.contains(&"slow"),
+        // Upstream implicit "slow" category: any command lacking the
+        // 'fast' flag is automatically slow (commands.def assigns
+        // SLOW for everything except a small set of O(1) commands).
+        // (br-frankenredis-ifuw)
+        "slow" => !flag_list.contains(&"fast"),
         "admin" => flag_list.contains(&"admin"),
         "pubsub" => flag_list.contains(&"pubsub"),
         "scripting" => flag_list.contains(&"scripting"),
