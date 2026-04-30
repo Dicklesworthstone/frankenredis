@@ -1587,6 +1587,23 @@ fn eq_ascii_token(lhs: &[u8], rhs: &[u8]) -> bool {
     lhs.eq_ignore_ascii_case(rhs)
 }
 
+/// Mirror upstream networking.c::addReplySubcommandSyntaxError for
+/// ACL subcommands whose handlers fall through (commands.def arity
+/// is variadic: -2). Uses the user-typed subcommand casing and an
+/// uppercased parent command, capped at 128 bytes per upstream's
+/// `%.128s` format. (br-frankenredis-aclsyntax)
+fn acl_subcommand_syntax_error(argv: &[Vec<u8>]) -> RespFrame {
+    let sub_raw: &[u8] = argv.get(1).map(Vec::as_slice).unwrap_or(b"");
+    let mut sub_bytes = sub_raw.to_vec();
+    if sub_bytes.len() > 128 {
+        sub_bytes.truncate(128);
+    }
+    let sub_display = String::from_utf8_lossy(&sub_bytes).into_owned();
+    RespFrame::Error(format!(
+        "ERR unknown subcommand or wrong number of arguments for '{sub_display}'. Try ACL HELP."
+    ))
+}
+
 #[allow(dead_code)]
 fn increment_run_id_hex(current: &str) -> String {
     let parsed = u128::from_str_radix(current, 16).unwrap_or(0);
@@ -6214,11 +6231,8 @@ impl Runtime {
                 RespFrame::Error(format!("ERR Unknown category '{cat}'"))
             }
         } else {
-            CommandError::WrongSubcommandArity {
-                command: "ACL",
-                subcommand: "CAT".to_string(),
-            }
-            .to_resp()
+            // (br-frankenredis-aclsyntax)
+            acl_subcommand_syntax_error(argv)
         }
     }
 
@@ -6326,11 +6340,12 @@ impl Runtime {
                 self.acl_log_entries_response(Some(count), now_ms)
             }
         } else {
-            CommandError::WrongSubcommandArity {
-                command: "ACL",
-                subcommand: "LOG".to_string(),
-            }
-            .to_resp()
+            // Upstream's commands.def declares ACL with arity = -2,
+            // so any extra args land in the aclCommand fallthrough
+            // which calls addReplySubcommandSyntaxError, NOT the
+            // standard "wrong number of arguments for 'acl|log'
+            // command" wording. (br-frankenredis-aclsyntax)
+            acl_subcommand_syntax_error(argv)
         }
     }
 
