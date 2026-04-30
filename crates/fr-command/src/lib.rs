@@ -10044,8 +10044,7 @@ fn parse_zset_algebra_options(
             // Upstream t_zset.c::zunionInterDiffGenericCommand emits
             // "ERR weight value is not a float" for both
             // unparseable and NaN weights. (br-frankenredis-uczv)
-            let bad_weight =
-                || CommandError::Custom("ERR weight value is not a float".to_string());
+            let bad_weight = || CommandError::Custom("ERR weight value is not a float".to_string());
             for slot in weights.iter_mut().take(numkeys) {
                 let w = std::str::from_utf8(&argv[i])
                     .map_err(|_| bad_weight())?
@@ -14402,9 +14401,8 @@ fn zintercard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             // a non-negative long-long and emits "ERR LIMIT can't be
             // negative" for both negative integers and non-numeric
             // arguments. (br-frankenredis-uczv)
-            let parsed = parse_i64_arg(&argv[idx]).map_err(|_| {
-                CommandError::Custom("ERR LIMIT can't be negative".to_string())
-            })?;
+            let parsed = parse_i64_arg(&argv[idx])
+                .map_err(|_| CommandError::Custom("ERR LIMIT can't be negative".to_string()))?;
             if parsed < 0 {
                 return Err(CommandError::Custom(
                     "ERR LIMIT can't be negative".to_string(),
