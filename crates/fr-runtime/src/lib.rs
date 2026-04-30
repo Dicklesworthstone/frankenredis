@@ -8415,9 +8415,18 @@ impl Runtime {
                     };
 
                     if opt.eq_ignore_ascii_case("ID") && i + 1 < argv.len() {
+                        // Upstream networking.c::clientCommand uses
+                        // getLongLongFromObjectOrReply with the message
+                        // "client-id should be greater than 0" for the
+                        // ID arg, covering both unparseable and <=0
+                        // values. (br-frankenredis-clkill)
                         let id = match parse_i64_arg(&argv[i + 1]) {
                             Ok(id) if id > 0 => id as u64,
-                            _ => return RespFrame::Error("ERR Invalid client ID".to_string()),
+                            _ => {
+                                return RespFrame::Error(
+                                    "ERR client-id should be greater than 0".to_string(),
+                                );
+                            }
                         };
                         filter_id = Some(id);
                         i += 2;
@@ -8435,7 +8444,17 @@ impl Runtime {
                         filter_type = Some(kind);
                         i += 2;
                     } else if opt.eq_ignore_ascii_case("USER") && i + 1 < argv.len() {
-                        filter_user = Some(argv[i + 1].clone());
+                        // Upstream networking.c::clientCommand calls
+                        // ACLGetUserByName up-front and emits "No such
+                        // user '<name>'" when missing. (br-frankenredis-clkill)
+                        let user_arg = &argv[i + 1];
+                        if self.server.auth_state.get_user(user_arg).is_none() {
+                            return RespFrame::Error(format!(
+                                "ERR No such user '{}'",
+                                String::from_utf8_lossy(user_arg)
+                            ));
+                        }
+                        filter_user = Some(user_arg.clone());
                         i += 2;
                     } else if opt.eq_ignore_ascii_case("ADDR") && i + 1 < argv.len() {
                         let addr = match std::str::from_utf8(&argv[i + 1]) {
@@ -8449,14 +8468,15 @@ impl Runtime {
                             Ok(s) => s,
                             Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
                         };
+                        // Upstream's CLIENT KILL SKIPME branch falls
+                        // through to the generic syntaxerr (no
+                        // dedicated wording). (br-frankenredis-clkill)
                         if val.eq_ignore_ascii_case("yes") {
                             skipme = true;
                         } else if val.eq_ignore_ascii_case("no") {
                             skipme = false;
                         } else {
-                            return RespFrame::Error(
-                                "ERR argument must be 'yes' or 'no'".to_string(),
-                            );
+                            return RespFrame::Error("ERR syntax error".to_string());
                         }
                         i += 2;
                     } else {
