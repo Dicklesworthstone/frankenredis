@@ -6325,8 +6325,15 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
 }
 
 fn xrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 4 && argv.len() != 6 {
+    if argv.len() < 4 {
         return Err(CommandError::WrongArity("XRANGE"));
+    }
+    // Upstream t_stream.c::xrangeGenericCommand emits 'syntax error'
+    // (not wrong-arity) when the optional COUNT segment is malformed
+    // or the trailing args don't fit the expected pattern.
+    // (br-frankenredis-xrangearity)
+    if argv.len() != 4 && argv.len() != 6 {
+        return Err(CommandError::SyntaxError);
     }
 
     let start = match parse_stream_range_bound(&argv[2], true) {
@@ -6372,8 +6379,13 @@ fn xrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
 }
 
 fn xrevrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 4 && argv.len() != 6 {
+    if argv.len() < 4 {
         return Err(CommandError::WrongArity("XREVRANGE"));
+    }
+    // (br-frankenredis-xrangearity) — match upstream syntax-error
+    // wording for malformed COUNT trailer.
+    if argv.len() != 4 && argv.len() != 6 {
+        return Err(CommandError::SyntaxError);
     }
 
     let end = match parse_stream_range_bound(&argv[2], false) {
