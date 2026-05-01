@@ -5784,11 +5784,19 @@ fn xautoclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         return Err(CommandError::WrongArity("XAUTOCLAIM"));
     }
 
-    let min_idle_raw = parse_i64_arg(&argv[4])?;
-    if min_idle_raw < 0 {
-        return Err(CommandError::InvalidInteger);
-    }
-    let min_idle_time_ms = u64::try_from(min_idle_raw).unwrap_or(u64::MAX);
+    // Upstream t_stream.c::xautoclaimCommand parses min-idle-time
+    // via getLongLongFromObjectOrReply with the dedicated wording
+    // 'Invalid min-idle-time argument for XAUTOCLAIM'. Negative
+    // values are rejected. (br-frankenredis-xautoclaim)
+    let min_idle_raw = parse_i64_arg(&argv[4]).map_err(|_| {
+        CommandError::Custom("ERR Invalid min-idle-time argument for XAUTOCLAIM".to_string())
+    })?;
+    // Upstream silently clamps negative min-idle-time to 0.
+    let min_idle_time_ms = if min_idle_raw < 0 {
+        0
+    } else {
+        u64::try_from(min_idle_raw).unwrap_or(u64::MAX)
+    };
 
     let start = match parse_stream_id(&argv[5]) {
         Ok(id) => id,
@@ -5801,11 +5809,16 @@ fn xautoclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     while idx < argv.len() {
         if eq_ascii_command(&argv[idx], b"COUNT") {
             if idx + 1 >= argv.len() {
-                return Err(CommandError::WrongArity("XAUTOCLAIM"));
+                return Err(CommandError::SyntaxError);
             }
-            let parsed = parse_i64_arg(&argv[idx + 1])?;
+            // Upstream uses getRangeLongFromObjectOrReply that
+            // returns 'COUNT must be > 0' for any non-positive or
+            // unparseable value. (br-frankenredis-xautoclaim)
+            let bad_count =
+                || CommandError::Custom("ERR COUNT must be > 0".to_string());
+            let parsed = parse_i64_arg(&argv[idx + 1]).map_err(|_| bad_count())?;
             if parsed <= 0 {
-                return Err(CommandError::InvalidInteger);
+                return Err(bad_count());
             }
             count = usize::try_from(parsed).unwrap_or(usize::MAX);
             idx += 2;
@@ -24465,7 +24478,12 @@ mod tests {
             0,
         )
         .expect_err("xautoclaim invalid count");
-        assert_eq!(invalid_count, CommandError::InvalidInteger);
+        // Upstream uses 'COUNT must be > 0' for any non-positive
+        // or unparseable COUNT value. (br-frankenredis-xautoclaim)
+        assert_eq!(
+            invalid_count,
+            CommandError::Custom("ERR COUNT must be > 0".to_string())
+        );
 
         let xclaim_missing = dispatch_argv(
             &[
