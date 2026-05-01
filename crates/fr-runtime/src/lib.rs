@@ -7133,8 +7133,16 @@ impl Runtime {
     }
 
     fn handle_config_set(&mut self, argv: &[Vec<u8>]) -> RespFrame {
-        if argv.len() < 4 || !argv.len().is_multiple_of(2) {
+        // Upstream commands.def declares CONFIG SET with arity = -4
+        // (CONFIG + SET + parameter + value, ≥ 4 args). Beyond that
+        // upstream's pair-walker emits 'syntax error' for any odd
+        // tail count rather than the WrongSubcommandArity wording.
+        // (br-frankenredis-confsetary)
+        if argv.len() < 4 {
             return config_wrong_subcommand_arity("SET");
+        }
+        if !argv.len().is_multiple_of(2) {
+            return CommandError::SyntaxError.to_resp();
         }
 
         let mut next_requirepass: Option<Option<Vec<u8>>> = None;
