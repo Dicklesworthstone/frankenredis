@@ -128,6 +128,10 @@ __pycache__/
 /lua_test
 /lua_test[0-9]*
 
+# Stdout dumps from `redis-cli ACL ... > password`-style shell redirection
+# during local testing — never source content.
+/password
+
 # Bug scanner output (SARIF / extra reports not covered above)
 ubs.sarif
 ubs_*.txt
