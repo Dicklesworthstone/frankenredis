@@ -1731,6 +1731,18 @@ impl<'a> LuaState<'a> {
             LuaValue::Str(b"debug".to_vec()),
             LuaValue::RustFunction("redis.debug".to_string()),
         );
+        // Upstream script_lua.c registers `setresp` and
+        // `acl_check_cmd` even though their effects are largely
+        // no-ops in standalone mode — clients still expect them
+        // to validate their arguments. (br-frankenredis-redislua)
+        redis_table.set(
+            LuaValue::Str(b"setresp".to_vec()),
+            LuaValue::RustFunction("redis.setresp".to_string()),
+        );
+        redis_table.set(
+            LuaValue::Str(b"acl_check_cmd".to_vec()),
+            LuaValue::RustFunction("redis.acl_check_cmd".to_string()),
+        );
         redis_table.set(LuaValue::Str(b"LOG_DEBUG".to_vec()), LuaValue::Number(0.0));
         redis_table.set(
             LuaValue::Str(b"LOG_VERBOSE".to_vec()),
@@ -2511,7 +2523,15 @@ impl<'a> LuaState<'a> {
                 })])
             }
             "redis.log" => {
-                // Silently ignore log calls
+                // Upstream script_lua.c::luaLogCommand requires
+                // (level, msg [, msg2 …]) — at least two args, with
+                // the first arg numeric. (br-frankenredis-redislog)
+                if args.len() < 2 {
+                    return Err("redis.log() requires two arguments or more.".to_string());
+                }
+                if !matches!(args[0], LuaValue::Number(_)) {
+                    return Err("First argument must be a number (log level).".to_string());
+                }
                 Ok(vec![LuaValue::Nil])
             }
             "redis.replicate_commands" => {
@@ -2539,6 +2559,54 @@ impl<'a> LuaState<'a> {
             "redis.breakpoint" => {
                 // Redis returns false when the Lua debugger is inactive.
                 Ok(vec![LuaValue::Bool(false)])
+            }
+            "redis.setresp" => {
+                // Upstream script_lua.c::luaSetRespCommand requires
+                // exactly one numeric argument; the value must be 2 or
+                // 3. (br-frankenredis-redislua)
+                if args.len() != 1 {
+                    return Err("redis.setresp() requires one argument.".to_string());
+                }
+                let Some(version) = args[0].to_number() else {
+                    return Err("RESP version must be 2 or 3.".to_string());
+                };
+                if !version.is_finite() || version.fract() != 0.0 {
+                    return Err("RESP version must be 2 or 3.".to_string());
+                }
+                let v = version as i64;
+                if v != 2 && v != 3 {
+                    return Err("RESP version must be 2 or 3.".to_string());
+                }
+                // fr's per-script RESP propagation isn't tracked on
+                // the LuaState today; the command's effect on reply
+                // shape is a no-op for now but the validation matches
+                // upstream so client error wording is correct.
+                Ok(vec![LuaValue::Nil])
+            }
+            "redis.acl_check_cmd" => {
+                // Upstream script_lua.c::luaRedisAclCheckCmdCommand
+                // requires at least one string argument (the command
+                // name); rejects unknown commands. (br-frankenredis-redislua)
+                if args.is_empty() {
+                    return Err(
+                        "Please specify at least one argument for this redis lib call".to_string(),
+                    );
+                }
+                let cmd_bytes = match &args[0] {
+                    LuaValue::Str(b) => b.clone(),
+                    _ => {
+                        return Err(
+                            "Lua redis lib command arguments must be strings or integers"
+                                .to_string(),
+                        );
+                    }
+                };
+                if !crate::is_known_command(&cmd_bytes) {
+                    return Err("Invalid command passed to redis.acl_check_cmd()".to_string());
+                }
+                // Standalone mode without per-call ACL gating: assume
+                // the command is allowed.
+                Ok(vec![LuaValue::Bool(true)])
             }
             "redis.debug" => {
                 // Redis emits debugger console output only when the Lua debugger is active.
