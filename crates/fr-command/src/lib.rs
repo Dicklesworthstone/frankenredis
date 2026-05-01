@@ -5491,8 +5491,13 @@ fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     idx += 1;
 
     let tail = argv.len().saturating_sub(idx);
+    // Upstream t_stream.c::xreadCommand emits the dedicated
+    // 'Unbalanced ... list of streams' error when the trailing
+    // STREAMS arg count is not even or is empty. (br-frankenredis-xreadbal)
     if tail < 2 || !tail.is_multiple_of(2) {
-        return Err(CommandError::WrongArity("XREAD"));
+        return Err(CommandError::Custom(
+            "ERR Unbalanced 'xread' list of streams: for each stream key an ID or '$' must be specified.".to_string(),
+        ));
     }
     let stream_count = tail / 2;
     let keys = &argv[idx..idx + stream_count];
@@ -5587,8 +5592,11 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     idx += 1;
 
     let tail = argv.len().saturating_sub(idx);
+    // (br-frankenredis-xreadbal)
     if tail < 2 || !tail.is_multiple_of(2) {
-        return Err(CommandError::WrongArity("XREADGROUP"));
+        return Err(CommandError::Custom(
+            "ERR Unbalanced 'xreadgroup' list of streams: for each stream key an ID or '$' must be specified.".to_string(),
+        ));
     }
     let stream_count = tail / 2;
     let keys = &argv[idx..idx + stream_count];
@@ -23298,7 +23306,15 @@ mod tests {
             0,
         )
         .expect_err("xread mismatched keys/ids");
-        assert!(matches!(arity, CommandError::WrongArity("XREAD")));
+        // Upstream emits the dedicated 'Unbalanced ...' error for
+        // XREAD STREAMS with an odd number of trailing tokens.
+        // (br-frankenredis-xreadbal)
+        assert_eq!(
+            arity,
+            CommandError::Custom(
+                "ERR Unbalanced 'xread' list of streams: for each stream key an ID or '$' must be specified.".to_string()
+            )
+        );
 
         store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
         let wrongtype = dispatch_argv(
@@ -23649,7 +23665,13 @@ mod tests {
             0,
         )
         .expect_err("xreadgroup keys/ids mismatch");
-        assert!(matches!(arity, CommandError::WrongArity("XREADGROUP")));
+        // (br-frankenredis-xreadbal)
+        assert_eq!(
+            arity,
+            CommandError::Custom(
+                "ERR Unbalanced 'xreadgroup' list of streams: for each stream key an ID or '$' must be specified.".to_string()
+            )
+        );
 
         store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
         let wrongtype = dispatch_argv(
