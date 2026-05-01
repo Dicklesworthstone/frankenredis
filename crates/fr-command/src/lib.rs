@@ -15159,8 +15159,8 @@ fn eval_cmd(
         }));
     }
     let script = &argv[1];
-    if let Some(msg) = script_shebang_invalid_error(script) {
-        return Ok(RespFrame::Error(msg.to_string()));
+    if let Err(msg) = script_shebang_invalid_error(script) {
+        return Ok(RespFrame::Error(msg));
     }
     let (_numkeys, keys, args) = parse_eval_args(argv)?;
     if store.script_nesting_level >= 1 {
@@ -15248,18 +15248,53 @@ fn script_shebang_has_no_writes_flag(script: &[u8]) -> bool {
     script_shebang_line_has_no_writes(&script[..first_line_end])
 }
 
-/// Mirror upstream eval.c::evalExtractShebangFlags's invalid-shebang
-/// branch: if the script body starts with '#!' but the first line is
-/// not terminated by a newline, the shebang is malformed and EVAL
-/// must reject before parsing any flags. (br-frankenredis-shebang)
-fn script_shebang_invalid_error(script: &[u8]) -> Option<&'static str> {
+/// Mirror upstream eval.c::evalExtractShebangFlags. Returns `Ok(())`
+/// when the shebang is absent or valid, `Err(msg)` with the upstream
+/// wording when the shebang is malformed. (br-frankenredis-shebang)
+fn script_shebang_invalid_error(script: &[u8]) -> Result<(), String> {
     if !script.starts_with(b"#!") {
-        return None;
+        return Ok(());
     }
-    if !script.contains(&b'\n') {
-        return Some("ERR Invalid script shebang");
+    let Some(line_end) = script.iter().position(|&b| b == b'\n') else {
+        return Err("ERR Invalid script shebang".to_string());
+    };
+    let line = &script[..line_end];
+    let mut tokens = line.split(|&b| b == b' ' || b == b'\t').filter(|t| !t.is_empty());
+    let Some(engine) = tokens.next() else {
+        return Err("ERR Invalid engine in script shebang".to_string());
+    };
+    if engine != b"#!lua" {
+        return Err(format!(
+            "ERR Unexpected engine in script shebang: {}",
+            String::from_utf8_lossy(engine)
+        ));
     }
-    None
+    // Known scripts_flags_def from eval.c: no-writes, allow-oom,
+    // allow-stale, no-cluster, allow-cross-slot-keys.
+    const KNOWN_FLAGS: &[&str] = &[
+        "no-writes",
+        "allow-oom",
+        "allow-stale",
+        "no-cluster",
+        "allow-cross-slot-keys",
+    ];
+    for token in tokens {
+        let token_str = String::from_utf8_lossy(token);
+        // Upstream EVAL only recognises `flags=...`; FUNCTION LOAD's
+        // `name=...` is rejected here. (br-frankenredis-shebang)
+        let Some(flags_csv) = token_str.strip_prefix("flags=") else {
+            return Err(format!("ERR Unknown lua shebang option: {token_str}"));
+        };
+        for flag in flags_csv.split(',') {
+            if flag.is_empty() {
+                continue;
+            }
+            if !KNOWN_FLAGS.contains(&flag) {
+                return Err(format!("ERR Unexpected flag in script shebang: {flag}"));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn script_shebang_line_has_no_writes(line: &[u8]) -> bool {
@@ -31195,7 +31230,11 @@ mod tests {
     fn eval_with_shebang_combined_flags_honours_no_writes() {
         let mut store = Store::new();
         // Multiple flags including `no-writes` must still gate.
-        let script = b"#!lua name=mylib flags=allow-stale,no-writes,allow-oom\nreturn redis.call('SET','shebang_combo','v')";
+        // Upstream EVAL only accepts `flags=...` shebang options;
+        // `name=...` is reserved for FUNCTION LOAD and rejected
+        // by EVAL with 'Unknown lua shebang option'.
+        // (br-frankenredis-shebang)
+        let script = b"#!lua flags=allow-stale,no-writes,allow-oom\nreturn redis.call('SET','shebang_combo','v')";
         let out = dispatch_argv(
             &[b"EVAL".to_vec(), script.to_vec(), b"0".to_vec()],
             &mut store,
