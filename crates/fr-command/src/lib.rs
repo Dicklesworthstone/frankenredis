@@ -16148,13 +16148,23 @@ fn bitfield_parse_encoding(arg: &[u8]) -> Option<(bool, u8)> {
 
 /// Parse a BITFIELD offset like "100" (plain bit offset) or "#5" (type-aligned offset).
 fn bitfield_parse_offset(arg: &[u8], bits: u8) -> Option<u64> {
+    // Upstream bitops.c::getBitOffsetFromArgument enforces
+    // (offset >> 3) < proto_max_bulk_len (default 512 MiB), i.e.
+    // bit-offsets must stay below 2^32. The #N hash form multiplies
+    // by `bits` first, then applies the same cap.
+    // (br-frankenredis-bitfieldoff)
+    const MAX_BIT_OFFSET_EXCLUSIVE: u64 = 512 * 1024 * 1024 * 8;
     let s = std::str::from_utf8(arg).ok()?;
-    if let Some(rest) = s.strip_prefix('#') {
+    let offset = if let Some(rest) = s.strip_prefix('#') {
         let n: u64 = rest.parse().ok()?;
-        Some(n.checked_mul(u64::from(bits))?)
+        n.checked_mul(u64::from(bits))?
     } else {
-        s.parse::<u64>().ok()
+        s.parse::<u64>().ok()?
+    };
+    if offset >= MAX_BIT_OFFSET_EXCLUSIVE {
+        return None;
     }
+    Some(offset)
 }
 
 /// Sign-extend a value from `bits` width to i64.
