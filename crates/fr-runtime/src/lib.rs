@@ -14160,13 +14160,14 @@ mod tests {
     #[test]
     fn client_caching_requires_tracking_modes_matching_redis() {
         let mut rt = Runtime::default_strict();
-        // Upstream emits the mode-specific reply even when tracking
-        // is disabled outright. (br-frankenredis-w579)
+        // Upstream emits the dedicated 'tracking mode with OPTIN or
+        // OPTOUT' wording when tracking is disabled, then the per-mode
+        // reply once tracking is on but in the wrong mode.
+        // (br-frankenredis-cachemode)
         assert_eq!(
             rt.execute_frame(command(&[b"CLIENT", b"CACHING", b"YES"]), 1),
             RespFrame::Error(
-                "ERR CLIENT CACHING YES is only valid when tracking is enabled in OPTIN mode."
-                    .to_string()
+                "ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled".to_string()
             )
         );
         assert_eq!(

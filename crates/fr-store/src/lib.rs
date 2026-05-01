@@ -1271,6 +1271,11 @@ pub struct Store {
     pub server_pid: u32,
     /// Server TCP port.
     pub server_port: u16,
+    /// Wall-clock millisecond timestamp when this Store was created.
+    /// Used by INFO server's `uptime_in_seconds` to compute time
+    /// since process startup (not the absolute timestamp).
+    /// (br-frankenredis-uptime)
+    pub server_start_ms: u64,
     /// Total number of commands processed since server start.
     pub stat_total_commands_processed: u64,
     /// Total number of connections received since server start.
@@ -1479,6 +1484,10 @@ impl Default for Store {
             cluster_shard_id: generate_run_id(),
             server_pid: std::process::id(),
             server_port: 6379,
+            server_start_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
             stat_total_commands_processed: 0,
             stat_total_connections_received: 0,
             stat_connected_clients: 0,

@@ -10647,7 +10647,11 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             "server_time_usec:{}\r\n",
             now_ms.saturating_mul(1000)
         ));
-        let uptime_s = now_ms / 1000;
+        // Upstream INFO server's uptime_in_seconds reports
+        // (now - server_start), not the absolute now. fr's old
+        // expression `now_ms / 1000` accidentally returned the
+        // Unix timestamp. (br-frankenredis-uptime)
+        let uptime_s = now_ms.saturating_sub(store.server_start_ms) / 1000;
         info.push_str(&format!("uptime_in_seconds:{uptime_s}\r\n"));
         info.push_str(&format!("uptime_in_days:{}\r\n", uptime_s / 86400));
         info.push_str(&format!("hz:{}\r\n", store.server_hz));
