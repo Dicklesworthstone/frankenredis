@@ -14356,9 +14356,15 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     } else {
         let sub_str =
             std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        // Vendored Redis 7.2.4 emits the simpler 'unknown subcommand
+        // '<X>'. Try MEMORY HELP.' wording for an unknown MEMORY
+        // subcommand (preserving the user-typed casing). The verbose
+        // 'unknown subcommand or wrong number of arguments for'
+        // wording is reserved for command families whose subcommand
+        // handlers use addReplySubcommandSyntaxError.
+        // (br-frankenredis-memunknown)
         Ok(RespFrame::Error(format!(
-            "ERR Unknown subcommand or wrong number of arguments for '{}'. Try MEMORY HELP.",
-            sub_str.to_ascii_lowercase()
+            "ERR unknown subcommand '{sub_str}'. Try MEMORY HELP."
         )))
     }
 }
