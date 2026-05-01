@@ -7218,13 +7218,15 @@ fn cluster_cmd(
     }
     if sub.eq_ignore_ascii_case("FAILOVER") {
         // CLUSTER FAILOVER [FORCE | TAKEOVER]+ — upstream accepts
-        // either or both flags in any order, so allow up to two
-        // trailing modifiers. (br-frankenredis-nzaw)
-        if argv.len() > 4 {
-            return Err(cluster_wrong_subcommand_arity(sub));
-        }
+        // either or both flags in any order. The cluster-enabled
+        // gate fires BEFORE any subcommand-level arity / option
+        // parsing, so excess args still yield 'cluster support
+        // disabled' in standalone mode. (br-frankenredis-clusterord)
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
+        }
+        if argv.len() > 4 {
+            return Err(cluster_wrong_subcommand_arity(sub));
         }
         for flag in &argv[2..] {
             let flag_str =
