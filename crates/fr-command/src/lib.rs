@@ -10490,8 +10490,9 @@ fn zunionstore(
         return Err(CommandError::InvalidInteger);
     }
     if numkeys_val == 0 {
+        // (br-frankenredis-zsetinput)
         return Ok(RespFrame::Error(
-            "ERR at least 1 input key is needed for ZUNIONSTORE/ZINTERSTORE".to_string(),
+            "ERR at least 1 input key is needed for 'zunionstore' command".to_string(),
         ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
@@ -10520,8 +10521,9 @@ fn zinterstore(
         return Err(CommandError::InvalidInteger);
     }
     if numkeys_val == 0 {
+        // (br-frankenredis-zsetinput)
         return Ok(RespFrame::Error(
-            "ERR at least 1 input key is needed for ZUNIONSTORE/ZINTERSTORE".to_string(),
+            "ERR at least 1 input key is needed for 'zinterstore' command".to_string(),
         ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
@@ -14834,8 +14836,14 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Err(CommandError::WrongArity("ZDIFF"));
     }
     let numkeys_val = parse_i64_arg(&argv[1])?;
+    // Upstream t_zset.c::zsetCommandGenericZdiffstore /
+    // genericZdiffCommand emit the dedicated 'at least 1 input key
+    // is needed for <cmd> command' wording when numkeys <= 0.
+    // (br-frankenredis-zsetinput)
     if numkeys_val <= 0 {
-        return Err(CommandError::InvalidInteger);
+        return Err(CommandError::Custom(
+            "ERR at least 1 input key is needed for 'zdiff' command".to_string(),
+        ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 2_usize.saturating_add(numkeys) {
@@ -14889,8 +14897,11 @@ fn zdiffstore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     }
     let dest = &argv[1];
     let numkeys_val = parse_i64_arg(&argv[2])?;
+    // (br-frankenredis-zsetinput)
     if numkeys_val <= 0 {
-        return Err(CommandError::InvalidInteger);
+        return Err(CommandError::Custom(
+            "ERR at least 1 input key is needed for 'zdiffstore' command".to_string(),
+        ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 3_usize.saturating_add(numkeys) {
@@ -14930,8 +14941,11 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("ZINTER"));
     }
     let numkeys_val = parse_i64_arg(&argv[1])?;
+    // (br-frankenredis-zsetinput)
     if numkeys_val <= 0 {
-        return Err(CommandError::InvalidInteger);
+        return Err(CommandError::Custom(
+            "ERR at least 1 input key is needed for 'zinter' command".to_string(),
+        ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 2_usize.saturating_add(numkeys) {
@@ -14980,8 +14994,11 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         return Err(CommandError::WrongArity("ZUNION"));
     }
     let numkeys_val = parse_i64_arg(&argv[1])?;
+    // (br-frankenredis-zsetinput)
     if numkeys_val <= 0 {
-        return Err(CommandError::InvalidInteger);
+        return Err(CommandError::Custom(
+            "ERR at least 1 input key is needed for 'zunion' command".to_string(),
+        ));
     }
     let numkeys = usize::try_from(numkeys_val).map_err(|_| CommandError::InvalidInteger)?;
     if argv.len() < 2_usize.saturating_add(numkeys) {
