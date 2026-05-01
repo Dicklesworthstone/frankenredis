@@ -14212,11 +14212,18 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     }
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if sub.eq_ignore_ascii_case("USAGE") {
-        if argv.len() < 3 || argv.len() > 5 {
+        // Upstream commands.def declares MEMORY USAGE with arity = -3
+        // (≥ 3 args). The trailing-args branch in object.c::memoryCommand
+        // emits 'syntax error' rather than the WrongSubcommandArity
+        // wording. (br-frankenredis-memusage)
+        if argv.len() < 3 {
             return Err(CommandError::WrongSubcommandArity {
                 command: "MEMORY",
                 subcommand: "USAGE".to_string(),
             });
+        }
+        if argv.len() > 5 {
+            return Err(CommandError::SyntaxError);
         }
         // Optional SAMPLES count (ignored, we do full scan)
         if argv.len() > 3 {
