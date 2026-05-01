@@ -3665,7 +3665,16 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     if incr {
         let score_delta = parse_f64_arg(&argv[i])?;
         let member = argv[i + 1].clone();
-        match store.zincrby_with_options(&argv[1], member, score_delta, opts, now_ms)? {
+        let result = store
+            .zincrby_with_options(&argv[1], member, score_delta, opts, now_ms)
+            .map_err(|e| match e {
+                // (br-frankenredis-zinaN)
+                StoreError::IncrFloatNaN => CommandError::Custom(
+                    "ERR resulting score is not a number (NaN)".to_string(),
+                ),
+                other => other.into(),
+            })?;
+        match result {
             Some(new_score) => Ok(RespFrame::BulkString(Some(
                 new_score.to_string().into_bytes(),
             ))),
@@ -3987,7 +3996,18 @@ fn zincrby(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         return Err(CommandError::WrongArity("ZINCRBY"));
     }
     let delta = parse_f64_arg(&argv[2])?;
-    let new_score = store.zincrby(&argv[1], argv[3].clone(), delta, now_ms)?;
+    let new_score = store.zincrby(&argv[1], argv[3].clone(), delta, now_ms).map_err(|e| {
+        // Upstream t_zset.c uses 'resulting score is not a number
+        // (NaN)' for any zset increment that yields NaN, distinct
+        // from INCRBYFLOAT's 'increment would produce NaN or
+        // Infinity' wording. (br-frankenredis-zinaN)
+        match e {
+            StoreError::IncrFloatNaN => CommandError::Custom(
+                "ERR resulting score is not a number (NaN)".to_string(),
+            ),
+            other => other.into(),
+        }
+    })?;
     Ok(RespFrame::BulkString(Some(
         new_score.to_string().into_bytes(),
     )))
