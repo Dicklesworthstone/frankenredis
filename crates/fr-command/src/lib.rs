@@ -15938,7 +15938,7 @@ fn bitfield_cmd(
                 Some(v) => v,
                 None => {
                     return Ok(RespFrame::Error(
-                        "ERR Invalid bitfield type. Use something like i8 u8 i16 u16 i32 u32 i64 u63"
+                        "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
                             .to_string(),
                     ));
                 }
@@ -15964,7 +15964,7 @@ fn bitfield_cmd(
                 Some(v) => v,
                 None => {
                     return Ok(RespFrame::Error(
-                        "ERR Invalid bitfield type. Use something like i8 u8 i16 u16 i32 u32 i64 u63"
+                        "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
                             .to_string(),
                     ));
                 }
@@ -16000,7 +16000,7 @@ fn bitfield_cmd(
                 Some(v) => v,
                 None => {
                     return Ok(RespFrame::Error(
-                        "ERR Invalid bitfield type. Use something like i8 u8 i16 u16 i32 u32 i64 u63"
+                        "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
                             .to_string(),
                     ));
                 }
@@ -16085,7 +16085,7 @@ fn bitfield_ro_cmd(
                 Some(v) => v,
                 None => {
                     return Ok(RespFrame::Error(
-                        "ERR Invalid bitfield type. Use something like i8 u8 i16 u16 i32 u32 i64 u63"
+                        "ERR Invalid bitfield type. Use something like i16 u8. Note that u64 is not supported but i64 is."
                             .to_string(),
                     ));
                 }

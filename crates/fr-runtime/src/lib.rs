@@ -6238,15 +6238,22 @@ impl Runtime {
 
     fn handle_acl_genpass(&self, argv: &[Vec<u8>]) -> RespFrame {
         let bits = if argv.len() == 3 {
-            match parse_i64_arg(&argv[2]) {
-                Ok(b) if b > 0 && b <= 4096 => b as usize,
-                _ => {
-                    return RespFrame::Error(
-                        "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
-                            .to_string(),
-                    );
-                }
+            // Upstream acl.c::aclCommand parses GENPASS bits via
+            // getLongFromObjectOrReply (NULL msg → 'value is not
+            // an integer or out of range') THEN range-checks with
+            // the dedicated 'ACL GENPASS argument must be …' wording.
+            // (br-frankenredis-genpass)
+            let bits_raw = match parse_i64_arg(&argv[2]) {
+                Ok(b) => b,
+                Err(_) => return CommandError::InvalidInteger.to_resp(),
+            };
+            if bits_raw <= 0 || bits_raw > 4096 {
+                return RespFrame::Error(
+                    "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
+                        .to_string(),
+                );
             }
+            bits_raw as usize
         } else if argv.len() == 2 {
             256
         } else {
