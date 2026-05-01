@@ -13114,16 +13114,23 @@ pub fn validate_client_caching_mode(
     if !mode.eq_ignore_ascii_case("YES") && !mode.eq_ignore_ascii_case("NO") {
         return Err(CommandError::SyntaxError);
     }
-    // Upstream networking.c::clientSubcommand reports the
-    // mode-specific reply regardless of whether tracking is disabled
-    // or enabled-in-the-wrong-mode. (br-frankenredis-w579)
+    // Upstream networking.c::clientCommand splits the error wording:
+    // tracking disabled → 'CLIENT CACHING can be called only when
+    // the client is in tracking mode with OPTIN or OPTOUT mode
+    // enabled'; tracking enabled but wrong mode → the per-mode
+    // message. (br-frankenredis-cachemode)
+    if !tracking.enabled {
+        return Err(CommandError::Custom(
+            "ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled".to_string(),
+        ));
+    }
     if mode.eq_ignore_ascii_case("YES") {
-        if !tracking.enabled || !tracking.optin {
+        if !tracking.optin {
             return Err(CommandError::Custom(
                 CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string(),
             ));
         }
-    } else if !tracking.enabled || !tracking.optout {
+    } else if !tracking.optout {
         return Err(CommandError::Custom(
             CLIENT_CACHING_NO_REQUIRES_OPTOUT.to_string(),
         ));
@@ -36724,9 +36731,10 @@ mod tests {
 
     #[test]
     fn client_caching_requires_optin_or_optout_modes() {
-        // Upstream emits the mode-specific reply whether tracking
-        // is disabled entirely or enabled in the wrong mode.
-        // (br-frankenredis-w579)
+        // Upstream's tracking-disabled branch emits the dedicated
+        // 'tracking mode with OPTIN or OPTOUT' wording, then the
+        // per-mode reply once tracking is enabled in the wrong mode.
+        // (br-frankenredis-cachemode)
         let mut store = Store::new();
         assert_eq!(
             dispatch_argv(
@@ -36735,7 +36743,9 @@ mod tests {
                 0
             )
             .unwrap_err(),
-            CommandError::Custom(CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string())
+            CommandError::Custom(
+                "ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled".to_string()
+            )
         );
         dispatch_argv(
             &[b"CLIENT".to_vec(), b"TRACKING".to_vec(), b"ON".to_vec()],

@@ -8845,7 +8845,15 @@ impl Runtime {
     /// Mirrors Redis upstream `processCommand` which rejects DEBUG
     /// before any subcommand arity check when
     /// `server.enable_debug_command == 0`. (br-frankenredis-j29y)
-    fn handle_debug_command_gate(&self, _argv: &[Vec<u8>]) -> Option<RespFrame> {
+    fn handle_debug_command_gate(&self, argv: &[Vec<u8>]) -> Option<RespFrame> {
+        // Upstream server.c::processCommand checks commandCheckArity
+        // BEFORE the CMD_PROTECTED gate, so 'DEBUG' alone (argc=1)
+        // emits the standard 'wrong number of arguments for debug
+        // command' before the security message ever fires.
+        // (br-frankenredis-debugarity)
+        if argv.len() < 2 {
+            return Some(CommandError::WrongArity("DEBUG").to_resp());
+        }
         match self.server.enable_debug_command.as_str() {
             "yes" => None,
             // "local" is only meaningful when the connection's peer
