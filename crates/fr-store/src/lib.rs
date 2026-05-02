@@ -2572,10 +2572,12 @@ impl Store {
             self.dirty = self.dirty.saturating_add(1);
         }
 
-        self.internal_entries_insert(
-            key.to_vec(),
-            Entry::new(Value::String(bytes), expires_at_ms, now_ms),
-        );
+        // Upstream bitops.c::bitfieldGeneric routes SET/INCRBY
+        // through dbUnshareStringValue / dbAdd which always store
+        // values with raw encoding. (br-frankenredis-bitfieldenc)
+        let mut entry = Entry::new(Value::String(bytes), expires_at_ms, now_ms);
+        entry.force_raw_encoding = true;
+        self.internal_entries_insert(key.to_vec(), entry);
         Ok(old_value)
     }
 
