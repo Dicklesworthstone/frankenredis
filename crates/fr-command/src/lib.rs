@@ -16879,11 +16879,15 @@ fn restore_cmd(
         return Err(CommandError::WrongArity("RESTORE"));
     }
     let key = &argv[1];
-    let ttl_ms: u64 = parse_i64_arg(&argv[2]).map(|v| v.max(0) as u64)?;
     let payload = &argv[3];
-    // Parse options: REPLACE, ABSTTL, IDLETIME, FREQ
+    // Upstream cluster.c::restoreCommand parses options first
+    // (with full IDLETIME/FREQ value validation), then BUSYKEY,
+    // then TTL >= 0, then verifyDumpPayload last.
+    // (br-frankenredis-restoreorder)
     let mut replace = false;
     let mut absttl = false;
+    let mut idletime_seen = false;
+    let mut freq_seen = false;
     let mut i = 4;
     while i < argv.len() {
         let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -16893,12 +16897,54 @@ fn restore_cmd(
         } else if opt.eq_ignore_ascii_case("ABSTTL") {
             absttl = true;
             i += 1;
-        } else if opt.eq_ignore_ascii_case("IDLETIME") || opt.eq_ignore_ascii_case("FREQ") {
-            i += 2; // skip the value argument
+        } else if opt.eq_ignore_ascii_case("IDLETIME") {
+            // Upstream requires an additional arg AND that FREQ
+            // hasn't been seen yet; without those, falls through
+            // to the catch-all 'syntax error'.
+            if freq_seen || i + 1 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let v = parse_i64_arg(&argv[i + 1])?;
+            if v < 0 {
+                return Ok(RespFrame::Error(
+                    "ERR Invalid IDLETIME value, must be >= 0".to_string(),
+                ));
+            }
+            idletime_seen = true;
+            i += 2;
+        } else if opt.eq_ignore_ascii_case("FREQ") {
+            if idletime_seen || i + 1 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let v = parse_i64_arg(&argv[i + 1])?;
+            if !(0..=255).contains(&v) {
+                return Ok(RespFrame::Error(
+                    "ERR Invalid FREQ value, must be >= 0 and <= 255".to_string(),
+                ));
+            }
+            freq_seen = true;
+            i += 2;
         } else {
             return Err(CommandError::SyntaxError);
         }
     }
+    // Upstream reports BUSYKEY BEFORE payload validation. See
+    // legacy_redis_code/redis/src/cluster.c::restoreCommand which calls
+    // `lookupKeyWrite` + busy-key check before `verifyDumpPayload`.
+    // (br-frankenredis-ao1i)
+    if !replace && store.exists(key, now_ms) {
+        return Ok(RespFrame::Error(
+            "BUSYKEY Target key name already exists.".to_string(),
+        ));
+    }
+    // Upstream validates TTL >= 0 after BUSYKEY but before payload.
+    let ttl_signed = parse_i64_arg(&argv[2])?;
+    if ttl_signed < 0 {
+        return Ok(RespFrame::Error(
+            "ERR Invalid TTL value, must be >= 0".to_string(),
+        ));
+    }
+    let ttl_ms = ttl_signed as u64;
     // When ABSTTL is set, ttl_ms is an absolute Unix timestamp; convert to relative
     let effective_ttl = if absttl && ttl_ms > 0 {
         if ttl_ms <= now_ms {
@@ -16909,18 +16955,6 @@ fn restore_cmd(
     } else {
         ttl_ms
     };
-    // Upstream reports BUSYKEY BEFORE payload validation. See
-    // legacy_redis_code/redis/src/cluster.c::restoreCommand which calls
-    // `lookupKeyWrite` + busy-key check before `verifyDumpPayload`.
-    // Without this precedence, a RESTORE onto an existing key with a
-    // malformed payload emits "ERR DUMP payload version or checksum are
-    // wrong" where upstream would emit BUSYKEY.
-    // (br-frankenredis-ao1i)
-    if !replace && store.exists(key, now_ms) {
-        return Ok(RespFrame::Error(
-            "BUSYKEY Target key name already exists.".to_string(),
-        ));
-    }
     match store.restore_key(key, effective_ttl, payload, replace, now_ms) {
         Ok(()) => Ok(RespFrame::SimpleString("OK".to_string())),
         Err(StoreError::BusyKey) => Ok(RespFrame::Error(
