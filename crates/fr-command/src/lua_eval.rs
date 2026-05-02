@@ -3701,15 +3701,20 @@ impl<'a> LuaState<'a> {
                     // Upstream script_lua.c::luaRedisGenericCommand →
                     // scriptVerifyCommandArity rewrites unknown-command
                     // and wrong-arity surfaces into script-context
-                    // wording before bubbling up. (br-frankenredis-fo1s,
-                    // br-frankenredis-fdys)
+                    // wording before bubbling up. The rewritten string
+                    // keeps the 'ERR ' prefix so redis.pcall's .err
+                    // table preserves it; the redis.call wrapper at
+                    // lib.rs::script_error_with_context detects an
+                    // existing prefix and avoids double-stamping.
+                    // (br-frankenredis-fo1s, br-frankenredis-fdys,
+                    // br-frankenredis-pcallerr)
                     let err_msg = if err_msg.starts_with("ERR unknown command ") {
-                        "Unknown Redis command called from script".to_string()
+                        "ERR Unknown Redis command called from script".to_string()
                     } else if err_msg.starts_with("ERR wrong number of arguments")
                         || err_msg
                             .starts_with("ERR Unknown subcommand or wrong number of arguments")
                     {
-                        "Wrong number of args calling Redis command from script".to_string()
+                        "ERR Wrong number of args calling Redis command from script".to_string()
                     } else {
                         err_msg
                     };
