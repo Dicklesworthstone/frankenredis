@@ -2075,7 +2075,10 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         return Err(CommandError::WrongArity("SET"));
     }
 
-    // Expiry mode: at most one of EX/PX/EXAT/PXAT/KEEPTTL
+    // Expiry mode: at most one *kind* of EX/PX/EXAT/PXAT/KEEPTTL,
+    // but upstream t_string.c::parseExtendedStringArgumentsOrReply
+    // allows the same expiry-kind to be repeated (last value wins) —
+    // only different kinds conflict. (br-frankenredis-setdupex)
     enum ExpiryMode {
         None,
         Px(u64),
@@ -2094,7 +2097,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
         let option =
             std::str::from_utf8(option_arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if option.eq_ignore_ascii_case("PX") {
-            if !matches!(expiry_mode, ExpiryMode::None) {
+            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Px(_)) {
                 return Err(CommandError::SyntaxError);
             }
             let Some(ttl_arg) = options.next() else {
@@ -2102,7 +2105,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             };
             expiry_mode = ExpiryMode::Px(parse_set_expire_arg(ttl_arg)?);
         } else if option.eq_ignore_ascii_case("EX") {
-            if !matches!(expiry_mode, ExpiryMode::None) {
+            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Ex(_)) {
                 return Err(CommandError::SyntaxError);
             }
             let Some(seconds_arg) = options.next() else {
@@ -2110,7 +2113,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             };
             expiry_mode = ExpiryMode::Ex(parse_set_expire_arg(seconds_arg)?);
         } else if option.eq_ignore_ascii_case("PXAT") {
-            if !matches!(expiry_mode, ExpiryMode::None) {
+            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Pxat(_)) {
                 return Err(CommandError::SyntaxError);
             }
             let Some(ts_arg) = options.next() else {
@@ -2118,7 +2121,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             };
             expiry_mode = ExpiryMode::Pxat(parse_set_expire_arg(ts_arg)?);
         } else if option.eq_ignore_ascii_case("EXAT") {
-            if !matches!(expiry_mode, ExpiryMode::None) {
+            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Exat(_)) {
                 return Err(CommandError::SyntaxError);
             }
             let Some(ts_arg) = options.next() else {
@@ -2126,7 +2129,7 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             };
             expiry_mode = ExpiryMode::Exat(parse_set_expire_arg(ts_arg)?);
         } else if option.eq_ignore_ascii_case("KEEPTTL") {
-            if !matches!(expiry_mode, ExpiryMode::None) {
+            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::KeepTtl) {
                 return Err(CommandError::SyntaxError);
             }
             expiry_mode = ExpiryMode::KeepTtl;
