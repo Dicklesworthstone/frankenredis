@@ -8749,10 +8749,17 @@ impl Store {
         let len = result.len();
         self.stream_groups.remove(dest);
         self.stream_last_ids.remove(dest);
-        self.internal_entries_insert(
-            dest.to_vec(),
-            Entry::new(Value::String(result), None, now_ms),
-        );
+        // Upstream bitops.c::bitopCommand deletes the destination
+        // key when the result length is 0, rather than storing an
+        // empty string. (br-frankenredis-bitopempty)
+        if len == 0 {
+            self.entries.remove(dest);
+        } else {
+            self.internal_entries_insert(
+                dest.to_vec(),
+                Entry::new(Value::String(result), None, now_ms),
+            );
+        }
         self.dirty = self.dirty.saturating_add(1);
         Ok(len)
     }
