@@ -420,6 +420,8 @@ const KEY_FLAGS_RM_DELETE: &[&str] = &["RM", "delete"];
 const KEY_FLAGS_RW_ACCESS_DELETE: &[&str] = &["RW", "access", "delete"];
 const KEY_FLAGS_RW_INSERT: &[&str] = &["RW", "insert"];
 const KEY_FLAGS_RW_DELETE: &[&str] = &["RW", "delete"];
+const KEY_FLAGS_RW_UPDATE: &[&str] = &["RW", "update"];
+const KEY_FLAGS_RO: &[&str] = &["RO"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CommandKeyReference {
@@ -437,6 +439,25 @@ enum CommandKeyLookupError {
 
 fn command_uses_custom_key_specs(cmd_name: &str) -> bool {
     cmd_name.eq_ignore_ascii_case("APPEND")
+        || cmd_name.eq_ignore_ascii_case("HSET")
+        || cmd_name.eq_ignore_ascii_case("HSETNX")
+        || cmd_name.eq_ignore_ascii_case("HMSET")
+        || cmd_name.eq_ignore_ascii_case("LPUSH")
+        || cmd_name.eq_ignore_ascii_case("LPUSHX")
+        || cmd_name.eq_ignore_ascii_case("RPUSH")
+        || cmd_name.eq_ignore_ascii_case("RPUSHX")
+        || cmd_name.eq_ignore_ascii_case("SADD")
+        || cmd_name.eq_ignore_ascii_case("ZADD")
+        || cmd_name.eq_ignore_ascii_case("XADD")
+        || cmd_name.eq_ignore_ascii_case("XDEL")
+        || cmd_name.eq_ignore_ascii_case("XTRIM")
+        || cmd_name.eq_ignore_ascii_case("XLEN")
+        || cmd_name.eq_ignore_ascii_case("LLEN")
+        || cmd_name.eq_ignore_ascii_case("HLEN")
+        || cmd_name.eq_ignore_ascii_case("SCARD")
+        || cmd_name.eq_ignore_ascii_case("ZCARD")
+        || cmd_name.eq_ignore_ascii_case("STRLEN")
+        || cmd_name.eq_ignore_ascii_case("TYPE")
         || cmd_name.eq_ignore_ascii_case("BLPOP")
         || cmd_name.eq_ignore_ascii_case("BRPOP")
         || cmd_name.eq_ignore_ascii_case("BZPOPMIN")
@@ -755,6 +776,73 @@ fn command_key_references_with_exact_flags(
                 flags: KEY_FLAGS_RW_INSERT,
             },
         ]));
+    }
+
+    // Insert-style writes (LPUSH/RPUSH/LPUSHX/RPUSHX/SADD/HSETNX):
+    // RW/insert. (br-frankenredis-keyflagsupd3)
+    if cmd_name.eq_ignore_ascii_case("LPUSH")
+        || cmd_name.eq_ignore_ascii_case("RPUSH")
+        || cmd_name.eq_ignore_ascii_case("LPUSHX")
+        || cmd_name.eq_ignore_ascii_case("RPUSHX")
+        || cmd_name.eq_ignore_ascii_case("SADD")
+        || cmd_name.eq_ignore_ascii_case("HSETNX")
+    {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_INSERT,
+        }]));
+    }
+
+    // Update-style writes that may overwrite existing fields/scores:
+    // HSET, HMSET, ZADD, XADD. RW/update. (br-frankenredis-keyflagsupd3)
+    if cmd_name.eq_ignore_ascii_case("HSET")
+        || cmd_name.eq_ignore_ascii_case("HMSET")
+        || cmd_name.eq_ignore_ascii_case("ZADD")
+        || cmd_name.eq_ignore_ascii_case("XADD")
+    {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_UPDATE,
+        }]));
+    }
+
+    // Stream delete-like ops: XDEL, XTRIM. RW/delete.
+    // (br-frankenredis-keyflagsupd3)
+    if cmd_name.eq_ignore_ascii_case("XDEL") || cmd_name.eq_ignore_ascii_case("XTRIM") {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_DELETE,
+        }]));
+    }
+
+    // Metadata-only readonly ops: XLEN, LLEN, HLEN, SCARD, ZCARD,
+    // STRLEN, EXISTS-style. Upstream uses just RO without 'access'.
+    // (br-frankenredis-keyflagsupd3)
+    if cmd_name.eq_ignore_ascii_case("XLEN")
+        || cmd_name.eq_ignore_ascii_case("LLEN")
+        || cmd_name.eq_ignore_ascii_case("HLEN")
+        || cmd_name.eq_ignore_ascii_case("SCARD")
+        || cmd_name.eq_ignore_ascii_case("ZCARD")
+        || cmd_name.eq_ignore_ascii_case("STRLEN")
+        || cmd_name.eq_ignore_ascii_case("TYPE")
+        || cmd_name.eq_ignore_ascii_case("OBJECT")
+    {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RO,
+        }]));
     }
 
     // Element-pop ops (LPOP, RPOP, SPOP, ZPOPMIN, ZPOPMAX, blocking
