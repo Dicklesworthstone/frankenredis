@@ -9049,6 +9049,15 @@ fn hincrbyfloat(
         return Err(CommandError::WrongArity("HINCRBYFLOAT"));
     }
     let delta = parse_f64_arg(&argv[3])?;
+    // Upstream t_hash.c::hincrbyfloatCommand validates the increment
+    // for NaN/Infinity BEFORE looking up the key, so a probe like
+    // 'HINCRBYFLOAT wrong-type-key f inf' reports 'value is NaN or
+    // Infinity' rather than WRONGTYPE. (br-frankenredis-hincrnaninf)
+    if delta.is_nan() || delta.is_infinite() {
+        return Err(CommandError::Custom(
+            "ERR value is NaN or Infinity".to_string(),
+        ));
+    }
     let new_val = store
         .hincrbyfloat(&argv[1], &argv[2], delta, now_ms)
         .map_err(|err| match err {
