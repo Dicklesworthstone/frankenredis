@@ -9547,12 +9547,29 @@ impl Runtime {
         if argv.len() != 3 {
             return CommandError::WrongArity("SWAPDB").to_resp();
         }
+        // Upstream db.c::swapdbCommand uses bespoke wording:
+        //   - 'invalid first DB index'  for unparseable argv[1]
+        //   - 'invalid second DB index' for unparseable argv[2]
+        //   - 'DB index is out of range' for either index >= dbnum
+        // (br-frankenredis-swapdberrs)
         let dbc = self.server.store.database_count;
-        let db1 = match parse_db_index_arg(&argv[1], "ERR invalid DB index", dbc) {
+        let parse_index = |arg: &[u8], invalid: &'static str| -> Result<usize, RespFrame> {
+            let parsed = match parse_i64_arg(arg) {
+                Ok(v) => v,
+                Err(_) => return Err(RespFrame::Error(invalid.to_string())),
+            };
+            if !(0..dbc as i64).contains(&parsed) {
+                return Err(RespFrame::Error(
+                    "ERR DB index is out of range".to_string(),
+                ));
+            }
+            Ok(parsed as usize)
+        };
+        let db1 = match parse_index(&argv[1], "ERR invalid first DB index") {
             Ok(n) => n,
             Err(e) => return e,
         };
-        let db2 = match parse_db_index_arg(&argv[2], "ERR invalid DB index", dbc) {
+        let db2 = match parse_index(&argv[2], "ERR invalid second DB index") {
             Ok(n) => n,
             Err(e) => return e,
         };
