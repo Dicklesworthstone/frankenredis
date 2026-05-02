@@ -3779,12 +3779,28 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     while i < argv.len() {
         let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if opt.eq_ignore_ascii_case("BYSCORE") {
+            // Upstream t_zset.c::zrangeGenericCommand only matches
+            // BYSCORE when rangetype is still AUTO; a second BYSCORE
+            // (or BYLEX after BYSCORE) falls through to syntax error.
+            // (br-frankenredis-zrangedup)
+            if byscore || bylex {
+                return Err(CommandError::SyntaxError);
+            }
             byscore = true;
             i += 1;
         } else if opt.eq_ignore_ascii_case("BYLEX") {
+            if byscore || bylex {
+                return Err(CommandError::SyntaxError);
+            }
             bylex = true;
             i += 1;
         } else if opt.eq_ignore_ascii_case("REV") {
+            // Upstream only matches REV when direction is AUTO; a
+            // duplicate REV falls through to syntax error.
+            // (br-frankenredis-zrangedup)
+            if rev {
+                return Err(CommandError::SyntaxError);
+            }
             rev = true;
             i += 1;
         } else if opt.eq_ignore_ascii_case("WITHSCORES") {
@@ -3805,14 +3821,12 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         }
     }
 
-    if byscore && bylex {
-        return Err(CommandError::SyntaxError);
-    }
-
     // Upstream t_zset.c::zrangeGenericCommand uses verbose syntax-error
     // wording for LIMIT-without-shape and WITHSCORES+BYLEX, matching
     // these exact strings. (br-frankenredis-zrangeshape)
-    if limit_offset.is_some() && !byscore && !bylex {
+    // The check uses opt_limit != -1, so a sentinel `LIMIT offset -1`
+    // (limit_count=None) is allowed even in rank mode.
+    if limit_count.is_some() && !byscore && !bylex {
         return Err(CommandError::Custom(
             "ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX"
                 .to_string(),
