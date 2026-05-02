@@ -231,6 +231,19 @@ fn config_set_failed(field: &str, detail: &str) -> RespFrame {
     ))
 }
 
+impl Runtime {
+    /// Whether PROTECTED_CONFIG fields (dbfilename, dir) can be set
+    /// via CONFIG SET. Mirrors upstream's `enable-protected-configs`
+    /// gate; defaults to "no". (br-frankenredis-protectedcfg)
+    fn protected_configs_allowed(&self) -> bool {
+        self.server
+            .config_overrides
+            .get("enable-protected-configs")
+            .map(|v| v.eq_ignore_ascii_case("yes") || v.eq_ignore_ascii_case("local"))
+            .unwrap_or(false)
+    }
+}
+
 fn histogram_percentile_us(hist: &CommandHistogram, percentile: f64) -> f64 {
     if hist.calls == 0 {
         return 0.0;
@@ -8169,6 +8182,12 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("dir") {
+                // Upstream config.c marks dir as PROTECTED_CONFIG;
+                // requires enable-protected-configs to allow.
+                // (br-frankenredis-protectedcfg)
+                if !self.protected_configs_allowed() {
+                    return config_set_failed("dir", "can't set protected config");
+                }
                 let value_str = match std::str::from_utf8(&pair[1]) {
                     Ok(value) => value,
                     Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
@@ -8203,6 +8222,12 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("dbfilename") {
+                // Upstream config.c marks dbfilename as PROTECTED_CONFIG;
+                // requires enable-protected-configs to allow.
+                // (br-frankenredis-protectedcfg)
+                if !self.protected_configs_allowed() {
+                    return config_set_failed("dbfilename", "can't set protected config");
+                }
                 let value_str = match std::str::from_utf8(&pair[1]) {
                     Ok(value) => value,
                     Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
@@ -18004,6 +18029,12 @@ mod tests {
         let _ = std::fs::create_dir_all(&new_dir);
 
         let mut rt = Runtime::default_strict();
+        // dir and dbfilename are PROTECTED_CONFIG in upstream; the
+        // gate is opt-in via enable-protected-configs.
+        // (br-frankenredis-protectedcfg)
+        rt.server
+            .config_overrides
+            .insert("enable-protected-configs".to_string(), "yes".to_string());
         assert_eq!(
             rt.execute_frame(
                 command(&[
@@ -18045,6 +18076,11 @@ mod tests {
     fn config_set_dir_rejects_nonexistent_paths_without_mutating_live_target() {
         let mut rt = Runtime::default_strict();
         rt.set_rdb_path(std::path::PathBuf::from("original.rdb"));
+        // dir is PROTECTED_CONFIG; opt-in via enable-protected-configs.
+        // (br-frankenredis-protectedcfg)
+        rt.server
+            .config_overrides
+            .insert("enable-protected-configs".to_string(), "yes".to_string());
 
         let missing_dir =
             std::env::temp_dir().join(format!("fr_runtime_missing_dir_{}", std::process::id()));
@@ -18078,6 +18114,11 @@ mod tests {
     #[test]
     fn config_set_dbfilename_rejects_path_values() {
         let mut rt = Runtime::default_strict();
+        // dbfilename is PROTECTED_CONFIG; opt-in via enable-protected-configs.
+        // (br-frankenredis-protectedcfg)
+        rt.server
+            .config_overrides
+            .insert("enable-protected-configs".to_string(), "yes".to_string());
 
         assert_eq!(
             rt.execute_frame(
