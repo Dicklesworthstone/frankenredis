@@ -11969,9 +11969,32 @@ fn command_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     }
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if sub.eq_ignore_ascii_case("COUNT") {
+        // Upstream commands.def declares COMMAND COUNT with exact
+        // arity 2, so trailing args trigger the table-level
+        // 'wrong number of arguments for command|count command'
+        // wording. (br-frankenredis-commandcount)
+        if argv.len() != 2 {
+            return Err(CommandError::WrongSubcommandArity {
+                command: "COMMAND",
+                subcommand: sub.to_string(),
+            });
+        }
         Ok(RespFrame::Integer(COMMAND_TABLE.len() as i64))
     } else if sub.eq_ignore_ascii_case("LIST") {
         // COMMAND LIST [FILTERBY MODULE modname | ACLCAT category | PATTERN pattern]
+        // Upstream server.c::commandListCommand requires either
+        // exactly 'COMMAND LIST' (argc==2) or
+        // 'COMMAND LIST FILTERBY <type> <value>' (argc==5);
+        // anything else falls through to addReplyErrorObject(c,
+        // shared.syntaxerr). (br-frankenredis-commandlist)
+        if argv.len() != 2
+            && !(argv.len() >= 4
+                && std::str::from_utf8(&argv[2])
+                    .ok()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("FILTERBY")))
+        {
+            return Ok(RespFrame::Error("ERR syntax error".to_string()));
+        }
         if argv.len() >= 4
             && std::str::from_utf8(&argv[2])
                 .ok()
