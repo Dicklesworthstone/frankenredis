@@ -7503,13 +7503,15 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("timeout") {
-                // (br-frankenredis-7rj0)
+                // Upstream config.c declares timeout as INTEGER_CONFIG
+                // range [0, 2147483647]. (br-frankenredis-7rj0,
+                // br-frankenredis-cfgmemvalue)
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 0 => value as u64,
+                    Ok(value) if (0..=i32::MAX as i64).contains(&value) => value as u64,
                     Ok(_) => {
                         return config_set_failed(
                             "timeout",
-                            "argument must be between 0 and 9223372036854775807 inclusive",
+                            "argument must be between 0 and 2147483647 inclusive",
                         );
                     }
                     Err(_) => {
@@ -7858,14 +7860,27 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("maxmemory-samples") {
+                // Upstream config.c declares maxmemory-samples as
+                // INTEGER_CONFIG range [1, 2147483647]. Out-of-range
+                // values use the table-level
+                // 'argument must be between 1 and 2147483647 inclusive'
+                // wording; unparseable values use
+                // 'argument couldn't be parsed into an integer'.
+                // (br-frankenredis-cfgmemvalue)
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 1 => value as usize,
+                    Ok(value) if (1..=i32::MAX as i64).contains(&value) => value as usize,
                     Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'maxmemory-samples'".to_string(),
+                        return config_set_failed(
+                            "maxmemory-samples",
+                            "argument must be between 1 and 2147483647 inclusive",
                         );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return config_set_failed(
+                            "maxmemory-samples",
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
                 };
                 next_maxmemory_samples = Some(parsed);
                 static_override_updates.push(("maxmemory-samples".to_string(), parsed.to_string()));
@@ -7966,6 +7981,7 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("port")
                 || parameter.eq_ignore_ascii_case("rdbchecksum")
                 || parameter.eq_ignore_ascii_case("set-proc-title")
+                || parameter.eq_ignore_ascii_case("supervised")
                 || parameter.eq_ignore_ascii_case("tcp-backlog")
                 || parameter.eq_ignore_ascii_case("unixsocket")
                 || parameter.eq_ignore_ascii_case("unixsocketperm")
@@ -7973,6 +7989,30 @@ impl Runtime {
                 return RespFrame::Error(format!(
                     "ERR CONFIG SET failed (possibly related to argument '{parameter}') - can't set immutable config"
                 ));
+            }
+            // Upstream config.c declares loglevel as an enum
+            // (debug, verbose, notice, warning, nothing). Without
+            // explicit validation fr accepts any value via the
+            // static-override fallthrough. (br-frankenredis-cfgmemvalue)
+            if parameter.eq_ignore_ascii_case("loglevel") {
+                let value_str = match std::str::from_utf8(&pair[1]) {
+                    Ok(v) => v,
+                    Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                };
+                if !matches!(
+                    value_str.to_ascii_lowercase().as_str(),
+                    "debug" | "verbose" | "notice" | "warning" | "nothing"
+                ) {
+                    return config_set_failed(
+                        "loglevel",
+                        "argument(s) must be one of the following: debug, verbose, notice, warning, nothing",
+                    );
+                }
+                static_override_updates.push((
+                    "loglevel".to_string(),
+                    value_str.to_ascii_lowercase(),
+                ));
+                continue;
             }
             if parameter.eq_ignore_ascii_case("dir") {
                 let value_str = match std::str::from_utf8(&pair[1]) {
