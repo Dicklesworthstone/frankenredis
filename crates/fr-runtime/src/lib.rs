@@ -6635,7 +6635,28 @@ impl Runtime {
                 Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
             let pattern = raw_pattern.to_ascii_lowercase();
+            let before = entries.len();
             self.collect_config_entries(&pattern, &mut entries);
+            // Upstream config.c::configGetCommand echoes the
+            // user-typed name verbatim for literal (non-glob)
+            // matches; glob matches use the canonical (lowercase)
+            // dictionary key. Mirror that by rewriting the key
+            // for newly-added entries when the pattern is literal.
+            // (br-frankenredis-cfggetcase)
+            let is_literal = !raw_pattern
+                .chars()
+                .any(|c| matches!(c, '*' | '?' | '['));
+            if is_literal && raw_pattern != pattern {
+                let mut idx = before;
+                while idx + 1 < entries.len() {
+                    if let RespFrame::BulkString(Some(name)) = &entries[idx]
+                        && name.eq_ignore_ascii_case(raw_pattern.as_bytes())
+                    {
+                        entries[idx] = RespFrame::BulkString(Some(raw_pattern.as_bytes().to_vec()));
+                    }
+                    idx += 2;
+                }
+            }
         }
         // RESP3 callers receive a Map (key → value); RESP2 callers
         // continue to receive the alternating-key/value Array form.
