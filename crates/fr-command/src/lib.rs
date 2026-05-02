@@ -643,11 +643,14 @@ fn command_key_references_with_exact_flags(
             return Err(CommandKeyLookupError::InvalidArguments);
         }
         let num_keys = remaining.len() / 2;
+        // Upstream commands.def declares both XREAD and XREADGROUP
+        // with key_specs.flags = RO/access. (br-frankenredis-xreadflags)
+        let flags = KEY_FLAGS_RO_ACCESS;
         return Ok(Some(
             (0..num_keys)
                 .map(|offset| CommandKeyReference {
                     index: streams_idx + 1 + offset,
-                    flags: KEY_FLAGS_NONE,
+                    flags,
                 })
                 .collect(),
         ));
