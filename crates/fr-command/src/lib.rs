@@ -8454,6 +8454,14 @@ fn setex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Err(CommandError::WrongArity("SETEX"));
     }
     let seconds = parse_expire_time_arg(&argv[2], "setex")?;
+    // (br-frankenredis-setexrange) — reject when seconds*1000
+    // would overflow LLONG_MAX, matching upstream
+    // t_string.c::getExpireMillisecondsOrReply.
+    if seconds > i64::MAX as u64 / 1000 {
+        return Err(CommandError::Custom(
+            "ERR invalid expire time in 'setex' command".to_string(),
+        ));
+    }
     let px = seconds.saturating_mul(1000);
     store.set(argv[1].clone(), argv[3].clone(), Some(px), now_ms);
     Ok(RespFrame::SimpleString("OK".to_string()))
@@ -10144,6 +10152,12 @@ fn getex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                 return Err(CommandError::SyntaxError);
             }
             let secs = parse_expire_time_arg(&argv[3], "getex")?;
+            // (br-frankenredis-setexrange)
+            if secs > i64::MAX as u64 / 1000 {
+                return Err(CommandError::Custom(
+                    "ERR invalid expire time in 'getex' command".to_string(),
+                ));
+            }
             Some(Some(now_ms.saturating_add(secs.saturating_mul(1000))))
         } else if opt.eq_ignore_ascii_case("PX") {
             if argv.len() != 4 {
@@ -10156,6 +10170,12 @@ fn getex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                 return Err(CommandError::SyntaxError);
             }
             let ts = parse_expire_time_arg(&argv[3], "getex")?;
+            // (br-frankenredis-setexrange)
+            if ts > i64::MAX as u64 / 1000 {
+                return Err(CommandError::Custom(
+                    "ERR invalid expire time in 'getex' command".to_string(),
+                ));
+            }
             Some(Some(ts.saturating_mul(1000)))
         } else if opt.eq_ignore_ascii_case("PXAT") {
             if argv.len() != 4 {
