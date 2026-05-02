@@ -2400,9 +2400,16 @@ fn decrby(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("DECRBY"));
     }
     let delta = parse_i64_arg(&argv[2])?;
-    let neg_delta = delta
-        .checked_neg()
-        .ok_or(CommandError::Store(StoreError::IntegerOverflow))?;
+    // Upstream t_string.c::decrbyCommand emits the bespoke
+    // 'decrement would overflow' wording when the increment is
+    // LLONG_MIN (whose negation overflows). All other overflows
+    // surface from incrDecrCommand as the generic
+    // 'increment or decrement would overflow'. (br-frankenredis-decroverflow)
+    let Some(neg_delta) = delta.checked_neg() else {
+        return Err(CommandError::Custom(
+            "ERR decrement would overflow".to_string(),
+        ));
+    };
     let value = store.incrby(&argv[1], neg_delta, now_ms)?;
     Ok(RespFrame::Integer(value))
 }
