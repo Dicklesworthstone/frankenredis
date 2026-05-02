@@ -9331,6 +9331,37 @@ pub fn parse_migrate_request(argv: &[Vec<u8>]) -> Result<MigrateRequest, Command
         .map_err(|_| CommandError::InvalidUtf8Argument)?
         .to_string();
     let key_arg = &argv[3];
+    // Upstream cluster.c::migrateCommand parses dbid/timeout via
+    // atoi (silent on parse failure, default 0) and runs the option
+    // loop AFTER. Pre-scan for unknown trailing tokens so that
+    // 'MIGRATE h p k bad-db bad-timeout extra' reports the option
+    // syntax error before falling foul of a stricter integer parser.
+    // (br-frankenredis-migratesyntax)
+    {
+        let mut j = 6;
+        while j < argv.len() {
+            let opt = std::str::from_utf8(&argv[j])
+                .map_err(|_| CommandError::InvalidUtf8Argument)?;
+            if opt.eq_ignore_ascii_case("COPY") || opt.eq_ignore_ascii_case("REPLACE") {
+                j += 1;
+            } else if opt.eq_ignore_ascii_case("AUTH") {
+                if j + 1 >= argv.len() {
+                    return Err(CommandError::SyntaxError);
+                }
+                j += 2;
+            } else if opt.eq_ignore_ascii_case("AUTH2") {
+                if j + 2 >= argv.len() {
+                    return Err(CommandError::SyntaxError);
+                }
+                j += 3;
+            } else if opt.eq_ignore_ascii_case("KEYS") {
+                // KEYS consumes the remaining tokens.
+                break;
+            } else {
+                return Err(CommandError::SyntaxError);
+            }
+        }
+    }
     let destination_db = parse_i64_arg(&argv[4])?;
     let timeout_ms = parse_i64_arg(&argv[5])?;
     let timeout = Duration::from_millis(if timeout_ms <= 0 {
