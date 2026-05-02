@@ -4490,6 +4490,25 @@ impl Runtime {
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             return Self::pubsub_context_error(&Self::pubsub_blocked_command_name(&argv));
         }
+        // Upstream networking.c::pingCommand emits a 2-element array
+        // ["pong", optional-msg] when the client is in subscribe mode
+        // and RESP2, rather than the +PONG simple-string reply.
+        // (br-frankenredis-subpubping)
+        if command_arity_ok
+            && self.is_in_subscription_mode()
+            && argv
+                .first()
+                .is_some_and(|command| eq_ascii_token(command, b"PING"))
+        {
+            let msg = match argv.get(1) {
+                Some(m) => m.clone(),
+                None => Vec::new(),
+            };
+            return RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"pong".to_vec())),
+                RespFrame::BulkString(Some(msg)),
+            ]));
+        }
         if command_arity_ok
             && let Some(reply) =
                 self.reject_due_to_disk_write_error(&argv, special_command, now_ms, packet_id)

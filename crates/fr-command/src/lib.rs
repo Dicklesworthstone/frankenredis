@@ -11231,7 +11231,9 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
 /// Static command metadata table: (name, arity, flags, first_key, last_key, step)
 /// Arity: positive = exact arg count incl. command, negative = minimum args
 const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
-    ("ping", 1, "fast", 0, 0, 0),
+    // Upstream commands/ping.json declares arity -1 (1 or more args).
+    // (br-frankenredis-pingarity)
+    ("ping", -1, "fast", 0, 0, 0),
     ("echo", 2, "fast", 0, 0, 0),
     ("set", -3, "write denyoom", 1, 1, 1),
     ("get", 2, "readonly fast", 1, 1, 1),
