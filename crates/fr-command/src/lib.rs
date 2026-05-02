@@ -7300,11 +7300,19 @@ fn cluster_cmd(
     //   SET-CONFIG-EPOCH, SLOTSTATE.
     if sub.eq_ignore_ascii_case("MEET") {
         // CLUSTER MEET <host> <port> [cluster-bus-port]
-        if argv.len() != 4 && argv.len() != 5 {
+        // Upstream commands.def declares arity -4 (min 4, no max),
+        // so trailing args still hit the cluster-disabled error
+        // before any per-subcommand arity rejection. Once cluster
+        // mode is enabled the handler still rejects argc > 5.
+        // (br-frankenredis-clustermeetarity)
+        if argv.len() < 4 {
             return Err(cluster_wrong_subcommand_arity(sub));
         }
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
+        }
+        if argv.len() > 5 {
+            return Err(cluster_wrong_subcommand_arity(sub));
         }
         let host = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         let port = std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -8430,6 +8438,12 @@ fn getrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     }
     let start = parse_i64_arg(&argv[2])?;
     let end = parse_i64_arg(&argv[3])?;
+    // Upstream t_string.c::getrangeCommand short-circuits to empty
+    // when both bounds are negative and start > end, BEFORE
+    // resolving the negatives against strlen. (br-frankenredis-getrangeneg)
+    if start < 0 && end < 0 && start > end {
+        return Ok(RespFrame::BulkString(Some(Vec::new())));
+    }
     let result = store.getrange(&argv[1], start, end, now_ms)?;
     Ok(RespFrame::BulkString(Some(result)))
 }
@@ -8444,6 +8458,10 @@ fn substr(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     }
     let start = parse_i64_arg(&argv[2])?;
     let end = parse_i64_arg(&argv[3])?;
+    // (br-frankenredis-getrangeneg) — same upstream short-circuit.
+    if start < 0 && end < 0 && start > end {
+        return Ok(RespFrame::BulkString(Some(Vec::new())));
+    }
     let result = store.getrange(&argv[1], start, end, now_ms)?;
     Ok(RespFrame::BulkString(Some(result)))
 }
