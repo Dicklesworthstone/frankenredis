@@ -2111,7 +2111,16 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             let Some(seconds_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            expiry_mode = ExpiryMode::Ex(parse_set_expire_arg(seconds_arg)?);
+            let seconds = parse_set_expire_arg(seconds_arg)?;
+            // Upstream t_string.c::getExpireMillisecondsOrReply
+            // rejects seconds-unit values whose ms-conversion would
+            // overflow LLONG_MAX. (br-frankenredis-setexrange)
+            if seconds > i64::MAX as u64 / 1000 {
+                return Err(CommandError::Custom(
+                    "ERR invalid expire time in 'set' command".to_string(),
+                ));
+            }
+            expiry_mode = ExpiryMode::Ex(seconds);
         } else if option.eq_ignore_ascii_case("PXAT") {
             if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Pxat(_)) {
                 return Err(CommandError::SyntaxError);
@@ -2127,7 +2136,14 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             let Some(ts_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            expiry_mode = ExpiryMode::Exat(parse_set_expire_arg(ts_arg)?);
+            let seconds = parse_set_expire_arg(ts_arg)?;
+            // (br-frankenredis-setexrange) — EXAT is also seconds.
+            if seconds > i64::MAX as u64 / 1000 {
+                return Err(CommandError::Custom(
+                    "ERR invalid expire time in 'set' command".to_string(),
+                ));
+            }
+            expiry_mode = ExpiryMode::Exat(seconds);
         } else if option.eq_ignore_ascii_case("KEEPTTL") {
             if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::KeepTtl) {
                 return Err(CommandError::SyntaxError);
@@ -2305,6 +2321,37 @@ fn expire_like(
         return Err(CommandError::WrongArity(command_name));
     }
     let raw_time = parse_i64_arg(&argv[2])?;
+    // Mirror upstream expire.c::expireGenericCommand which rejects
+    // values whose ms-conversion (and basetime addition for relative
+    // forms) would overflow LLONG_MAX. (br-frankenredis-expirerange)
+    let invalid_expire = || {
+        CommandError::Custom(format!(
+            "ERR invalid expire time in '{}' command",
+            command_name.to_lowercase()
+        ))
+    };
+    let when_ms_signed: Option<i64> = match kind {
+        ExpireCommandKind::RelativeSeconds | ExpireCommandKind::AbsoluteSeconds => {
+            if raw_time > i64::MAX / 1000 || raw_time < i64::MIN / 1000 {
+                return Err(invalid_expire());
+            }
+            let ms = raw_time.saturating_mul(1000);
+            if matches!(kind, ExpireCommandKind::RelativeSeconds) {
+                let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
+                ms.checked_add(now_i)
+            } else {
+                Some(ms)
+            }
+        }
+        ExpireCommandKind::RelativeMilliseconds => {
+            let now_i = i64::try_from(now_ms).unwrap_or(i64::MAX);
+            raw_time.checked_add(now_i)
+        }
+        ExpireCommandKind::AbsoluteMilliseconds => Some(raw_time),
+    };
+    if when_ms_signed.is_none() {
+        return Err(invalid_expire());
+    }
     let options = parse_expire_options(&argv[3..])?;
     let when_ms = deadline_from_expire_kind(kind, raw_time, now_ms);
     let applied = apply_expiry_with_options(store, &argv[1], when_ms, now_ms, options);
