@@ -3742,24 +3742,75 @@ fn zcard(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     Ok(RespFrame::Integer(i64::try_from(len).unwrap_or(i64::MAX)))
 }
 
-fn zrank(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 3 {
-        return Err(CommandError::WrongArity("ZRANK"));
+fn zrank_generic(
+    argv: &[Vec<u8>],
+    store: &mut Store,
+    now_ms: u64,
+    reverse: bool,
+) -> Result<RespFrame, CommandError> {
+    // ZRANK/ZREVRANK key member [WITHSCORE]
+    // Upstream t_zset.c::zrankGenericCommand accepts argc==3 or
+    // argc==4 (with WITHSCORE), >4 = WrongArity, unknown 4th arg
+    // = syntax error. (br-frankenredis-zrankws)
+    let cmd_name = if reverse { "ZREVRANK" } else { "ZRANK" };
+    if argv.len() < 3 {
+        return Err(CommandError::WrongArity(if reverse {
+            "ZREVRANK"
+        } else {
+            "ZRANK"
+        }));
     }
-    match store.zrank(&argv[1], &argv[2], now_ms)? {
-        Some(rank) => Ok(RespFrame::Integer(i64::try_from(rank).unwrap_or(i64::MAX))),
-        None => Ok(RespFrame::BulkString(None)),
+    if argv.len() > 4 {
+        return Err(CommandError::WrongArity(if reverse {
+            "ZREVRANK"
+        } else {
+            "ZRANK"
+        }));
+    }
+    let withscore = if argv.len() == 4 {
+        let opt = std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?;
+        if !opt.eq_ignore_ascii_case("WITHSCORE") {
+            return Err(CommandError::SyntaxError);
+        }
+        true
+    } else {
+        false
+    };
+    let _ = cmd_name;
+    let rank_opt = if reverse {
+        store.zrevrank(&argv[1], &argv[2], now_ms)?
+    } else {
+        store.zrank(&argv[1], &argv[2], now_ms)?
+    };
+    match rank_opt {
+        Some(rank) => {
+            let rank_i = i64::try_from(rank).unwrap_or(i64::MAX);
+            if withscore {
+                let score = store.zscore(&argv[1], &argv[2], now_ms)?.unwrap_or(0.0);
+                Ok(RespFrame::Array(Some(vec![
+                    RespFrame::Integer(rank_i),
+                    RespFrame::BulkString(Some(score.to_string().into_bytes())),
+                ])))
+            } else {
+                Ok(RespFrame::Integer(rank_i))
+            }
+        }
+        None => {
+            if withscore {
+                Ok(RespFrame::Array(None))
+            } else {
+                Ok(RespFrame::BulkString(None))
+            }
+        }
     }
 }
 
+fn zrank(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
+    zrank_generic(argv, store, now_ms, false)
+}
+
 fn zrevrank(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() != 3 {
-        return Err(CommandError::WrongArity("ZREVRANK"));
-    }
-    match store.zrevrank(&argv[1], &argv[2], now_ms)? {
-        Some(rank) => Ok(RespFrame::Integer(i64::try_from(rank).unwrap_or(i64::MAX))),
-        None => Ok(RespFrame::BulkString(None)),
-    }
+    zrank_generic(argv, store, now_ms, true)
 }
 
 fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
