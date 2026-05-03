@@ -676,7 +676,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR value is not an integer or out of range"
+        "value": "ERR The MAXLEN argument must be >= 0."
       }
     },
     {
@@ -3064,6 +3064,21 @@
       }
     },
     {
+      "name": "xrevrange_count_zero",
+      "now_ms": 100,
+      "argv": [
+        "XREVRANGE",
+        "xadd_expl",
+        "+",
+        "-",
+        "COUNT",
+        "0"
+      ],
+      "expect": {
+        "kind": "null_array"
+      }
+    },
+    {
       "name": "xtrim_setup",
       "now_ms": 100,
       "argv": [
@@ -5064,7 +5079,7 @@
       "name": "xinfo_full_bad_arity_missing_count_value",
       "now_ms": 95000,
       "argv": ["XINFO", "STREAM", "xifull", "FULL", "COUNT"],
-      "expect": { "kind": "error", "value": "ERR wrong number of arguments for 'xinfo|stream' command" }
+      "expect": { "kind": "error", "value": "ERR unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP." }
     },
     {
       "name": "xinfo_full_with_group_setup",
@@ -5113,13 +5128,17 @@
             {"kind":"array","value":[
               {"kind":"bulk","value":"name"},
               {"kind":"bulk","value":"grp1"},
-              {"kind":"bulk","value":"consumers"},
-              {"kind":"integer","value":0},
-              {"kind":"bulk","value":"pending"},
-              {"kind":"integer","value":0},
               {"kind":"bulk","value":"last-delivered-id"},
               {"kind":"bulk","value":"0-0"},
-              {"kind":"bulk","value":"consumers-list"},
+              {"kind":"bulk","value":"entries-read"},
+              {"kind":"bulk","value":null},
+              {"kind":"bulk","value":"lag"},
+              {"kind":"bulk","value":null},
+              {"kind":"bulk","value":"pel-count"},
+              {"kind":"integer","value":0},
+              {"kind":"bulk","value":"pending"},
+              {"kind":"array","value":[]},
+              {"kind":"bulk","value":"consumers"},
               {"kind":"array","value":[]}
             ]}
           ]}
@@ -5148,19 +5167,36 @@
           {"kind":"bulk","value":"recorded-first-entry-id"},
           {"kind":"bulk","value":"1-1"},
           {"kind":"bulk","value":"entries"},
-          {"kind":"array","value":[]},
+          {"kind":"array","value":[
+            {"kind":"array","value":[
+              {"kind":"bulk","value":"1-1"},
+              {"kind":"array","value":[{"kind":"bulk","value":"a"},{"kind":"bulk","value":"1"}]}
+            ]},
+            {"kind":"array","value":[
+              {"kind":"bulk","value":"2-1"},
+              {"kind":"array","value":[{"kind":"bulk","value":"b"},{"kind":"bulk","value":"2"}]}
+            ]},
+            {"kind":"array","value":[
+              {"kind":"bulk","value":"3-1"},
+              {"kind":"array","value":[{"kind":"bulk","value":"c"},{"kind":"bulk","value":"3"}]}
+            ]}
+          ]},
           {"kind":"bulk","value":"groups"},
           {"kind":"array","value":[
             {"kind":"array","value":[
               {"kind":"bulk","value":"name"},
               {"kind":"bulk","value":"grp1"},
-              {"kind":"bulk","value":"consumers"},
-              {"kind":"integer","value":0},
-              {"kind":"bulk","value":"pending"},
-              {"kind":"integer","value":0},
               {"kind":"bulk","value":"last-delivered-id"},
               {"kind":"bulk","value":"0-0"},
-              {"kind":"bulk","value":"consumers-list"},
+              {"kind":"bulk","value":"entries-read"},
+              {"kind":"bulk","value":null},
+              {"kind":"bulk","value":"lag"},
+              {"kind":"bulk","value":null},
+              {"kind":"bulk","value":"pel-count"},
+              {"kind":"integer","value":0},
+              {"kind":"bulk","value":"pending"},
+              {"kind":"array","value":[]},
+              {"kind":"bulk","value":"consumers"},
               {"kind":"array","value":[]}
             ]}
           ]}

@@ -7339,13 +7339,11 @@ fn xrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             return Err(CommandError::SyntaxError);
         }
         let parsed = parse_i64_arg(&argv[5])?;
-        // Upstream parses COUNT via getLongFromObjectOrReply with no
-        // sign check, then walks the radix tree decrementing count
-        // for each emitted entry; a negative count never enters the
-        // emit path so the reply is an empty array.
+        // Upstream parses COUNT via getLongFromObjectOrReply, clamps
+        // negative values to 0, then emits a null array when count is 0.
         // (br-frankenredis-xrangenegcount)
         if parsed <= 0 {
-            return Ok(RespFrame::Array(Some(Vec::new())));
+            return Ok(RespFrame::Array(None));
         }
         Some(usize::try_from(parsed).unwrap_or(usize::MAX))
     } else {
@@ -7394,7 +7392,7 @@ fn xrevrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         let parsed = parse_i64_arg(&argv[5])?;
         // (br-frankenredis-xrangenegcount) — see xrange.
         if parsed <= 0 {
-            return Ok(RespFrame::Array(Some(Vec::new())));
+            return Ok(RespFrame::Array(None));
         }
         Some(usize::try_from(parsed).unwrap_or(usize::MAX))
     } else {
@@ -23054,10 +23052,9 @@ mod tests {
             0,
         )
         .expect("xrange count zero");
-        // Upstream returns an empty array (not nil) for COUNT <= 0
-        // because the radix-tree walk simply never enters the emit
-        // path. (br-frankenredis-xrangenegcount)
-        assert_eq!(count_zero, RespFrame::Array(Some(Vec::new())));
+        // (br-frankenredis-xrangenegcount) — upstream emits a RESP
+        // null array for COUNT <= 0.
+        assert_eq!(count_zero, RespFrame::Array(None));
     }
 
     #[test]
@@ -23259,9 +23256,9 @@ mod tests {
             0,
         )
         .expect("xrevrange count zero");
-        // (br-frankenredis-xrangenegcount) — upstream returns empty
-        // array for COUNT <= 0.
-        assert_eq!(count_zero, RespFrame::Array(Some(Vec::new())));
+        // (br-frankenredis-xrangenegcount) — upstream emits a RESP
+        // null array for COUNT <= 0.
+        assert_eq!(count_zero, RespFrame::Array(None));
 
         store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
         let wrongtype = dispatch_argv(
