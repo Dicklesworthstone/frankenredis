@@ -477,6 +477,77 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("enable-module-command", "no"),
     ("hide-user-data-from-log", "no"),
     ("acl-pubsub-default", "resetchannels"),
+    // CONFIG GET parity vs vendored Redis 7.2.4 — defaults pulled from
+    // upstream config.c create*Config registrations. CONFIG SET wiring
+    // for these is out-of-scope; the goal is to surface the same key
+    // names so monitoring tools that grep CONFIG GET output (Sentinel,
+    // redis_exporter, RedisInsight) don't see fields silently disappear.
+    // (br-frankenredis-u8in)
+    ("aof_rewrite_cpulist", ""),
+    ("bgsave_cpulist", ""),
+    ("bio_cpulist", ""),
+    ("server_cpulist", ""),
+    ("cluster-allow-replica-migration", "yes"),
+    ("cluster-announce-bus-port", "0"),
+    ("cluster-announce-ip", ""),
+    ("cluster-announce-port", "0"),
+    ("cluster-announce-tls-port", "0"),
+    ("cluster-port", "0"),
+    ("cluster-replica-validity-factor", "10"),
+    ("cluster-slave-no-failover", "no"),
+    ("cluster-slave-validity-factor", "10"),
+    ("crash-log-enabled", "yes"),
+    ("crash-memcheck-enabled", "yes"),
+    ("ignore-warnings", ""),
+    ("locale-collate", ""),
+    ("maxmemory-clients", "0"),
+    ("min-slaves-max-lag", "10"),
+    ("min-slaves-to-write", "0"),
+    ("oom-score-adj", "no"),
+    ("oom-score-adj-values", "0 200 800"),
+    ("propagation-error-behavior", "ignore"),
+    ("repl-disable-tcp-nodelay", "no"),
+    ("repl-diskless-sync-max-replicas", "0"),
+    ("repl-ping-slave-period", "10"),
+    ("replica-announce-ip", ""),
+    ("replica-announce-port", "0"),
+    ("replica-ignore-disk-write-errors", "no"),
+    ("replica-ignore-maxmemory", "yes"),
+    ("replica-priority", "100"),
+    ("set-max-listpack-value", "64"),
+    ("shutdown-timeout", "10"),
+    ("slave-announce-ip", ""),
+    ("slave-announce-port", "0"),
+    ("slave-ignore-maxmemory", "yes"),
+    ("slave-lazy-flush", "no"),
+    ("slave-priority", "100"),
+    ("slave-read-only", "yes"),
+    ("slaveof", ""),
+    ("socket-mark-id", "0"),
+    ("supervised", "no"),
+    ("syslog-enabled", "no"),
+    ("syslog-facility", "local0"),
+    ("syslog-ident", "redis"),
+    ("tls-auth-clients", "yes"),
+    ("tls-ca-cert-dir", ""),
+    ("tls-ca-cert-file", ""),
+    ("tls-cert-file", ""),
+    ("tls-ciphers", ""),
+    ("tls-ciphersuites", ""),
+    ("tls-client-cert-file", ""),
+    ("tls-client-key-file", ""),
+    ("tls-client-key-file-pass", ""),
+    ("tls-cluster", "no"),
+    ("tls-dh-params-file", ""),
+    ("tls-key-file", ""),
+    ("tls-key-file-pass", ""),
+    ("tls-port", "0"),
+    ("tls-prefer-server-ciphers", "no"),
+    ("tls-replication", "no"),
+    ("tls-session-cache-size", "20480"),
+    ("tls-session-cache-timeout", "300"),
+    ("tls-session-caching", "yes"),
+    ("tracking-table-max-keys", "1000000"),
 ];
 
 fn canonical_static_config_param(parameter: &str) -> Option<&'static str> {
@@ -18399,6 +18470,77 @@ mod tests {
                 RespFrame::BulkString(Some(b"no".to_vec())),
             ]))
         );
+    }
+
+    #[test]
+    fn config_get_returns_upstream_static_keys_for_tls_and_aliases() {
+        // (frankenredis-u8in) Upstream Redis 7.2.4 emits TLS settings,
+        // slave/replica aliases, syslog, oom-score-adj, cluster-announce,
+        // and other static keys via CONFIG GET regardless of whether the
+        // underlying subsystem is wired up. Pin the upstream defaults
+        // so monitoring tools that scrape these don't see fields drop.
+        let mut rt = Runtime::default_strict();
+        let fetch = |rt: &mut Runtime, name: &[u8]| -> Vec<u8> {
+            let RespFrame::Array(Some(items)) =
+                rt.execute_frame(command(&[b"CONFIG", b"GET", name]), 0)
+            else {
+                panic!("expected array reply from CONFIG GET");
+            };
+            assert_eq!(
+                items.len(),
+                2,
+                "CONFIG GET should yield one (key, value) pair for {}",
+                std::str::from_utf8(name).unwrap()
+            );
+            let RespFrame::BulkString(Some(value)) = items[1].clone() else {
+                panic!("CONFIG GET value is not a bulk string");
+            };
+            value
+        };
+
+        for (name, expected) in [
+            // TLS — upstream emits even with TLS off.
+            ("tls-port", "0"),
+            ("tls-cert-file", ""),
+            ("tls-auth-clients", "yes"),
+            ("tls-cluster", "no"),
+            ("tls-replication", "no"),
+            ("tls-session-cache-size", "20480"),
+            ("tls-session-cache-timeout", "300"),
+            ("tls-session-caching", "yes"),
+            // slave-* aliases for replica-*.
+            ("slave-priority", "100"),
+            ("slave-read-only", "yes"),
+            ("slaveof", ""),
+            // cluster-announce-* family.
+            ("cluster-announce-bus-port", "0"),
+            ("cluster-announce-ip", ""),
+            ("cluster-announce-port", "0"),
+            ("cluster-port", "0"),
+            ("cluster-allow-replica-migration", "yes"),
+            // syslog.
+            ("syslog-enabled", "no"),
+            ("syslog-facility", "local0"),
+            ("syslog-ident", "redis"),
+            // oom-score-adj.
+            ("oom-score-adj", "no"),
+            ("oom-score-adj-values", "0 200 800"),
+            // misc.
+            ("supervised", "no"),
+            ("shutdown-timeout", "10"),
+            ("propagation-error-behavior", "ignore"),
+            ("tracking-table-max-keys", "1000000"),
+            ("replica-priority", "100"),
+            ("min-slaves-to-write", "0"),
+            ("set-max-listpack-value", "64"),
+            ("crash-log-enabled", "yes"),
+        ] {
+            assert_eq!(
+                fetch(&mut rt, name.as_bytes()),
+                expected.as_bytes(),
+                "CONFIG GET {name} default mismatch"
+            );
+        }
     }
 
     #[test]
