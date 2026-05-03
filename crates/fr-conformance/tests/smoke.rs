@@ -78,6 +78,8 @@ const CORE_OBJECT_LIVE_STABLE_CASES: &[&str] = &[
     "object_idletime_lfu_policy_errors",
     "object_idletime_disable_lfu_again",
     "object_no_subcommand",
+    "object_encoding_extra_arg",
+    "object_refcount_extra_arg",
     "object_encoding_lowercase_subcommand",
     "object_encoding_mixedcase_subcommand",
     "object_encoding_hll_setup",

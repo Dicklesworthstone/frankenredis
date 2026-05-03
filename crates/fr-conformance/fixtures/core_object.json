@@ -331,6 +331,24 @@
         "value": "ERR wrong number of arguments for 'object|encoding' command"
       }
     },
+    {
+      "name": "object_encoding_extra_arg",
+      "now_ms": 26003,
+      "argv": ["OBJECT", "ENCODING", "obj_int", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'object|encoding' command"
+      }
+    },
+    {
+      "name": "object_refcount_extra_arg",
+      "now_ms": 26004,
+      "argv": ["OBJECT", "REFCOUNT", "obj_int", "extra"],
+      "expect": {
+        "kind": "error",
+        "value": "ERR wrong number of arguments for 'object|refcount' command"
+      }
+    },
 
     {
       "name": "config_set_hash_max_listpack_entries_low",

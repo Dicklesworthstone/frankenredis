@@ -41329,6 +41329,39 @@ mod tests {
     }
 
     #[test]
+    fn object_encoding_and_refcount_reject_trailing_args() {
+        let mut store = Store::new();
+
+        for subcommand in ["ENCODING", "REFCOUNT"] {
+            let err = dispatch_argv(
+                &[
+                    b"OBJECT".to_vec(),
+                    subcommand.as_bytes().to_vec(),
+                    b"k".to_vec(),
+                    b"extra".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                CommandError::WrongSubcommandArity {
+                    command: "OBJECT",
+                    subcommand: subcommand.to_string(),
+                }
+            );
+            assert_eq!(
+                err.to_resp(),
+                RespFrame::Error(format!(
+                    "ERR wrong number of arguments for 'object|{}' command",
+                    subcommand.to_ascii_lowercase()
+                ))
+            );
+        }
+    }
+
+    #[test]
     fn object_freq_and_idletime_require_exact_arity_before_other_paths() {
         let mut store = Store::new();
 
