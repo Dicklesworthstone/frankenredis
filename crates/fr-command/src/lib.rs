@@ -5354,15 +5354,13 @@ fn geosearchstore(
     geo_store_results(store, &dest, &results, unit_mult, storedist, now_ms)
 }
 
-/// Parse a stream ID matching upstream Redis 7.2 strict semantics
-/// (see `t_stream.c::streamGenericParseIDOrReply` with strict=1):
-///   - "ms-seq"  → (ms, seq)
-///   - "ms"      → (ms, 0)  (bare-integer shorthand: missing seq
-///                          defaults to 0; matches upstream's
-///                          most common `missing_seq` value for
-///                          XACK/XSETID/XADD-explicit-id paths.)
-/// The non-strict "+" / "-" special IDs are accepted only by
-/// dedicated range-parsing helpers, not this function.
+/// Parse a stream ID matching upstream Redis 7.2 strict semantics.
+///
+/// Accepted strict forms:
+/// - `ms-seq` -> `(ms, seq)`
+/// - `ms` -> `(ms, 0)`, matching upstream's common `missing_seq=0`
+///
+/// Dedicated range-parsing helpers handle non-strict `+` and `-` special IDs.
 /// (br-frankenredis-s0v0)
 fn parse_stream_id(arg: &[u8]) -> Result<StreamId, RespFrame> {
     let invalid = || {
@@ -5579,7 +5577,7 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         && parse_partial_auto_id(&argv[id_idx]).is_none()
     {
         match parse_stream_id(&argv[id_idx]) {
-            Ok(id) if id == (0, 0) => {
+            Ok((0, 0)) => {
                 // Upstream xaddCommand also requires the ID to be
                 // strictly greater than 0-0. (br-frankenredis-xaddorder)
                 return Ok(RespFrame::Error(
@@ -34296,6 +34294,64 @@ mod tests {
     }
 
     #[test]
+    fn xack_accepts_bare_integer_id() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"mystream".to_vec(),
+                b"1-0".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"mystream".to_vec(),
+                b"grp".to_vec(),
+                b"0-0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"grp".to_vec(),
+                b"consumer1".to_vec(),
+                b"COUNT".to_vec(),
+                b"10".to_vec(),
+                b"STREAMS".to_vec(),
+                b"mystream".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            1,
+        )
+        .unwrap();
+
+        let out = dispatch_argv(
+            &[
+                b"XACK".to_vec(),
+                b"mystream".to_vec(),
+                b"grp".to_vec(),
+                b"1".to_vec(),
+            ],
+            &mut store,
+            2,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    #[test]
     fn xack_nonexistent_id() {
         let mut store = Store::new();
         dispatch_argv(
@@ -34372,6 +34428,30 @@ mod tests {
         .unwrap();
         let out = dispatch_argv(
             &[b"XSETID".to_vec(), b"s".to_vec(), b"5-0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn xsetid_accepts_bare_integer_id() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1-0".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[b"XSETID".to_vec(), b"s".to_vec(), b"5".to_vec()],
             &mut store,
             0,
         )
