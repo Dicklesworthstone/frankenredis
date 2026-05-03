@@ -6117,7 +6117,10 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     // (br-frankenredis-xreadbal)
     if tail < 2 || !tail.is_multiple_of(2) {
         return Err(CommandError::Custom(
-            "ERR Unbalanced 'xreadgroup' list of streams: for each stream key an ID or '$' must be specified.".to_string(),
+            // Upstream t_stream.c::xreadCommand uses '>' for the XREADGROUP
+            // sentinel (vs '$' for plain XREAD); pin the matching wording.
+            // (br-frankenredis-xreadbal)
+            "ERR Unbalanced 'xreadgroup' list of streams: for each stream key an ID or '>' must be specified.".to_string(),
         ));
     }
     let stream_count = tail / 2;
@@ -24550,7 +24553,7 @@ mod tests {
         assert_eq!(
             arity,
             CommandError::Custom(
-                "ERR Unbalanced 'xreadgroup' list of streams: for each stream key an ID or '$' must be specified.".to_string()
+                "ERR Unbalanced 'xreadgroup' list of streams: for each stream key an ID or '>' must be specified.".to_string()
             )
         );
 
