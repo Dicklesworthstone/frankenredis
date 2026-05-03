@@ -12881,6 +12881,24 @@ mod tests {
     }
 
     #[test]
+    fn append_and_setrange_promote_embstr_string_encoding_to_raw() {
+        let mut store = Store::new();
+
+        store.set(b"append".to_vec(), b"short".to_vec(), None, 0);
+        assert_eq!(store.object_encoding(b"append", 0), Some("embstr"));
+        assert_eq!(store.append(b"append", b"_more", 1).unwrap(), 10);
+        assert_eq!(store.object_encoding(b"append", 1), Some("raw"));
+
+        store.set(b"setrange".to_vec(), b"short".to_vec(), None, 0);
+        assert_eq!(store.object_encoding(b"setrange", 0), Some("embstr"));
+        assert_eq!(store.setrange(b"setrange", 1, b"X", 1).unwrap(), 5);
+        assert_eq!(store.object_encoding(b"setrange", 1), Some("raw"));
+
+        assert_eq!(store.setrange(b"created", 0, b"hi", 1).unwrap(), 2);
+        assert_eq!(store.object_encoding(b"created", 1), Some("raw"));
+    }
+
+    #[test]
     fn strlen_returns_length_or_zero() {
         let mut store = Store::new();
         assert_eq!(store.strlen(b"missing", 0).unwrap(), 0);
