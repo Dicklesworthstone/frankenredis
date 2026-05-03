@@ -3319,6 +3319,7 @@ const CORE_CONFIG_LIVE_STABLE_CASES: &[&str] = &[
     "config_get_list_compress_depth_after_set",
     "config_set_list_compress_depth_negative_error",
     "config_set_list_compress_depth_non_integer",
+    "config_set_active_defrag_max_scan_fields_zero_error",
     "config_set_syslog_enabled_immutable",
     "config_set_cluster_announce_port_non_integer",
     "config_set_oom_score_adj_bad_enum",

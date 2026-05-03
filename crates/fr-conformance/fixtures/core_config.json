@@ -1118,6 +1118,20 @@
       }
     },
     {
+      "name": "config_set_active_defrag_max_scan_fields_zero_error",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "active-defrag-max-scan-fields",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CONFIG SET failed (possibly related to argument 'active-defrag-max-scan-fields') - argument must be between 1 and 9223372036854775807 inclusive"
+      }
+    },
+    {
       "name": "config_set_syslog_enabled_immutable",
       "now_ms": 0,
       "argv": [

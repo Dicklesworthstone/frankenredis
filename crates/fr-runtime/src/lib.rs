@@ -8157,11 +8157,11 @@ impl Runtime {
             }
             if parameter.eq_ignore_ascii_case("active-defrag-max-scan-fields") {
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(v) if v >= 0 => v,
+                    Ok(v) if v >= 1 => v,
                     Ok(_) => {
                         return config_set_failed(
                             "active-defrag-max-scan-fields",
-                            "argument must be between 0 and 9223372036854775807 inclusive",
+                            "argument must be between 1 and 9223372036854775807 inclusive",
                         );
                     }
                     Err(_) => {
@@ -18754,6 +18754,21 @@ mod tests {
             rt.execute_frame(command(&[b"CONFIG", b"SET", b"list-compress-depth", b"-1"]), 0),
             RespFrame::Error(
                 "ERR CONFIG SET failed (possibly related to argument 'list-compress-depth') - argument must be between 0 and 2147483647 inclusive"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"active-defrag-max-scan-fields",
+                    b"0"
+                ]),
+                0
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'active-defrag-max-scan-fields') - argument must be between 1 and 9223372036854775807 inclusive"
                     .to_string()
             )
         );
