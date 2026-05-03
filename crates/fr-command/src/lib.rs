@@ -31984,6 +31984,7 @@ mod tests {
         // crates/fr-conformance live oracle. (br-frankenredis-xvlj)
         let cases: &[(&str, &str)] = &[
             ("return redis.error_reply('err')", "ERR err"),
+            ("return redis.error_reply('CUSTOM hi')", "CUSTOM hi"),
             ("return redis.error_reply('-CUSTOM hi')", "CUSTOM hi"),
             ("return redis.error_reply('NOMSG')", "ERR NOMSG"),
             ("return redis.error_reply('-NOMSG')", "ERR NOMSG"),

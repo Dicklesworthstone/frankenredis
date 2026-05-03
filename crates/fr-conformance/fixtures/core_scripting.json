@@ -761,6 +761,58 @@
       }
     },
     {
+      "name": "eval_error_reply_default_err_code",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return redis.error_reply('err')",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR err"
+      }
+    },
+    {
+      "name": "eval_error_reply_no_dash_uses_first_word_as_code",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return redis.error_reply('CUSTOM hi')",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "CUSTOM hi"
+      }
+    },
+    {
+      "name": "eval_error_reply_dash_uses_first_word_as_code",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return redis.error_reply('-CUSTOM hi')",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "CUSTOM hi"
+      }
+    },
+    {
+      "name": "eval_error_reply_dash_without_message_defaults_err_code",
+      "now_ms": 0,
+      "argv": [
+        "EVAL",
+        "return redis.error_reply('-NOMSG')",
+        "0"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR NOMSG"
+      }
+    },
+    {
       "name": "function_flush_initial",
       "now_ms": 0,
       "argv": [
@@ -1383,7 +1435,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'eval' command"
+        "value": "ERR wrong number of arguments for 'eval_ro' command"
       }
     },
     {
@@ -1405,7 +1457,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'evalsha' command"
+        "value": "ERR wrong number of arguments for 'evalsha_ro' command"
       }
     },
     {
@@ -3297,7 +3349,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'eval' command"
+        "value": "ERR wrong number of arguments for 'eval_ro' command"
       }
     },
     {
@@ -3347,7 +3399,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'evalsha' command"
+        "value": "ERR wrong number of arguments for 'evalsha_ro' command"
       }
     },
     {
