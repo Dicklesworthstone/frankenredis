@@ -29336,10 +29336,27 @@ mod tests {
 
     #[test]
     fn memory_doctor() {
+        const EMPTY_REPORT: &[u8] = b"Hi Sam, this instance is empty or is using very little memory, my issues detector can't be used in these conditions. Please, leave for your mission on Earth and fill it with some data. The new Sam and I will be back to our programming as soon as I finished rebooting.\n";
+
         let mut store = Store::new();
         let out = dispatch_argv(&[b"MEMORY".to_vec(), b"DOCTOR".to_vec()], &mut store, 0)
             .expect("memory doctor");
-        assert!(matches!(out, RespFrame::BulkString(Some(_))));
+        assert_eq!(out, RespFrame::BulkString(Some(EMPTY_REPORT.to_vec())));
+    }
+
+    #[test]
+    fn memory_doctor_large_database_uses_no_issues_report() {
+        const NO_ISSUES_REPORT: &[u8] =
+            b"Hi Sam, I can't find any memory issue in your instance. I can only account for what occurs on this base.\n";
+
+        let mut store = Store::new();
+        for i in 0..50_000 {
+            store.set(format!("k{i}").into_bytes(), b"v".to_vec(), None, 0);
+        }
+
+        let out = dispatch_argv(&[b"MEMORY".to_vec(), b"DOCTOR".to_vec()], &mut store, 0)
+            .expect("memory doctor");
+        assert_eq!(out, RespFrame::BulkString(Some(NO_ISSUES_REPORT.to_vec())));
     }
 
     #[test]
