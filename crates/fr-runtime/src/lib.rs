@@ -13519,6 +13519,46 @@ mod tests {
     }
 
     #[test]
+    fn flushdb_rejects_invalid_optional_modes_on_selected_db_path() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"shared", b"db0"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"2"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"shared", b"db2"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"FLUSHDB", b"BOGUS"]), 3),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"FLUSHDB", b"ASYNC", b"extra"]), 4),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"shared"]), 5),
+            RespFrame::BulkString(Some(b"db2".to_vec()))
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SELECT", b"0"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"shared"]), 7),
+            RespFrame::BulkString(Some(b"db0".to_vec()))
+        );
+    }
+
+    #[test]
     fn multi_db_move_and_swapdb_preserve_logical_keys() {
         let mut rt = Runtime::default_strict();
 
