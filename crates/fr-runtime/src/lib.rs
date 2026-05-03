@@ -8540,7 +8540,7 @@ impl Runtime {
                         | "list-compress-depth"
                 ) {
                     match parse_i64_arg(value_bytes) {
-                        Ok(v) if v >= 0 => {}
+                        Ok(v) if (0..=i64::from(i32::MAX)).contains(&v) => {}
                         Ok(_) => {
                             return config_set_failed(
                                 canonical,
@@ -18754,6 +18754,41 @@ mod tests {
             rt.execute_frame(command(&[b"CONFIG", b"SET", b"list-compress-depth", b"-1"]), 0),
             RespFrame::Error(
                 "ERR CONFIG SET failed (possibly related to argument 'list-compress-depth') - argument must be between 0 and 2147483647 inclusive"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"list-compress-depth",
+                    b"2147483648"
+                ]),
+                0
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'list-compress-depth') - argument must be between 0 and 2147483647 inclusive"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"lfu-log-factor", b"2147483648"]),
+                0
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'lfu-log-factor') - argument must be between 0 and 2147483647 inclusive"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"tcp-keepalive", b"2147483648"]),
+                0
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'tcp-keepalive') - argument must be between 0 and 2147483647 inclusive"
                     .to_string()
             )
         );

@@ -1118,6 +1118,48 @@
       }
     },
     {
+      "name": "config_set_list_compress_depth_over_max_error",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "list-compress-depth",
+        "2147483648"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CONFIG SET failed (possibly related to argument 'list-compress-depth') - argument must be between 0 and 2147483647 inclusive"
+      }
+    },
+    {
+      "name": "config_set_lfu_log_factor_over_max_error",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "lfu-log-factor",
+        "2147483648"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CONFIG SET failed (possibly related to argument 'lfu-log-factor') - argument must be between 0 and 2147483647 inclusive"
+      }
+    },
+    {
+      "name": "config_set_tcp_keepalive_over_max_error",
+      "now_ms": 0,
+      "argv": [
+        "CONFIG",
+        "SET",
+        "tcp-keepalive",
+        "2147483648"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR CONFIG SET failed (possibly related to argument 'tcp-keepalive') - argument must be between 0 and 2147483647 inclusive"
+      }
+    },
+    {
       "name": "config_set_active_defrag_max_scan_fields_zero_error",
       "now_ms": 0,
       "argv": [
