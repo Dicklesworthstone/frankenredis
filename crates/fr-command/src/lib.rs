@@ -6174,6 +6174,25 @@ fn xclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("XCLAIM"));
     }
 
+    // Upstream t_stream.c::xclaimCommand looks up the stream key + the
+    // consumer group BEFORE parsing min-idle-time or any trailing
+    // options, so a missing-key/group call replies NOGROUP regardless
+    // of how mangled the rest of the argv is. The other XCLAIM-family
+    // commands (XPENDING, XAUTOCLAIM) parse args first per upstream;
+    // only XCLAIM short-circuits early. (frankenredis-3qrt)
+    match store.key_type(&argv[1], now_ms) {
+        None => return Ok(xclaim_nogroup_error(&argv[1], &argv[2])),
+        Some("stream") => {
+            let group_exists = store
+                .stream_consumer_groups(&argv[1])
+                .is_some_and(|groups| groups.contains_key(argv[2].as_slice()));
+            if !group_exists {
+                return Ok(xclaim_nogroup_error(&argv[1], &argv[2]));
+            }
+        }
+        Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
+    }
+
     // Upstream t_stream.c::xclaimCommand parses min-idle-time via
     // getLongLongFromObjectOrReply with the 'Invalid min-idle-time
     // argument for XCLAIM' error string, then clamps negative values
@@ -25581,6 +25600,120 @@ mod tests {
             xautoclaim_missing,
             RespFrame::Error("NOGROUP No such key 's' or consumer group 'g1'".to_string())
         );
+    }
+
+    #[test]
+    fn xclaim_missing_group_short_circuits_before_arg_parsing() {
+        // (frankenredis-3qrt) Upstream xclaimCommand looks up the key +
+        // consumer group BEFORE parsing min-idle-time and trailing
+        // options, so a missing-group call must surface NOGROUP — not
+        // 'Invalid min-idle-time argument' or 'Unrecognized XCLAIM option'.
+        let mut store = Store::new();
+        // Stream key exists but no group 'g'.
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"xs".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        for argv in [
+            // Garbage min-idle-time would normally surface
+            // 'Invalid min-idle-time argument for XCLAIM'.
+            vec![
+                b"XCLAIM".to_vec(),
+                b"xs".to_vec(),
+                b"g".to_vec(),
+                b"c".to_vec(),
+                b"BAD".to_vec(),
+                b"0-0".to_vec(),
+            ],
+            // Bad IDLE option arg would normally surface
+            // 'Invalid IDLE option argument for XCLAIM'.
+            vec![
+                b"XCLAIM".to_vec(),
+                b"xs".to_vec(),
+                b"g".to_vec(),
+                b"c".to_vec(),
+                b"0".to_vec(),
+                b"0-0".to_vec(),
+                b"IDLE".to_vec(),
+                b"BAD".to_vec(),
+            ],
+            // Unknown trailing option would normally surface
+            // "Unrecognized XCLAIM option 'NOSUCH'".
+            vec![
+                b"XCLAIM".to_vec(),
+                b"xs".to_vec(),
+                b"g".to_vec(),
+                b"c".to_vec(),
+                b"0".to_vec(),
+                b"0-0".to_vec(),
+                b"NOSUCH".to_vec(),
+            ],
+        ] {
+            let reply = dispatch_argv(&argv, &mut store, 0).expect("xclaim returns frame");
+            assert_eq!(
+                reply,
+                RespFrame::Error(
+                    "NOGROUP No such key 'xs' or consumer group 'g'".to_string()
+                ),
+                "xclaim with missing group must NOGROUP, got {reply:?} for {argv:?}"
+            );
+        }
+
+        // Missing key (not just group) also short-circuits.
+        let reply = dispatch_argv(
+            &[
+                b"XCLAIM".to_vec(),
+                b"nokey".to_vec(),
+                b"g".to_vec(),
+                b"c".to_vec(),
+                b"BAD".to_vec(),
+                b"0-0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "NOGROUP No such key 'nokey' or consumer group 'g'".to_string()
+            )
+        );
+
+        // Wrong-type key surfaces WRONGTYPE per upstream checkType, not
+        // NOGROUP.
+        dispatch_argv(
+            &[b"SET".to_vec(), b"strkey".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let err = dispatch_argv(
+            &[
+                b"XCLAIM".to_vec(),
+                b"strkey".to_vec(),
+                b"g".to_vec(),
+                b"c".to_vec(),
+                b"0".to_vec(),
+                b"0-0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("wrongtype");
+        assert!(matches!(
+            err,
+            CommandError::Store(StoreError::WrongType)
+        ));
     }
 
     #[test]
