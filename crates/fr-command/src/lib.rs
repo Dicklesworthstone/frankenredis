@@ -7012,26 +7012,57 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             ])));
         }
 
-        return Ok(RespFrame::Array(Some(vec![
-            RespFrame::BulkString(Some(b"length".to_vec())),
-            RespFrame::Integer(len_i64),
-            RespFrame::BulkString(Some(b"radix-tree-keys".to_vec())),
-            RespFrame::Integer(radix_tree_keys),
-            RespFrame::BulkString(Some(b"radix-tree-nodes".to_vec())),
-            RespFrame::Integer(radix_tree_nodes),
-            RespFrame::BulkString(Some(b"last-generated-id".to_vec())),
-            RespFrame::BulkString(Some(last_generated_id)),
-            RespFrame::BulkString(Some(b"max-deleted-entry-id".to_vec())),
-            RespFrame::BulkString(Some(max_deleted_entry_id)),
-            RespFrame::BulkString(Some(b"entries-added".to_vec())),
-            RespFrame::Integer(len_i64),
-            RespFrame::BulkString(Some(b"recorded-first-entry-id".to_vec())),
-            RespFrame::BulkString(Some(recorded_first_entry_id)),
-            RespFrame::BulkString(Some(b"entries".to_vec())),
-            RespFrame::Array(Some(entries_frames)),
-            RespFrame::BulkString(Some(b"groups".to_vec())),
-            RespFrame::Array(Some(group_frames)),
-        ])));
+        // Upstream t_stream.c::xinfoFullCommand uses addReplyMapLen for
+        // the FULL form (same as the non-FULL one). Emit RespFrame::Map
+        // for RESP3 callers, alternating-array for RESP2.
+        // (br-frankenredis-f6z6)
+        let pairs: Vec<(RespFrame, RespFrame)> = vec![
+            (
+                RespFrame::BulkString(Some(b"length".to_vec())),
+                RespFrame::Integer(len_i64),
+            ),
+            (
+                RespFrame::BulkString(Some(b"radix-tree-keys".to_vec())),
+                RespFrame::Integer(radix_tree_keys),
+            ),
+            (
+                RespFrame::BulkString(Some(b"radix-tree-nodes".to_vec())),
+                RespFrame::Integer(radix_tree_nodes),
+            ),
+            (
+                RespFrame::BulkString(Some(b"last-generated-id".to_vec())),
+                RespFrame::BulkString(Some(last_generated_id)),
+            ),
+            (
+                RespFrame::BulkString(Some(b"max-deleted-entry-id".to_vec())),
+                RespFrame::BulkString(Some(max_deleted_entry_id)),
+            ),
+            (
+                RespFrame::BulkString(Some(b"entries-added".to_vec())),
+                RespFrame::Integer(len_i64),
+            ),
+            (
+                RespFrame::BulkString(Some(b"recorded-first-entry-id".to_vec())),
+                RespFrame::BulkString(Some(recorded_first_entry_id)),
+            ),
+            (
+                RespFrame::BulkString(Some(b"entries".to_vec())),
+                RespFrame::Array(Some(entries_frames)),
+            ),
+            (
+                RespFrame::BulkString(Some(b"groups".to_vec())),
+                RespFrame::Array(Some(group_frames)),
+            ),
+        ];
+        if store.dispatch_client_ctx.resp_protocol_version == 3 {
+            return Ok(RespFrame::Map(Some(pairs)));
+        }
+        let mut flat = Vec::with_capacity(pairs.len() * 2);
+        for (k, v) in pairs {
+            flat.push(k);
+            flat.push(v);
+        }
+        return Ok(RespFrame::Array(Some(flat)));
     }
 
     let group_count = store
@@ -9526,12 +9557,29 @@ fn hrandfield(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     }
     let pairs = store.hrandfield_count(&argv[1], count, now_ms)?;
     if withvalues {
-        let mut frames = Vec::with_capacity(pairs.len() * 2);
-        for (field, value) in pairs {
-            frames.push(RespFrame::BulkString(Some(field)));
-            frames.push(RespFrame::BulkString(Some(value)));
+        // Upstream t_hash.c::hrandfieldWithCountCommand uses
+        // addReplyArrayLen(2) per pair when in RESP3 mode (array of
+        // [field, value] sub-arrays) but emits flat alternating k/v
+        // when in RESP2. Match both shapes. (br-frankenredis-f6z6)
+        if store.dispatch_client_ctx.resp_protocol_version == 3 {
+            let frames = pairs
+                .into_iter()
+                .map(|(field, value)| {
+                    RespFrame::Array(Some(vec![
+                        RespFrame::BulkString(Some(field)),
+                        RespFrame::BulkString(Some(value)),
+                    ]))
+                })
+                .collect();
+            Ok(RespFrame::Array(Some(frames)))
+        } else {
+            let mut frames = Vec::with_capacity(pairs.len() * 2);
+            for (field, value) in pairs {
+                frames.push(RespFrame::BulkString(Some(field)));
+                frames.push(RespFrame::BulkString(Some(value)));
+            }
+            Ok(RespFrame::Array(Some(frames)))
         }
-        Ok(RespFrame::Array(Some(frames)))
     } else {
         let frames = pairs
             .into_iter()
@@ -39955,6 +40003,134 @@ mod tests {
             }
             other => panic!("expected array, got {other:?}"), // ubs:ignore — AI triage
         }
+    }
+
+    #[test]
+    fn hrandfield_withvalues_resp3_emits_array_of_pairs() {
+        // (br-frankenredis-f6z6) Upstream
+        // t_hash.c::hrandfieldWithCountCommand wraps each (field, value)
+        // in addReplyArrayLen(2) when in RESP3 mode, so the reply is an
+        // Array of [field, value] sub-arrays — not a flat alternating-k/v
+        // array as in RESP2.
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"h".to_vec(),
+                b"f1".to_vec(),
+                b"v1".to_vec(),
+                b"f2".to_vec(),
+                b"v2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"HRANDFIELD".to_vec(),
+                b"h".to_vec(),
+                b"2".to_vec(),
+                b"WITHVALUES".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::Array(Some(pairs)) = out else {
+            panic!("expected outer array, got {out:?}"); // ubs:ignore — AI triage
+        };
+        assert_eq!(pairs.len(), 2, "expected 2 pairs, got {pairs:?}");
+        for pair in pairs {
+            let RespFrame::Array(Some(kv)) = pair else {
+                panic!("each pair must be a 2-element array, got {pair:?}"); // ubs:ignore — AI triage
+            };
+            assert_eq!(kv.len(), 2);
+            assert!(matches!(kv[0], RespFrame::BulkString(Some(_))));
+            assert!(matches!(kv[1], RespFrame::BulkString(Some(_))));
+        }
+
+        // RESP2 still emits the flat 4-element alternating array.
+        store.dispatch_client_ctx.resp_protocol_version = 2;
+        let out = dispatch_argv(
+            &[
+                b"HRANDFIELD".to_vec(),
+                b"h".to_vec(),
+                b"2".to_vec(),
+                b"WITHVALUES".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::Array(Some(arr)) = out else {
+            panic!("expected array, got {out:?}"); // ubs:ignore — AI triage
+        };
+        assert_eq!(arr.len(), 4);
+    }
+
+    #[test]
+    fn xinfo_stream_full_resp3_emits_map() {
+        // (br-frankenredis-f6z6) Upstream xinfoFullCommand uses
+        // addReplyMapLen for the FULL form's outer envelope. Match in
+        // RESP3 (Map), keep flat alternating-array in RESP2.
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"xs".to_vec(),
+                b"*".to_vec(),
+                b"a".to_vec(),
+                b"1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let out = dispatch_argv(
+            &[
+                b"XINFO".to_vec(),
+                b"STREAM".to_vec(),
+                b"xs".to_vec(),
+                b"FULL".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::Map(Some(pairs)) = out else {
+            panic!("expected RESP3 Map, got {out:?}"); // ubs:ignore — AI triage
+        };
+        let keys: Vec<&[u8]> = pairs
+            .iter()
+            .filter_map(|(k, _)| match k {
+                RespFrame::BulkString(Some(b)) => Some(b.as_slice()),
+                _ => None,
+            })
+            .collect();
+        assert!(keys.contains(&b"length".as_slice()));
+        assert!(keys.contains(&b"entries".as_slice()));
+        assert!(keys.contains(&b"groups".as_slice()));
+
+        // RESP2 emits flat alternating array of the same pairs.
+        store.dispatch_client_ctx.resp_protocol_version = 2;
+        let out = dispatch_argv(
+            &[
+                b"XINFO".to_vec(),
+                b"STREAM".to_vec(),
+                b"xs".to_vec(),
+                b"FULL".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::Array(Some(flat)) = out else {
+            panic!("expected RESP2 Array, got {out:?}"); // ubs:ignore — AI triage
+        };
+        assert!(flat.len().is_multiple_of(2) && flat.len() >= 18);
     }
 
     #[test]
