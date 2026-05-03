@@ -12767,6 +12767,19 @@ mod tests {
     }
 
     #[test]
+    fn auth_two_arg_default_nopass_accepts_any_password_when_no_requirepass() {
+        let mut rt = Runtime::default_strict();
+        assert!(rt.is_authenticated());
+
+        let out = rt.execute_frame(command(&[b"AUTH", b"default", b"bad"]), 0);
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(
+            rt.session.authenticated_user.as_deref(),
+            Some(b"default".as_slice())
+        );
+    }
+
+    #[test]
     fn auth_one_arg_keeps_not_configured_error_when_no_requirepass() {
         let mut rt = Runtime::default_strict();
         assert!(rt.is_authenticated());
