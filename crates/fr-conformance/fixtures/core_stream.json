@@ -5440,6 +5440,232 @@
           ]}
         ]
       }
+    },
+    {
+      "name": "xinfo_lag_tombstone_behind_setup_1",
+      "now_ms": 98000,
+      "argv": ["XADD", "xilagtomb", "1-0", "a", "1"],
+      "expect": { "kind": "bulk", "value": "1-0" }
+    },
+    {
+      "name": "xinfo_lag_tombstone_behind_setup_2",
+      "now_ms": 98000,
+      "argv": ["XADD", "xilagtomb", "2-0", "b", "2"],
+      "expect": { "kind": "bulk", "value": "2-0" }
+    },
+    {
+      "name": "xinfo_lag_tombstone_behind_setup_3",
+      "now_ms": 98000,
+      "argv": ["XADD", "xilagtomb", "3-0", "c", "3"],
+      "expect": { "kind": "bulk", "value": "3-0" }
+    },
+    {
+      "name": "xinfo_lag_tombstone_behind_setup_4",
+      "now_ms": 98000,
+      "argv": ["XADD", "xilagtomb", "4-0", "d", "4"],
+      "expect": { "kind": "bulk", "value": "4-0" }
+    },
+    {
+      "name": "xinfo_lag_tombstone_behind_delete_first",
+      "now_ms": 98000,
+      "argv": ["XDEL", "xilagtomb", "1-0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xinfo_lag_tombstone_behind_create_group",
+      "now_ms": 98000,
+      "argv": ["XGROUP", "CREATE", "xilagtomb", "grp1", "3-0", "ENTRIESREAD", "3"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xinfo_groups_reports_entriesread_lag_when_tombstone_behind_cursor",
+      "now_ms": 98000,
+      "argv": ["XINFO", "GROUPS", "xilagtomb"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind":"array","value":[
+            {"kind":"bulk","value":"name"},
+            {"kind":"bulk","value":"grp1"},
+            {"kind":"bulk","value":"consumers"},
+            {"kind":"integer","value":0},
+            {"kind":"bulk","value":"pending"},
+            {"kind":"integer","value":0},
+            {"kind":"bulk","value":"last-delivered-id"},
+            {"kind":"bulk","value":"3-0"},
+            {"kind":"bulk","value":"entries-read"},
+            {"kind":"integer","value":3},
+            {"kind":"bulk","value":"lag"},
+            {"kind":"integer","value":1}
+          ]}
+        ]
+      }
+    },
+    {
+      "name": "xinfo_full_reports_entriesread_lag_when_tombstone_behind_cursor",
+      "now_ms": 98000,
+      "argv": ["XINFO", "STREAM", "xilagtomb", "FULL", "COUNT", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind":"bulk","value":"length"},
+          {"kind":"integer","value":3},
+          {"kind":"bulk","value":"radix-tree-keys"},
+          {"kind":"integer","value":3},
+          {"kind":"bulk","value":"radix-tree-nodes"},
+          {"kind":"integer","value":4},
+          {"kind":"bulk","value":"last-generated-id"},
+          {"kind":"bulk","value":"4-0"},
+          {"kind":"bulk","value":"max-deleted-entry-id"},
+          {"kind":"bulk","value":"1-0"},
+          {"kind":"bulk","value":"entries-added"},
+          {"kind":"integer","value":4},
+          {"kind":"bulk","value":"recorded-first-entry-id"},
+          {"kind":"bulk","value":"2-0"},
+          {"kind":"bulk","value":"entries"},
+          {"kind":"array","value":[
+            {"kind":"array","value":[
+              {"kind":"bulk","value":"2-0"},
+              {"kind":"array","value":[{"kind":"bulk","value":"b"},{"kind":"bulk","value":"2"}]}
+            ]},
+            {"kind":"array","value":[
+              {"kind":"bulk","value":"3-0"},
+              {"kind":"array","value":[{"kind":"bulk","value":"c"},{"kind":"bulk","value":"3"}]}
+            ]},
+            {"kind":"array","value":[
+              {"kind":"bulk","value":"4-0"},
+              {"kind":"array","value":[{"kind":"bulk","value":"d"},{"kind":"bulk","value":"4"}]}
+            ]}
+          ]},
+          {"kind":"bulk","value":"groups"},
+          {"kind":"array","value":[
+            {"kind":"array","value":[
+              {"kind":"bulk","value":"name"},
+              {"kind":"bulk","value":"grp1"},
+              {"kind":"bulk","value":"last-delivered-id"},
+              {"kind":"bulk","value":"3-0"},
+              {"kind":"bulk","value":"entries-read"},
+              {"kind":"integer","value":3},
+              {"kind":"bulk","value":"lag"},
+              {"kind":"integer","value":1},
+              {"kind":"bulk","value":"pel-count"},
+              {"kind":"integer","value":0},
+              {"kind":"bulk","value":"pending"},
+              {"kind":"array","value":[]},
+              {"kind":"bulk","value":"consumers"},
+              {"kind":"array","value":[]}
+            ]}
+          ]}
+        ]
+      }
+    },
+    {
+      "name": "xinfo_rename_max_deleted_setup",
+      "now_ms": 99000,
+      "argv": ["XADD", "ximaxdelrename", "1-0", "f", "v"],
+      "expect": { "kind": "bulk", "value": "1-0" }
+    },
+    {
+      "name": "xinfo_rename_max_deleted_delete",
+      "now_ms": 99000,
+      "argv": ["XDEL", "ximaxdelrename", "1-0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xinfo_rename_max_deleted_rename",
+      "now_ms": 99000,
+      "argv": ["RENAME", "ximaxdelrename", "ximaxdelrenamed"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xinfo_stream_rename_preserves_max_deleted",
+      "now_ms": 99000,
+      "argv": ["XINFO", "STREAM", "ximaxdelrenamed"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind":"bulk","value":"length"},
+          {"kind":"integer","value":0},
+          {"kind":"bulk","value":"radix-tree-keys"},
+          {"kind":"integer","value":0},
+          {"kind":"bulk","value":"radix-tree-nodes"},
+          {"kind":"integer","value":1},
+          {"kind":"bulk","value":"last-generated-id"},
+          {"kind":"bulk","value":"1-0"},
+          {"kind":"bulk","value":"max-deleted-entry-id"},
+          {"kind":"bulk","value":"1-0"},
+          {"kind":"bulk","value":"entries-added"},
+          {"kind":"integer","value":1},
+          {"kind":"bulk","value":"recorded-first-entry-id"},
+          {"kind":"bulk","value":"0-0"},
+          {"kind":"bulk","value":"groups"},
+          {"kind":"integer","value":0},
+          {"kind":"bulk","value":"first-entry"},
+          {"kind":"bulk","value":null},
+          {"kind":"bulk","value":"last-entry"},
+          {"kind":"bulk","value":null}
+        ]
+      }
+    },
+    {
+      "name": "xinfo_copy_max_deleted_setup",
+      "now_ms": 99500,
+      "argv": ["XADD", "ximaxdelcopy", "1-0", "f", "v"],
+      "expect": { "kind": "bulk", "value": "1-0" }
+    },
+    {
+      "name": "xinfo_copy_max_deleted_delete",
+      "now_ms": 99500,
+      "argv": ["XDEL", "ximaxdelcopy", "1-0"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xinfo_copy_max_deleted_copy",
+      "now_ms": 99500,
+      "argv": ["COPY", "ximaxdelcopy", "ximaxdelcopied"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "xinfo_stream_copy_preserves_max_deleted",
+      "now_ms": 99500,
+      "argv": ["XINFO", "STREAM", "ximaxdelcopied"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind":"bulk","value":"length"},
+          {"kind":"integer","value":0},
+          {"kind":"bulk","value":"radix-tree-keys"},
+          {"kind":"integer","value":0},
+          {"kind":"bulk","value":"radix-tree-nodes"},
+          {"kind":"integer","value":1},
+          {"kind":"bulk","value":"last-generated-id"},
+          {"kind":"bulk","value":"1-0"},
+          {"kind":"bulk","value":"max-deleted-entry-id"},
+          {"kind":"bulk","value":"1-0"},
+          {"kind":"bulk","value":"entries-added"},
+          {"kind":"integer","value":1},
+          {"kind":"bulk","value":"recorded-first-entry-id"},
+          {"kind":"bulk","value":"0-0"},
+          {"kind":"bulk","value":"groups"},
+          {"kind":"integer","value":0},
+          {"kind":"bulk","value":"first-entry"},
+          {"kind":"bulk","value":null},
+          {"kind":"bulk","value":"last-entry"},
+          {"kind":"bulk","value":null}
+        ]
+      }
+    },
+    {
+      "name": "xsetid_entriesadded_zero_empty_stream_create",
+      "now_ms": 100000,
+      "argv": ["XGROUP", "CREATE", "xizero", "grp1", "$", "MKSTREAM"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xsetid_entriesadded_zero_empty_stream_ok",
+      "now_ms": 100000,
+      "argv": ["XSETID", "xizero", "0-0", "ENTRIESADDED", "0"],
+      "expect": { "kind": "simple", "value": "OK" }
     }
   ]
 }

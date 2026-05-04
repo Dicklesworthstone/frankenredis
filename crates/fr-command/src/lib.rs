@@ -6085,6 +6085,24 @@ fn stream_entries_read_frame(entries_read: Option<u64>) -> RespFrame {
     })
 }
 
+fn stream_lag_range_has_tombstones(
+    stream_len: usize,
+    first_id: Option<StreamId>,
+    max_deleted_id: StreamId,
+    start_id: StreamId,
+) -> bool {
+    if stream_len == 0 || max_deleted_id == (0, 0) {
+        return false;
+    }
+    let Some(first_id) = first_id else {
+        return false;
+    };
+    if first_id > max_deleted_id {
+        return false;
+    }
+    start_id <= max_deleted_id
+}
+
 fn stream_full_group_lag_frame(
     stream_entries_added: u64,
     stream_len: usize,
@@ -6095,7 +6113,7 @@ fn stream_full_group_lag_frame(
     entries_read: Option<u64>,
 ) -> RespFrame {
     if let Some(entries_read) = entries_read
-        && max_deleted_id == (0, 0)
+        && !stream_lag_range_has_tombstones(stream_len, first_id, max_deleted_id, last_delivered_id)
     {
         let len = i64::try_from(stream_entries_added).unwrap_or(i64::MAX);
         let read = i64::try_from(entries_read).unwrap_or(i64::MAX);
@@ -7191,9 +7209,9 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         10 // Redis default COUNT for FULL is 10
     };
 
-    let last_generated_id = last
-        .as_ref()
-        .map(|(id, _)| format_stream_id(*id))
+    let stream_watermark = store.stream_watermark(&argv[2])?;
+    let last_generated_id = stream_watermark
+        .map(format_stream_id)
         .unwrap_or_else(|| b"0-0".to_vec());
     let recorded_first_entry_id = first
         .as_ref()
@@ -7203,11 +7221,7 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let entries_added = store.stream_entries_added(&argv[2], len);
     let entries_added_i64 = i64::try_from(entries_added).unwrap_or(i64::MAX);
     let radix_tree_keys = i64::try_from(len).unwrap_or(i64::MAX);
-    let radix_tree_nodes = if len == 0 {
-        0
-    } else {
-        i64::try_from(len.saturating_add(1)).unwrap_or(i64::MAX)
-    };
+    let radix_tree_nodes = i64::try_from(len.saturating_add(1)).unwrap_or(i64::MAX);
     let max_deleted_id = store.stream_max_deleted_id(&argv[2]).unwrap_or((0, 0));
     let max_deleted_entry_id = format_stream_id(max_deleted_id);
 
@@ -40339,6 +40353,14 @@ mod tests {
         assert_eq!(
             stream_full_group_lag_frame(10, 3, Some((1, 1)), Some((3, 1)), (0, 0), (2, 1), Some(2)),
             RespFrame::Integer(8)
+        );
+        assert_eq!(
+            stream_full_group_lag_frame(4, 3, Some((2, 0)), Some((4, 0)), (1, 0), (3, 0), Some(3)),
+            RespFrame::Integer(1)
+        );
+        assert_eq!(
+            stream_full_group_lag_frame(4, 3, Some((2, 0)), Some((4, 0)), (3, 0), (2, 0), Some(2)),
+            RespFrame::BulkString(None)
         );
     }
 
