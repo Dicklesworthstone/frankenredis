@@ -279,6 +279,85 @@ fn mr_enc_no_shift_on_replace_hash_value_same_size() {
 }
 
 #[test]
+fn mr_enc_mono_set_traverses_intset_listpack_hashtable_in_order() {
+    // ENC-MONO-SET: For sets, encoding moves monotonically through
+    // intset → listpack → hashtable as the membership grows. Each
+    // transition fires at most once and never reverses, even when
+    // intermediate states could re-qualify for an earlier encoding.
+    //
+    // Stage 1: pure-integer members ≤ set_max_intset_entries → intset
+    // Stage 2: introducing one non-integer member with the working set
+    //          still under set_max_listpack_entries → listpack
+    // Stage 3: growing past set_max_listpack_entries → hashtable
+    let mut store = Store::new();
+    let mut transitions: Vec<&'static str> = Vec::new();
+    let record = |store: &mut Store, transitions: &mut Vec<&'static str>| {
+        let enc = store.object_encoding(b"s", NOW).expect("set encoding");
+        if transitions.last().is_none_or(|prev| *prev != enc) {
+            transitions.push(enc);
+        }
+    };
+
+    for i in 0..50_u32 {
+        store
+            .sadd(b"s", &[format!("{i}").into_bytes()], NOW)
+            .expect("sadd int");
+        record(&mut store, &mut transitions);
+    }
+    // Adding one non-integer demotes to listpack (no longer pure-int).
+    store
+        .sadd(b"s", &[b"alpha".to_vec()], NOW)
+        .expect("sadd non-int");
+    record(&mut store, &mut transitions);
+
+    // Grow past set_max_listpack_entries (default 128) to flip to hashtable.
+    for i in 0..200_u32 {
+        store
+            .sadd(b"s", &[format!("m{i}").into_bytes()], NOW)
+            .expect("sadd extra");
+        record(&mut store, &mut transitions);
+    }
+
+    let encs: Vec<&'static str> = transitions.clone();
+    assert_eq!(
+        encs,
+        vec!["intset", "listpack", "hashtable"],
+        "unexpected set encoding trajectory: {transitions:?}"
+    );
+}
+
+#[test]
+#[ignore = "frankenredis-1jwi: fr currently downgrades to intset after SREM removes the last non-int; upstream keeps listpack"]
+fn mr_enc_no_downgrade_on_set_srem_after_listpack_promotion() {
+    // ENC-NO-DOWNGRADE-ON-REMOVE: Once a set has been promoted from
+    // intset to listpack (because a non-integer was added), removing
+    // that non-integer does NOT downgrade the encoding back to intset.
+    // Upstream Redis tracks the "this set was once non-int" state via
+    // the encoding itself; downgrades are not part of the type
+    // contract. (mirror of upstream t_set.c::setTypeMaybeConvert)
+    let mut store = Store::new();
+    for i in 0..10_u32 {
+        store
+            .sadd(b"s", &[format!("{i}").into_bytes()], NOW)
+            .expect("sadd int");
+    }
+    assert_eq!(store.object_encoding(b"s", NOW), Some("intset"));
+
+    store
+        .sadd(b"s", &[b"alpha".to_vec()], NOW)
+        .expect("sadd non-int");
+    assert_eq!(store.object_encoding(b"s", NOW), Some("listpack"));
+
+    let alpha = b"alpha".as_slice();
+    store
+        .srem(b"s", &[alpha], NOW)
+        .expect("srem non-int");
+    // Now the set is purely integers again, BUT the encoding stays at
+    // listpack — this is the metamorphic non-reversal property.
+    assert_eq!(store.object_encoding(b"s", NOW), Some("listpack"));
+}
+
+#[test]
 fn mr_enc_mono_zset_does_not_downgrade_on_insert_sweep() {
     let mut store = Store::new();
     let mut last: Option<&'static str> = None;
