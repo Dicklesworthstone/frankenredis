@@ -14877,9 +14877,12 @@ mod tests {
         assert_eq!(first.len(), 2);
         assert_eq!(first[0].0, (1000, 0));
         assert_eq!(first[1].0, (1000, 1));
+        // entries-read is bumped after each XREADGROUP delivery — the
+        // counter reflects the number of entries the group has read so
+        // far. (frankenredis-ic8v / 6rpn)
         assert_eq!(
             store.xinfo_groups(b"s", 0).unwrap().expect("groups"),
-            vec![(b"g1".to_vec(), 1, 2, (1000, 1), None)]
+            vec![(b"g1".to_vec(), 1, 2, (1000, 1), Some(2))]
         );
 
         let second = store
@@ -14909,9 +14912,11 @@ mod tests {
             .expect("group exists");
         assert_eq!(third.len(), 1);
         assert_eq!(third[0].0, (1001, 0));
+        // entries-read continues advancing across new XADD + XREADGROUP
+        // rounds. (frankenredis-ic8v)
         assert_eq!(
             store.xinfo_groups(b"s", 0).unwrap().expect("groups"),
-            vec![(b"g1".to_vec(), 1, 3, (1001, 0), None)]
+            vec![(b"g1".to_vec(), 1, 3, (1001, 0), Some(3))]
         );
     }
 
@@ -15057,7 +15062,9 @@ mod tests {
         assert_eq!(owner_history_after_noack[0].0, (1000, 0));
 
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), 2, 1, (1000, 2), None)]);
+        // entries-read tracks total deliveries to the group, including
+        // NOACK reads. (frankenredis-ic8v)
+        assert_eq!(groups, vec![(b"g1".to_vec(), 2, 1, (1000, 2), Some(3))]);
     }
 
     #[test]
@@ -15714,7 +15721,9 @@ mod tests {
             Some(1)
         );
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), 1, 0, (1000, 0), None)]);
+        // entries-read persists across XGROUP DELCONSUMER and no-op
+        // calls — only the consumer table is mutated. (frankenredis-ic8v)
+        assert_eq!(groups, vec![(b"g1".to_vec(), 1, 0, (1000, 0), Some(1))]);
 
         assert_eq!(
             store
@@ -15723,7 +15732,9 @@ mod tests {
             Some(0)
         );
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), 1, 0, (1000, 0), None)]);
+        // entries-read persists across XGROUP DELCONSUMER and no-op
+        // calls — only the consumer table is mutated. (frankenredis-ic8v)
+        assert_eq!(groups, vec![(b"g1".to_vec(), 1, 0, (1000, 0), Some(1))]);
 
         assert_eq!(
             store
@@ -16890,7 +16901,9 @@ mod tests {
         assert_eq!(entries[0].1, vec![(b"name".to_vec(), b"alice".to_vec())]);
         assert_eq!(entries[1].0, (2, 0));
         let groups = store2.xinfo_groups(b"s", 100).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g".to_vec(), 1, 2, (2, 0), None)]);
+        // DUMP/RESTORE round-trips entries-read alongside other group
+        // metadata. (frankenredis-ic8v)
+        assert_eq!(groups, vec![(b"g".to_vec(), 1, 2, (2, 0), Some(2))]);
         let pending = store2
             .xpending_summary(b"s", b"g", 200)
             .unwrap()
@@ -17192,6 +17205,8 @@ mod tests {
         let cmds = store.to_aof_commands(100);
         assert_eq!(cmds.len(), 6);
         assert_eq!(cmds[0][0], b"XADD");
+        // XGROUP CREATE replay carries the ENTRIESREAD trailer so the
+        // restored group preserves its read counter. (frankenredis-ic8v)
         assert_eq!(
             cmds[1],
             vec![
@@ -17200,6 +17215,8 @@ mod tests {
                 b"s".to_vec(),
                 b"g".to_vec(),
                 b"1-0".to_vec(),
+                b"ENTRIESREAD".to_vec(),
+                b"1".to_vec(),
             ]
         );
         assert_eq!(
