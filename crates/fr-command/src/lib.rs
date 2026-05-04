@@ -37109,6 +37109,134 @@ mod tests {
     }
 
     #[test]
+    fn acl_cat_golden_membership_matches_vendored_redis_7_2_4() {
+        // Golden lists captured from `redis-cli -p 16701 ACL CAT <cat>`
+        // against vendored Redis 7.2.4 on 2026-05-04. Pinning the full
+        // sorted membership (rather than just .len()) catches both
+        // accidental drops AND silent additions when build.rs derives
+        // categories from upstream commands JSON. Failing this test
+        // means either upstream JSON drifted, build.rs miscategorizes,
+        // or someone bumped the vendored Redis tag — investigate before
+        // updating the goldens.
+        fn sorted(cat: &str) -> Vec<&'static str> {
+            let mut v: Vec<&'static str> = commands_in_acl_category(cat).to_vec();
+            v.sort_unstable();
+            v
+        }
+
+        let pubsub_golden: &[&str] = &[
+            "psubscribe",
+            "publish",
+            "pubsub|channels",
+            "pubsub|numpat",
+            "pubsub|numsub",
+            "pubsub|shardchannels",
+            "pubsub|shardnumsub",
+            "punsubscribe",
+            "spublish",
+            "ssubscribe",
+            "subscribe",
+            "sunsubscribe",
+            "unsubscribe",
+        ];
+        assert_eq!(sorted("pubsub"), pubsub_golden);
+
+        let blocking_golden: &[&str] = &[
+            "blmove",
+            "blmpop",
+            "blpop",
+            "brpop",
+            "brpoplpush",
+            "bzmpop",
+            "bzpopmax",
+            "bzpopmin",
+            "xread",
+            "xreadgroup",
+        ];
+        assert_eq!(sorted("blocking"), blocking_golden);
+
+        let keyspace_golden: &[&str] = &[
+            "copy",
+            "dbsize",
+            "del",
+            "dump",
+            "exists",
+            "expire",
+            "expireat",
+            "expiretime",
+            "flushall",
+            "flushdb",
+            "keys",
+            "migrate",
+            "move",
+            "object|encoding",
+            "object|freq",
+            "object|help",
+            "object|idletime",
+            "object|refcount",
+            "persist",
+            "pexpire",
+            "pexpireat",
+            "pexpiretime",
+            "pttl",
+            "randomkey",
+            "rename",
+            "renamenx",
+            "restore",
+            "restore-asking",
+            "scan",
+            "swapdb",
+            "touch",
+            "ttl",
+            "type",
+            "unlink",
+        ];
+        assert_eq!(sorted("keyspace"), keyspace_golden);
+
+        let connection_golden: &[&str] = &[
+            "asking",
+            "auth",
+            "client|caching",
+            "client|getname",
+            "client|getredir",
+            "client|help",
+            "client|id",
+            "client|info",
+            "client|kill",
+            "client|list",
+            "client|no-evict",
+            "client|no-touch",
+            "client|pause",
+            "client|reply",
+            "client|setinfo",
+            "client|setname",
+            "client|tracking",
+            "client|trackinginfo",
+            "client|unblock",
+            "client|unpause",
+            "command",
+            "command|count",
+            "command|docs",
+            "command|getkeys",
+            "command|getkeysandflags",
+            "command|help",
+            "command|info",
+            "command|list",
+            "echo",
+            "hello",
+            "ping",
+            "quit",
+            "readonly",
+            "readwrite",
+            "reset",
+            "select",
+            "wait",
+            "waitaof",
+        ];
+        assert_eq!(sorted("connection"), connection_golden);
+    }
+
+    #[test]
     fn acl_command_selectors_prefer_known_subcommands() {
         assert!(is_known_acl_command_selector("client|info"));
         assert!(is_known_acl_command_selector("get"));
