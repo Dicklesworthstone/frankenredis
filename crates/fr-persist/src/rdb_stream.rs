@@ -150,17 +150,8 @@ fn encode_consumer_group(buf: &mut Vec<u8>, group: &RdbStreamConsumerGroup) -> O
     super::rdb_encode_string(buf, &group.name);
     super::rdb_encode_length(buf, usize::try_from(group.last_delivered_id_ms).ok()?);
     super::rdb_encode_length(buf, usize::try_from(group.last_delivered_id_seq).ok()?);
-    // Upstream `t_stream.h::SCG_INVALID_ENTRIES_READ` is `-1` cast to a
-    // u64; emitting it tells `streamReplyWithRange` / XINFO STREAM FULL
-    // to fall back to `streamEstimateDistanceFromFirstEverEntry` for
-    // lag computation rather than trusting a count we don't track.
-    // Previously we emitted `group.pending.len()` here as an
-    // approximation, which is structurally wrong: `entries_read` is
-    // the cumulative count of entries the group has read (including
-    // acked ones), not the size of the unacked pending list — using
-    // the latter under-counts and inflates the upstream-side `lag`
-    // metric every time a group acks anything. (br-frankenredis-3njd)
-    super::rdb_encode_length(buf, usize::MAX);
+    let entries_read = group.entries_read.unwrap_or(u64::MAX);
+    super::rdb_encode_length(buf, usize::try_from(entries_read).ok()?);
 
     let mut pending_by_id: BTreeMap<(u64, u64), &RdbStreamPendingEntry> = BTreeMap::new();
     for pending in &group.pending {
@@ -365,11 +356,18 @@ pub(crate) fn decode_upstream_stream_skeleton(
         let (last_delivered_id_seq, c) =
             rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
         cursor += c;
-        if is_v2_or_later {
-            let (_v, c) =
+        let entries_read = if is_v2_or_later {
+            let (v, c) =
                 rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
             cursor += c;
-        }
+            if v == usize::MAX {
+                None
+            } else {
+                Some(v as u64)
+            }
+        } else {
+            None
+        };
         let (pel_count, c) =
             rdb_decode_length(&data[cursor..]).ok_or(UpstreamStreamError::InvalidLength)?;
         cursor += c;
@@ -424,6 +422,7 @@ pub(crate) fn decode_upstream_stream_skeleton(
             name,
             last_delivered_id_ms: last_delivered_id_ms as u64,
             last_delivered_id_seq: last_delivered_id_seq as u64,
+            entries_read,
             consumers,
             pending,
         });
@@ -978,6 +977,7 @@ mod tests {
             name: b"group".to_vec(),
             last_delivered_id_ms: 1001,
             last_delivered_id_seq: 1,
+            entries_read: Some(2),
             consumers: vec![b"alice".to_vec(), b"bob".to_vec()],
             pending: vec![
                 RdbStreamPendingEntry {
@@ -1037,6 +1037,7 @@ mod tests {
                 name: b"group".to_vec(),
                 last_delivered_id_ms: 1001,
                 last_delivered_id_seq: 1,
+                entries_read: Some(2),
                 consumers: vec![b"alice".to_vec(), b"bob".to_vec()],
                 pending: vec![
                     RdbStreamPendingEntry {
@@ -1065,6 +1066,7 @@ mod tests {
             name: b"group".to_vec(),
             last_delivered_id_ms: 1000,
             last_delivered_id_seq: 0,
+            entries_read: None,
             consumers: vec![b"alice".to_vec()],
             pending: vec![RdbStreamPendingEntry {
                 entry_id_ms: 1000,
@@ -1112,6 +1114,7 @@ mod tests {
                     name: format!("group-{fixture}").into_bytes(),
                     last_delivered_id_ms: watermark.0,
                     last_delivered_id_seq: watermark.1,
+                    entries_read: None,
                     consumers: vec![b"consumer".to_vec()],
                     pending: vec![RdbStreamPendingEntry {
                         entry_id_ms: pending_id.0,
@@ -1339,6 +1342,7 @@ mod tests {
             name: b"g".to_vec(),
             last_delivered_id_ms: 10,
             last_delivered_id_seq: 0,
+            entries_read: None,
             consumers: vec![b"alice".to_vec()],
             pending: vec![
                 RdbStreamPendingEntry {

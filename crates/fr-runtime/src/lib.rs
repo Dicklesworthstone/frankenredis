@@ -11973,6 +11973,7 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
                                 name: name.clone(),
                                 last_delivered_id_ms: group.last_delivered_id.0,
                                 last_delivered_id_seq: group.last_delivered_id.1,
+                                entries_read: group.entries_read,
                                 consumers: group.consumers.iter().cloned().collect(),
                                 pending: group
                                     .pending

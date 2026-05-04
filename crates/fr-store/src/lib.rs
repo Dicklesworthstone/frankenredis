@@ -332,12 +332,13 @@ pub struct StreamGroupReadOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamGroup {
     pub last_delivered_id: StreamId,
+    pub entries_read: Option<u64>,
     pub consumers: BTreeSet<Vec<u8>>,
     pub pending: StreamPendingEntries,
 }
 
 pub type StreamGroupState = BTreeMap<Vec<u8>, StreamGroup>;
-pub type StreamGroupInfo = (Vec<u8>, usize, usize, StreamId);
+pub type StreamGroupInfo = (Vec<u8>, usize, usize, StreamId, Option<u64>);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ZaddOptions {
@@ -7036,6 +7037,7 @@ impl Store {
             group_name,
             StreamGroup {
                 last_delivered_id,
+                entries_read: None,
                 consumers,
                 pending,
             },
@@ -7411,6 +7413,10 @@ impl Store {
             None => return Ok(None),
         };
         let last_seen_id = records.last().map(|(id, _)| *id);
+        let has_deleted_stream_entries = self
+            .stream_max_deleted_ids
+            .get(key)
+            .is_some_and(|id| *id != (0, 0));
 
         let Some(groups) = self.stream_groups.get_mut(key) else {
             return Ok(None);
@@ -7423,6 +7429,14 @@ impl Store {
         if let StreamGroupReadCursor::NewEntries = cursor
             && let Some(last_seen_id) = last_seen_id
         {
+            if let Some(entries_read) = group_state.entries_read.as_mut() {
+                if has_deleted_stream_entries {
+                    group_state.entries_read = None;
+                } else {
+                    let read_count = u64::try_from(records.len()).unwrap_or(u64::MAX);
+                    *entries_read = entries_read.saturating_add(read_count);
+                }
+            }
             group_state.last_delivered_id = last_seen_id;
             if !noack {
                 for (id, _) in &records {
@@ -7823,6 +7837,18 @@ impl Store {
         mkstream: bool,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
+        self.xgroup_create_with_entries_read(key, group, start_id, None, mkstream, now_ms)
+    }
+
+    pub fn xgroup_create_with_entries_read(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        start_id: StreamId,
+        entries_read: Option<u64>,
+        mkstream: bool,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
         let key_exists_as_stream = match self.entries.get(key) {
             Some(entry) => match &entry.value {
@@ -7852,6 +7878,7 @@ impl Store {
             group.to_vec(),
             StreamGroup {
                 last_delivered_id: start_id,
+                entries_read,
                 consumers: BTreeSet::new(),
                 pending: BTreeMap::new(),
             },
@@ -7898,6 +7925,17 @@ impl Store {
         last_delivered_id: StreamId,
         now_ms: u64,
     ) -> Result<bool, StoreError> {
+        self.xgroup_setid_with_entries_read(key, group, last_delivered_id, None, now_ms)
+    }
+
+    pub fn xgroup_setid_with_entries_read(
+        &mut self,
+        key: &[u8],
+        group: &[u8],
+        last_delivered_id: StreamId,
+        entries_read: Option<u64>,
+        now_ms: u64,
+    ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
         match self.entries.get(key) {
             Some(entry) => match &entry.value {
@@ -7906,6 +7944,7 @@ impl Store {
                         && let Some(current_group) = groups.get_mut(group)
                     {
                         current_group.last_delivered_id = last_delivered_id;
+                        current_group.entries_read = entries_read;
                         self.dirty = self.dirty.saturating_add(1);
                         return Ok(true);
                     }
@@ -7940,6 +7979,7 @@ impl Store {
                                         group.consumers.len(),
                                         group.pending.len(),
                                         group.last_delivered_id,
+                                        group.entries_read,
                                     )
                                 })
                                 .collect()
@@ -10167,6 +10207,7 @@ impl Store {
                         name: name.clone(),
                         last_delivered_id_ms: group.last_delivered_id.0,
                         last_delivered_id_seq: group.last_delivered_id.1,
+                        entries_read: group.entries_read,
                         consumers: group.consumers.iter().cloned().collect(),
                         pending: group
                             .pending
@@ -10724,13 +10765,18 @@ impl Store {
                             let group = &groups[group_name];
                             let (ms, seq) = group.last_delivered_id;
                             let id = format!("{ms}-{seq}");
-                            commands.push(vec![
+                            let mut create = vec![
                                 b"XGROUP".to_vec(),
                                 b"CREATE".to_vec(),
                                 logical_key.clone(),
                                 group_name.clone(),
                                 id.into_bytes(),
-                            ]);
+                            ];
+                            if let Some(entries_read) = group.entries_read {
+                                create.push(b"ENTRIESREAD".to_vec());
+                                create.push(entries_read.to_string().into_bytes());
+                            }
+                            commands.push(create);
 
                             for consumer in &group.consumers {
                                 commands.push(vec![
@@ -10848,6 +10894,7 @@ fn restore_stream_groups(groups: Vec<fr_persist::RdbStreamConsumerGroup>) -> Str
                 group.name,
                 StreamGroup {
                     last_delivered_id: (group.last_delivered_id_ms, group.last_delivered_id_seq),
+                    entries_read: group.entries_read,
                     consumers: group.consumers.into_iter().collect(),
                     pending,
                 },
@@ -14515,7 +14562,7 @@ mod tests {
         assert_eq!(first[1].0, (1000, 1));
         assert_eq!(
             store.xinfo_groups(b"s", 0).unwrap().expect("groups"),
-            vec![(b"g1".to_vec(), 1, 2, (1000, 1))]
+            vec![(b"g1".to_vec(), 1, 2, (1000, 1), None)]
         );
 
         let second = store
@@ -14547,7 +14594,7 @@ mod tests {
         assert_eq!(third[0].0, (1001, 0));
         assert_eq!(
             store.xinfo_groups(b"s", 0).unwrap().expect("groups"),
-            vec![(b"g1".to_vec(), 1, 3, (1001, 0))]
+            vec![(b"g1".to_vec(), 1, 3, (1001, 0), None)]
         );
     }
 
@@ -14597,7 +14644,7 @@ mod tests {
         assert!(explicit.is_empty());
         assert_eq!(
             store.xinfo_groups(b"s", 0).unwrap().expect("groups"),
-            vec![(b"g1".to_vec(), 1, 0, (0, 0))]
+            vec![(b"g1".to_vec(), 1, 0, (0, 0), None)]
         );
 
         store.set(b"str".to_vec(), b"value".to_vec(), None, 0);
@@ -14693,7 +14740,7 @@ mod tests {
         assert_eq!(owner_history_after_noack[0].0, (1000, 0));
 
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), 2, 1, (1000, 2))]);
+        assert_eq!(groups, vec![(b"g1".to_vec(), 2, 1, (1000, 2), None)]);
     }
 
     #[test]
@@ -15110,7 +15157,7 @@ mod tests {
         assert!(!duplicate);
 
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), 0, 0, (0, 0))]);
+        assert_eq!(groups, vec![(b"g1".to_vec(), 0, 0, (0, 0), None)]);
     }
 
     #[test]
@@ -15176,7 +15223,7 @@ mod tests {
 
         assert!(store.xgroup_destroy(b"s", b"g1", 0).unwrap());
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g2".to_vec(), 0, 0, (0, 0))]);
+        assert_eq!(groups, vec![(b"g2".to_vec(), 0, 0, (0, 0), None)]);
 
         assert!(store.xgroup_destroy(b"s", b"g2", 0).unwrap());
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
@@ -15202,9 +15249,55 @@ mod tests {
 
         assert!(store.xgroup_setid(b"s", b"g1", (1000, 0), 0).unwrap());
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), 0, 0, (1000, 0))]);
+        assert_eq!(groups, vec![(b"g1".to_vec(), 0, 0, (1000, 0), None)]);
 
         assert!(!store.xgroup_setid(b"s", b"missing", (1000, 0), 0).unwrap());
+    }
+
+    #[test]
+    fn stream_xgroup_entries_read_counters_are_reported_and_advanced() {
+        let mut store = Store::new();
+        for id in [(1000, 0), (1001, 0), (1002, 0)] {
+            store
+                .xadd(b"s", id, &[(b"f".to_vec(), b"v".to_vec())], 0)
+                .unwrap();
+        }
+
+        assert!(
+            store
+                .xgroup_create_with_entries_read(b"s", b"g1", (0, 0), Some(0), false, 0)
+                .unwrap()
+        );
+        assert_eq!(
+            store.xinfo_groups(b"s", 0).unwrap().expect("groups"),
+            vec![(b"g1".to_vec(), 0, 0, (0, 0), Some(0))]
+        );
+
+        let records = store
+            .xreadgroup(
+                b"s",
+                b"g1",
+                b"c1",
+                group_read_options(StreamGroupReadCursor::NewEntries, false, Some(2)),
+                0,
+            )
+            .unwrap()
+            .expect("group exists");
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            store.xinfo_groups(b"s", 0).unwrap().expect("groups"),
+            vec![(b"g1".to_vec(), 1, 2, (1001, 0), Some(2))]
+        );
+
+        assert!(
+            store
+                .xgroup_setid_with_entries_read(b"s", b"g1", (1002, 0), Some(3), 0)
+                .unwrap()
+        );
+        assert_eq!(
+            store.xinfo_groups(b"s", 0).unwrap().expect("groups"),
+            vec![(b"g1".to_vec(), 1, 2, (1002, 0), Some(3))]
+        );
     }
 
     #[test]
@@ -15248,7 +15341,7 @@ mod tests {
         );
 
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), 2, 0, (0, 0))]);
+        assert_eq!(groups, vec![(b"g1".to_vec(), 2, 0, (0, 0), None)]);
 
         assert_eq!(
             store
@@ -15304,7 +15397,7 @@ mod tests {
             Some(1)
         );
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), 1, 0, (1000, 0))]);
+        assert_eq!(groups, vec![(b"g1".to_vec(), 1, 0, (1000, 0), None)]);
 
         assert_eq!(
             store
@@ -15313,7 +15406,7 @@ mod tests {
             Some(0)
         );
         let groups = store.xinfo_groups(b"s", 0).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g1".to_vec(), 1, 0, (1000, 0))]);
+        assert_eq!(groups, vec![(b"g1".to_vec(), 1, 0, (1000, 0), None)]);
 
         assert_eq!(
             store
@@ -16480,7 +16573,7 @@ mod tests {
         assert_eq!(entries[0].1, vec![(b"name".to_vec(), b"alice".to_vec())]);
         assert_eq!(entries[1].0, (2, 0));
         let groups = store2.xinfo_groups(b"s", 100).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g".to_vec(), 1, 2, (2, 0))]);
+        assert_eq!(groups, vec![(b"g".to_vec(), 1, 2, (2, 0), None)]);
         let pending = store2
             .xpending_summary(b"s", b"g", 200)
             .unwrap()
@@ -16692,7 +16785,7 @@ mod tests {
             .xadd(b"s", (1, 0), &[(b"k".to_vec(), b"v".to_vec())], 100)
             .unwrap();
         store
-            .xgroup_create(b"s", b"grp1", (0, 0), false, 100)
+            .xgroup_create_with_entries_read(b"s", b"grp1", (0, 0), Some(0), false, 100)
             .unwrap();
         store
             .xgroup_create(b"s", b"grp2", (1, 0), false, 100)
@@ -16707,6 +16800,8 @@ mod tests {
         assert_eq!(cmds[1][2], b"s");
         assert_eq!(cmds[1][3], b"grp1");
         assert_eq!(cmds[1][4], b"0-0");
+        assert_eq!(cmds[1][5], b"ENTRIESREAD");
+        assert_eq!(cmds[1][6], b"0");
         assert_eq!(cmds[2][0], b"XGROUP");
         assert_eq!(cmds[2][1], b"CREATE");
         assert_eq!(cmds[2][2], b"s");
@@ -19007,12 +19102,19 @@ mod tests {
                         .expect("XSETID replay must stay valid");
                 } else if eq_ascii_ci(command, b"XGROUP") {
                     if eq_ascii_ci(&argv[1], b"CREATE") {
+                        let entries_read =
+                            if argv.len() == 7 && eq_ascii_ci(&argv[5], b"ENTRIESREAD") {
+                                Some(parse_u64_arg(&argv[6]))
+                            } else {
+                                None
+                            };
                         assert!(
                             store
-                                .xgroup_create(
+                                .xgroup_create_with_entries_read(
                                     &encode_db_key(current_db, &argv[2]),
                                     &argv[3],
                                     parse_stream_id_arg(&argv[4]),
+                                    entries_read,
                                     false,
                                     METAMORPHIC_NOW_MS,
                                 )

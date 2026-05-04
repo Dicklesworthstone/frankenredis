@@ -1216,8 +1216,8 @@
                 "value": "lag"
               },
               {
-                "kind": "bulk",
-                "value": null
+                "kind": "integer",
+                "value": 1
               }
             ]
           }
@@ -1298,8 +1298,8 @@
                 "value": "lag"
               },
               {
-                "kind": "bulk",
-                "value": null
+                "kind": "integer",
+                "value": 0
               }
             ]
           }
@@ -1410,8 +1410,8 @@
                 "value": "lag"
               },
               {
-                "kind": "bulk",
-                "value": null
+                "kind": "integer",
+                "value": 0
               }
             ]
           }
@@ -1581,8 +1581,8 @@
                 "value": "lag"
               },
               {
-                "kind": "bulk",
-                "value": null
+                "kind": "integer",
+                "value": 0
               }
             ]
           }
@@ -1964,8 +1964,8 @@
                 "value": "lag"
               },
               {
-                "kind": "bulk",
-                "value": null
+                "kind": "integer",
+                "value": 0
               }
             ]
           }
@@ -2368,8 +2368,8 @@
                 "value": "lag"
               },
               {
-                "kind": "bulk",
-                "value": null
+                "kind": "integer",
+                "value": 0
               }
             ]
           }
@@ -2573,8 +2573,8 @@
                 "value": "lag"
               },
               {
-                "kind": "bulk",
-                "value": null
+                "kind": "integer",
+                "value": 0
               }
             ]
           }
@@ -5199,6 +5199,142 @@
               {"kind":"bulk","value":"consumers"},
               {"kind":"array","value":[]}
             ]}
+          ]}
+        ]
+      }
+    },
+    {
+      "name": "xgroup_entriesread_setup_1",
+      "now_ms": 96000,
+      "argv": ["XADD", "xientries", "1-1", "a", "1"],
+      "expect": { "kind": "bulk", "value": "1-1" }
+    },
+    {
+      "name": "xgroup_entriesread_setup_2",
+      "now_ms": 96000,
+      "argv": ["XADD", "xientries", "2-1", "b", "2"],
+      "expect": { "kind": "bulk", "value": "2-1" }
+    },
+    {
+      "name": "xgroup_entriesread_setup_3",
+      "now_ms": 96000,
+      "argv": ["XADD", "xientries", "3-1", "c", "3"],
+      "expect": { "kind": "bulk", "value": "3-1" }
+    },
+    {
+      "name": "xgroup_create_entriesread_zero",
+      "now_ms": 96000,
+      "argv": ["XGROUP", "CREATE", "xientries", "grp1", "0", "ENTRIESREAD", "0"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xinfo_groups_reports_entriesread_and_lag",
+      "now_ms": 96000,
+      "argv": ["XINFO", "GROUPS", "xientries"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind":"array","value":[
+            {"kind":"bulk","value":"name"},
+            {"kind":"bulk","value":"grp1"},
+            {"kind":"bulk","value":"consumers"},
+            {"kind":"integer","value":0},
+            {"kind":"bulk","value":"pending"},
+            {"kind":"integer","value":0},
+            {"kind":"bulk","value":"last-delivered-id"},
+            {"kind":"bulk","value":"0-0"},
+            {"kind":"bulk","value":"entries-read"},
+            {"kind":"integer","value":0},
+            {"kind":"bulk","value":"lag"},
+            {"kind":"integer","value":3}
+          ]}
+        ]
+      }
+    },
+    {
+      "name": "xinfo_full_reports_group_entriesread_and_lag",
+      "now_ms": 96000,
+      "argv": ["XINFO", "STREAM", "xientries", "FULL", "COUNT", "0"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind":"bulk","value":"length"},
+          {"kind":"integer","value":3},
+          {"kind":"bulk","value":"radix-tree-keys"},
+          {"kind":"integer","value":3},
+          {"kind":"bulk","value":"radix-tree-nodes"},
+          {"kind":"integer","value":4},
+          {"kind":"bulk","value":"last-generated-id"},
+          {"kind":"bulk","value":"3-1"},
+          {"kind":"bulk","value":"max-deleted-entry-id"},
+          {"kind":"bulk","value":"0-0"},
+          {"kind":"bulk","value":"entries-added"},
+          {"kind":"integer","value":3},
+          {"kind":"bulk","value":"recorded-first-entry-id"},
+          {"kind":"bulk","value":"1-1"},
+          {"kind":"bulk","value":"entries"},
+          {"kind":"array","value":[
+            {"kind":"array","value":[
+              {"kind":"bulk","value":"1-1"},
+              {"kind":"array","value":[{"kind":"bulk","value":"a"},{"kind":"bulk","value":"1"}]}
+            ]},
+            {"kind":"array","value":[
+              {"kind":"bulk","value":"2-1"},
+              {"kind":"array","value":[{"kind":"bulk","value":"b"},{"kind":"bulk","value":"2"}]}
+            ]},
+            {"kind":"array","value":[
+              {"kind":"bulk","value":"3-1"},
+              {"kind":"array","value":[{"kind":"bulk","value":"c"},{"kind":"bulk","value":"3"}]}
+            ]}
+          ]},
+          {"kind":"bulk","value":"groups"},
+          {"kind":"array","value":[
+            {"kind":"array","value":[
+              {"kind":"bulk","value":"name"},
+              {"kind":"bulk","value":"grp1"},
+              {"kind":"bulk","value":"last-delivered-id"},
+              {"kind":"bulk","value":"0-0"},
+              {"kind":"bulk","value":"entries-read"},
+              {"kind":"integer","value":0},
+              {"kind":"bulk","value":"lag"},
+              {"kind":"integer","value":3},
+              {"kind":"bulk","value":"pel-count"},
+              {"kind":"integer","value":0},
+              {"kind":"bulk","value":"pending"},
+              {"kind":"array","value":[]},
+              {"kind":"bulk","value":"consumers"},
+              {"kind":"array","value":[]}
+            ]}
+          ]}
+        ]
+      }
+    },
+    {
+      "name": "xgroup_setid_entriesread_two",
+      "now_ms": 96000,
+      "argv": ["XGROUP", "SETID", "xientries", "grp1", "2-1", "ENTRIESREAD", "2"],
+      "expect": { "kind": "simple", "value": "OK" }
+    },
+    {
+      "name": "xinfo_groups_reports_setid_entriesread_lag",
+      "now_ms": 96000,
+      "argv": ["XINFO", "GROUPS", "xientries"],
+      "expect": {
+        "kind": "array",
+        "value": [
+          {"kind":"array","value":[
+            {"kind":"bulk","value":"name"},
+            {"kind":"bulk","value":"grp1"},
+            {"kind":"bulk","value":"consumers"},
+            {"kind":"integer","value":0},
+            {"kind":"bulk","value":"pending"},
+            {"kind":"integer","value":0},
+            {"kind":"bulk","value":"last-delivered-id"},
+            {"kind":"bulk","value":"2-1"},
+            {"kind":"bulk","value":"entries-read"},
+            {"kind":"integer","value":2},
+            {"kind":"bulk","value":"lag"},
+            {"kind":"integer","value":1}
           ]}
         ]
       }

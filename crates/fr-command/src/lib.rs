@@ -5894,6 +5894,8 @@ fn stream_group_info_to_frame(
     consumers: usize,
     pending: usize,
     last_delivered_id: StreamId,
+    entries_read: Option<u64>,
+    lag: RespFrame,
     resp_protocol_version: i64,
 ) -> RespFrame {
     let pairs: Vec<(RespFrame, RespFrame)> = vec![
@@ -5915,12 +5917,9 @@ fn stream_group_info_to_frame(
         ),
         (
             RespFrame::BulkString(Some(b"entries-read".to_vec())),
-            RespFrame::BulkString(None),
+            stream_entries_read_frame(entries_read),
         ),
-        (
-            RespFrame::BulkString(Some(b"lag".to_vec())),
-            RespFrame::BulkString(None),
-        ),
+        (RespFrame::BulkString(Some(b"lag".to_vec())), lag),
     ];
     if resp_protocol_version == 3 {
         RespFrame::Map(Some(pairs))
@@ -6018,11 +6017,16 @@ fn stream_full_consumer_info_to_frame(
     }
 }
 
-fn stream_full_group_info_to_frame(
+struct StreamFullGroupFrameInfo {
     name: Vec<u8>,
     pending_count: usize,
     last_delivered_id: StreamId,
+    entries_read: Option<u64>,
     lag: RespFrame,
+}
+
+fn stream_full_group_info_to_frame(
+    info: StreamFullGroupFrameInfo,
     pending_frames: Vec<RespFrame>,
     consumer_frames: Vec<RespFrame>,
     resp_protocol_version: i64,
@@ -6030,20 +6034,20 @@ fn stream_full_group_info_to_frame(
     let pairs: Vec<(RespFrame, RespFrame)> = vec![
         (
             RespFrame::BulkString(Some(b"name".to_vec())),
-            RespFrame::BulkString(Some(name)),
+            RespFrame::BulkString(Some(info.name)),
         ),
         (
             RespFrame::BulkString(Some(b"last-delivered-id".to_vec())),
-            RespFrame::BulkString(Some(format_stream_id(last_delivered_id))),
+            RespFrame::BulkString(Some(format_stream_id(info.last_delivered_id))),
         ),
         (
             RespFrame::BulkString(Some(b"entries-read".to_vec())),
-            RespFrame::BulkString(None),
+            stream_entries_read_frame(info.entries_read),
         ),
-        (RespFrame::BulkString(Some(b"lag".to_vec())), lag),
+        (RespFrame::BulkString(Some(b"lag".to_vec())), info.lag),
         (
             RespFrame::BulkString(Some(b"pel-count".to_vec())),
-            RespFrame::Integer(i64::try_from(pending_count).unwrap_or(i64::MAX)),
+            RespFrame::Integer(i64::try_from(info.pending_count).unwrap_or(i64::MAX)),
         ),
         (
             RespFrame::BulkString(Some(b"pending".to_vec())),
@@ -6075,13 +6079,27 @@ fn stream_full_count_limit(full_count: usize) -> usize {
     }
 }
 
+fn stream_entries_read_frame(entries_read: Option<u64>) -> RespFrame {
+    entries_read.map_or(RespFrame::BulkString(None), |read| {
+        RespFrame::Integer(i64::try_from(read).unwrap_or(i64::MAX))
+    })
+}
+
 fn stream_full_group_lag_frame(
     stream_len: usize,
     first_id: Option<StreamId>,
     last_id: Option<StreamId>,
     max_deleted_id: StreamId,
     last_delivered_id: StreamId,
+    entries_read: Option<u64>,
 ) -> RespFrame {
+    if let Some(entries_read) = entries_read
+        && max_deleted_id == (0, 0)
+    {
+        let len = i64::try_from(stream_len).unwrap_or(i64::MAX);
+        let read = i64::try_from(entries_read).unwrap_or(i64::MAX);
+        return RespFrame::Integer(len.saturating_sub(read));
+    }
     let Some(first_id) = first_id else {
         return RespFrame::Integer(0);
     };
@@ -6748,6 +6766,7 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             });
         }
         let mut mkstream = false;
+        let mut entries_read = None;
         let mut i = 5;
         while i < argv.len() {
             if eq_ascii_command(&argv[i], b"MKSTREAM") {
@@ -6757,12 +6776,13 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                 if i + 1 >= argv.len() {
                     return Err(create_subcommand_syntax());
                 }
-                // Upstream parses the entries-read value via
-                // getLongLongFromObjectOrReply ('value is not an
-                // integer or out of range' on bad input). The actual
-                // tracked value isn't yet stored in fr's xgroup model,
-                // so we currently validate but ignore it.
-                let _ = parse_i64_arg(&argv[i + 1])?;
+                let parsed = parse_i64_arg(&argv[i + 1])?;
+                if parsed < 0 && parsed != -1 {
+                    return Err(CommandError::Custom(
+                        "ERR value for ENTRIESREAD must be positive or -1".to_string(),
+                    ));
+                }
+                entries_read = u64::try_from(parsed).ok();
                 i += 2;
             } else {
                 return Err(create_subcommand_syntax());
@@ -6783,7 +6803,14 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             }
         };
 
-        return match store.xgroup_create(&argv[2], &argv[3], start_id, mkstream, now_ms) {
+        return match store.xgroup_create_with_entries_read(
+            &argv[2],
+            &argv[3],
+            start_id,
+            entries_read,
+            mkstream,
+            now_ms,
+        ) {
             Ok(true) => Ok(RespFrame::SimpleString("OK".to_string())),
             Ok(false) => Ok(RespFrame::Error(
                 "BUSYGROUP Consumer Group name already exists".to_string(),
@@ -6841,17 +6868,20 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         if argv.len() != 5 && argv.len() != 7 {
             return Err(setid_subcommand_syntax());
         }
-        if argv.len() == 7 {
-            if !eq_ascii_command(&argv[5], b"ENTRIESREAD") {
-                return Err(setid_subcommand_syntax());
-            }
-            // Upstream parses ENTRIESREAD via getLongLongFromObjectOrReply
-            // (raw 'value is not an integer or out of range' on bad
-            // input) but ignores the actual value here — fr currently
-            // doesn't track per-group entries-read state, so we still
-            // accept the value while validating its shape.
-            let _ = parse_i64_arg(&argv[6])?;
+        if argv.len() == 7 && !eq_ascii_command(&argv[5], b"ENTRIESREAD") {
+            return Err(setid_subcommand_syntax());
         }
+        let entries_read = if argv.len() == 7 {
+            let parsed = parse_i64_arg(&argv[6])?;
+            if parsed < 0 && parsed != -1 {
+                return Err(CommandError::Custom(
+                    "ERR value for ENTRIESREAD must be positive or -1".to_string(),
+                ));
+            }
+            u64::try_from(parsed).ok()
+        } else {
+            None
+        };
         let last_delivered_id = if eq_ascii_command(&argv[4], b"$") {
             store.xlast_id(&argv[2], now_ms)?.unwrap_or((0, 0))
         } else {
@@ -6865,7 +6895,13 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                 Err(reply) => return Ok(reply),
             }
         };
-        return match store.xgroup_setid(&argv[2], &argv[3], last_delivered_id, now_ms) {
+        return match store.xgroup_setid_with_entries_read(
+            &argv[2],
+            &argv[3],
+            last_delivered_id,
+            entries_read,
+            now_ms,
+        ) {
             Ok(true) => Ok(RespFrame::SimpleString("OK".to_string())),
             Ok(false) => Ok(xgroup_nogroup_error(&argv[2], &argv[3])),
             // (br-frankenredis-qcmh)
@@ -7052,14 +7088,27 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         let Some(groups) = store.xinfo_groups(&argv[2], now_ms)? else {
             return Err(CommandError::NoSuchKey);
         };
+        let Some((len, first, last)) = store.xinfo_stream(&argv[2], now_ms)? else {
+            return Err(CommandError::NoSuchKey);
+        };
+        let max_deleted_id = store.stream_max_deleted_id(&argv[2]).unwrap_or((0, 0));
         let resp = store.dispatch_client_ctx.resp_protocol_version;
         let mut out = Vec::with_capacity(groups.len());
-        for (name, consumers, pending, last_delivered_id) in groups {
+        for (name, consumers, pending, last_delivered_id, entries_read) in groups {
             out.push(stream_group_info_to_frame(
                 name,
                 consumers,
                 pending,
                 last_delivered_id,
+                entries_read,
+                stream_full_group_lag_frame(
+                    len,
+                    first.as_ref().map(|(id, _)| *id),
+                    last.as_ref().map(|(id, _)| *id),
+                    max_deleted_id,
+                    last_delivered_id,
+                    entries_read,
+                ),
                 resp,
             ));
         }
@@ -7169,7 +7218,7 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
 
         let groups = store.xinfo_groups(&argv[2], now_ms)?.unwrap_or_default();
         let mut group_frames = Vec::with_capacity(groups.len());
-        for (name, _consumers_count, pending_count, last_delivered_id) in &groups {
+        for (name, _consumers_count, pending_count, last_delivered_id, entries_read) in &groups {
             let group_pending = store
                 .xpending_entries(
                     &argv[2],
@@ -7212,16 +7261,20 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                 ));
             }
             group_frames.push(stream_full_group_info_to_frame(
-                name.clone(),
-                *pending_count,
-                *last_delivered_id,
-                stream_full_group_lag_frame(
-                    len,
-                    first.as_ref().map(|(id, _)| *id),
-                    last.as_ref().map(|(id, _)| *id),
-                    max_deleted_id,
-                    *last_delivered_id,
-                ),
+                StreamFullGroupFrameInfo {
+                    name: name.clone(),
+                    pending_count: *pending_count,
+                    last_delivered_id: *last_delivered_id,
+                    entries_read: *entries_read,
+                    lag: stream_full_group_lag_frame(
+                        len,
+                        first.as_ref().map(|(id, _)| *id),
+                        last.as_ref().map(|(id, _)| *id),
+                        max_deleted_id,
+                        *last_delivered_id,
+                        *entries_read,
+                    ),
+                },
                 group_pending,
                 consumer_frames,
                 resp_v,
@@ -40212,20 +40265,24 @@ mod tests {
     #[test]
     fn stream_full_group_lag_frame_matches_redis_estimable_cases() {
         assert_eq!(
-            stream_full_group_lag_frame(3, Some((1, 1)), Some((3, 1)), (0, 0), (0, 0)),
+            stream_full_group_lag_frame(3, Some((1, 1)), Some((3, 1)), (0, 0), (0, 0), None),
             RespFrame::Integer(3)
         );
         assert_eq!(
-            stream_full_group_lag_frame(3, Some((1, 1)), Some((3, 1)), (0, 0), (1, 1)),
+            stream_full_group_lag_frame(3, Some((1, 1)), Some((3, 1)), (0, 0), (1, 1), None),
             RespFrame::Integer(2)
         );
         assert_eq!(
-            stream_full_group_lag_frame(3, Some((1, 1)), Some((3, 1)), (2, 1), (3, 1)),
+            stream_full_group_lag_frame(3, Some((1, 1)), Some((3, 1)), (2, 1), (3, 1), None),
             RespFrame::Integer(0)
         );
         assert_eq!(
-            stream_full_group_lag_frame(3, Some((1, 1)), Some((3, 1)), (2, 1), (2, 1)),
+            stream_full_group_lag_frame(3, Some((1, 1)), Some((3, 1)), (2, 1), (2, 1), None),
             RespFrame::BulkString(None)
+        );
+        assert_eq!(
+            stream_full_group_lag_frame(3, Some((1, 1)), Some((3, 1)), (0, 0), (2, 1), Some(2)),
+            RespFrame::Integer(1)
         );
     }
 
@@ -41264,7 +41321,7 @@ mod tests {
         assert_eq!(entries[1].0, (2, 0));
         assert_eq!(entries[1].1, vec![(b"name".to_vec(), b"bob".to_vec())]);
         let groups = restored.xinfo_groups(b"s", 300).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g".to_vec(), 1, 2, (2, 0))]);
+        assert_eq!(groups, vec![(b"g".to_vec(), 1, 2, (2, 0), None)]);
         let pending = restored
             .xpending_summary(b"s", b"g", 300)
             .unwrap()

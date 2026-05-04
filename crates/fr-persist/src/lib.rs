@@ -840,6 +840,7 @@ pub struct RdbStreamConsumerGroup {
     pub name: Vec<u8>,
     pub last_delivered_id_ms: u64,
     pub last_delivered_id_seq: u64,
+    pub entries_read: Option<u64>,
     pub consumers: Vec<Vec<u8>>,
     pub pending: Vec<RdbStreamPendingEntry>,
 }
@@ -1534,6 +1535,7 @@ fn encode_private_stream_rdb_value(
         rdb_encode_string(buf, &group.name);
         buf.extend_from_slice(&group.last_delivered_id_ms.to_le_bytes());
         buf.extend_from_slice(&group.last_delivered_id_seq.to_le_bytes());
+        buf.extend_from_slice(&group.entries_read.unwrap_or(u64::MAX).to_le_bytes());
         rdb_encode_length(buf, group.consumers.len());
         for consumer in &group.consumers {
             rdb_encode_string(buf, consumer);
@@ -2363,7 +2365,7 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                             let (name, nc) = rdb_decode_string(&data[cursor..])
                                 .ok_or(PersistError::InvalidFrame)?;
                             cursor += nc;
-                            if cursor + 16 > data.len() {
+                            if cursor + 24 > data.len() {
                                 return Err(PersistError::InvalidFrame);
                             }
                             let ld_ms = u64::from_le_bytes(
@@ -2373,6 +2375,12 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                             );
                             cursor += 8;
                             let ld_seq = u64::from_le_bytes(
+                                data[cursor..cursor + 8]
+                                    .try_into()
+                                    .map_err(|_| PersistError::InvalidFrame)?,
+                            );
+                            cursor += 8;
+                            let entries_read = u64::from_le_bytes(
                                 data[cursor..cursor + 8]
                                     .try_into()
                                     .map_err(|_| PersistError::InvalidFrame)?,
@@ -2440,6 +2448,11 @@ pub fn decode_rdb_prefix(data: &[u8]) -> Result<RdbDecodeResult, PersistError> {
                                 name,
                                 last_delivered_id_ms: ld_ms,
                                 last_delivered_id_seq: ld_seq,
+                                entries_read: if entries_read == u64::MAX {
+                                    None
+                                } else {
+                                    Some(entries_read)
+                                },
                                 consumers,
                                 pending,
                             });
@@ -5235,6 +5248,7 @@ mod tests {
                     name: b"mygroup".to_vec(),
                     last_delivered_id_ms: 1001,
                     last_delivered_id_seq: 0,
+                    entries_read: None,
                     consumers: vec![b"alice".to_vec(), b"bob".to_vec()],
                     pending: vec![
                         RdbStreamPendingEntry {
@@ -5275,6 +5289,7 @@ mod tests {
                     name: b"mygroup".to_vec(),
                     last_delivered_id_ms: 1000,
                     last_delivered_id_seq: 0,
+                    entries_read: None,
                     consumers: vec![b"alice".to_vec()],
                     pending: vec![RdbStreamPendingEntry {
                         entry_id_ms: 1000,
@@ -5341,6 +5356,7 @@ mod tests {
                         name: format!("group-{fixture}").into_bytes(),
                         last_delivered_id_ms: ms,
                         last_delivered_id_seq: 1,
+                        entries_read: Some(1),
                         consumers: vec![b"alice".to_vec()],
                         pending: vec![RdbStreamPendingEntry {
                             entry_id_ms: ms,
@@ -5511,6 +5527,7 @@ mod tests {
                         name: b"g".to_vec(),
                         last_delivered_id_ms: 42,
                         last_delivered_id_seq: 7,
+                        entries_read: Some(1),
                         consumers: vec![b"alice".to_vec()],
                         pending: vec![RdbStreamPendingEntry {
                             entry_id_ms: 42,
@@ -5968,6 +5985,7 @@ mod tests {
                             name,
                             last_delivered_id_ms,
                             last_delivered_id_seq,
+                            entries_read: None,
                             consumers,
                             pending,
                         }
@@ -6271,6 +6289,7 @@ mod tests {
                             name,
                             last_delivered_id_ms,
                             last_delivered_id_seq,
+                            entries_read: None,
                             consumers,
                             pending,
                         }
