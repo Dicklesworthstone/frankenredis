@@ -894,7 +894,7 @@ mod tests {
 
     #[test]
     fn fr_p2c_002_u006_invalid_prefix_rejection() {
-        let cases = [b'?', b'@', b'/'];
+        let cases = *b"?@/";
         let mut input_acc = Vec::new();
         let mut output_acc = Vec::new();
         for prefix in cases {
@@ -917,7 +917,7 @@ mod tests {
 
     #[test]
     fn fr_p2c_002_u007_resp3_fail_closed_prefix_matrix() {
-        let prefixes = [b'~', b'%', b'#', b',', b'_', b'(', b'=', b'|', b'>', b'!'];
+        let prefixes = *b"~%#,_(=|>!";
         let mut input_acc = Vec::new();
         let mut output_acc = Vec::new();
         for prefix in prefixes {
