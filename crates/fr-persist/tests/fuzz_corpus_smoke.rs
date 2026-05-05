@@ -73,8 +73,8 @@ fn fuzz_aof_decoder_rejects_hostile_seeds() {
         "non_resp_prefix",
         "deeply_nested_arrays",
     ] {
-        let bytes = fs::read(dir.join(name))
-            .unwrap_or_else(|err| panic!("missing seed {name}: {err}"));
+        let bytes =
+            fs::read(dir.join(name)).unwrap_or_else(|err| panic!("missing seed {name}: {err}"));
         let result = decode_aof_stream(&bytes);
         assert!(
             result.is_err(),
@@ -125,18 +125,14 @@ fn fuzz_aof_manifest_parser_classifies_valid_vs_hostile_seeds() {
     // non-monotonic incremental sequences) without explicit thought.
     let dir = manifest_corpus_dir();
     let load = |name: &str| -> String {
-        let bytes = fs::read(dir.join(name))
-            .unwrap_or_else(|err| panic!("missing seed {name}: {err}"));
+        let bytes =
+            fs::read(dir.join(name)).unwrap_or_else(|err| panic!("missing seed {name}: {err}"));
         String::from_utf8(bytes).unwrap_or_else(|err| panic!("non-utf8 seed {name}: {err}"))
     };
 
     for name in [
         "valid_base_history_incremental.manifest",
-        // valid_comments_blank intentionally NOT in this list —
-        // upstream Redis 7.2 aof.c accepts `# comment` lines and
-        // blank lines, but fr-persist's parser currently rejects
-        // them with 'empty manifest row'. Tracked as
-        // frankenredis-oozpg.
+        "valid_comments_blank.manifest",
         "valid_incremental_only.manifest",
         "valid_quoted_spaces.manifest",
     ] {
