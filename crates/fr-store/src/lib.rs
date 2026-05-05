@@ -584,6 +584,13 @@ struct Entry {
     /// produces embstr/raw, never int. The embstr-vs-raw threshold
     /// still applies normally. (br-frankenredis-incrfloatenc)
     force_string_encoding: bool,
+    /// Redis set encodings are one-way promotions. Once an intset is
+    /// converted to listpack by a non-integer member, removing that
+    /// member does not downgrade the object back to intset.
+    force_set_listpack_encoding: bool,
+    /// Likewise, once a set is promoted to hashtable, later removals
+    /// do not compact it back to listpack or intset.
+    force_set_hashtable_encoding: bool,
 }
 
 impl Entry {
@@ -597,6 +604,8 @@ impl Entry {
             modification_count: 0,
             force_raw_encoding: false,
             force_string_encoding: false,
+            force_set_listpack_encoding: false,
+            force_set_hashtable_encoding: false,
         }
     }
 
@@ -1991,6 +2000,45 @@ impl Store {
         true
     }
 
+    fn set_fits_intset(set: &BTreeSet<Vec<u8>>, max_intset_entries: usize) -> bool {
+        set.len() <= max_intset_entries && set.iter().all(|member| parse_i64(member).is_ok())
+    }
+
+    fn set_fits_listpack(set: &BTreeSet<Vec<u8>>, max_listpack_entries: usize) -> bool {
+        set.len() <= max_listpack_entries && set.iter().all(|member| member.len() <= 64)
+    }
+
+    fn refresh_set_encoding_flags(
+        entry: &mut Entry,
+        max_intset_entries: usize,
+        max_listpack_entries: usize,
+    ) {
+        let Value::Set(set) = &entry.value else {
+            return;
+        };
+        if entry.force_set_hashtable_encoding {
+            return;
+        }
+        if !Self::set_fits_listpack(set, max_listpack_entries) {
+            entry.force_set_hashtable_encoding = true;
+            entry.force_set_listpack_encoding = false;
+        } else if entry.force_set_listpack_encoding
+            || !Self::set_fits_intset(set, max_intset_entries)
+        {
+            entry.force_set_listpack_encoding = true;
+        }
+    }
+
+    fn set_entry(&self, set: BTreeSet<Vec<u8>>, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
+        let mut entry = Entry::new(Value::Set(set), expires_at_ms, now_ms);
+        Self::refresh_set_encoding_flags(
+            &mut entry,
+            self.set_max_intset_entries,
+            self.set_max_listpack_entries,
+        );
+        entry
+    }
+
     /// Get a string value. Returns `None` if the key doesn't exist.
     /// Returns `Err(WrongType)` if the key holds a non-string value.
     pub fn get(&mut self, key: &[u8], now_ms: u64) -> Result<Option<Vec<u8>>, StoreError> {
@@ -3029,12 +3077,13 @@ impl Store {
                 }
             }
             Value::Set(s) => {
-                if s.len() <= self.set_max_intset_entries && s.iter().all(|m| parse_i64(m).is_ok())
-                {
+                if entry.force_set_hashtable_encoding {
+                    "hashtable"
+                } else if entry.force_set_listpack_encoding {
+                    "listpack"
+                } else if Self::set_fits_intset(s, self.set_max_intset_entries) {
                     "intset"
-                } else if s.len() <= self.set_max_listpack_entries
-                    && s.iter().all(|m| m.len() <= 64)
-                {
+                } else if Self::set_fits_listpack(s, self.set_max_listpack_entries) {
                     "listpack"
                 } else {
                     "hashtable"
@@ -5351,6 +5400,8 @@ impl Store {
         now_ms: u64,
     ) -> Result<u64, StoreError> {
         self.drop_if_expired(key, now_ms);
+        let max_intset_entries = self.set_max_intset_entries;
+        let max_listpack_entries = self.set_max_listpack_entries;
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Set(s) => {
@@ -5364,6 +5415,11 @@ impl Store {
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
                             &mut self.digest_mutations,
+                        );
+                        Self::refresh_set_encoding_flags(
+                            entry,
+                            max_intset_entries,
+                            max_listpack_entries,
                         );
                     }
                     entry.touch_write(now_ms);
@@ -5380,7 +5436,8 @@ impl Store {
                         added += 1;
                     }
                 }
-                self.internal_entries_insert(key.to_vec(), Entry::new(Value::Set(s), None, now_ms));
+                let entry = self.set_entry(s, None, now_ms);
+                self.internal_entries_insert(key.to_vec(), entry);
                 self.dirty = self.dirty.saturating_add(added);
                 Ok(added)
             }
@@ -5983,10 +6040,8 @@ impl Store {
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
             let set: BTreeSet<Vec<u8>> = result.into_iter().collect();
-            self.internal_entries_insert(
-                destination.to_vec(),
-                Entry::new(Value::Set(set), None, now_ms),
-            );
+            let entry = self.set_entry(set, None, now_ms);
+            self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
             self.dirty = self.dirty.saturating_add(1);
@@ -6007,10 +6062,8 @@ impl Store {
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
             let set: BTreeSet<Vec<u8>> = result.into_iter().collect();
-            self.internal_entries_insert(
-                destination.to_vec(),
-                Entry::new(Value::Set(set), None, now_ms),
-            );
+            let entry = self.set_entry(set, None, now_ms);
+            self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
             self.dirty = self.dirty.saturating_add(1);
@@ -6031,10 +6084,8 @@ impl Store {
         self.stream_last_ids.remove(destination);
         if !result.is_empty() {
             let set: BTreeSet<Vec<u8>> = result.into_iter().collect();
-            self.internal_entries_insert(
-                destination.to_vec(),
-                Entry::new(Value::Set(set), None, now_ms),
-            );
+            let entry = self.set_entry(set, None, now_ms);
+            self.internal_entries_insert(destination.to_vec(), entry);
             self.dirty = self.dirty.saturating_add(1);
         } else if deleted {
             self.dirty = self.dirty.saturating_add(1);
@@ -10567,7 +10618,17 @@ impl Store {
             Value::Set(s) => {
                 let integer_members: Option<Vec<i64>> =
                     s.iter().map(|member| parse_i64(member).ok()).collect();
-                if s.len() <= self.set_max_intset_entries {
+                if entry.force_set_hashtable_encoding {
+                    buf.push(RDB_TYPE_SET);
+                    encode_length(&mut buf, s.len());
+                    for member in s {
+                        encode_dump_bulk(&mut buf, member);
+                    }
+                } else if entry.force_set_listpack_encoding {
+                    buf.push(RDB_TYPE_SET_LISTPACK);
+                    let members: Vec<&[u8]> = s.iter().map(Vec::as_slice).collect();
+                    encode_dump_bulk(&mut buf, &encode_listpack_strings(&members)?);
+                } else if s.len() <= self.set_max_intset_entries {
                     if let Some(mut integers) = integer_members {
                         integers.sort_unstable();
                         buf.push(RDB_TYPE_SET_INTSET);
@@ -10718,6 +10779,8 @@ impl Store {
         let mut restored_stream_last_id = None;
         let mut restored_stream_entries_added = None;
         let mut restored_stream_groups = None;
+        let mut force_set_listpack_encoding = false;
+        let mut force_set_hashtable_encoding = false;
         let value = match type_byte {
             RDB_TYPE_STRING => {
                 let (v, consumed) = decode_rdb_string(payload, cursor, data_end)?;
@@ -10746,6 +10809,7 @@ impl Store {
                     cursor += consumed;
                     set.insert(member);
                 }
+                force_set_hashtable_encoding = true;
                 Value::Set(set)
             }
             RDB_TYPE_HASH => {
@@ -10863,6 +10927,7 @@ impl Store {
                 for member in members {
                     set.insert(member);
                 }
+                force_set_listpack_encoding = true;
                 Value::Set(set)
             }
             RDB_TYPE_ZSET_LISTPACK => {
@@ -10897,7 +10962,10 @@ impl Store {
         self.stream_groups.remove(key);
         self.stream_last_ids.remove(key);
         self.stream_entries_added.remove(key);
-        self.internal_entries_insert(key.to_vec(), Entry::new(value, expires_at_ms, now_ms));
+        let mut entry = Entry::new(value, expires_at_ms, now_ms);
+        entry.force_set_listpack_encoding = force_set_listpack_encoding;
+        entry.force_set_hashtable_encoding = force_set_hashtable_encoding;
+        self.internal_entries_insert(key.to_vec(), entry);
         if let Some(last_id) = restored_stream_last_id {
             self.stream_last_ids.insert(key.to_vec(), last_id);
         }
@@ -13070,6 +13138,35 @@ mod tests {
         let mut store = Store::new();
         store.sadd(b"t", &[b"1".to_vec()], 0).expect("sadd");
         assert_eq!(store.object_encoding(b"t", 0), Some("intset"));
+    }
+
+    #[test]
+    fn set_object_encoding_promotions_do_not_downgrade_after_srem() {
+        let mut store = Store::new();
+        let integer_members: Vec<Vec<u8>> = (0..10)
+            .map(|value| value.to_string().into_bytes())
+            .collect();
+        store.sadd(b"s", &integer_members, 0).expect("sadd");
+        assert_eq!(store.object_encoding(b"s", 0), Some("intset"));
+
+        store.sadd(b"s", &[b"alpha".to_vec()], 0).expect("sadd");
+        assert_eq!(store.object_encoding(b"s", 0), Some("listpack"));
+
+        store.srem(b"s", &[b"alpha"], 0).expect("srem");
+        assert_eq!(store.object_encoding(b"s", 0), Some("listpack"));
+
+        store.set_max_listpack_entries = 2;
+        store
+            .sadd(
+                b"h",
+                &[b"alpha".to_vec(), b"beta".to_vec(), b"gamma".to_vec()],
+                0,
+            )
+            .expect("sadd");
+        assert_eq!(store.object_encoding(b"h", 0), Some("hashtable"));
+
+        store.srem(b"h", &[b"gamma"], 0).expect("srem");
+        assert_eq!(store.object_encoding(b"h", 0), Some("hashtable"));
     }
 
     #[test]

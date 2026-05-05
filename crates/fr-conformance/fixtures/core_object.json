@@ -88,6 +88,42 @@
       "argv": ["OBJECT", "ENCODING", "obj_set_lp"],
       "expect": { "kind": "bulk", "value": "listpack" }
     },
+    {
+      "name": "object_encoding_set_sticky_intset_setup",
+      "now_ms": 34,
+      "argv": ["SADD", "obj_set_sticky", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9"],
+      "expect": { "kind": "integer", "value": 10 }
+    },
+    {
+      "name": "object_encoding_set_sticky_initial_intset",
+      "now_ms": 35,
+      "argv": ["OBJECT", "ENCODING", "obj_set_sticky"],
+      "expect": { "kind": "bulk", "value": "intset" }
+    },
+    {
+      "name": "object_encoding_set_sticky_promote_listpack",
+      "now_ms": 36,
+      "argv": ["SADD", "obj_set_sticky", "alpha"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "object_encoding_set_sticky_after_promote",
+      "now_ms": 37,
+      "argv": ["OBJECT", "ENCODING", "obj_set_sticky"],
+      "expect": { "kind": "bulk", "value": "listpack" }
+    },
+    {
+      "name": "object_encoding_set_sticky_remove_noninteger",
+      "now_ms": 38,
+      "argv": ["SREM", "obj_set_sticky", "alpha"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "object_encoding_set_sticky_after_srem",
+      "now_ms": 39,
+      "argv": ["OBJECT", "ENCODING", "obj_set_sticky"],
+      "expect": { "kind": "bulk", "value": "listpack" }
+    },
 
     {
       "name": "object_encoding_zset_small_setup",
@@ -445,6 +481,18 @@
     {
       "name": "object_encoding_set_hashtable",
       "now_ms": 32002,
+      "argv": ["OBJECT", "ENCODING", "obj_set_big"],
+      "expect": { "kind": "bulk", "value": "hashtable" }
+    },
+    {
+      "name": "object_encoding_set_hashtable_remove_to_listpack_size",
+      "now_ms": 32003,
+      "argv": ["SREM", "obj_set_big", "gamma"],
+      "expect": { "kind": "integer", "value": 1 }
+    },
+    {
+      "name": "object_encoding_set_hashtable_sticky_after_srem",
+      "now_ms": 32004,
       "argv": ["OBJECT", "ENCODING", "obj_set_big"],
       "expect": { "kind": "bulk", "value": "hashtable" }
     },
