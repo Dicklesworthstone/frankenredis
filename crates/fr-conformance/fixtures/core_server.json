@@ -151,8 +151,8 @@
         "BGREWRITEAOF"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR appendonly is disabled, cannot rewrite append only file"
+        "kind": "simple",
+        "value": "Background append only file rewriting started"
       }
     },
     {
@@ -2894,8 +2894,8 @@
         "BGREWRITEAOF"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR appendonly is disabled, cannot rewrite append only file"
+        "kind": "simple",
+        "value": "Background append only file rewriting started"
       }
     },
     {
