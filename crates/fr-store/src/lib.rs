@@ -3746,6 +3746,13 @@ impl Store {
         self.stream_last_ids.clear();
         self.stream_entries_added.clear();
         self.stream_max_deleted_ids.clear();
+        // (frankenredis-ss2k0) ordered_keys backs KEYS/SCAN/RANDOMKEY;
+        // failing to clear it left ghost names visible after FLUSHALL
+        // even though entries.is_empty() == true. hash_field_expires
+        // similarly survived as orphan TTLs without their parent
+        // hashes, breaking HTTL/HEXPIRETIME on subsequent re-creates.
+        self.ordered_keys.clear();
+        self.hash_field_expires.clear();
         self.running_digest = 0;
         self.digest_stale = false;
         self.expires_count = 0;
@@ -13650,6 +13657,43 @@ mod tests {
         store.set(b"b".to_vec(), b"2".to_vec(), None, 0);
         store.flushdb();
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn flushdb_clears_ordered_keys_and_hash_field_expires() {
+        // (frankenredis-ss2k0) Real bug: flushdb cleared `entries` but
+        // not `ordered_keys`, so KEYS/SCAN/RANDOMKEY surfaced ghost
+        // key names after FLUSHALL — clients saw "the database is
+        // empty (DBSIZE=0) but RANDOMKEY returned a name". hash_field_
+        // expires was similarly orphaned, breaking HTTL on hashes
+        // re-created with the same key after a flush.
+        let mut store = Store::new();
+        store.set(b"alpha".to_vec(), b"1".to_vec(), None, 0);
+        store.set(b"beta".to_vec(), b"2".to_vec(), None, 0);
+        store
+            .hset(b"h", b"f".to_vec(), b"v".to_vec(), 0)
+            .expect("hset");
+        // Set a per-field TTL so hash_field_expires is non-empty.
+        store
+            .hash_field_expires
+            .insert((b"h".to_vec(), b"f".to_vec()), 10_000);
+
+        store.flushdb();
+
+        // All visible state is empty.
+        assert!(store.is_empty());
+        assert!(store.ordered_keys.is_empty(), "ordered_keys must be empty");
+        assert!(
+            store.hash_field_expires.is_empty(),
+            "hash_field_expires must be empty after flush"
+        );
+
+        // KEYS/SCAN/RANDOMKEY surface contracts: nothing to enumerate.
+        assert_eq!(
+            store.keys_matching(b"*", 0),
+            Vec::<Vec<u8>>::new(),
+            "KEYS * after flush must be empty"
+        );
     }
 
     #[test]
