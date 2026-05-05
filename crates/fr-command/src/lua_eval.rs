@@ -1778,7 +1778,13 @@ impl<'a> LuaState<'a> {
         self.globals
             .insert("os".to_string(), LuaValue::Table(os_table));
 
-        // Coroutine stubs — Redis does not support coroutines in EVAL scripts.
+        // Coroutine table registration — DIVERGES from upstream
+        // Redis 7.2, which keeps the full Lua coroutine library
+        // (create / resume / yield / status / wrap / running)
+        // functional inside the script sandbox. fr's interpreter has
+        // no suspended-frame support yet, so the registered methods
+        // dispatch to RustFunctions that return 'attempt to call a nil
+        // value'. Tracked as frankenredis-bw15 / frankenredis-n8vo2.
         let coroutine_table = LuaTable::new();
         for name in &["create", "resume", "yield", "status", "wrap", "running"] {
             coroutine_table.set(
@@ -5892,14 +5898,22 @@ mod tests {
     }
 
     #[test]
-    fn coroutine_stubs_return_error() {
+    fn coroutine_stubs_return_error_pending_bw15() {
+        // (frankenredis-bw15 / n8vo2) Regression marker for a CURRENT
+        // divergence from upstream Redis 7.2: every coroutine.* method
+        // returns 'attempt to call a nil value' because fr's Lua
+        // interpreter has no suspended-frame support. Upstream keeps
+        // the full coroutine library functional inside the script
+        // sandbox, so this test will need to flip (and the linked
+        // ignore'd parity test eval_lua_coroutine_create_and_resume_
+        // yields_value will start passing) once bw15 lands.
         let mut store = Store::new();
         for func in &["create", "resume", "yield", "status", "wrap", "running"] {
             let script = format!("return coroutine.{func}()").into_bytes();
             let result = eval_script(&script, &[], &[], &mut store, 0);
             assert!(
                 result.is_err(),
-                "coroutine.{func}() should return an error, got: {result:?}"
+                "coroutine.{func}() currently errors pending bw15, got: {result:?}"
             );
         }
     }
