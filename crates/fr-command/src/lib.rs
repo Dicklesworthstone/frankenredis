@@ -6961,11 +6961,16 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                 subcommand: sub.to_string(),
             });
         }
-        // (br-frankenredis-qcmh)
-        match store.xlen(&argv[2], now_ms) {
-            Ok(_) => {}
-            Err(StoreError::KeyNotFound) => return Ok(xgroup_key_required_error()),
-            Err(err) => return Err(CommandError::Store(err)),
+        // Same dead-code shape as XGROUP DESTROY: Store::xlen returns
+        // Ok(0) for a missing key (matching the user-facing XLEN
+        // contract), so the KeyNotFound arm never fired and dispatch
+        // fell through to xgroup_delconsumer → NOGROUP error wording
+        // instead of upstream's key-required ERR. Replace the probe
+        // with Store::key_type. (frankenredis-n4g5, supersedes qcmh)
+        match store.key_type(&argv[2], now_ms) {
+            None => return Ok(xgroup_key_required_error()),
+            Some("stream") => {}
+            Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
         }
         return match store.xgroup_delconsumer(&argv[2], &argv[3], &argv[4], now_ms) {
             Ok(Some(deleted_pending)) => Ok(RespFrame::Integer(

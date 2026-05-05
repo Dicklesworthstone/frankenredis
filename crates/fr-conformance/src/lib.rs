@@ -8942,16 +8942,19 @@ mod tests {
             "xadd_auto_same_millisecond",
             "xadd_explicit_higher_id",
             "xadd_for_xtrim",
-            "xautoclaim_nogroup",
-            "xclaim_nogroup",
-            "xdel_removes_existing_and_missing_ids",
-            "xgroup_create_missing_key_error",
-            "xgroup_delconsumer_missing_key_error",
-            // xgroup_destroy_missing_key_zero removed from XFAIL: fr now
-            // emits the upstream key-required error instead of returning
-            // 0 (frankenredis-n4qd).
-            "xgroup_setid_invalid_id_error",
-            "xgroup_setid_missing_key_error",
+            // The following 7 cases were dropped from XFAIL on
+            // 2026-05-04 — differential probe vs vendored Redis 7.2.4
+            // confirms each one byte-matches upstream now:
+            //   xautoclaim_nogroup                 → NOGROUP wording
+            //   xclaim_nogroup                     → NOGROUP wording
+            //   xdel_removes_existing_and_missing_ids → 0 on missing IDs
+            //   xgroup_create_missing_key_error    → key-required ERR
+            //   xgroup_delconsumer_missing_key_error → key-required ERR
+            //                                        (frankenredis-n4g5)
+            //   xgroup_destroy_missing_key_zero    → key-required ERR
+            //                                        (frankenredis-n4qd)
+            //   xgroup_setid_invalid_id_error      → 'Invalid stream ID'
+            //   xgroup_setid_missing_key_error     → key-required ERR
             "xinfo_consumers_read1_after_createconsumer",
             "xinfo_consumers_read1_after_delconsumer",
             "xinfo_full_bad_arity_missing_count_value",
