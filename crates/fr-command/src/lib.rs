@@ -26478,8 +26478,12 @@ mod tests {
                 RespFrame::BulkString(Some(b"1001-0".to_vec())),
                 RespFrame::BulkString(Some(b"entries-read".to_vec())),
                 RespFrame::BulkString(None),
+                // (frankenredis-9wr6) post-mut9 lag emission: integer
+                // gap between group cursor and stream tail. Fresh
+                // group on a 1-entry stream with last-delivered-id at
+                // the tail → 0.
                 RespFrame::BulkString(Some(b"lag".to_vec())),
-                RespFrame::BulkString(None),
+                RespFrame::Integer(0),
             ]))]))
         );
 
@@ -26579,8 +26583,10 @@ mod tests {
                 RespFrame::BulkString(Some(b"0-0".to_vec())),
                 RespFrame::BulkString(Some(b"entries-read".to_vec())),
                 RespFrame::BulkString(None),
+                // (frankenredis-9wr6) post-mut9 lag emission. MKSTREAM
+                // group on an empty stream is at the tail → 0.
                 RespFrame::BulkString(Some(b"lag".to_vec())),
-                RespFrame::BulkString(None),
+                RespFrame::Integer(0),
             ]))]))
         );
 
@@ -26859,8 +26865,9 @@ mod tests {
                 RespFrame::BulkString(Some(b"1000-0".to_vec())),
                 RespFrame::BulkString(Some(b"entries-read".to_vec())),
                 RespFrame::BulkString(None),
+                // (frankenredis-9wr6) lag = 1 entry behind tail.
                 RespFrame::BulkString(Some(b"lag".to_vec())),
-                RespFrame::BulkString(None),
+                RespFrame::Integer(1),
             ]))]))
         );
 
@@ -26897,8 +26904,10 @@ mod tests {
                 RespFrame::BulkString(Some(b"1001-0".to_vec())),
                 RespFrame::BulkString(Some(b"entries-read".to_vec())),
                 RespFrame::BulkString(None),
+                // (frankenredis-9wr6) SETID $ moved cursor to tail
+                // (1001-0) → caught up → lag = 0.
                 RespFrame::BulkString(Some(b"lag".to_vec())),
-                RespFrame::BulkString(None),
+                RespFrame::Integer(0),
             ]))]))
         );
     }
@@ -27103,8 +27112,10 @@ mod tests {
                 RespFrame::BulkString(Some(b"0-0".to_vec())),
                 RespFrame::BulkString(Some(b"entries-read".to_vec())),
                 RespFrame::BulkString(None),
+                // (frankenredis-9wr6) one entry on stream, group at
+                // 0-0 → lag = 1 entry behind.
                 RespFrame::BulkString(Some(b"lag".to_vec())),
-                RespFrame::BulkString(None),
+                RespFrame::Integer(1),
             ]))]))
         );
 
@@ -27141,8 +27152,9 @@ mod tests {
                 RespFrame::BulkString(Some(b"0-0".to_vec())),
                 RespFrame::BulkString(Some(b"entries-read".to_vec())),
                 RespFrame::BulkString(None),
+                // (frankenredis-9wr6) lag unchanged after delconsumer.
                 RespFrame::BulkString(Some(b"lag".to_vec())),
-                RespFrame::BulkString(None),
+                RespFrame::Integer(1),
             ]))]))
         );
 
