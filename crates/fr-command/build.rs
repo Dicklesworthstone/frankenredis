@@ -46,7 +46,7 @@ const CANONICAL_ACL_CATEGORY_ORDER: &[&str] = &[
     "scripting",
 ];
 
-fn sort_canonical(categories: &mut Vec<String>) {
+fn sort_canonical(categories: &mut [String]) {
     categories.sort_by_key(|cat| {
         CANONICAL_ACL_CATEGORY_ORDER
             .iter()
