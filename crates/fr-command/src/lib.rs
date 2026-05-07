@@ -15067,14 +15067,13 @@ pub fn validate_client_caching_mode(
     mode: &str,
     tracking: &ClientTrackingState,
 ) -> Result<(), CommandError> {
-    if !mode.eq_ignore_ascii_case("YES") && !mode.eq_ignore_ascii_case("NO") {
-        return Err(CommandError::SyntaxError);
-    }
-    // Upstream networking.c::clientCommand splits the error wording:
-    // tracking disabled → 'CLIENT CACHING can be called only when
-    // the client is in tracking mode with OPTIN or OPTOUT mode
-    // enabled'; tracking enabled but wrong mode → the per-mode
-    // message. (br-frankenredis-cachemode)
+    // Upstream networking.c::clientCommand:3415-3441 checks the
+    // tracking-enabled gate BEFORE parsing the YES|NO opt. So a call
+    // like `CLIENT CACHING BOGUS` against a non-tracking client
+    // surfaces 'tracking mode with OPTIN or OPTOUT mode enabled',
+    // not 'syntax error'. fr's prior ordering inverted that and
+    // diverged for invalid-opt + tracking-disabled inputs.
+    // (br-frankenredis-cachemode + frankenredis-cacheorder)
     if !tracking.enabled {
         return Err(CommandError::Custom(
             "ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled".to_string(),
@@ -15086,10 +15085,14 @@ pub fn validate_client_caching_mode(
                 CLIENT_CACHING_YES_REQUIRES_OPTIN.to_string(),
             ));
         }
-    } else if !tracking.optout {
-        return Err(CommandError::Custom(
-            CLIENT_CACHING_NO_REQUIRES_OPTOUT.to_string(),
-        ));
+    } else if mode.eq_ignore_ascii_case("NO") {
+        if !tracking.optout {
+            return Err(CommandError::Custom(
+                CLIENT_CACHING_NO_REQUIRES_OPTOUT.to_string(),
+            ));
+        }
+    } else {
+        return Err(CommandError::SyntaxError);
     }
     Ok(())
 }
@@ -48209,6 +48212,47 @@ mod tests {
             let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
             assert_eq!(err, expected);
         }
+    }
+
+    #[test]
+    fn client_caching_invalid_opt_with_tracking_disabled_uses_tracking_mode_error() {
+        // (frankenredis-cacheorder) Upstream networking.c:3415-3441
+        // checks the tracking-enabled gate BEFORE parsing YES|NO, so
+        // `CLIENT CACHING BOGUS` against a non-tracking client surfaces
+        // the dedicated 'tracking mode with OPTIN or OPTOUT' wording —
+        // not 'syntax error'. Probe vs vendored 7.2.4 confirmed for
+        // BOGUS / YES / NO / lowercase / mixed-case opts.
+        let mut store = Store::new();
+        for opt in [b"BOGUS".as_slice(), b"YES".as_slice(), b"NO".as_slice(), b"yes".as_slice()] {
+            let err = dispatch_argv(
+                &[b"CLIENT".to_vec(), b"CACHING".to_vec(), opt.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect_err("client caching tracking-disabled");
+            assert_eq!(
+                err,
+                CommandError::Custom(
+                    "ERR CLIENT CACHING can be called only when the client is in tracking mode with OPTIN or OPTOUT mode enabled".to_string()
+                ),
+                "opt={:?}",
+                std::str::from_utf8(opt).unwrap_or("<bin>")
+            );
+        }
+        // Once tracking is enabled, an invalid opt surfaces SyntaxError.
+        dispatch_argv(
+            &[b"CLIENT".to_vec(), b"TRACKING".to_vec(), b"ON".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let err = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"CACHING".to_vec(), b"BOGUS".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("client caching invalid opt with tracking enabled");
+        assert_eq!(err, CommandError::SyntaxError);
     }
 
     #[test]
