@@ -12183,18 +12183,18 @@ fn digest_bytes(bytes: &[u8]) -> String {
 /// followed by a unit suffix (case-insensitive). 1024-base units:
 /// kb, mb, gb. 1000-base units: k, m, g. 'b' or no suffix means
 /// raw bytes. Negative values and other suffixes are rejected.
-/// (br-frankenredis-ky4n)
+/// An empty digit run is treated as 0 (memtoull copies 0 digits
+/// into its scratch buffer, which strtoull parses as 0 cleanly),
+/// so a bare suffix like "kb" or empty input both yield 0.
+/// (br-frankenredis-ky4n + frankenredis-memtu)
 fn parse_memory_size_arg(arg: &[u8]) -> Result<u64, ()> {
     let text = std::str::from_utf8(arg).map_err(|_| ())?;
-    if text.is_empty() || text.starts_with('-') {
+    if text.starts_with('-') {
         return Err(());
     }
     let split_idx = text
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(text.len());
-    if split_idx == 0 {
-        return Err(());
-    }
     let (digits, suffix) = text.split_at(split_idx);
     let mul: u64 = match suffix.to_ascii_lowercase().as_str() {
         "" | "b" => 1,
@@ -12206,7 +12206,11 @@ fn parse_memory_size_arg(arg: &[u8]) -> Result<u64, ()> {
         "gb" => 1_024 * 1_024 * 1_024,
         _ => return Err(()),
     };
-    let val: u64 = digits.parse().map_err(|_| ())?;
+    let val: u64 = if digits.is_empty() {
+        0
+    } else {
+        digits.parse().map_err(|_| ())?
+    };
     val.checked_mul(mul).ok_or(())
 }
 
@@ -20232,6 +20236,12 @@ mod tests {
 
     #[test]
     fn config_set_maxmemory_accepts_redis_memory_suffixes() {
+        // (frankenredis-memtu) Empty input, bare suffixes ('b' / 'kb' /
+        // 'mb' / 'gb' alone), and zero are all accepted by upstream
+        // memtoull and yield 0 — strtoull on the empty digit run is a
+        // clean parse, then the multiplier gets applied to 0. fr's
+        // parser previously rejected empty / suffix-only / bare-'b'
+        // inputs.
         let cases: &[(&[u8], &[u8])] = &[
             (b"100kb", b"102400"),
             (b"100mb", b"104857600"),
@@ -20242,6 +20252,11 @@ mod tests {
             (b"100b", b"100"),
             (b"100", b"100"),
             (b"1Gb", b"1073741824"),
+            (b"", b"0"),
+            (b"b", b"0"),
+            (b"kb", b"0"),
+            (b"GB", b"0"),
+            (b"0", b"0"),
         ];
 
         let mut rt = Runtime::default_strict();
