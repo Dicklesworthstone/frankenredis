@@ -10378,9 +10378,29 @@ impl Store {
         let mut functions = Vec::new();
         for line in code_str.lines() {
             let trimmed = line.trim();
-            if trimmed.contains("register_function")
-                && let Some((name, description)) = extract_function_metadata(trimmed)
-            {
+            if !trimmed.contains("register_function") {
+                continue;
+            }
+            // Upstream function_lua.c::luaRegisterFunction rejects a
+            // table-form invocation that omits the `callback` field
+            // with 'ERR redis.register_function must get a callback
+            // argument'. fr's textual parser previously only checked
+            // for `function_name=`, so a malformed library like
+            // `register_function{function_name='nocb'}` registered an
+            // empty function silently. (frankenredis-fncb)
+            if let Some(start) = trimmed.find("register_function") {
+                let after_call = &trimmed[start + "register_function".len()..];
+                let trimmed_after = after_call.trim_start();
+                if trimmed_after.starts_with('{')
+                    && !has_table_key(&trimmed_after[1..], "callback")
+                {
+                    return Err(StoreError::GenericError(
+                        "ERR Error registering functions: ERR redis.register_function must get a callback argument"
+                            .to_string(),
+                    ));
+                }
+            }
+            if let Some((name, description)) = extract_function_metadata(trimmed) {
                 if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
                 {
                     // Upstream functions.c::functionsRegisterEngineLib
@@ -12658,6 +12678,33 @@ fn extract_table_field(buf: &str, key: &str) -> Option<String> {
         i += 1;
     }
     None
+}
+
+/// Return true if `<key> *= *...` appears in `buf` with the same
+/// left-boundary discipline as `extract_table_field`, regardless
+/// of the value shape. Used to detect presence of fields whose
+/// values are not quoted strings (e.g. `callback=function() ...`)
+/// so we can mirror upstream's required-field wording without
+/// fully parsing Lua. (frankenredis-fncb)
+fn has_table_key(buf: &str, key: &str) -> bool {
+    let bytes = buf.as_bytes();
+    let key_bytes = key.as_bytes();
+    let mut i = 0;
+    while i + key_bytes.len() <= bytes.len() {
+        if &bytes[i..i + key_bytes.len()] == key_bytes {
+            let left_ok =
+                i == 0 || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+            let mut j = i + key_bytes.len();
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if left_ok && j < bytes.len() && bytes[j] == b'=' {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 fn extract_quoted_string(s: &str) -> Option<String> {
@@ -18249,6 +18296,45 @@ mod tests {
             err,
             StoreError::GenericError("ERR No functions registered".to_string())
         );
+    }
+
+    #[test]
+    fn function_load_table_form_rejects_missing_callback() {
+        // Upstream function_lua.c::luaRegisterFunction rejects a
+        // table-form register_function call that omits the
+        // `callback` field with 'ERR Error registering functions:
+        // ERR redis.register_function must get a callback argument'.
+        // fr's textual parser previously only checked for
+        // function_name=, so a library like
+        //     register_function{function_name='nocb'}
+        // silently registered an empty function. Differential probe
+        // vs vendored 7.2.4 confirmed the wording. (frankenredis-fncb)
+        let mut store = Store::new();
+        let code = b"#!lua name=lib1\n\
+                     redis.register_function{function_name='nocb'}";
+        let err = store
+            .function_load(code, false)
+            .expect_err("missing callback must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR redis.register_function must get a callback argument"
+                    .to_string()
+            )
+        );
+        assert!(
+            !store.function_libraries.contains_key("lib1"),
+            "library must not be registered when callback is missing"
+        );
+
+        // Sanity: a properly-formed table-form call with callback
+        // present still loads.
+        let ok_code = b"#!lua name=lib_ok\n\
+                        redis.register_function{function_name='f', callback=function() return 1 end}";
+        store
+            .function_load(ok_code, false)
+            .expect("library with callback must load");
+        assert!(store.function_libraries.contains_key("lib_ok"));
     }
 
     #[test]
