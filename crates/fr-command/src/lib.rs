@@ -9545,12 +9545,17 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 /// Transform `redis.register_function('name', function(k,a) body end)` into
 /// `function name(k,a) body end` so it can be called by name in our Lua evaluator.
 fn transform_register_function(line: &str) -> Option<String> {
-    // Match: redis.register_function('name', function(...)
-    // or:    redis.register_function("name", function(...)
+    // Match: redis.register_function('name', function(...))    (positional)
+    //   or:  redis.register_function("name", function(...))    (positional)
+    //   or:  redis.register_function{function_name='name', callback=function(...) ...}  (table)
     let after = line
         .find("register_function")
         .map(|i| &line[i + "register_function".len()..])?;
-    let after = after.trim_start().strip_prefix('(')?;
+    let after = after.trim_start();
+    if let Some(rest) = after.strip_prefix('{') {
+        return transform_register_function_table_form(rest);
+    }
+    let after = after.strip_prefix('(')?;
     let after = after.trim_start();
     // Extract function name from 'name' or "name"
     let (name, rest) = if let Some(stripped) = after.strip_prefix('\'') {
@@ -9570,6 +9575,160 @@ fn transform_register_function(line: &str) -> Option<String> {
     let rest = rest.trim_end();
     let rest = rest.strip_suffix(')')?;
     Some(format!("function {name}{rest}"))
+}
+
+/// Transform a table-form `register_function{...}` call into a
+/// named-function definition for the wrapper script.
+/// Handles `{function_name='name', callback=function(params) body end, ...}`
+/// in any field order. (frankenredis-fntblxform)
+fn transform_register_function_table_form(body: &str) -> Option<String> {
+    // Locate the closing `}` of the table at brace_depth==0,
+    // skipping nested strings and braces.
+    let bytes = body.as_bytes();
+    let mut i = 0;
+    let mut depth: i32 = 1;
+    let mut name: Option<String> = None;
+    let mut params: Option<&str> = None;
+    let mut fn_body: Option<&str> = None;
+    while i < bytes.len() && depth > 0 {
+        let b = bytes[i];
+        if b == b'\'' || b == b'"' {
+            let q = b;
+            i += 1;
+            while i < bytes.len() && bytes[i] != q {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 1;
+                }
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'{' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if b == b'}' {
+            depth -= 1;
+            i += 1;
+            continue;
+        }
+        let left_ok =
+            i == 0 || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+        if depth == 1
+            && left_ok
+            && matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'_')
+        {
+            let start = i;
+            while i < bytes.len()
+                && matches!(bytes[i], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_')
+            {
+                i += 1;
+            }
+            let ident = &body[start..i];
+            let mut j = i;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'=' {
+                let after_eq = body[j + 1..].trim_start();
+                if ident == "function_name" {
+                    let qbytes = after_eq.as_bytes();
+                    if let Some(&q) = qbytes.first()
+                        && (q == b'\'' || q == b'"')
+                        && let Some(end) = after_eq[1..].find(q as char)
+                    {
+                        name = Some(after_eq[1..1 + end].to_string());
+                    }
+                } else if ident == "callback" {
+                    if let Some(rest) = after_eq.strip_prefix("function") {
+                        // rest = (params) body end[, ...]
+                        let rest = rest.trim_start();
+                        if rest.starts_with('(') {
+                            // Find matching ')'
+                            let pbytes = rest.as_bytes();
+                            let mut k = 1;
+                            let mut pdepth: i32 = 1;
+                            while k < pbytes.len() && pdepth > 0 {
+                                match pbytes[k] {
+                                    b'(' => pdepth += 1,
+                                    b')' => pdepth -= 1,
+                                    _ => {}
+                                }
+                                k += 1;
+                            }
+                            params = Some(&rest[..k]);
+                            // body extends from k to the matching `end` token
+                            // closing the function. Coarse keyword-block depth
+                            // counter (matches the helper in fr-store).
+                            let after_params = &rest[k..];
+                            let abytes = after_params.as_bytes();
+                            let mut m = 0;
+                            let mut bdepth: i32 = 1;
+                            while m < abytes.len() && bdepth > 0 {
+                                let bb = abytes[m];
+                                if bb == b'\'' || bb == b'"' {
+                                    let q = bb;
+                                    m += 1;
+                                    while m < abytes.len() && abytes[m] != q {
+                                        if abytes[m] == b'\\' && m + 1 < abytes.len() {
+                                            m += 1;
+                                        }
+                                        m += 1;
+                                    }
+                                    if m < abytes.len() {
+                                        m += 1;
+                                    }
+                                    continue;
+                                }
+                                let lok = m == 0
+                                    || !matches!(
+                                        abytes[m - 1],
+                                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'
+                                    );
+                                if lok && matches!(bb, b'A'..=b'Z' | b'a'..=b'z' | b'_') {
+                                    let s = m;
+                                    while m < abytes.len()
+                                        && matches!(
+                                            abytes[m],
+                                            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'
+                                        )
+                                    {
+                                        m += 1;
+                                    }
+                                    let id = &after_params[s..m];
+                                    match id {
+                                        "function" | "if" | "while" | "for" | "do" => {
+                                            bdepth += 1
+                                        }
+                                        "end" => bdepth -= 1,
+                                        _ => {}
+                                    }
+                                    continue;
+                                }
+                                m += 1;
+                            }
+                            fn_body = Some(&after_params[..m]);
+                            i = j + 1 + (after_eq.as_ptr() as usize - body[j + 1..].as_ptr() as usize)
+                                + (rest.as_ptr() as usize - after_eq.as_ptr() as usize)
+                                + k
+                                + m;
+                            continue;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    let name = name?;
+    let params = params?;
+    let body = fn_body?;
+    Some(format!("function {name}{params}{body}"))
 }
 
 // ── SSUBSCRIBE / SUNSUBSCRIBE / SPUBLISH (shard Pub/Sub) ───────────
@@ -48231,6 +48390,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::BulkString(Some(b"echoed".to_vec())));
+    }
+
+    #[test]
+    fn fcall_ro_succeeds_for_table_form_function_with_no_writes_flag() {
+        // The positional form has no way to declare flags, so
+        // FCALL_RO always rejects it. The table form's
+        // flags={'no-writes'} declaration must dispatch through
+        // FCALL_RO successfully — exercising the
+        // fr-store::function_load flag-capture path
+        // (frankenredis-fnflagstore) and the FCALL_RO no-writes
+        // gate at fr-command/src/lib.rs:9476.
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=rolib_nw\nredis.register_function{function_name='nw_echo', callback=function(keys, args) return args[1] end, flags={'no-writes'}}"
+                    .to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(b"rolib_nw".to_vec())));
+
+        let out = dispatch_argv(
+            &[
+                b"FCALL_RO".to_vec(),
+                b"nw_echo".to_vec(),
+                b"0".to_vec(),
+                b"hello".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::BulkString(Some(b"hello".to_vec())));
     }
 
     #[test]
