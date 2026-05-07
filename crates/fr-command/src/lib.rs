@@ -14254,6 +14254,12 @@ fn config_cmd(
                 subcommand: sub.to_string(),
             });
         }
+        // Upstream commands.def declares config|get with CMD_NOSCRIPT
+        // (line 6530). fr previously ran CONFIG GET from script
+        // contexts and returned the config values. (frankenredis-cfgsc)
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
+        }
         let mut entries = Vec::new();
         for arg in &argv[2..] {
             let raw_pattern =
@@ -14268,6 +14274,11 @@ fn config_cmd(
                 command: "CONFIG",
                 subcommand: sub.to_string(),
             });
+        }
+        // Upstream commands.def declares config|set with CMD_NOSCRIPT
+        // (line 6534). (frankenredis-cfgsc)
+        if store.script_nesting_level >= 1 {
+            return Err(script_noscript_command_error());
         }
         config_apply_store_sets(&argv[2..], store)?;
         Ok(RespFrame::SimpleString("OK".to_string()))
@@ -44864,6 +44875,22 @@ mod tests {
         for argv in [
             vec![b"CONFIG".to_vec(), b"RESETSTAT".to_vec()],
             vec![b"CONFIG".to_vec(), b"REWRITE".to_vec()],
+            // (frankenredis-cfgsc) Upstream commands.def declares
+            // config|get and config|set with CMD_NOSCRIPT — fr
+            // previously ran both from script contexts and returned
+            // the config values / OK silently. Differential probe
+            // vs vendored 7.2.4 confirmed the noscript reply.
+            vec![
+                b"CONFIG".to_vec(),
+                b"GET".to_vec(),
+                b"maxmemory".to_vec(),
+            ],
+            vec![
+                b"CONFIG".to_vec(),
+                b"SET".to_vec(),
+                b"maxmemory".to_vec(),
+                b"0".to_vec(),
+            ],
         ] {
             let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
             assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
