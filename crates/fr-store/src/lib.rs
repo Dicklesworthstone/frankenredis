@@ -10398,6 +10398,20 @@ impl Store {
                             .to_string(),
                     ));
                 }
+                // Upstream functions.c::functionLibCreateFunction
+                // rejects a second registration with the same name
+                // inside one library via 'ERR Error registering
+                // functions: ERR Function already exists in the
+                // library'. fr previously pushed a duplicate entry,
+                // so FUNCTION LIST would show the function twice and
+                // FCALL would silently dispatch to whichever matched
+                // first in the wrapper script. (frankenredis-fnfdup)
+                if functions.iter().any(|f: &FunctionEntry| f.name == name) {
+                    return Err(StoreError::GenericError(
+                        "ERR Error registering functions: ERR Function already exists in the library"
+                            .to_string(),
+                    ));
+                }
                 functions.push(FunctionEntry {
                     name,
                     description,
@@ -18234,6 +18248,35 @@ mod tests {
         assert_eq!(
             err,
             StoreError::GenericError("ERR No functions registered".to_string())
+        );
+    }
+
+    #[test]
+    fn function_load_rejects_duplicate_function_name_within_library() {
+        // Upstream functions.c::functionLibCreateFunction rejects a
+        // second registration with the same name inside one library
+        // with 'ERR Error registering functions: ERR Function
+        // already exists in the library'. fr previously pushed a
+        // duplicate entry, so FUNCTION LIST would show the function
+        // twice. Differential probe vs vendored 7.2.4 confirmed the
+        // wording. (frankenredis-fnfdup)
+        let mut store = Store::new();
+        let code = b"#!lua name=lib1\n\
+                     redis.register_function('dupe', function() return 1 end)\n\
+                     redis.register_function('dupe', function() return 2 end)";
+        let err = store
+            .function_load(code, false)
+            .expect_err("duplicate fname must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR Function already exists in the library"
+                    .to_string()
+            )
+        );
+        assert!(
+            !store.function_libraries.contains_key("lib1"),
+            "library must not be registered when duplicate fname is rejected"
         );
     }
 
