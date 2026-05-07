@@ -1106,6 +1106,19 @@ pub fn dispatch_argv(
     let Some(raw_cmd) = argv.first() else {
         return Err(CommandError::InvalidCommandFrame);
     };
+    // Upstream commands.def declares client|reply with CMD_NOSCRIPT
+    // (line 1551), so processCommand fires the noscript reply before
+    // the handler-level mode validation. fr previously parsed the
+    // mode first via the `?` propagation, so a scripted
+    // `CLIENT REPLY BOGUS` surfaced SyntaxError instead of the
+    // canonical noscript wording. Guard CLIENT REPLY at the
+    // dispatch level before parse runs. (frankenredis-clirep)
+    let is_client_reply = argv.len() >= 2
+        && argv[0].eq_ignore_ascii_case(b"CLIENT")
+        && argv[1].eq_ignore_ascii_case(b"REPLY");
+    if is_client_reply && argv.len() == 3 && store.script_nesting_level >= 1 {
+        return Err(script_noscript_command_error());
+    }
     if parse_client_reply_action(argv)?.is_some() && store.script_nesting_level >= 1 {
         return Err(script_noscript_command_error());
     }
@@ -44342,14 +44355,22 @@ mod tests {
         let mut store = Store::new();
         store.script_nesting_level = 1;
 
+        // (frankenredis-clirep) Upstream commands.def declares
+        // client|reply with CMD_NOSCRIPT (line 1551). For an
+        // arity-3 call, processCommand fires noscript BEFORE the
+        // mode validator runs — even when the mode is bogus. fr
+        // previously surfaced SyntaxError here because the dispatch-
+        // level guard ran AFTER the parse step's `?` propagation.
         let err = dispatch_argv(
             &[b"CLIENT".to_vec(), b"REPLY".to_vec(), b"MAYBE".to_vec()],
             &mut store,
             0,
         )
         .unwrap_err();
-        assert_eq!(err, CommandError::SyntaxError);
+        assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
 
+        // 4-arg case is still wrong-arity at fr-command; lua_eval
+        // wraps it into the script-context wording at the call site.
         let err = dispatch_argv(
             &[
                 b"CLIENT".to_vec(),
