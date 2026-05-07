@@ -31858,6 +31858,95 @@ mod tests {
     }
 
     #[test]
+    fn bitcount_bitpos_reject_combined_bit_byte_keywords() {
+        // Pin upstream bitops.c BITCOUNT / BITPOS index-mode keyword
+        // gating (frankenredis-bitbb): exactly one of BIT or BYTE is
+        // permitted. Specifying both surfaces 'ERR syntax error' since
+        // the second keyword is parsed as an unknown trailing argument.
+        // Differential probe vs vendored 7.2.4 confirmed for both
+        // orderings (BIT BYTE / BYTE BIT) on both commands.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"hello world".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+
+        for argv_in in [
+            vec![
+                b"BITCOUNT".to_vec(),
+                b"k".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"BIT".to_vec(),
+                b"BYTE".to_vec(),
+            ],
+            vec![
+                b"BITCOUNT".to_vec(),
+                b"k".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"BYTE".to_vec(),
+                b"BIT".to_vec(),
+            ],
+            vec![
+                b"BITPOS".to_vec(),
+                b"k".to_vec(),
+                b"1".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"BIT".to_vec(),
+                b"BYTE".to_vec(),
+            ],
+            vec![
+                b"BITPOS".to_vec(),
+                b"k".to_vec(),
+                b"1".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"BYTE".to_vec(),
+                b"BIT".to_vec(),
+            ],
+        ] {
+            let err = dispatch_argv(&argv_in, &mut store, 0).expect_err("bit+byte combo");
+            assert_eq!(
+                err,
+                CommandError::SyntaxError,
+                "argv={argv_in:?} should reject duplicate BIT/BYTE keywords as syntax error"
+            );
+        }
+
+        // Sanity: each keyword *alone* still parses cleanly.
+        let bit_alone = dispatch_argv(
+            &[
+                b"BITCOUNT".to_vec(),
+                b"k".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"BIT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("bitcount BIT");
+        assert!(matches!(bit_alone, RespFrame::Integer(_)));
+        let byte_alone = dispatch_argv(
+            &[
+                b"BITCOUNT".to_vec(),
+                b"k".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"BYTE".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("bitcount BYTE");
+        assert!(matches!(byte_alone, RespFrame::Integer(_)));
+    }
+
+    #[test]
     fn bitcount_with_range() {
         let mut store = Store::new();
         // Set "foobar" which has a known bitcount
