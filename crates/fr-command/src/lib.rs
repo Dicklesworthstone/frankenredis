@@ -17609,6 +17609,17 @@ fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
     }
 }
 
+/// Build the upstream-canonical "unknown subcommand or wrong number of
+/// arguments" envelope for DEBUG, preserving the input case of the
+/// subcommand token. Upstream debug.c routes wrong-arity through
+/// addReplySubcommandSyntaxError which echoes argv[1] verbatim.
+/// (frankenredis-dbgcase)
+fn debug_subcommand_envelope_error(sub: &str) -> CommandError {
+    CommandError::Custom(format!(
+        "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try DEBUG HELP."
+    ))
+}
+
 fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("DEBUG"));
@@ -17624,11 +17635,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             // table-level wrong-arity reply. Mirrors the pattern
             // already used by SET-ACTIVE-EXPIRE / OBJECT / RELOAD-as-
             // unknown-option below. (frankenredis-dbgs)
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'SLEEP'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let secs: f64 = std::str::from_utf8(&argv[2])
             .ok()
@@ -17644,11 +17651,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             // "ERR unknown subcommand or wrong number of arguments
             // for 'SET-ACTIVE-EXPIRE'. Try DEBUG HELP."
             // (br-frankenredis-1pe7)
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'SET-ACTIVE-EXPIRE'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         // Upstream debug.c::debugCommand parses the argument with a
         // permissive atoi-style path and treats any non-zero integer
@@ -17696,11 +17699,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             // Upstream debug.c::debugCommand emits
             // "ERR unknown subcommand or wrong number of arguments
             // for 'OBJECT'. Try DEBUG HELP." (br-frankenredis-1pe7)
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'OBJECT'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let key = &argv[2];
         let Some(encoding) = store.object_encoding(key, now_ms) else {
@@ -17732,11 +17731,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // addReplySubcommandSyntaxError (envelope wording), distinct
         // from the table-level wrong-arity reply. (frankenredis-dbgenv)
         if argv.len() != 2 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'DIGEST'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let digest = compute_debug_digest(store, now_ms, None);
         Ok(RespFrame::BulkString(Some(digest.into_bytes())))
@@ -17753,11 +17748,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // Wrong-arity routing uses the subcommand-syntax envelope
         // per (frankenredis-dbgenv).
         if argv.len() < 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'DIGEST-VALUE'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let frames: Vec<RespFrame> = argv[2..]
             .iter()
@@ -17773,11 +17764,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // Upstream debug.c routes wrong-arity through the subcommand-
         // syntax envelope. (frankenredis-dbgenv)
         if argv.len() < 3 || argv.len() > 5 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'POPULATE'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let count = parse_i64_arg(&argv[2])?;
         let prefix = if argv.len() >= 4 {
@@ -17853,11 +17840,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // (br-frankenredis-s11v) Upstream routes wrong-arity through
         // the subcommand-syntax envelope. (frankenredis-dbgenv)
         if argv.len() != 2 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'CHANGE-REPL-ID'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("ERROR") {
@@ -17865,11 +17848,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // frame from the caller's string with newlines mapped to spaces so
         // the protocol stays valid. (frankenredis-l2zqy)
         if argv.len() != 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'ERROR'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let msg = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         let sanitized: String = msg
@@ -17883,11 +17862,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // carry log infra, so accept-and-OK matches the wire contract.
         // (frankenredis-l2zqy)
         if argv.len() != 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'LOG'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         // Validate UTF-8 to mirror error handling for the rest of debug_cmd.
         let _msg = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
@@ -17897,11 +17872,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // argument and returns OK. We accept-and-OK without leaking.
         // (frankenredis-l2zqy)
         if argv.len() != 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'LEAK'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("PAUSE-CRON") {
@@ -17909,11 +17880,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // via atoi(). fr-command has no periodic cron, so accept-and-OK
         // matches the wire contract. (frankenredis-r2l7c)
         if argv.len() != 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'PAUSE-CRON'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("SET-DISABLE-DENY-SCRIPTS") {
@@ -17922,11 +17889,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // deny-scripts gate to disable, so accept-and-OK is correct.
         // (frankenredis-r2l7c)
         if argv.len() != 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'SET-DISABLE-DENY-SCRIPTS'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("AOF-FLUSH-SLEEP") {
@@ -17935,11 +17898,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // point, so accept-and-OK matches the wire contract.
         // (frankenredis-r2l7c)
         if argv.len() != 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'AOF-FLUSH-SLEEP'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("SET-SKIP-CHECKSUM-VALIDATION") {
@@ -17948,11 +17907,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // path validates checksums unconditionally, so accept-and-OK
         // matches the wire contract. (frankenredis-r2l7c)
         if argv.len() != 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'SET-SKIP-CHECKSUM-VALIDATION'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("SDSLEN") {
@@ -17965,11 +17920,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // separate over-allocation concept). Tooling that parses the
         // format gets a syntactically valid reply. (frankenredis-byt3l)
         if argv.len() != 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'SDSLEN'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let key = &argv[2];
         let Some(encoding) = store.object_encoding(key, now_ms) else {
@@ -17993,11 +17944,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // detect arch keeps working. The other fields stay informational.
         // (frankenredis-wcedk)
         if argv.len() != 2 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'STRUCTSIZE'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let bits = (usize::BITS) as i64; // 64 on 64-bit hosts.
         Ok(RespFrame::BulkString(Some(
@@ -18014,11 +17961,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // fr has no listpack repr to print, so we skip the print and
         // return the canned status. (frankenredis-wcedk)
         if argv.len() != 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'LISTPACK'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let key = &argv[2];
         let Some(encoding) = store.object_encoding(key, now_ms) else {
@@ -18040,11 +17983,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         //   +Quicklist structure printed on stdout otherwise
         // (frankenredis-wcedk)
         if argv.len() != 3 && argv.len() != 4 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'QUICKLIST'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let key = &argv[2];
         let Some(encoding) = store.object_encoding(key, now_ms) else {
@@ -18065,11 +18004,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // memory via CONFIG SET); accept-and-OK matches the wire
         // contract. (frankenredis-eejfm)
         if argv.len() != 2 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'CONFIG-REWRITE-FORCE-ALL'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("DROP-CLUSTER-PACKET-FILTER") {
@@ -18079,11 +18014,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // cluster-packet-filter; validate the integer arg and accept-
         // and-OK. (frankenredis-eejfm)
         if argv.len() != 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'DROP-CLUSTER-PACKET-FILTER'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         // Validate the packet-type integer matches upstream's
         // getLongFromObjectOrReply behavior. parse_i64_arg returns
@@ -18099,11 +18030,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // disabled.'. fr has no client-memory-usage tracking, so the
         // disabled error is the correct reply. (frankenredis-eejfm)
         if argv.len() != 2 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'CLIENT-EVICTION'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::Error(
             "ERR maxmemory-clients is disabled.".to_string(),
@@ -18115,11 +18042,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // bucket-distribution numbers; emit a synthetic minimal block
         // that's syntactically valid for tooling. (frankenredis-72pfi)
         if argv.len() < 3 || argv.len() > 4 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'HTSTATS'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let dbid = parse_i64_arg(&argv[2])?;
         if dbid < 0 || dbid >= store.database_count as i64 {
@@ -18150,11 +18073,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // those families; everything else triggers the "not represented
         // using an hash table" error. (frankenredis-72pfi)
         if argv.len() < 3 || argv.len() > 4 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'HTSTATS-KEY'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let key = &argv[2];
         let Some(encoding) = store.object_encoding(key, now_ms) else {
@@ -18185,11 +18104,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // replica-feed hook from dispatch_argv, so accept-and-OK matches
         // the wire contract. (frankenredis-53n6u)
         if argv.len() < 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'REPLICATE'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("REPLYBUFFER") {
@@ -18205,11 +18120,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // mechanism, so accept-and-OK on syntactically-valid inputs.
         // (frankenredis-53n6u)
         if argv.len() != 4 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'REPLYBUFFER'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         let sub2 = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if sub2.eq_ignore_ascii_case("PEAK-RESET-TIME") {
@@ -18230,11 +18141,7 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             // unparseable. Mirrors upstream's atoi(c->argv[3]->ptr).
             Ok(RespFrame::SimpleString("OK".to_string()))
         } else {
-            Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'REPLYBUFFER'. Try DEBUG HELP."
-                    .to_string(),
-            ))
+            Err(debug_subcommand_envelope_error(sub))
         }
     } else if sub.eq_ignore_ascii_case("STRINGMATCH-LEN") {
         // Upstream debug.c spells this `STRINGMATCH-TEST` and runs
@@ -18244,21 +18151,13 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // (br-frankenredis-s11v) Upstream routes wrong-arity through
         // the subcommand-syntax envelope. (frankenredis-dbgenv)
         if argv.len() != 2 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'STRINGMATCH-LEN'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("STRINGMATCH-TEST") {
         // (frankenredis-dbgenv)
         if argv.len() != 2 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'STRINGMATCH-TEST'. Try DEBUG HELP."
-                    .to_string(),
-            ));
+            return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::SimpleString(
             "Apparently Redis did not crash: test passed".to_string(),
@@ -18307,9 +18206,10 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // the generic unknown-subcommand error, matching upstream's
         // `&& c->argc == 5` gating. (frankenredis-1iosf)
         if argv.len() != 5 || !argv[2].eq_ignore_ascii_case(b"KILL") {
+            // (frankenredis-dbgcase) Preserve the input-case sub token
+            // per upstream addReplySubcommandSyntaxError.
             return Ok(RespFrame::Error(format!(
-                "ERR unknown subcommand or wrong number of arguments for '{}'. Try DEBUG HELP.",
-                sub.to_ascii_uppercase()
+                "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try DEBUG HELP.",
             )));
         }
         if !store.cluster_enabled {
@@ -39340,6 +39240,77 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn debug_subcommand_envelope_preserves_input_case() {
+        // (frankenredis-dbgcase) Upstream debug.c routes per-subcommand
+        // wrong-arity through addReplySubcommandSyntaxError, which echoes
+        // argv[1] verbatim — preserving the input case. fr previously
+        // hard-coded each subcommand's name in uppercase across ~20
+        // arity-error sites. Differential probe vs vendored 7.2.4
+        // confirmed lowercase / mixed-case inputs surface the lowercase /
+        // mixed-case token in the wording.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (b"sleep", "sleep"),
+            (b"Sleep", "Sleep"),
+            (b"set-active-expire", "set-active-expire"),
+            (b"SeT-AcTive-EXPIRE", "SeT-AcTive-EXPIRE"),
+            (b"object", "object"),
+            (b"populate", "populate"),
+            (b"digest extra", "digest"),
+            (b"error", "error"),
+            (b"log", "log"),
+            (b"leak", "leak"),
+            (b"pause-cron", "pause-cron"),
+            (b"set-disable-deny-scripts", "set-disable-deny-scripts"),
+            (b"aof-flush-sleep", "aof-flush-sleep"),
+            (b"set-skip-checksum-validation", "set-skip-checksum-validation"),
+            (b"sdslen", "sdslen"),
+            (b"structsize extra", "structsize"),
+            (b"listpack", "listpack"),
+            (b"quicklist", "quicklist"),
+            (b"config-rewrite-force-all extra", "config-rewrite-force-all"),
+            (b"drop-cluster-packet-filter", "drop-cluster-packet-filter"),
+            (b"client-eviction extra", "client-eviction"),
+            (b"htstats", "htstats"),
+            (b"htstats-key", "htstats-key"),
+            (b"replicate", "replicate"),
+            (b"replybuffer", "replybuffer"),
+            (b"stringmatch-len extra", "stringmatch-len"),
+            (b"stringmatch-test extra", "stringmatch-test"),
+            (b"change-repl-id extra", "change-repl-id"),
+            (b"digest-value", "digest-value"),
+        ];
+        for (token, expected_in_msg) in cases {
+            let argv = if token.contains(&b' ') {
+                let parts: Vec<Vec<u8>> = token
+                    .split(|b| *b == b' ')
+                    .map(|s| s.to_vec())
+                    .collect();
+                let mut v = vec![b"DEBUG".to_vec()];
+                v.extend(parts);
+                v
+            } else {
+                vec![b"DEBUG".to_vec(), token.to_vec()]
+            };
+            let result = dispatch_argv(&argv, &mut store, 0);
+            let frame = match result {
+                Ok(frame) => frame,
+                Err(CommandError::Custom(msg)) => RespFrame::Error(msg),
+                Err(other) => panic!("unexpected error for {token:?}: {other:?}"),
+            };
+            let expected = format!(
+                "ERR unknown subcommand or wrong number of arguments for '{expected_in_msg}'. Try DEBUG HELP."
+            );
+            assert_eq!(
+                frame,
+                RespFrame::Error(expected),
+                "case-preservation mismatch for input {:?}",
+                std::str::from_utf8(token).unwrap_or("<bin>")
+            );
+        }
     }
 
     #[test]
