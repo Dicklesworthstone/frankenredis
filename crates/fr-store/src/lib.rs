@@ -10411,6 +10411,47 @@ impl Store {
                         ));
                     }
                     // Upstream function_lua.c::luaRegisterFunction
+                    // type-checks the three string-typed fields
+                    // (function_name, description) and the callback.
+                    // Anything else surfaces a `<field> argument
+                    // given to redis.register_function must be a
+                    // <type>` wording. (frankenredis-fntype)
+                    if let Some(v) = extract_table_value_raw(body, "function_name") {
+                        let v = v.trim_start();
+                        let head = v.as_bytes().first().copied();
+                        if matches!(head, Some(b'{')) {
+                            return Err(StoreError::GenericError(
+                                "ERR Error registering functions: ERR function_name argument given to redis.register_function must be a string"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    if let Some(v) = extract_table_value_raw(body, "description") {
+                        let v = v.trim_start();
+                        let head = v.as_bytes().first().copied();
+                        if matches!(head, Some(b'{')) {
+                            return Err(StoreError::GenericError(
+                                "ERR Error registering functions: ERR description argument given to redis.register_function must be a string"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    if let Some(v) = extract_table_value_raw(body, "callback") {
+                        let v = v.trim_start();
+                        // Upstream accepts only `function(...) ... end`
+                        // (or a Lua function reference, but those are
+                        // not expressible inline). Anything starting
+                        // with a quote, a number, or a `{` is a
+                        // non-function value.
+                        let is_function = v.starts_with("function");
+                        if !is_function {
+                            return Err(StoreError::GenericError(
+                                "ERR Error registering functions: ERR callback argument given to redis.register_function must be a function"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    // Upstream function_lua.c::luaRegisterFunction
                     // rejects any table key beyond the four valid
                     // fields with 'ERR unknown argument given to
                     // redis.register_function'. fr previously
@@ -18576,6 +18617,66 @@ mod tests {
             err,
             StoreError::GenericError("ERR No functions registered".to_string())
         );
+    }
+
+    #[test]
+    fn function_load_table_form_type_checks_string_and_callback_fields() {
+        // Upstream function_lua.c::luaRegisterFunction type-checks
+        // the three string-typed fields (function_name, description)
+        // and the callback. Differential probe vs vendored 7.2.4
+        // confirmed the wordings. fr previously accepted these
+        // silently. (frankenredis-fntype)
+        let mut s = Store::new();
+
+        // function_name as a Lua table (e.g. `{'a'}`) → must be a string.
+        let err = s
+            .function_load(
+                b"#!lua name=lib1\n\
+                  redis.register_function{function_name={'a'}, callback=function() return 1 end}",
+                false,
+            )
+            .expect_err("function_name as table must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR function_name argument given to redis.register_function must be a string"
+                    .to_string()
+            )
+        );
+
+        // description as a Lua table → must be a string.
+        let err = s
+            .function_load(
+                b"#!lua name=lib2\n\
+                  redis.register_function{function_name='f', callback=function() return 1 end, description={'x'}}",
+                false,
+            )
+            .expect_err("description as table must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR description argument given to redis.register_function must be a string"
+                    .to_string()
+            )
+        );
+
+        // callback as a string → must be a function.
+        let err = s
+            .function_load(
+                b"#!lua name=lib3\n\
+                  redis.register_function{function_name='f', callback='not_fn'}",
+                false,
+            )
+            .expect_err("callback as string must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR callback argument given to redis.register_function must be a function"
+                    .to_string()
+            )
+        );
+
+        assert!(s.function_libraries.is_empty());
     }
 
     #[test]
