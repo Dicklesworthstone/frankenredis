@@ -17746,9 +17746,17 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         let digest = compute_debug_digest(store, now_ms, None);
         Ok(RespFrame::BulkString(Some(digest.into_bytes())))
     } else if sub.eq_ignore_ascii_case("DIGEST-VALUE") {
-        // DEBUG DIGEST-VALUE key [key ...] - compute digest of specific keys.
-        // Upstream debug.c routes wrong-arity through the subcommand-
-        // syntax envelope. (frankenredis-dbgenv)
+        // DEBUG DIGEST-VALUE key [key ...] - return an Array of
+        // per-key digests. Upstream debug.c::debugCommand calls
+        // computeDatasetDigest per key and emits an array reply
+        // (one digest hex string per key, 40 chars for SHA1
+        // upstream). fr previously returned a SINGLE BulkString
+        // combining all keys into one hash, diverging from the
+        // upstream wire shape. Differential probe vs vendored 7.2.4
+        // confirmed the array reply, including a zero-digest for
+        // missing keys. (frankenredis-dbgdigval)
+        // Wrong-arity routing uses the subcommand-syntax envelope
+        // per (frankenredis-dbgenv).
         if argv.len() < 3 {
             return Err(CommandError::Custom(
                 "ERR unknown subcommand or wrong number of arguments \
@@ -17756,9 +17764,15 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                     .to_string(),
             ));
         }
-        let keys: Vec<&[u8]> = argv[2..].iter().map(|v| v.as_slice()).collect();
-        let digest = compute_debug_digest(store, now_ms, Some(&keys));
-        Ok(RespFrame::BulkString(Some(digest.into_bytes())))
+        let frames: Vec<RespFrame> = argv[2..]
+            .iter()
+            .map(|key| {
+                let single = [key.as_slice()];
+                let digest = compute_debug_digest(store, now_ms, Some(&single));
+                RespFrame::BulkString(Some(digest.into_bytes()))
+            })
+            .collect();
+        Ok(RespFrame::Array(Some(frames)))
     } else if sub.eq_ignore_ascii_case("POPULATE") {
         // DEBUG POPULATE <count> [<prefix>] [<size>]
         // Upstream debug.c routes wrong-arity through the subcommand-
@@ -33491,19 +33505,48 @@ mod tests {
         )
         .expect("set");
 
+        // (frankenredis-dbgdigval) DEBUG DIGEST-VALUE returns an
+        // Array of per-key digests (one entry per requested key),
+        // matching upstream debug.c. Each entry is a BulkString of
+        // hex digits.
         let digest = dispatch_argv(
             &[b"DEBUG".to_vec(), b"DIGEST-VALUE".to_vec(), b"foo".to_vec()],
             &mut store,
             0,
         )
         .expect("debug digest-value");
-        let RespFrame::BulkString(Some(digest_bytes)) = digest else {
-            panic!("expected bulk string");
+        let RespFrame::Array(Some(entries)) = digest else {
+            panic!("expected array of digests"); // ubs:ignore — AI triage
         };
-        let digest_str = String::from_utf8(digest_bytes).expect("valid utf8");
+        assert_eq!(entries.len(), 1);
+        let RespFrame::BulkString(Some(digest_bytes)) = &entries[0] else {
+            panic!("expected bulk string per-key digest"); // ubs:ignore — AI triage
+        };
+        let digest_str = std::str::from_utf8(digest_bytes).expect("valid utf8");
         assert_eq!(digest_str.len(), 16);
 
-        // Digest of nonexistent key should still work (just no value hashed)
+        // DIGEST-VALUE with multiple keys returns one entry per key.
+        let multi = dispatch_argv(
+            &[
+                b"DEBUG".to_vec(),
+                b"DIGEST-VALUE".to_vec(),
+                b"foo".to_vec(),
+                b"baz".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("debug digest-value multi");
+        let RespFrame::Array(Some(multi_entries)) = multi else {
+            panic!("expected array of digests"); // ubs:ignore — AI triage
+        };
+        assert_eq!(multi_entries.len(), 2);
+        for entry in &multi_entries {
+            assert!(matches!(entry, RespFrame::BulkString(Some(b)) if b.len() == 16));
+        }
+
+        // Digest of nonexistent key should still emit a BulkString
+        // entry so the array shape stays predictable.
         let digest_nokey = dispatch_argv(
             &[
                 b"DEBUG".to_vec(),
@@ -33514,7 +33557,11 @@ mod tests {
             0,
         )
         .expect("debug digest-value nonexistent");
-        assert!(matches!(digest_nokey, RespFrame::BulkString(Some(_))));
+        let RespFrame::Array(Some(missing)) = digest_nokey else {
+            panic!("expected array"); // ubs:ignore — AI triage
+        };
+        assert_eq!(missing.len(), 1);
+        assert!(matches!(&missing[0], RespFrame::BulkString(Some(_))));
     }
 
     #[test]
