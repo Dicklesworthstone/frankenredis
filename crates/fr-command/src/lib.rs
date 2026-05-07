@@ -17732,24 +17732,43 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // HELP cluster (0o9vo / vtege / kuthf / s574p / tnscz / 7ysld).
         Ok(RespFrame::SimpleString(debug_info))
     } else if sub.eq_ignore_ascii_case("DIGEST") {
-        // DEBUG DIGEST - compute a hash digest of the entire database
+        // DEBUG DIGEST - compute a hash digest of the entire database.
+        // Upstream debug.c::debugCommand routes wrong-arity through
+        // addReplySubcommandSyntaxError (envelope wording), distinct
+        // from the table-level wrong-arity reply. (frankenredis-dbgenv)
         if argv.len() != 2 {
-            return Err(CommandError::WrongArity("DEBUG"));
+            return Err(CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments \
+                 for 'DIGEST'. Try DEBUG HELP."
+                    .to_string(),
+            ));
         }
         let digest = compute_debug_digest(store, now_ms, None);
         Ok(RespFrame::BulkString(Some(digest.into_bytes())))
     } else if sub.eq_ignore_ascii_case("DIGEST-VALUE") {
-        // DEBUG DIGEST-VALUE key [key ...] - compute digest of specific keys
+        // DEBUG DIGEST-VALUE key [key ...] - compute digest of specific keys.
+        // Upstream debug.c routes wrong-arity through the subcommand-
+        // syntax envelope. (frankenredis-dbgenv)
         if argv.len() < 3 {
-            return Err(CommandError::WrongArity("DEBUG"));
+            return Err(CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments \
+                 for 'DIGEST-VALUE'. Try DEBUG HELP."
+                    .to_string(),
+            ));
         }
         let keys: Vec<&[u8]> = argv[2..].iter().map(|v| v.as_slice()).collect();
         let digest = compute_debug_digest(store, now_ms, Some(&keys));
         Ok(RespFrame::BulkString(Some(digest.into_bytes())))
     } else if sub.eq_ignore_ascii_case("POPULATE") {
         // DEBUG POPULATE <count> [<prefix>] [<size>]
+        // Upstream debug.c routes wrong-arity through the subcommand-
+        // syntax envelope. (frankenredis-dbgenv)
         if argv.len() < 3 || argv.len() > 5 {
-            return Err(CommandError::WrongArity("DEBUG"));
+            return Err(CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments \
+                 for 'POPULATE'. Try DEBUG HELP."
+                    .to_string(),
+            ));
         }
         let count = parse_i64_arg(&argv[2])?;
         let prefix = if argv.len() >= 4 {
@@ -17822,9 +17841,14 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // replication IDs. Our replication state machine doesn't yet
         // model dual repl-ids, so accept-and-OK matches the upstream
         // wire contract for tests that don't inspect the new ids.
-        // (br-frankenredis-s11v)
+        // (br-frankenredis-s11v) Upstream routes wrong-arity through
+        // the subcommand-syntax envelope. (frankenredis-dbgenv)
         if argv.len() != 2 {
-            return Err(CommandError::WrongArity("DEBUG"));
+            return Err(CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments \
+                 for 'CHANGE-REPL-ID'. Try DEBUG HELP."
+                    .to_string(),
+            ));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("ERROR") {
@@ -18208,14 +18232,24 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // an in-process fuzz of stringmatchlen() before replying OK.
         // Both forms surface in the wild; accept-and-OK is correct
         // for tests that just want a no-op breakpoint hook.
-        // (br-frankenredis-s11v)
+        // (br-frankenredis-s11v) Upstream routes wrong-arity through
+        // the subcommand-syntax envelope. (frankenredis-dbgenv)
         if argv.len() != 2 {
-            return Err(CommandError::WrongArity("DEBUG"));
+            return Err(CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments \
+                 for 'STRINGMATCH-LEN'. Try DEBUG HELP."
+                    .to_string(),
+            ));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("STRINGMATCH-TEST") {
+        // (frankenredis-dbgenv)
         if argv.len() != 2 {
-            return Err(CommandError::WrongArity("DEBUG"));
+            return Err(CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments \
+                 for 'STRINGMATCH-TEST'. Try DEBUG HELP."
+                    .to_string(),
+            ));
         }
         Ok(RespFrame::SimpleString(
             "Apparently Redis did not crash: test passed".to_string(),
@@ -39218,6 +39252,60 @@ mod tests {
         ] {
             let err = dispatch_argv(&argv, &mut store, 0).expect_err("debug noscript");
             assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
+        }
+    }
+
+    #[test]
+    fn debug_subcommands_use_subcommand_syntax_envelope_for_arity_errors() {
+        // (frankenredis-dbgenv) Upstream debug.c::debugCommand routes
+        // wrong-arity through addReplySubcommandSyntaxError for the
+        // per-subcommand handlers — distinct from the table-level
+        // 'wrong number of arguments for debug command' wording. fr
+        // previously surfaced the table-level reply for several DEBUG
+        // subcommands. Differential probe vs vendored 7.2.4 confirmed
+        // the envelope wording per subcommand.
+        let mut store = Store::new();
+        for (argv, sub) in [
+            (
+                vec![b"DEBUG".to_vec(), b"DIGEST".to_vec(), b"extra".to_vec()],
+                "DIGEST",
+            ),
+            (
+                vec![b"DEBUG".to_vec(), b"DIGEST-VALUE".to_vec()],
+                "DIGEST-VALUE",
+            ),
+            (vec![b"DEBUG".to_vec(), b"POPULATE".to_vec()], "POPULATE"),
+            (
+                vec![
+                    b"DEBUG".to_vec(),
+                    b"CHANGE-REPL-ID".to_vec(),
+                    b"extra".to_vec(),
+                ],
+                "CHANGE-REPL-ID",
+            ),
+            (
+                vec![
+                    b"DEBUG".to_vec(),
+                    b"STRINGMATCH-LEN".to_vec(),
+                    b"extra".to_vec(),
+                ],
+                "STRINGMATCH-LEN",
+            ),
+            (
+                vec![
+                    b"DEBUG".to_vec(),
+                    b"STRINGMATCH-TEST".to_vec(),
+                    b"extra".to_vec(),
+                ],
+                "STRINGMATCH-TEST",
+            ),
+        ] {
+            let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
+            let expected = format!(
+                "ERR unknown subcommand or wrong number of arguments \
+                 for '{sub}'. Try DEBUG HELP."
+            );
+            assert_eq!(err, CommandError::Custom(expected), "subcommand: {sub}");
         }
     }
 
