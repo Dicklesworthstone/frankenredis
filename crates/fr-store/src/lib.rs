@@ -10381,23 +10381,35 @@ impl Store {
             if !trimmed.contains("register_function") {
                 continue;
             }
-            // Upstream function_lua.c::luaRegisterFunction rejects a
-            // table-form invocation that omits the `callback` field
-            // with 'ERR redis.register_function must get a callback
-            // argument'. fr's textual parser previously only checked
-            // for `function_name=`, so a malformed library like
-            // `register_function{function_name='nocb'}` registered an
-            // empty function silently. (frankenredis-fncb)
+            // Upstream function_lua.c::luaRegisterFunction validates
+            // table-form register_function calls in a fixed order:
+            //   1. function_name field present
+            //      → 'ERR redis.register_function must get a function
+            //         name argument'  (frankenredis-fnnam)
+            //   2. callback field present
+            //      → 'ERR redis.register_function must get a callback
+            //         argument'  (frankenredis-fncb)
+            // fr's textual parser previously skipped both checks, so
+            // a library like `register_function{description='x'}`
+            // silently registered nothing, producing the wrong
+            // 'No functions registered' wording.
             if let Some(start) = trimmed.find("register_function") {
                 let after_call = &trimmed[start + "register_function".len()..];
                 let trimmed_after = after_call.trim_start();
-                if trimmed_after.starts_with('{')
-                    && !has_table_key(&trimmed_after[1..], "callback")
-                {
-                    return Err(StoreError::GenericError(
-                        "ERR Error registering functions: ERR redis.register_function must get a callback argument"
-                            .to_string(),
-                    ));
+                if trimmed_after.starts_with('{') {
+                    let body = &trimmed_after[1..];
+                    if !has_table_key(body, "function_name") {
+                        return Err(StoreError::GenericError(
+                            "ERR Error registering functions: ERR redis.register_function must get a function name argument"
+                                .to_string(),
+                        ));
+                    }
+                    if !has_table_key(body, "callback") {
+                        return Err(StoreError::GenericError(
+                            "ERR Error registering functions: ERR redis.register_function must get a callback argument"
+                                .to_string(),
+                        ));
+                    }
                 }
             }
             if let Some((name, description)) = extract_function_metadata(trimmed) {
@@ -18296,6 +18308,64 @@ mod tests {
             err,
             StoreError::GenericError("ERR No functions registered".to_string())
         );
+    }
+
+    #[test]
+    fn function_load_table_form_rejects_missing_function_name() {
+        // Upstream function_lua.c::luaRegisterFunction validates
+        // function_name BEFORE callback, so a table-form invocation
+        // missing function_name surfaces 'ERR redis.register_function
+        // must get a function name argument' even when callback is
+        // also missing. fr previously fell through to extract_
+        // function_metadata, returned None, and surfaced the wrong
+        // 'No functions registered' wording. Differential probe vs
+        // vendored 7.2.4 confirmed the wording. (frankenredis-fnnam)
+        let mut store = Store::new();
+
+        // callback present, function_name missing
+        let err = store
+            .function_load(
+                b"#!lua name=lib1\n\
+                  redis.register_function{callback=function() return 1 end}",
+                false,
+            )
+            .expect_err("missing function_name must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR redis.register_function must get a function name argument"
+                    .to_string()
+            )
+        );
+
+        // empty table → function_name fires before callback
+        let err = store
+            .function_load(b"#!lua name=lib2\nredis.register_function{}", false)
+            .expect_err("empty table must error with function_name wording");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR redis.register_function must get a function name argument"
+                    .to_string()
+            )
+        );
+
+        // description-only table
+        let err = store
+            .function_load(
+                b"#!lua name=lib3\nredis.register_function{description='x'}",
+                false,
+            )
+            .expect_err("description-only must error with function_name wording");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR redis.register_function must get a function name argument"
+                    .to_string()
+            )
+        );
+
+        assert!(store.function_libraries.is_empty());
     }
 
     #[test]
