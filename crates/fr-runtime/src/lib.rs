@@ -9317,20 +9317,25 @@ impl Runtime {
                 Ok(v) => v.to_string(),
                 Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
             };
-            if attr.eq_ignore_ascii_case("LIB-NAME") || attr.eq_ignore_ascii_case("lib-name") {
+            // Upstream networking.c::clientSetinfoCommand:2935-2952
+            // forwards the argv-supplied attr verbatim through
+            // addReplyErrorFormat("%s cannot contain ...", attr).
+            // fr-runtime previously hardcoded the canonical
+            // uppercase 'LIB-NAME'/'LIB-VER' wording, so a probe
+            // using lib-name or Lib-Ver echoed back the wrong case.
+            // (frankenredis-rsetinfo)
+            if attr.eq_ignore_ascii_case("LIB-NAME") {
                 if val.bytes().any(|b| b <= b' ') {
-                    return RespFrame::Error(
-                        "ERR LIB-NAME cannot contain spaces, newlines or special characters."
-                            .to_string(),
-                    );
+                    return RespFrame::Error(format!(
+                        "ERR {attr} cannot contain spaces, newlines or special characters."
+                    ));
                 }
                 self.session.client_lib_name = if val.is_empty() { None } else { Some(val) };
-            } else if attr.eq_ignore_ascii_case("LIB-VER") || attr.eq_ignore_ascii_case("lib-ver") {
+            } else if attr.eq_ignore_ascii_case("LIB-VER") {
                 if val.bytes().any(|b| b <= b' ') {
-                    return RespFrame::Error(
-                        "ERR LIB-VER cannot contain spaces, newlines or special characters."
-                            .to_string(),
-                    );
+                    return RespFrame::Error(format!(
+                        "ERR {attr} cannot contain spaces, newlines or special characters."
+                    ));
                 }
                 self.session.client_lib_ver = if val.is_empty() { None } else { Some(val) };
             } else {
@@ -13828,6 +13833,59 @@ mod tests {
             rt.session.client_name.as_deref(),
             Some(b"before".as_slice())
         );
+    }
+
+    #[test]
+    fn client_setinfo_validation_error_preserves_input_attribute_case() {
+        // (frankenredis-rsetinfo) Upstream
+        // networking.c::clientSetinfoCommand emits the user-supplied
+        // attr verbatim through addReplyErrorFormat("%s cannot
+        // contain spaces, newlines or special characters.", attr).
+        // fr-runtime's handler previously hardcoded the canonical
+        // 'LIB-NAME'/'LIB-VER' wording, so a probe with `lib-name`
+        // or `Lib-Ver` echoed back the wrong case. The fr-command
+        // dispatch path was already fixed under e2xii; this pin
+        // covers the runtime path that handle_client_command takes
+        // for live TCP clients.
+        let mut rt = Runtime::default_strict();
+
+        for input in [
+            "lib-name".as_bytes(),
+            "Lib-Name".as_bytes(),
+            "LIB-NAME".as_bytes(),
+        ] {
+            let reply = rt.execute_frame(
+                command(&[b"CLIENT", b"SETINFO", input, b"a b"]),
+                0,
+            );
+            let expected = String::from_utf8(input.to_vec()).unwrap();
+            assert_eq!(
+                reply,
+                RespFrame::Error(format!(
+                    "ERR {expected} cannot contain spaces, newlines or special characters."
+                )),
+                "CLIENT SETINFO must echo argv[2] verbatim",
+            );
+        }
+
+        for input in [
+            "lib-ver".as_bytes(),
+            "Lib-Ver".as_bytes(),
+            "LIB-VER".as_bytes(),
+        ] {
+            let reply = rt.execute_frame(
+                command(&[b"CLIENT", b"SETINFO", input, b"1 2"]),
+                1,
+            );
+            let expected = String::from_utf8(input.to_vec()).unwrap();
+            assert_eq!(
+                reply,
+                RespFrame::Error(format!(
+                    "ERR {expected} cannot contain spaces, newlines or special characters."
+                )),
+                "CLIENT SETINFO must echo argv[2] verbatim",
+            );
+        }
     }
 
     #[test]
