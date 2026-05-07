@@ -10287,6 +10287,14 @@ impl Store {
                 engine_display = part.to_string();
             } else if let Some(name) = part.strip_prefix("name=") {
                 lib_name = name.to_string();
+            } else {
+                // Upstream functions.c rejects any meta token beyond
+                // the engine and `name=...` with a dedicated wording.
+                // fr previously silently ignored unknown tokens.
+                // (frankenredis-fnmeta)
+                return Err(StoreError::GenericError(format!(
+                    "ERR Invalid metadata value given: {part}"
+                )));
             }
         }
 

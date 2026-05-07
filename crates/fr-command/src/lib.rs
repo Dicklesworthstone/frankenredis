@@ -47930,6 +47930,57 @@ mod tests {
     }
 
     #[test]
+    fn function_load_rejects_unknown_shebang_meta_tokens_like_upstream() {
+        // Pin upstream functions.c rejection of unknown meta tokens in
+        // the shebang line beyond the engine and `name=...` (frankenredis
+        // -fnmeta): 'ERR Invalid metadata value given: <token>'. fr
+        // previously silently ignored the extras and loaded the library.
+        // Differential probe vs vendored 7.2.4 byte-matched the wording.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"#!lua name=lib1 extra_token\nredis.register_function('f',function() return 1 end)",
+                "ERR Invalid metadata value given: extra_token",
+            ),
+            (
+                b"#!lua badkey=value name=lib1\nredis.register_function('f',function() return 1 end)",
+                "ERR Invalid metadata value given: badkey=value",
+            ),
+            (
+                b"#!lua name=lib1 description=foo\nredis.register_function('f',function() return 1 end)",
+                "ERR Invalid metadata value given: description=foo",
+            ),
+        ];
+        for (code, expected) in cases {
+            let err = dispatch_argv(
+                &[b"FUNCTION".to_vec(), b"LOAD".to_vec(), code.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect_err("function load bad meta");
+            assert_eq!(
+                err.to_resp(),
+                RespFrame::Error(expected.to_string()),
+                "code={:?}",
+                String::from_utf8_lossy(code)
+            );
+        }
+
+        // Sanity: the canonical engine + name=... combination still loads.
+        let ok = dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=goodmeta\nredis.register_function('f',function() return 1 end)".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("function load valid meta");
+        assert_eq!(ok, RespFrame::BulkString(Some(b"goodmeta".to_vec())));
+    }
+
+    #[test]
     fn function_load_engine_not_found_preserves_user_casing() {
         // Pin upstream functions.c reporting of the engine token
         // verbatim (frankenredis-fneng): the comparison is
