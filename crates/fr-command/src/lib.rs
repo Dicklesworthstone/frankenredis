@@ -18154,38 +18154,76 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             "Apparently Redis did not crash: test passed".to_string(),
         ))
     } else if sub.eq_ignore_ascii_case("QUICKLIST-PACKED-THRESHOLD") {
-        // Upstream debug.c parses the argument with memtoull and
-        // calls quicklistisSetPackedThreshold(). Our quicklist
-        // representation is currently a single-node listpack so
-        // the threshold has no observable effect — match the
-        // upstream OK reply on accepted-memory-value, error on
-        // unparseable input. (br-frankenredis-s11v)
+        // Upstream debug.c:847-856 parses the argument with util.c
+        // memtoull() then dispatches to quicklistisSetPackedThreshold.
+        // Our quicklist representation is a single-node listpack so the
+        // threshold has no observable effect — but the wire contract
+        // (range, parser semantics, error wording) must still match.
+        // (br-frankenredis-s11v + frankenredis-dbgqpt)
+        //
+        // Three behaviours that diverged previously and are now pinned:
+        //   1. Wrong-arity routes through addReplySubcommandSyntaxError,
+        //      not the table-level 'wrong number of arguments for debug'
+        //      reply. Probe vs vendored 7.2.4: `DEBUG QUICKLIST-PACKED-
+        //      THRESHOLD` → "ERR unknown subcommand or wrong number of
+        //      arguments for 'QUICKLIST-PACKED-THRESHOLD'. Try DEBUG HELP."
+        //   2. memtoull's single-letter suffix is decimal — `k` = 1000,
+        //      `m` = 1_000_000, `g` = 1_000_000_000. The two-letter
+        //      `kb` / `mb` / `gb` are binary (1024-based). `b` alone = 1.
+        //   3. quicklistisSetPackedThreshold accepts sz == 0 (means
+        //      "restore default"), accepts sz up through 4GB - 1MB
+        //      (`(1<<32) - (1<<20)` = 4_293_918_720), rejects above.
         if argv.len() != 3 {
-            return Err(CommandError::WrongArity("DEBUG"));
+            return Err(debug_subcommand_envelope_error(sub));
         }
-        let val = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::InvalidUtf8Argument)?;
-        let parsed: Option<u64> = if let Some(rest) = val.strip_suffix(['k', 'K']) {
-            rest.parse::<u64>().ok().and_then(|n| n.checked_mul(1024))
-        } else if let Some(rest) = val.strip_suffix(['m', 'M']) {
-            rest.parse::<u64>()
-                .ok()
-                .and_then(|n| n.checked_mul(1024 * 1024))
-        } else if let Some(rest) = val.strip_suffix(['g', 'G']) {
-            rest.parse::<u64>()
-                .ok()
-                .and_then(|n| n.checked_mul(1024 * 1024 * 1024))
-        } else {
-            val.parse::<u64>().ok()
-        };
-        match parsed {
-            Some(n) if n > 1 && n < 4 * 1024 * 1024 * 1024 => {
-                Ok(RespFrame::SimpleString("OK".to_string()))
+        let raw = &argv[2];
+        let bad = || Ok(RespFrame::Error(
+            "ERR argument must be a memory value bigger than 1 and smaller than 4gb".to_string(),
+        ));
+        let (digits_end, mul) = {
+            let mut idx = 0;
+            while idx < raw.len() && raw[idx].is_ascii_digit() {
+                idx += 1;
             }
-            _ => Ok(RespFrame::Error(
-                "ERR argument must be a memory value bigger than 1 and smaller than 4gb"
-                    .to_string(),
-            )),
+            let suffix = &raw[idx..];
+            let mul: u64 = match suffix {
+                b"" => 1,
+                s if s.eq_ignore_ascii_case(b"b") => 1,
+                s if s.eq_ignore_ascii_case(b"k") => 1_000,
+                s if s.eq_ignore_ascii_case(b"kb") => 1_024,
+                s if s.eq_ignore_ascii_case(b"m") => 1_000_000,
+                s if s.eq_ignore_ascii_case(b"mb") => 1_048_576,
+                s if s.eq_ignore_ascii_case(b"g") => 1_000_000_000,
+                s if s.eq_ignore_ascii_case(b"gb") => 1_073_741_824,
+                _ => return bad(),
+            };
+            (idx, mul)
+        };
+        // memtoull rejects an explicit leading '-'; an empty digit run
+        // before a known suffix parses as 0, mirroring strtoull("").
+        if !raw.is_empty() && raw[0] == b'-' {
+            return bad();
         }
+        let digits_text = match std::str::from_utf8(&raw[..digits_end]) {
+            Ok(t) => t,
+            Err(_) => return bad(),
+        };
+        let parsed: u64 = if digits_text.is_empty() {
+            0
+        } else {
+            match digits_text.parse::<u64>() {
+                Ok(v) => v,
+                Err(_) => return bad(),
+            }
+        };
+        let Some(value) = parsed.checked_mul(mul) else {
+            return bad();
+        };
+        const PACKED_THRESHOLD_MAX: u64 = (1u64 << 32) - (1u64 << 20); // 4GB - 1MB
+        if value > PACKED_THRESHOLD_MAX {
+            return bad();
+        }
+        Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("CLUSTERLINK") {
         // Upstream debug.c::debugCommand handles
         // `DEBUG CLUSTERLINK KILL <direction> <node-id>` (argc=5):
@@ -38958,9 +38996,31 @@ mod tests {
     }
 
     #[test]
-    fn debug_quicklist_packed_threshold_accepts_memory_values() {
+    fn debug_quicklist_packed_threshold_accepts_memtoull_values() {
+        // (frankenredis-dbgqpt) Differential probe vs vendored 7.2.4
+        // confirmed:
+        //   * 0 / 1 are valid (0 = restore default, 1 = set to 1 byte).
+        //   * memtoull treats single-letter k/m/g as DECIMAL multipliers,
+        //     two-letter kb/mb/gb as BINARY. Empty / `b` is 1.
+        //   * The accepted upper bound is (1<<32) - (1<<20) = 4GB-1MB.
         let mut store = Store::new();
-        for arg in [b"100".as_slice(), b"4k".as_slice(), b"1m".as_slice()] {
+        let valid: &[&[u8]] = &[
+            b"0",
+            b"1",
+            b"100",
+            b"4k",
+            b"4kb",
+            b"1m",
+            b"1mb",
+            b"1g",
+            b"1gb",
+            b"3g",
+            b"4g",
+            b"4293918720", // exactly 4GB - 1MB
+            b"",            // empty digit run = 0
+            b"512b",
+        ];
+        for arg in valid {
             let out = dispatch_argv(
                 &[
                     b"DEBUG".to_vec(),
@@ -38971,14 +39031,31 @@ mod tests {
                 0,
             )
             .expect("debug quicklist-packed-threshold");
-            assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+            assert_eq!(
+                out,
+                RespFrame::SimpleString("OK".to_string()),
+                "arg={:?}",
+                std::str::from_utf8(arg).unwrap_or("<bin>")
+            );
         }
     }
 
     #[test]
     fn debug_quicklist_packed_threshold_rejects_invalid_values() {
+        // (frankenredis-dbgqpt) memerr inputs and oversized values land
+        // on the same dedicated error wording.
         let mut store = Store::new();
-        for arg in [b"0".as_slice(), b"1".as_slice(), b"abc".as_slice()] {
+        let invalid: &[&[u8]] = &[
+            b"abc",
+            b"-1",
+            b"5g",
+            b"5gb",
+            b"4gb", // 4 * 1024^3 = 4GB exactly, > 4GB-1MB cap
+            b"4294967295", // (1<<32) - 1, > cap
+            b"100x",
+            b"1KIB",
+        ];
+        for arg in invalid {
             let out = dispatch_argv(
                 &[
                     b"DEBUG".to_vec(),
@@ -38994,9 +39071,51 @@ mod tests {
                 RespFrame::Error(
                     "ERR argument must be a memory value bigger than 1 and smaller than 4gb"
                         .to_string()
-                )
+                ),
+                "arg={:?}",
+                std::str::from_utf8(arg).unwrap_or("<bin>")
             );
         }
+    }
+
+    #[test]
+    fn debug_quicklist_packed_threshold_arity_uses_subcommand_envelope() {
+        // (frankenredis-dbgqpt) Wrong-arity uses the per-subcommand
+        // envelope, not the table-level 'wrong number of arguments
+        // for debug command' reply. Probe vs vendored 7.2.4 with
+        // both uppercase and lowercase input echoed the input case.
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"QUICKLIST-PACKED-THRESHOLD".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("debug quicklist-packed-threshold no-arg");
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments for 'QUICKLIST-PACKED-THRESHOLD'. Try DEBUG HELP."
+                    .to_string()
+            )
+        );
+        let err = dispatch_argv(
+            &[
+                b"DEBUG".to_vec(),
+                b"quicklist-packed-threshold".to_vec(),
+                b"1".to_vec(),
+                b"extra".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("debug quicklist-packed-threshold extra");
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments for 'quicklist-packed-threshold'. Try DEBUG HELP."
+                    .to_string()
+            )
+        );
     }
 
     #[test]
