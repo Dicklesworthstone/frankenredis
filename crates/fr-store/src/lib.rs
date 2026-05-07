@@ -10356,10 +10356,18 @@ impl Store {
             {
                 if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
                 {
+                    // Upstream functions.c::functionsRegisterEngineLib
+                    // wraps every per-function registration error with
+                    // a `ERR Error registering functions: ` prefix
+                    // before bubbling it back to the client. The bare-
+                    // header path (`name=lib-bad`) reports the same
+                    // underlying wording without the prefix, so the
+                    // two codepaths must stay distinguishable on the
+                    // wire. (frankenredis-fnreg)
                     return Err(StoreError::GenericError(
-                        "ERR Library names can only contain letters, numbers, \
-                         or underscores(_) and must be at least one character \
-                         long"
+                        "ERR Error registering functions: ERR Library names \
+                         can only contain letters, numbers, or underscores(_) \
+                         and must be at least one character long"
                             .to_string(),
                     ));
                 }
@@ -18099,6 +18107,14 @@ mod tests {
         // forged register_function call with a hyphen must fail
         // loudly, not record an invalid function entry.
         // (br-frankenredis-r85v)
+        //
+        // The per-function name path additionally wraps the wording
+        // with `ERR Error registering functions: ` before bubbling
+        // back to the client, distinguishing it from the header
+        // (`name=...`) charset-failure path which reports the same
+        // underlying wording without the prefix. Differential probe
+        // vs vendored 7.2.4 confirmed this divergence; the un-
+        // prefixed wording was previously pinned. (frankenredis-fnreg)
         let mut store = Store::new();
         let code =
             b"#!lua name=lib_fnv\nredis.register_function('bad-name', function() return 1 end)";
@@ -18108,7 +18124,7 @@ mod tests {
         assert_eq!(
             err,
             StoreError::GenericError(
-                "ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long"
+                "ERR Error registering functions: ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long"
                     .to_string()
             )
         );
