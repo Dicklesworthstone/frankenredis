@@ -6534,14 +6534,9 @@ impl Runtime {
             256
         } else {
             // Upstream acl.c::aclCommand emits the ACL-subcommand
-            // invalid-arity reply: "ERR unknown subcommand or wrong
-            // number of arguments for 'GENPASS'. Try ACL HELP."
-            // (br-frankenredis-faqe)
-            return RespFrame::Error(
-                "ERR unknown subcommand or wrong number of arguments \
-                 for 'GENPASS'. Try ACL HELP."
-                    .to_string(),
-            );
+            // invalid-arity reply preserving the input-case sub token.
+            // (br-frankenredis-faqe + frankenredis-subcase)
+            return acl_subcommand_syntax_error(argv);
         };
 
         let hex_chars = bits.div_ceil(4);
@@ -9724,11 +9719,12 @@ impl Runtime {
         if sub.eq_ignore_ascii_case("GET") {
             if argv.len() > 3 {
                 // Upstream slowlog.c::slowlogCommand emits the
-                // standard subcommand-arity wording for GET trailers.
-                // (br-frankenredis-slgary)
-                return RespFrame::Error(
-                    "ERR unknown subcommand or wrong number of arguments for 'GET'. Try SLOWLOG HELP.".to_string(),
-                );
+                // subcommand-arity wording for GET trailers; the
+                // sub token preserves the input case.
+                // (br-frankenredis-slgary + frankenredis-subcase)
+                return RespFrame::Error(format!(
+                    "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try SLOWLOG HELP."
+                ));
             }
             // Upstream uses 'count should be greater than or equal
             // to -1' for both unparseable and explicit-< -1 counts.
@@ -10220,9 +10216,10 @@ impl Runtime {
                 // (br-frankenredis-pubsubary) — upstream emits the
                 // subcommand-specific arity error rather than the
                 // generic SyntaxError.
-                return RespFrame::Error(
-                    "ERR unknown subcommand or wrong number of arguments for 'CHANNELS'. Try PUBSUB HELP.".to_string(),
-                );
+                // (frankenredis-subcase) Preserve input-case sub token.
+                return RespFrame::Error(format!(
+                    "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try PUBSUB HELP."
+                ));
             }
             let mut channels: Vec<Vec<u8>> =
                 self.server.pubsub_channel_subs.keys().cloned().collect();
@@ -10277,9 +10274,10 @@ impl Runtime {
         if sub.eq_ignore_ascii_case("SHARDCHANNELS") {
             if argv.len() != 2 && argv.len() != 3 {
                 // (br-frankenredis-pubsubary)
-                return RespFrame::Error(
-                    "ERR unknown subcommand or wrong number of arguments for 'SHARDCHANNELS'. Try PUBSUB HELP.".to_string(),
-                );
+                // (frankenredis-subcase) Preserve input-case sub token.
+                return RespFrame::Error(format!(
+                    "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try PUBSUB HELP."
+                ));
             }
             let mut channels: Vec<Vec<u8>> =
                 self.server.pubsub_shard_subs.keys().cloned().collect();

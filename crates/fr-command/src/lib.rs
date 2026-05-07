@@ -9300,10 +9300,11 @@ fn function_cmd(
             return Err(script_noscript_command_error());
         }
         if argv.len() > 4 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments for 'RESTORE'. Try FUNCTION HELP."
-                    .to_string(),
-            ));
+            // (frankenredis-subcase) Preserve the input-case sub token
+            // per upstream addReplySubcommandSyntaxError.
+            return Err(CommandError::Custom(format!(
+                "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try FUNCTION HELP."
+            )));
         }
         let policy = if argv.len() >= 4 {
             std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?
@@ -9326,9 +9327,10 @@ fn function_cmd(
             return Err(script_noscript_command_error());
         }
         if argv.len() > 3 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments for 'FLUSH'. Try FUNCTION HELP.".to_string(),
-            ));
+            // (frankenredis-subcase)
+            return Err(CommandError::Custom(format!(
+                "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try FUNCTION HELP."
+            )));
         }
         if argv.len() == 3 {
             let mode =
@@ -15403,10 +15405,10 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         // than the wrong-arity reply when too many trailing args are
         // supplied. (br-frankenredis-clipausearity)
         if argv.len() < 3 || argv.len() > 4 {
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments for 'PAUSE'. Try CLIENT HELP."
-                    .to_string(),
-            ));
+            // (frankenredis-subcase)
+            return Err(CommandError::Custom(format!(
+                "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try CLIENT HELP."
+            )));
         }
         // Upstream commands.def line 1550 marks CLIENT PAUSE with
         // CMD_NOSCRIPT — fire the noscript guard before the
@@ -16081,9 +16083,9 @@ fn slowlog_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
             // wording: `SLOWLOG GET extra extra` surfaces the GET
             // envelope, not 'wrong number of arguments for
             // slowlog|get command'. (frankenredis-slogenv)
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments for 'GET'. Try SLOWLOG HELP.".to_string(),
-            ));
+            return Err(CommandError::Custom(format!(
+                "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try SLOWLOG HELP."
+            )));
         }
         // Upstream slowlog.c:172-174 routes both parse failure and
         // out-of-range through getRangeLongFromObjectOrReply with the
@@ -16875,9 +16877,9 @@ fn pubsub_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
             // subcommand-form addReplySubcommandSyntaxError envelope
             // for arity mismatches, matching what fr-runtime does on
             // the live path. (frankenredis-vvsx)
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments for 'CHANNELS'. Try PUBSUB HELP.".to_string(),
-            ));
+            return Err(CommandError::Custom(format!(
+                "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try PUBSUB HELP."
+            )));
         }
         let channels = store.pubsub_channels();
         // Optionally filter by glob pattern
@@ -16917,9 +16919,9 @@ fn pubsub_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         if argv.len() != 2 && argv.len() != 3 {
             // (frankenredis-vvsx) Match upstream
             // addReplySubcommandSyntaxError envelope.
-            return Err(CommandError::Custom(
-                "ERR unknown subcommand or wrong number of arguments for 'SHARDCHANNELS'. Try PUBSUB HELP.".to_string(),
-            ));
+            return Err(CommandError::Custom(format!(
+                "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try PUBSUB HELP."
+            )));
         }
         let mut channels: Vec<Vec<u8>> = store.subscribed_shard_channels.iter().cloned().collect();
         if argv.len() > 2 {
@@ -39309,6 +39311,52 @@ mod tests {
                 RespFrame::Error(expected),
                 "case-preservation mismatch for input {:?}",
                 std::str::from_utf8(token).unwrap_or("<bin>")
+            );
+        }
+    }
+
+    #[test]
+    fn subcommand_arity_envelopes_preserve_input_case() {
+        // (frankenredis-subcase) Beyond DEBUG, several other dispatched
+        // commands route per-subcommand wrong-arity through
+        // addReplySubcommandSyntaxError. Upstream preserves the input
+        // case of argv[1] in the wording. fr previously hard-coded the
+        // sub token in uppercase across CLIENT PAUSE / SLOWLOG GET /
+        // PUBSUB CHANNELS / PUBSUB SHARDCHANNELS / FUNCTION RESTORE /
+        // FUNCTION FLUSH. Probe vs vendored 7.2.4 confirmed the
+        // lowercase / mixed-case echo.
+        let mut store = Store::new();
+        let cases: &[(&[&[u8]], &str, &str)] = &[
+            (&[b"CLIENT", b"pause"], "pause", "CLIENT"),
+            (&[b"CLIENT", b"Pause", b"100", b"WRITE", b"extra"], "Pause", "CLIENT"),
+            (&[b"SLOWLOG", b"get", b"1", b"extra"], "get", "SLOWLOG"),
+            (&[b"SLOWLOG", b"Get", b"1", b"extra"], "Get", "SLOWLOG"),
+            (&[b"PUBSUB", b"channels", b"a", b"extra"], "channels", "PUBSUB"),
+            (&[b"PUBSUB", b"Channels", b"a", b"extra"], "Channels", "PUBSUB"),
+            (&[b"PUBSUB", b"shardchannels", b"a", b"extra"], "shardchannels", "PUBSUB"),
+            (&[b"FUNCTION", b"flush", b"SYNC", b"extra"], "flush", "FUNCTION"),
+            (&[b"FUNCTION", b"Flush", b"SYNC", b"extra"], "Flush", "FUNCTION"),
+            (
+                &[b"FUNCTION", b"restore", b"body", b"REPLACE", b"extra"],
+                "restore",
+                "FUNCTION",
+            ),
+        ];
+        for (argv_parts, expected_token, parent_cmd) in cases {
+            let argv: Vec<Vec<u8>> = argv_parts.iter().map(|p| p.to_vec()).collect();
+            let result = dispatch_argv(&argv, &mut store, 0);
+            let frame = match result {
+                Ok(frame) => frame,
+                Err(CommandError::Custom(msg)) => RespFrame::Error(msg),
+                Err(other) => panic!("unexpected error for {argv_parts:?}: {other:?}"),
+            };
+            let expected = format!(
+                "ERR unknown subcommand or wrong number of arguments for '{expected_token}'. Try {parent_cmd} HELP."
+            );
+            assert_eq!(
+                frame,
+                RespFrame::Error(expected),
+                "case-preservation mismatch for argv {argv_parts:?}"
             );
         }
     }
