@@ -10548,6 +10548,20 @@ impl Store {
                                         .to_string(),
                                 ));
                             }
+                            // Detect a third positional argument by
+                            // walking past the function expression
+                            // (matched via the keyword-block depth
+                            // counter) and checking for a comma at
+                            // the same paren depth as register_function
+                            // itself. Upstream rejects 3+ args with
+                            // 'ERR wrong number of arguments to
+                            // redis.register_function'. (frankenredis-fnpos3)
+                            if positional_call_has_extra_arg_after_function(val) {
+                                return Err(StoreError::GenericError(
+                                    "ERR Error registering functions: ERR wrong number of arguments to redis.register_function"
+                                        .to_string(),
+                                ));
+                            }
                         } else if rest.starts_with(')') {
                             // Single-string-arg form — upstream surfaces
                             // a dedicated wording explaining that
@@ -12860,6 +12874,88 @@ fn extract_table_field(buf: &str, key: &str) -> Option<String> {
         i += 1;
     }
     None
+}
+
+/// Walk past a `function(params) body end` expression that begins
+/// at the start of `s` and return true if the FIRST character
+/// after the function expression (skipping whitespace) is a
+/// comma — indicating a third positional argument to the
+/// enclosing register_function call. (frankenredis-fnpos3)
+fn positional_call_has_extra_arg_after_function(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if !s.starts_with("function") {
+        return false;
+    }
+    let mut i = "function".len();
+    // Skip the (params) header: a balanced paren expression.
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if i >= bytes.len() || bytes[i] != b'(' {
+        return false;
+    }
+    let mut pdepth: i32 = 1;
+    i += 1;
+    while i < bytes.len() && pdepth > 0 {
+        match bytes[i] {
+            b'(' => pdepth += 1,
+            b')' => pdepth -= 1,
+            b'\'' | b'"' => {
+                let q = bytes[i];
+                i += 1;
+                while i < bytes.len() && bytes[i] != q {
+                    if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    // Walk the function body, matching `function`/`if`/`while`/
+    // `for`/`do` openers against `end` closers.
+    let mut bdepth: i32 = 1;
+    while i < bytes.len() && bdepth > 0 {
+        let b = bytes[i];
+        if b == b'\'' || b == b'"' {
+            let q = b;
+            i += 1;
+            while i < bytes.len() && bytes[i] != q {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 1;
+                }
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        let lok = i == 0
+            || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+        if lok && matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'_') {
+            let st = i;
+            while i < bytes.len()
+                && matches!(bytes[i], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_')
+            {
+                i += 1;
+            }
+            let id = &s[st..i];
+            match id {
+                "function" | "if" | "while" | "for" | "do" => bdepth += 1,
+                "end" => bdepth -= 1,
+                _ => {}
+            }
+            continue;
+        }
+        i += 1;
+    }
+    while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i < bytes.len() && bytes[i] == b','
 }
 
 /// Return the raw text after `<key>=` at top-level of a Lua
@@ -18672,6 +18768,39 @@ mod tests {
             err,
             StoreError::GenericError("ERR No functions registered".to_string())
         );
+    }
+
+    #[test]
+    fn function_load_positional_form_rejects_third_argument() {
+        // Upstream function_lua.c::luaRegisterFunction rejects 3+
+        // positional arguments with 'ERR wrong number of arguments
+        // to redis.register_function'. fr previously walked past
+        // the function expression and silently ignored any trailing
+        // arg(s), pushing a FunctionEntry as if the call were
+        // well-formed. (frankenredis-fnpos3)
+        let mut s = Store::new();
+
+        let err = s
+            .function_load(
+                b"#!lua name=lib1\nredis.register_function('f', function() return 1 end, 'extra')",
+                false,
+            )
+            .expect_err("third positional arg must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR wrong number of arguments to redis.register_function"
+                    .to_string()
+            )
+        );
+
+        // Sanity: two-arg positional still loads.
+        s.function_load(
+            b"#!lua name=lib_ok\nredis.register_function('f', function() return 1 end)",
+            false,
+        )
+        .expect("two-arg positional must load");
+        assert!(s.function_libraries.contains_key("lib_ok"));
     }
 
     #[test]
