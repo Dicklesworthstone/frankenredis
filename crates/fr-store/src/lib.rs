@@ -10268,12 +10268,28 @@ impl Store {
         // Parse the library header: #!<engine> name=<name>
         let code_str = std::str::from_utf8(code).map_err(|_| StoreError::WrongType)?;
 
-        let first_line = code_str.lines().next().unwrap_or("");
-        if !first_line.starts_with("#!") {
+        if !code_str.starts_with("#!") {
             return Err(StoreError::GenericError(
                 "ERR Missing library metadata".to_string(),
             ));
         }
+
+        // Upstream functions.c::functionExtractLibMetaData splits the
+        // shebang on the FIRST `\n`. If the payload contains no
+        // newline at all, the shebang is considered unterminated and
+        // upstream returns 'Invalid library metadata' — distinct from
+        // the empty-body 'No functions registered' wording. fr
+        // previously fell through to the function-extraction loop on
+        // a single-line payload, surfacing the wrong wording.
+        // (frankenredis-fnhdr)
+        let first_line = match code_str.find('\n') {
+            Some(i) => &code_str[..i],
+            None => {
+                return Err(StoreError::GenericError(
+                    "ERR Invalid library metadata".to_string(),
+                ));
+            }
+        };
 
         let header = &first_line[2..].trim();
         // Preserve the original engine-name casing for the error
@@ -10281,12 +10297,23 @@ impl Store {
         // (upstream strcasecmp). (frankenredis-fneng)
         let mut engine_display = String::new();
         let mut lib_name = String::new();
+        // Upstream functions.c rejects a duplicate `name=` token with
+        // a dedicated wording rather than silently overwriting.
+        // (frankenredis-fnhdr)
+        let mut name_seen = false;
 
         for (i, part) in header.split_whitespace().enumerate() {
             if i == 0 {
                 engine_display = part.to_string();
             } else if let Some(name) = part.strip_prefix("name=") {
+                if name_seen {
+                    return Err(StoreError::GenericError(
+                        "ERR Invalid metadata value, name argument was given multiple times"
+                            .to_string(),
+                    ));
+                }
                 lib_name = name.to_string();
+                name_seen = true;
             } else {
                 // Upstream functions.c rejects any meta token beyond
                 // the engine and `name=...` with a dedicated wording.
@@ -18181,6 +18208,61 @@ mod tests {
                 "ERR Library names can only contain letters, numbers, or underscores(_) and must be at least one character long"
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn function_load_no_newline_payload_returns_invalid_library_metadata() {
+        // Upstream functions.c::functionExtractLibMetaData splits on
+        // the first '\n'; a single-line payload with no terminator
+        // surfaces 'Invalid library metadata' (distinct from the
+        // empty-body 'No functions registered'). Differential probe
+        // vs vendored 7.2.4 confirmed the wording. fr previously
+        // returned 'No functions registered' here. (frankenredis-fnhdr)
+        let mut store = Store::new();
+        let err = store
+            .function_load(b"#!lua name=l1", false)
+            .expect_err("no-newline payload must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError("ERR Invalid library metadata".to_string())
+        );
+        // A trailing newline is enough to flip to the body-empty path.
+        let err = store
+            .function_load(b"#!lua name=l1\n", false)
+            .expect_err("empty-body payload must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError("ERR No functions registered".to_string())
+        );
+    }
+
+    #[test]
+    fn function_load_rejects_duplicate_name_argument() {
+        // Upstream functions.c rejects a second `name=` token with
+        // 'Invalid metadata value, name argument was given multiple
+        // times'. fr previously silently overwrote the first name.
+        // (frankenredis-fnhdr)
+        let mut store = Store::new();
+        let code =
+            b"#!lua name=a name=b\nredis.register_function('f', function() return 1 end)";
+        let err = store
+            .function_load(code, false)
+            .expect_err("duplicate name= must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Invalid metadata value, name argument was given multiple times"
+                    .to_string()
+            )
+        );
+        assert!(
+            !store.function_libraries.contains_key("a"),
+            "first name must not be registered"
+        );
+        assert!(
+            !store.function_libraries.contains_key("b"),
+            "second name must not be registered"
         );
     }
 
