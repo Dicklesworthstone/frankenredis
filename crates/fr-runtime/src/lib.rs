@@ -6198,9 +6198,15 @@ impl Runtime {
                     // 'Command not found' / 'wrong number of
                     // arguments' error directly. (br-frankenredis-aclrun)
                     if !fr_command::is_known_command(&dryrun_argv[0]) {
+                        // Upstream acl.c::aclCommand DRYRUN passes
+                        // c->argv[3]->ptr verbatim into the format
+                        // string, preserving the caller's exact
+                        // input case. fr was uppercasing here, so
+                        // `ACL DRYRUN default unknownCmd` returned
+                        // 'UNKNOWNCMD' instead of 'unknownCmd'.
+                        // (frankenredis-aclcase)
                         return RespFrame::Error(format!(
-                            "ERR Command '{}' not found",
-                            cmd_name.to_ascii_uppercase()
+                            "ERR Command '{cmd_name}' not found"
                         ));
                     }
                     if fr_command::check_command_arity(&dryrun_argv[0], dryrun_argv.len()).is_err()
@@ -21797,6 +21803,43 @@ mod tests {
             3,
         );
         assert_eq!(clear, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn acl_dryrun_command_not_found_preserves_input_case() {
+        // (frankenredis-aclcase) Upstream acl.c::aclCommand DRYRUN
+        // passes c->argv[3]->ptr verbatim into the
+        // "Command '%s' not found" format string, so the wording
+        // mirrors whatever case the caller supplied. fr previously
+        // uppercased the command name, breaking the differential
+        // probe `ACL DRYRUN default unknownCmd` against vendored
+        // Redis 7.2.4.
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"alice", b"on", b">pw", b"+@all", b"~*"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        for input in [
+            "unknownCmd".as_bytes(),
+            "BoGuS".as_bytes(),
+            "abcDEF".as_bytes(),
+        ] {
+            let reply = rt.execute_frame(
+                command(&[b"ACL", b"DRYRUN", b"alice", input, b"k"]),
+                1,
+            );
+            let expected = String::from_utf8(input.to_vec()).unwrap();
+            assert_eq!(
+                reply,
+                RespFrame::Error(format!("ERR Command '{expected}' not found")),
+                "ACL DRYRUN must echo the input command name verbatim",
+            );
+        }
     }
 
     #[test]
