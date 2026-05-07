@@ -4022,6 +4022,23 @@ fn parse_geo_f64_with_msg(arg: &[u8], msg: &str) -> Result<f64, RespFrame> {
     if val.is_nan() {
         return Err(err());
     }
+    // Mirror upstream util.c::string2d, which sets errno=ERANGE
+    // when strtod returns ±HUGE_VAL and rejects only that overflow
+    // case — explicit "inf"/"infinity" literals are still accepted
+    // because they do not trip ERANGE. Rust's parse::<f64> silently
+    // saturates "1e500" to f64::INFINITY without an overflow signal,
+    // so reject any post-parse infinity unless the original token
+    // was itself an infinity literal. (frankenredis-geoovf)
+    if val.is_infinite() {
+        let lc = text.to_ascii_lowercase();
+        let stripped = lc
+            .strip_prefix('+')
+            .or_else(|| lc.strip_prefix('-'))
+            .unwrap_or(&lc);
+        if stripped != "inf" && stripped != "infinity" {
+            return Err(err());
+        }
+    }
     Ok(val)
 }
 
@@ -41586,6 +41603,104 @@ mod tests {
         // for-byte to what redis 7.2.4 reports.
         assert_eq!(lon, "0.99999994039535522");
         assert_eq!(lat, "2.0000001856465488");
+    }
+
+    #[test]
+    fn geosearch_radius_rejects_overflow_to_infinity_but_accepts_explicit_inf() {
+        // (frankenredis-geoovf) Pin upstream util.c::string2d ERANGE
+        // rejection for the BYRADIUS / BYBOX argument paths via
+        // parse_geo_f64_with_msg. fr previously only rejected NaN,
+        // so probes like `GEOSEARCH g FROMMEMBER a BYRADIUS 1e500 m`
+        // silently coerced the overflow to f64::INFINITY and matched
+        // every member instead of returning the bespoke
+        // "ERR need numeric radius" wording. Differential probe vs
+        // vendored Redis 7.2.4 confirmed the upstream wording.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"g".to_vec(),
+                b"13.5".to_vec(),
+                b"37.5".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("GEOADD seed");
+
+        // BYRADIUS with overflow-to-infinity → "need numeric radius".
+        for bad in [b"1e500".as_slice(), b"-1e500", b"1e1000", b"+1e500"] {
+            let reply = dispatch_argv(
+                &[
+                    b"GEOSEARCH".to_vec(),
+                    b"g".to_vec(),
+                    b"FROMMEMBER".to_vec(),
+                    b"a".to_vec(),
+                    b"BYRADIUS".to_vec(),
+                    bad.to_vec(),
+                    b"m".to_vec(),
+                ],
+                &mut store,
+                1,
+            )
+            .expect("GEOSEARCH must surface as Ok(Error)");
+            assert_eq!(
+                reply,
+                RespFrame::Error("ERR need numeric radius".to_string()),
+                "bad radius {:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+
+        // BYBOX width with overflow-to-infinity → "need numeric width".
+        for bad in [b"1e500".as_slice(), b"-1e500"] {
+            let reply = dispatch_argv(
+                &[
+                    b"GEOSEARCH".to_vec(),
+                    b"g".to_vec(),
+                    b"FROMMEMBER".to_vec(),
+                    b"a".to_vec(),
+                    b"BYBOX".to_vec(),
+                    bad.to_vec(),
+                    b"100".to_vec(),
+                    b"m".to_vec(),
+                ],
+                &mut store,
+                2,
+            )
+            .expect("GEOSEARCH must surface as Ok(Error)");
+            assert_eq!(
+                reply,
+                RespFrame::Error("ERR need numeric width".to_string()),
+                "bad width {:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+
+        // Explicit infinity literals must still be accepted (the
+        // BYRADIUS branch then short-circuits inf > 0 to a single
+        // member match because every distance is finite).
+        let reply = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"g".to_vec(),
+                b"FROMMEMBER".to_vec(),
+                b"a".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"inf".to_vec(),
+                b"m".to_vec(),
+            ],
+            &mut store,
+            3,
+        )
+        .expect("inf radius must be accepted");
+        match reply {
+            RespFrame::Array(Some(items)) => {
+                assert_eq!(items.len(), 1, "expected the seed member to match");
+            }
+            other => panic!("expected Array reply, got {other:?}"),
+        }
     }
 
     #[test]
