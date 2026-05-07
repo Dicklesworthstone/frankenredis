@@ -10504,6 +10504,50 @@ impl Store {
                             }
                         }
                     }
+                } else if trimmed_after.starts_with('(') {
+                    // Positional form: validate the second argument is
+                    // `function(...)` rather than a quote/number/table
+                    // /nil literal. Upstream function_lua.c rejects
+                    // `register_function('f', 'str')` etc. with
+                    // 'ERR second argument to redis.register_function
+                    // must be a function'. fr previously extracted
+                    // only the first quoted arg and pushed a
+                    // FunctionEntry whose body was missing from the
+                    // wrapper script. (frankenredis-fnposcb)
+                    let inner = &trimmed_after[1..];
+                    let inner = inner.trim_start();
+                    // Skip the first arg: a quoted string OR a non-
+                    // string literal. If non-string, surface upstream's
+                    // 'first argument ... must be a string'.
+                    let after_first = if let Some(stripped) = inner.strip_prefix('\'') {
+                        stripped.find('\'').map(|e| &stripped[e + 1..])
+                    } else if let Some(stripped) = inner.strip_prefix('"') {
+                        stripped.find('"').map(|e| &stripped[e + 1..])
+                    } else {
+                        // Non-quoted first arg → upstream rejects.
+                        // Only fire if there IS something after `(`
+                        // that isn't whitespace or a closing paren —
+                        // otherwise the empty-arg case would mis-route.
+                        if !inner.is_empty() && !inner.starts_with(')') {
+                            return Err(StoreError::GenericError(
+                                "ERR Error registering functions: ERR first argument to redis.register_function must be a string"
+                                    .to_string(),
+                            ));
+                        }
+                        None
+                    };
+                    if let Some(rest) = after_first {
+                        let rest = rest.trim_start();
+                        if let Some(after_comma) = rest.strip_prefix(',') {
+                            let val = after_comma.trim_start();
+                            if !val.starts_with("function") {
+                                return Err(StoreError::GenericError(
+                                    "ERR Error registering functions: ERR second argument to redis.register_function must be a function"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
                 }
             }
             if let Some((name, description)) = extract_function_metadata(trimmed) {
@@ -18617,6 +18661,73 @@ mod tests {
             err,
             StoreError::GenericError("ERR No functions registered".to_string())
         );
+    }
+
+    #[test]
+    fn function_load_positional_form_type_checks_callback_and_first_arg() {
+        // Upstream function_lua.c::luaRegisterFunction rejects
+        // positional register_function calls whose second argument
+        // is not a function ('ERR second argument to
+        // redis.register_function must be a function') and whose
+        // first argument is not a string ('ERR first argument to
+        // redis.register_function must be a string'). fr previously
+        // extracted only the first quoted arg and silently pushed a
+        // FunctionEntry whose body was missing from the wrapper
+        // script. (frankenredis-fnposcb)
+        let mut s = Store::new();
+
+        // callback as a quoted string
+        let err = s
+            .function_load(
+                b"#!lua name=lib1\nredis.register_function('f', 'not_fn')",
+                false,
+            )
+            .expect_err("string callback must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR second argument to redis.register_function must be a function"
+                    .to_string()
+            )
+        );
+
+        // callback as a number
+        let err = s
+            .function_load(
+                b"#!lua name=lib2\nredis.register_function('f', 42)",
+                false,
+            )
+            .expect_err("numeric callback must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR second argument to redis.register_function must be a function"
+                    .to_string()
+            )
+        );
+
+        // first arg is a Lua bool literal — non-string.
+        let err = s
+            .function_load(
+                b"#!lua name=lib3\nredis.register_function(true, function() return 1 end)",
+                false,
+            )
+            .expect_err("non-string first arg must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR first argument to redis.register_function must be a string"
+                    .to_string()
+            )
+        );
+
+        // Sanity: positional form with valid types still loads.
+        s.function_load(
+            b"#!lua name=lib_ok\nredis.register_function('f', function() return 1 end)",
+            false,
+        )
+        .expect("valid positional form must load");
+        assert!(s.function_libraries.contains_key("lib_ok"));
     }
 
     #[test]
