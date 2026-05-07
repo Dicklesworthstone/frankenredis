@@ -2447,7 +2447,12 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
             let Some(ttl_arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
-            expiry_mode = ExpiryMode::Px(parse_set_expire_arg(ttl_arg)?);
+            let ms = parse_set_expire_arg(ttl_arg)?;
+            // (frankenredis-expbase) upstream rejects relative
+            // ms values whose ms+basetime would overflow LLONG_MAX
+            // before fr would silently saturate.
+            validate_relative_expire_basetime(ms, now_ms, "set")?;
+            expiry_mode = ExpiryMode::Px(ms);
         } else if option.eq_ignore_ascii_case("EX") {
             if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Ex(_)) {
                 return Err(CommandError::SyntaxError);
@@ -2464,6 +2469,8 @@ fn set(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
                     "ERR invalid expire time in 'set' command".to_string(),
                 ));
             }
+            // (frankenredis-expbase) ms+basetime overflow check.
+            validate_relative_expire_basetime(seconds * 1000, now_ms, "set")?;
             expiry_mode = ExpiryMode::Ex(seconds);
         } else if option.eq_ignore_ascii_case("PXAT") {
             if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Pxat(_)) {
@@ -9945,6 +9952,8 @@ fn setex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         ));
     }
     let px = seconds.saturating_mul(1000);
+    // (frankenredis-expbase) basetime overflow check.
+    validate_relative_expire_basetime(px, now_ms, "setex")?;
     store.set(argv[1].clone(), argv[3].clone(), Some(px), now_ms);
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
@@ -9955,6 +9964,8 @@ fn psetex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("PSETEX"));
     }
     let px = parse_expire_time_arg(&argv[2], "psetex")?;
+    // (frankenredis-expbase) basetime overflow check.
+    validate_relative_expire_basetime(px, now_ms, "psetex")?;
     store.set(argv[1].clone(), argv[3].clone(), Some(px), now_ms);
     Ok(RespFrame::SimpleString("OK".to_string()))
 }
@@ -11544,6 +11555,26 @@ fn parse_set_expire_arg(arg: &[u8]) -> Result<u64, CommandError> {
     parse_expire_time_arg(arg, "set")
 }
 
+/// Mirror upstream t_string.c::getExpireMillisecondsOrReply's
+/// relative-to-absolute basetime overflow check: when a relative
+/// EX/PX value (already converted to milliseconds) plus the
+/// current `now_ms` would exceed LLONG_MAX, upstream replies
+/// "ERR invalid expire time in '<command>' command" rather than
+/// silently saturating. (frankenredis-expbase)
+fn validate_relative_expire_basetime(
+    relative_ms: u64,
+    now_ms: u64,
+    command: &str,
+) -> Result<(), CommandError> {
+    let max_ms = i64::MAX as u64;
+    if relative_ms > max_ms.saturating_sub(now_ms) {
+        return Err(CommandError::Custom(format!(
+            "ERR invalid expire time in '{command}' command"
+        )));
+    }
+    Ok(())
+}
+
 fn parse_u64_arg(arg: &[u8]) -> Result<u64, CommandError> {
     let val = parse_i64_arg(arg)?;
     if val < 0 {
@@ -11731,12 +11762,16 @@ fn getex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                     "ERR invalid expire time in 'getex' command".to_string(),
                 ));
             }
+            // (frankenredis-expbase) basetime overflow check.
+            validate_relative_expire_basetime(secs * 1000, now_ms, "getex")?;
             Some(Some(now_ms.saturating_add(secs.saturating_mul(1000))))
         } else if opt.eq_ignore_ascii_case("PX") {
             if argv.len() != 4 {
                 return Err(CommandError::SyntaxError);
             }
             let ms = parse_expire_time_arg(&argv[3], "getex")?;
+            // (frankenredis-expbase) basetime overflow check.
+            validate_relative_expire_basetime(ms, now_ms, "getex")?;
             Some(Some(now_ms.saturating_add(ms)))
         } else if opt.eq_ignore_ascii_case("EXAT") {
             if argv.len() != 4 {
@@ -31983,6 +32018,176 @@ mod tests {
                 ))
             );
         }
+    }
+
+    // (frankenredis-expbase) Upstream
+    // t_string.c::getExpireMillisecondsOrReply rejects EX/PX (and
+    // SETEX/PSETEX) values whose ms-resolved expression added to
+    // basetime would overflow LLONG_MAX. Pre-fix, fr only checked
+    // the seconds*1000 ladder for SET/SETEX/GETEX EX and skipped
+    // overflow validation entirely for PX/PSETEX/GETEX PX, so a
+    // relative ms near i64::MAX silently saturated instead of
+    // raising the canonical error wording.
+    #[test]
+    fn relative_expire_rejects_basetime_overflow_across_set_paths() {
+        // basetime = 10s into the epoch (in ms). Anything
+        // strictly greater than i64::MAX - 10_000 must be
+        // rejected with the per-command "ERR invalid expire time"
+        // wording.
+        let now_ms: u64 = 10_000;
+        let just_over: u64 = (i64::MAX as u64) - now_ms + 1;
+        let just_under: u64 = (i64::MAX as u64) - now_ms;
+
+        // SET ... PX <ms>
+        {
+            let mut store = Store::new();
+            let err = dispatch_argv(
+                &[
+                    b"SET".to_vec(),
+                    b"k".to_vec(),
+                    b"v".to_vec(),
+                    b"PX".to_vec(),
+                    just_over.to_string().into_bytes(),
+                ],
+                &mut store,
+                now_ms,
+            )
+            .expect_err("SET PX must reject basetime overflow");
+            assert_eq!(
+                err.to_resp(),
+                RespFrame::Error("ERR invalid expire time in 'set' command".into())
+            );
+            // The boundary value MUST still be accepted.
+            dispatch_argv(
+                &[
+                    b"SET".to_vec(),
+                    b"k".to_vec(),
+                    b"v".to_vec(),
+                    b"PX".to_vec(),
+                    just_under.to_string().into_bytes(),
+                ],
+                &mut store,
+                now_ms,
+            )
+            .expect("SET PX boundary value must succeed");
+        }
+
+        // GETEX k PX <ms>
+        {
+            let mut store = Store::new();
+            dispatch_argv(
+                &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+                &mut store,
+                now_ms,
+            )
+            .expect("SET k v");
+            let err = dispatch_argv(
+                &[
+                    b"GETEX".to_vec(),
+                    b"k".to_vec(),
+                    b"PX".to_vec(),
+                    just_over.to_string().into_bytes(),
+                ],
+                &mut store,
+                now_ms,
+            )
+            .expect_err("GETEX PX must reject basetime overflow");
+            assert_eq!(
+                err.to_resp(),
+                RespFrame::Error("ERR invalid expire time in 'getex' command".into())
+            );
+        }
+
+        // PSETEX k <ms> v
+        {
+            let mut store = Store::new();
+            let err = dispatch_argv(
+                &[
+                    b"PSETEX".to_vec(),
+                    b"k".to_vec(),
+                    just_over.to_string().into_bytes(),
+                    b"v".to_vec(),
+                ],
+                &mut store,
+                now_ms,
+            )
+            .expect_err("PSETEX must reject basetime overflow");
+            assert_eq!(
+                err.to_resp(),
+                RespFrame::Error("ERR invalid expire time in 'psetex' command".into())
+            );
+        }
+
+        // SET/SETEX/GETEX EX <seconds> overflow happens further
+        // out (basetime / 1000). Ensure the same wording fires
+        // for relative EX once seconds*1000 + basetime tips over.
+        // Pick now_ms_big such that 1 second over the seconds-cap
+        // window triggers the basetime check rather than the
+        // seconds-ladder check.
+        let now_ms_big: u64 = 5_000;
+        let secs_over: u64 = ((i64::MAX as u64) - now_ms_big) / 1000 + 1;
+        // Sanity: this is still ≤ i64::MAX/1000, so it bypasses
+        // the older seconds-ladder check and exercises the new
+        // basetime check instead.
+        assert!(secs_over <= (i64::MAX as u64) / 1000);
+
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"SET".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+                b"EX".to_vec(),
+                secs_over.to_string().into_bytes(),
+            ],
+            &mut store,
+            now_ms_big,
+        )
+        .expect_err("SET EX must reject basetime overflow");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR invalid expire time in 'set' command".into())
+        );
+
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"SETEX".to_vec(),
+                b"k".to_vec(),
+                secs_over.to_string().into_bytes(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            now_ms_big,
+        )
+        .expect_err("SETEX must reject basetime overflow");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR invalid expire time in 'setex' command".into())
+        );
+
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            now_ms_big,
+        )
+        .expect("SET k v");
+        let err = dispatch_argv(
+            &[
+                b"GETEX".to_vec(),
+                b"k".to_vec(),
+                b"EX".to_vec(),
+                secs_over.to_string().into_bytes(),
+            ],
+            &mut store,
+            now_ms_big,
+        )
+        .expect_err("GETEX EX must reject basetime overflow");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR invalid expire time in 'getex' command".into())
+        );
     }
 
     // ── Set algebra command tests ───────────────────────────────────────
