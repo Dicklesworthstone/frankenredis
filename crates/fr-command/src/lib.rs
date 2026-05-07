@@ -3756,6 +3756,58 @@ fn sismember(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     Ok(RespFrame::Integer(if is_member { 1 } else { 0 }))
 }
 
+/// Parse a C99 hex-float literal: optional sign, `0x` or `0X` prefix,
+/// hex digits with optional `.`-separated fraction, optional binary
+/// exponent introduced by `p`/`P`. Mirrors what `strtod` accepts via
+/// glibc, which is the parser upstream Redis routes scores / floats
+/// through (util.c::string2d → strtod). Returns `None` if the text
+/// isn't a hex literal so the decimal fallback can run.
+/// (frankenredis-hexfloat)
+fn try_parse_hex_float(text: &str) -> Option<f64> {
+    let (sign, rest) = if let Some(t) = text.strip_prefix('-') {
+        (-1.0_f64, t)
+    } else if let Some(t) = text.strip_prefix('+') {
+        (1.0_f64, t)
+    } else {
+        (1.0_f64, text)
+    };
+    let after_prefix = rest
+        .strip_prefix("0x")
+        .or_else(|| rest.strip_prefix("0X"))?;
+    if after_prefix.is_empty() {
+        return None;
+    }
+    let (significand, exp_str) = match after_prefix.find(|c: char| c == 'p' || c == 'P') {
+        Some(idx) => (&after_prefix[..idx], Some(&after_prefix[idx + 1..])),
+        None => (after_prefix, None),
+    };
+    let (int_part, frac_part) = match significand.find('.') {
+        Some(idx) => (&significand[..idx], &significand[idx + 1..]),
+        None => (significand, ""),
+    };
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    let int_val: f64 = if int_part.is_empty() {
+        0.0
+    } else {
+        u64::from_str_radix(int_part, 16).ok()? as f64
+    };
+    let frac_val: f64 = if frac_part.is_empty() {
+        0.0
+    } else {
+        let f = u64::from_str_radix(frac_part, 16).ok()? as f64;
+        f * 16f64.powi(-(frac_part.len() as i32))
+    };
+    let exp_val: i32 = match exp_str {
+        Some(s) if s.is_empty() => return None,
+        Some(s) => s.parse::<i32>().ok()?,
+        None => 0,
+    };
+    let value = (int_val + frac_val) * 2f64.powi(exp_val);
+    Some(sign * value)
+}
+
 fn parse_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
     let text = std::str::from_utf8(arg)
         .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
@@ -3765,6 +3817,19 @@ fn parse_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
         || bytes[bytes.len() - 1].is_ascii_whitespace()
     {
         return Err(CommandError::Store(fr_store::StoreError::ValueNotFloat));
+    }
+    // Try the C99 hex-float form first — Rust's f64::from_str only
+    // accepts decimal, but upstream's strtod path accepts both. fr
+    // previously rejected `0xff`, `0x1.5`, `0x1.0p2`, etc.
+    // (frankenredis-hexfloat)
+    if let Some(val) = try_parse_hex_float(text) {
+        if val.is_nan() {
+            return Err(CommandError::Store(fr_store::StoreError::ValueNotFloat));
+        }
+        if val.is_infinite() {
+            return Err(CommandError::Store(fr_store::StoreError::ValueNotFloat));
+        }
+        return Ok(val);
     }
     let val = text
         .parse::<f64>()
@@ -31739,6 +31804,98 @@ mod tests {
         )
         .expect("incrbyfloat missing");
         assert_eq!(out, RespFrame::BulkString(Some(b"3.5".to_vec())));
+    }
+
+    #[test]
+    fn incrbyfloat_accepts_c99_hex_float_literals() {
+        // (frankenredis-hexfloat) Upstream util.c::string2d routes the
+        // float arg through strtod, which accepts C99 hex-float
+        // literals. Differential probe vs vendored 7.2.4:
+        //   INCRBYFLOAT k 0xff   (k=1)  -> 256
+        //   INCRBYFLOAT k 0x1.5  (k=1)  -> 2.3125
+        //   INCRBYFLOAT k 0x1.0p2 (k=1) -> 5
+        //   INCRBYFLOAT k 0X10   (k=1)  -> 17
+        //   INCRBYFLOAT k -0x10  (k=100)-> 84
+        //   INCRBYFLOAT k 0xZZ          -> ERR value is not a valid float
+        // fr's parse_f64_arg routed everything through Rust's f64::FromStr
+        // which is decimal-only, rejecting all hex inputs.
+        let cases: &[(&[u8], &[u8], &[u8])] = &[
+            (b"1", b"0xff", b"256"),
+            (b"1", b"0X10", b"17"),
+            (b"1", b"0x1.0p2", b"5"),
+            (b"100", b"-0x10", b"84"),
+            (b"100", b"+0x4", b"104"),
+        ];
+        for (initial, delta, expected) in cases {
+            let mut store = Store::new();
+            dispatch_argv(
+                &[b"SET".to_vec(), b"k".to_vec(), initial.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("set");
+            let out = dispatch_argv(
+                &[
+                    b"INCRBYFLOAT".to_vec(),
+                    b"k".to_vec(),
+                    delta.to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("incrbyfloat hex");
+            assert_eq!(
+                out,
+                RespFrame::BulkString(Some((*expected).to_vec())),
+                "INCRBYFLOAT k={:?} delta={:?}",
+                std::str::from_utf8(initial).unwrap(),
+                std::str::from_utf8(delta).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn incrbyfloat_hex_fraction_rounds_correctly() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+        let out = dispatch_argv(
+            &[b"INCRBYFLOAT".to_vec(), b"k".to_vec(), b"0x1.5".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("incrbyfloat hex frac");
+        // 0x1.5 = 1 + 5/16 = 1.3125; result = 2.3125
+        assert_eq!(out, RespFrame::BulkString(Some(b"2.3125".to_vec())));
+    }
+
+    #[test]
+    fn incrbyfloat_rejects_invalid_hex_literals() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+        for delta in [b"0xZZ".as_slice(), b"0x".as_slice(), b"0x1.0p".as_slice()] {
+            let out = dispatch_argv(
+                &[b"INCRBYFLOAT".to_vec(), b"k".to_vec(), delta.to_vec()],
+                &mut store,
+                0,
+            );
+            let err = out.expect_err("invalid hex must error");
+            assert_eq!(
+                err,
+                CommandError::Store(fr_store::StoreError::ValueNotFloat),
+                "delta={:?}",
+                std::str::from_utf8(delta).unwrap()
+            );
+        }
     }
 
     #[test]
