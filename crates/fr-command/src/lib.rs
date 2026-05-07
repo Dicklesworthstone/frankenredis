@@ -21109,6 +21109,78 @@ mod tests {
     }
 
     #[test]
+    fn zadd_incr_multi_pair_rejected_with_upstream_wording() {
+        // Pin upstream t_zset.c::zaddGenericCommand rejection of ZADD
+        // INCR with more than one (score, member) pair (frankenredis-
+        // zaddincr): 'ERR INCR option supports a single increment-
+        // element pair'. Source-level guard at lib.rs:4112; this test
+        // locks the wire-visible wording. Differential probe vs
+        // vendored 7.2.4 byte-matched. Single-pair INCR remains
+        // accepted (sanity-check regression guard).
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"INCR".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd incr multi");
+        assert_eq!(
+            err,
+            RespFrame::Error(
+                "ERR INCR option supports a single increment-element pair".to_string()
+            )
+        );
+
+        // Three pairs — same wording.
+        let err3 = dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"INCR".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd incr 3 pairs");
+        assert_eq!(
+            err3,
+            RespFrame::Error(
+                "ERR INCR option supports a single increment-element pair".to_string()
+            )
+        );
+
+        // Single-pair INCR must still succeed and return the new score
+        // as a BulkString.
+        let ok = dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"INCR".to_vec(),
+                b"5".to_vec(),
+                b"m".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd incr single");
+        assert!(matches!(ok, RespFrame::BulkString(Some(_))));
+    }
+
+    #[test]
     fn incr_decr_incrby_decrby_overflow_emits_upstream_wording() {
         // Pin upstream t_string.c::incrDecrCommand overflow rejection
         // (frankenredis-incovf): INCR / DECR / INCRBY / DECRBY emit
