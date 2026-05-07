@@ -21272,6 +21272,35 @@ mod tests {
     }
 
     #[test]
+    fn ttl_pttl_persist_expiretime_pexpiretime_extra_args_rejected_with_upstream_wording() {
+        // Pin upstream commands.def arity = 2 (exact) for the
+        // five TTL-introspection commands (frankenredis-ttlary).
+        // Extra trailing args surface
+        // 'ERR wrong number of arguments for <cmd> command' with the
+        // lowercased command name. fr renders WrongArity('TTL') / etc.
+        // through to_resp; this test locks the wire-visible wording so
+        // future renames don't accidentally lose the tag.
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"v".to_vec(), Some(5000), 0);
+
+        for (cmd, name) in [
+            (b"TTL".as_slice(), "ttl"),
+            (b"PTTL", "pttl"),
+            (b"PERSIST", "persist"),
+            (b"EXPIRETIME", "expiretime"),
+            (b"PEXPIRETIME", "pexpiretime"),
+        ] {
+            let argv = vec![cmd.to_vec(), b"k".to_vec(), b"extra".to_vec()];
+            let err = dispatch_argv(&argv, &mut store, 0).expect_err("extra args");
+            assert_eq!(
+                err.to_resp(),
+                RespFrame::Error(format!("ERR wrong number of arguments for '{name}' command")),
+                "{cmd:?}"
+            );
+        }
+    }
+
+    #[test]
     fn persist_command() {
         let mut store = Store::new();
         store.set(b"k".to_vec(), b"v".to_vec(), Some(5000), 0);
