@@ -10427,6 +10427,42 @@ impl Store {
                                 .to_string(),
                         ));
                     }
+                    // Upstream function_lua.c::luaRegisterFunction
+                    // validates the flags field in two passes:
+                    //   1. flags must be a table — non-table values
+                    //      surface 'ERR flags argument to
+                    //      redis.register_function must be a table
+                    //      representing function flags'.
+                    //   2. each table entry must be one of the
+                    //      registered flag names — anything else
+                    //      surfaces 'ERR unknown flag given'.
+                    // fr previously ignored the flags field entirely,
+                    // so malformed flags silently loaded.
+                    // (frankenredis-fnflags)
+                    if let Some(value) = extract_table_value_raw(body, "flags") {
+                        let v = value.trim_start();
+                        if !v.starts_with('{') {
+                            return Err(StoreError::GenericError(
+                                "ERR Error registering functions: ERR flags argument to redis.register_function must be a table representing function flags"
+                                    .to_string(),
+                            ));
+                        }
+                        const VALID_FLAGS: &[&str] = &[
+                            "no-writes",
+                            "allow-oom",
+                            "allow-stale",
+                            "no-cluster",
+                            "allow-cross-slot-keys",
+                        ];
+                        for flag in extract_flag_strings(v) {
+                            if !VALID_FLAGS.iter().any(|f| *f == flag) {
+                                return Err(StoreError::GenericError(
+                                    "ERR Error registering functions: ERR unknown flag given"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
                 }
             }
             if let Some((name, description)) = extract_function_metadata(trimmed) {
@@ -12707,6 +12743,78 @@ fn extract_table_field(buf: &str, key: &str) -> Option<String> {
         i += 1;
     }
     None
+}
+
+/// Return the raw text after `<key>=` at top-level of a Lua
+/// table body, stopping at the matching brace, paren, or comma
+/// at the same depth. Used to inspect non-quoted-string values
+/// like `flags={'no-writes'}` where extract_table_field is
+/// limited to quoted scalars. (frankenredis-fnflags)
+fn extract_table_value_raw<'a>(buf: &'a str, key: &str) -> Option<&'a str> {
+    let bytes = buf.as_bytes();
+    let key_bytes = key.as_bytes();
+    let mut i = 0;
+    while i + key_bytes.len() <= bytes.len() {
+        if &bytes[i..i + key_bytes.len()] == key_bytes {
+            let left_ok =
+                i == 0 || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+            let mut j = i + key_bytes.len();
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if left_ok && j < bytes.len() && bytes[j] == b'=' {
+                return Some(&buf[j + 1..]);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Extract the quoted string entries from a Lua flags table value
+/// like `{'no-writes', 'allow-oom'}`. Returns the entries in
+/// source order, ignoring whitespace and commas. (frankenredis-fnflags)
+fn extract_flag_strings(value: &str) -> Vec<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::new();
+    let Some(start) = bytes.iter().position(|&b| b == b'{') else {
+        return out;
+    };
+    let mut i = start + 1;
+    let mut depth: i32 = 1;
+    while i < bytes.len() && depth > 0 {
+        let b = bytes[i];
+        if b == b'{' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if b == b'}' {
+            depth -= 1;
+            i += 1;
+            continue;
+        }
+        if b == b'\'' || b == b'"' {
+            let quote = b;
+            let s = i + 1;
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 1;
+                }
+                i += 1;
+            }
+            if depth == 1 {
+                out.push(value[s..i].to_string());
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Walk a Lua table-form body and return the first `<ident>=`
@@ -18447,6 +18555,89 @@ mod tests {
             err,
             StoreError::GenericError("ERR No functions registered".to_string())
         );
+    }
+
+    #[test]
+    fn function_load_table_form_validates_flags() {
+        // Upstream function_lua.c::luaRegisterFunction validates the
+        // flags field in two passes: it must be a table, and every
+        // entry must be a registered flag name. The five accepted
+        // flags in vendored 7.2.4 are no-writes, allow-oom,
+        // allow-stale, no-cluster, allow-cross-slot-keys.
+        // Differential probe vs vendored 7.2.4 confirmed the
+        // wordings. (frankenredis-fnflags)
+        let mut store = Store::new();
+
+        // Non-table flags → must-be-a-table wording.
+        let err = store
+            .function_load(
+                b"#!lua name=lib1\n\
+                  redis.register_function{function_name='f', callback=function() return 1 end, flags='x'}",
+                false,
+            )
+            .expect_err("scalar flags must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR flags argument to redis.register_function must be a table representing function flags"
+                    .to_string()
+            )
+        );
+
+        // Unknown flag in a flags table → unknown-flag wording.
+        let err = store
+            .function_load(
+                b"#!lua name=lib2\n\
+                  redis.register_function{function_name='f', callback=function() return 1 end, flags={'bogus-flag'}}",
+                false,
+            )
+            .expect_err("unknown flag must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR unknown flag given".to_string()
+            )
+        );
+
+        // Valid flag mixed with unknown → unknown-flag wording fires.
+        let err = store
+            .function_load(
+                b"#!lua name=lib3\n\
+                  redis.register_function{function_name='f', callback=function() return 1 end, flags={'no-writes', 'bogus'}}",
+                false,
+            )
+            .expect_err("mixed valid/unknown must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR unknown flag given".to_string()
+            )
+        );
+
+        // Sanity: each individual valid flag still loads.
+        for flag in [
+            "no-writes",
+            "allow-oom",
+            "allow-stale",
+            "no-cluster",
+            "allow-cross-slot-keys",
+        ] {
+            let mut s = Store::new();
+            let code = format!(
+                "#!lua name=lib_ok\nredis.register_function{{function_name='f', callback=function() return 1 end, flags={{'{flag}'}}}}"
+            );
+            s.function_load(code.as_bytes(), false)
+                .unwrap_or_else(|_| panic!("flag {flag} must load"));
+        }
+
+        // Empty flags table is valid (no-op).
+        let mut s = Store::new();
+        s.function_load(
+            b"#!lua name=lib_empty\nredis.register_function{function_name='f', callback=function() return 1 end, flags={}}",
+            false,
+        )
+        .expect("empty flags table must load");
+        assert!(store.function_libraries.is_empty());
     }
 
     #[test]
