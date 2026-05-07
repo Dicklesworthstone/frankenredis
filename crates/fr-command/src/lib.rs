@@ -47930,6 +47930,73 @@ mod tests {
     }
 
     #[test]
+    fn function_load_engine_not_found_preserves_user_casing() {
+        // Pin upstream functions.c reporting of the engine token
+        // verbatim (frankenredis-fneng): the comparison is
+        // case-insensitive (LUA / Lua / lua all accepted) but the
+        // 'Engine X not found' wording must echo the user-typed
+        // casing. fr previously uppercased the token before formatting.
+        // Differential probe vs vendored 7.2.4 captured all four
+        // representative cases.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"#!python name=lib1\nredis.register_function('f',function() return 1 end)",
+                "ERR Engine 'python' not found",
+            ),
+            (
+                b"#!PYTHON name=lib1\nredis.register_function('f',function() return 1 end)",
+                "ERR Engine 'PYTHON' not found",
+            ),
+            (
+                b"#!Python name=lib1\nredis.register_function('f',function() return 1 end)",
+                "ERR Engine 'Python' not found",
+            ),
+            (
+                b"#!js name=lib1\nredis.register_function('f',function() return 1 end)",
+                "ERR Engine 'js' not found",
+            ),
+        ];
+        for (code, expected) in cases {
+            let err = dispatch_argv(
+                &[b"FUNCTION".to_vec(), b"LOAD".to_vec(), code.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect_err("function load bad engine");
+            assert_eq!(
+                err.to_resp(),
+                RespFrame::Error(expected.to_string()),
+                "code={:?}",
+                String::from_utf8_lossy(code)
+            );
+        }
+
+        // Sanity: case-insensitive LUA matching still works.
+        for shebang in [
+            "#!lua name=goodlua",
+            "#!LUA name=GOODLUAUPPER",
+            "#!Lua name=GoodLuaMixed",
+        ] {
+            let code = format!(
+                "{shebang}\nredis.register_function('f',function() return 1 end)"
+            );
+            let mut s = Store::new();
+            let ok = dispatch_argv(
+                &[
+                    b"FUNCTION".to_vec(),
+                    b"LOAD".to_vec(),
+                    code.into_bytes(),
+                ],
+                &mut s,
+                0,
+            )
+            .expect("function load lua");
+            assert!(matches!(ok, RespFrame::BulkString(Some(_))));
+        }
+    }
+
+    #[test]
     fn function_load_unknown_option_and_empty_body_match_upstream() {
         // Pin upstream functions.c rejection paths (frankenredis-fnopt):
         //

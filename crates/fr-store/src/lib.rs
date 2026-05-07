@@ -10276,12 +10276,15 @@ impl Store {
         }
 
         let header = &first_line[2..].trim();
-        let mut engine = String::new();
+        // Preserve the original engine-name casing for the error
+        // wording while keeping the comparison case-insensitive
+        // (upstream strcasecmp). (frankenredis-fneng)
+        let mut engine_display = String::new();
         let mut lib_name = String::new();
 
         for (i, part) in header.split_whitespace().enumerate() {
             if i == 0 {
-                engine = part.to_ascii_uppercase();
+                engine_display = part.to_string();
             } else if let Some(name) = part.strip_prefix("name=") {
                 lib_name = name.to_string();
             }
@@ -10295,14 +10298,15 @@ impl Store {
         //   4. lib name charset (else "Library names can only ...")
         // Match that ordering so peers and conformance fixtures see
         // the same error precedence. (br-frankenredis-r85v)
-        if engine.is_empty() {
+        if engine_display.is_empty() {
             return Err(StoreError::GenericError(
                 "ERR Missing library metadata".to_string(),
             ));
         }
+        let engine = engine_display.to_ascii_uppercase();
         if engine != "LUA" {
             return Err(StoreError::GenericError(format!(
-                "ERR Engine '{engine}' not found"
+                "ERR Engine '{engine_display}' not found"
             )));
         }
         if lib_name.is_empty() {
@@ -18062,13 +18066,15 @@ mod tests {
         // any other engine name must hit the same gate, not silently
         // load. (br-frankenredis-r85v)
         let mut store = Store::new();
+        // (frankenredis-fneng) Engine name is reported with the
+        // user-typed casing from the shebang, not uppercased.
         let code = b"#!python name=lib\nprint('not lua')";
         let err = store
             .function_load(code, false)
             .expect_err("non-lua engine must be rejected");
         assert_eq!(
             err,
-            StoreError::GenericError("ERR Engine 'PYTHON' not found".to_string())
+            StoreError::GenericError("ERR Engine 'python' not found".to_string())
         );
 
         // Plain LUA still loads.
@@ -18123,12 +18129,13 @@ mod tests {
         );
 
         // Bad engine + bad name → engine error fires first.
+        // (frankenredis-fneng) Engine name preserves user casing.
         let err = store
             .function_load(b"#!python name=lib-bad\nx", false)
             .expect_err("bad engine must error first");
         assert_eq!(
             err,
-            StoreError::GenericError("ERR Engine 'PYTHON' not found".to_string())
+            StoreError::GenericError("ERR Engine 'python' not found".to_string())
         );
 
         // Good engine + missing name → name-not-given fires.
