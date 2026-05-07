@@ -18145,17 +18145,6 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         } else {
             Err(debug_subcommand_envelope_error(sub))
         }
-    } else if sub.eq_ignore_ascii_case("STRINGMATCH-LEN") {
-        // Upstream debug.c spells this `STRINGMATCH-TEST` and runs
-        // an in-process fuzz of stringmatchlen() before replying OK.
-        // Both forms surface in the wild; accept-and-OK is correct
-        // for tests that just want a no-op breakpoint hook.
-        // (br-frankenredis-s11v) Upstream routes wrong-arity through
-        // the subcommand-syntax envelope. (frankenredis-dbgenv)
-        if argv.len() != 2 {
-            return Err(debug_subcommand_envelope_error(sub));
-        }
-        Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("STRINGMATCH-TEST") {
         // (frankenredis-dbgenv)
         if argv.len() != 2 {
@@ -39245,6 +39234,44 @@ mod tests {
     }
 
     #[test]
+    fn debug_stringmatch_len_falls_through_to_unknown_subcommand() {
+        // (frankenredis-dbgsml) Upstream debug.c only registers
+        // STRINGMATCH-TEST. STRINGMATCH-LEN does not exist; fr
+        // previously fabricated a no-op handler returning OK.
+        // Differential probe vs vendored 7.2.4 confirmed both
+        // `DEBUG STRINGMATCH-LEN` and the lowercase form fall
+        // through to addReplySubcommandSyntaxError with the input
+        // case echoed verbatim.
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"STRINGMATCH-LEN".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug stringmatch-len reply");
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR unknown subcommand or wrong number of arguments for 'STRINGMATCH-LEN'. Try DEBUG HELP."
+                    .to_string()
+            )
+        );
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"stringmatch-len".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug stringmatch-len lower reply");
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR unknown subcommand or wrong number of arguments for 'stringmatch-len'. Try DEBUG HELP."
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
     fn debug_subcommand_envelope_preserves_input_case() {
         // (frankenredis-dbgcase) Upstream debug.c routes per-subcommand
         // wrong-arity through addReplySubcommandSyntaxError, which echoes
@@ -39388,14 +39415,6 @@ mod tests {
                     b"extra".to_vec(),
                 ],
                 "CHANGE-REPL-ID",
-            ),
-            (
-                vec![
-                    b"DEBUG".to_vec(),
-                    b"STRINGMATCH-LEN".to_vec(),
-                    b"extra".to_vec(),
-                ],
-                "STRINGMATCH-LEN",
             ),
             (
                 vec![
