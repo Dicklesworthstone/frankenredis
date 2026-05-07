@@ -2298,8 +2298,8 @@
         "JMAP"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
       }
     },
     {

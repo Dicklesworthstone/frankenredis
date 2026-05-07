@@ -123,8 +123,8 @@
         "JMAP"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
       }
     },
     {
@@ -137,7 +137,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'debug' command"
+        "value": "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
       }
     },
     {
@@ -450,8 +450,8 @@
         "jmap"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "OK"
+        "kind": "error",
+        "value": "ERR unknown subcommand or wrong number of arguments for 'jmap'. Try DEBUG HELP."
       }
     },
     {
@@ -1218,7 +1218,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'debug' command"
+        "value": "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
       }
     },
     {

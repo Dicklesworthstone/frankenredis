@@ -17666,11 +17666,6 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         let value: i64 = trimmed.parse().unwrap_or(0);
         store.active_expire_enabled = value != 0;
         Ok(RespFrame::SimpleString("OK".to_string()))
-    } else if sub.eq_ignore_ascii_case("JMAP") {
-        if argv.len() != 2 {
-            return Err(CommandError::WrongArity("DEBUG"));
-        }
-        Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("RELOAD") {
         // Upstream debug.c::debugCommand accepts the optional
         // [NOSAVE] [NOFLUSH] [MERGE] keyword args after DEBUG RELOAD
@@ -18328,9 +18323,12 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         let node_id = String::from_utf8_lossy(&argv[4]);
         Ok(RespFrame::Error(format!("ERR Unknown node {node_id}")))
     } else {
+        // Upstream debug.c::debugCommand routes the unknown-subcommand
+        // fallthrough through addReplySubcommandSyntaxError, which
+        // echoes the subcommand token verbatim — preserving the input
+        // case. (frankenredis-dbgjmap)
         Ok(RespFrame::Error(format!(
-            "ERR unknown subcommand or wrong number of arguments for '{}'. Try DEBUG HELP.",
-            sub.to_ascii_uppercase()
+            "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try DEBUG HELP.",
         )))
     }
 }
@@ -39300,6 +39298,48 @@ mod tests {
             let err = dispatch_argv(&argv, &mut store, 0).expect_err("debug noscript");
             assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
         }
+    }
+
+    #[test]
+    fn debug_jmap_falls_through_to_unknown_subcommand_envelope() {
+        // (frankenredis-dbgjmap) Upstream debug.c::debugCommand has no
+        // JMAP subcommand. fr previously hard-coded `DEBUG JMAP` to
+        // return SimpleString OK, diverging from upstream which routes
+        // through addReplySubcommandSyntaxError. The fallthrough also
+        // preserves the input case of the subcommand token so probe
+        // confirmed `DEBUG jmap` echoes 'jmap' verbatim.
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"DEBUG".to_vec(), b"JMAP".to_vec()], &mut store, 0)
+            .expect("debug jmap reply");
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
+                    .to_string()
+            )
+        );
+        let out = dispatch_argv(&[b"DEBUG".to_vec(), b"jmap".to_vec()], &mut store, 0)
+            .expect("debug jmap lower reply");
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR unknown subcommand or wrong number of arguments for 'jmap'. Try DEBUG HELP."
+                    .to_string()
+            )
+        );
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"JMAP".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug jmap extra reply");
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
+                    .to_string()
+            )
+        );
     }
 
     #[test]

@@ -294,11 +294,30 @@ fn debug_set_active_expire() {
 }
 
 #[test]
-fn debug_jmap_returns_ok() {
+fn debug_jmap_rejects_with_subcommand_envelope() {
+    // Upstream debug.c::debugCommand has no JMAP subcommand; it
+    // falls through to addReplySubcommandSyntaxError. Differential
+    // probe vs vendored 7.2.4 confirmed both `DEBUG JMAP` and
+    // `DEBUG jmap` return the envelope with the input-case token
+    // preserved. (frankenredis-dbgjmap)
     let mut rt = Runtime::default_strict();
     rt.set_enable_debug_command("yes");
     let resp = rt.execute_frame(command(&[b"DEBUG", b"JMAP"]), 0);
-    assert_eq!(resp, RespFrame::SimpleString("OK".to_string()));
+    assert_eq!(
+        resp,
+        RespFrame::Error(
+            "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
+                .to_string()
+        )
+    );
+    let resp = rt.execute_frame(command(&[b"DEBUG", b"jmap"]), 0);
+    assert_eq!(
+        resp,
+        RespFrame::Error(
+            "ERR unknown subcommand or wrong number of arguments for 'jmap'. Try DEBUG HELP."
+                .to_string()
+        )
+    );
 }
 
 #[test]
@@ -324,10 +343,18 @@ fn debug_object_requires_key_argument() {
 
 #[test]
 fn debug_jmap_rejects_extra_arguments() {
+    // (frankenredis-dbgjmap) Upstream emits the same subcommand-syntax
+    // envelope regardless of extra argv tail, since JMAP is unknown.
     let mut rt = Runtime::default_strict();
     rt.set_enable_debug_command("yes");
     let resp = rt.execute_frame(command(&[b"DEBUG", b"JMAP", b"extra"]), 0);
-    assert!(matches!(resp, RespFrame::Error(_)));
+    assert_eq!(
+        resp,
+        RespFrame::Error(
+            "ERR unknown subcommand or wrong number of arguments for 'JMAP'. Try DEBUG HELP."
+                .to_string()
+        )
+    );
 }
 
 #[test]
