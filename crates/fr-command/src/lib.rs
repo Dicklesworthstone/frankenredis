@@ -16060,10 +16060,19 @@ fn slowlog_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
     let sub = std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
     if sub.eq_ignore_ascii_case("GET") {
         if argv.len() > 3 {
-            return Err(CommandError::WrongSubcommandArity {
-                command: "SLOWLOG",
-                subcommand: "GET".to_string(),
-            });
+            // Upstream slowlog.c::slowlogCommand routes too-many-args
+            // through addReplySubcommandSyntaxError (line 165), which
+            // emits the 'unknown subcommand or wrong number of
+            // arguments for '<sub>'. Try <CMD> HELP.' envelope —
+            // distinct from the table-level wrong-arity reply
+            // emitted for the 0-arg or LEN/RESET/HELP arity errors.
+            // Differential probe vs vendored 7.2.4 confirmed the
+            // wording: `SLOWLOG GET extra extra` surfaces the GET
+            // envelope, not 'wrong number of arguments for
+            // slowlog|get command'. (frankenredis-slogenv)
+            return Err(CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments for 'GET'. Try SLOWLOG HELP.".to_string(),
+            ));
         }
         // Upstream slowlog.c:172-174 routes both parse failure and
         // out-of-range through getRangeLongFromObjectOrReply with the
@@ -44640,6 +44649,11 @@ mod tests {
             );
         }
 
+        // (frankenredis-slogenv) Upstream slowlog.c::slowlogCommand
+        // emits the subcommand-syntax-error envelope for too-many-
+        // args on SLOWLOG GET, distinct from the table-level
+        // wrong-arity reply emitted by LEN/RESET/HELP. Differential
+        // probe vs vendored 7.2.4 confirmed the wording.
         let err = dispatch_argv(
             &[
                 b"SLOWLOG".to_vec(),
@@ -44653,10 +44667,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
-            CommandError::WrongSubcommandArity {
-                command: "SLOWLOG",
-                subcommand: "GET".to_string(),
-            }
+            CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments for 'GET'. Try SLOWLOG HELP."
+                    .to_string()
+            )
         );
     }
 
