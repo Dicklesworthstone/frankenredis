@@ -10360,6 +10360,17 @@ impl Store {
         }
         functions.sort_by(|a, b| b.name.cmp(&a.name));
 
+        // Upstream functions.c::functionsRegisterEngineLib rejects
+        // libraries that don't register at least one function with
+        // 'ERR No functions registered'. fr previously accepted
+        // empty-body libraries, returning the library name as if the
+        // load succeeded. (frankenredis-fnopt)
+        if functions.is_empty() {
+            return Err(StoreError::GenericError(
+                "ERR No functions registered".to_string(),
+            ));
+        }
+
         let library = FunctionLibrary {
             name: lib_name.clone(),
             engine,

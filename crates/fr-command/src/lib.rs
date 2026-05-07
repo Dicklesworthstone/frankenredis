@@ -9024,7 +9024,15 @@ fn function_cmd(
                 replace = true;
                 code_idx = 3;
             } else {
-                code_idx = 2;
+                // Upstream functions.c::functionsCommand rejects any
+                // non-REPLACE token in the option slot with the
+                // dedicated 'ERR Unknown option given: <token>' wording
+                // before parsing the body. fr previously fell through
+                // and treated argv[2] as the code body, losing the
+                // upstream wording. (frankenredis-fnopt)
+                return Err(CommandError::Custom(format!(
+                    "ERR Unknown option given: {flag}"
+                )));
             }
         } else {
             code_idx = 2;
@@ -47919,6 +47927,73 @@ mod tests {
             function_list_bad,
             CommandError::Custom("ERR Unknown argument NOPE".to_string())
         );
+    }
+
+    #[test]
+    fn function_load_unknown_option_and_empty_body_match_upstream() {
+        // Pin upstream functions.c rejection paths (frankenredis-fnopt):
+        //
+        // (1) FUNCTION LOAD <BANANA> <code> — upstream rejects the
+        //     unknown option-slot token with 'ERR Unknown option given:
+        //     BANANA' before parsing the body. fr previously treated
+        //     the first token as code and surfaced 'Missing library
+        //     metadata' from the body parser.
+        //
+        // (2) FUNCTION LOAD '#!lua name=lib\n' (well-formed shebang,
+        //     no register_function calls) — upstream rejects with
+        //     'ERR No functions registered'. fr previously accepted
+        //     the empty-body library and returned the lib name.
+        //
+        // Differential probe vs vendored 7.2.4 byte-matched both wordings.
+        let mut store = Store::new();
+
+        let unknown_option = dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"BANANA".to_vec(),
+                b"#!lua name=ignored\nredis.register_function('f',function() return 1 end)".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("function load bad option");
+        assert_eq!(
+            unknown_option,
+            CommandError::Custom("ERR Unknown option given: BANANA".to_string())
+        );
+
+        let empty_body = dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=emptylib\n".to_vec(),
+            ],
+            &mut store,
+            0,
+        );
+        let msg = match empty_body {
+            Ok(RespFrame::Error(s)) => s,
+            Err(e) => match e.to_resp() {
+                RespFrame::Error(s) => s,
+                other => panic!("expected Error, got {other:?}"),
+            },
+            other => panic!("expected error reply, got {other:?}"),
+        };
+        assert_eq!(msg, "ERR No functions registered".to_string());
+
+        // Sanity: a properly-formed library still loads.
+        let ok = dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=goodlib\nredis.register_function('f',function() return 1 end)".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("function load good");
+        assert_eq!(ok, RespFrame::BulkString(Some(b"goodlib".to_vec())));
     }
 
     #[test]
