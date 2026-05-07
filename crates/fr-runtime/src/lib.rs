@@ -7614,6 +7614,32 @@ impl Runtime {
         let mut encoding_threshold_updates: Vec<(&str, usize)> = Vec::new();
         let mut static_override_updates: Vec<(String, String)> = Vec::new();
 
+        // Upstream config.c::configSetCommand:872-880 walks the pair
+        // list once, tracks each resolved config in a `set_configs[]`
+        // array, and fires the dedicated 'duplicate parameter' error
+        // when the same parameter shows up twice in one CONFIG SET
+        // call. fr's pair-walker previously let duplicates win silently
+        // (last value applied). Probe vs vendored 7.2.4 confirmed:
+        //   CONFIG SET maxmemory 100 maxmemory 200
+        //     -> "ERR CONFIG SET failed (possibly related to argument
+        //         'maxmemory') - duplicate parameter"
+        // Detection is case-insensitive (CONFIG SET parameter lookup
+        // is itself case-insensitive). (frankenredis-cfgdup)
+        {
+            let mut seen: Vec<String> = Vec::with_capacity(argv.len() / 2);
+            for pair in argv[2..].chunks_exact(2) {
+                let parameter = match std::str::from_utf8(&pair[0]) {
+                    Ok(parameter) => parameter,
+                    Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                };
+                let lower = parameter.to_ascii_lowercase();
+                if seen.iter().any(|prev| prev == &lower) {
+                    return config_set_failed(parameter, "duplicate parameter");
+                }
+                seen.push(lower);
+            }
+        }
+
         for pair in argv[2..].chunks_exact(2) {
             let parameter = match std::str::from_utf8(&pair[0]) {
                 Ok(parameter) => parameter,
@@ -20285,6 +20311,78 @@ mod tests {
                 *expected_bytes
             );
         }
+    }
+
+    #[test]
+    fn config_set_rejects_duplicate_parameters_within_one_call() {
+        // (frankenredis-cfgdup) Upstream config.c::configSetCommand
+        // walks the pair list, tracks each resolved config, and fires
+        // the dedicated 'duplicate parameter' error when the same
+        // config appears twice. Detection is case-insensitive — the
+        // CONFIG SET parameter lookup itself is case-insensitive, so
+        // `MaxMemory` and `maxmemory` count as a duplicate. fr
+        // previously let duplicates win silently (last value applied).
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"maxmemory",
+                    b"100",
+                    b"maxmemory",
+                    b"200",
+                ]),
+                0,
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'maxmemory') - duplicate parameter"
+                    .to_string()
+            )
+        );
+        // Case-insensitive duplicate.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"MaxMemory",
+                    b"100",
+                    b"maxmemory",
+                    b"200",
+                ]),
+                1,
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'maxmemory') - duplicate parameter"
+                    .to_string()
+            )
+        );
+        // Non-duplicate two-pair call still succeeds.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"maxmemory",
+                    b"100",
+                    b"tcp-keepalive",
+                    b"30",
+                ]),
+                2,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // First-occurrence value never lands when the call errors.
+        // The earlier error path returned 'maxmemory 0' (untouched);
+        // the success path above set it to 100. Verify final state.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"maxmemory"]), 3),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"maxmemory".to_vec())),
+                RespFrame::BulkString(Some(b"100".to_vec())),
+            ]))
+        );
     }
 
     #[test]
