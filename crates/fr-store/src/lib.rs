@@ -10516,6 +10516,15 @@ impl Store {
                     // wrapper script. (frankenredis-fnposcb)
                     let inner = &trimmed_after[1..];
                     let inner = inner.trim_start();
+                    // Empty argument list → upstream surfaces the
+                    // generic 'wrong number of arguments' wording.
+                    // (frankenredis-fnposary)
+                    if inner.starts_with(')') {
+                        return Err(StoreError::GenericError(
+                            "ERR Error registering functions: ERR wrong number of arguments to redis.register_function"
+                                .to_string(),
+                        ));
+                    }
                     // Skip the first arg: a quoted string OR a non-
                     // string literal. If non-string, surface upstream's
                     // 'first argument ... must be a string'.
@@ -10524,17 +10533,10 @@ impl Store {
                     } else if let Some(stripped) = inner.strip_prefix('"') {
                         stripped.find('"').map(|e| &stripped[e + 1..])
                     } else {
-                        // Non-quoted first arg → upstream rejects.
-                        // Only fire if there IS something after `(`
-                        // that isn't whitespace or a closing paren —
-                        // otherwise the empty-arg case would mis-route.
-                        if !inner.is_empty() && !inner.starts_with(')') {
-                            return Err(StoreError::GenericError(
-                                "ERR Error registering functions: ERR first argument to redis.register_function must be a string"
-                                    .to_string(),
-                            ));
-                        }
-                        None
+                        return Err(StoreError::GenericError(
+                            "ERR Error registering functions: ERR first argument to redis.register_function must be a string"
+                                .to_string(),
+                        ));
                     };
                     if let Some(rest) = after_first {
                         let rest = rest.trim_start();
@@ -10546,6 +10548,15 @@ impl Store {
                                         .to_string(),
                                 ));
                             }
+                        } else if rest.starts_with(')') {
+                            // Single-string-arg form — upstream surfaces
+                            // a dedicated wording explaining that
+                            // single-arg invocation is only valid for
+                            // the Lua-table form. (frankenredis-fnposary)
+                            return Err(StoreError::GenericError(
+                                "ERR Error registering functions: ERR calling redis.register_function with a single argument is only applicable to Lua table (representing named arguments)."
+                                    .to_string(),
+                            ));
                         }
                     }
                 }
@@ -18661,6 +18672,51 @@ mod tests {
             err,
             StoreError::GenericError("ERR No functions registered".to_string())
         );
+    }
+
+    #[test]
+    fn function_load_positional_form_arity_wordings() {
+        // Upstream function_lua.c::luaRegisterFunction surfaces
+        // dedicated arity wordings:
+        //   - 0 args → 'ERR wrong number of arguments to
+        //     redis.register_function'
+        //   - 1 arg (single string) → 'ERR calling
+        //     redis.register_function with a single argument is only
+        //     applicable to Lua table (representing named arguments).'
+        // fr previously fell through to extract_function_metadata
+        // for these cases, surfacing the wrong 'No functions
+        // registered' wording (zero-arg) or silently loading a
+        // body-less function entry (single-arg). (frankenredis-fnposary)
+        let mut s = Store::new();
+
+        let err = s
+            .function_load(
+                b"#!lua name=lib1\nredis.register_function()",
+                false,
+            )
+            .expect_err("zero args must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR wrong number of arguments to redis.register_function"
+                    .to_string()
+            )
+        );
+
+        let err = s
+            .function_load(
+                b"#!lua name=lib2\nredis.register_function('f')",
+                false,
+            )
+            .expect_err("single string arg must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR calling redis.register_function with a single argument is only applicable to Lua table (representing named arguments).".to_string()
+            )
+        );
+
+        assert!(s.function_libraries.is_empty());
     }
 
     #[test]
