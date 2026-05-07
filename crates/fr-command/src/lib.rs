@@ -14282,11 +14282,22 @@ fn config_cmd(
         }
         Ok(RespFrame::Array(Some(entries)))
     } else if sub.eq_ignore_ascii_case("SET") {
-        if argv.len() < 4 || !argv.len().is_multiple_of(2) {
+        if argv.len() < 4 {
             return Err(CommandError::WrongSubcommandArity {
                 command: "CONFIG",
                 subcommand: sub.to_string(),
             });
+        }
+        // Upstream config.c::configSetCommand line 819-821 routes
+        // odd-arity (`c->argc & 1`) through addReplyErrorObject with
+        // shared.syntaxerr — i.e. 'ERR syntax error', distinct from
+        // the table-level wrong-arity reply emitted for argv.len()
+        // < 4. Differential probe vs vendored 7.2.4 confirmed the
+        // wording: `CONFIG SET maxmemory 0 extra` (5 args) surfaces
+        // 'ERR syntax error', not 'wrong number of arguments for
+        // config|set command'. (frankenredis-cfgsetodd)
+        if !argv.len().is_multiple_of(2) {
+            return Err(CommandError::SyntaxError);
         }
         // Upstream commands.def declares config|set with CMD_NOSCRIPT
         // (line 6534). (frankenredis-cfgsc)
@@ -52703,6 +52714,48 @@ mod tests {
                     RespFrame::BulkString(Some(b"value".to_vec())),
                 ])),
             ]))
+        );
+    }
+
+    #[test]
+    fn config_set_odd_arity_returns_upstream_syntax_error() {
+        // (frankenredis-cfgsetodd) Upstream config.c::configSetCommand
+        // line 819-821 routes odd-arity (`c->argc & 1`) through
+        // addReplyErrorObject(shared.syntaxerr) — 'ERR syntax error'.
+        // fr previously surfaced the table-level wrong-arity reply.
+        // Differential probe vs vendored 7.2.4 confirmed.
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[
+                b"CONFIG".to_vec(),
+                b"SET".to_vec(),
+                b"maxmemory".to_vec(),
+                b"0".to_vec(),
+                b"extra".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, CommandError::SyntaxError);
+
+        // Sanity: argv.len() < 4 still surfaces wrong-arity.
+        let err = dispatch_argv(
+            &[
+                b"CONFIG".to_vec(),
+                b"SET".to_vec(),
+                b"maxmemory".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::WrongSubcommandArity {
+                command: "CONFIG",
+                subcommand: "SET".to_string(),
+            }
         );
     }
 
