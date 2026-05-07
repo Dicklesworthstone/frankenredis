@@ -10410,6 +10410,23 @@ impl Store {
                                 .to_string(),
                         ));
                     }
+                    // Upstream function_lua.c::luaRegisterFunction
+                    // rejects any table key beyond the four valid
+                    // fields with 'ERR unknown argument given to
+                    // redis.register_function'. fr previously
+                    // ignored unknown fields silently.
+                    // (frankenredis-fnukn)
+                    if find_unknown_table_key(
+                        body,
+                        &["function_name", "callback", "description", "flags"],
+                    )
+                    .is_some()
+                    {
+                        return Err(StoreError::GenericError(
+                            "ERR Error registering functions: ERR unknown argument given to redis.register_function"
+                                .to_string(),
+                        ));
+                    }
                 }
             }
             if let Some((name, description)) = extract_function_metadata(trimmed) {
@@ -12686,6 +12703,128 @@ fn extract_table_field(buf: &str, key: &str) -> Option<String> {
                     return Some(v);
                 }
             }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Walk a Lua table-form body and return the first `<ident>=`
+/// token at top-level whose ident is not in `allowed`. Skips
+/// identifiers inside quoted strings, nested braces, and inside
+/// `function ... end` blocks (the common case for `callback=fn`).
+/// Best-effort: complex nested control-flow inside callback
+/// bodies may end the scan early, which only produces false
+/// negatives (no error reported) — never false positives.
+/// (frankenredis-fnukn)
+fn find_unknown_table_key(buf: &str, allowed: &[&str]) -> Option<String> {
+    let bytes = buf.as_bytes();
+    let mut i = 0;
+    let mut brace_depth: i32 = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // Skip over single- or double-quoted strings.
+        if b == b'\'' || b == b'"' {
+            let quote = b;
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                    i += 1;
+                }
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        if b == b'{' {
+            brace_depth += 1;
+            i += 1;
+            continue;
+        }
+        if b == b'}' {
+            if brace_depth == 0 {
+                break;
+            }
+            brace_depth -= 1;
+            i += 1;
+            continue;
+        }
+        let left_ok =
+            i == 0 || !matches!(bytes[i - 1], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_');
+        if left_ok && matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'_') {
+            let start = i;
+            while i < bytes.len()
+                && matches!(bytes[i], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_')
+            {
+                i += 1;
+            }
+            let ident_end = i;
+            let ident = &buf[start..ident_end];
+            // When entering a `function ... end` expression at the
+            // top of the table, skip past the matching `end` token.
+            // Use a coarse keyword-block depth counter that treats
+            // `function`/`if`/`while`/`for`/`do` as openers and
+            // `end` as a closer. Imperfect for nested control flow
+            // but sufficient for typical Redis function bodies.
+            if brace_depth == 0 && ident == "function" {
+                let mut depth: i32 = 1;
+                while depth > 0 && i < bytes.len() {
+                    let c = bytes[i];
+                    if c == b'\'' || c == b'"' {
+                        let q = c;
+                        i += 1;
+                        while i < bytes.len() && bytes[i] != q {
+                            if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                                i += 1;
+                            }
+                            i += 1;
+                        }
+                        if i < bytes.len() {
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    let lok = i == 0
+                        || !matches!(
+                            bytes[i - 1],
+                            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'
+                        );
+                    if lok && matches!(c, b'A'..=b'Z' | b'a'..=b'z' | b'_') {
+                        let s = i;
+                        while i < bytes.len()
+                            && matches!(
+                                bytes[i],
+                                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'
+                            )
+                        {
+                            i += 1;
+                        }
+                        let id = &buf[s..i];
+                        match id {
+                            "function" | "if" | "while" | "for" | "do" => depth += 1,
+                            "end" => depth -= 1,
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            if brace_depth == 0 {
+                let mut j = i;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'=' && bytes.get(j + 1).copied() != Some(b'=')
+                    && !allowed.iter().any(|a| *a == ident)
+                {
+                    return Some(ident.to_string());
+                }
+            }
+            continue;
         }
         i += 1;
     }
@@ -18308,6 +18447,61 @@ mod tests {
             err,
             StoreError::GenericError("ERR No functions registered".to_string())
         );
+    }
+
+    #[test]
+    fn function_load_table_form_rejects_unknown_field() {
+        // Upstream function_lua.c::luaRegisterFunction rejects any
+        // table key beyond function_name / callback / description /
+        // flags with 'ERR unknown argument given to
+        // redis.register_function'. fr previously accepted unknown
+        // fields silently. Differential probe vs vendored 7.2.4
+        // confirmed the wording. (frankenredis-fnukn)
+        let mut store = Store::new();
+
+        // Unknown field 'bogus' AFTER callback=function() ... end —
+        // exercises the function-body-skipping logic in
+        // find_unknown_table_key.
+        let err = store
+            .function_load(
+                b"#!lua name=lib1\n\
+                  redis.register_function{function_name='f', callback=function() return 1 end, bogus='x'}",
+                false,
+            )
+            .expect_err("unknown field after callback must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR unknown argument given to redis.register_function"
+                    .to_string()
+            )
+        );
+
+        // Unknown field BEFORE callback.
+        let err = store
+            .function_load(
+                b"#!lua name=lib2\n\
+                  redis.register_function{function_name='f', foo=1, callback=function() return 1 end}",
+                false,
+            )
+            .expect_err("unknown field before callback must error");
+        assert_eq!(
+            err,
+            StoreError::GenericError(
+                "ERR Error registering functions: ERR unknown argument given to redis.register_function"
+                    .to_string()
+            )
+        );
+
+        // Sanity: all four valid fields together still load.
+        store
+            .function_load(
+                b"#!lua name=lib_ok\n\
+                  redis.register_function{function_name='f', callback=function() return 1 end, description='d', flags={'no-writes'}}",
+                false,
+            )
+            .expect("library with all valid fields must load");
+        assert!(store.function_libraries.contains_key("lib_ok"));
     }
 
     #[test]
