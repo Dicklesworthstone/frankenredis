@@ -16003,17 +16003,15 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
 }
 
 fn wait_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
-    // Upstream commands.def declares WAIT with arity=3 (exact) and the
-    // CMD_NOSCRIPT flag, so trailing args are wrong-arity and any
-    // script call surfaces 'This Redis command is not allowed from
-    // script'. fr-command was accepting extras silently and lacked
-    // the noscript guard — same dispatch_argv-vs-runtime drift
-    // family as WAITAOF (which already guards). (frankenredis-o7kay)
+    // Upstream commands.def declares WAIT with arity=3 (exact) and
+    // flags=0 — notably NO CMD_NOSCRIPT (compare WAITAOF on the
+    // adjacent line which does carry CMD_NOSCRIPT). A previous
+    // version of this handler erroneously fired noscript on WAIT
+    // from inside EVAL/FCALL; differential probe vs vendored 7.2.4
+    // confirmed the script-context call returns the integer 0.
+    // (frankenredis-waitsc)
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("WAIT"));
-    }
-    if store.script_nesting_level >= 1 {
-        return Err(script_noscript_command_error());
     }
     let numreplicas = match parse_i64_arg(&argv[1]) {
         Ok(value) if value >= 0 => value,
@@ -42421,14 +42419,18 @@ mod tests {
     }
 
     #[test]
-    fn wait_rejects_script_context_and_extra_args() {
-        // (frankenredis-o7kay) Upstream commands.def declares WAIT
-        // with arity=3 (exact) and CMD_NOSCRIPT, so trailing args
-        // surface the wrong-arity reply and any Lua call must hit
-        // the script_noscript guard.
+    fn wait_rejects_extra_args_and_runs_inside_script() {
+        // (frankenredis-waitsc) Upstream commands.def declares WAIT
+        // with arity=3 (exact) and flags=0 — notably NOT
+        // CMD_NOSCRIPT (compare the adjacent WAITAOF entry which
+        // does carry CMD_NOSCRIPT). So trailing args surface
+        // wrong-arity, but a scripted call must succeed and return
+        // 0 — fr previously fired noscript here, diverging from
+        // vendored 7.2.4 behavior verified via differential probe.
         let mut store = Store::new();
 
-        // Trailing args → WrongArity (was silently accepted).
+        // Trailing args → WrongArity (was silently accepted prior
+        // to o7kay).
         let extra = dispatch_argv(
             &[
                 b"WAIT".to_vec(),
@@ -42442,18 +42444,16 @@ mod tests {
         .unwrap_err();
         assert_eq!(extra, CommandError::WrongArity("WAIT"));
 
-        // Inside a Lua script, WAIT must surface the noscript reply.
+        // Inside a Lua script, WAIT must SUCCEED — upstream allows
+        // it (no CMD_NOSCRIPT). Standalone reply is 0 replicas.
         store.script_nesting_level = 1;
         let scripted = dispatch_argv(
             &[b"WAIT".to_vec(), b"0".to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
-        .unwrap_err();
-        assert_eq!(
-            scripted,
-            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
-        );
+        .unwrap();
+        assert_eq!(scripted, RespFrame::Integer(0));
     }
 
     #[test]
