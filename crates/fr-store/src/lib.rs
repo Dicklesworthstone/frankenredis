@@ -10497,10 +10497,31 @@ impl Store {
                             .to_string(),
                     ));
                 }
+                // Capture the table-form flags (already validated by
+                // the per-call presence/membership checks above) so
+                // FCALL_RO can correctly dispatch on no-writes and
+                // FUNCTION LIST surfaces the registered flag set.
+                // The positional form has no flags. (frankenredis-fnflagstore)
+                let flags = if let Some(start) = trimmed.find("register_function") {
+                    let after_call = &trimmed[start + "register_function".len()..];
+                    let trimmed_after = after_call.trim_start();
+                    if trimmed_after.starts_with('{') {
+                        let body = &trimmed_after[1..];
+                        if let Some(value) = extract_table_value_raw(body, "flags") {
+                            extract_flag_strings(value.trim_start())
+                        } else {
+                            Vec::new()
+                        }
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
                 functions.push(FunctionEntry {
                     name,
                     description,
-                    flags: Vec::new(),
+                    flags,
                 });
             }
         }
@@ -18555,6 +18576,52 @@ mod tests {
             err,
             StoreError::GenericError("ERR No functions registered".to_string())
         );
+    }
+
+    #[test]
+    fn function_load_table_form_captures_flags_into_function_entry() {
+        // FCALL_RO dispatch and FUNCTION LIST output both depend on
+        // the flags array on FunctionEntry. fr previously validated
+        // table-form flags but always pushed an empty Vec, so
+        // FCALL_RO could never succeed against a function declared
+        // with flags={'no-writes'} — the no-writes lookup at the
+        // FCALL_RO gate always returned false. (frankenredis-fnflagstore)
+        let mut store = Store::new();
+        let code = b"#!lua name=lib_nw\n\
+                     redis.register_function{function_name='nw_get', callback=function() return 1 end, flags={'no-writes'}}";
+        store.function_load(code, false).expect("library must load");
+        let lib = store
+            .function_libraries
+            .get("lib_nw")
+            .expect("library present");
+        assert_eq!(lib.functions.len(), 1);
+        assert_eq!(lib.functions[0].name, "nw_get");
+        assert_eq!(lib.functions[0].flags, vec!["no-writes".to_string()]);
+
+        // Multi-flag table preserves order and content.
+        let mut s2 = Store::new();
+        let code2 = b"#!lua name=lib_multi\n\
+                      redis.register_function{function_name='f', callback=function() return 1 end, flags={'no-writes', 'allow-stale'}}";
+        s2.function_load(code2, false).expect("multi-flag library must load");
+        let lib2 = s2
+            .function_libraries
+            .get("lib_multi")
+            .expect("multi-flag library present");
+        assert_eq!(
+            lib2.functions[0].flags,
+            vec!["no-writes".to_string(), "allow-stale".to_string()]
+        );
+
+        // No flags field → flags vec is empty.
+        let mut s3 = Store::new();
+        let code3 = b"#!lua name=lib_none\n\
+                      redis.register_function{function_name='f', callback=function() return 1 end}";
+        s3.function_load(code3, false).expect("flagless library must load");
+        let lib3 = s3
+            .function_libraries
+            .get("lib_none")
+            .expect("flagless library present");
+        assert!(lib3.functions[0].flags.is_empty());
     }
 
     #[test]
