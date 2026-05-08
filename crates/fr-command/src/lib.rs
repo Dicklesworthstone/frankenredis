@@ -19076,9 +19076,34 @@ fn bitfield_cmd(
                 }
             };
             let value = parse_i64_arg(&argv[i + 3])?;
-            let clamped = bitfield_clamp(value, bits, signed, overflow_mode);
-            // For SET, overflow FAIL still writes (SET always succeeds per Redis behavior),
-            // but we truncate/wrap as needed
+            // Mirror upstream bitops.c::bitfieldCommand SET path:
+            //   newval = thisop->i64;
+            //   overflow = checkUnsignedBitfieldOverflow(newval, 0, bits, owtype, &wrapped);
+            //                  ^ for unsigned, newval (int64_t) is read as uint64_t, so a
+            //   negative i64 becomes UINT64_MAX which exceeds max → positive-overflow path,
+            //   SAT clamps to MAX (255 for u8), not 0. fr was funneling all SET-paths through
+            //   bitfield_clamp_with_overflow with i64_overflowed=false, hitting the
+            //   `value < 0 → (0, true)` branch that's only correct for INCRBY underflow.
+            // Signal the positive-overflow case via the existing i64_overflowed hint so the
+            // unsigned-SAT branch returns max (matches upstream).
+            // Also: upstream's SET path with FAIL overflow returns nil and does NOT write
+            //   `if (!(overflow && owtype == BFOVERFLOW_FAIL)) { addReply; setUnsignedBitfield; }`
+            // fr was writing the wrap value and returning Integer(0) regardless; switch to
+            // returning BulkString(None) without touching the store under FAIL-on-overflow.
+            // (frankenredis-bfsetovrflw)
+            let trigger_pos_overflow = !signed && value < 0;
+            let (clamped, overflowed) = bitfield_clamp_with_overflow(
+                value,
+                trigger_pos_overflow,
+                bits,
+                signed,
+                overflow_mode,
+            );
+            if overflowed && overflow_mode == BitfieldOverflow::Fail {
+                results.push(RespFrame::BulkString(None));
+                i += 4;
+                continue;
+            }
             let old = store
                 .bitfield_set(key, bit_offset, bits, clamped, now_ms)
                 .map_err(CommandError::Store)?;
@@ -43580,6 +43605,200 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(250)])));
+    }
+
+    #[test]
+    fn bitfield_set_overflow_fail_returns_nil_and_sat_unsigned_negative_clamps_to_max() {
+        // Pins frankenredis-bfsetovrflw. Two upstream-divergent paths in
+        // BITFIELD SET caught by differential probe vs vendored 7.2.4:
+        //   1. SAT SET u8 0 -1: upstream casts the i64 input to uint64_t in
+        //      checkUnsignedBitfieldOverflow, so -1 becomes UINT64_MAX which
+        //      exceeds max → positive-overflow path → SAT clamps to MAX (255).
+        //      fr was clamping to 0 (the underflow path that's only correct
+        //      for INCRBY, not SET).
+        //   2. FAIL SET on overflow: upstream returns nil and does NOT write
+        //      ('if (!(overflow && owtype==FAIL)) { setUnsignedBitfield; ...}').
+        //      fr was writing the wrap value and returning Integer(0).
+
+        // Case 1: SAT SET u8 0 -1 → byte 0 = 255 (clamped to MAX).
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"OVERFLOW".to_vec(),
+                b"SAT".to_vec(),
+                b"SET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // Returns the previous byte (0 — fresh string, but BITFIELD on a
+        // missing key auto-zero-pads, so previous u8 at offset 0 is 0).
+        assert_eq!(out, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
+        let read = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"GET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            read,
+            RespFrame::Array(Some(vec![RespFrame::Integer(255)])),
+            "SAT SET u8 0 -1 should clamp to MAX (255) per upstream"
+        );
+
+        // Case 2a: FAIL SET u8 0 -1 → returns nil, byte 0 stays 0.
+        let mut store2 = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"OVERFLOW".to_vec(),
+                b"FAIL".to_vec(),
+                b"SET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store2,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(None)])),
+            "FAIL SET u8 0 -1 should return nil per upstream"
+        );
+        let read = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"GET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store2,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            read,
+            RespFrame::Array(Some(vec![RespFrame::Integer(0)])),
+            "FAIL SET u8 0 -1 must NOT write (byte stays 0)"
+        );
+
+        // Case 2b: FAIL SET u8 0 1000 (positive overflow) → nil, no write.
+        let mut store3 = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"OVERFLOW".to_vec(),
+                b"FAIL".to_vec(),
+                b"SET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"1000".to_vec(),
+            ],
+            &mut store3,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(None)])),
+            "FAIL SET u8 0 1000 should return nil per upstream"
+        );
+
+        // Case 2c: FAIL SET i8 0 -200 (signed negative overflow) → nil.
+        let mut store4 = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"OVERFLOW".to_vec(),
+                b"FAIL".to_vec(),
+                b"SET".to_vec(),
+                b"i8".to_vec(),
+                b"0".to_vec(),
+                b"-200".to_vec(),
+            ],
+            &mut store4,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(None)])),
+            "FAIL SET i8 0 -200 should return nil per upstream"
+        );
+
+        // Regression: WRAP SET u8 0 -1 still wraps to 255 (no behavior
+        // change for the WRAP case).
+        let mut store5 = Store::new();
+        dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"OVERFLOW".to_vec(),
+                b"WRAP".to_vec(),
+                b"SET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store5,
+            0,
+        )
+        .unwrap();
+        let read = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"GET".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store5,
+            0,
+        )
+        .unwrap();
+        assert_eq!(read, RespFrame::Array(Some(vec![RespFrame::Integer(255)])));
+
+        // Regression: INCRBY u8 0 -1 from 0 under SAT still clamps to 0
+        // (true underflow, distinct from the SET case fixed above).
+        let mut store6 = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"BITFIELD".to_vec(),
+                b"bf".to_vec(),
+                b"OVERFLOW".to_vec(),
+                b"SAT".to_vec(),
+                b"INCRBY".to_vec(),
+                b"u8".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store6,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::Integer(0)])),
+            "SAT INCRBY u8 0 -1 from 0 should still clamp to 0 (true underflow)"
+        );
     }
 
     #[test]
