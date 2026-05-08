@@ -615,11 +615,17 @@ fn command_key_references(
         return Err(CommandKeyLookupError::InvalidCommand);
     };
 
-    if check_command_arity(raw_cmd, argv.len()).is_err() {
-        return Err(CommandKeyLookupError::InvalidNumberOfArguments);
-    }
+    // Upstream COMMAND GETKEYS surfaces "no key arguments" before any arity
+    // error: getKeysFromCommandWithSpecs() in commands.def first inspects the
+    // command's key spec count, and only commands with >=1 key spec ever reach
+    // the arity branch. Mirror that ordering so no-key commands (PUBLISH,
+    // SUBSCRIBE, WAIT, ...) report "no key arguments" regardless of how many
+    // args followed. (br-frankenredis-getkeysorder)
     if !command_has_keys(table_name) {
         return Err(CommandKeyLookupError::NoKeyArguments);
+    }
+    if check_command_arity(raw_cmd, argv.len()).is_err() {
+        return Err(CommandKeyLookupError::InvalidNumberOfArguments);
     }
     if let Some(exact_refs) = command_key_references_with_exact_flags(table_name, argv)? {
         return Ok(exact_refs);
@@ -48251,6 +48257,74 @@ mod tests {
         // arity check. Just assert it doesn't crash and surfaces an
         // error.
         assert!(matches!(out, Ok(RespFrame::Error(_)) | Err(_)));
+    }
+
+    #[test]
+    fn command_getkeys_no_key_commands_report_no_keys_before_arity() {
+        // Pins frankenredis-getkeysorder. Upstream getKeysFromCommandWithSpecs
+        // (commands.def) inspects the command's key spec count first, so
+        // commands with zero key specs (PUBLISH, SUBSCRIBE, WAIT, ...) report
+        // "no key arguments" regardless of whether the trailing argv would
+        // satisfy the wrapped command's own arity. fr previously evaluated
+        // arity first, so under-arity calls of no-key commands surfaced
+        // "Invalid number of arguments specified for command" instead.
+        let mut store = Store::new();
+        let probes: &[&[&[u8]]] = &[
+            &[b"COMMAND", b"GETKEYS", b"PUBLISH"],
+            &[b"COMMAND", b"GETKEYS", b"SUBSCRIBE"],
+            &[b"COMMAND", b"GETKEYS", b"UNSUBSCRIBE"],
+            &[b"COMMAND", b"GETKEYS", b"WAIT"],
+            &[b"COMMAND", b"GETKEYS", b"PING"],
+            &[b"COMMAND", b"GETKEYSANDFLAGS", b"PUBLISH"],
+            &[b"COMMAND", b"GETKEYSANDFLAGS", b"WAIT"],
+        ];
+        for argv in probes {
+            let owned: Vec<Vec<u8>> = argv.iter().map(|a| a.to_vec()).collect();
+            let frame = dispatch_argv(&owned, &mut store, 0).expect("dispatch");
+            match frame {
+                RespFrame::Error(msg) => assert_eq!(
+                    msg, "ERR The command has no key arguments",
+                    "unexpected error wording for {:?}", argv,
+                ),
+                other => panic!("expected error frame for {:?}, got {:?}", argv, other),
+            }
+        }
+
+        // Sanity: a no-key command with extra (irrelevant) argv still reports
+        // "no key arguments" — the order swap must not regress the case where
+        // arity *does* pass.
+        let frame = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"PUBLISH".to_vec(),
+                b"channel".to_vec(),
+                b"msg".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("PUBLISH full-arity");
+        assert_eq!(
+            frame,
+            RespFrame::Error("ERR The command has no key arguments".to_string()),
+        );
+
+        // Sanity: a *keyed* command with under-arity still surfaces the arity
+        // wording (vendored: "Invalid number of arguments specified for
+        // command"). The swap only affects no-key commands.
+        let frame = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"GETKEYS".to_vec(), b"SET".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("SET under-arity");
+        assert_eq!(
+            frame,
+            RespFrame::Error(
+                "ERR Invalid number of arguments specified for command".to_string()
+            ),
+        );
     }
 
     #[test]

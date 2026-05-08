@@ -206,6 +206,7 @@ dependencies = [
  "fr-store",
  "proptest",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]
