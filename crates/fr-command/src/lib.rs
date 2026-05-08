@@ -4417,10 +4417,19 @@ fn zrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            limit_offset = Some(
-                usize::try_from(parse_u64_arg(&argv[i + 1])?)
-                    .map_err(|_| CommandError::InvalidInteger)?,
-            );
+            // Upstream t_zset.c::zrangeGenericCommand parses LIMIT
+            // offset via getLongFromObjectOrReply (accepts any long,
+            // including negatives) and only validates the BYSCORE/BYLEX
+            // pairing AFTER the parse loop completes. A negative offset
+            // is then carried into genericZrangebyscoreCommand which
+            // short-circuits to empty via 'if (offset >= ll) goto cleanup'
+            // never firing for offset<0 — but `if (limit == 0) break`
+            // does fire on the clamped count, so the result is empty.
+            // Use parse_limit_offset_arg (returns usize::MAX for
+            // negative input) so .skip(usize::MAX) produces the same
+            // empty result, and the dependency check below still wins
+            // for the no-BYSCORE-no-BYLEX path. (frankenredis-zrnegoff)
+            limit_offset = Some(parse_limit_offset_arg(&argv[i + 1])?);
             limit_count = parse_limit_count_arg(&argv[i + 2])?;
             i += 3;
         } else {
@@ -9120,10 +9129,12 @@ fn zrangestore_cmd(
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            limit_offset = Some(
-                usize::try_from(parse_u64_arg(&argv[i + 1])?)
-                    .map_err(|_| CommandError::InvalidInteger)?,
-            );
+            // Same parse-order discipline as the ZRANGE generic above:
+            // upstream t_zset.c::zrangeGenericCommand (called by
+            // ZRANGESTORE via the shared ZRangeArgs path) parses the
+            // LIMIT offset as a long and defers BYSCORE/BYLEX-pairing
+            // validation to a post-loop check. (frankenredis-zrnegoff)
+            limit_offset = Some(parse_limit_offset_arg(&argv[i + 1])?);
             limit_count = parse_limit_count_arg(&argv[i + 2])?;
             i += 3;
         } else {
@@ -37907,6 +37918,182 @@ mod tests {
         assert_eq!(
             got,
             "ERR min or max not valid string range item".to_string()
+        );
+    }
+
+    #[test]
+    fn zrange_zrangestore_limit_negative_offset_defers_to_dependency_check_or_empties() {
+        // Pins frankenredis-zrnegoff. Upstream t_zset.c::zrangeGenericCommand
+        // parses LIMIT offset as a long via getLongFromObjectOrReply, so a
+        // negative offset is accepted; the BYSCORE/BYLEX-pairing check runs
+        // AFTER the parse loop. Pre-fix fr called parse_u64_arg on the
+        // offset and rejected with 'value is not an integer or out of
+        // range' before reaching the dependency check, masking upstream's
+        // verbose 'LIMIT is only supported in combination with BYSCORE/BYLEX'
+        // wording for the no-shape path and erroring instead of returning
+        // empty for the BYSCORE-with-negative-offset path.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        // ZRANGE z 0 -1 LIMIT -1 0  (no BYSCORE/BYLEX) → upstream's LIMIT-
+        // requires-shape error wording, not the integer-parse error.
+        let zrange_no_shape = dispatch_argv(
+            &[
+                b"ZRANGE".to_vec(),
+                b"z".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"LIMIT".to_vec(),
+                b"-1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        );
+        let got = match zrange_no_shape {
+            Ok(RespFrame::Error(s)) => s,
+            Err(e) => match e.to_resp() {
+                RespFrame::Error(s) => s,
+                other => panic!("expected error frame, got {other:?}"),
+            },
+            other => panic!("expected error, got {other:?}"),
+        };
+        assert_eq!(
+            got,
+            "ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX"
+                .to_string()
+        );
+
+        // ZRANGE z 0 +inf BYSCORE LIMIT -1 0  → upstream's negative-offset
+        // path produces an empty array (offset >= ll never fires for
+        // negative offset, but the limit==0 break still does). fr's
+        // .skip(usize::MAX) yields the same empty result.
+        let zrange_byscore_neg = dispatch_argv(
+            &[
+                b"ZRANGE".to_vec(),
+                b"z".to_vec(),
+                b"0".to_vec(),
+                b"+inf".to_vec(),
+                b"BYSCORE".to_vec(),
+                b"LIMIT".to_vec(),
+                b"-1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zrange byscore limit -1 0");
+        assert_eq!(zrange_byscore_neg, RespFrame::Array(Some(Vec::new())));
+
+        // ZRANGESTORE dst z 0 -1 LIMIT -1 0  → same dependency-check error.
+        let zrs_no_shape = dispatch_argv(
+            &[
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"z".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"LIMIT".to_vec(),
+                b"-1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        );
+        let got = match zrs_no_shape {
+            Ok(RespFrame::Error(s)) => s,
+            Err(e) => match e.to_resp() {
+                RespFrame::Error(s) => s,
+                other => panic!("expected error frame, got {other:?}"),
+            },
+            other => panic!("expected error, got {other:?}"),
+        };
+        assert_eq!(
+            got,
+            "ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX"
+                .to_string()
+        );
+
+        // ZRANGESTORE dst z 0 +inf BYSCORE LIMIT -1 0  → empty result, dst
+        // is deleted (count = 0).
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"dst".to_vec(),
+                b"99".to_vec(),
+                b"z".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let zrs_byscore_neg = dispatch_argv(
+            &[
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"z".to_vec(),
+                b"0".to_vec(),
+                b"+inf".to_vec(),
+                b"BYSCORE".to_vec(),
+                b"LIMIT".to_vec(),
+                b"-1".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zrangestore byscore limit -1 0");
+        assert_eq!(zrs_byscore_neg, RespFrame::Integer(0));
+        // dst should now be deleted (empty pairs branch in zrangestore_cmd).
+        let exists_dst = dispatch_argv(
+            &[b"EXISTS".to_vec(), b"dst".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("exists dst");
+        assert_eq!(exists_dst, RespFrame::Integer(0));
+
+        // Regression: positive LIMIT 0 5 without BYSCORE/BYLEX still
+        // surfaces the same dependency-check error (no behavior change).
+        let zrange_pos_no_shape = dispatch_argv(
+            &[
+                b"ZRANGE".to_vec(),
+                b"z".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"LIMIT".to_vec(),
+                b"0".to_vec(),
+                b"5".to_vec(),
+            ],
+            &mut store,
+            0,
+        );
+        let got = match zrange_pos_no_shape {
+            Ok(RespFrame::Error(s)) => s,
+            Err(e) => match e.to_resp() {
+                RespFrame::Error(s) => s,
+                other => panic!("expected error frame, got {other:?}"),
+            },
+            other => panic!("expected error, got {other:?}"),
+        };
+        assert_eq!(
+            got,
+            "ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX"
+                .to_string()
         );
     }
 
