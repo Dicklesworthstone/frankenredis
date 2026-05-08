@@ -10247,6 +10247,22 @@ fn setrange(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
             "ERR offset is out of range".to_string(),
         ));
     }
+    // (frankenredis-setrangeorder) Mirror upstream
+    // t_string.c::setrangeCommand ordering:
+    //   1. parse offset
+    //   2. negative offset rejected
+    //   3. lookupKeyWrite + checkType(OBJ_STRING) -> WRONGTYPE
+    //   4. empty value short-circuit
+    //   5. checkStringLength
+    // fr previously fired the size check (step 5) before the type
+    // check (step 3) for non-empty values, so a probe like
+    // `LPUSH listk a; SETRANGE listk 600000000 v` returned the
+    // size-limit error instead of WRONGTYPE.
+    if let Some(t) = store.key_type(&argv[1], now_ms)
+        && t != "string"
+    {
+        return Err(CommandError::Store(StoreError::WrongType));
+    }
     let offset_u64 = u64::try_from(offset).map_err(|_| CommandError::InvalidInteger)?;
     let added_len = argv[3].len();
     // (frankenredis-23ngn) Upstream t_string.c::setrangeCommand
@@ -32757,6 +32773,54 @@ mod tests {
         )
         .expect_err("non-string + empty value must WRONGTYPE");
         assert_eq!(err, CommandError::Store(StoreError::WrongType));
+    }
+
+    /// (frankenredis-setrangeorder) Upstream t_string.c::setrangeCommand
+    /// runs the type check before the size check, so SETRANGE on a
+    /// list/hash/set key with a huge offset surfaces WRONGTYPE rather
+    /// than the size-limit error. Pinned vs vendored Redis 7.2.4:
+    ///   LPUSH listk a; SETRANGE listk 600000000 v -> WRONGTYPE
+    #[test]
+    fn setrange_wrongtype_check_precedes_size_check() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"LPUSH".to_vec(), b"listk".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("LPUSH listk a");
+        let err = dispatch_argv(
+            &[
+                b"SETRANGE".to_vec(),
+                b"listk".to_vec(),
+                b"600000000".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("SETRANGE on list w/ huge offset must surface WRONGTYPE before size check");
+        assert_eq!(err, CommandError::Store(StoreError::WrongType));
+
+        // Missing key with same huge offset must still hit the size
+        // limit (preserves existing 23ngn invariant).
+        let r = dispatch_argv(
+            &[
+                b"SETRANGE".to_vec(),
+                b"nonex".to_vec(),
+                b"600000000".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("SETRANGE missing key + size-violation");
+        assert_eq!(
+            r,
+            RespFrame::Error(
+                "ERR string exceeds maximum allowed size (proto-max-bulk-len)".to_string()
+            )
+        );
     }
 
     #[test]
