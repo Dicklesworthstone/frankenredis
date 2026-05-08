@@ -10125,8 +10125,17 @@ fn sdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
 }
 
 fn spop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() < 2 || argv.len() > 3 {
+    if argv.len() < 2 {
         return Err(CommandError::WrongArity("SPOP"));
+    }
+    // Upstream commands.def declares SPOP with arity = -2 and
+    // t_set.c::spopCommand:974-977 emits `addReplyErrorObject(
+    // c, shared.syntaxerr)` when argc > 3. fr previously rejected
+    // those calls with the table-level
+    // 'wrong number of arguments for spop command' wording.
+    // (frankenredis-spopary)
+    if argv.len() > 3 {
+        return Err(CommandError::SyntaxError);
     }
     if argv.len() == 3 {
         // Upstream t_set.c::spopCommand uses the
@@ -50597,6 +50606,38 @@ mod tests {
                 err,
                 CommandError::Custom("ERR value is out of range, must be positive".to_string())
             );
+        }
+    }
+
+    #[test]
+    fn spop_extra_args_after_count_use_handler_syntax_error_not_table_arity() {
+        // (frankenredis-spopary) Upstream commands.def declares SPOP
+        // with arity = -2 and t_set.c::spopCommand:974-977 maps argc>3
+        // to `addReplyErrorObject(c, shared.syntaxerr)`. fr previously
+        // rejected those at the table-level WrongArity check, so a
+        // probe like `SPOP s 2 extra` returned
+        //   ERR wrong number of arguments for 'spop' command
+        // instead of upstream's
+        //   ERR syntax error
+        // Differential probe vs vendored Redis 7.2.4 confirmed the
+        // syntax-error wording (matching SRANDMEMBER's existing
+        // br-frankenredis-randextra pattern).
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SADD".to_vec(), b"s".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("SADD seed");
+
+        for trailing in [
+            vec![b"2".to_vec(), b"extra".to_vec()],
+            vec![b"2".to_vec(), b"a".to_vec(), b"b".to_vec()],
+        ] {
+            let mut argv = vec![b"SPOP".to_vec(), b"s".to_vec()];
+            argv.extend(trailing);
+            let err = dispatch_argv(&argv, &mut store, 1).expect_err("SPOP extra args");
+            assert_eq!(err, CommandError::SyntaxError, "argv={argv:?}");
         }
     }
 
