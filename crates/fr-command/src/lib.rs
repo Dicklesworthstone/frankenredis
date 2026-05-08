@@ -17896,14 +17896,36 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         if argv.len() < 3 || argv.len() > 5 {
             return Err(debug_subcommand_envelope_error(sub));
         }
-        let count = parse_i64_arg(&argv[2])?;
+        // Upstream debug.c::debugCommand:713,721 parses both
+        // <count> and <size> via getPositiveLongFromObjectOrReply
+        // (NULL msg), which emits the canonical
+        // "value is out of range, must be positive" wording for
+        // BOTH unparseable input and non-positive values. fr was
+        // using parse_i64_arg, so negative counts iterated 0 times
+        // and silently OK'd, and bad-parse cases surfaced
+        // 'value is not an integer or out of range' — both diverge
+        // from upstream. (frankenredis-dbgpop)
+        let positive_arg = |arg: &[u8]| -> Result<i64, CommandError> {
+            let val = parse_i64_arg(arg).map_err(|_| {
+                CommandError::Custom(
+                    "ERR value is out of range, must be positive".to_string(),
+                )
+            })?;
+            if val < 0 {
+                return Err(CommandError::Custom(
+                    "ERR value is out of range, must be positive".to_string(),
+                ));
+            }
+            Ok(val)
+        };
+        let count = positive_arg(&argv[2])?;
         let prefix = if argv.len() >= 4 {
             std::str::from_utf8(&argv[3]).map_err(|_| CommandError::InvalidUtf8Argument)?
         } else {
             "key:"
         };
         let size = if argv.len() == 5 {
-            parse_i64_arg(&argv[4])? as usize
+            positive_arg(&argv[4])? as usize
         } else {
             0
         };
@@ -33901,6 +33923,71 @@ mod tests {
     }
 
     #[test]
+    fn debug_populate_rejects_non_positive_count_and_size_with_upstream_wording() {
+        // (frankenredis-dbgpop) Upstream debug.c::debugCommand:707-723
+        // parses both <count> and <size> via
+        // getPositiveLongFromObjectOrReply with NULL msg, so the
+        // canonical "value is out of range, must be positive" reply
+        // covers BOTH unparseable input and non-positive values. fr's
+        // POPULATE branch was using parse_i64_arg, so negative counts
+        // silently iterated 0 times (returning OK) and bad-parse
+        // cases surfaced "value is not an integer or out of range".
+        let mut store = Store::new();
+        let want = "ERR value is out of range, must be positive";
+
+        // <count> must be parseable AND non-negative.
+        for bad_count in [b"-1".as_slice(), b"-100", b"abc"] {
+            let err = dispatch_argv(
+                &[
+                    b"DEBUG".to_vec(),
+                    b"POPULATE".to_vec(),
+                    bad_count.to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect_err("DEBUG POPULATE bad count must error");
+            assert_eq!(
+                err,
+                CommandError::Custom(want.to_string()),
+                "count={:?}",
+                String::from_utf8_lossy(bad_count)
+            );
+        }
+
+        // Same wording when the bad value lands in the <size> slot
+        // (fourth argument).
+        for bad_size in [b"-1".as_slice(), b"abc"] {
+            let err = dispatch_argv(
+                &[
+                    b"DEBUG".to_vec(),
+                    b"POPULATE".to_vec(),
+                    b"5".to_vec(),
+                    b"pre:".to_vec(),
+                    bad_size.to_vec(),
+                ],
+                &mut store,
+                1,
+            )
+            .expect_err("DEBUG POPULATE bad size must error");
+            assert_eq!(
+                err,
+                CommandError::Custom(want.to_string()),
+                "size={:?}",
+                String::from_utf8_lossy(bad_size)
+            );
+        }
+
+        // Sanity: count = 0 still succeeds (no iteration).
+        dispatch_argv(
+            &[b"DEBUG".to_vec(), b"POPULATE".to_vec(), b"0".to_vec()],
+            &mut store,
+            2,
+        )
+        .expect("DEBUG POPULATE 0 must succeed");
+    }
+
+    #[test]
     fn debug_digest_empty_db() {
         let mut store = Store::new();
         let digest = dispatch_argv(&[b"DEBUG".to_vec(), b"DIGEST".to_vec()], &mut store, 0)
@@ -39865,7 +39952,10 @@ mod tests {
             (b"stringmatch-len extra", "stringmatch-len"),
             (b"stringmatch-test extra", "stringmatch-test"),
             (b"change-repl-id extra", "change-repl-id"),
-            (b"digest-value", "digest-value"),
+            // (frankenredis-dbgdigvempty) DEBUG DIGEST-VALUE accepts
+            // any argc >= 2 (extra args are treated as keys), so it
+            // can no longer trigger the envelope error and is no
+            // longer pinned in this case-preservation sweep.
         ];
         for (token, expected_in_msg) in cases {
             let argv = if token.contains(&b' ') {
