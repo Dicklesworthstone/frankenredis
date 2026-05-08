@@ -17914,11 +17914,17 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("HELP") {
+        // Upstream debug.c::debugCommand:391 gates HELP on
+        // `c->argc == 2 && !strcasecmp(argv[1]->ptr,"help")`. When
+        // argc > 2 the help branch is skipped, no other arm matches
+        // "help", and execution falls through to
+        // addReplySubcommandSyntaxError at line 1046, which emits
+        // "ERR unknown subcommand or wrong number of arguments for
+        // 'HELP'. Try DEBUG HELP." — the envelope wording, NOT the
+        // table-level "wrong number of arguments for 'debug|help'
+        // command" that fr previously surfaced. (frankenredis-dbghelp)
         if argv.len() != 2 {
-            return Err(CommandError::WrongSubcommandArity {
-                command: "DEBUG",
-                subcommand: "HELP".to_string(),
-            });
+            return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::Array(Some(vec![
             hello_simple("DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
@@ -39640,6 +39646,33 @@ mod tests {
             items.last(),
             Some(&RespFrame::SimpleString("    Print this help.".to_string())),
             "{items:?}"
+        );
+    }
+
+    #[test]
+    fn debug_help_with_extra_args_uses_subcommand_envelope_error() {
+        // (frankenredis-dbghelp) Upstream debug.c::debugCommand:391
+        // gates the help branch on `argc == 2 && !strcasecmp(argv[1],
+        // "help")`. With argc > 2 the help branch is skipped and
+        // execution falls through to addReplySubcommandSyntaxError at
+        // debug.c:1046, which emits the
+        // "unknown subcommand or wrong number of arguments for 'HELP'.
+        // Try DEBUG HELP." envelope — NOT the table-level
+        // 'wrong number of arguments for debug|help' wording that fr
+        // previously surfaced for the rest of the container HELPs.
+        let mut store = Store::new();
+        let err = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"HELP".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("debug help extra");
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR unknown subcommand or wrong number of arguments for 'HELP'. Try DEBUG HELP."
+                    .to_string()
+            )
         );
     }
 
