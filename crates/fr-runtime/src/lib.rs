@@ -12223,7 +12223,17 @@ fn digest_bytes(bytes: &[u8]) -> String {
 /// An empty digit run is treated as 0 (memtoull copies 0 digits
 /// into its scratch buffer, which strtoull parses as 0 cleanly),
 /// so a bare suffix like "kb" or empty input both yield 0.
-/// (br-frankenredis-ky4n + frankenredis-memtu)
+///
+/// Upstream's memtoull does NOT check `errno == ERANGE` after its
+/// `strtoull` call — the only failure modes it gates on are EINVAL
+/// (non-numeric prefix) and trailing non-digit chars. So a digit
+/// run that overflows u64 silently saturates to ULLONG_MAX, and
+/// the subsequent `val * mul` wraps modulo 2^64. To stay byte-for-
+/// byte compatible (e.g. `9999999999999999999999gb` → 18446744072
+/// 635809792, the exact value vendored Redis 7.2.4 returns from
+/// CONFIG GET maxmemory) we saturate the digit parse on overflow
+/// and use wrapping_mul rather than checked_mul.
+/// (br-frankenredis-ky4n + frankenredis-memtu + frankenredis-cfgmemovf)
 fn parse_memory_size_arg(arg: &[u8]) -> Result<u64, ()> {
     let text = std::str::from_utf8(arg).map_err(|_| ())?;
     if text.starts_with('-') {
@@ -12246,9 +12256,12 @@ fn parse_memory_size_arg(arg: &[u8]) -> Result<u64, ()> {
     let val: u64 = if digits.is_empty() {
         0
     } else {
-        digits.parse().map_err(|_| ())?
+        // Mirror strtoull's ULLONG_MAX-on-ERANGE saturation; upstream
+        // doesn't check errno after the call, so an overflowing digit
+        // run is silently accepted as ULLONG_MAX.
+        digits.parse().unwrap_or(u64::MAX)
     };
-    val.checked_mul(mul).ok_or(())
+    Ok(val.wrapping_mul(mul))
 }
 
 /// Mirror the canonical Redis 7.2 ACL category names accepted by
@@ -20380,6 +20393,88 @@ mod tests {
                 *expected_bytes
             );
         }
+    }
+
+    #[test]
+    fn config_set_maxmemory_silently_saturates_on_strtoull_overflow() {
+        // (frankenredis-cfgmemovf) Upstream util.c::memtoull calls
+        // strtoull and only fails on EINVAL or trailing non-digit
+        // chars — ERANGE is silently accepted, so an overflowing
+        // digit run becomes ULLONG_MAX and the subsequent val*mul
+        // wraps modulo 2^64. fr was rejecting overflow at the
+        // digits.parse step and again at checked_mul, surfacing
+        // 'argument must be a memory value' for inputs that
+        // vendored 7.2.4 happily accepts. Match the wrap-around
+        // value byte-for-byte.
+        let mut rt = Runtime::default_strict();
+
+        // Digit overflow + gb suffix: matches vendored output.
+        // u64::MAX.wrapping_mul(1024^3) == 18446744072635809792.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"maxmemory",
+                    b"9999999999999999999999gb",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"maxmemory"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"maxmemory".to_vec())),
+                RespFrame::BulkString(Some(b"18446744072635809792".to_vec())),
+            ]))
+        );
+
+        // No-suffix overflow: digits saturate to u64::MAX, mul=1
+        // leaves the value at u64::MAX = 18446744073709551615.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CONFIG",
+                    b"SET",
+                    b"maxmemory",
+                    b"99999999999999999999",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"maxmemory"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"maxmemory".to_vec())),
+                RespFrame::BulkString(Some(b"18446744073709551615".to_vec())),
+            ]))
+        );
+
+        // Negative still rejected (memtoull returns err on '-' prefix).
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"maxmemory", b"-1"]),
+                0,
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'maxmemory') - argument must be a memory value"
+                    .to_string()
+            )
+        );
+
+        // Unknown suffix still rejected (memtoull's else branch).
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"maxmemory", b"5xb"]),
+                0,
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'maxmemory') - argument must be a memory value"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
