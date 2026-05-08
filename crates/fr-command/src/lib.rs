@@ -14409,6 +14409,20 @@ fn is_key_argument_position(
 
 fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
     let flag_list: Vec<&str> = flags.split_whitespace().collect();
+    // (frankenredis-cmddocgrp) Differential probe vs vendored 7.2.4
+    // exposed several mis-classifications driven by name.starts_with('s'):
+    //   SET / SETEX / SETNX / SETRANGE / STRLEN / SUBSTR were "set" in fr,
+    //     "string" upstream;
+    //   SETBIT was "set" in fr, "bitmap" upstream (the
+    //     `name.starts_with("bit")` arm came AFTER the s-prefix arm so
+    //     never fired for setbit);
+    //   SELECT was "generic" in fr, "connection" upstream;
+    //   SWAPDB was "generic" in fr, "server" upstream;
+    //   SENTINEL is intentionally not enumerated upstream (returns no
+    //     COMMAND DOCS entry), so dropping it from the server list is
+    //     wire-compatible.
+    // Enumerate the affected commands explicitly BEFORE the prefix
+    // heuristics so each lands in the correct upstream group.
     if flag_list.contains(&"pubsub") {
         "pubsub"
     } else if flag_list.contains(&"scripting") {
@@ -14417,7 +14431,7 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
         "transactions"
     } else if matches!(
         name,
-        "auth" | "hello" | "quit" | "reset" | "client" | "echo" | "ping"
+        "auth" | "hello" | "quit" | "reset" | "client" | "echo" | "ping" | "select"
     ) {
         "connection"
     } else if matches!(name, "cluster" | "asking" | "readonly" | "readwrite") {
@@ -14439,7 +14453,6 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
             | "info"
             | "command"
             | "module"
-            | "sentinel"
             | "failover"
             | "replconf"
             | "psync"
@@ -14448,6 +14461,7 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
             | "slaveof"
             | "wait"
             | "waitaof"
+            | "swapdb"
     ) {
         "server"
     } else if matches!(
@@ -14480,10 +14494,19 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
             | "memory"
             | "flushdb"
             | "flushall"
-            | "select"
-            | "swapdb"
     ) {
         "generic"
+    } else if matches!(
+        name,
+        "set" | "setex" | "setnx" | "setrange" | "strlen" | "substr"
+    ) {
+        // s-prefix string commands — must come before the s-prefix→set
+        // heuristic below.
+        "string"
+    } else if matches!(name, "setbit" | "getbit") || name.starts_with("bit") {
+        // Likewise setbit must beat the s-prefix arm, and getbit needs
+        // an explicit match because it doesn't start with "bit".
+        "bitmap"
     } else if name.starts_with('h') {
         "hash"
     } else if name.starts_with('l')
@@ -14500,8 +14523,6 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
         "geo"
     } else if name.starts_with("pf") {
         "hyperloglog"
-    } else if name.starts_with("bit") || matches!(name, "setbit" | "getbit") {
-        "bitmap"
     } else {
         "string"
     }
@@ -47910,6 +47931,104 @@ mod tests {
         assert_eq!(kv(b"since"), Some(&b"1.0.0"[..]));
         assert_eq!(kv(b"complexity"), Some(&b"O(1)"[..]));
         assert_eq!(kv(b"group"), Some(&b"string"[..]));
+    }
+
+    #[test]
+    fn command_docs_group_classification_matches_upstream() {
+        // Pins frankenredis-cmddocgrp. Differential probe vs vendored
+        // 7.2.4 caught several misclassifications driven by the
+        // `name.starts_with('s') → "set"` heuristic running before any
+        // explicit name match for the s-prefix string and bitmap
+        // commands. Also fixes SELECT / SWAPDB placement.
+        fn group_for(store: &mut Store, name: &[u8]) -> Vec<u8> {
+            let out = dispatch_argv(
+                &[b"COMMAND".to_vec(), b"DOCS".to_vec(), name.to_vec()],
+                store,
+                0,
+            )
+            .unwrap();
+            let RespFrame::Array(Some(entries)) = out else {
+                panic!("expected docs array")
+            };
+            let RespFrame::Array(Some(fields)) = &entries[1] else {
+                panic!("expected doc fields array")
+            };
+            for chunk in fields.chunks(2) {
+                if let [
+                    RespFrame::BulkString(Some(k)),
+                    RespFrame::BulkString(Some(v)),
+                ] = chunk
+                    && k.as_slice() == b"group"
+                {
+                    return v.clone();
+                }
+            }
+            panic!("group field missing for {:?}", String::from_utf8_lossy(name));
+        }
+
+        let mut store = Store::new();
+
+        // s-prefix string commands (previously fell into the s-prefix
+        // → "set" arm).
+        for name in [b"SET".as_slice(), b"SETEX", b"SETNX", b"SETRANGE", b"STRLEN", b"SUBSTR"] {
+            assert_eq!(
+                group_for(&mut store, name),
+                b"string".to_vec(),
+                "{:?} should be 'string'",
+                String::from_utf8_lossy(name)
+            );
+        }
+
+        // SETBIT must reach the bitmap arm.
+        assert_eq!(group_for(&mut store, b"SETBIT"), b"bitmap".to_vec());
+        assert_eq!(group_for(&mut store, b"GETBIT"), b"bitmap".to_vec());
+        assert_eq!(group_for(&mut store, b"BITCOUNT"), b"bitmap".to_vec());
+
+        // SELECT moves from generic → connection.
+        assert_eq!(group_for(&mut store, b"SELECT"), b"connection".to_vec());
+
+        // SWAPDB moves from generic → server.
+        assert_eq!(group_for(&mut store, b"SWAPDB"), b"server".to_vec());
+
+        // Regression checks: real set / sorted_set / list / hash /
+        // stream / hyperloglog / geo / pubsub / scripting / transaction
+        // groupings still resolve correctly.
+        for (name, expected) in [
+            (b"SADD".as_slice(), b"set".as_slice()),
+            (b"SREM", b"set"),
+            (b"SSCAN", b"set"),
+            (b"SMOVE", b"set"),
+            (b"ZADD", b"sorted_set"),
+            (b"ZRANGE", b"sorted_set"),
+            (b"LPUSH", b"list"),
+            (b"BLPOP", b"list"),
+            (b"HSET", b"hash"),
+            (b"XADD", b"stream"),
+            (b"PFADD", b"hyperloglog"),
+            (b"GEOADD", b"geo"),
+            (b"SUBSCRIBE", b"pubsub"),
+            (b"SCRIPT", b"scripting"),
+            (b"MULTI", b"transactions"),
+            (b"PING", b"connection"),
+            (b"CLUSTER", b"cluster"),
+            (b"SAVE", b"server"),
+            (b"BGSAVE", b"server"),
+            (b"SLOWLOG", b"server"),
+            (b"SCAN", b"generic"),
+            (b"SORT", b"generic"),
+            (b"SORT_RO", b"generic"),
+            (b"GET", b"string"),
+            (b"APPEND", b"string"),
+            (b"GETRANGE", b"string"),
+        ] {
+            assert_eq!(
+                group_for(&mut store, name),
+                expected.to_vec(),
+                "{:?} should be {:?}",
+                String::from_utf8_lossy(name),
+                String::from_utf8_lossy(expected)
+            );
+        }
     }
 
     #[test]
