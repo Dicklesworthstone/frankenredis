@@ -8829,17 +8829,20 @@ fn cluster_cmd(
         }
         return Err(CommandError::Custom(format!("ERR Unknown node {node_id}")));
     }
-    // Upstream cluster.c::clusterCommand starts with a cluster_enabled
-    // gate that fires before any subcommand dispatch, so ANY subcommand
-    // call (known or unknown) returns "This instance has cluster support
-    // disabled" first when cluster mode is off. The per-subcommand arms
-    // above already honour that, but the unknown-subcommand fallthrough
-    // would otherwise leak the "unknown subcommand" wording to clients
-    // running on a non-cluster instance — diverging from upstream's
-    // top-of-clusterCommand check. (frankenredis-53ati)
-    if !store.cluster_enabled {
-        return Err(cluster_disabled_error());
-    }
+    // Upstream commands.def declares each known cluster subcommand
+    // (cluster|myid, cluster|nodes, ...) with clusterCommand as the
+    // handler, so the dispatcher returns
+    // "ERR unknown subcommand '<X>'. Try CLUSTER HELP." for any token
+    // that isn't one of those entries — BEFORE clusterCommand (and
+    // therefore the cluster_enabled gate inside it) ever runs.
+    // Differential probe vs vendored Redis 7.2.4 with cluster-enabled
+    // set to no confirmed: `CLUSTER MYID` -> "cluster support
+    // disabled" (handler runs), but `CLUSTER NOPE` -> "unknown
+    // subcommand 'NOPE'..." (handler is never called). The earlier
+    // frankenredis-53ati change misread the upstream source's
+    // top-of-function gate and gated the unknown-subcommand
+    // fallthrough on cluster_enabled too, leaking "disabled" for
+    // typo'd subs. (frankenredis-cunk)
     Err(cluster_unknown_subcommand_error(sub))
 }
 
@@ -43604,11 +43607,15 @@ mod tests {
 
     #[test]
     fn cluster_unknown_subcommand_matches_redis_error() {
-        // Upstream cluster.c::clusterCommand emits the unknown-subcommand
-        // wording only when cluster mode is enabled; with cluster off
-        // the top-of-clusterCommand cluster_enabled gate fires first
-        // (see cluster_unknown_subcommand_with_cluster_disabled_*).
-        // (frankenredis-53ati)
+        // Upstream commands.def declares each known CLUSTER subcommand
+        // with clusterCommand as its handler; an unknown token like
+        // `NOPE` is rejected by the dispatcher with
+        // "unknown subcommand 'NOPE'. Try CLUSTER HELP." before
+        // clusterCommand (and its cluster_enabled gate) ever runs.
+        // The behavior is therefore independent of cluster mode —
+        // see cluster_unknown_subcommand_with_cluster_disabled_*
+        // for the matching cluster-disabled assertion.
+        // (frankenredis-cunk)
         let mut store = Store::new();
         store.cluster_enabled = true;
         let err =
@@ -43960,13 +43967,21 @@ mod tests {
         assert_eq!(err, cluster_disabled_error());
     }
 
-    // (frankenredis-53ati) Upstream cluster.c::clusterCommand starts
-    // with a cluster_enabled gate, so ANY subcommand (even unknown ones)
-    // returns "This instance has cluster support disabled" when cluster
-    // mode is off. fr's unknown-subcommand fallthrough was leaking the
-    // "unknown subcommand" wording instead.
+    // (frankenredis-cunk) Each known CLUSTER subcommand
+    // (cluster|myid, cluster|nodes, ...) has its own entry in
+    // upstream commands.def with clusterCommand as the handler, so
+    // the dispatcher returns "ERR unknown subcommand '<X>'. Try
+    // CLUSTER HELP." for any typo'd token BEFORE clusterCommand and
+    // its cluster_enabled gate are reached. Differential probe vs
+    // vendored Redis 7.2.4 with cluster-enabled=no:
+    //   CLUSTER MYID  -> "cluster support disabled" (handler runs)
+    //   CLUSTER NOPE  -> "unknown subcommand 'NOPE'..." (handler is
+    //                    never called)
+    // The earlier frankenredis-53ati change misread the source's
+    // top-of-clusterCommand cluster_enabled gate as authoritative
+    // for the unknown-subcommand fallthrough too.
     #[test]
-    fn cluster_unknown_subcommand_with_cluster_disabled_reports_cluster_disabled() {
+    fn cluster_unknown_subcommand_with_cluster_disabled_reports_unknown_subcommand() {
         let mut store = Store::new();
         // cluster_enabled defaults to false
         let err = dispatch_argv(
@@ -43975,7 +43990,10 @@ mod tests {
             0,
         )
         .unwrap_err();
-        assert_eq!(err, cluster_disabled_error());
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR unknown subcommand 'FOOBAR'. Try CLUSTER HELP.".to_string())
+        );
     }
 
     #[test]

@@ -18112,16 +18112,21 @@ mod tests {
         let reset = rt.execute_frame(command(&[b"CLUSTER", b"RESET"]), 0);
         assert_eq!(reset, cluster_disabled);
 
-        // (frankenredis-53ati) With cluster mode off, the upstream
-        // top-of-clusterCommand cluster_enabled gate fires before the
-        // unknown-subcommand fallthrough — so even a typo'd
-        // subcommand surfaces "cluster support disabled" rather than
-        // the unknown-subcommand wording. The unknown-subcommand
-        // wording is asserted with cluster_enabled=true in
-        // cluster_unknown_subcommand_with_cluster_enabled_reports_unknown_subcommand
-        // (fr-command crate).
+        // (frankenredis-cunk) Each known CLUSTER subcommand has its
+        // own commands.def entry (cluster|myid, cluster|nodes, ...),
+        // so the dispatcher hands "unknown subcommand '<X>'. Try
+        // CLUSTER HELP." back for any typo'd token BEFORE
+        // clusterCommand (and its cluster_enabled gate) is even
+        // invoked. Differential probe vs vendored Redis 7.2.4 with
+        // cluster-enabled=no: `CLUSTER NOPE` -> "unknown subcommand
+        // 'NOPE'..." (no "disabled" wording).
         let unknown = rt.execute_frame(command(&[b"CLUSTER", b"NOPE"]), 0);
-        assert_eq!(unknown, cluster_disabled);
+        assert_eq!(
+            unknown,
+            RespFrame::Error(
+                "ERR unknown subcommand 'NOPE'. Try CLUSTER HELP.".to_string()
+            )
+        );
 
         let keyslot_wrong_arity = rt.execute_frame(command(&[b"CLUSTER", b"KEYSLOT"]), 0);
         assert_eq!(
