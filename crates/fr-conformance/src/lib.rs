@@ -287,7 +287,20 @@ pub fn run_fixture(
         runtime.wait_for_child_processes();
         let evidence_before = runtime.evidence().events().len();
         let frame = case_to_frame(&case);
-        let actual = runtime.execute_frame(frame, case.now_ms);
+        // Mirror the live-oracle path (line 399-407): commands that
+        // mutate connection-local state need isolated sessions on the
+        // runtime side too, otherwise replica/auth/select/etc. flags
+        // leak into later cases that expect a virgin connection.
+        // Without this, REPLCONF listening-port adds the shared client
+        // session id to replication_runtime_state.replicas, and
+        // subsequent REPLICAOF cases are correctly rejected with
+        // "Command is not valid when client is a replica" (matching
+        // upstream's per-connection gate). (frankenredis-runfixtureiso)
+        let actual = if live_oracle_case_uses_dedicated_connection(&case) {
+            runtime.with_isolated_session(|rt| rt.execute_frame(frame, case.now_ms))
+        } else {
+            runtime.execute_frame(frame, case.now_ms)
+        };
         let new_events = &runtime.evidence().events()[evidence_before..];
         let threat_result = validate_threat_expectation(case.expect_threat.as_ref(), new_events);
         let log_result = validate_structured_log_emission(
@@ -1908,6 +1921,17 @@ fn live_oracle_case_uses_dedicated_connection(case: &ConformanceCase) -> bool {
             || command.eq_ignore_ascii_case("READWRITE")
             || command.eq_ignore_ascii_case("RESET")
             || command.eq_ignore_ascii_case("SELECT")
+            // REPLCONF listening-port/ip-address/capa call
+            // ReplicationRuntimeState::ensure_replica(client_id),
+            // which adds the session's client_id to the replicas map.
+            // is_replica() then returns true for that connection, so
+            // any REPLICAOF/SLAVEOF dispatched later on the same shared
+            // session is rejected with "Command is not valid when client
+            // is a replica" (matching upstream's per-connection gate at
+            // replication.c::replicaofCommand). Isolate REPLCONF cases
+            // so the shared fixture session never inherits replica
+            // state. (frankenredis-replconfisolation)
+            || command.eq_ignore_ascii_case("REPLCONF")
     })
 }
 
@@ -3818,7 +3842,10 @@ mod tests {
         assert!(live_oracle_case_uses_dedicated_connection(&hello));
         assert!(live_oracle_case_uses_dedicated_connection(&reset));
         assert!(live_oracle_case_uses_dedicated_connection(&quit));
-        assert!(!live_oracle_case_uses_dedicated_connection(&replconf));
+        // (frankenredis-replconfisolation) REPLCONF mutates connection-
+        // local replica state via ensure_replica(client_id), so it now
+        // uses a dedicated session like the other handshake commands.
+        assert!(live_oracle_case_uses_dedicated_connection(&replconf));
     }
 
     #[test]

@@ -4200,8 +4200,22 @@ impl Runtime {
     where
         F: FnOnce(&mut Runtime) -> R,
     {
+        // Allocate a unique client_id for the isolated session so any
+        // server-shared per-client state mutated by the wrapped command
+        // (replication_runtime_state.replicas, client_sessions, pubsub
+        // tables, ...) doesn't collide with the saved session's id when
+        // both happen to default to 0. (frankenredis-isosessionid)
+        static ISOLATED_CLIENT_ID_COUNTER: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let isolated_id = u64::MAX
+            - ISOLATED_CLIENT_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let saved = std::mem::take(&mut self.session);
+        self.session.client_id = isolated_id;
         let result = f(self);
+        // Drop any per-client residue the isolated session left behind,
+        // mirroring TCP-side cleanup_disconnected_client semantics so
+        // state doesn't leak between cases.
+        self.cleanup_disconnected_client(isolated_id);
         self.session = saved;
         result
     }
