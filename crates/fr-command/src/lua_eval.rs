@@ -389,15 +389,16 @@ impl LuaValue {
     }
 
     fn to_redis_arg(&self) -> Result<Vec<u8>, String> {
+        // Upstream src/script_lua.c::luaArgsToRedisArgv only accepts
+        // numbers (formatted via %.17g) and strings; lua_tolstring on
+        // any other type (nil, boolean, table, function, thread,
+        // userdata) returns NULL, and the loop bails with a single
+        // unified error: 'Lua redis lib command arguments must be
+        // strings or integers'. fr previously had per-type error
+        // wordings AND silently coerced LuaValue::Bool to "1"/"0",
+        // so `redis.call("SET", k, true)` returned OK on fr but errored
+        // on vendored. (frankenredis-redisargtype)
         match self {
-            LuaValue::Nil => Err("Lua nil can't be used as a Redis argument".to_string()),
-            LuaValue::Bool(b) => {
-                if *b {
-                    Ok(b"1".to_vec())
-                } else {
-                    Ok(b"0".to_vec())
-                }
-            }
             LuaValue::Number(n) => {
                 if *n == (*n as i64) as f64 && n.is_finite() {
                     Ok(format!("{}", *n as i64).into_bytes())
@@ -406,16 +407,9 @@ impl LuaValue {
                 }
             }
             LuaValue::Str(s) => Ok(s.clone()),
-            LuaValue::Table(_) => Err("Lua table can't be used as a Redis argument".to_string()),
-            LuaValue::Function(_) | LuaValue::RustFunction(_) => {
-                Err("Lua function can't be used as a Redis argument".to_string())
-            }
-            LuaValue::Coroutine(_) => {
-                Err("Lua thread can't be used as a Redis argument".to_string())
-            }
-            LuaValue::WrappedCoroutine(_) => {
-                Err("Lua function can't be used as a Redis argument".to_string())
-            }
+            _ => Err(
+                "Lua redis lib command arguments must be strings or integers".to_string(),
+            ),
         }
     }
 
@@ -5694,6 +5688,61 @@ mod tests {
         Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
         json_to_lua_value, lua_raw_equal, lua_value_to_json,
     };
+
+    #[test]
+    fn redis_call_rejects_non_string_or_number_args_with_upstream_wording() {
+        // Pins frankenredis-redisargtype. Upstream
+        // src/script_lua.c::luaArgsToRedisArgv calls lua_tolstring on
+        // each arg; lua_tolstring returns NULL for nil / boolean /
+        // table / function / thread / userdata, and the loop bails
+        // with a single unified error:
+        //   'Lua redis lib command arguments must be strings or integers'
+        // fr previously had per-type wordings AND silently coerced
+        // LuaValue::Bool to '1'/'0', so `redis.call('SET', k, true)`
+        // returned OK on fr but errored on vendored.
+        let mut store = Store::new();
+
+        let expected = "Lua redis lib command arguments must be strings or integers";
+        let cases: &[&[u8]] = &[
+            b"return redis.call('SET', 'k', true)",
+            b"return redis.call('SET', 'k', false)",
+            b"return redis.call('SET', 'k', nil)",
+            b"return redis.call('SET', 'k', {})",
+            b"return redis.call('SET', 'k', {1,2})",
+            b"return redis.call('SET', 'k', function() end)",
+        ];
+        for src in cases {
+            let err = eval_script(src, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected error for {:?}",
+                String::from_utf8_lossy(src)
+            ));
+            assert!(
+                err.contains(expected),
+                "wrong wording for {:?}: {err}",
+                String::from_utf8_lossy(src)
+            );
+        }
+
+        // Numbers and strings still work (regression check).
+        let frame = eval_script(
+            b"redis.call('SET', 'k', 12345) return redis.call('GET', 'k')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"12345".to_vec())));
+        let frame = eval_script(
+            b"redis.call('SET', 'k', 'hello') return redis.call('GET', 'k')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
 
     #[test]
     fn lua_to_resp_recognises_resp3_type_hint_tables() {
