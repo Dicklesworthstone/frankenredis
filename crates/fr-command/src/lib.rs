@@ -13649,14 +13649,14 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("readonly", 1, "fast", 0, 0, 0),
     ("readwrite", 1, "fast", 0, 0, 0),
     ("replconf", -1, "admin", 0, 0, 0),
-    ("psync", 3, "admin", 0, 0, 0),
+    ("psync", -3, "admin", 0, 0, 0),
     ("sync", 1, "admin", 0, 0, 0),
     ("monitor", 1, "admin", 0, 0, 0),
     ("migrate", -6, "write", 0, 0, 0),
     ("failover", -1, "admin", 0, 0, 0),
     ("module", -2, "admin", 0, 0, 0),
     ("sentinel", -2, "admin", 0, 0, 0),
-    ("pfdebug", -3, "admin", 1, 1, 1),
+    ("pfdebug", 3, "admin", 1, 1, 1),
     ("pfselftest", 1, "admin", 0, 0, 0),
     ("replicaof", 3, "admin", 0, 0, 0),
     ("slaveof", 3, "admin", 0, 0, 0),
@@ -57091,6 +57091,43 @@ mod tests {
                 fields[1],
                 RespFrame::Integer(-3),
                 "{cmd} arity must be -3, got {:?}",
+                fields[1]
+            );
+        }
+    }
+
+    /// (frankenredis-pfdebugpsyncarity) Upstream commands.def declares
+    ///   pfdebug -> arity=3   (PFDEBUG <subcommand> <key>; exact)
+    ///   psync   -> arity=-3  (replication PSYNC accepts trailing options;
+    ///                         minimum 3 args)
+    /// fr's COMMAND_TABLE had the two inverted (pfdebug=-3, psync=3),
+    /// causing `COMMAND INFO PFDEBUG` and `COMMAND INFO PSYNC` to diverge
+    /// from vendored Redis 7.2.4. Handler logic was already aligned with
+    /// upstream; only the table metadata was stale.
+    #[test]
+    fn command_info_arity_for_pfdebug_and_psync_matches_upstream() {
+        let mut store = Store::new();
+        for (cmd, want) in [("PFDEBUG", 3i64), ("PSYNC", -3)] {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            assert_eq!(
+                fields[1],
+                RespFrame::Integer(want),
+                "{cmd} arity must be {want}, got {:?}",
                 fields[1]
             );
         }
