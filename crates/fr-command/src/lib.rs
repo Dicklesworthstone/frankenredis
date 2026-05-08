@@ -365,6 +365,43 @@ pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
         return (3..argv.len()).take(num_keys).collect();
     }
 
+    if cmd_name.eq_ignore_ascii_case("MIGRATE") {
+        // MIGRATE host port key destination-db timeout [COPY] [REPLACE]
+        //         [AUTH password] [AUTH2 username password] [KEYS k1 k2 ...]
+        //
+        // argv[3] is either the single key OR an empty string when the
+        // multi-key form is used. Upstream's commands/migrate.json
+        // declares two key specs:
+        //   - { begin_search: { type: index, spec: { index: 3 } },
+        //       find_keys: { type: keynum,
+        //                    spec: { keynumidx: 0, firstkey: 0, keystep: 0 } } }
+        //     (single positional key at argv[3])
+        //   - keyword-anchored 'KEYS' spec for the multi-key tail
+        // (frankenredis-migratekeyspec) fr's COMMAND_TABLE entry uses
+        // first/last/step = 0/0/0 (no positional keys), so without an
+        // explicit handler MIGRATE returned 'no key arguments' for both
+        // forms.
+        if argv.len() < 6 {
+            return Vec::new();
+        }
+        let mut keys: Vec<usize> = Vec::new();
+        // Single-key form: argv[3] is non-empty.
+        if !argv[3].is_empty() {
+            keys.push(3);
+        }
+        // Multi-key form: scan for KEYS sentinel and consume the tail.
+        if let Some(keys_idx) = argv
+            .iter()
+            .position(|a| a.eq_ignore_ascii_case(b"KEYS"))
+            && keys_idx + 1 < argv.len()
+        {
+            for i in (keys_idx + 1)..argv.len() {
+                keys.push(i);
+            }
+        }
+        return keys;
+    }
+
     if cmd_name.eq_ignore_ascii_case("SMOVE")
         || cmd_name.eq_ignore_ascii_case("RENAME")
         || cmd_name.eq_ignore_ascii_case("RENAMENX")
@@ -535,6 +572,7 @@ fn command_uses_custom_key_specs(cmd_name: &str) -> bool {
         || cmd_name.eq_ignore_ascii_case("BLMOVE")
         || cmd_name.eq_ignore_ascii_case("RPOPLPUSH")
         || cmd_name.eq_ignore_ascii_case("BRPOPLPUSH")
+        || cmd_name.eq_ignore_ascii_case("MIGRATE")
 }
 
 fn command_has_keys(cmd_name: &str) -> bool {
@@ -48076,6 +48114,143 @@ mod tests {
         )
         .expect("count 0 should succeed");
         assert_eq!(frame, RespFrame::Array(Some(Vec::new())));
+    }
+
+    #[test]
+    fn command_getkeys_for_migrate_handles_single_and_multi_key_forms() {
+        // Pins frankenredis-migratekeyspec. Upstream's commands/migrate.json
+        // declares two key specs for MIGRATE: a positional spec at
+        // argv[3] (single-key form) and a keyword-anchored 'KEYS' spec
+        // for the multi-key form. fr's COMMAND_TABLE entry uses
+        // first/last/step = 0/0/0 (no positional keys), so without an
+        // explicit handler in command_key_indexes both forms returned
+        // 'ERR The command has no key arguments' from COMMAND GETKEYS.
+        let mut store = Store::new();
+
+        // Single-key form: argv[3] = "mykey" (non-empty).
+        let out = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"MIGRATE".to_vec(),
+                b"host".to_vec(),
+                b"port".to_vec(),
+                b"mykey".to_vec(),
+                b"0".to_vec(),
+                b"5000".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("COMMAND GETKEYS MIGRATE single-key");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"mykey".to_vec()))]))
+        );
+
+        // Multi-key form: argv[3] = "" sentinel + KEYS tail.
+        let out = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"MIGRATE".to_vec(),
+                b"host".to_vec(),
+                b"port".to_vec(),
+                b"".to_vec(),
+                b"0".to_vec(),
+                b"5000".to_vec(),
+                b"KEYS".to_vec(),
+                b"k1".to_vec(),
+                b"k2".to_vec(),
+                b"k3".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("COMMAND GETKEYS MIGRATE multi-key");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"k1".to_vec())),
+                RespFrame::BulkString(Some(b"k2".to_vec())),
+                RespFrame::BulkString(Some(b"k3".to_vec())),
+            ]))
+        );
+
+        // With BOTH a single-key arg AND a KEYS tail, upstream returns
+        // both. Verify fr now does too.
+        let out = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"MIGRATE".to_vec(),
+                b"host".to_vec(),
+                b"port".to_vec(),
+                b"first".to_vec(),
+                b"0".to_vec(),
+                b"5000".to_vec(),
+                b"KEYS".to_vec(),
+                b"second".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("MIGRATE single + KEYS form");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"first".to_vec())),
+                RespFrame::BulkString(Some(b"second".to_vec())),
+            ]))
+        );
+
+        // With AUTH / COPY / REPLACE options between key and KEYS, the
+        // KEYS sentinel still gets located.
+        let out = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"MIGRATE".to_vec(),
+                b"host".to_vec(),
+                b"port".to_vec(),
+                b"".to_vec(),
+                b"0".to_vec(),
+                b"5000".to_vec(),
+                b"COPY".to_vec(),
+                b"REPLACE".to_vec(),
+                b"AUTH".to_vec(),
+                b"password".to_vec(),
+                b"KEYS".to_vec(),
+                b"only".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("MIGRATE COPY REPLACE AUTH ... KEYS");
+        assert_eq!(
+            out,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"only".to_vec()))]))
+        );
+
+        // Too few args (under arity-6 minimum) → empty key list (caller
+        // surfaces 'no key arguments' / arity error envelope).
+        let out = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"MIGRATE".to_vec(),
+                b"h".to_vec(),
+                b"p".to_vec(),
+            ],
+            &mut store,
+            0,
+        );
+        // Upstream emits InvalidNumberOfArguments wording here; the
+        // downstream command-handling layer transforms our empty-vec
+        // return into either that or NoKeyArguments depending on the
+        // arity check. Just assert it doesn't crash and surfaces an
+        // error.
+        assert!(matches!(out, Ok(RespFrame::Error(_)) | Err(_)));
     }
 
     #[test]
