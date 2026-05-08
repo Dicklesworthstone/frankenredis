@@ -505,6 +505,31 @@ enum Token {
     Eof,
 }
 
+/// Parse a string like "0xFF" or "-0X1A" as a Lua number, mirroring
+/// upstream Lua 5.1's lobject.c::luaO_str2d hex fallback. Returns
+/// LuaValue::Nil on any malformed input (no digits, junk, etc.) so
+/// callers can route directly into tonumber's nil-on-failure path.
+/// (frankenredis-luatonumhex)
+fn hex_str_to_lua_number(trimmed: &str) -> LuaValue {
+    let (neg, rest) = match trimmed.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, trimmed.strip_prefix('+').unwrap_or(trimmed)),
+    };
+    let Some(hex) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) else {
+        return LuaValue::Nil;
+    };
+    if hex.is_empty() {
+        return LuaValue::Nil;
+    }
+    match u64::from_str_radix(hex, 16) {
+        Ok(n) => {
+            let v = n as f64;
+            LuaValue::Number(if neg { -v } else { v })
+        }
+        Err(_) => LuaValue::Nil,
+    }
+}
+
 /// Format a token the way upstream Lua surfaces it in syntax errors —
 /// e.g. 'lua', '<eof>', 'b', '+'. Used by the parser to reproduce
 /// upstream's "'=' expected near '<token>'" wording for invalid
@@ -3020,7 +3045,16 @@ impl<'a> LuaState<'a> {
                         } else {
                             match trimmed.parse::<f64>() {
                                 Ok(n) => Ok(vec![LuaValue::Number(n)]),
-                                Err(_) => Ok(vec![LuaValue::Nil]),
+                                Err(_) => {
+                                    // Lua 5.1 lobject.c::luaO_str2d falls
+                                    // back to a strtoul(s, ..., 16) parse
+                                    // when strtod fails or stops at
+                                    // 'x'/'X', so `tonumber("0xFF")` →
+                                    // 255 and `tonumber("-0xff")` → -255.
+                                    // fr was returning nil for any 0x-
+                                    // prefixed string. (frankenredis-luatonumhex)
+                                    Ok(vec![hex_str_to_lua_number(trimmed)])
+                                }
                             }
                         }
                     }
@@ -5591,6 +5625,71 @@ mod tests {
         Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
         json_to_lua_value, lua_raw_equal, lua_value_to_json,
     };
+
+    #[test]
+    fn tonumber_accepts_hex_strings_via_lua_5_1_str2d_fallback() {
+        // Pins frankenredis-luatonumhex. Lua 5.1's lobject.c::luaO_str2d
+        // tries strtod first and, when that stops at 'x'/'X' or fails,
+        // re-parses the input as `strtoul(s, ..., 16)`. So
+        // `tonumber("0xFF")` → 255, `tonumber("-0xff")` → -255, and
+        // whitespace gets stripped just like for a decimal string.
+        // fr was returning nil for any 0x-prefixed string regardless of
+        // case or sign.
+        let mut store = Store::new();
+
+        let cases: &[(&[u8], LuaValue)] = &[
+            (b"return tonumber('0xFF')", LuaValue::Number(255.0)),
+            (b"return tonumber('0xff')", LuaValue::Number(255.0)),
+            (b"return tonumber('0X1A')", LuaValue::Number(26.0)),
+            (b"return tonumber('-0xff')", LuaValue::Number(-255.0)),
+            (b"return tonumber('+0x10')", LuaValue::Number(16.0)),
+            (b"return tonumber(' 0xFF ')", LuaValue::Number(255.0)),
+            (b"return tonumber('0x0')", LuaValue::Number(0.0)),
+            (b"return tonumber('0xDEAD')", LuaValue::Number(57005.0)),
+        ];
+        for (src, expected) in cases {
+            let frame = eval_script(src, &[], &[], &mut store, 0)
+                .unwrap_or_else(|e| panic!("eval {:?} failed: {e}", String::from_utf8_lossy(src)));
+            let LuaValue::Number(want) = expected else { unreachable!() };
+            match frame {
+                RespFrame::Integer(got) => assert_eq!(got as f64, *want, "src = {:?}", String::from_utf8_lossy(src)),
+                RespFrame::BulkString(Some(bytes)) => {
+                    let s = String::from_utf8_lossy(&bytes);
+                    let got: f64 = s.parse().expect("numeric reply");
+                    assert_eq!(got, *want, "src = {:?}", String::from_utf8_lossy(src));
+                }
+                other => panic!("expected number reply for {:?}, got {other:?}", String::from_utf8_lossy(src)),
+            }
+        }
+
+        // Malformed hex still returns nil, matching upstream.
+        for src in [
+            b"return tonumber('0x') == nil".as_slice(),
+            b"return tonumber('0xZ') == nil".as_slice(),
+            b"return tonumber('0xFF.5') == nil".as_slice(),
+            b"return tonumber('xyz') == nil".as_slice(),
+        ] {
+            let frame = eval_script(src, &[], &[], &mut store, 0)
+                .unwrap_or_else(|e| panic!("eval {:?} failed: {e}", String::from_utf8_lossy(src)));
+            assert_eq!(frame, RespFrame::Integer(1), "src = {:?}", String::from_utf8_lossy(src));
+        }
+
+        // Decimal / scientific tonumber paths remain unaffected (use
+        // integer-valued cases so Lua-to-Resp returns Integer cleanly).
+        for (src, expected) in [
+            (b"return tonumber('42')".as_slice(), 42),
+            (b"return tonumber('1.5e2')".as_slice(), 150),
+            (b"return tonumber('-7')".as_slice(), -7),
+        ] {
+            let frame = eval_script(src, &[], &[], &mut store, 0).unwrap();
+            assert_eq!(
+                frame,
+                RespFrame::Integer(expected),
+                "src = {:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+    }
 
     #[test]
     fn lexer_parses_hex_literals_like_lua_5_1() {
