@@ -13908,10 +13908,17 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 if argv.len() != 5 {
                     return Ok(RespFrame::Error("ERR syntax error".to_string()));
                 }
-                let pattern = &argv[4];
+                // Upstream server.c::commandListWithFilter calls
+                // stringmatchlen(filter->str, ..., cmd->fullname, ..., 1)
+                // where the trailing 1 is the nocase flag, so a pattern like
+                // 'GET*' matches the lowercase command name 'get'. fr stores
+                // command names lowercase already, so lowercasing only the
+                // pattern is equivalent to upstream's two-sided tolower.
+                // (frankenredis-cmdlistnocase)
+                let pattern_lc: Vec<u8> = argv[4].to_ascii_lowercase();
                 let names: Vec<RespFrame> = COMMAND_TABLE
                     .iter()
-                    .filter(|&&(name, ..)| fr_store::glob_match(pattern, name.as_bytes()))
+                    .filter(|&&(name, ..)| fr_store::glob_match(&pattern_lc, name.as_bytes()))
                     .map(|&(name, ..)| RespFrame::BulkString(Some(name.as_bytes().to_vec())))
                     .collect();
                 return Ok(RespFrame::Array(Some(names)));
@@ -55617,6 +55624,108 @@ mod tests {
             let reply = dispatch_argv(&argv, &mut store, 0).expect("module syntax reply");
             assert_eq!(reply, RespFrame::Error("ERR syntax error".to_string()));
         }
+    }
+
+    #[test]
+    fn command_list_filterby_pattern_is_case_insensitive_like_upstream() {
+        // Upstream server.c::commandListWithFilter passes nocase=1 to
+        // stringmatchlen, so 'GET*' matches the lowercase 'get', 'getbit',
+        // 'getdel', 'getex', 'getrange', 'getset' in the command table.
+        // Pre-fix fr was case-sensitive, returning empty for any uppercase
+        // pattern. (frankenredis-cmdlistnocase)
+        let mut store = Store::new();
+
+        let extract_names = |reply: RespFrame| -> Vec<String> {
+            match reply {
+                RespFrame::Array(Some(items)) => items
+                    .into_iter()
+                    .filter_map(|f| match f {
+                        RespFrame::BulkString(Some(b)) => String::from_utf8(b).ok(),
+                        _ => None,
+                    })
+                    .collect(),
+                other => panic!("expected Array reply, got {:?}", other),
+            }
+        };
+
+        let upper = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"LIST".to_vec(),
+                b"FILTERBY".to_vec(),
+                b"PATTERN".to_vec(),
+                b"GET*".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("command list filterby pattern GET*");
+        let mut upper_names = extract_names(upper);
+        upper_names.sort();
+        assert_eq!(
+            upper_names,
+            vec!["get", "getbit", "getdel", "getex", "getrange", "getset"]
+        );
+
+        let lower = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"LIST".to_vec(),
+                b"FILTERBY".to_vec(),
+                b"PATTERN".to_vec(),
+                b"get*".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("command list filterby pattern get*");
+        let mut lower_names = extract_names(lower);
+        lower_names.sort();
+        assert_eq!(lower_names, upper_names);
+
+        let exact_upper = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"LIST".to_vec(),
+                b"FILTERBY".to_vec(),
+                b"PATTERN".to_vec(),
+                b"GET".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("command list filterby pattern GET");
+        assert_eq!(extract_names(exact_upper), vec!["get"]);
+
+        let mixed = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"LIST".to_vec(),
+                b"FILTERBY".to_vec(),
+                b"PATTERN".to_vec(),
+                b"?ScAn".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("command list filterby pattern ?ScAn");
+        let mut mixed_names = extract_names(mixed);
+        mixed_names.sort();
+        assert_eq!(mixed_names, vec!["hscan", "sscan", "zscan"]);
+
+        let no_match = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"LIST".to_vec(),
+                b"FILTERBY".to_vec(),
+                b"PATTERN".to_vec(),
+                b"NOSUCHCMD*".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("command list filterby pattern NOSUCHCMD*");
+        assert_eq!(extract_names(no_match), Vec::<String>::new());
     }
 
     mod metamorphic {
