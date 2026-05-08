@@ -13653,18 +13653,18 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("psync", -3, "admin noscript no_async_loading no_multi", 0, 0, 0),
     ("sync", 1, "admin noscript no_async_loading no_multi", 0, 0, 0),
     ("monitor", 1, "admin noscript loading stale", 0, 0, 0),
-    ("migrate", -6, "write movablekeys", 0, 0, 0),
+    ("migrate", -6, "write movablekeys", 3, 3, 1),
     ("failover", -1, "admin noscript stale", 0, 0, 0),
     ("module", -2, "", 0, 0, 0),
     ("sentinel", -2, "admin", 0, 0, 0),
-    ("pfdebug", 3, "write denyoom admin", 1, 1, 1),
+    ("pfdebug", 3, "write denyoom admin", 2, 2, 1),
     ("pfselftest", 1, "admin", 0, 0, 0),
     ("replicaof", 3, "admin noscript stale no_async_loading", 0, 0, 0),
     ("slaveof", 3, "admin noscript stale no_async_loading", 0, 0, 0),
     ("function", -2, "", 0, 0, 0),
-    ("ssubscribe", -2, "pubsub noscript loading stale", 0, 0, 0),
-    ("sunsubscribe", -1, "pubsub noscript loading stale", 0, 0, 0),
-    ("spublish", 3, "pubsub loading stale fast", 0, 0, 0),
+    ("ssubscribe", -2, "pubsub noscript loading stale", 1, -1, 1),
+    ("sunsubscribe", -1, "pubsub noscript loading stale", 1, -1, 1),
+    ("spublish", 3, "pubsub loading stale fast", 1, 1, 1),
     ("sort_ro", -2, "readonly movablekeys", 1, 1, 1),
     ("zrangestore", -5, "write denyoom", 1, 2, 1),
 ];
@@ -57425,6 +57425,66 @@ mod tests {
                 .collect();
             let want: Vec<String> = want_flags.iter().map(|s| (*s).to_string()).collect();
             assert_eq!(got, want, "{cmd} flags must be {want:?}, got {got:?}");
+        }
+    }
+
+    /// (frankenredis-keyspecfixes) Differential probe vs vendored 7.2.4
+    /// found five COMMAND_TABLE rows whose first_key/last_key/step
+    /// triple disagreed with the upstream COMMAND INFO emission AND
+    /// where the divergence either misled fr's own key-extraction
+    /// algorithm (PFDEBUG read argv[1] = the subcommand string instead
+    /// of argv[2] = the actual key) or simply failed to advertise the
+    /// channel/key positions to clients (MIGRATE reported 0/0/0
+    /// despite the explicit key at argv[3]; SPUBLISH/SSUBSCRIBE/
+    /// SUNSUBSCRIBE reported 0/0/0 despite the channel at argv[1]).
+    /// MIGRATE's special-case key extractor sits above the
+    /// COMMAND_TABLE fallback so the multi-key 'KEYS' form continues
+    /// to work; the triple change only affects emission.
+    #[test]
+    fn command_info_key_specs_first_last_step_for_keyspec_fixes_matches_upstream() {
+        let mut store = Store::new();
+        let cases: &[(&str, i64, i64, i64)] = &[
+            ("MIGRATE", 3, 3, 1),
+            ("PFDEBUG", 2, 2, 1),
+            ("SPUBLISH", 1, 1, 1),
+            ("SSUBSCRIBE", 1, -1, 1),
+            ("SUNSUBSCRIBE", 1, -1, 1),
+        ];
+        for (cmd, first, last, step) in cases {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            assert_eq!(
+                fields[3],
+                RespFrame::Integer(*first),
+                "{cmd} first_key must be {first}, got {:?}",
+                fields[3]
+            );
+            assert_eq!(
+                fields[4],
+                RespFrame::Integer(*last),
+                "{cmd} last_key must be {last}, got {:?}",
+                fields[4]
+            );
+            assert_eq!(
+                fields[5],
+                RespFrame::Integer(*step),
+                "{cmd} step must be {step}, got {:?}",
+                fields[5]
+            );
         }
     }
 
