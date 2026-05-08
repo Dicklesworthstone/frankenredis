@@ -5023,8 +5023,22 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
         LuaValue::Bool(true) => RespFrame::Integer(1),
         LuaValue::Bool(false) => RespFrame::BulkString(None),
         LuaValue::Number(n) => {
-            // Redis converts Lua numbers to integers (truncated)
-            RespFrame::Integer(*n as i64)
+            // Upstream src/script_lua.c::luaReplyToRedisReply line 622:
+            //   addReplyLongLong(c, (long long)lua_tonumber(lua, -1));
+            // The cast `(long long)x` for non-finite double is UB in
+            // C, but on x86-64 GCC it consistently returns LLONG_MIN
+            // (the "indefinite integer" sentinel). Rust's `as i64`
+            // instead saturates: +inf → i64::MAX, -inf → i64::MIN,
+            // NaN → 0. Pin upstream's de-facto behavior so EVAL of
+            // math.huge / 1/0 / 0/0 surfaces the same Integer reply
+            // (Integer(-9223372036854775808)) as vendored 7.2.4.
+            // (frankenredis-luanonfinite)
+            let i = if n.is_finite() {
+                *n as i64
+            } else {
+                i64::MIN
+            };
+            RespFrame::Integer(i)
         }
         LuaValue::Str(s) => RespFrame::BulkString(Some(s.clone())),
         LuaValue::Table(t) => {
@@ -5688,6 +5702,56 @@ mod tests {
         Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
         json_to_lua_value, lua_raw_equal, lua_value_to_json,
     };
+
+    #[test]
+    fn lua_to_resp_non_finite_numbers_match_upstream_llong_min_cast() {
+        // Pins frankenredis-luanonfinite. Upstream
+        // src/script_lua.c::luaReplyToRedisReply (line 622) does
+        //   addReplyLongLong(c, (long long)lua_tonumber(lua, -1));
+        // The C cast `(long long)x` for non-finite double is UB, but
+        // on x86-64 GCC it consistently returns LLONG_MIN
+        // (-9223372036854775808). fr's previous `*n as i64` saturated
+        // differently: +inf → i64::MAX, -inf → i64::MIN, NaN → 0,
+        // which made math.huge / 1/0 / 0/0 / -1/0 each return a
+        // different integer than vendored.
+        let mut store = Store::new();
+
+        for src in [
+            b"return math.huge".as_slice(),
+            b"return 1/0".as_slice(),
+            b"return -1/0".as_slice(),
+            b"return -math.huge".as_slice(),
+            b"return 0/0".as_slice(),
+            b"return math.huge / 2".as_slice(),
+            b"return math.huge - math.huge".as_slice(),
+        ] {
+            let frame = eval_script(src, &[], &[], &mut store, 0).unwrap();
+            assert_eq!(
+                frame,
+                RespFrame::Integer(i64::MIN),
+                "src = {:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+
+        // Finite numbers still truncate per upstream (long long)cast.
+        for (src, expected) in [
+            (b"return 3.14".as_slice(), 3),
+            (b"return -3.14".as_slice(), -3),
+            (b"return 1e9".as_slice(), 1_000_000_000),
+            (b"return 0.5".as_slice(), 0),
+            (b"return -0.5".as_slice(), 0),
+            (b"return 0".as_slice(), 0),
+        ] {
+            let frame = eval_script(src, &[], &[], &mut store, 0).unwrap();
+            assert_eq!(
+                frame,
+                RespFrame::Integer(expected),
+                "src = {:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+    }
 
     #[test]
     fn redis_call_rejects_non_string_or_number_args_with_upstream_wording() {
