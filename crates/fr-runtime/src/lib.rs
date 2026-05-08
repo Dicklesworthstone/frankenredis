@@ -7906,9 +7906,12 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("maxclients") {
-                // (br-frankenredis-7rj0)
+                // Upstream config.c declares maxclients as
+                // INTEGER_CONFIG with range [1, UINT_MAX], so
+                // 4_294_967_295 is the max accepted value.
+                // (frankenredis-maxclientsupper, supersedes br-frankenredis-7rj0)
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 1 => value as usize,
+                    Ok(value) if (1..=u32::MAX as i64).contains(&value) => value as usize,
                     Ok(_) => {
                         return config_set_failed(
                             "maxclients",
@@ -20510,6 +20513,44 @@ mod tests {
             ),
             RespFrame::Error(
                 "ERR CONFIG SET failed (possibly related to argument 'active-defrag-max-scan-fields') - argument must be between 1 and 9223372036854775807 inclusive"
+                    .to_string()
+            )
+        );
+    }
+
+    /// (frankenredis-maxclientsupper) Upstream config.c declares
+    /// maxclients as INTEGER_CONFIG with the bounded range [1, UINT_MAX]
+    /// so values above 4_294_967_295 must surface the documented bound,
+    /// not silently widen to a 64-bit usize.
+    #[test]
+    fn config_set_maxclients_enforces_uint_max_upper_bound() {
+        let mut rt = Runtime::default_strict();
+        // Lower bound: 0 and -1 already covered elsewhere.
+        // Upper bound: 4_294_967_295 must succeed; one over must fail.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"maxclients", b"4294967295"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"maxclients", b"4294967296"]),
+                0
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'maxclients') - argument must be between 1 and 4294967295 inclusive"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"maxclients", b"99999999999"]),
+                0
+            ),
+            RespFrame::Error(
+                "ERR CONFIG SET failed (possibly related to argument 'maxclients') - argument must be between 1 and 4294967295 inclusive"
                     .to_string()
             )
         );
