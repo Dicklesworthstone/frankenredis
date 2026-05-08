@@ -9936,29 +9936,54 @@ fn spublish_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Comman
 }
 
 fn parse_score_bound(arg: &[u8]) -> Result<ScoreBound, CommandError> {
-    // Upstream Redis 7.2 t_zset.c::zslParseRange emits "ERR min or
-    // max is not a float" for malformed score bounds in ZRANGEBYSCORE
-    // / ZRANGE-BYSCORE / ZCOUNT / ZRANGESTORE-BYSCORE. The generic
-    // ValueNotFloat error wording diverges from that. Map to the
-    // upstream wording at parse time so every score-range caller
-    // benefits. (br-frankenredis-uczv)
+    // Upstream Redis 7.2 t_zset.c::zslParseRange uses
+    // strtod((char*)ptr+(open?1:0), &eptr) and `eptr[0] != '\0'` as
+    // the trailing-junk gate. That has three observable consequences
+    // worth mirroring exactly (frankenredis-zbound):
+    //
+    //   1. The `(` prefix must be the FIRST character — strtod is
+    //      called on `ptr+1` only when `ptr[0] == '('`. Leading
+    //      whitespace BEFORE `(` (e.g. ` (5`) routes to the non-open
+    //      branch and strtod fails on the `(` character.
+    //   2. After `(` (or with no prefix), strtod accepts an empty
+    //      string by returning 0.0 with eptr at `'\0'`, so `(`
+    //      alone is parsed as an exclusive 0.
+    //   3. strtod skips LEADING whitespace but the `eptr[0] != '\0'`
+    //      check rejects any trailing whitespace or junk.
+    //
+    // fr previously called `.trim()` on the whole input, which
+    // accepted both leading whitespace before `(` and trailing
+    // whitespace anywhere, and called `parse::<f64>` on `""` for
+    // bare `(` which rejected the value upstream silently coerces
+    // to 0. The wording stays "ERR min or max is not a float"
+    // (upstream uczv).
     let bad = || CommandError::Custom("ERR min or max is not a float".to_string());
-    let text = std::str::from_utf8(arg).map_err(|_| bad())?.trim();
-    if text.eq_ignore_ascii_case("-inf") {
-        Ok(ScoreBound::Inclusive(f64::NEG_INFINITY))
-    } else if text.eq_ignore_ascii_case("+inf") || text.eq_ignore_ascii_case("inf") {
-        Ok(ScoreBound::Inclusive(f64::INFINITY))
-    } else if let Some(rest) = text.strip_prefix('(') {
-        let val = rest.trim().parse::<f64>().map_err(|_| bad())?;
-        if val.is_nan() {
+    let text = std::str::from_utf8(arg).map_err(|_| bad())?;
+    let (rest, exclusive) = match text.strip_prefix('(') {
+        Some(rest) => (rest, true),
+        None => (text, false),
+    };
+    // Mirror strtod's empty-string -> 0.0 branch.
+    let val = if rest.is_empty() {
+        0.0
+    } else {
+        // strtod skips leading whitespace then attempts to parse;
+        // the eptr[0] != '\0' check rejects any trailing chars.
+        // Rust's parse::<f64> doesn't skip whitespace, so do that
+        // explicitly. parse::<f64> rejects trailing whitespace too,
+        // which matches upstream.
+        let after_ws = rest.trim_start();
+        if after_ws.is_empty() {
             return Err(bad());
         }
+        after_ws.parse::<f64>().map_err(|_| bad())?
+    };
+    if val.is_nan() {
+        return Err(bad());
+    }
+    if exclusive {
         Ok(ScoreBound::Exclusive(val))
     } else {
-        let val = text.parse::<f64>().map_err(|_| bad())?;
-        if val.is_nan() {
-            return Err(bad());
-        }
         Ok(ScoreBound::Inclusive(val))
     }
 }
@@ -25463,6 +25488,99 @@ mod tests {
                 RespFrame::BulkString(Some(b"b".to_vec())),
             ]))
         );
+    }
+
+    #[test]
+    fn zrangebyscore_score_bound_matches_strtod_semantics() {
+        // (frankenredis-zbound) Pin upstream
+        // t_zset.c::zslParseRange's strtod-based parser:
+        //   1. Bare `(` -> exclusive 0 (strtod("") returns 0.0,
+        //      eptr[0] == '\0' passes the trailing-junk check).
+        //   2. `( 5` (whitespace after `(`) -> exclusive 5
+        //      (strtod skips leading whitespace).
+        //   3. ` (5` (whitespace BEFORE `(`) -> error (the open
+        //      gate only triggers when ptr[0] == '(').
+        //   4. `(5 ` (trailing whitespace) -> error (eptr[0]
+        //      points at the trailing space).
+        //   5. `(NaN` -> error (isnan check).
+        // fr previously called .trim() on the whole input, which
+        // accepted both leading-before-paren and trailing whitespace
+        // and rejected the bare `(` case.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"0".to_vec(),
+                b"zero".to_vec(),
+                b"1".to_vec(),
+                b"one".to_vec(),
+                b"2".to_vec(),
+                b"two".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd seed");
+
+        // (1) Bare `(` is parsed as exclusive 0; range `(`..`(2`
+        //     selects scores in (0, 2] but max is also `(2` so it's
+        //     just one == "one".
+        let one = dispatch_argv(
+            &[
+                b"ZRANGEBYSCORE".to_vec(),
+                b"zs".to_vec(),
+                b"(".to_vec(),
+                b"(2".to_vec(),
+            ],
+            &mut store,
+            1,
+        )
+        .expect("bare ( must parse as exclusive 0");
+        assert_eq!(
+            one,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"one".to_vec()))]))
+        );
+
+        // (2) `( 5` -> exclusive 5 (whitespace after paren is fine).
+        let after_open_ws = dispatch_argv(
+            &[
+                b"ZRANGEBYSCORE".to_vec(),
+                b"zs".to_vec(),
+                b"( 0".to_vec(),
+                b"+inf".to_vec(),
+            ],
+            &mut store,
+            2,
+        )
+        .expect("( 0 must parse as exclusive 0");
+        let RespFrame::Array(Some(items)) = after_open_ws else {
+            panic!("expected array");
+        };
+        assert_eq!(items.len(), 2);
+
+        // (3-5) These all reject with the upstream wording.
+        let bad = CommandError::Custom("ERR min or max is not a float".to_string());
+        for arg in [
+            b" (0".as_slice(), // leading whitespace before `(`
+            b"(0 ",            // trailing whitespace after number
+            b"0 ",             // trailing whitespace, no paren
+            b"(NaN",           // NaN rejected
+            b"NaN",             // NaN rejected (no paren)
+        ] {
+            let err = dispatch_argv(
+                &[
+                    b"ZRANGEBYSCORE".to_vec(),
+                    b"zs".to_vec(),
+                    arg.to_vec(),
+                    b"+inf".to_vec(),
+                ],
+                &mut store,
+                3,
+            )
+            .expect_err("invalid score bound");
+            assert_eq!(err, bad, "input={:?}", String::from_utf8_lossy(arg));
+        }
     }
 
     #[test]
