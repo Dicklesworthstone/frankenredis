@@ -10917,7 +10917,20 @@ fn zrangebylex(
     }
     validate_lex_bound(&argv[2])?;
     validate_lex_bound(&argv[3])?;
-    let (_, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
+    // (frankenredis-zlexws) Upstream t_zset.c::genericZrangebyscore
+    // Command guards `if (withscores && zlex)` and emits this exact
+    // wording. fr was reusing parse_zrangebyscore_opts (which silently
+    // accepts WITHSCORES) and discarding the flag, so a stray
+    // WITHSCORES on ZRANGEBYLEX returned the elements without scores
+    // instead of erroring. The newer ZRANGE BYLEX path already
+    // rejects this case correctly; the regression was scoped to the
+    // legacy ZRANGEBYLEX / ZREVRANGEBYLEX commands.
+    let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
+    if withscores {
+        return Err(CommandError::Custom(
+            "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
+        ));
+    }
     let mut members = store.zrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
     if let Some(offset) = limit_offset {
         if let Some(count) = limit_count {
@@ -10944,7 +10957,13 @@ fn zrevrangebylex(
     }
     validate_lex_bound(&argv[2])?;
     validate_lex_bound(&argv[3])?;
-    let (_, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
+    // (frankenredis-zlexws) See zrangebylex() above for rationale.
+    let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
+    if withscores {
+        return Err(CommandError::Custom(
+            "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
+        ));
+    }
     let mut members = store.zrevrangebylex(&argv[1], &argv[2], &argv[3], now_ms)?;
     if let Some(offset) = limit_offset {
         if let Some(count) = limit_count {
@@ -51203,6 +51222,86 @@ mod tests {
             }
             other => panic!("expected array, got {other:?}"), // ubs:ignore — AI triage
         }
+    }
+
+    #[test]
+    fn zrangebylex_and_zrevrangebylex_reject_withscores() {
+        // (frankenredis-zlexws) Upstream t_zset.c::genericZrangebyscore
+        // Command guards `if (withscores && zlex)` and emits the literal
+        // wording 'syntax error, WITHSCORES not supported in combination
+        // with BYLEX'. fr was reusing parse_zrangebyscore_opts (which
+        // silently accepts WITHSCORES) and discarding the flag, so a
+        // stray WITHSCORES on the legacy ZRANGEBYLEX / ZREVRANGEBYLEX
+        // returned bare elements without scores. The newer ZRANGE BYLEX
+        // path already rejects this case correctly; the regression was
+        // scoped to the legacy commands.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zs".to_vec(),
+                b"0".to_vec(),
+                b"a".to_vec(),
+                b"0".to_vec(),
+                b"b".to_vec(),
+                b"0".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd");
+
+        let expected = "ERR syntax error, WITHSCORES not supported in combination with BYLEX";
+
+        for cmd in [b"ZRANGEBYLEX".as_slice(), b"ZREVRANGEBYLEX".as_slice()] {
+            let err = dispatch_argv(
+                &[
+                    cmd.to_vec(),
+                    b"zs".to_vec(),
+                    b"[a".to_vec(),
+                    b"[z".to_vec(),
+                    b"WITHSCORES".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect_err("WITHSCORES on BYLEX must error");
+            let RespFrame::Error(msg) = err.to_resp() else {
+                panic!("expected Error frame, got {err:?}");
+            };
+            assert_eq!(
+                msg,
+                expected,
+                "wrong wording for {}",
+                String::from_utf8_lossy(cmd)
+            );
+        }
+
+        // Regression: ZRANGEBYLEX without WITHSCORES still returns
+        // the bare element list.
+        let out = dispatch_argv(
+            &[
+                b"ZRANGEBYLEX".to_vec(),
+                b"zs".to_vec(),
+                b"[a".to_vec(),
+                b"[c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("happy path");
+        let RespFrame::Array(Some(arr)) = out else {
+            panic!("expected Array, got {out:?}");
+        };
+        assert_eq!(
+            arr,
+            vec![
+                RespFrame::BulkString(Some(b"a".to_vec())),
+                RespFrame::BulkString(Some(b"b".to_vec())),
+                RespFrame::BulkString(Some(b"c".to_vec())),
+            ]
+        );
     }
 
     #[test]
