@@ -5467,6 +5467,35 @@ pub fn eval_script(
     Ok(lua_to_resp(&result))
 }
 
+/// Lex+parse a script body without executing it. Returns the parser's
+/// error message verbatim on failure. Mirrors the shebang-stripping
+/// performed by `eval_script` so SCRIPT LOAD validates the same source
+/// EVAL would later run. (frankenredis-scrldch)
+pub fn compile_check(script: &[u8]) -> Result<(), String> {
+    let stripped: Vec<u8>;
+    let source: &[u8] = if script.starts_with(b"#!") {
+        let line_end = script
+            .iter()
+            .position(|&b| b == b'\n')
+            .unwrap_or(script.len());
+        let mut tmp = Vec::with_capacity(script.len());
+        tmp.extend(std::iter::repeat_n(b' ', line_end));
+        tmp.extend_from_slice(&script[line_end..]);
+        stripped = tmp;
+        &stripped
+    } else {
+        script
+    };
+    let mut lexer = Lexer::new(source);
+    let tokens = lexer.tokenize_all()?;
+    let mut parser = Parser::new(tokens);
+    let _ = parser.parse_block()?;
+    if !parser.check(&Token::Eof) {
+        return Err(format!("unexpected token: {:?}", parser.peek()));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use fr_protocol::RespFrame;

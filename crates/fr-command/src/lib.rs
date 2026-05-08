@@ -17651,6 +17651,18 @@ fn script_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         if store.script_nesting_level >= 1 {
             return Err(script_noscript_command_error());
         }
+        // (frankenredis-scrldch) Upstream scripting.c::scriptingLoadCommand
+        // routes through luaCreateFunction, which calls luaL_loadbuffer to
+        // compile the body before storing the SHA. Syntactically broken
+        // scripts surface the compile error and are NOT cached. fr was
+        // hashing first and only failing later at EVAL time, so callers
+        // got a SHA back for unparseable Lua. Pre-validate via the same
+        // lex+parse path EVAL uses so the rejection happens at LOAD time.
+        if let Err(parse_err) = lua_eval::compile_check(&argv[2]) {
+            return Err(CommandError::Custom(format!(
+                "ERR Error compiling script (new function): user_script:1: {parse_err}"
+            )));
+        }
         let sha1 = store.script_load(&argv[2]);
         Ok(RespFrame::BulkString(Some(sha1.into_bytes())))
     } else if sub.eq_ignore_ascii_case("EXISTS") {
@@ -39430,6 +39442,48 @@ mod tests {
             repeat,
             RespFrame::BulkString(Some(b"e0e1f9fabfc9d4800c877a703b823ac0578ff8db".to_vec()))
         );
+    }
+
+    #[test]
+    fn script_load_rejects_unparseable_lua_with_compile_error_envelope() {
+        // (frankenredis-scrldch) Upstream scripting.c::scriptingLoadCommand
+        // routes through luaCreateFunction, which calls luaL_loadbuffer
+        // before storing the SHA. Syntactically broken scripts must
+        // surface "Error compiling script (new function): user_script:1:
+        // <detail>" and NOT cache. fr was hashing first and only failing
+        // later at EVAL time, so callers got a SHA back for unparseable
+        // Lua. Verify the rejection happens at LOAD time, the body is
+        // not cached, and the prefix is verbatim.
+        let mut store = Store::new();
+        let bad_cases: &[&[u8]] = &[b"invalid lua syntax {{{", b"!!@#$%^"];
+        for script in bad_cases {
+            let err = dispatch_argv(
+                &[b"SCRIPT".to_vec(), b"LOAD".to_vec(), script.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect_err("expected compile-error envelope");
+            let CommandError::Custom(msg) = err else {
+                panic!("expected Custom error, got {err:?}");
+            };
+            assert!(
+                msg.starts_with("ERR Error compiling script (new function): user_script:1: "),
+                "missing upstream envelope prefix: {msg}"
+            );
+        }
+        // Body must NOT be cached after a rejected SCRIPT LOAD.
+        let exists = dispatch_argv(
+            &[
+                b"SCRIPT".to_vec(),
+                b"EXISTS".to_vec(),
+                // sha1 of "invalid lua syntax {{{"
+                b"74b2707b772daffa348465673e5134bec7d12ae4".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("script exists");
+        assert_eq!(exists, RespFrame::Array(Some(vec![RespFrame::Integer(0)])));
     }
 
     #[test]
