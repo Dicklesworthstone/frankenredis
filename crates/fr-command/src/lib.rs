@@ -7984,31 +7984,35 @@ fn xsetid_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
 
 fn lolwut_cmd(argv: &[Vec<u8>]) -> Result<RespFrame, CommandError> {
     // LOLWUT [VERSION version]
-    // Upstream Redis 7.2 dispatches via REDIS_VERSION major:
-    //   5.x → lolwut5 (Schotter), 6.x → lolwut6 (braille),
-    //   otherwise (incl. 7.x) → lolwutUnstableCommand which emits
-    //   "Redis ver. <REDIS_VERSION>\n".
-    // fr currently ports only the unstable branch; VERSION 5/6
-    // arguments are accepted (so clients don't error out) but emit
-    // the same single-line body. (br-frankenredis-m5nf)
-    if argv.len() >= 2 {
+    // Upstream Redis 7.2 lolwut.c::lolwutCommand only enters the VERSION
+    // branch when `argc >= 3 && strcasecmp(argv[1], "version") == 0`,
+    // shifts argv past `VERSION <ver>`, and then dispatches to
+    // lolwut5/lolwut6/lolwutUnstable based on the parsed version.
+    //   - argc==2 ("LOLWUT VERSION" with no value, or "LOLWUT BOGUS",
+    //     or "LOLWUT 5"): the VERSION branch is NOT taken (argc check
+    //     fails or first token isn't "version"), and the chosen render
+    //     fn for vendored 7.2 is lolwutUnstable, which IGNORES every
+    //     remaining arg and just emits "Redis ver. <REDIS_VERSION>\n".
+    //   - argc>=3 && argv[1]=="version" && argv[2] non-numeric: upstream's
+    //     getLongFromObjectOrReply emits the generic
+    //     "value is not an integer or out of range" envelope.
+    //
+    // fr currently ports only the unstable render path. The pre-fix
+    // code (br-frankenredis-m5nf) eagerly validated trailing args as
+    // i64 and rejected `LOLWUT VERSION` (no value) with WrongArity,
+    // so vendored-permissive inputs like `LOLWUT BOGUS`, `LOLWUT VERSION`,
+    // `LOLWUT VERSION 5 some-token` surfaced errors that vendored 7.2.4
+    // never raises. (frankenredis-lolwutpermit)
+    if argv.len() >= 3 {
         let ver_kw =
             std::str::from_utf8(&argv[1]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if ver_kw.eq_ignore_ascii_case("VERSION") {
-            if argv.len() < 3 {
-                return Err(CommandError::WrongArity("LOLWUT"));
-            }
-            // Validate the version integer and any version-specific
-            // trailing args, matching upstream's getLongFromObject
-            // path.
+            // Only the version selector arg is parsed by upstream's
+            // top-level lolwutCommand. lolwut5/lolwut6 do parse their
+            // own trailing cols/squares-per-row/squares-per-col args,
+            // but fr's port routes everything to lolwutUnstable, which
+            // ignores them — so don't reject them here.
             parse_i64_arg(&argv[2])?;
-            for arg in &argv[3..] {
-                parse_i64_arg(arg)?;
-            }
-        } else {
-            for arg in &argv[1..] {
-                parse_i64_arg(arg)?;
-            }
         }
     }
     let body = format!("Redis ver. {}\n", fr_store::REDIS_COMPAT_VERSION);
@@ -43977,6 +43981,58 @@ mod tests {
         .unwrap();
         let expected = format!("Redis ver. {}\n", fr_store::REDIS_COMPAT_VERSION);
         assert_eq!(out, RespFrame::BulkString(Some(expected.into_bytes())));
+    }
+
+    #[test]
+    fn lolwut_accepts_permissive_args_per_upstream_unstable_path() {
+        // (frankenredis-lolwutpermit) Upstream lolwut.c::lolwutCommand
+        // only enters the VERSION branch when `argc >= 3 && argv[1] is
+        // "version"`. Everything else routes through the unstable
+        // render fn for vendored 7.2.x, which IGNORES every remaining
+        // arg and just emits "Redis ver. <REDIS_VERSION>\n". fr was
+        // eagerly validating trailing args as i64 and rejecting
+        // `LOLWUT VERSION` (no value) with WrongArity, surfacing
+        // errors that vendored 7.2.4 never raises.
+        let mut store = Store::new();
+        let expected = format!("Redis ver. {}\n", fr_store::REDIS_COMPAT_VERSION);
+        let permissive_cases: &[&[&[u8]]] = &[
+            // VERSION keyword without a numeric arg → unstable fall-through.
+            &[b"LOLWUT", b"VERSION"],
+            // Non-VERSION first arg → ignored entirely.
+            &[b"LOLWUT", b"BOGUS"],
+            // Positional non-version arg → ignored.
+            &[b"LOLWUT", b"5"],
+            // VERSION + integer + extra trailing token → trailing tokens
+            // are upstream-render-fn args; fr's unstable port ignores them.
+            &[b"LOLWUT", b"VERSION", b"5", b"BOGUS"],
+        ];
+        for argv_in in permissive_cases {
+            let argv: Vec<Vec<u8>> = argv_in.iter().map(|s| s.to_vec()).collect();
+            let out = dispatch_argv(&argv, &mut store, 0)
+                .unwrap_or_else(|e| panic!("argv {argv_in:?}: {e:?}"));
+            assert_eq!(
+                out,
+                RespFrame::BulkString(Some(expected.clone().into_bytes())),
+                "argv: {argv_in:?}",
+            );
+        }
+
+        // Regression: VERSION + non-integer still errors via upstream's
+        // getLongFromObjectOrReply path.
+        let err = dispatch_argv(
+            &[
+                b"LOLWUT".to_vec(),
+                b"VERSION".to_vec(),
+                b"abc".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("VERSION + non-integer must still error");
+        assert!(
+            matches!(err, CommandError::InvalidInteger),
+            "got {err:?}"
+        );
     }
 
     // ── WAITAOF test ────────────────────────────────────────────────
