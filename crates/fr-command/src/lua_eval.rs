@@ -5041,6 +5041,75 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
             if let LuaValue::Str(err) = t.get(&LuaValue::Str(b"err".to_vec())) {
                 return RespFrame::Error(String::from_utf8_lossy(&err).to_string());
             }
+
+            // Upstream src/script_lua.c::luaReplyToRedisReply checks for
+            // RESP3 type-hint tables AFTER ok/err. fr was missing the
+            // entire group, so map / set / double / big_number /
+            // verbatim_string hint tables were all serialized as
+            // empty arrays (no integer keys at top level).
+            // (frankenredis-luaresp3hint)
+
+            // {map = t}: emit a Map frame whose entries are the hash
+            // pairs of the inner table. The fr-protocol layer flattens
+            // Map → 2N alternating Array under RESP2 and emits the `%`
+            // prefix under RESP3.
+            let map_field = t.get(&LuaValue::Str(b"map".to_vec()));
+            if let LuaValue::Table(inner) = map_field {
+                let pairs = inner
+                    .hash_pairs()
+                    .into_iter()
+                    .map(|(k, v)| (lua_to_resp(&k), lua_to_resp(&v)))
+                    .collect();
+                return RespFrame::Map(Some(pairs));
+            }
+
+            // {set = t}: emit the inner table's array part as an Array.
+            // RESP2 wire is the same as for any array; RESP3's `~` Set
+            // prefix isn't represented in fr's frame enum, so this is
+            // a RESP2-correct approximation under RESP3 too.
+            let set_field = t.get(&LuaValue::Str(b"set".to_vec()));
+            if let LuaValue::Table(inner) = set_field {
+                let items: Vec<RespFrame> = inner
+                    .inner
+                    .borrow()
+                    .array
+                    .iter()
+                    .filter(|v| !matches!(v, LuaValue::Nil))
+                    .map(lua_to_resp)
+                    .collect();
+                return RespFrame::Array(Some(items));
+            }
+
+            // {double = x}: emit BulkString of the double formatted
+            // upstream-style. Lua's `%.17g`-equivalent rendering
+            // matches what Redis surfaces, so use Rust's default
+            // f64 Display which is round-trip safe.
+            let double_field = t.get(&LuaValue::Str(b"double".to_vec()));
+            if let LuaValue::Number(n) = double_field {
+                let s = format!("{n}");
+                return RespFrame::BulkString(Some(s.into_bytes()));
+            }
+
+            // {big_number = "..."}: emit BulkString of the bignum. RESP3
+            // would prefix `(`, but fr-protocol has no BigNumber variant
+            // and BulkString is the documented RESP2 fallback.
+            let bn_field = t.get(&LuaValue::Str(b"big_number".to_vec()));
+            if let LuaValue::Str(s) = bn_field {
+                return RespFrame::BulkString(Some(s.clone()));
+            }
+
+            // {verbatim_string = {format = ..., string = ...}}:
+            // emit BulkString of the inner `string` field. Upstream's
+            // RESP3 `=<len>\r\n<fmt>:<payload>` framing isn't
+            // representable in fr's frame enum; the BulkString of the
+            // raw payload is the documented RESP2 fallback.
+            let vs_field = t.get(&LuaValue::Str(b"verbatim_string".to_vec()));
+            if let LuaValue::Table(inner) = vs_field {
+                if let LuaValue::Str(s) = inner.get(&LuaValue::Str(b"string".to_vec())) {
+                    return RespFrame::BulkString(Some(s));
+                }
+            }
+
             // Convert array part to RESP array (stop at first nil, matching Redis)
             let mut items = Vec::new();
             for item in t.inner.borrow().array.clone() {
@@ -5625,6 +5694,107 @@ mod tests {
         Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
         json_to_lua_value, lua_raw_equal, lua_value_to_json,
     };
+
+    #[test]
+    fn lua_to_resp_recognises_resp3_type_hint_tables() {
+        // Pins frankenredis-luaresp3hint. Upstream src/script_lua.c::
+        // luaReplyToRedisReply checks for {map=...}, {set=...},
+        // {double=...}, {big_number=...}, {verbatim_string=...} hint
+        // tables AFTER ok/err but before the array-iteration fallback.
+        // fr was returning empty arrays for ALL of them.
+
+        let mut store = Store::new();
+
+        // {map = {a=1, b=2}} → Map frame with 2 pairs.
+        let frame = eval_script(b"return {map = {a=1, b=2}}", &[], &[], &mut store, 0)
+            .expect("map hint should not error");
+        match frame {
+            RespFrame::Map(Some(pairs)) => {
+                let mut keys: Vec<String> = pairs
+                    .iter()
+                    .filter_map(|(k, _)| match k {
+                        RespFrame::BulkString(Some(b)) => {
+                            Some(String::from_utf8_lossy(b).into_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                keys.sort();
+                assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
+            }
+            other => panic!("expected Map for map hint, got {other:?}"),
+        }
+
+        // {set = {1, 2, 3}} → Array of the inner array's values.
+        let frame = eval_script(b"return {set = {1, 2, 3}}", &[], &[], &mut store, 0)
+            .expect("set hint should not error");
+        assert_eq!(
+            frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+                RespFrame::Integer(3),
+            ]))
+        );
+
+        // {double = 3.14} → BulkString of the formatted double.
+        let frame = eval_script(b"return {double = 3.14}", &[], &[], &mut store, 0)
+            .expect("double hint should not error");
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"3.14".to_vec()))
+        );
+
+        // {big_number = "12345..."} → BulkString of the bignum.
+        let frame = eval_script(
+            b"return {big_number = '1234567890123456789012345'}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("big_number hint should not error");
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"1234567890123456789012345".to_vec()))
+        );
+
+        // {verbatim_string = {format='txt', string='hi'}} → BulkString of `string`.
+        let frame = eval_script(
+            b"return {verbatim_string = {format='txt', string='hi'}}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("verbatim_string hint should not error");
+        assert_eq!(frame, RespFrame::BulkString(Some(b"hi".to_vec())));
+
+        // err and ok still take precedence over the type hints.
+        let frame = eval_script(
+            b"return {err = 'oops', map = {a = 1}}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("err+map should not error before reply");
+        assert_eq!(frame, RespFrame::Error("oops".to_string()));
+        let frame = eval_script(
+            b"return {ok = 'good', map = {a = 1}}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::SimpleString("good".to_string()));
+
+        // Bare string-keyed tables without any hint key still produce
+        // an empty array (no behavior change for the non-hint path).
+        let frame = eval_script(b"return {a = 1, b = 2}", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Array(Some(Vec::new())));
+    }
 
     #[test]
     fn tonumber_accepts_hex_strings_via_lua_5_1_str2d_fallback() {
