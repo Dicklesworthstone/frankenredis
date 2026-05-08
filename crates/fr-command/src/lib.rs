@@ -39731,6 +39731,61 @@ mod tests {
     }
 
     #[test]
+    fn lua_redis_call_acl_genpass_splits_parse_vs_range_errors() {
+        // (frankenredis-genpassluasplit) fr-command's Lua-context
+        // acl_script_result previously conflated parse failure and
+        // out-of-range under the GENPASS-specific wording, so a
+        // redis.call("ACL","GENPASS","abc") from a script returned
+        //   ERR ACL GENPASS argument must be the number of bits ...
+        // for any non-integer arg. Upstream's processCommand fires
+        // CMD_NOSCRIPT first regardless, but fr's pre-noscript
+        // validation should still match the non-script wording so
+        // both code paths agree on parse vs range. fr-runtime's
+        // handle_acl_genpass already splits the two; this pin
+        // ensures lua_eval.rs follows the same pattern.
+        let mut store = Store::new();
+
+        let parse_err = dispatch_argv(
+            &[
+                b"EVAL".to_vec(),
+                b"return redis.call('ACL','GENPASS','abc')".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("eval");
+        let RespFrame::Error(msg) = parse_err else {
+            panic!("expected error, got {parse_err:?}");
+        };
+        assert!(
+            msg.contains("value is not an integer or out of range"),
+            "non-integer GENPASS arg should surface the parse-error wording: {msg}",
+        );
+
+        for bad_range in [b"0".as_slice(), b"-1", b"4097"] {
+            let frame = dispatch_argv(
+                &[
+                    b"EVAL".to_vec(),
+                    format!("return redis.call('ACL','GENPASS','{}')", String::from_utf8_lossy(bad_range)).into_bytes(),
+                    b"0".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("eval");
+            let RespFrame::Error(msg) = frame else {
+                panic!("expected error for {bad_range:?}, got {frame:?}");
+            };
+            assert!(
+                msg.contains("ACL GENPASS argument must be the number of bits"),
+                "out-of-range GENPASS ({:?}) should surface the dedicated wording: {msg}",
+                String::from_utf8_lossy(bad_range),
+            );
+        }
+    }
+
+    #[test]
     fn lua_redis_builtins_invalid_arg_shapes_match_upstream() {
         // Pin upstream script_lua.c wordings for fr's Lua redis.*
         // builtin error paths (frankenredis-wo58):

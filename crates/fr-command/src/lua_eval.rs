@@ -4392,13 +4392,25 @@ fn acl_script_result(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
 
     if sub.eq_ignore_ascii_case("GENPASS") {
         if argv.len() == 3 {
+            // Upstream acl.c::aclCommand parses GENPASS bits via
+            // getLongFromObjectOrReply (NULL msg → "value is not an
+            // integer or out of range") THEN range-checks with the
+            // dedicated wording. fr-runtime's handle_acl_genpass already
+            // splits the two; mirror that split here so the lua-call
+            // path emits the same parse vs range distinction (noscript
+            // still wins at the upstream layer, but fr's pre-noscript
+            // validation should match its own non-script wording).
+            // (frankenredis-genpassluasplit)
             match parse_i64_arg(&argv[2]) {
                 Ok(bits) if bits > 0 && bits <= 4096 => {}
-                _ => {
+                Ok(_) => {
                     return Some(Err(
                         "ERR ACL GENPASS argument must be the number of bits for the output password, a positive number up to 4096"
                             .to_string(),
                     ));
+                }
+                Err(_) => {
+                    return Some(Err(command_error_string(CommandError::InvalidInteger)));
                 }
             }
         } else if argv.len() != 2 {
