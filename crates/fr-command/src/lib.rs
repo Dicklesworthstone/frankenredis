@@ -11997,59 +11997,91 @@ fn getex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     }
     let key = &argv[1];
 
-    // Parse expiration options
-    let new_expires: Option<Option<u64>> = if argv.len() == 2 {
-        None // No expiration change
-    } else {
-        let opt = std::str::from_utf8(&argv[2]).map_err(|_| CommandError::SyntaxError)?;
-        if opt.eq_ignore_ascii_case("EX") {
-            if argv.len() != 4 {
+    // (frankenredis-getexdup) Mirror upstream
+    // t_string.c::parseExtendedStringArgumentsOrReply (the COMMAND_GET
+    // branch shared with SET): each expiry-kind is gated on
+    // !(*flags & OBJ_<other>) but NOT on its own flag, so the same
+    // option can appear twice (last value wins). Only mixed kinds
+    // conflict. fr previously hardcoded a strict argc check that
+    // rejected `GETEX k EX 5 EX 10`, `GETEX k PERSIST PERSIST`, etc.,
+    // diverging from vendored Redis 7.2.4.
+    enum ExpiryMode {
+        None,
+        Persist,
+        Ex(u64),
+        Px(u64),
+        Exat(u64),
+        Pxat(u64),
+    }
+    let mut expiry_mode = ExpiryMode::None;
+    let mut options = argv[2..].iter();
+    while let Some(option_arg) = options.next() {
+        let option =
+            std::str::from_utf8(option_arg).map_err(|_| CommandError::SyntaxError)?;
+        if option.eq_ignore_ascii_case("EX") {
+            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Ex(_)) {
                 return Err(CommandError::SyntaxError);
             }
-            let secs = parse_expire_time_arg(&argv[3], "getex")?;
-            // (br-frankenredis-setexrange)
+            let Some(arg) = options.next() else {
+                return Err(CommandError::SyntaxError);
+            };
+            let secs = parse_expire_time_arg(arg, "getex")?;
             if secs > i64::MAX as u64 / 1000 {
                 return Err(CommandError::Custom(
                     "ERR invalid expire time in 'getex' command".to_string(),
                 ));
             }
-            // (frankenredis-expbase) basetime overflow check.
             validate_relative_expire_basetime(secs * 1000, now_ms, "getex")?;
-            Some(Some(now_ms.saturating_add(secs.saturating_mul(1000))))
-        } else if opt.eq_ignore_ascii_case("PX") {
-            if argv.len() != 4 {
+            expiry_mode = ExpiryMode::Ex(secs);
+        } else if option.eq_ignore_ascii_case("PX") {
+            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Px(_)) {
                 return Err(CommandError::SyntaxError);
             }
-            let ms = parse_expire_time_arg(&argv[3], "getex")?;
-            // (frankenredis-expbase) basetime overflow check.
+            let Some(arg) = options.next() else {
+                return Err(CommandError::SyntaxError);
+            };
+            let ms = parse_expire_time_arg(arg, "getex")?;
             validate_relative_expire_basetime(ms, now_ms, "getex")?;
-            Some(Some(now_ms.saturating_add(ms)))
-        } else if opt.eq_ignore_ascii_case("EXAT") {
-            if argv.len() != 4 {
+            expiry_mode = ExpiryMode::Px(ms);
+        } else if option.eq_ignore_ascii_case("EXAT") {
+            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Exat(_)) {
                 return Err(CommandError::SyntaxError);
             }
-            let ts = parse_expire_time_arg(&argv[3], "getex")?;
-            // (br-frankenredis-setexrange)
+            let Some(arg) = options.next() else {
+                return Err(CommandError::SyntaxError);
+            };
+            let ts = parse_expire_time_arg(arg, "getex")?;
             if ts > i64::MAX as u64 / 1000 {
                 return Err(CommandError::Custom(
                     "ERR invalid expire time in 'getex' command".to_string(),
                 ));
             }
-            Some(Some(ts.saturating_mul(1000)))
-        } else if opt.eq_ignore_ascii_case("PXAT") {
-            if argv.len() != 4 {
+            expiry_mode = ExpiryMode::Exat(ts);
+        } else if option.eq_ignore_ascii_case("PXAT") {
+            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Pxat(_)) {
                 return Err(CommandError::SyntaxError);
             }
-            let ts_ms = parse_expire_time_arg(&argv[3], "getex")?;
-            Some(Some(ts_ms))
-        } else if opt.eq_ignore_ascii_case("PERSIST") {
-            if argv.len() != 3 {
+            let Some(arg) = options.next() else {
+                return Err(CommandError::SyntaxError);
+            };
+            expiry_mode = ExpiryMode::Pxat(parse_expire_time_arg(arg, "getex")?);
+        } else if option.eq_ignore_ascii_case("PERSIST") {
+            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Persist) {
                 return Err(CommandError::SyntaxError);
             }
-            Some(None)
+            expiry_mode = ExpiryMode::Persist;
         } else {
             return Err(CommandError::SyntaxError);
         }
+    }
+
+    let new_expires: Option<Option<u64>> = match expiry_mode {
+        ExpiryMode::None => None,
+        ExpiryMode::Persist => Some(None),
+        ExpiryMode::Ex(secs) => Some(Some(now_ms.saturating_add(secs.saturating_mul(1000)))),
+        ExpiryMode::Px(ms) => Some(Some(now_ms.saturating_add(ms))),
+        ExpiryMode::Exat(ts) => Some(Some(ts.saturating_mul(1000))),
+        ExpiryMode::Pxat(ts_ms) => Some(Some(ts_ms)),
     };
 
     match store.getex(key, new_expires, now_ms)? {
@@ -33064,6 +33096,118 @@ mod tests {
         assert_eq!(
             err.to_resp(),
             RespFrame::Error("ERR invalid expire time in 'getex' command".into())
+        );
+    }
+
+    /// (frankenredis-getexdup) Upstream
+    /// t_string.c::parseExtendedStringArgumentsOrReply allows the same
+    /// expiry-kind to repeat (last value wins); only mixed kinds
+    /// conflict. Verified vs vendored Redis 7.2.4:
+    ///   GETEX k PERSIST PERSIST -> v
+    ///   GETEX k EX 5 EX 10      -> v + TTL=10
+    ///   GETEX k PXAT 1 PXAT 2   -> v
+    ///   GETEX k EX 5 EXAT 100   -> ERR syntax error
+    #[test]
+    fn getex_accepts_duplicate_same_kind_options_and_rejects_mixed() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("SET k v");
+
+        // Duplicate PERSIST is accepted (idempotent).
+        let r = dispatch_argv(
+            &[
+                b"GETEX".to_vec(),
+                b"k".to_vec(),
+                b"PERSIST".to_vec(),
+                b"PERSIST".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("GETEX PERSIST PERSIST");
+        assert_eq!(r, RespFrame::BulkString(Some(b"v".to_vec())));
+
+        // Duplicate EX accepted, second value wins.
+        let r = dispatch_argv(
+            &[
+                b"GETEX".to_vec(),
+                b"k".to_vec(),
+                b"EX".to_vec(),
+                b"5".to_vec(),
+                b"EX".to_vec(),
+                b"10".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("GETEX EX 5 EX 10");
+        assert_eq!(r, RespFrame::BulkString(Some(b"v".to_vec())));
+        let abs_ms = store.get_expires_at_ms(b"k", 0);
+        assert_eq!(
+            abs_ms,
+            Some(10_000),
+            "expected absolute expiry of now_ms(0) + 10s = 10000ms after EX 5 EX 10 override, got {abs_ms:?}"
+        );
+
+        // Duplicate PXAT accepted (last wins; no error).
+        let r = dispatch_argv(
+            &[
+                b"GETEX".to_vec(),
+                b"k".to_vec(),
+                b"PXAT".to_vec(),
+                b"1".to_vec(),
+                b"PXAT".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("GETEX PXAT 1 PXAT 2");
+        assert_eq!(r, RespFrame::BulkString(Some(b"v".to_vec())));
+
+        // Mixed kinds still rejected.
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("SET k v");
+        let err = dispatch_argv(
+            &[
+                b"GETEX".to_vec(),
+                b"k".to_vec(),
+                b"EX".to_vec(),
+                b"5".to_vec(),
+                b"EXAT".to_vec(),
+                b"100".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("GETEX EX 5 EXAT 100 must reject mixed kinds");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+        let err = dispatch_argv(
+            &[
+                b"GETEX".to_vec(),
+                b"k".to_vec(),
+                b"PERSIST".to_vec(),
+                b"EX".to_vec(),
+                b"5".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("GETEX PERSIST EX 5 must reject mixed kinds");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR syntax error".to_string())
         );
     }
 

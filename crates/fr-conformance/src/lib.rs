@@ -285,22 +285,24 @@ pub fn run_fixture(
     let total = fixture.cases.len();
     for case in fixture.cases {
         runtime.wait_for_child_processes();
+        // (frankenredis-runfixtureiso) Drop any replica tag the
+        // shared fixture session may have inherited from a prior
+        // REPLCONF case. REPLCONF listening-port/ip-address/capa
+        // call ensure_replica(self.session.client_id) which adds
+        // the shared client_id to replication_runtime_state.replicas.
+        // Without this reset, every subsequent REPLICAOF/SLAVEOF
+        // case on the same shared session would be rejected with
+        // "Command is not valid when client is a replica."
+        // (matching upstream's per-connection gate at
+        // replication.c::replicaofCommand). Mirroring the live-redis
+        // path's per-case dedicated connection without resorting to
+        // a full session swap, which several auth/handshake fixtures
+        // (e.g. fr_p2c_004_acl_journey) deliberately rely on.
+        let shared_client_id = runtime.client_id();
+        runtime.cleanup_disconnected_client(shared_client_id);
         let evidence_before = runtime.evidence().events().len();
         let frame = case_to_frame(&case);
-        // Mirror the live-oracle path (line 399-407): commands that
-        // mutate connection-local state need isolated sessions on the
-        // runtime side too, otherwise replica/auth/select/etc. flags
-        // leak into later cases that expect a virgin connection.
-        // Without this, REPLCONF listening-port adds the shared client
-        // session id to replication_runtime_state.replicas, and
-        // subsequent REPLICAOF cases are correctly rejected with
-        // "Command is not valid when client is a replica" (matching
-        // upstream's per-connection gate). (frankenredis-runfixtureiso)
-        let actual = if live_oracle_case_uses_dedicated_connection(&case) {
-            runtime.with_isolated_session(|rt| rt.execute_frame(frame, case.now_ms))
-        } else {
-            runtime.execute_frame(frame, case.now_ms)
-        };
+        let actual = runtime.execute_frame(frame, case.now_ms);
         let new_events = &runtime.evidence().events()[evidence_before..];
         let threat_result = validate_threat_expectation(case.expect_threat.as_ref(), new_events);
         let log_result = validate_structured_log_emission(
