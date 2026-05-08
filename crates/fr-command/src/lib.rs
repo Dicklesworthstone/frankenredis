@@ -7023,6 +7023,23 @@ fn xpending(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
         (3, if argv.len() >= 7 { Some(6) } else { None })
     };
 
+    // (frankenredis-xpendcount) Upstream t_stream.c::xpendingCommand:
+    // 2895-2929 parses the count argument FIRST and clamps `count < 0`
+    // to 0, then parses start/end. This affects the surfaced error for
+    // mixed-bad inputs:
+    //   XPENDING s g abc - + 5  →  upstream rejects count='+' first
+    //                              ("value is not an integer..."),
+    //                              fr was rejecting start='abc'
+    //                              ("Invalid stream ID...").
+    //   XPENDING s g - + -1     →  upstream clamps count=0 and replies
+    //                              with an empty array; fr was erroring.
+    let count_raw = parse_i64_arg(&argv[start_idx + 2])?;
+    let count = if count_raw < 0 {
+        0
+    } else {
+        usize::try_from(count_raw).unwrap_or(usize::MAX)
+    };
+
     let start = match parse_stream_range_bound(&argv[start_idx], true) {
         Ok(id) => id,
         Err(reply) => return Ok(reply),
@@ -7031,12 +7048,6 @@ fn xpending(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
         Ok(id) => id,
         Err(reply) => return Ok(reply),
     };
-
-    let count_raw = parse_i64_arg(&argv[start_idx + 2])?;
-    if count_raw < 0 {
-        return Err(CommandError::InvalidInteger);
-    }
-    let count = usize::try_from(count_raw).unwrap_or(usize::MAX);
     let consumer = consumer_idx.map(|idx| argv[idx].as_slice());
 
     let Some(entries) = store.xpending_entries(
@@ -29085,7 +29096,13 @@ mod tests {
             .expect_err("xpending arity");
         assert!(matches!(arity, CommandError::WrongArity("XPENDING")));
 
-        let invalid_count = dispatch_argv(
+        // (frankenredis-xpendcount) Upstream t_stream.c::xpendingCommand
+        // line 2915 clamps `count < 0` to 0 (after parsing as long long)
+        // and proceeds rather than erroring. The empty range plus a
+        // missing key/group then triggers the NOGROUP path; with a
+        // valid group it would return an empty array. fr previously
+        // surfaced InvalidInteger for negative count.
+        let negative_count = dispatch_argv(
             &[
                 b"XPENDING".to_vec(),
                 b"s".to_vec(),
@@ -29097,8 +29114,11 @@ mod tests {
             &mut store,
             0,
         )
-        .expect_err("xpending invalid count");
-        assert_eq!(invalid_count, CommandError::InvalidInteger);
+        .expect("xpending negative count must clamp, not error");
+        assert_eq!(
+            negative_count,
+            RespFrame::Error("NOGROUP No such key 's' or consumer group 'g1'".to_string())
+        );
 
         let missing = dispatch_argv(
             &[b"XPENDING".to_vec(), b"s".to_vec(), b"g1".to_vec()],
@@ -29110,6 +29130,64 @@ mod tests {
         assert_eq!(
             missing,
             RespFrame::Error("NOGROUP No such key 's' or consumer group 'g1'".to_string())
+        );
+    }
+
+    #[test]
+    fn xpending_parses_count_before_start_end_per_upstream() {
+        // (frankenredis-xpendcount) Upstream t_stream.c::xpendingCommand
+        // 2895-2929 parses the count argument FIRST, then start/end.
+        // For a call like `XPENDING s g abc - + 5`: argv layout (no
+        // IDLE) maps to start=abc, end=-, count=+. Upstream errors on
+        // count='+' first ("value is not an integer or out of range");
+        // fr was erroring on start='abc' first ("Invalid stream ID
+        // specified as stream command argument").
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1-1".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd");
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"$".to_vec(),
+                b"MKSTREAM".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+
+        // count='+' must surface the integer-parse error BEFORE the
+        // start='abc' stream-ID parse.
+        let err = dispatch_argv(
+            &[
+                b"XPENDING".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"abc".to_vec(),
+                b"-".to_vec(),
+                b"+".to_vec(),
+                b"5".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("count parses before start");
+        assert!(
+            matches!(err, CommandError::InvalidInteger),
+            "got {err:?}",
         );
     }
 
