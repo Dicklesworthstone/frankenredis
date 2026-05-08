@@ -1057,7 +1057,23 @@ impl AuthState {
     }
 
     fn auth_required(&self) -> bool {
-        self.requirepass.is_some() || self.acl_users.values().any(|u| !u.passwords.is_empty())
+        // Upstream src/networking.c::createClient assigns DefaultUser
+        // to every new client and sets c->authenticated = 1 only when
+        // DefaultUser carries USER_FLAG_NOPASS. That is, a fresh
+        // connection auto-authenticates iff the *default* user is
+        // nopass — adding other password-protected users (alice, bob,
+        // ...) does NOT change the default's auth requirement.
+        // fr previously returned true if ANY ACL user had a password,
+        // so calling `ACL SETUSER alice on >secret` would lock out all
+        // subsequent fresh connections even though the default user
+        // remained nopass. (frankenredis-aclnopass)
+        if self.requirepass.is_some() {
+            return true;
+        }
+        match self.acl_users.get(DEFAULT_AUTH_USER) {
+            Some(default) => !default.nopass,
+            None => true, // defensive — default user shouldn't be missing
+        }
     }
 
     fn requirepass(&self) -> Option<&[u8]> {
@@ -13578,13 +13594,24 @@ mod tests {
 
     #[test]
     fn fr_p2c_004_u008_auth_user_password_success() {
+        // (frankenredis-aclnopass) Adding a non-default user with a
+        // password does NOT deauth the current connection — upstream
+        // keeps the connection auto-authed as default (which is nopass)
+        // and only switches identity on explicit AUTH. The pre-fix
+        // assert!(!rt.is_authenticated()) pinned a bug where any
+        // password-protected user globally triggered auth_required.
         let mut rt = Runtime::default_strict();
         rt.add_user(b"alice".to_vec(), b"secret2".to_vec());
-        assert!(!rt.is_authenticated());
+        assert!(rt.is_authenticated(), "default-nopass auto-auth survives non-default user adds");
 
         let out = rt.execute_frame(command(&[b"AUTH", b"alice", b"secret2"]), 0);
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
         assert!(rt.is_authenticated());
+        // After AUTH alice, the session's authenticated user switches.
+        assert_eq!(
+            rt.session.authenticated_user.as_deref(),
+            Some(b"alice".as_slice())
+        );
     }
 
     #[test]
@@ -14934,7 +14961,13 @@ mod tests {
 
     #[test]
     fn fr_p2c_004_u010_user_auth_requires_authentication_before_dispatch() {
+        // (frankenredis-aclnopass) Set requirepass to force the auth
+        // gate; in upstream, adding a non-default user with a password
+        // alone doesn't change default's nopass, so simply adding alice
+        // would NOT gate dispatch. To exercise the gate we need
+        // requirepass (which deauths default).
         let mut rt = Runtime::default_strict();
+        rt.set_requirepass(Some(b"masterpw".to_vec()));
         rt.add_user(b"alice".to_vec(), b"secret2".to_vec());
 
         let gated = rt.execute_frame(command(&[b"GET", b"k"]), 0);
@@ -14959,6 +14992,58 @@ mod tests {
     }
 
     #[test]
+    fn adding_password_user_does_not_deauth_default_nopass_connections() {
+        // Pins frankenredis-aclnopass. Upstream
+        // src/networking.c::createClient assigns DefaultUser to every
+        // new client and sets c->authenticated = 1 only when DefaultUser
+        // carries USER_FLAG_NOPASS. Adding a non-default
+        // password-protected user (alice / bob / ...) does NOT change
+        // default's auth-required status. fr previously was checking
+        //   self.acl_users.values().any(|u| !u.passwords.is_empty())
+        // which globally locked out fresh connections whenever any user
+        // had a password — even though the default user remained nopass.
+        let mut rt = Runtime::default_strict();
+
+        // Fresh runtime: default is nopass, fresh sessions auto-auth.
+        assert!(rt.is_authenticated(), "fresh default-nopass session should be authenticated");
+        let ping = rt.execute_frame(command(&[b"PING"]), 0);
+        assert_eq!(ping, RespFrame::SimpleString("PONG".to_string()));
+
+        // Add a password-protected user; the existing connection MUST
+        // stay authenticated and ordinary commands must NOT gate.
+        rt.add_user(b"alice".to_vec(), b"secret".to_vec());
+        assert!(
+            rt.is_authenticated(),
+            "adding non-default user with password must not deauth default-nopass session"
+        );
+        let after_add = rt.execute_frame(command(&[b"PING"]), 1);
+        assert_eq!(
+            after_add,
+            RespFrame::SimpleString("PONG".to_string()),
+            "PING must still succeed after adding a password-protected user"
+        );
+
+        // Add another; same.
+        rt.add_user(b"bob".to_vec(), b"secret2".to_vec());
+        let after_add2 = rt.execute_frame(command(&[b"GET", b"k"]), 2);
+        assert_eq!(after_add2, RespFrame::BulkString(None));
+
+        // Setting requirepass DOES gate — sets default-nopass=false.
+        rt.set_requirepass(Some(b"masterpw".to_vec()));
+        // The session is rebuilt by set_requirepass; check via execute.
+        let gated = rt.execute_frame(command(&[b"GET", b"k"]), 3);
+        assert_eq!(
+            gated,
+            RespFrame::Error("NOAUTH Authentication required.".to_string())
+        );
+
+        // Clearing requirepass restores nopass on default.
+        rt.set_requirepass(None);
+        let restored = rt.execute_frame(command(&[b"PING"]), 4);
+        assert_eq!(restored, RespFrame::SimpleString("PONG".to_string()));
+    }
+
+    #[test]
     fn quit_and_reset_bypass_auth_gate_when_unauthenticated() {
         // Upstream Redis 7.2 commands.def marks AUTH / HELLO / QUIT / RESET
         // with CMD_NO_AUTH; server.c::processCommand:3911 bypasses the
@@ -14968,14 +15053,17 @@ mod tests {
         // upstream allowing them. (frankenredis-mhxwl)
 
         // QUIT under requirepass with no AUTH succeeds.
+        // (frankenredis-aclnopass) Use set_requirepass since adding a
+        // non-default password-protected user doesn't deauth the
+        // current connection (default stays nopass).
         let mut rt = Runtime::default_strict();
-        rt.add_user(b"alice".to_vec(), b"secret".to_vec());
+        rt.set_requirepass(Some(b"secret".to_vec()));
         let quit = rt.execute_frame(command(&[b"QUIT"]), 0);
         assert_eq!(quit, RespFrame::SimpleString("OK".to_string()));
 
         // RESET under requirepass with no AUTH succeeds with +RESET.
         let mut rt = Runtime::default_strict();
-        rt.add_user(b"alice".to_vec(), b"secret".to_vec());
+        rt.set_requirepass(Some(b"secret".to_vec()));
         let reset = rt.execute_frame(command(&[b"RESET"]), 0);
         assert_eq!(reset, RespFrame::SimpleString("RESET".to_string()));
 
@@ -14994,8 +15082,13 @@ mod tests {
         // AUTH <user> <pass> form, rather than the generic
         // "NOAUTH Authentication required." used by other commands.
         // (frankenredis-qvouv)
+        // (frankenredis-aclnopass) Force the auth gate via
+        // set_requirepass — adding a non-default password-protected
+        // user alone doesn't change default's nopass status, and the
+        // pre-fix behavior of treating "any user has password" as
+        // "auth required" was the bug we fixed.
         let mut rt = Runtime::default_strict();
-        rt.add_user(b"alice".to_vec(), b"secret".to_vec());
+        rt.set_requirepass(Some(b"secret".to_vec()));
 
         // Bare HELLO 2 without AUTH must surface the hint.
         let bare = rt.execute_frame(command(&[b"HELLO", b"2"]), 0);
@@ -15020,8 +15113,9 @@ mod tests {
 
         // HELLO 2 AUTH <user> <pass> still authenticates and switches
         // protocol — confirms the fix didn't break the inline form.
+        // requirepass binds to the default user, so use 'default secret'.
         let inline = rt.execute_frame(
-            command(&[b"HELLO", b"2", b"AUTH", b"alice", b"secret"]),
+            command(&[b"HELLO", b"2", b"AUTH", b"default", b"secret"]),
             2,
         );
         let RespFrame::Array(_) = &inline else {
