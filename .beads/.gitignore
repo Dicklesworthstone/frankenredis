@@ -14,6 +14,9 @@ last-touched
 # Local history backups
 .br_history/
 
+# br doctor --repair backup snapshots (created when DB is rebuilt from JSONL).
+.br_recovery/
+
 # Sync state (local-only, per-machine)
 .sync.lock
 sync_base.jsonl
