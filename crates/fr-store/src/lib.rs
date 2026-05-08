@@ -1384,6 +1384,15 @@ pub struct Store {
     pub stat_unexpected_error_replies: u64,
     /// Total number of RESP error replies emitted to clients.
     pub stat_total_error_replies: u64,
+    /// Per-error-code reply counter, keyed by uppercase error prefix (e.g.
+    /// "ERR", "WRONGTYPE", "NOAUTH", "OOM", "BUSYKEY", "WRONGPASS",
+    /// "MOVED", "ASK", "NOPROTO", "NOSCRIPT", "READONLY", "MASTERDOWN",
+    /// "LOADING", "BUSY", "TRYAGAIN", "EXECABORT", "NOREPLICAS", "NOPERM",
+    /// "NOGROUP", "MISCONF", "CROSSSLOT", "NOTBUSY"). Drives INFO
+    /// Errorstats per-code lines (`errorstat_<CODE>:count=<N>`) — mirrors
+    /// upstream server.c::errorstats[] tracked via incrementErrorCount.
+    /// (frankenredis-errorstatslines)
+    pub errorstats_per_type: HashMap<String, u64>,
     /// Total number of client-visible readonly commands processed.
     pub stat_total_reads_processed: u64,
     /// Total number of client-visible write commands processed.
@@ -1590,6 +1599,7 @@ impl Default for Store {
             stat_keyspace_misses: 0,
             stat_unexpected_error_replies: 0,
             stat_total_error_replies: 0,
+            errorstats_per_type: HashMap::new(),
             stat_total_reads_processed: 0,
             stat_total_writes_processed: 0,
             stat_expired_keys: 0,
@@ -1822,6 +1832,7 @@ impl Store {
         self.stat_total_connections_received = 0;
         self.stat_unexpected_error_replies = 0;
         self.stat_total_error_replies = 0;
+        self.errorstats_per_type.clear();
         self.stat_total_reads_processed = 0;
         self.stat_total_writes_processed = 0;
         self.stat_expired_keys = 0;

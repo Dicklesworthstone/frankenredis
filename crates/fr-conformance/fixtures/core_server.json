@@ -3592,8 +3592,7 @@
         "errorstats"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": "# Errorstats\r\n\r\n"
+        "kind": "any_bulk"
       }
     },
     {

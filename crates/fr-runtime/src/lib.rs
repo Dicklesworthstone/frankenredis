@@ -4245,10 +4245,24 @@ impl Runtime {
         let reply = fr_store::with_touch_disabled(disable_touch, || {
             self.execute_frame_internal(frame, argv_result, now_ms, packet_id)
         });
-        if matches!(reply, RespFrame::Error(_)) {
+        if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
             if self.execution_source.counts_as_unexpected_error_reply() {
                 self.server.store.stat_unexpected_error_replies += 1;
+            }
+            // Upstream server.c::incrementErrorCount keys errorstats by
+            // the leading whitespace-delimited error code token (uppercase).
+            // Fr's RespFrame::Error body already excludes the '-' prefix.
+            // (frankenredis-errorstatslines)
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next() {
+                if !code.is_empty() {
+                    *self
+                        .server
+                        .store
+                        .errorstats_per_type
+                        .entry(code.to_string())
+                        .or_insert(0) += 1;
+                }
             }
         }
         self.server.store.stat_total_reads_processed += processed_counts.0;
@@ -13408,6 +13422,78 @@ mod tests {
         };
         let all_body = String::from_utf8(bytes).expect("utf8 info");
         assert!(all_body.contains("# Commandstats"), "{all_body}");
+    }
+
+    #[test]
+    fn info_errorstats_emits_per_error_code_counts() {
+        // Pin upstream INFO Errorstats parity (server.c::genRedisInfoString:
+        // 6178-6191). Each emitted error reply should bump
+        // server.store.errorstats_per_type[<CODE>], where <CODE> is the
+        // leading whitespace-delimited token of the reply (no '-' prefix
+        // since that lives at the protocol layer). (frankenredis-errorstatslines)
+        let mut rt = Runtime::default_strict();
+        rt.set_requirepass(Some(b"secret".to_vec()));
+
+        // NOAUTH-coded reply (auth required, no AUTH yet).
+        assert!(matches!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 0),
+            RespFrame::Error(_)
+        ));
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"secret"]), 1),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // WRONGTYPE-coded reply.
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 2);
+        assert!(matches!(
+            rt.execute_frame(command(&[b"LPUSH", b"k", b"x"]), 3),
+            RespFrame::Error(_)
+        ));
+
+        // Generic ERR-coded reply (wrong-arity).
+        assert!(matches!(
+            rt.execute_frame(command(&[b"SET"]), 4),
+            RespFrame::Error(_)
+        ));
+
+        let info = rt.execute_frame(command(&[b"INFO", b"errorstats"]), 5);
+        let RespFrame::BulkString(Some(bytes)) = info else {
+            panic!("expected bulk info response");
+        };
+        let body = String::from_utf8(bytes).expect("utf8 info");
+
+        assert!(body.starts_with("# Errorstats\r\n"), "{body}");
+        assert!(
+            body.contains("errorstat_NOAUTH:count=1\r\n"),
+            "expected NOAUTH counter: {body}",
+        );
+        assert!(
+            body.contains("errorstat_WRONGTYPE:count=1\r\n"),
+            "expected WRONGTYPE counter: {body}",
+        );
+        assert!(
+            body.contains("errorstat_ERR:count=1\r\n"),
+            "expected ERR counter for wrong-arity: {body}",
+        );
+
+        // Codes emitted in lex-sorted order — ERR < NOAUTH < WRONGTYPE.
+        let err_pos = body.find("errorstat_ERR:").expect("ERR present");
+        let noauth_pos = body.find("errorstat_NOAUTH:").expect("NOAUTH present");
+        let wrongtype_pos = body.find("errorstat_WRONGTYPE:").expect("WRONGTYPE present");
+        assert!(err_pos < noauth_pos && noauth_pos < wrongtype_pos, "{body}");
+
+        // CONFIG RESETSTAT should clear the counters along with the rest.
+        rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 6);
+        let after = rt.execute_frame(command(&[b"INFO", b"errorstats"]), 7);
+        let RespFrame::BulkString(Some(bytes)) = after else {
+            panic!("expected bulk info response");
+        };
+        let after_body = String::from_utf8(bytes).expect("utf8 info");
+        assert_eq!(
+            after_body, "# Errorstats\r\n\r\n",
+            "RESETSTAT should empty errorstats: {after_body}",
+        );
     }
 
     #[test]

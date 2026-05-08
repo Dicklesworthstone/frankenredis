@@ -13303,7 +13303,22 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
 
     // Errorstats section
     if section_requested("errorstats") {
+        // Upstream server.c::genRedisInfoString:6178-6191 emits one
+        // 'errorstat_<CODE>:count=<N>' line per error code that has a
+        // non-zero counter, sorted by code (lex). The counters are
+        // populated by server.c::incrementErrorCount keyed on the
+        // leading whitespace-delimited token of each error reply.
+        // (frankenredis-errorstatslines)
         info.push_str("# Errorstats\r\n");
+        let mut codes: Vec<(&String, &u64)> = store
+            .errorstats_per_type
+            .iter()
+            .filter(|(_, count)| **count > 0)
+            .collect();
+        codes.sort_by(|a, b| a.0.cmp(b.0));
+        for (code, count) in codes {
+            let _ = write!(info, "errorstat_{code}:count={count}\r\n");
+        }
         info.push_str("\r\n");
     }
 
