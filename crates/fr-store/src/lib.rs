@@ -635,8 +635,38 @@ impl Entry {
             .saturating_sub(u8::try_from(periods).unwrap_or(u8::MAX))
     }
 
-    fn bump_lfu_freq(&mut self, now_ms: u64, decay_time: u64) {
-        self.lfu_freq = self.current_lfu_freq(now_ms, decay_time).saturating_add(1);
+    /// Mirror upstream evict.c::LFULogIncr: logarithmic probabilistic
+    /// counter increment with `p = 1.0 / (baseval * log_factor + 1)`
+    /// where `baseval = max(0, counter - LFU_INIT_VAL)`. Saturated at
+    /// 255. fr previously bumped naively (+1 every access), which made
+    /// `OBJECT FREQ` grow linearly with access count instead of
+    /// asymptoting like vendored 7.2.4. (frankenredis-lfulog)
+    ///
+    /// `rand_sample` is a u64 supplied by the caller (typically from
+    /// `Store::next_rand`) so this method stays free of a borrow on the
+    /// owning Store. Probability `p = 1/denom` is checked deterministic-
+    /// ally as `rand_sample % denom == 0`, which is uniform when the
+    /// upstream PRNG is uniform — that's how fr's other random-sampled
+    /// commands (HRANDFIELD, RANDOMKEY, …) consume the LCG.
+    fn bump_lfu_freq(
+        &mut self,
+        now_ms: u64,
+        decay_time: u64,
+        log_factor: u64,
+        rand_sample: u64,
+    ) {
+        let counter = self.current_lfu_freq(now_ms, decay_time);
+        if counter < 255 {
+            let baseval = u64::from(counter.saturating_sub(LFU_INIT_VAL));
+            let denom = baseval.saturating_mul(log_factor).saturating_add(1);
+            if rand_sample % denom == 0 {
+                self.lfu_freq = counter.saturating_add(1);
+            } else {
+                self.lfu_freq = counter;
+            }
+        } else {
+            self.lfu_freq = 255;
+        }
         self.lfu_last_touch_min = now_ms / 60_000;
     }
 
@@ -1255,6 +1285,10 @@ pub struct Store {
     // Eviction policy — configurable via CONFIG SET maxmemory-policy.
     pub maxmemory_policy: MaxmemoryPolicy,
     pub lfu_decay_time: u64,
+    /// Upstream config.c default = 10. Controls the probability of an
+    /// LFU counter increment via 1/(baseval*log_factor + 1) — higher
+    /// factor = slower growth. (frankenredis-lfulog)
+    pub lfu_log_factor: u64,
 
     // Encoding thresholds — configurable via CONFIG SET, used by OBJECT ENCODING.
     pub hash_max_listpack_entries: usize,
@@ -1509,6 +1543,7 @@ impl Default for Store {
             hash_field_expired_counts: BTreeMap::new(),
             maxmemory_policy: MaxmemoryPolicy::default(),
             lfu_decay_time: 1,
+            lfu_log_factor: 10,
             hash_max_listpack_entries: 512,
             hash_max_listpack_value: 64,
             list_max_listpack_size: -2,
@@ -2082,12 +2117,19 @@ impl Store {
             return Ok(None);
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::String(v) => {
                     let v = v.clone();
                     if lfu_tracking_enabled {
-                        entry.bump_lfu_freq(now_ms, self.lfu_decay_time);
+                        entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                     }
                     entry.touch(now_ms);
                     Ok(Some(v))
@@ -2202,9 +2244,16 @@ impl Store {
             return false;
         }
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
         if let Some(entry) = self.entries.get_mut(key) {
             if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, self.lfu_decay_time);
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
             entry.touch(now_ms);
             true
@@ -3224,9 +3273,16 @@ impl Store {
     pub fn touch_key(&mut self, key: &[u8], now_ms: u64) -> bool {
         self.drop_if_expired(key, now_ms);
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
+        let rand_sample = if lfu_tracking_enabled {
+            self.next_rand()
+        } else {
+            0
+        };
         if let Some(entry) = self.entries.get_mut(key) {
             if lfu_tracking_enabled {
-                entry.bump_lfu_freq(now_ms, self.lfu_decay_time);
+                entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
             }
             entry.touch(now_ms);
             true
@@ -9831,13 +9887,20 @@ impl Store {
     pub fn touch(&mut self, keys: &[&[u8]], now_ms: u64) -> i64 {
         let mut count = 0i64;
         let lfu_tracking_enabled = self.lfu_tracking_enabled();
+        let lfu_decay = self.lfu_decay_time;
+        let lfu_log_factor = self.lfu_log_factor;
         for &key in keys {
             if !self.record_keyspace_lookup(key, now_ms) {
                 continue;
             }
+            let rand_sample = if lfu_tracking_enabled {
+                self.next_rand()
+            } else {
+                0
+            };
             if let Some(entry) = self.entries.get_mut(key) {
                 if lfu_tracking_enabled {
-                    entry.bump_lfu_freq(now_ms, self.lfu_decay_time);
+                    entry.bump_lfu_freq(now_ms, lfu_decay, lfu_log_factor, rand_sample);
                 }
                 entry.touch(now_ms);
                 count += 1;
@@ -14377,6 +14440,47 @@ mod tests {
         store.maxmemory_policy = MaxmemoryPolicy::VolatileLfu;
         store.set(b"k2".to_vec(), b"v".to_vec(), None, 100);
         assert_eq!(store.object_freq(b"k2", 150), Some(5));
+    }
+
+    #[test]
+    fn object_freq_log_increment_grows_sublinearly_with_default_factor() {
+        // (frankenredis-lfulog) Upstream evict.c::LFULogIncr makes the
+        // counter probabilistically incremented with
+        // p = 1.0 / (baseval * log_factor + 1) where
+        // baseval = max(0, counter - LFU_INIT_VAL). With log_factor=10
+        // (upstream default), counter trajectory after many GETs grows
+        // logarithmically — vendored reaches 8 after 50 GETs and stays
+        // in the high teens after thousands of GETs. fr was bumping
+        // naively (+1 each access) and counter would grow linearly.
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.lfu_log_factor = 10;
+        store.lfu_decay_time = 0; // disable decay so we measure pure incr
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
+
+        // Counter starts at LFU_INIT_VAL = 5, baseval = 0, p = 1.0
+        // → first GET deterministically bumps to 6 even with random.
+        assert_eq!(store.object_freq(b"k", 0), Some(5));
+        assert_eq!(store.get(b"k", 0).unwrap(), Some(b"v".to_vec()));
+        assert_eq!(store.object_freq(b"k", 0), Some(6));
+
+        // 1000 more GETs: p drops to 1/(1*10+1)=~0.09 once baseval=1,
+        // then 1/21, 1/31… so counter must grow but stay sub-linear.
+        // Even with the LCG random sample, 1000 accesses can't push
+        // beyond ~30 with default log_factor.
+        for _ in 0..1000 {
+            store.get(b"k", 0).unwrap();
+        }
+        let freq_after_1000 = store.object_freq(b"k", 0).expect("freq");
+        assert!(
+            (10..=40).contains(&freq_after_1000),
+            "log-incr trajectory after 1000 GETs out of expected 10..=40 range: {freq_after_1000}"
+        );
+
+        // Saturated at 255 — bumping a saturated counter is a no-op.
+        store.entries.get_mut(b"k".as_slice()).unwrap().lfu_freq = 255;
+        store.get(b"k", 0).unwrap();
+        assert_eq!(store.object_freq(b"k", 0), Some(255));
     }
 
     #[test]

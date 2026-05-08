@@ -7572,6 +7572,7 @@ impl Runtime {
         let mut next_maxmemory: Option<usize> = None;
         let mut next_maxmemory_policy: Option<MaxmemoryPolicy> = None;
         let mut next_lfu_decay_time: Option<u64> = None;
+        let mut next_lfu_log_factor: Option<u64> = None;
         let mut next_slowlog_slower_than: Option<i64> = None;
         let mut next_slowlog_max_len: Option<usize> = None;
         let mut next_latency_monitor_threshold: Option<u64> = None;
@@ -8804,7 +8805,16 @@ impl Runtime {
                         | "list-compress-depth"
                 ) {
                     match parse_i64_arg(value_bytes) {
-                        Ok(v) if (0..=i64::from(i32::MAX)).contains(&v) => {}
+                        Ok(v) if (0..=i64::from(i32::MAX)).contains(&v) => {
+                            // (frankenredis-lfulog) Propagate lfu-log-factor
+                            // to the store so the LFULogIncr probability gate
+                            // actually picks up CONFIG SET changes. Other
+                            // INTEGER_CONFIGs in this group are not yet wired
+                            // through the runtime's pending-update slot.
+                            if canonical == "lfu-log-factor" {
+                                next_lfu_log_factor = Some(v as u64);
+                            }
+                        }
                         Ok(_) => {
                             return config_set_failed(
                                 canonical,
@@ -8972,6 +8982,9 @@ impl Runtime {
         }
         if let Some(maxmemory_policy) = next_maxmemory_policy {
             self.server.store.maxmemory_policy = maxmemory_policy;
+        }
+        if let Some(lfu_log_factor) = next_lfu_log_factor {
+            self.server.store.lfu_log_factor = lfu_log_factor;
         }
         if let Some(lfu_decay_time) = next_lfu_decay_time {
             self.server.store.lfu_decay_time = lfu_decay_time;
