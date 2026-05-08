@@ -34,7 +34,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'debug' command"
+        "value": "ERR unknown subcommand or wrong number of arguments for 'SLEEP'. Try DEBUG HELP."
       }
     },
     {
@@ -48,7 +48,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'debug' command"
+        "value": "ERR unknown subcommand or wrong number of arguments for 'SLEEP'. Try DEBUG HELP."
       }
     },
     {
@@ -162,7 +162,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'debug' command"
+        "value": "ERR DEBUG RELOAD only supports the MERGE, NOFLUSH and NOSAVE options."
       }
     },
     {
@@ -274,7 +274,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR wrong number of arguments for 'debug' command"
+        "value": "ERR unknown subcommand or wrong number of arguments for 'DIGEST'. Try DEBUG HELP."
       }
     },
     {
@@ -286,7 +286,7 @@
         "missingkey"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -297,8 +297,8 @@
         "DIGEST-VALUE"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR wrong number of arguments for 'debug' command"
+        "kind": "array",
+        "value": []
       }
     },
     {
@@ -338,7 +338,7 @@
         "key1"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -352,7 +352,7 @@
         "key3"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -375,7 +375,7 @@
         "key1"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -427,7 +427,7 @@
         "nosuch2"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -573,7 +573,7 @@
         "debughash"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -585,7 +585,7 @@
         "debuglist"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -600,7 +600,7 @@
         "debugzset"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -651,7 +651,7 @@
         "key1"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -690,7 +690,7 @@
         "debugstream"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -745,7 +745,7 @@
         "debughll"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -939,7 +939,7 @@
         "debug_exp_key"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -1029,7 +1029,7 @@
         "definitely_not_a_key"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -1043,7 +1043,7 @@
         "debuglist"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -1080,7 +1080,7 @@
         "debug_empty"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -1155,7 +1155,7 @@
         "debug:special:key"
       ],
       "expect": {
-        "kind": "any_bulk"
+        "kind": "any_array"
       }
     },
     {
@@ -1203,8 +1203,8 @@
         "DIGEST-VALUE"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR wrong number of arguments for 'debug' command"
+        "kind": "array",
+        "value": []
       }
     },
     {
