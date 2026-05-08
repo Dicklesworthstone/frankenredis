@@ -13469,10 +13469,10 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("dbsize", 1, "readonly fast", 0, 0, 0),
     ("flushdb", -1, "write", 0, 0, 0),
     ("flushall", -1, "write", 0, 0, 0),
-    ("select", 2, "fast", 0, 0, 0),
+    ("select", 2, "loading stale fast", 0, 0, 0),
     ("move", 3, "write fast", 1, 1, 1),
     ("copy", -3, "write", 1, 2, 1),
-    ("sort", -2, "write denyoom", 1, 1, 1),
+    ("sort", -2, "write denyoom movablekeys", 1, 1, 1),
     ("dump", 2, "readonly", 1, 1, 1),
     ("restore", -4, "write denyoom", 1, 1, 1),
     ("unlink", -2, "write fast", 1, -1, 1),
@@ -13510,14 +13510,14 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("lmove", 5, "write denyoom", 1, 2, 1),
     ("lmpop", -4, "write fast", 0, 0, 0),
     ("rpoplpush", 3, "write denyoom", 1, 2, 1),
-    ("blpop", -3, "write denyoom", 1, -2, 1),
-    ("brpop", -3, "write denyoom", 1, -2, 1),
-    ("blmove", 6, "write denyoom", 1, 2, 1),
-    ("blmpop", -5, "write denyoom", 0, 0, 0),
+    ("blpop", -3, "write blocking", 1, -2, 1),
+    ("brpop", -3, "write blocking", 1, -2, 1),
+    ("blmove", 6, "write denyoom blocking", 1, 2, 1),
+    ("blmpop", -5, "write blocking movablekeys", 0, 0, 0),
     ("brpoplpush", 4, "write denyoom", 1, 2, 1),
-    ("bzpopmin", -3, "write denyoom", 1, -2, 1),
-    ("bzpopmax", -3, "write denyoom", 1, -2, 1),
-    ("bzmpop", -5, "write denyoom", 0, 0, 0),
+    ("bzpopmin", -3, "write blocking fast", 1, -2, 1),
+    ("bzpopmax", -3, "write blocking fast", 1, -2, 1),
+    ("bzmpop", -5, "write blocking movablekeys", 0, 0, 0),
     ("sadd", -3, "write denyoom fast", 1, 1, 1),
     ("srem", -3, "write fast", 1, 1, 1),
     ("smembers", 2, "readonly sort_for_script", 1, 1, 1),
@@ -13590,8 +13590,8 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("xlen", 2, "readonly fast", 1, 1, 1),
     ("xdel", -3, "write fast", 1, 1, 1),
     ("xtrim", -4, "write", 1, 1, 1),
-    ("xread", -4, "readonly", 0, 0, 0),
-    ("xreadgroup", -7, "write", 0, 0, 0),
+    ("xread", -4, "readonly blocking movablekeys", 0, 0, 0),
+    ("xreadgroup", -7, "write blocking movablekeys", 0, 0, 0),
     ("xclaim", -6, "write fast", 1, 1, 1),
     ("xautoclaim", -6, "write fast", 1, 1, 1),
     ("xpending", -3, "readonly", 1, 1, 1),
@@ -13601,12 +13601,12 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("xgroup", -2, "write", 2, 2, 1),
     ("xrange", -4, "readonly", 1, 1, 1),
     ("xrevrange", -4, "readonly", 1, 1, 1),
-    ("subscribe", -2, "pubsub", 0, 0, 0),
-    ("unsubscribe", -1, "pubsub", 0, 0, 0),
-    ("psubscribe", -2, "pubsub", 0, 0, 0),
-    ("punsubscribe", -1, "pubsub", 0, 0, 0),
-    ("publish", 3, "pubsub fast", 0, 0, 0),
-    ("pubsub", -2, "pubsub", 0, 0, 0),
+    ("subscribe", -2, "pubsub noscript loading stale", 0, 0, 0),
+    ("unsubscribe", -1, "pubsub noscript loading stale", 0, 0, 0),
+    ("psubscribe", -2, "pubsub noscript loading stale", 0, 0, 0),
+    ("punsubscribe", -1, "pubsub noscript loading stale", 0, 0, 0),
+    ("publish", 3, "pubsub loading stale fast", 0, 0, 0),
+    ("pubsub", -2, "", 0, 0, 0),
     ("eval", -3, "noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
     ("evalsha", -3, "noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
     ("eval_ro", -3, "readonly noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
@@ -13614,57 +13614,57 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("fcall", -3, "noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
     ("fcall_ro", -3, "readonly noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
     ("script", -2, "", 0, 0, 0),
-    ("multi", 1, "fast", 0, 0, 0),
+    ("multi", 1, "noscript loading stale fast allow_busy", 0, 0, 0),
     ("exec", 1, "noscript loading stale skip_slowlog", 0, 0, 0),
-    ("discard", 1, "fast", 0, 0, 0),
-    ("watch", -2, "fast", 1, -1, 1),
-    ("unwatch", 1, "fast", 0, 0, 0),
+    ("discard", 1, "noscript loading stale fast allow_busy", 0, 0, 0),
+    ("watch", -2, "noscript loading stale fast allow_busy", 1, -1, 1),
+    ("unwatch", 1, "noscript loading stale fast allow_busy", 0, 0, 0),
     ("auth", -2, "fast", 0, 0, 0),
     ("hello", -1, "fast", 0, 0, 0),
     ("quit", -1, "fast", 0, 0, 0),
     ("reset", 1, "fast", 0, 0, 0),
-    ("info", -1, "fast", 0, 0, 0),
-    ("config", -2, "admin", 0, 0, 0),
-    ("acl", -2, "admin", 0, 0, 0),
+    ("info", -1, "loading stale", 0, 0, 0),
+    ("config", -2, "", 0, 0, 0),
+    ("acl", -2, "", 0, 0, 0),
     ("command", -1, "fast", 0, 0, 0),
-    ("client", -2, "admin", 0, 0, 0),
-    ("time", 1, "fast", 0, 0, 0),
-    ("save", 1, "admin", 0, 0, 0),
-    ("bgsave", -1, "admin", 0, 0, 0),
-    ("bgrewriteaof", 1, "admin", 0, 0, 0),
-    ("lastsave", 1, "fast", 0, 0, 0),
+    ("client", -2, "", 0, 0, 0),
+    ("time", 1, "loading stale fast", 0, 0, 0),
+    ("save", 1, "admin noscript no_async_loading no_multi", 0, 0, 0),
+    ("bgsave", -1, "admin noscript no_async_loading", 0, 0, 0),
+    ("bgrewriteaof", 1, "admin noscript no_async_loading", 0, 0, 0),
+    ("lastsave", 1, "loading stale fast", 0, 0, 0),
     ("swapdb", 3, "write fast", 0, 0, 0),
-    ("object", -2, "readonly", 2, 2, 1),
-    ("memory", -2, "readonly", 0, 0, 0),
-    ("slowlog", -2, "admin", 0, 0, 0),
-    ("debug", -2, "admin", 0, 0, 0),
-    ("role", 1, "fast", 0, 0, 0),
-    ("shutdown", -1, "admin", 0, 0, 0),
-    ("latency", -2, "admin", 0, 0, 0),
+    ("object", -2, "", 2, 2, 1),
+    ("memory", -2, "", 0, 0, 0),
+    ("slowlog", -2, "", 0, 0, 0),
+    ("debug", -2, "admin noscript loading stale", 0, 0, 0),
+    ("role", 1, "noscript loading stale fast", 0, 0, 0),
+    ("shutdown", -1, "admin noscript loading stale no_multi allow_busy", 0, 0, 0),
+    ("latency", -2, "", 0, 0, 0),
     ("wait", 3, "", 0, 0, 0),
     ("waitaof", 4, "noscript", 0, 0, 0),
-    ("lolwut", -1, "fast", 0, 0, 0),
-    ("cluster", -2, "admin", 0, 0, 0),
+    ("lolwut", -1, "readonly fast", 0, 0, 0),
+    ("cluster", -2, "", 0, 0, 0),
     ("asking", 1, "fast", 0, 0, 0),
     ("readonly", 1, "fast", 0, 0, 0),
     ("readwrite", 1, "fast", 0, 0, 0),
-    ("replconf", -1, "admin", 0, 0, 0),
+    ("replconf", -1, "admin noscript loading stale allow_busy", 0, 0, 0),
     ("psync", -3, "admin", 0, 0, 0),
-    ("sync", 1, "admin", 0, 0, 0),
-    ("monitor", 1, "admin", 0, 0, 0),
+    ("sync", 1, "admin noscript no_async_loading no_multi", 0, 0, 0),
+    ("monitor", 1, "admin noscript loading stale", 0, 0, 0),
     ("migrate", -6, "write", 0, 0, 0),
-    ("failover", -1, "admin", 0, 0, 0),
-    ("module", -2, "admin", 0, 0, 0),
+    ("failover", -1, "admin noscript stale", 0, 0, 0),
+    ("module", -2, "", 0, 0, 0),
     ("sentinel", -2, "admin", 0, 0, 0),
     ("pfdebug", 3, "admin", 1, 1, 1),
     ("pfselftest", 1, "admin", 0, 0, 0),
     ("replicaof", 3, "admin", 0, 0, 0),
     ("slaveof", 3, "admin", 0, 0, 0),
     ("function", -2, "", 0, 0, 0),
-    ("ssubscribe", -2, "pubsub", 0, 0, 0),
-    ("sunsubscribe", -1, "pubsub", 0, 0, 0),
-    ("spublish", 3, "pubsub fast", 0, 0, 0),
-    ("sort_ro", -2, "readonly fast", 1, 1, 1),
+    ("ssubscribe", -2, "pubsub noscript loading stale", 0, 0, 0),
+    ("sunsubscribe", -1, "pubsub noscript loading stale", 0, 0, 0),
+    ("spublish", 3, "pubsub loading stale fast", 0, 0, 0),
+    ("sort_ro", -2, "readonly movablekeys", 1, 1, 1),
     ("zrangestore", -5, "write denyoom", 1, 2, 1),
 ];
 
@@ -13781,6 +13781,20 @@ fn acl_category_maps() -> &'static AclCategoryMaps {
         for &(name, _arity, flags, _first, _last, _step) in COMMAND_TABLE {
             let categories = by_command.entry(name).or_default();
             merge_command_table_acl_categories(categories, flags);
+            // (frankenredis-flagsbatch2) The COMMAND_TABLE flags column
+            // mirrors `redis-cli COMMAND INFO` emission, which for some
+            // commands (cluster, client, acl, config, memory, slowlog,
+            // latency, module, object) is empty even though upstream
+            // still classifies them under @admin/@dangerous in ACL
+            // terms. Apply the fr-side ACL overlay here so cleaning the
+            // flag-emission column doesn't drop the per-command ACL
+            // category. by_category is populated from
+            // UPSTREAM_ACL_CATEGORY_ENTRIES only (not from
+            // COMMAND_TABLE), so the overlay only affects by_command —
+            // which matches vendored: ACL CAT lists subcommand-level
+            // entries (config|set, slowlog|get, …) rather than the
+            // top-level container names.
+            apply_static_acl_overrides(name, categories);
         }
 
         AclCategoryMaps {
@@ -13846,6 +13860,42 @@ pub fn acl_command_selectors_for_argv(argv: &[Vec<u8>]) -> Vec<String> {
 
     selectors.push(command);
     selectors
+}
+
+/// (frankenredis-flagsbatch2) Per-command ACL category overlay.
+///
+/// The COMMAND_TABLE flags column drives both `COMMAND INFO` emission
+/// and `ACL CAT` derivation. Upstream Redis 7.2.4 distinguishes the
+/// two: a command can be in @admin/@dangerous for ACL purposes while
+/// emitting an empty CMD_* flag set via COMMAND INFO (cluster, client,
+/// acl, config, memory, slowlog, latency, module, object are all in
+/// this bucket). Without this overlay, cleaning the flags column
+/// to match COMMAND INFO would drop those ACL categories.
+///
+/// Each entry pushes the listed categories onto the per-command list.
+/// Categories that come from the upstream JSON or from flag-driven
+/// merge are preserved; this overlay only adds.
+const STATIC_ACL_OVERRIDES: &[(&str, &[&str])] = &[
+    ("cluster", &["admin", "slow", "dangerous"]),
+    ("client", &["admin", "slow", "dangerous", "connection"]),
+    ("acl", &["admin", "slow", "dangerous"]),
+    ("config", &["admin", "slow", "dangerous"]),
+    ("memory", &["slow"]),
+    ("slowlog", &["admin", "slow", "dangerous"]),
+    ("latency", &["admin", "slow", "dangerous"]),
+    ("module", &["admin", "slow", "dangerous"]),
+    ("object", &["keyspace", "slow"]),
+    ("function", &["slow", "scripting"]),
+    ("script", &["slow", "scripting"]),
+    ("debug", &["admin", "slow", "dangerous"]),
+];
+
+fn apply_static_acl_overrides(name: &str, categories: &mut Vec<&'static str>) {
+    if let Some(&(_, overrides)) = STATIC_ACL_OVERRIDES.iter().find(|(n, _)| *n == name) {
+        for &cat in overrides {
+            push_unique_acl_category(categories, cat);
+        }
+    }
 }
 
 fn merge_command_table_acl_categories(categories: &mut Vec<&'static str>, flags: &str) {
@@ -57247,6 +57297,133 @@ mod tests {
                 got, want,
                 "{cmd} flags must be {want:?}, got {got:?}"
             );
+        }
+    }
+
+    /// (frankenredis-flagsbatch2) Second slice of frankenredis-commandflagsaudit:
+    /// pin the COMMAND INFO flag emission for ~48 more rows after batch1.
+    /// Each tuple is the upstream flag list captured from
+    /// `redis-cli -p 16380 COMMAND INFO <cmd>` against vendored 7.2.4.
+    #[test]
+    fn command_info_flags_for_admin_blocking_pubsub_subset_matches_upstream() {
+        let mut store = Store::new();
+        let cases: &[(&str, &[&str])] = &[
+            ("CLUSTER", &[]),
+            ("CLIENT", &[]),
+            ("ACL", &[]),
+            ("CONFIG", &[]),
+            ("MEMORY", &[]),
+            ("SLOWLOG", &[]),
+            ("LATENCY", &[]),
+            ("MODULE", &[]),
+            ("OBJECT", &[]),
+            ("PUBSUB", &[]),
+            ("DEBUG", &["admin", "noscript", "loading", "stale"]),
+            ("INFO", &["loading", "stale"]),
+            (
+                "SHUTDOWN",
+                &[
+                    "admin",
+                    "noscript",
+                    "loading",
+                    "stale",
+                    "no_multi",
+                    "allow_busy",
+                ],
+            ),
+            ("ROLE", &["noscript", "loading", "stale", "fast"]),
+            ("TIME", &["loading", "stale", "fast"]),
+            ("LASTSAVE", &["loading", "stale", "fast"]),
+            (
+                "SAVE",
+                &["admin", "noscript", "no_async_loading", "no_multi"],
+            ),
+            ("BGSAVE", &["admin", "noscript", "no_async_loading"]),
+            ("BGREWRITEAOF", &["admin", "noscript", "no_async_loading"]),
+            ("FAILOVER", &["admin", "noscript", "stale"]),
+            ("LOLWUT", &["readonly", "fast"]),
+            (
+                "SYNC",
+                &["admin", "noscript", "no_async_loading", "no_multi"],
+            ),
+            (
+                "REPLCONF",
+                &[
+                    "admin",
+                    "noscript",
+                    "loading",
+                    "stale",
+                    "allow_busy",
+                ],
+            ),
+            ("MONITOR", &["admin", "noscript", "loading", "stale"]),
+            ("SELECT", &["loading", "stale", "fast"]),
+            (
+                "DISCARD",
+                &["noscript", "loading", "stale", "fast", "allow_busy"],
+            ),
+            (
+                "MULTI",
+                &["noscript", "loading", "stale", "fast", "allow_busy"],
+            ),
+            (
+                "WATCH",
+                &["noscript", "loading", "stale", "fast", "allow_busy"],
+            ),
+            (
+                "UNWATCH",
+                &["noscript", "loading", "stale", "fast", "allow_busy"],
+            ),
+            ("PUBLISH", &["pubsub", "loading", "stale", "fast"]),
+            ("SPUBLISH", &["pubsub", "loading", "stale", "fast"]),
+            ("SUBSCRIBE", &["pubsub", "noscript", "loading", "stale"]),
+            ("UNSUBSCRIBE", &["pubsub", "noscript", "loading", "stale"]),
+            ("PSUBSCRIBE", &["pubsub", "noscript", "loading", "stale"]),
+            ("PUNSUBSCRIBE", &["pubsub", "noscript", "loading", "stale"]),
+            ("SSUBSCRIBE", &["pubsub", "noscript", "loading", "stale"]),
+            ("SUNSUBSCRIBE", &["pubsub", "noscript", "loading", "stale"]),
+            ("SORT", &["write", "denyoom", "movablekeys"]),
+            ("SORT_RO", &["readonly", "movablekeys"]),
+            ("XREAD", &["readonly", "blocking", "movablekeys"]),
+            ("XREADGROUP", &["write", "blocking", "movablekeys"]),
+            ("BLPOP", &["write", "blocking"]),
+            ("BRPOP", &["write", "blocking"]),
+            ("BLMOVE", &["write", "denyoom", "blocking"]),
+            ("BLMPOP", &["write", "blocking", "movablekeys"]),
+            ("BZPOPMIN", &["write", "blocking", "fast"]),
+            ("BZPOPMAX", &["write", "blocking", "fast"]),
+            ("BZMPOP", &["write", "blocking", "movablekeys"]),
+        ];
+
+        for (cmd, want_flags) in cases {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            let RespFrame::Array(Some(emitted_flags)) = &fields[2] else {
+                panic!("expected flags Array for {cmd}, got {:?}", fields[2]);
+            };
+            let got: Vec<String> = emitted_flags
+                .iter()
+                .map(|f| match f {
+                    RespFrame::SimpleString(s) => s.clone(),
+                    other => panic!("expected flag SimpleString for {cmd}, got {other:?}"),
+                })
+                .collect();
+            let want: Vec<String> = want_flags.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(got, want, "{cmd} flags must be {want:?}, got {got:?}");
         }
     }
 
