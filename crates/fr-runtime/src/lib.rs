@@ -4683,22 +4683,16 @@ impl Runtime {
                     | Some(RuntimeSpecialCommand::Quit)
                     | Some(RuntimeSpecialCommand::Reset)
             );
-            // Subscribe/Unsubscribe family is not allowed inside MULTI
-            let is_sub_cmd = matches!(
-                special_command,
-                Some(RuntimeSpecialCommand::Subscribe)
-                    | Some(RuntimeSpecialCommand::Unsubscribe)
-                    | Some(RuntimeSpecialCommand::Psubscribe)
-                    | Some(RuntimeSpecialCommand::Punsubscribe)
-                    | Some(RuntimeSpecialCommand::Ssubscribe)
-                    | Some(RuntimeSpecialCommand::Sunsubscribe)
-            );
-            if is_sub_cmd {
-                self.apply_existing_client_reply_suppression_to_undispatched_reply();
-                return RespFrame::Error(
-                    "ERR Command not allowed inside a transaction".to_string(),
-                );
-            }
+            // (frankenredis-submulti) Upstream commands.def line 10755
+            // tags subscribeCommand with CMD_PUBSUB|CMD_NOSCRIPT|CMD_LOADING|
+            // CMD_STALE|CMD_SENTINEL — there is no CMD_NO_MULTI flag, so
+            // server.c::processCommand:3920 lets SUBSCRIBE / UNSUBSCRIBE /
+            // PSUBSCRIBE / PUNSUBSCRIBE / SSUBSCRIBE / SUNSUBSCRIBE queue
+            // inside MULTI like any other command. fr was hard-rejecting
+            // the entire family with 'ERR Command not allowed inside a
+            // transaction'; vendored 7.2.4 returns QUEUED. Removed the
+            // special case; the no-multi gate below handles the genuine
+            // SAVE/SHUTDOWN/etc cases via the CMD_NO_MULTI bitmap.
             if !must_execute_now {
                 let cmd_bytes = match argv.first() {
                     Some(cmd) => cmd,
@@ -18737,6 +18731,46 @@ mod tests {
                 matches!(&exec, RespFrame::Error(e) if e.contains("EXECABORT")),
                 "EXEC after CMD_NO_MULTI rejection should return EXECABORT for {}, got: {exec:?}",
                 std::str::from_utf8(cmd).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn multi_queues_subscribe_family_per_upstream_no_no_multi_flag() {
+        // (frankenredis-submulti) Upstream commands.def line 10755 tags
+        // subscribeCommand with CMD_PUBSUB|CMD_NOSCRIPT|CMD_LOADING|
+        // CMD_STALE|CMD_SENTINEL — there is no CMD_NO_MULTI flag, so
+        // server.c::processCommand:3920 lets SUBSCRIBE / UNSUBSCRIBE /
+        // PSUBSCRIBE / PUNSUBSCRIBE / SSUBSCRIBE / SUNSUBSCRIBE queue
+        // inside MULTI like any other command. fr was hard-rejecting
+        // the entire family with 'ERR Command not allowed inside a
+        // transaction'; vendored 7.2.4 returns QUEUED. Now matches
+        // upstream's queue-then-execute-on-EXEC behavior.
+        let cases: &[&[u8]] = &[
+            b"SUBSCRIBE",
+            b"UNSUBSCRIBE",
+            b"PSUBSCRIBE",
+            b"PUNSUBSCRIBE",
+            b"SSUBSCRIBE",
+            b"SUNSUBSCRIBE",
+        ];
+        for cmd in cases {
+            let mut rt = Runtime::default_strict();
+            assert_eq!(
+                rt.execute_frame(command(&[b"MULTI"]), 0),
+                RespFrame::SimpleString("OK".to_string())
+            );
+            let reply = rt.execute_frame(command(&[cmd, b"chan"]), 1);
+            assert_eq!(
+                reply,
+                RespFrame::SimpleString("QUEUED".to_string()),
+                "MULTI + {} should QUEUE inside transaction (matches vendored 7.2.4)",
+                std::str::from_utf8(cmd).unwrap()
+            );
+            // DISCARD should clean up cleanly.
+            assert_eq!(
+                rt.execute_frame(command(&[b"DISCARD"]), 2),
+                RespFrame::SimpleString("OK".to_string())
             );
         }
     }
