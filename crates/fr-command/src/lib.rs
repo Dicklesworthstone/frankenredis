@@ -15782,10 +15782,17 @@ fn client_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandE
         }
     } else if sub.eq_ignore_ascii_case("PAUSE") {
         // CLIENT PAUSE timeout [WRITE|ALL]
-        // Upstream emits the subcommand-specific arity error rather
-        // than the wrong-arity reply when too many trailing args are
-        // supplied. (br-frankenredis-clipausearity)
-        if argv.len() < 3 || argv.len() > 4 {
+        // Upstream's table-level arity check (commands.def line 1550,
+        // arity = -3) fires before the handler, so a missing timeout
+        // surfaces the canonical 'wrong number of arguments for
+        // client|pause command' wording. Only the too-many-args path
+        // reaches the handler's pauseCommand body, where
+        // addReplySubcommandSyntaxError emits the longer envelope.
+        // (frankenredis-clipausearity)
+        if argv.len() < 3 {
+            return Err(client_wrong_subcommand_arity(sub));
+        }
+        if argv.len() > 4 {
             // (frankenredis-subcase)
             return Err(CommandError::Custom(format!(
                 "ERR unknown subcommand or wrong number of arguments for '{sub}'. Try CLIENT HELP."
@@ -41022,7 +41029,10 @@ mod tests {
         // lowercase / mixed-case echo.
         let mut store = Store::new();
         let cases: &[(&[&[u8]], &str, &str)] = &[
-            (&[b"CLIENT", b"pause"], "pause", "CLIENT"),
+            // Use too-many-args to exercise the SubcommandSyntaxError
+            // envelope. The too-few-args path now uses the table-level
+            // wording per (frankenredis-clipausearity).
+            (&[b"CLIENT", b"pause", b"100", b"WRITE", b"extra"], "pause", "CLIENT"),
             (&[b"CLIENT", b"Pause", b"100", b"WRITE", b"extra"], "Pause", "CLIENT"),
             (&[b"SLOWLOG", b"get", b"1", b"extra"], "get", "SLOWLOG"),
             (&[b"SLOWLOG", b"Get", b"1", b"extra"], "Get", "SLOWLOG"),
@@ -46579,7 +46589,9 @@ mod tests {
             0,
         )
         .unwrap_err();
-        // (br-frankenredis-clipausearity)
+        // (frankenredis-clipausearity) Too-many-args path keeps the
+        // SubcommandSyntaxError envelope — pauseCommand reaches the
+        // handler body before its addReplySubcommandSyntaxError fires.
         assert_eq!(
             err,
             CommandError::Custom(
@@ -46587,6 +46599,19 @@ mod tests {
                     .to_string()
             )
         );
+
+        // (frankenredis-clipausearity) Too-few-args path uses the
+        // table-level wording. Upstream commands.def declares CLIENT
+        // PAUSE with arity = -3, so the missing-timeout case never
+        // reaches the handler — the table-level arity check emits
+        // 'wrong number of arguments for client|pause command'.
+        let err = dispatch_argv(
+            &[b"CLIENT".to_vec(), b"PAUSE".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(err, client_wrong_subcommand_arity("PAUSE"));
 
         let err = dispatch_argv(
             &[
