@@ -13450,10 +13450,10 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("getex", -2, "write fast", 1, 1, 1),
     ("substr", 4, "readonly", 1, 1, 1),
     ("lcs", -3, "readonly", 1, 2, 1),
-    ("expire", 3, "write fast", 1, 1, 1),
-    ("pexpire", 3, "write fast", 1, 1, 1),
-    ("expireat", 3, "write fast", 1, 1, 1),
-    ("pexpireat", 3, "write fast", 1, 1, 1),
+    ("expire", -3, "write fast", 1, 1, 1),
+    ("pexpire", -3, "write fast", 1, 1, 1),
+    ("expireat", -3, "write fast", 1, 1, 1),
+    ("pexpireat", -3, "write fast", 1, 1, 1),
     ("persist", 2, "write fast", 1, 1, 1),
     ("ttl", 2, "readonly fast", 1, 1, 1),
     ("pttl", 2, "readonly fast", 1, 1, 1),
@@ -57019,6 +57019,40 @@ mod tests {
                 RespFrame::Array(Some(Vec::new())),
             ]))]))
         );
+    }
+
+    /// (frankenredis-expirearity) Upstream commands.def declares
+    /// EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT with arity=-3 (variadic for the
+    /// optional NX/XX/GT/LT modifiers introduced in Redis 7.0). fr's
+    /// COMMAND_TABLE previously had arity=3, so `COMMAND INFO EXPIRE`
+    /// reported Integer(3) instead of Integer(-3).
+    #[test]
+    fn command_info_arity_for_expire_family_matches_upstream() {
+        let mut store = Store::new();
+        for cmd in ["EXPIRE", "PEXPIRE", "EXPIREAT", "PEXPIREAT"] {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            assert_eq!(
+                fields[1],
+                RespFrame::Integer(-3),
+                "{cmd} arity must be -3, got {:?}",
+                fields[1]
+            );
+        }
     }
 
     #[test]
