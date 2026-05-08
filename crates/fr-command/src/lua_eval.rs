@@ -706,24 +706,42 @@ impl<'a> Lexer<'a> {
         match b {
             b'0'..=b'9' => {
                 let start = self.pos;
-                while let Some(d) = self.peek_byte() {
-                    if d.is_ascii_digit() || d == b'.' {
-                        self.pos += 1;
-                    } else {
-                        break;
-                    }
-                }
-                // Handle hex 0x prefix
-                if self.pos - start >= 2
-                    && self.src[start] == b'0'
-                    && (self.src[start + 1] == b'x' || self.src[start + 1] == b'X')
+                // Detect hex prefix `0x` / `0X` BEFORE consuming further
+                // digits — Lua 5.1 (Redis's embedded Lua) accepts
+                // 0xFF, 0X1A, etc. The previous gate `self.pos - start
+                // >= 2` was unreachable: at that point only the leading
+                // `0` had been consumed (1 byte), so the hex block was
+                // skipped, the trailing `xFF` got re-lexed as a Name,
+                // and `bit.band(0xFF, 0)` errored with
+                // "expected RParen, got Name(\"xFF\")".
+                // (frankenredis-luahexlit)
+                if self.src[self.pos] == b'0'
+                    && self.pos + 1 < self.src.len()
+                    && (self.src[self.pos + 1] == b'x' || self.src[self.pos + 1] == b'X')
                 {
+                    self.pos += 2; // consume "0x"
                     while let Some(d) = self.peek_byte() {
                         if d.is_ascii_hexdigit() {
                             self.pos += 1;
                         } else {
                             break;
                         }
+                    }
+                    let s = std::str::from_utf8(&self.src[start..self.pos])
+                        .map_err(|_| "invalid number")?;
+                    if s.len() <= 2 {
+                        return Err(format!("malformed number near '{s}'"));
+                    }
+                    let n = u64::from_str_radix(&s[2..], 16)
+                        .map(|i| i as f64)
+                        .map_err(|e| e.to_string())?;
+                    return Ok(Token::Number(n));
+                }
+                while let Some(d) = self.peek_byte() {
+                    if d.is_ascii_digit() || d == b'.' {
+                        self.pos += 1;
+                    } else {
+                        break;
                     }
                 }
                 // Handle scientific notation
@@ -746,13 +764,7 @@ impl<'a> Lexer<'a> {
                 }
                 let s = std::str::from_utf8(&self.src[start..self.pos])
                     .map_err(|_| "invalid number")?;
-                let n = if s.starts_with("0x") || s.starts_with("0X") {
-                    i64::from_str_radix(&s[2..], 16)
-                        .map(|i| i as f64)
-                        .map_err(|e| e.to_string())?
-                } else {
-                    s.parse::<f64>().map_err(|e| e.to_string())?
-                };
+                let n = s.parse::<f64>().map_err(|e| e.to_string())?;
                 Ok(Token::Number(n))
             }
             b'"' | b'\'' => {
@@ -5579,6 +5591,57 @@ mod tests {
         Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
         json_to_lua_value, lua_raw_equal, lua_value_to_json,
     };
+
+    #[test]
+    fn lexer_parses_hex_literals_like_lua_5_1() {
+        // Pins frankenredis-luahexlit. Lua 5.1 (the dialect Redis
+        // embeds) accepts hex integer literals via `0x` / `0X`. fr's
+        // lexer had a hex block guarded by `self.pos - start >= 2`,
+        // which never fired because only the leading `0` had been
+        // consumed at that point — so `0xFF` parsed as Number(0)
+        // followed by Name("xFF") and `bit.band(0xFF, 0)` errored
+        // with "expected RParen, got Name(\"xFF\")" instead of
+        // returning 0.
+        let mut store = Store::new();
+        let cases: &[(&[u8], i64)] = &[
+            (b"return 0xFF", 255),
+            (b"return 0xff", 255),
+            (b"return 0X1A", 26),
+            (b"return 0x0", 0),
+            (b"return 0xDEAD", 57005),
+            (b"return 0xFF + 0x0F", 270),
+            (b"return 0x10 * 0x10", 256),
+            (b"return 0x100 - 1", 255),
+            // Verify the lex split bug is gone: `bit.band(0xFF, 0x0F)`
+            // previously errored "expected RParen, got Name('xFF')"
+            // before we ever reached the bit-library lookup. We can't
+            // assert on bit.band's result here (it isn't part of fr's
+            // sandbox), but we can confirm the parser at least gets
+            // past the call-args boundary via a synthetic 2-arg call.
+            (b"local function f(a,b) return a + b end return f(0xFF, 0x0F)", 270),
+        ];
+        for (src, expected) in cases {
+            let frame = eval_script(src, &[], &[], &mut store, 0)
+                .unwrap_or_else(|e| panic!("eval {:?} failed: {e}", String::from_utf8_lossy(src)));
+            match frame {
+                RespFrame::Integer(got) => assert_eq!(got, *expected, "src = {:?}", String::from_utf8_lossy(src)),
+                other => panic!("expected Integer({expected}) for {:?}, got {other:?}", String::from_utf8_lossy(src)),
+            }
+        }
+
+        // Negative hex via unary minus must still parse cleanly.
+        let frame = eval_script(b"return -0xff", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(-255));
+
+        // Malformed `0x` (no hex digits) errors instead of silently
+        // splitting like before.
+        let err = eval_script(b"return 0x", &[], &[], &mut store, 0)
+            .expect_err("0x with no hex digits should error");
+        assert!(
+            err.contains("malformed number"),
+            "expected malformed-number error, got {err}"
+        );
+    }
 
     #[test]
     fn parser_rejects_bare_identifier_statements_with_upstream_wording() {
