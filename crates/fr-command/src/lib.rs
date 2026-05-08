@@ -13540,10 +13540,10 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("zscore", 3, "readonly fast", 1, 1, 1),
     ("zmscore", -3, "readonly fast", 1, 1, 1),
     ("zcard", 2, "readonly fast", 1, 1, 1),
-    ("zrank", 3, "readonly fast", 1, 1, 1),
-    ("zrevrank", 3, "readonly fast", 1, 1, 1),
+    ("zrank", -3, "readonly fast", 1, 1, 1),
+    ("zrevrank", -3, "readonly fast", 1, 1, 1),
     ("zrange", -4, "readonly", 1, 1, 1),
-    ("zrevrange", 4, "readonly", 1, 1, 1),
+    ("zrevrange", -4, "readonly", 1, 1, 1),
     ("zrangebyscore", -4, "readonly", 1, 1, 1),
     ("zrevrangebyscore", -4, "readonly", 1, 1, 1),
     ("zrangebylex", -4, "readonly", 1, 1, 1),
@@ -13593,7 +13593,7 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("xread", -4, "readonly", 0, 0, 0),
     ("xreadgroup", -7, "write", 0, 0, 0),
     ("xclaim", -6, "write fast", 1, 1, 1),
-    ("xautoclaim", -7, "write fast", 1, 1, 1),
+    ("xautoclaim", -6, "write fast", 1, 1, 1),
     ("xpending", -3, "readonly", 1, 1, 1),
     ("xack", -4, "write fast", 1, 1, 1),
     ("xsetid", -3, "write", 1, 1, 1),
@@ -57019,6 +57019,47 @@ mod tests {
                 RespFrame::Array(Some(Vec::new())),
             ]))]))
         );
+    }
+
+    /// (frankenredis-arityfixes2) COMMAND_TABLE arity entries that
+    /// must match upstream commands.def for the variadic forms:
+    ///   ZRANK/ZREVRANK    -> -3 (optional WITHSCORE)
+    ///   ZREVRANGE         -> -4 (optional WITHSCORES)
+    ///   XAUTOCLAIM        -> -6 (key group consumer min-idle-time start)
+    /// Handlers were already correct; only the COMMAND INFO metadata
+    /// diverged.
+    #[test]
+    fn command_info_arity_for_zrank_zrevrange_xautoclaim_matches_upstream() {
+        let mut store = Store::new();
+        for (cmd, want) in [
+            ("ZRANK", -3i64),
+            ("ZREVRANK", -3),
+            ("ZREVRANGE", -4),
+            ("XAUTOCLAIM", -6),
+        ] {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            assert_eq!(
+                fields[1],
+                RespFrame::Integer(want),
+                "{cmd} arity must be {want}, got {:?}",
+                fields[1]
+            );
+        }
     }
 
     /// (frankenredis-expirearity) Upstream commands.def declares
