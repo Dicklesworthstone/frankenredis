@@ -250,6 +250,18 @@
       }
     },
     {
+      "name": "pubsub_unknown_subcommand",
+      "now_ms": 0,
+      "argv": [
+        "PUBSUB",
+        "NOSUCHSUB"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown subcommand 'NOSUCHSUB'. Try PUBSUB HELP."
+      }
+    },
+    {
       "name": "subscribe_for_pubsub_test",
       "now_ms": 0,
       "argv": [
@@ -406,18 +418,6 @@
       "expect": {
         "kind": "error",
         "value": "ERR wrong number of arguments for 'pubsub' command"
-      }
-    },
-    {
-      "name": "pubsub_unknown_subcommand",
-      "now_ms": 0,
-      "argv": [
-        "PUBSUB",
-        "NOSUCHSUB"
-      ],
-      "expect": {
-        "kind": "error",
-        "value": "ERR unknown subcommand 'NOSUCHSUB'. Try PUBSUB HELP."
       }
     },
     {
