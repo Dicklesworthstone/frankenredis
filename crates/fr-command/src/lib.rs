@@ -4730,16 +4730,19 @@ fn zpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         return Err(CommandError::WrongArity("ZPOPMIN"));
     }
     if argv.len() == 3 {
-        let count = parse_i64_arg(&argv[2])?;
-        if count < 0 {
-            return Err(CommandError::Custom(
-                "ERR value is out of range, must be positive".to_string(),
-            ));
-        }
+        // Upstream t_zset.c::genericZpopCommand uses
+        //   getRangeLongFromObjectOrReply(c, c->argv[2], 0, LONG_MAX,
+        //                                 &count, "value is out of range, must be positive")
+        // so a non-numeric count gets the same wording as a negative
+        // count. fr was calling parse_i64_arg first, surfacing the
+        // generic 'value is not an integer or out of range' for
+        // non-numeric input. Switch to the same parse_zpop_count helper
+        // ZPOPMAX already uses to keep the wording uniform.
+        // (frankenredis-zpopminword)
+        let count = parse_zpop_count(&argv[2])?;
         if count == 0 {
             return Ok(RespFrame::Array(Some(vec![])));
         }
-        let count = count as usize;
         let pairs = store.zpopmin_count(&argv[1], count, now_ms)?;
         return Ok(zpop_count_emit(
             pairs,
@@ -47946,6 +47949,116 @@ mod tests {
         assert_eq!(kv(b"since"), Some(&b"1.0.0"[..]));
         assert_eq!(kv(b"complexity"), Some(&b"O(1)"[..]));
         assert_eq!(kv(b"group"), Some(&b"string"[..]));
+    }
+
+    #[test]
+    fn zpopmin_count_parse_failure_matches_upstream_must_be_positive_wording() {
+        // Pins frankenredis-zpopminword. Upstream t_zset.c::genericZpopCommand
+        // uses getRangeLongFromObjectOrReply with the unified message
+        // "value is out of range, must be positive" — so non-numeric
+        // count, negative count, and out-of-range count all surface the
+        // same wording. fr's ZPOPMIN was using parse_i64_arg directly
+        // and emitting the generic 'value is not an integer or out of
+        // range' for non-numeric input, while ZPOPMAX (which already
+        // routed through parse_zpop_count) had the right wording.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        let expected = "value is out of range, must be positive";
+
+        // Non-numeric count.
+        let err = dispatch_argv(
+            &[b"ZPOPMIN".to_vec(), b"z".to_vec(), b"abc".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("non-numeric count should error");
+        let resp = err.to_resp();
+        let RespFrame::Error(s) = &resp else {
+            panic!("expected error frame, got {resp:?}")
+        };
+        assert!(s.contains(expected), "got {s}");
+
+        // Negative count.
+        let err = dispatch_argv(
+            &[b"ZPOPMIN".to_vec(), b"z".to_vec(), b"-1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("negative count should error");
+        let resp = err.to_resp();
+        let RespFrame::Error(s) = &resp else {
+            panic!("expected error frame, got {resp:?}")
+        };
+        assert!(s.contains(expected), "got {s}");
+
+        // Float / mixed input.
+        let err = dispatch_argv(
+            &[b"ZPOPMIN".to_vec(), b"z".to_vec(), b"1.5".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("float count should error");
+        let resp = err.to_resp();
+        let RespFrame::Error(s) = &resp else {
+            panic!("expected error frame, got {resp:?}")
+        };
+        assert!(s.contains(expected), "got {s}");
+
+        // ZPOPMAX still surfaces the same wording (no regression).
+        let err = dispatch_argv(
+            &[b"ZPOPMAX".to_vec(), b"z".to_vec(), b"abc".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("non-numeric count should error");
+        let resp = err.to_resp();
+        let RespFrame::Error(s) = &resp else {
+            panic!("expected error frame, got {resp:?}")
+        };
+        assert!(s.contains(expected), "got {s}");
+
+        // Valid count (regression: positive count still works).
+        let frame = dispatch_argv(
+            &[b"ZPOPMIN".to_vec(), b"z".to_vec(), b"1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("positive count should succeed");
+        let RespFrame::Array(Some(items)) = frame else {
+            panic!("expected array");
+        };
+        assert_eq!(items.len(), 2, "popped (member, score) pair");
+
+        // Count 0 still returns empty array (special case in ZPOPMIN).
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let frame = dispatch_argv(
+            &[b"ZPOPMIN".to_vec(), b"z".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("count 0 should succeed");
+        assert_eq!(frame, RespFrame::Array(Some(Vec::new())));
     }
 
     #[test]
