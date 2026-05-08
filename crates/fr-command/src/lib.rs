@@ -3699,8 +3699,17 @@ fn lindex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("LINDEX"));
     }
-    if !store.exists_no_touch(&argv[1], now_ms) {
-        return Ok(RespFrame::BulkString(None));
+    // (frankenredis-lidxorder) Upstream t_list.c::lindexCommand:594-600
+    // calls lookupKeyReadOrReply(shared.null) and checkType(OBJ_LIST)
+    // BEFORE getLongFromObjectOrReply for the index. fr was performing
+    // the existence check but then parsing the index BEFORE the type
+    // check, so a non-numeric index on a wrong-type key surfaced
+    // "value is not an integer or out of range" instead of upstream's
+    // WRONGTYPE. Mirror upstream's order with a key_type probe.
+    match store.key_type(&argv[1], now_ms) {
+        None => return Ok(RespFrame::BulkString(None)),
+        Some("list") => {}
+        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
     }
     let index = parse_i64_arg(&argv[2])?;
     let value = store.lindex(&argv[1], index, now_ms)?;
@@ -24673,6 +24682,80 @@ mod tests {
         )
         .expect("missing key should short-circuit to nil");
         assert_eq!(missing_with_invalid_index, RespFrame::BulkString(None));
+    }
+
+    #[test]
+    fn lindex_type_check_runs_before_index_parse() {
+        // (frankenredis-lidxorder) Upstream t_list.c::lindexCommand:594-600
+        // calls lookupKeyReadOrReply(shared.null) and checkType(OBJ_LIST)
+        // BEFORE getLongFromObjectOrReply for the index. fr was already
+        // short-circuiting on missing key but then parsed the index
+        // BEFORE the type check, so a non-numeric index on a wrong-
+        // type key surfaced "value is not an integer or out of range"
+        // instead of upstream's WRONGTYPE.
+        let mut store = Store::new();
+
+        // Wrong-type key + invalid index → WRONGTYPE (type check wins).
+        dispatch_argv(
+            &[b"SET".to_vec(), b"s".to_vec(), b"hello".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+        let err = dispatch_argv(
+            &[b"LINDEX".to_vec(), b"s".to_vec(), b"abc".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("string key");
+        assert!(
+            matches!(err, CommandError::Store(fr_store::StoreError::WrongType)),
+            "got {err:?}"
+        );
+
+        // Wrong-type key + valid index → WRONGTYPE (regression).
+        let err = dispatch_argv(
+            &[b"LINDEX".to_vec(), b"s".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("string key valid index");
+        assert!(
+            matches!(err, CommandError::Store(fr_store::StoreError::WrongType)),
+            "got {err:?}"
+        );
+
+        // List key + invalid index → InvalidInteger (parse fires last).
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"l".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("rpush");
+        let err = dispatch_argv(
+            &[b"LINDEX".to_vec(), b"l".to_vec(), b"abc".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("list key bad index");
+        assert!(
+            matches!(err, CommandError::InvalidInteger),
+            "got {err:?}"
+        );
+
+        // Regression: list key + valid index still returns the value.
+        let out = dispatch_argv(
+            &[b"LINDEX".to_vec(), b"l".to_vec(), b"1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("happy path");
+        assert_eq!(out, RespFrame::BulkString(Some(b"b".to_vec())));
     }
 
     #[test]
