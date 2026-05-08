@@ -12550,11 +12550,13 @@ fn zunionstore(
     }
     let dest = &argv[1];
     let numkeys_val = parse_i64_arg(&argv[2])?;
-    if numkeys_val < 0 {
-        return Err(CommandError::InvalidInteger);
-    }
-    if numkeys_val == 0 {
-        // (br-frankenredis-zsetinput)
+    // (frankenredis-zstoreneg) Upstream t_zset.c::zunionInterDiffGenericCommand
+    // gates on `setnum < 1` after a successful getLongFromObjectOrReply, so
+    // a negative count surfaces the dedicated 'at least 1 input key is
+    // needed' wording — not the generic out-of-range envelope. fr was
+    // splitting the check and emitting CommandError::InvalidInteger for
+    // negative numkeys, diverging from vendored 7.2.4 for ZUNIONSTORE -1.
+    if numkeys_val < 1 {
         return Ok(RespFrame::Error(
             "ERR at least 1 input key is needed for 'zunionstore' command".to_string(),
         ));
@@ -12581,11 +12583,8 @@ fn zinterstore(
     }
     let dest = &argv[1];
     let numkeys_val = parse_i64_arg(&argv[2])?;
-    if numkeys_val < 0 {
-        return Err(CommandError::InvalidInteger);
-    }
-    if numkeys_val == 0 {
-        // (br-frankenredis-zsetinput)
+    // (frankenredis-zstoreneg) See zunionstore() above for rationale.
+    if numkeys_val < 1 {
         return Ok(RespFrame::Error(
             "ERR at least 1 input key is needed for 'zinterstore' command".to_string(),
         ));
@@ -30575,6 +30574,52 @@ mod tests {
             ),
         ];
 
+        for (argv_in, expected) in cases {
+            let argv: Vec<Vec<u8>> = argv_in.iter().map(|s| s.to_vec()).collect();
+            let result = dispatch_argv(&argv, &mut store, 0);
+            let got = match result {
+                Ok(RespFrame::Error(s)) => s,
+                Err(e) => match e.to_resp() {
+                    RespFrame::Error(s) => s,
+                    other => panic!("expected error frame, got {other:?}"),
+                },
+                other => panic!("expected error frame for {argv_in:?}, got {other:?}"),
+            };
+            assert_eq!(&got, *expected, "argv: {argv_in:?}");
+        }
+    }
+
+    #[test]
+    fn zinterstore_zunionstore_negative_numkeys_uses_input_key_wording() {
+        // (frankenredis-zstoreneg) Upstream t_zset.c::zunionInterDiff
+        // GenericCommand gates on `setnum < 1` after a successful
+        // getLongFromObjectOrReply, so a NEGATIVE count surfaces the
+        // same dedicated 'at least 1 input key is needed for <cmd>
+        // command' wording as numkeys=0. fr was splitting the check
+        // into a (numkeys < 0) → InvalidInteger arm plus a separate
+        // (numkeys == 0) → input-key arm, diverging from vendored
+        // 7.2.4 only on the negative branch. ZDIFFSTORE / ZINTER /
+        // ZUNION / ZDIFF / ZINTERCARD already used `<= 0` correctly;
+        // the regression was scoped to ZUNIONSTORE and ZINTERSTORE.
+        let mut store = Store::new();
+        let cases: &[(&[&[u8]], &str)] = &[
+            (
+                &[b"ZUNIONSTORE", b"dst", b"-1", b"k"],
+                "ERR at least 1 input key is needed for 'zunionstore' command",
+            ),
+            (
+                &[b"ZUNIONSTORE", b"dst", b"-100", b"a", b"b"],
+                "ERR at least 1 input key is needed for 'zunionstore' command",
+            ),
+            (
+                &[b"ZINTERSTORE", b"dst", b"-1", b"k"],
+                "ERR at least 1 input key is needed for 'zinterstore' command",
+            ),
+            (
+                &[b"ZINTERSTORE", b"dst", b"-100", b"a", b"b"],
+                "ERR at least 1 input key is needed for 'zinterstore' command",
+            ),
+        ];
         for (argv_in, expected) in cases {
             let argv: Vec<Vec<u8>> = argv_in.iter().map(|s| s.to_vec()).collect();
             let result = dispatch_argv(&argv, &mut store, 0);
