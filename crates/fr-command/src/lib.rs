@@ -5061,6 +5061,48 @@ fn is_geo_flag(arg: &[u8]) -> bool {
 
 /// Extract STORE/STOREDIST destination key from GEORADIUS/GEORADIUSBYMEMBER argv.
 /// Returns (store_key, is_storedist).
+/// Mirror upstream geo.c::georadiusGeneric's STORE/STOREDIST gate:
+/// each option must be followed by a destination key (`(i+1) <
+/// remaining`), and `RADIUS_NOSTORE` (set for the _RO variants)
+/// rejects the option entirely. Bare STORE/STOREDIST falls through
+/// to the loop's else and surfaces shared.syntaxerr. fr previously
+/// silently dropped the missing-key case and silently accepted
+/// STORE/STOREDIST in _RO mode. (frankenredis-geostorearg)
+fn validate_geo_store_args(
+    argv: &[Vec<u8>],
+    start: usize,
+    nostore: bool,
+) -> Result<(), CommandError> {
+    let mut i = start;
+    while i < argv.len() {
+        let is_store = eq_ascii_command(&argv[i], b"STORE");
+        let is_storedist = eq_ascii_command(&argv[i], b"STOREDIST");
+        if is_store || is_storedist {
+            if nostore {
+                return Err(CommandError::SyntaxError);
+            }
+            if i + 1 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            // Skip the dest key so a `STORE foo STORE` pattern
+            // doesn't double-trigger; the second STORE keyword is
+            // a new option occurrence.
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
+/// Returns true when the command name is GEORADIUS_RO or
+/// GEORADIUSBYMEMBER_RO. Both share the same dispatch handler as
+/// their non-RO counterparts but upstream's RADIUS_NOSTORE flag
+/// rejects STORE/STOREDIST in those variants. (frankenredis-geostorearg)
+fn is_geo_ro_variant(cmd: &[u8]) -> bool {
+    eq_ascii_command(cmd, b"GEORADIUS_RO") || eq_ascii_command(cmd, b"GEORADIUSBYMEMBER_RO")
+}
+
 fn extract_geo_store(argv: &[Vec<u8>], start: usize) -> (Option<Vec<u8>>, bool) {
     let mut store_key: Option<Vec<u8>> = None;
     let mut storedist = false;
@@ -5124,7 +5166,13 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
-    let radius = match parse_geo_f64(&argv[4]) {
+    // (frankenredis-geostorearg) Upstream geo.c::georadiusGeneric
+    // routes the radius parse through extractDistanceOrReply, whose
+    // error message is "need numeric radius" — not the generic
+    // "value is not a valid float" wording fr inherited from
+    // parse_geo_f64. Match upstream exactly so radius-arg failure
+    // is distinguishable from longitude/latitude-arg failure.
+    let radius = match parse_geo_f64_with_msg(&argv[4], "need numeric radius") {
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
@@ -5142,6 +5190,14 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         }
     };
     let radius_m = radius * unit_mult;
+    // (frankenredis-geostorearg) Upstream geo.c::georadiusGeneric
+    // gates the STORE/STOREDIST option branches on `(i+1) < remaining`
+    // and `!(flags & RADIUS_NOSTORE)`. A trailing STORE/STOREDIST
+    // with no following key, OR any STORE/STOREDIST in the _RO
+    // variant, falls through to the loop's else and surfaces
+    // shared.syntaxerr. fr was silently dropping a missing dest
+    // key and silently accepting STORE/STOREDIST in _RO mode.
+    validate_geo_store_args(argv, 6, /* nostore = */ is_geo_ro_variant(&argv[0]))?;
     let (withcoord, withdist, withhash, count, _any, asc, _) =
         parse_geo_search_flags(argv, 6, unit_mult)?;
     let (store_key, storedist) = extract_geo_store(argv, 6);
@@ -5182,7 +5238,10 @@ fn georadiusbymember(
     let Some((center_lon, center_lat)) = geo_decode_score(score) else {
         return Ok(RespFrame::Array(Some(Vec::new())));
     };
-    let radius = match parse_geo_f64(&argv[3]) {
+    // (frankenredis-geostorearg) Upstream geo.c::georadiusGeneric
+    // routes the radius parse through extractDistanceOrReply with
+    // the literal message "need numeric radius".
+    let radius = match parse_geo_f64_with_msg(&argv[3], "need numeric radius") {
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
@@ -5200,6 +5259,8 @@ fn georadiusbymember(
         }
     };
     let radius_m = radius * unit_mult;
+    // (frankenredis-geostorearg) See georadius() above for rationale.
+    validate_geo_store_args(argv, 5, /* nostore = */ is_geo_ro_variant(&argv[0]))?;
     let (withcoord, withdist, withhash, count, _any, asc, _) =
         parse_geo_search_flags(argv, 5, unit_mult)?;
     let (store_key, storedist) = extract_geo_store(argv, 5);
@@ -42023,6 +42084,94 @@ mod tests {
             }
             other => panic!("expected Array reply, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn georadius_store_storedist_argv_validation_matches_upstream_syntaxerr() {
+        // (frankenredis-geostorearg) Upstream geo.c::georadiusGeneric
+        // gates the STORE/STOREDIST option branches on
+        // `(i+1) < remaining` and `!(flags & RADIUS_NOSTORE)`. A
+        // trailing STORE/STOREDIST with no following key, or any
+        // STORE/STOREDIST in the _RO variant, falls through to the
+        // loop's else and surfaces shared.syntaxerr ("ERR syntax
+        // error"). The radius arg in GEORADIUS / GEORADIUSBYMEMBER
+        // routes through extractDistanceOrReply with the literal
+        // "need numeric radius" wording — not the generic
+        // "value is not a valid float" fr inherited from parse_geo_f64.
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+
+        // STORE / STOREDIST without a destination key surfaces
+        // SyntaxError (matching upstream's shared.syntaxerr) for
+        // the legacy GEORADIUS and GEORADIUSBYMEMBER commands.
+        let trailing_store_cases: &[&[&[u8]]] = &[
+            &[b"GEORADIUS", b"mygeo", b"15", b"37", b"200", b"km", b"STORE"],
+            &[b"GEORADIUS", b"mygeo", b"15", b"37", b"200", b"km", b"STOREDIST"],
+            &[b"GEORADIUSBYMEMBER", b"mygeo", b"Catania", b"200", b"km", b"STORE"],
+            &[b"GEORADIUSBYMEMBER", b"mygeo", b"Catania", b"200", b"km", b"STOREDIST"],
+        ];
+        for argv_slices in trailing_store_cases {
+            let argv: Vec<Vec<u8>> = argv_slices.iter().map(|s| s.to_vec()).collect();
+            assert_eq!(
+                dispatch_argv(&argv, &mut store, 0).expect_err("trailing STORE"),
+                CommandError::SyntaxError,
+                "argv = {argv_slices:?}",
+            );
+        }
+
+        // _RO variants reject STORE/STOREDIST even with a key: upstream
+        // sets RADIUS_NOSTORE for GEORADIUS_RO / GEORADIUSBYMEMBER_RO.
+        let ro_cases: &[&[&[u8]]] = &[
+            &[b"GEORADIUS_RO", b"mygeo", b"15", b"37", b"200", b"km", b"STORE", b"dst"],
+            &[b"GEORADIUS_RO", b"mygeo", b"15", b"37", b"200", b"km", b"STOREDIST", b"dst"],
+            &[b"GEORADIUSBYMEMBER_RO", b"mygeo", b"Catania", b"200", b"km", b"STORE", b"dst"],
+            &[b"GEORADIUSBYMEMBER_RO", b"mygeo", b"Catania", b"200", b"km", b"STOREDIST", b"dst"],
+        ];
+        for argv_slices in ro_cases {
+            let argv: Vec<Vec<u8>> = argv_slices.iter().map(|s| s.to_vec()).collect();
+            assert_eq!(
+                dispatch_argv(&argv, &mut store, 0).expect_err("_RO with STORE"),
+                CommandError::SyntaxError,
+                "argv = {argv_slices:?}",
+            );
+        }
+
+        // Non-numeric radius surfaces "ERR need numeric radius" for
+        // legacy GEORADIUS / GEORADIUSBYMEMBER (matching the existing
+        // GEOSEARCH wording). This validates the radius-arg-specific
+        // wording, distinguishing it from longitude/latitude failures.
+        let radius_cases: &[&[&[u8]]] = &[
+            &[b"GEORADIUS", b"mygeo", b"15", b"37", b"abc", b"km"],
+            &[b"GEORADIUSBYMEMBER", b"mygeo", b"Catania", b"abc", b"km"],
+        ];
+        for argv_slices in radius_cases {
+            let argv: Vec<Vec<u8>> = argv_slices.iter().map(|s| s.to_vec()).collect();
+            let out = dispatch_argv(&argv, &mut store, 0).expect("non-numeric radius");
+            assert_eq!(
+                out,
+                RespFrame::Error("ERR need numeric radius".to_string()),
+                "argv = {argv_slices:?}",
+            );
+        }
+
+        // Regression: STORE/STOREDIST with valid dest key still
+        // produces a count reply on the legacy commands.
+        let stored = dispatch_argv(
+            &[
+                b"GEORADIUS".to_vec(),
+                b"mygeo".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"STORE".to_vec(),
+                b"dst".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("STORE-with-key");
+        assert!(matches!(stored, RespFrame::Integer(_)));
     }
 
     #[test]
