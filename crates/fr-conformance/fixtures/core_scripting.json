@@ -3733,94 +3733,16 @@
       }
     },
     {
-      "name": "eval_redis_call_config_get_maxmemory_policy",
+      "name": "eval_redis_call_config_get_blocked_by_noscript",
       "now_ms": 0,
       "argv": [
         "EVAL",
-        "local result = redis.call('CONFIG', 'GET', 'maxmemory-policy') return result['maxmemory-policy'] or 'EMPTY'",
+        "return redis.call('CONFIG', 'GET', 'maxmemory-policy')",
         "0"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": "noeviction"
-      }
-    },
-    {
-      "name": "eval_redis_call_config_get_hash_max_listpack_entries",
-      "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local result = redis.call('CONFIG', 'GET', 'hash-max-listpack-entries') return result['hash-max-listpack-entries'] or 'EMPTY'",
-        "0"
-      ],
-      "expect": {
-        "kind": "bulk",
-        "value": "512"
-      }
-    },
-    {
-      "name": "eval_redis_call_config_get_nonexistent_returns_empty",
-      "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local result = redis.call('CONFIG', 'GET', 'nonexistent-param') local count = 0 for _, _ in pairs(result) do count = count + 1 end return count",
-        "0"
-      ],
-      "expect": {
-        "kind": "integer",
-        "value": 0
-      }
-    },
-    {
-      "name": "eval_redis_call_config_set_and_get_encoding_threshold",
-      "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "redis.call('CONFIG', 'SET', 'hash-max-listpack-entries', '256') local r = redis.call('CONFIG', 'GET', 'hash-max-listpack-entries') return r['hash-max-listpack-entries']",
-        "0"
-      ],
-      "expect": {
-        "kind": "bulk",
-        "value": "256"
-      }
-    },
-    {
-      "name": "eval_redis_call_config_get_databases_static",
-      "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local r = redis.call('CONFIG', 'GET', 'databases') return r['databases'] or 'EMPTY'",
-        "0"
-      ],
-      "expect": {
-        "kind": "bulk",
-        "value": "16"
-      }
-    },
-    {
-      "name": "eval_redis_call_config_get_appendfsync_static",
-      "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local r = redis.call('CONFIG', 'GET', 'appendfsync') return r['appendfsync'] or 'EMPTY'",
-        "0"
-      ],
-      "expect": {
-        "kind": "bulk",
-        "value": "everysec"
-      }
-    },
-    {
-      "name": "eval_redis_call_config_get_wildcard_pattern",
-      "now_ms": 0,
-      "argv": [
-        "EVAL",
-        "local r = redis.call('CONFIG', 'GET', 'slowlog-*') local count = 0 for _, _ in pairs(r) do count = count + 1 end return count",
-        "0"
-      ],
-      "expect": {
-        "kind": "integer",
-        "value": 2
+        "kind": "error",
+        "value": "ERR This Redis command is not allowed from script script: 9c607d893a52610b325e988f6cef2674df6ed59e, on @user_script:1."
       }
     },
     {
