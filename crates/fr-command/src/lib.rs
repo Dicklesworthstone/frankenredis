@@ -10281,6 +10281,20 @@ fn incrbyfloat(
     if argv.len() != 3 {
         return Err(CommandError::WrongArity("INCRBYFLOAT"));
     }
+    // (frankenredis-incrbyfloatorder) Mirror upstream
+    // t_string.c::incrbyfloatCommand ordering:
+    //   1. lookupKeyWrite + checkType(OBJ_STRING)  -> WRONGTYPE
+    //   2. getLongDoubleFromObjectOrReply(current value)
+    //   3. getLongDoubleFromObjectOrReply(incr/argv[2])
+    //   4. add + NaN/Inf check
+    // fr previously parsed the delta first, leaking
+    // "value is not a valid float" on a wrong-type key when the
+    // delta was unparseable (probe: INCRBYFLOAT <list-key> abc).
+    if let Some(t) = store.key_type(&argv[1], now_ms)
+        && t != "string"
+    {
+        return Err(CommandError::Store(StoreError::WrongType));
+    }
     let delta = parse_f64_arg(&argv[2])?;
     let new_val = store.incrbyfloat(&argv[1], delta, now_ms)?;
     Ok(RespFrame::BulkString(Some(
@@ -32751,6 +32765,39 @@ mod tests {
         )
         .expect("incrbyfloat missing");
         assert_eq!(out, RespFrame::BulkString(Some(b"3.5".to_vec())));
+    }
+
+    /// (frankenredis-incrbyfloatorder) Upstream
+    /// t_string.c::incrbyfloatCommand checks WRONGTYPE *before* parsing
+    /// the increment, so a bad delta on a list/hash/set key surfaces
+    /// the WRONGTYPE wording, not the generic "value is not a valid
+    /// float" reply. Verified vs vendored Redis 7.2.4:
+    ///   LPUSH lk a; INCRBYFLOAT lk abc -> WRONGTYPE
+    #[test]
+    fn incrbyfloat_wrongtype_check_precedes_delta_parse() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"LPUSH".to_vec(), b"lk".to_vec(), b"a".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("LPUSH lk a");
+        let err = dispatch_argv(
+            &[
+                b"INCRBYFLOAT".to_vec(),
+                b"lk".to_vec(),
+                b"abc".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("INCRBYFLOAT on list with bad delta must surface WRONGTYPE");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error(
+                "WRONGTYPE Operation against a key holding the wrong kind of value".to_string()
+            )
+        );
     }
 
     #[test]
