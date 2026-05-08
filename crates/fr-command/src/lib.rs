@@ -13622,8 +13622,15 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("xpending", -3, "readonly", 1, 1, 1),
     ("xack", -4, "write fast", 1, 1, 1),
     ("xsetid", -3, "write denyoom fast", 1, 1, 1),
-    ("xinfo", -2, "", 2, 2, 1),
-    ("xgroup", -2, "", 2, 2, 1),
+    // (frankenredis-containerkeyspecs) Container commands — vendored
+    // emits (0,0,0) at the top-level COMMAND INFO entry and routes
+    // key extraction through subcommand-level key_specs sub-arrays.
+    // fr's command_key_indexes has dedicated name-based branches
+    // for XINFO/XGROUP/OBJECT (lib.rs:311-334) that pull argv[2] when
+    // present, so the runtime continues to find the key without the
+    // top-level (2,2,1) triple — matching upstream emission.
+    ("xinfo", -2, "", 0, 0, 0),
+    ("xgroup", -2, "", 0, 0, 0),
     ("xrange", -4, "readonly", 1, 1, 1),
     ("xrevrange", -4, "readonly", 1, 1, 1),
     ("subscribe", -2, "pubsub noscript loading stale", 0, 0, 0),
@@ -13659,7 +13666,11 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("bgrewriteaof", 1, "admin noscript no_async_loading", 0, 0, 0),
     ("lastsave", 1, "loading stale fast", 0, 0, 0),
     ("swapdb", 3, "write fast", 0, 0, 0),
-    ("object", -2, "", 2, 2, 1),
+    // (frankenredis-containerkeyspecs) Container — same rationale
+    // as XINFO/XGROUP above: top-level emission is (0,0,0); runtime
+    // extraction goes through the dedicated OBJECT branch in
+    // command_key_indexes (lib.rs:329-334).
+    ("object", -2, "", 0, 0, 0),
     ("memory", -2, "", 0, 0, 0),
     ("slowlog", -2, "", 0, 0, 0),
     ("debug", -2, "admin noscript loading stale", 0, 0, 0),
@@ -57529,6 +57540,89 @@ mod tests {
         }
     }
 
+    /// (frankenredis-containerkeyspecs) Top-level OBJECT/XGROUP/XINFO
+    /// container commands emit first/last/step = 0/0/0 and an empty
+    /// key_specs sub-array in vendored 7.2.4 because the actual key
+    /// position lives in subcommand-level KEYSPECS arrays. fr's
+    /// command_key_indexes has dedicated name branches for these
+    /// commands so dropping the COMMAND_TABLE triple to (0,0,0)
+    /// only changes COMMAND INFO emission — runtime key extraction
+    /// (and ACL key permission checks) continue to find argv[2]
+    /// via the name-based path.
+    #[test]
+    fn command_info_keyspecs_for_object_xgroup_xinfo_emit_empty_per_upstream() {
+        let mut store = Store::new();
+        for cmd in ["OBJECT", "XGROUP", "XINFO"] {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            assert_eq!(
+                fields[3],
+                RespFrame::Integer(0),
+                "{cmd} first_key must be 0"
+            );
+            assert_eq!(
+                fields[4],
+                RespFrame::Integer(0),
+                "{cmd} last_key must be 0"
+            );
+            assert_eq!(fields[5], RespFrame::Integer(0), "{cmd} step must be 0");
+            // key_specs sub-array is empty when first/last/step are 0.
+            let RespFrame::Array(Some(key_specs)) = &fields[8] else {
+                panic!("expected key_specs Array for {cmd}, got {:?}", fields[8]);
+            };
+            assert!(
+                key_specs.is_empty(),
+                "{cmd} key_specs must be empty, got {key_specs:?}"
+            );
+        }
+
+        // Runtime extraction must still find the key argument for
+        // OBJECT/XGROUP/XINFO subcommands via the name-based path.
+        // (Confirms the (0,0,0) triple change didn't regress
+        // ACL/cluster key resolution.)
+        for argv in [
+            vec![
+                b"OBJECT".to_vec(),
+                b"ENCODING".to_vec(),
+                b"mykey".to_vec(),
+            ],
+            vec![
+                b"XINFO".to_vec(),
+                b"STREAM".to_vec(),
+                b"mystream".to_vec(),
+            ],
+            vec![
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"mystream".to_vec(),
+                b"g1".to_vec(),
+                b"$".to_vec(),
+            ],
+        ] {
+            let keys = super::command_key_indexes(&argv);
+            assert_eq!(
+                keys,
+                vec![2],
+                "{:?} key extraction must yield [2], got {keys:?}",
+                String::from_utf8_lossy(&argv[0])
+            );
+        }
+    }
+
     /// (frankenredis-restoreasking) RESTORE-ASKING is the cluster
     /// slot-migration alias of RESTORE. Upstream commands.def
     /// declares both names backed by restoreCommand with arity=-4
@@ -57537,7 +57631,7 @@ mod tests {
     /// CommandId::Restore in classify_command and registers the
     /// dedicated COMMAND_TABLE entry so `COMMAND INFO restore-asking`
     /// returns the right metadata. The handler / is_write_command /
-    /// extract_keys_for_argv paths reuse the RESTORE branches via
+    /// command_key_indexes paths reuse the RESTORE branches via
     /// the alias.
     #[test]
     fn command_info_restore_asking_matches_upstream_metadata() {
