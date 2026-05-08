@@ -177,7 +177,9 @@ pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
         return vec![1];
     }
 
-    if cmd_name.eq_ignore_ascii_case("RESTORE") {
+    if cmd_name.eq_ignore_ascii_case("RESTORE")
+        || cmd_name.eq_ignore_ascii_case("RESTORE-ASKING")
+    {
         if argv.len() < 2 {
             return Vec::new();
         }
@@ -529,6 +531,7 @@ fn command_uses_custom_key_specs(cmd_name: &str) -> bool {
         || cmd_name.eq_ignore_ascii_case("XREADGROUP")
         || cmd_name.eq_ignore_ascii_case("XSETID")
         || cmd_name.eq_ignore_ascii_case("RESTORE")
+        || cmd_name.eq_ignore_ascii_case("RESTORE-ASKING")
         || cmd_name.eq_ignore_ascii_case("ZUNIONSTORE")
         || cmd_name.eq_ignore_ascii_case("ZINTERSTORE")
         || cmd_name.eq_ignore_ascii_case("ZDIFFSTORE")
@@ -2397,6 +2400,15 @@ fn classify_command(cmd: &[u8]) -> Option<CommandId> {
                 Some(CommandId::Zremrangebylex)
             } else if eq_ascii_command(cmd, b"GEOSEARCHSTORE") {
                 Some(CommandId::Geosearchstore)
+            } else if eq_ascii_command(cmd, b"RESTORE-ASKING") {
+                // (frankenredis-restoreasking) Cluster slot-migration alias
+                // of RESTORE: same handler, plus the CMD_ASKING flag.
+                // Upstream commands.def routes both names to
+                // restoreCommand; fr aliases here so dispatch falls through
+                // to restore_cmd (and ACL/AOF/key-extraction code that
+                // already special-cases RESTORE picks RESTORE-ASKING up
+                // automatically via the same CommandId variant).
+                Some(CommandId::Restore)
             } else {
                 None
             }
@@ -13482,6 +13494,12 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("sort", -2, "write denyoom movablekeys", 1, 1, 1),
     ("dump", 2, "readonly", 1, 1, 1),
     ("restore", -4, "write denyoom", 1, 1, 1),
+    // (frankenredis-restoreasking) Cluster slot-migration alias of
+    // RESTORE: same handler with CMD_ASKING surfaced as the 'asking'
+    // flag. Upstream commands.def declares both names with arity=-4
+    // and key spec firstkey=1/lastkey=1/keystep=1; the only delta is
+    // the asking flag and the ACL category set is identical.
+    ("restore-asking", -4, "write denyoom asking", 1, 1, 1),
     ("unlink", -2, "write fast", 1, -1, 1),
     ("touch", -2, "readonly fast", 1, -1, 1),
     ("hset", -4, "write denyoom fast", 1, 1, 1),
@@ -14349,6 +14367,13 @@ fn command_info_key_specs(
 
     let key_flags: Vec<&str> = if flags.split_whitespace().any(|flag| flag == "readonly") {
         vec!["RO", "access"]
+    } else if matches!(name, "restore" | "restore-asking") {
+        // (frankenredis-restoreasking) Upstream RESTORE/RESTORE-ASKING
+        // emit OW+update key-spec flags: the value is overwritten in
+        // full (OW) and the key already needs to exist or is created
+        // (update). RW+access (the catch-all default below) under-
+        // describes the operation.
+        vec!["OW", "update"]
     } else if matches!(
         name,
         "append"
@@ -57502,6 +57527,95 @@ mod tests {
             let want: Vec<String> = want_flags.iter().map(|s| (*s).to_string()).collect();
             assert_eq!(got, want, "{cmd} flags must be {want:?}, got {got:?}");
         }
+    }
+
+    /// (frankenredis-restoreasking) RESTORE-ASKING is the cluster
+    /// slot-migration alias of RESTORE. Upstream commands.def
+    /// declares both names backed by restoreCommand with arity=-4
+    /// and key spec firstkey=1/lastkey=1/keystep=1; RESTORE-ASKING
+    /// adds the CMD_ASKING flag. fr aliases RESTORE-ASKING to
+    /// CommandId::Restore in classify_command and registers the
+    /// dedicated COMMAND_TABLE entry so `COMMAND INFO restore-asking`
+    /// returns the right metadata. The handler / is_write_command /
+    /// extract_keys_for_argv paths reuse the RESTORE branches via
+    /// the alias.
+    #[test]
+    fn command_info_restore_asking_matches_upstream_metadata() {
+        let mut store = Store::new();
+        let r = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"INFO".to_vec(),
+                b"RESTORE-ASKING".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("COMMAND INFO RESTORE-ASKING");
+        let RespFrame::Array(Some(rows)) = r else {
+            panic!("expected Array");
+        };
+        let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
+            panic!("expected sub-Array");
+        };
+        // name
+        assert_eq!(
+            fields[0],
+            RespFrame::BulkString(Some(b"restore-asking".to_vec()))
+        );
+        // arity
+        assert_eq!(fields[1], RespFrame::Integer(-4));
+        // flags
+        let RespFrame::Array(Some(emitted_flags)) = &fields[2] else {
+            panic!("expected flags Array");
+        };
+        let got_flags: Vec<String> = emitted_flags
+            .iter()
+            .map(|f| match f {
+                RespFrame::SimpleString(s) => s.clone(),
+                other => panic!("expected SimpleString flag, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got_flags,
+            vec![
+                "write".to_string(),
+                "denyoom".to_string(),
+                "asking".to_string()
+            ],
+            "flags must match upstream `write denyoom asking`"
+        );
+        // first/last/step
+        assert_eq!(fields[3], RespFrame::Integer(1));
+        assert_eq!(fields[4], RespFrame::Integer(1));
+        assert_eq!(fields[5], RespFrame::Integer(1));
+
+        // RESTORE-ASKING is a write command (AOF replay gate).
+        assert!(
+            is_write_command(b"RESTORE-ASKING"),
+            "RESTORE-ASKING must be marked as a write command for AOF replay"
+        );
+
+        // RESTORE-ASKING shares RESTORE's classification (alias).
+        assert_eq!(
+            classify_command(b"RESTORE-ASKING"),
+            classify_command(b"RESTORE")
+        );
+
+        // ACL category derivation includes @write, @keyspace, @dangerous.
+        let cats = command_acl_categories("restore-asking");
+        assert!(
+            cats.contains(&"keyspace"),
+            "restore-asking must be in @keyspace, got {cats:?}"
+        );
+        assert!(
+            cats.contains(&"write"),
+            "restore-asking must be in @write, got {cats:?}"
+        );
+        assert!(
+            cats.contains(&"dangerous"),
+            "restore-asking must be in @dangerous, got {cats:?}"
+        );
     }
 
     /// (frankenredis-keyspecfixes) Differential probe vs vendored 7.2.4
