@@ -12780,7 +12780,12 @@ fn zinterstore(
 // ── Server / connection commands ──────────────────────────────────────
 
 fn quit(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
-    if argv.len() != 1 {
+    // (frankenredis-quitarity) Upstream commands.def declares QUIT with
+    // arity = -1 (argc >= 1 is accepted) and networking.c::quitCommand
+    // ignores any trailing arguments — `QUIT garbage extra` returns OK
+    // in vendored Redis 7.2.4. fr previously hardcoded an exact-arity
+    // check and rejected extra args.
+    if argv.is_empty() {
         return Err(CommandError::WrongArity("QUIT"));
     }
     if store.script_nesting_level >= 1 {
@@ -13600,7 +13605,7 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("unwatch", 1, "fast", 0, 0, 0),
     ("auth", -2, "fast", 0, 0, 0),
     ("hello", -1, "fast", 0, 0, 0),
-    ("quit", 1, "fast", 0, 0, 0),
+    ("quit", -1, "fast", 0, 0, 0),
     ("reset", 1, "fast", 0, 0, 0),
     ("info", -1, "fast", 0, 0, 0),
     ("config", -2, "admin", 0, 0, 0),
@@ -28892,12 +28897,25 @@ mod tests {
 
     #[test]
     fn quit_and_reset_rejected_from_scripts_after_arity_validation() {
+        // (frankenredis-quitarity) Upstream commands.def declares QUIT
+        // with arity=-1, so `QUIT extra` is accepted (returns OK from a
+        // non-script context, NOSCRIPT from inside a script). RESET is
+        // still arity=1 and rejects extras.
         let mut store = Store::new();
         store.script_nesting_level = 1;
 
-        let quit_arity = dispatch_argv(&[b"QUIT".to_vec(), b"extra".to_vec()], &mut store, 0)
-            .expect_err("quit arity");
-        assert_eq!(quit_arity, CommandError::WrongArity("QUIT"));
+        // QUIT extra under script: extras are valid per upstream arity,
+        // but the noscript guard still fires for QUIT itself.
+        let quit_extra_noscript = dispatch_argv(
+            &[b"QUIT".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("quit noscript with extras");
+        assert_eq!(
+            quit_extra_noscript,
+            CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
+        );
 
         let reset_arity = dispatch_argv(&[b"RESET".to_vec(), b"extra".to_vec()], &mut store, 0)
             .expect_err("reset arity");
@@ -28907,6 +28925,17 @@ mod tests {
             let err = dispatch_argv(&argv, &mut store, 0).expect_err("connection noscript");
             assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
         }
+
+        // Outside scripts, `QUIT garbage extra` returns OK to mirror
+        // upstream networking.c::quitCommand.
+        let mut clean = Store::new();
+        let r = dispatch_argv(
+            &[b"QUIT".to_vec(), b"garbage".to_vec(), b"extra".to_vec()],
+            &mut clean,
+            0,
+        )
+        .expect("QUIT extras outside script must succeed");
+        assert_eq!(r, RespFrame::SimpleString("OK".to_string()));
     }
 
     #[test]
