@@ -3711,6 +3711,18 @@ fn lset_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
     if argv.len() != 4 {
         return Err(CommandError::WrongArity("LSET"));
     }
+    // (frankenredis-lsetorder) Upstream t_list.c::lsetCommand:624-630
+    // calls lookupKeyWriteOrReply(shared.nokeyerr) and checkType(OBJ_LIST)
+    // BEFORE getLongFromObjectOrReply for the index. fr was parsing the
+    // index first, so a non-numeric index on a missing key surfaced
+    // "value is not an integer or out of range" instead of upstream's
+    // "ERR no such key", and on a wrong-type key surfaced the same
+    // generic instead of WRONGTYPE.
+    match store.key_type(&argv[1], now_ms) {
+        None => return Err(CommandError::NoSuchKey),
+        Some("list") => {}
+        Some(_) => return Err(CommandError::Store(fr_store::StoreError::WrongType)),
+    }
     let index = parse_i64_arg(&argv[2])?;
     store.lset(&argv[1], index, argv[3].clone(), now_ms)?;
     Ok(RespFrame::SimpleString("OK".to_string()))
@@ -24696,6 +24708,115 @@ mod tests {
         )
         .expect("lindex");
         assert_eq!(val, RespFrame::BulkString(Some(b"x".to_vec())));
+    }
+
+    #[test]
+    fn lset_lookup_and_type_check_run_before_index_parse() {
+        // (frankenredis-lsetorder) Upstream t_list.c::lsetCommand:624-630
+        // routes through lookupKeyWriteOrReply(shared.nokeyerr) and
+        // checkType(OBJ_LIST) BEFORE getLongFromObjectOrReply for the
+        // index. fr was parsing the index first, so a non-numeric
+        // index on a missing key surfaced "value is not an integer
+        // or out of range" instead of upstream's "ERR no such key",
+        // and on a wrong-type key surfaced the same generic instead
+        // of WRONGTYPE.
+        let mut store = Store::new();
+
+        // Missing key + invalid index → "ERR no such key" (lookup wins).
+        let err = dispatch_argv(
+            &[
+                b"LSET".to_vec(),
+                b"missing".to_vec(),
+                b"abc".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("missing key");
+        assert!(matches!(err, CommandError::NoSuchKey), "got {err:?}");
+
+        // String key + invalid index → WRONGTYPE (type check wins).
+        dispatch_argv(
+            &[b"SET".to_vec(), b"s".to_vec(), b"hello".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+        let err = dispatch_argv(
+            &[
+                b"LSET".to_vec(),
+                b"s".to_vec(),
+                b"abc".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("string key");
+        assert!(
+            matches!(err, CommandError::Store(fr_store::StoreError::WrongType)),
+            "got {err:?}"
+        );
+
+        // List key + invalid index → InvalidInteger (index parse fires).
+        dispatch_argv(
+            &[
+                b"RPUSH".to_vec(),
+                b"l".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("rpush");
+        let err = dispatch_argv(
+            &[
+                b"LSET".to_vec(),
+                b"l".to_vec(),
+                b"abc".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("list key bad index");
+        assert!(
+            matches!(err, CommandError::InvalidInteger),
+            "got {err:?}"
+        );
+
+        // List key + overflow index → InvalidInteger (parse_i64 rejects).
+        let err = dispatch_argv(
+            &[
+                b"LSET".to_vec(),
+                b"l".to_vec(),
+                b"99999999999999999999".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("list key overflow index");
+        assert!(
+            matches!(err, CommandError::InvalidInteger),
+            "got {err:?}"
+        );
+
+        // Regression: list key + valid index still sets and returns OK.
+        let out = dispatch_argv(
+            &[
+                b"LSET".to_vec(),
+                b"l".to_vec(),
+                b"0".to_vec(),
+                b"newval".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("happy path");
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
     }
 
     #[test]
