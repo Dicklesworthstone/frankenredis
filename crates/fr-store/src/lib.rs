@@ -593,13 +593,21 @@ struct Entry {
     force_set_hashtable_encoding: bool,
 }
 
+/// Upstream evict.h::LFU_INIT_VAL. Newly-created objects start at this
+/// counter so they have a chance to compete against established keys
+/// before being targeted by the LFU eviction policy. fr previously
+/// initialized to 0, surfacing as `OBJECT FREQ` returning 0 immediately
+/// after a SET when the maxmemory-policy is allkeys-lfu / volatile-lfu;
+/// vendored 7.2.4 returns 5. (frankenredis-lfuinit)
+const LFU_INIT_VAL: u8 = 5;
+
 impl Entry {
     fn new(value: Value, expires_at_ms: Option<u64>, now_ms: u64) -> Self {
         Self {
             value,
             expires_at_ms,
             last_access_ms: now_ms,
-            lfu_freq: 0,
+            lfu_freq: LFU_INIT_VAL,
             lfu_last_touch_min: now_ms / 60_000,
             modification_count: 0,
             force_raw_encoding: false,
@@ -2093,12 +2101,21 @@ impl Store {
     pub fn set(&mut self, key: Vec<u8>, value: Vec<u8>, px_ttl_ms: Option<u64>, now_ms: u64) {
         self.drop_if_expired(key.as_slice(), now_ms);
         let expires_at_ms = px_ttl_ms.map(|ttl| now_ms.saturating_add(ttl));
+        // (frankenredis-lfuinit) Upstream evict.h::LFU_INIT_VAL = 5.
+        // SET on a fresh key under an LFU policy creates the object via
+        // createObject → initObjectLFUOrLRU which seeds the counter at
+        // LFU_INIT_VAL so new objects can compete; SET overwriting an
+        // existing key under LFU bumps the existing counter by 1. fr's
+        // fresh-key branch was returning 0 instead of LFU_INIT_VAL,
+        // surfacing as `OBJECT FREQ` reading 0 immediately after a SET.
         let next_lfu_freq = if self.lfu_tracking_enabled() {
-            self.entries.get(key.as_slice()).map_or(0, |entry| {
-                entry
-                    .current_lfu_freq(now_ms, self.lfu_decay_time)
-                    .saturating_add(1)
-            })
+            self.entries
+                .get(key.as_slice())
+                .map_or(LFU_INIT_VAL, |entry| {
+                    entry
+                        .current_lfu_freq(now_ms, self.lfu_decay_time)
+                        .saturating_add(1)
+                })
         } else {
             0
         };
@@ -2120,12 +2137,21 @@ impl Store {
         now_ms: u64,
     ) {
         self.drop_if_expired(key.as_slice(), now_ms);
+        // (frankenredis-lfuinit) Upstream evict.h::LFU_INIT_VAL = 5.
+        // SET on a fresh key under an LFU policy creates the object via
+        // createObject → initObjectLFUOrLRU which seeds the counter at
+        // LFU_INIT_VAL so new objects can compete; SET overwriting an
+        // existing key under LFU bumps the existing counter by 1. fr's
+        // fresh-key branch was returning 0 instead of LFU_INIT_VAL,
+        // surfacing as `OBJECT FREQ` reading 0 immediately after a SET.
         let next_lfu_freq = if self.lfu_tracking_enabled() {
-            self.entries.get(key.as_slice()).map_or(0, |entry| {
-                entry
-                    .current_lfu_freq(now_ms, self.lfu_decay_time)
-                    .saturating_add(1)
-            })
+            self.entries
+                .get(key.as_slice())
+                .map_or(LFU_INIT_VAL, |entry| {
+                    entry
+                        .current_lfu_freq(now_ms, self.lfu_decay_time)
+                        .saturating_add(1)
+                })
         } else {
             0
         };
@@ -14308,21 +14334,49 @@ mod tests {
 
     #[test]
     fn object_freq_tracks_lfu_accesses_and_preserves_lru_switch_behavior() {
+        // (frankenredis-lfuinit) Updated for LFU_INIT_VAL=5 seeding.
+        // When the maxmemory-policy is non-LFU, set() leaves lfu_freq=0
+        // on the entry (the counter only matters under LFU). When the
+        // policy is LFU, fresh keys seed at LFU_INIT_VAL=5 to match
+        // upstream evict.h::LFU_INIT_VAL.
         let mut store = Store::new();
         store.set(b"k".to_vec(), b"v".to_vec(), None, 100);
+        // No LFU policy yet → counter is 0 (set() else-branch).
         assert_eq!(store.object_freq(b"k", 150), Some(0));
 
         store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        // Existing entry, LFU now enabled — counter still 0 from the
+        // pre-LFU set() above.
         assert_eq!(store.object_freq(b"k", 200), Some(0));
 
         assert_eq!(store.get(b"k", 300).unwrap(), Some(b"v".to_vec()));
         assert_eq!(store.object_freq(b"k", 301), Some(1));
 
+        // SET overwriting an existing entry under LFU bumps the counter
+        // by 1 (matches upstream's existing-object code path).
         store.set(b"k".to_vec(), b"v2".to_vec(), None, 400);
         assert_eq!(store.object_freq(b"k", 401), Some(2));
 
         store.maxmemory_policy = MaxmemoryPolicy::AllkeysLru;
         assert_eq!(store.object_freq(b"k", 500), Some(2));
+    }
+
+    #[test]
+    fn object_freq_seeds_at_lfu_init_val_on_fresh_set_under_lfu_policy() {
+        // (frankenredis-lfuinit) Upstream evict.h::LFU_INIT_VAL = 5
+        // gives newly-created objects a chance to compete before they
+        // can be targeted for eviction. fr was seeding fresh keys at
+        // 0 under LFU, so vendored 7.2.4's `OBJECT FREQ` returned 5
+        // immediately after a SET while fr returned 0.
+        let mut store = Store::new();
+        store.maxmemory_policy = MaxmemoryPolicy::AllkeysLfu;
+        store.set(b"k".to_vec(), b"v".to_vec(), None, 100);
+        assert_eq!(store.object_freq(b"k", 150), Some(5));
+
+        // VolatileLfu policy must also seed.
+        store.maxmemory_policy = MaxmemoryPolicy::VolatileLfu;
+        store.set(b"k2".to_vec(), b"v".to_vec(), None, 100);
+        assert_eq!(store.object_freq(b"k2", 150), Some(5));
     }
 
     #[test]
@@ -14332,16 +14386,19 @@ mod tests {
         store.lfu_decay_time = 1;
         store.set(b"k".to_vec(), b"v".to_vec(), None, 0);
 
+        // (frankenredis-lfuinit) Fresh SET under LFU now seeds at 5.
+        // Subsequent GET bumps to 6; decay across one minute drops
+        // back to 5 (one decay_time period).
         assert_eq!(store.get(b"k", 1).unwrap(), Some(b"v".to_vec()));
-        assert_eq!(store.object_freq(b"k", 2), Some(1));
-        assert_eq!(store.object_freq(b"k", 60_000), Some(0));
+        assert_eq!(store.object_freq(b"k", 2), Some(6));
+        assert_eq!(store.object_freq(b"k", 60_000), Some(5));
 
         assert_eq!(store.get(b"k", 60_001).unwrap(), Some(b"v".to_vec()));
-        assert_eq!(store.object_freq(b"k", 60_002), Some(1));
+        assert_eq!(store.object_freq(b"k", 60_002), Some(6));
 
         store.lfu_decay_time = 2;
-        assert_eq!(store.object_freq(b"k", 179_999), Some(1));
-        assert_eq!(store.object_freq(b"k", 180_000), Some(0));
+        assert_eq!(store.object_freq(b"k", 179_999), Some(6));
+        assert_eq!(store.object_freq(b"k", 180_000), Some(5));
     }
 
     #[test]
