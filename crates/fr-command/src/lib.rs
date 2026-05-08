@@ -17870,20 +17870,16 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         let digest = compute_debug_digest(store, now_ms, None);
         Ok(RespFrame::BulkString(Some(digest.into_bytes())))
     } else if sub.eq_ignore_ascii_case("DIGEST-VALUE") {
-        // DEBUG DIGEST-VALUE key [key ...] - return an Array of
-        // per-key digests. Upstream debug.c::debugCommand calls
-        // computeDatasetDigest per key and emits an array reply
-        // (one digest hex string per key, 40 chars for SHA1
-        // upstream). fr previously returned a SINGLE BulkString
-        // combining all keys into one hash, diverging from the
-        // upstream wire shape. Differential probe vs vendored 7.2.4
-        // confirmed the array reply, including a zero-digest for
-        // missing keys. (frankenredis-dbgdigval)
-        // Wrong-arity routing uses the subcommand-syntax envelope
-        // per (frankenredis-dbgenv).
-        if argv.len() < 3 {
-            return Err(debug_subcommand_envelope_error(sub));
-        }
+        // DEBUG DIGEST-VALUE [key ...] - return an Array of
+        // per-key digests. Upstream debug.c::debugCommand:754
+        // gates on `c->argc >= 2` and emits
+        // `addReplyArrayLen(c, c->argc - 2)`, so calling with no
+        // keys (argc == 2) returns an empty array rather than the
+        // subcommand-syntax envelope. Differential probe vs
+        // vendored Redis 7.2.4 confirmed the empty-array shape.
+        // fr previously rejected argc==2 with the envelope wording.
+        // (frankenredis-dbgdigvempty; supersedes frankenredis-dbgdigval
+        // which fixed the per-key reply shape.)
         let frames: Vec<RespFrame> = argv[2..]
             .iter()
             .map(|key| {
@@ -33889,6 +33885,19 @@ mod tests {
         };
         assert_eq!(missing.len(), 1);
         assert!(matches!(&missing[0], RespFrame::BulkString(Some(_))));
+
+        // (frankenredis-dbgdigvempty) DEBUG DIGEST-VALUE with no keys
+        // is gated by `c->argc >= 2` upstream and emits
+        // `addReplyArrayLen(c, c->argc - 2)` (i.e. an empty array)
+        // — NOT the subcommand-syntax envelope. fr previously
+        // rejected argc==2 with the envelope wording.
+        let empty = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"DIGEST-VALUE".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug digest-value with no keys must succeed");
+        assert_eq!(empty, RespFrame::Array(Some(Vec::new())));
     }
 
     #[test]
@@ -39949,10 +39958,10 @@ mod tests {
                 vec![b"DEBUG".to_vec(), b"DIGEST".to_vec(), b"extra".to_vec()],
                 "DIGEST",
             ),
-            (
-                vec![b"DEBUG".to_vec(), b"DIGEST-VALUE".to_vec()],
-                "DIGEST-VALUE",
-            ),
+            // (frankenredis-dbgdigvempty) DEBUG DIGEST-VALUE accepts
+            // argc == 2 (empty key list -> empty array), so the
+            // envelope-error pin lives on the argc-with-bogus-tail
+            // form below rather than no-args.
             (vec![b"DEBUG".to_vec(), b"POPULATE".to_vec()], "POPULATE"),
             (
                 vec![
