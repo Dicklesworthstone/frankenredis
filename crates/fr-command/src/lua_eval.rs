@@ -505,6 +505,66 @@ enum Token {
     Eof,
 }
 
+/// Format a token the way upstream Lua surfaces it in syntax errors —
+/// e.g. 'lua', '<eof>', 'b', '+'. Used by the parser to reproduce
+/// upstream's "'=' expected near '<token>'" wording for invalid
+/// expression statements. (frankenredis-luabarestmt)
+fn token_display(tok: &Token) -> String {
+    match tok {
+        Token::Name(n) => n.clone(),
+        Token::Number(n) => n.to_string(),
+        Token::Str(_) => "<string>".to_string(),
+        Token::Eof => "<eof>".to_string(),
+        Token::And => "and".to_string(),
+        Token::Break => "break".to_string(),
+        Token::Do => "do".to_string(),
+        Token::Else => "else".to_string(),
+        Token::ElseIf => "elseif".to_string(),
+        Token::End => "end".to_string(),
+        Token::False => "false".to_string(),
+        Token::For => "for".to_string(),
+        Token::Function => "function".to_string(),
+        Token::If => "if".to_string(),
+        Token::In => "in".to_string(),
+        Token::Local => "local".to_string(),
+        Token::Nil => "nil".to_string(),
+        Token::Not => "not".to_string(),
+        Token::Or => "or".to_string(),
+        Token::Repeat => "repeat".to_string(),
+        Token::Return => "return".to_string(),
+        Token::Then => "then".to_string(),
+        Token::True => "true".to_string(),
+        Token::Until => "until".to_string(),
+        Token::While => "while".to_string(),
+        Token::Plus => "+".to_string(),
+        Token::Minus => "-".to_string(),
+        Token::Star => "*".to_string(),
+        Token::Slash => "/".to_string(),
+        Token::Percent => "%".to_string(),
+        Token::Caret => "^".to_string(),
+        Token::Hash => "#".to_string(),
+        Token::EqEq => "==".to_string(),
+        Token::TildeEq => "~=".to_string(),
+        Token::Lt => "<".to_string(),
+        Token::Gt => ">".to_string(),
+        Token::LtEq => "<=".to_string(),
+        Token::GtEq => ">=".to_string(),
+        Token::Eq => "=".to_string(),
+        Token::DotDot => "..".to_string(),
+        Token::Dots => "...".to_string(),
+        Token::LParen => "(".to_string(),
+        Token::RParen => ")".to_string(),
+        Token::LBracket => "[".to_string(),
+        Token::RBracket => "]".to_string(),
+        Token::LBrace => "{".to_string(),
+        Token::RBrace => "}".to_string(),
+        Token::Comma => ",".to_string(),
+        Token::Semi => ";".to_string(),
+        Token::Colon => ":".to_string(),
+        Token::Dot => ".".to_string(),
+    }
+}
+
 // ── Lexer ───────────────────────────────────────────────────────────────
 
 struct Lexer<'a> {
@@ -1237,8 +1297,22 @@ impl Parser {
             let rhs = self.parse_expr_list()?;
             Ok(Stmt::Assign(lhs, rhs))
         } else {
-            // Expression statement (must be a call)
-            Ok(Stmt::Expression(expr))
+            // Lua's grammar restricts expression statements to function
+            // calls only:
+            //   stat ::= varlist '=' explist | functioncall | ...
+            // A bare `var` (Name / Field / Index) is *not* a valid
+            // statement. Upstream Lua's parser surfaces this as
+            // "'=' expected near '<token>'" because after parsing the
+            // var it expects either ',' or '=' to start an assignment.
+            // fr was wrapping any suffixed expression in
+            // Stmt::Expression and silently executing it as nil-discard,
+            // so SCRIPT LOAD / EVAL of `'invalid lua'`, `'foo bar'`,
+            // `'foo'` were succeeding instead of erroring.
+            // (frankenredis-luabarestmt)
+            match &expr {
+                Expr::Call(_, _) | Expr::MethodCall(_, _, _) => Ok(Stmt::Expression(expr)),
+                _ => Err(format!("'=' expected near '{}'", token_display(self.peek()))),
+            }
         }
     }
 
@@ -5502,9 +5576,58 @@ mod tests {
     use fr_store::Store;
 
     use super::{
-        Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, eval_script, json_to_lua_value,
-        lua_raw_equal, lua_value_to_json,
+        Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
+        json_to_lua_value, lua_raw_equal, lua_value_to_json,
     };
+
+    #[test]
+    fn parser_rejects_bare_identifier_statements_with_upstream_wording() {
+        // Pins frankenredis-luabarestmt. Lua's grammar allows expression
+        // statements only for function calls; bare `var` (Name / Field /
+        // Index) is not a valid statement. Upstream Lua surfaces this as
+        // "'=' expected near '<token>'" because after parsing the var
+        // it's expecting the start of an assignment. fr's parser was
+        // wrapping any suffixed expression in Stmt::Expression, so
+        // SCRIPT LOAD / EVAL of `'invalid lua'`, `'foo bar'`, `'foo'`
+        // were silently accepted (LOAD returned a SHA, EVAL returned
+        // nil) instead of erroring like vendored 7.2.4.
+        for (src, expected_near) in [
+            ("invalid lua", "'=' expected near 'lua'"),
+            ("foo bar", "'=' expected near 'bar'"),
+            ("a b c d", "'=' expected near 'b'"),
+            ("foo", "'=' expected near '<eof>'"),
+            ("redis", "'=' expected near '<eof>'"),
+            ("a.b", "'=' expected near '<eof>'"),
+            ("t[1]", "'=' expected near '<eof>'"),
+        ] {
+            let err = compile_check(src.as_bytes())
+                .expect_err(&format!("expected error for {src:?}"));
+            assert_eq!(
+                err, expected_near,
+                "wrong wording for {src:?}: {err}"
+            );
+        }
+
+        // Regression: legitimate function-call statements still parse.
+        for src in [
+            "redis.call('PING')",
+            "print('hello')",
+            "f(1, 2, 3)",
+            "obj:method(1)",
+            "f 'string-arg'",
+            "f { a = 1 }",
+            "return 1",
+            "local x = 1",
+            "a = 1",
+            "a, b = 1, 2",
+            "if true then end",
+            "for i = 1, 5 do end",
+            "do return 1 end",
+        ] {
+            compile_check(src.as_bytes())
+                .unwrap_or_else(|e| panic!("{src:?} should compile: {e}"));
+        }
+    }
 
     #[test]
     fn function_decl_errors_on_missing_table_path() {
