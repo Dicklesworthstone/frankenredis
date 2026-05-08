@@ -1599,6 +1599,7 @@ pub fn is_write_command(cmd: &[u8]) -> bool {
             | CommandId::Georadiusbymember
             | CommandId::Swapdb
             | CommandId::Migrate
+            | CommandId::Pfdebug
     )
 }
 
@@ -13426,7 +13427,7 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     // Upstream commands/ping.json declares arity -1 (1 or more args).
     // (br-frankenredis-pingarity)
     ("ping", -1, "fast", 0, 0, 0),
-    ("echo", 2, "fast", 0, 0, 0),
+    ("echo", 2, "loading stale fast", 0, 0, 0),
     ("set", -3, "write denyoom", 1, 1, 1),
     ("get", 2, "readonly fast", 1, 1, 1),
     ("del", -2, "write", 1, -1, 1),
@@ -13463,7 +13464,7 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("type", 2, "readonly fast", 1, 1, 1),
     ("rename", 3, "write", 1, 2, 1),
     ("renamenx", 3, "write fast", 1, 2, 1),
-    ("keys", 2, "readonly sort_for_script", 0, 0, 0),
+    ("keys", 2, "readonly", 0, 0, 0),
     ("randomkey", 1, "readonly", 0, 0, 0),
     ("scan", -2, "readonly", 0, 0, 0),
     ("dbsize", 1, "readonly fast", 0, 0, 0),
@@ -13471,7 +13472,7 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("flushall", -1, "write", 0, 0, 0),
     ("select", 2, "loading stale fast", 0, 0, 0),
     ("move", 3, "write fast", 1, 1, 1),
-    ("copy", -3, "write", 1, 2, 1),
+    ("copy", -3, "write denyoom", 1, 2, 1),
     ("sort", -2, "write denyoom movablekeys", 1, 1, 1),
     ("dump", 2, "readonly", 1, 1, 1),
     ("restore", -4, "write denyoom", 1, 1, 1),
@@ -13483,8 +13484,8 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("hexists", 3, "readonly fast", 1, 1, 1),
     ("hlen", 2, "readonly fast", 1, 1, 1),
     ("hgetall", 2, "readonly", 1, 1, 1),
-    ("hkeys", 2, "readonly sort_for_script", 1, 1, 1),
-    ("hvals", 2, "readonly sort_for_script", 1, 1, 1),
+    ("hkeys", 2, "readonly", 1, 1, 1),
+    ("hvals", 2, "readonly", 1, 1, 1),
     ("hmget", -3, "readonly fast", 1, 1, 1),
     ("hmset", -4, "write denyoom fast", 1, 1, 1),
     ("hincrby", 4, "write denyoom fast", 1, 1, 1),
@@ -13508,28 +13509,28 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("ltrim", 4, "write", 1, 1, 1),
     ("lpos", -3, "readonly", 1, 1, 1),
     ("lmove", 5, "write denyoom", 1, 2, 1),
-    ("lmpop", -4, "write fast", 0, 0, 0),
+    ("lmpop", -4, "write movablekeys", 0, 0, 0),
     ("rpoplpush", 3, "write denyoom", 1, 2, 1),
     ("blpop", -3, "write blocking", 1, -2, 1),
     ("brpop", -3, "write blocking", 1, -2, 1),
     ("blmove", 6, "write denyoom blocking", 1, 2, 1),
     ("blmpop", -5, "write blocking movablekeys", 0, 0, 0),
-    ("brpoplpush", 4, "write denyoom", 1, 2, 1),
+    ("brpoplpush", 4, "write denyoom blocking", 1, 2, 1),
     ("bzpopmin", -3, "write blocking fast", 1, -2, 1),
     ("bzpopmax", -3, "write blocking fast", 1, -2, 1),
     ("bzmpop", -5, "write blocking movablekeys", 0, 0, 0),
     ("sadd", -3, "write denyoom fast", 1, 1, 1),
     ("srem", -3, "write fast", 1, 1, 1),
-    ("smembers", 2, "readonly sort_for_script", 1, 1, 1),
+    ("smembers", 2, "readonly", 1, 1, 1),
     ("scard", 2, "readonly fast", 1, 1, 1),
     ("sismember", 3, "readonly fast", 1, 1, 1),
     ("smismember", -3, "readonly fast", 1, 1, 1),
-    ("sinter", -2, "readonly sort_for_script", 1, -1, 1),
+    ("sinter", -2, "readonly", 1, -1, 1),
     ("sinterstore", -3, "write denyoom", 1, -1, 1),
-    ("sintercard", -3, "readonly", 0, 0, 0),
-    ("sunion", -2, "readonly sort_for_script", 1, -1, 1),
+    ("sintercard", -3, "readonly movablekeys", 0, 0, 0),
+    ("sunion", -2, "readonly", 1, -1, 1),
     ("sunionstore", -3, "write denyoom", 1, -1, 1),
-    ("sdiff", -2, "readonly sort_for_script", 1, -1, 1),
+    ("sdiff", -2, "readonly", 1, -1, 1),
     ("sdiffstore", -3, "write denyoom", 1, -1, 1),
     ("spop", -2, "write fast", 1, 1, 1),
     ("srandmember", -2, "readonly", 1, 1, 1),
@@ -13554,14 +13555,14 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("zpopmin", -2, "write fast", 1, 1, 1),
     ("zpopmax", -2, "write fast", 1, 1, 1),
     ("zrandmember", -2, "readonly", 1, 1, 1),
-    ("zunionstore", -4, "write denyoom", 1, 1, 1),
-    ("zinterstore", -4, "write denyoom", 1, 1, 1),
-    ("zdiff", -3, "readonly sort_for_script", 0, 0, 0),
-    ("zdiffstore", -4, "write denyoom", 1, 1, 1),
-    ("zinter", -3, "readonly sort_for_script", 0, 0, 0),
-    ("zunion", -3, "readonly sort_for_script", 0, 0, 0),
-    ("zintercard", -3, "readonly", 0, 0, 0),
-    ("zmpop", -4, "write fast", 0, 0, 0),
+    ("zunionstore", -4, "write denyoom movablekeys", 1, 1, 1),
+    ("zinterstore", -4, "write denyoom movablekeys", 1, 1, 1),
+    ("zdiff", -3, "readonly movablekeys", 0, 0, 0),
+    ("zdiffstore", -4, "write denyoom movablekeys", 1, 1, 1),
+    ("zinter", -3, "readonly movablekeys", 0, 0, 0),
+    ("zunion", -3, "readonly movablekeys", 0, 0, 0),
+    ("zintercard", -3, "readonly movablekeys", 0, 0, 0),
+    ("zmpop", -4, "write movablekeys", 0, 0, 0),
     ("zremrangebyrank", 4, "write", 1, 1, 1),
     ("zremrangebyscore", 4, "write", 1, 1, 1),
     ("zremrangebylex", 4, "write", 1, 1, 1),
@@ -13580,9 +13581,9 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("geopos", -2, "readonly", 1, 1, 1),
     ("geodist", -4, "readonly", 1, 1, 1),
     ("geohash", -2, "readonly", 1, 1, 1),
-    ("georadius", -6, "write", 1, 1, 1),
+    ("georadius", -6, "write denyoom movablekeys", 1, 1, 1),
     ("georadius_ro", -6, "readonly", 1, 1, 1),
-    ("georadiusbymember", -5, "write", 1, 1, 1),
+    ("georadiusbymember", -5, "write denyoom movablekeys", 1, 1, 1),
     ("georadiusbymember_ro", -5, "readonly", 1, 1, 1),
     ("geosearch", -7, "readonly", 1, 1, 1),
     ("geosearchstore", -8, "write denyoom", 1, 2, 1),
@@ -13596,9 +13597,9 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("xautoclaim", -6, "write fast", 1, 1, 1),
     ("xpending", -3, "readonly", 1, 1, 1),
     ("xack", -4, "write fast", 1, 1, 1),
-    ("xsetid", -3, "write", 1, 1, 1),
-    ("xinfo", -2, "readonly", 2, 2, 1),
-    ("xgroup", -2, "write", 2, 2, 1),
+    ("xsetid", -3, "write denyoom fast", 1, 1, 1),
+    ("xinfo", -2, "", 2, 2, 1),
+    ("xgroup", -2, "", 2, 2, 1),
     ("xrange", -4, "readonly", 1, 1, 1),
     ("xrevrange", -4, "readonly", 1, 1, 1),
     ("subscribe", -2, "pubsub noscript loading stale", 0, 0, 0),
@@ -13619,14 +13620,14 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("discard", 1, "noscript loading stale fast allow_busy", 0, 0, 0),
     ("watch", -2, "noscript loading stale fast allow_busy", 1, -1, 1),
     ("unwatch", 1, "noscript loading stale fast allow_busy", 0, 0, 0),
-    ("auth", -2, "fast", 0, 0, 0),
-    ("hello", -1, "fast", 0, 0, 0),
-    ("quit", -1, "fast", 0, 0, 0),
-    ("reset", 1, "fast", 0, 0, 0),
+    ("auth", -2, "noscript loading stale fast no_auth allow_busy", 0, 0, 0),
+    ("hello", -1, "noscript loading stale fast no_auth allow_busy", 0, 0, 0),
+    ("quit", -1, "noscript loading stale fast no_auth allow_busy", 0, 0, 0),
+    ("reset", 1, "noscript loading stale fast no_auth allow_busy", 0, 0, 0),
     ("info", -1, "loading stale", 0, 0, 0),
     ("config", -2, "", 0, 0, 0),
     ("acl", -2, "", 0, 0, 0),
-    ("command", -1, "fast", 0, 0, 0),
+    ("command", -1, "loading stale", 0, 0, 0),
     ("client", -2, "", 0, 0, 0),
     ("time", 1, "loading stale fast", 0, 0, 0),
     ("save", 1, "admin noscript no_async_loading no_multi", 0, 0, 0),
@@ -13646,20 +13647,20 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("lolwut", -1, "readonly fast", 0, 0, 0),
     ("cluster", -2, "", 0, 0, 0),
     ("asking", 1, "fast", 0, 0, 0),
-    ("readonly", 1, "fast", 0, 0, 0),
-    ("readwrite", 1, "fast", 0, 0, 0),
+    ("readonly", 1, "", 0, 0, 0),
+    ("readwrite", 1, "loading stale fast", 0, 0, 0),
     ("replconf", -1, "admin noscript loading stale allow_busy", 0, 0, 0),
-    ("psync", -3, "admin", 0, 0, 0),
+    ("psync", -3, "admin noscript no_async_loading no_multi", 0, 0, 0),
     ("sync", 1, "admin noscript no_async_loading no_multi", 0, 0, 0),
     ("monitor", 1, "admin noscript loading stale", 0, 0, 0),
-    ("migrate", -6, "write", 0, 0, 0),
+    ("migrate", -6, "write movablekeys", 0, 0, 0),
     ("failover", -1, "admin noscript stale", 0, 0, 0),
     ("module", -2, "", 0, 0, 0),
     ("sentinel", -2, "admin", 0, 0, 0),
-    ("pfdebug", 3, "admin", 1, 1, 1),
+    ("pfdebug", 3, "write denyoom admin", 1, 1, 1),
     ("pfselftest", 1, "admin", 0, 0, 0),
-    ("replicaof", 3, "admin", 0, 0, 0),
-    ("slaveof", 3, "admin", 0, 0, 0),
+    ("replicaof", 3, "admin noscript stale no_async_loading", 0, 0, 0),
+    ("slaveof", 3, "admin noscript stale no_async_loading", 0, 0, 0),
     ("function", -2, "", 0, 0, 0),
     ("ssubscribe", -2, "pubsub noscript loading stale", 0, 0, 0),
     ("sunsubscribe", -1, "pubsub noscript loading stale", 0, 0, 0),
@@ -57393,6 +57394,134 @@ mod tests {
             ("BZPOPMIN", &["write", "blocking", "fast"]),
             ("BZPOPMAX", &["write", "blocking", "fast"]),
             ("BZMPOP", &["write", "blocking", "movablekeys"]),
+        ];
+
+        for (cmd, want_flags) in cases {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            let RespFrame::Array(Some(emitted_flags)) = &fields[2] else {
+                panic!("expected flags Array for {cmd}, got {:?}", fields[2]);
+            };
+            let got: Vec<String> = emitted_flags
+                .iter()
+                .map(|f| match f {
+                    RespFrame::SimpleString(s) => s.clone(),
+                    other => panic!("expected flag SimpleString for {cmd}, got {other:?}"),
+                })
+                .collect();
+            let want: Vec<String> = want_flags.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(got, want, "{cmd} flags must be {want:?}, got {got:?}");
+        }
+    }
+
+    /// (frankenredis-flagsbatch3) Third slice of frankenredis-commandflagsaudit.
+    /// Pins the corrected COMMAND INFO flag emission for the connection /
+    /// generic / movable-keys / replication / stream-container subset.
+    /// Each tuple is the upstream flag list captured from
+    /// `redis-cli -p 16380 COMMAND INFO <cmd>` against vendored 7.2.4.
+    #[test]
+    fn command_info_flags_for_connection_movablekeys_subset_matches_upstream() {
+        let mut store = Store::new();
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "AUTH",
+                &[
+                    "noscript",
+                    "loading",
+                    "stale",
+                    "fast",
+                    "no_auth",
+                    "allow_busy",
+                ],
+            ),
+            (
+                "HELLO",
+                &[
+                    "noscript",
+                    "loading",
+                    "stale",
+                    "fast",
+                    "no_auth",
+                    "allow_busy",
+                ],
+            ),
+            (
+                "QUIT",
+                &[
+                    "noscript",
+                    "loading",
+                    "stale",
+                    "fast",
+                    "no_auth",
+                    "allow_busy",
+                ],
+            ),
+            (
+                "RESET",
+                &[
+                    "noscript",
+                    "loading",
+                    "stale",
+                    "fast",
+                    "no_auth",
+                    "allow_busy",
+                ],
+            ),
+            ("ECHO", &["loading", "stale", "fast"]),
+            ("BRPOPLPUSH", &["write", "denyoom", "blocking"]),
+            ("COPY", &["write", "denyoom"]),
+            ("GEORADIUS", &["write", "denyoom", "movablekeys"]),
+            ("GEORADIUSBYMEMBER", &["write", "denyoom", "movablekeys"]),
+            ("HKEYS", &["readonly"]),
+            ("HVALS", &["readonly"]),
+            ("KEYS", &["readonly"]),
+            ("SMEMBERS", &["readonly"]),
+            ("SDIFF", &["readonly"]),
+            ("SINTER", &["readonly"]),
+            ("SUNION", &["readonly"]),
+            ("ZDIFF", &["readonly", "movablekeys"]),
+            ("ZINTER", &["readonly", "movablekeys"]),
+            ("ZUNION", &["readonly", "movablekeys"]),
+            ("SINTERCARD", &["readonly", "movablekeys"]),
+            ("ZINTERCARD", &["readonly", "movablekeys"]),
+            ("ZDIFFSTORE", &["write", "denyoom", "movablekeys"]),
+            ("ZINTERSTORE", &["write", "denyoom", "movablekeys"]),
+            ("ZUNIONSTORE", &["write", "denyoom", "movablekeys"]),
+            ("ZMPOP", &["write", "movablekeys"]),
+            ("LMPOP", &["write", "movablekeys"]),
+            ("MIGRATE", &["write", "movablekeys"]),
+            ("PFDEBUG", &["write", "denyoom", "admin"]),
+            (
+                "PSYNC",
+                &["admin", "noscript", "no_async_loading", "no_multi"],
+            ),
+            ("READONLY", &[]),
+            ("READWRITE", &["loading", "stale", "fast"]),
+            (
+                "REPLICAOF",
+                &["admin", "noscript", "stale", "no_async_loading"],
+            ),
+            (
+                "SLAVEOF",
+                &["admin", "noscript", "stale", "no_async_loading"],
+            ),
+            ("XGROUP", &[]),
+            ("XINFO", &[]),
+            ("XSETID", &["write", "denyoom", "fast"]),
         ];
 
         for (cmd, want_flags) in cases {
