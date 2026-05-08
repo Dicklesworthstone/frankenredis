@@ -6501,11 +6501,21 @@ fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             if idx + 1 >= argv.len() {
                 return Err(CommandError::WrongArity("XREAD"));
             }
+            // Upstream t_stream.c::xreadCommand parses COUNT via
+            // getLongFromObjectOrReply, then `if (count < 0) count = 0;`.
+            // The inner read loop has `if (count > 0 && ... > count)
+            // rsubcount = count;`, so count == 0 means "no upper bound",
+            // not "limit to 0". fr was rejecting negative COUNT with
+            // 'value is not an integer or out of range' and treating
+            // COUNT 0 as `Some(0)` (an explicit zero-cap) — both diverge
+            // from upstream. Map any non-positive COUNT to None
+            // (unbounded). (frankenredis-xreadcount)
             let parsed = parse_i64_arg(&argv[idx + 1])?;
-            if parsed < 0 {
-                return Err(CommandError::InvalidInteger);
-            }
-            count = Some(usize::try_from(parsed).unwrap_or(usize::MAX));
+            count = if parsed > 0 {
+                Some(usize::try_from(parsed).unwrap_or(usize::MAX))
+            } else {
+                None
+            };
             idx += 2;
             continue;
         }
@@ -6597,11 +6607,16 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             if idx + 1 >= argv.len() {
                 return Err(CommandError::WrongArity("XREADGROUP"));
             }
+            // Same parse-order discipline as XREAD: upstream clamps
+            // negative COUNT to 0 and treats 0 as "no upper bound".
+            // Map any non-positive COUNT to None (unbounded).
+            // (frankenredis-xreadcount)
             let parsed = parse_i64_arg(&argv[idx + 1])?;
-            if parsed < 0 {
-                return Err(CommandError::InvalidInteger);
-            }
-            count = Some(usize::try_from(parsed).unwrap_or(usize::MAX));
+            count = if parsed > 0 {
+                Some(usize::try_from(parsed).unwrap_or(usize::MAX))
+            } else {
+                None
+            };
             idx += 2;
             continue;
         }
@@ -47931,6 +47946,142 @@ mod tests {
         assert_eq!(kv(b"since"), Some(&b"1.0.0"[..]));
         assert_eq!(kv(b"complexity"), Some(&b"O(1)"[..]));
         assert_eq!(kv(b"group"), Some(&b"string"[..]));
+    }
+
+    #[test]
+    fn xread_xreadgroup_count_clamps_negative_and_zero_to_unbounded() {
+        // Pins frankenredis-xreadcount. Upstream t_stream.c::xreadCommand
+        // parses COUNT via getLongFromObjectOrReply then runs
+        //   if (count < 0) count = 0;
+        // so negative COUNT becomes 0; the inner read loop's
+        //   if (count > 0 && ... > count) rsubcount = count;
+        // never fires for count == 0, so 0 means 'no upper bound'. fr
+        // previously rejected negative COUNT with InvalidInteger and
+        // treated COUNT 0 as Some(0) (capped to zero entries).
+        let mut store = Store::new();
+        // Seed a stream with 3 entries.
+        for v in [b"v1".as_slice(), b"v2", b"v3"] {
+            dispatch_argv(
+                &[b"XADD".to_vec(), b"s".to_vec(), b"*".to_vec(), b"k".to_vec(), v.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("xadd");
+        }
+
+        // COUNT -1: should NOT error; should return all 3 entries.
+        let frame = dispatch_argv(
+            &[
+                b"XREAD".to_vec(),
+                b"COUNT".to_vec(),
+                b"-1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("XREAD COUNT -1 should not error");
+        let RespFrame::Array(Some(streams)) = frame else {
+            panic!("expected array")
+        };
+        assert_eq!(streams.len(), 1);
+        let RespFrame::Array(Some(stream_pair)) = &streams[0] else {
+            panic!("expected stream pair")
+        };
+        let RespFrame::Array(Some(entries)) = &stream_pair[1] else {
+            panic!("expected entries array")
+        };
+        assert_eq!(
+            entries.len(),
+            3,
+            "COUNT -1 should return all entries (unbounded)"
+        );
+
+        // COUNT 0: same behavior — unbounded.
+        let frame = dispatch_argv(
+            &[
+                b"XREAD".to_vec(),
+                b"COUNT".to_vec(),
+                b"0".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("XREAD COUNT 0 should not error");
+        let RespFrame::Array(Some(streams)) = frame else {
+            panic!("expected array")
+        };
+        let RespFrame::Array(Some(stream_pair)) = &streams[0] else {
+            panic!("expected stream pair")
+        };
+        let RespFrame::Array(Some(entries)) = &stream_pair[1] else {
+            panic!("expected entries array")
+        };
+        assert_eq!(entries.len(), 3, "COUNT 0 should return all entries");
+
+        // Positive COUNT still caps the result.
+        let frame = dispatch_argv(
+            &[
+                b"XREAD".to_vec(),
+                b"COUNT".to_vec(),
+                b"2".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("XREAD COUNT 2");
+        let RespFrame::Array(Some(streams)) = frame else {
+            panic!("expected array")
+        };
+        let RespFrame::Array(Some(stream_pair)) = &streams[0] else {
+            panic!("expected stream pair")
+        };
+        let RespFrame::Array(Some(entries)) = &stream_pair[1] else {
+            panic!("expected entries array")
+        };
+        assert_eq!(entries.len(), 2, "COUNT 2 caps result to 2 entries");
+
+        // XREADGROUP COUNT -1 must also NOT error (was rejecting before).
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+        let frame = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g".to_vec(),
+                b"c".to_vec(),
+                b"COUNT".to_vec(),
+                b"-1".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("XREADGROUP COUNT -1 should not error");
+        // We don't pin entries.len() here because xreadgroup's NewEntries
+        // semantics + the test's exact timing isn't pinned to a specific
+        // count — the key assertion is "no longer errors".
+        let _ = frame;
     }
 
     #[test]
