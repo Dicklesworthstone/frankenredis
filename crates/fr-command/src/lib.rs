@@ -13607,15 +13607,15 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("punsubscribe", -1, "pubsub", 0, 0, 0),
     ("publish", 3, "pubsub fast", 0, 0, 0),
     ("pubsub", -2, "pubsub", 0, 0, 0),
-    ("eval", -3, "scripting", 0, 0, 0),
-    ("evalsha", -3, "scripting", 0, 0, 0),
-    ("eval_ro", -3, "scripting readonly", 0, 0, 0),
-    ("evalsha_ro", -3, "scripting readonly", 0, 0, 0),
-    ("fcall", -3, "scripting", 0, 0, 0),
-    ("fcall_ro", -3, "scripting readonly", 0, 0, 0),
-    ("script", -2, "scripting", 0, 0, 0),
+    ("eval", -3, "noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
+    ("evalsha", -3, "noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
+    ("eval_ro", -3, "readonly noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
+    ("evalsha_ro", -3, "readonly noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
+    ("fcall", -3, "noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
+    ("fcall_ro", -3, "readonly noscript stale skip_monitor no_mandatory_keys movablekeys", 0, 0, 0),
+    ("script", -2, "", 0, 0, 0),
     ("multi", 1, "fast", 0, 0, 0),
-    ("exec", 1, "slow", 0, 0, 0),
+    ("exec", 1, "noscript loading stale skip_slowlog", 0, 0, 0),
     ("discard", 1, "fast", 0, 0, 0),
     ("watch", -2, "fast", 1, -1, 1),
     ("unwatch", 1, "fast", 0, 0, 0),
@@ -13633,7 +13633,7 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("bgsave", -1, "admin", 0, 0, 0),
     ("bgrewriteaof", 1, "admin", 0, 0, 0),
     ("lastsave", 1, "fast", 0, 0, 0),
-    ("swapdb", 3, "write fast admin dangerous", 0, 0, 0),
+    ("swapdb", 3, "write fast", 0, 0, 0),
     ("object", -2, "readonly", 2, 2, 1),
     ("memory", -2, "readonly", 0, 0, 0),
     ("slowlog", -2, "admin", 0, 0, 0),
@@ -13641,8 +13641,8 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("role", 1, "fast", 0, 0, 0),
     ("shutdown", -1, "admin", 0, 0, 0),
     ("latency", -2, "admin", 0, 0, 0),
-    ("wait", 3, "slow", 0, 0, 0),
-    ("waitaof", 4, "slow", 0, 0, 0),
+    ("wait", 3, "", 0, 0, 0),
+    ("waitaof", 4, "noscript", 0, 0, 0),
     ("lolwut", -1, "fast", 0, 0, 0),
     ("cluster", -2, "admin", 0, 0, 0),
     ("asking", 1, "fast", 0, 0, 0),
@@ -13660,7 +13660,7 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("pfselftest", 1, "admin", 0, 0, 0),
     ("replicaof", 3, "admin", 0, 0, 0),
     ("slaveof", 3, "admin", 0, 0, 0),
-    ("function", -2, "scripting", 0, 0, 0),
+    ("function", -2, "", 0, 0, 0),
     ("ssubscribe", -2, "pubsub", 0, 0, 0),
     ("sunsubscribe", -1, "pubsub", 0, 0, 0),
     ("spublish", 3, "pubsub fast", 0, 0, 0),
@@ -14567,10 +14567,32 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
     //     wire-compatible.
     // Enumerate the affected commands explicitly BEFORE the prefix
     // heuristics so each lands in the correct upstream group.
-    if flag_list.contains(&"pubsub") {
-        "pubsub"
-    } else if flag_list.contains(&"scripting") {
+    // (frankenredis-commandflagsaudit) Group classification was
+    // previously driven by the COMMAND_TABLE flags column ("scripting",
+    // "pubsub"). Those tags were not real CMD_* flags upstream — they
+    // were ACL category names that fr stuffed into the flags slot —
+    // so cleaning the flags column to match `redis-cli COMMAND INFO`
+    // had to come with an explicit name-based group rule here.
+    if matches!(
+        name,
+        "eval" | "evalsha" | "eval_ro" | "evalsha_ro" | "fcall" | "fcall_ro" | "script" | "function"
+    ) {
         "scripting"
+    } else if flag_list.contains(&"pubsub")
+        || matches!(
+            name,
+            "subscribe"
+                | "unsubscribe"
+                | "psubscribe"
+                | "punsubscribe"
+                | "ssubscribe"
+                | "sunsubscribe"
+                | "publish"
+                | "spublish"
+                | "pubsub"
+        )
+    {
+        "pubsub"
     } else if matches!(name, "multi" | "exec" | "discard" | "watch" | "unwatch") {
         "transactions"
     } else if matches!(
@@ -57092,6 +57114,138 @@ mod tests {
                 RespFrame::Integer(-3),
                 "{cmd} arity must be -3, got {:?}",
                 fields[1]
+            );
+        }
+    }
+
+    /// (frankenredis-commandflagsaudit, partial) Vendored Redis 7.2.4
+    /// emits the COMMAND INFO flags array from the upstream CMD_* set:
+    ///   readonly | write | denyoom | admin | noscript | random |
+    ///   sort_for_script | loading | stale | skip_monitor | skip_slowlog |
+    ///   asking | fast | no_auth | pubsub | allow-busy | blocking |
+    ///   movablekeys | no_async_loading | no_multi | no_mandatory_keys
+    /// fr's COMMAND_TABLE previously stored ACL category names ("scripting",
+    /// "dangerous") and made-up tokens ("slow") in the flags column. The
+    /// command_info_flags() helper emits that string verbatim, so clients
+    /// were getting bogus flag arrays.
+    ///
+    /// This test pins the "obviously wrong, no-real-CMD_*-equivalent"
+    /// subset that's been corrected (eval/evalsha/eval_ro/evalsha_ro/fcall/
+    /// fcall_ro/script/function with the bogus "scripting" tag, exec with
+    /// "slow", swapdb with "admin dangerous", wait/waitaof with "slow").
+    /// The remaining flag divergences (admin-as-flag for cluster/client/
+    /// acl/config/.., missing movablekeys for sort/sort_ro/xread, missing
+    /// blocking for blpop/brpop/bz*pop, etc.) are tracked in the parent
+    /// frankenredis-commandflagsaudit bead.
+    #[test]
+    fn command_info_flags_for_scripting_and_blocking_admin_subset_matches_upstream() {
+        let mut store = Store::new();
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "EVAL",
+                &[
+                    "noscript",
+                    "stale",
+                    "skip_monitor",
+                    "no_mandatory_keys",
+                    "movablekeys",
+                ],
+            ),
+            (
+                "EVALSHA",
+                &[
+                    "noscript",
+                    "stale",
+                    "skip_monitor",
+                    "no_mandatory_keys",
+                    "movablekeys",
+                ],
+            ),
+            (
+                "EVAL_RO",
+                &[
+                    "readonly",
+                    "noscript",
+                    "stale",
+                    "skip_monitor",
+                    "no_mandatory_keys",
+                    "movablekeys",
+                ],
+            ),
+            (
+                "EVALSHA_RO",
+                &[
+                    "readonly",
+                    "noscript",
+                    "stale",
+                    "skip_monitor",
+                    "no_mandatory_keys",
+                    "movablekeys",
+                ],
+            ),
+            (
+                "FCALL",
+                &[
+                    "noscript",
+                    "stale",
+                    "skip_monitor",
+                    "no_mandatory_keys",
+                    "movablekeys",
+                ],
+            ),
+            (
+                "FCALL_RO",
+                &[
+                    "readonly",
+                    "noscript",
+                    "stale",
+                    "skip_monitor",
+                    "no_mandatory_keys",
+                    "movablekeys",
+                ],
+            ),
+            ("SCRIPT", &[]),
+            ("FUNCTION", &[]),
+            (
+                "EXEC",
+                &["noscript", "loading", "stale", "skip_slowlog"],
+            ),
+            ("SWAPDB", &["write", "fast"]),
+            ("WAIT", &[]),
+            ("WAITAOF", &["noscript"]),
+        ];
+
+        for (cmd, want_flags) in cases {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row") else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            let RespFrame::Array(Some(emitted_flags)) = &fields[2] else {
+                panic!("expected flags Array for {cmd}, got {:?}", fields[2]);
+            };
+            let got: Vec<String> = emitted_flags
+                .iter()
+                .map(|f| match f {
+                    RespFrame::SimpleString(s) => s.clone(),
+                    other => panic!("expected flag SimpleString for {cmd}, got {other:?}"),
+                })
+                .collect();
+            let want: Vec<String> = want_flags.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(
+                got, want,
+                "{cmd} flags must be {want:?}, got {got:?}"
             );
         }
     }
