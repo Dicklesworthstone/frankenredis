@@ -6759,16 +6759,24 @@ fn xclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     let invalid_opt_arg = |label: &str| {
         CommandError::Custom(format!("ERR Invalid {label} option argument for XCLAIM"))
     };
+    // (frankenredis-xclaimneg) Upstream t_stream.c::xclaimCommand:
+    //   IDLE  → `deliverytime = now - idle`, then if `deliverytime < 0
+    //           || deliverytime > now` clamp to now. So a negative IDLE
+    //           silently maps to "delivery time = now" (i.e. idle=0).
+    //   TIME  → `deliverytime = parsed`; if `< 0 || > now` clamp to now.
+    //           Negative TIME also silently maps to "delivery time = now".
+    //   RETRYCOUNT → upstream stores the parsed long long verbatim with
+    //           no validation; negatives are silently accepted.
+    // fr was rejecting all three with the per-option "Invalid X option
+    // argument for XCLAIM" wording. Clamp the parsed value to >= 0 to
+    // mirror upstream's accept-and-clamp behavior.
     while idx < argv.len() {
         if eq_ascii_command(&argv[idx], b"IDLE") {
             if idx + 1 >= argv.len() {
                 return Err(unrecognized(&argv[idx]));
             }
             let parsed = parse_i64_arg(&argv[idx + 1]).map_err(|_| invalid_opt_arg("IDLE"))?;
-            if parsed < 0 {
-                return Err(invalid_opt_arg("IDLE"));
-            }
-            idle_ms = Some(u64::try_from(parsed).unwrap_or(u64::MAX));
+            idle_ms = Some(u64::try_from(parsed.max(0)).unwrap_or(u64::MAX));
             idx += 2;
             continue;
         }
@@ -6777,10 +6785,7 @@ fn xclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                 return Err(unrecognized(&argv[idx]));
             }
             let parsed = parse_i64_arg(&argv[idx + 1]).map_err(|_| invalid_opt_arg("TIME"))?;
-            if parsed < 0 {
-                return Err(invalid_opt_arg("TIME"));
-            }
-            time_ms = Some(u64::try_from(parsed).unwrap_or(u64::MAX));
+            time_ms = Some(u64::try_from(parsed.max(0)).unwrap_or(u64::MAX));
             idx += 2;
             continue;
         }
@@ -6790,10 +6795,7 @@ fn xclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
             }
             let parsed =
                 parse_i64_arg(&argv[idx + 1]).map_err(|_| invalid_opt_arg("RETRYCOUNT"))?;
-            if parsed < 0 {
-                return Err(invalid_opt_arg("RETRYCOUNT"));
-            }
-            retry_count = Some(u64::try_from(parsed).unwrap_or(u64::MAX));
+            retry_count = Some(u64::try_from(parsed.max(0)).unwrap_or(u64::MAX));
             idx += 2;
             continue;
         }
@@ -31484,7 +31486,11 @@ mod tests {
             CommandError::Custom("ERR Invalid IDLE option argument for XCLAIM".to_string())
         );
 
-        // RETRYCOUNT negative.
+        // RETRYCOUNT negative is silently clamped to 0 by upstream
+        // (xclaimCommand stores the parsed long long verbatim with no
+        // validation; downstream consumers treat negatives as 0).
+        // (frankenredis-xclaimneg) Pre-fix fr surfaced "Invalid
+        // RETRYCOUNT option argument for XCLAIM" — that's a divergence.
         let neg_rc = dispatch_argv(
             &[
                 b"XCLAIM".to_vec(),
@@ -31499,11 +31505,9 @@ mod tests {
             &mut store,
             0,
         )
-        .expect_err("xclaim neg RETRYCOUNT");
-        assert_eq!(
-            neg_rc,
-            CommandError::Custom("ERR Invalid RETRYCOUNT option argument for XCLAIM".to_string())
-        );
+        .expect("xclaim neg RETRYCOUNT clamps and returns empty array");
+        // No claim happens (1-0 isn't pending), so reply is an empty array.
+        assert_eq!(neg_rc, RespFrame::Array(Some(vec![])));
 
         // IDLE as last token (missing value).
         let idle_no_val = dispatch_argv(
@@ -31543,6 +31547,117 @@ mod tests {
         assert_eq!(
             unknown,
             CommandError::Custom("ERR Unrecognized XCLAIM option 'NOPE'".to_string())
+        );
+    }
+
+    #[test]
+    fn xclaim_negative_idle_time_retrycount_silently_clamp_per_upstream() {
+        // (frankenredis-xclaimneg) Upstream t_stream.c::xclaimCommand:
+        //   IDLE  → deliverytime = now - idle; if `< 0 || > now` clamp to now
+        //   TIME  → deliverytime = parsed; if `< 0 || > now` clamp to now
+        //   RETRYCOUNT → no validation, stored verbatim
+        // So negative IDLE/TIME silently map to delivery_time = now
+        // (i.e. idle effectively 0), and negative RETRYCOUNT is a
+        // silent no-op. fr was rejecting all three with the per-option
+        // 'Invalid X option argument for XCLAIM' wording. Now the
+        // parsed value is clamped to >= 0 before u64 conversion.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"1-0".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd");
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"$".to_vec(),
+                b"MKSTREAM".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+
+        // No matching pending entry → empty array, no error.
+        let cases: &[&[&[u8]]] = &[
+            &[
+                b"XCLAIM", b"s", b"g", b"c", b"0", b"1-1", b"IDLE", b"-100",
+            ],
+            &[
+                b"XCLAIM", b"s", b"g", b"c", b"0", b"1-1", b"TIME", b"-100",
+            ],
+            &[
+                b"XCLAIM",
+                b"s",
+                b"g",
+                b"c",
+                b"0",
+                b"1-1",
+                b"RETRYCOUNT",
+                b"-1",
+            ],
+        ];
+        for argv_in in cases {
+            let argv: Vec<Vec<u8>> = argv_in.iter().map(|s| s.to_vec()).collect();
+            let out = dispatch_argv(&argv, &mut store, 0)
+                .unwrap_or_else(|e| panic!("argv {argv_in:?}: {e:?}"));
+            assert_eq!(
+                out,
+                RespFrame::Array(Some(vec![])),
+                "argv: {argv_in:?}",
+            );
+        }
+
+        // Regression: IDLE without value still errors (Unrecognized).
+        let err = dispatch_argv(
+            &[
+                b"XCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"c".to_vec(),
+                b"0".to_vec(),
+                b"1-1".to_vec(),
+                b"IDLE".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("IDLE missing value still errors");
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Unrecognized XCLAIM option 'IDLE'".to_string())
+        );
+
+        // Regression: IDLE non-numeric still errors with the
+        // per-option wording.
+        let err = dispatch_argv(
+            &[
+                b"XCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"c".to_vec(),
+                b"0".to_vec(),
+                b"1-1".to_vec(),
+                b"IDLE".to_vec(),
+                b"abc".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("IDLE non-numeric still errors");
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR Invalid IDLE option argument for XCLAIM".to_string())
         );
     }
 
