@@ -8753,9 +8753,15 @@ fn cluster_cmd(
         // reply matches upstream once those preconditions hold.
         return Ok(RespFrame::SimpleString("OK".to_string()));
     }
-    if sub.eq_ignore_ascii_case("SLOTSTATE") {
-        return Err(cluster_disabled_error());
-    }
+    // (frankenredis-cslotstate) CLUSTER SLOTSTATE is not a recognized
+    // subcommand in upstream Redis 7.2.4 — neither commands.def nor
+    // cluster.c::clusterCommand mentions it — so vendored returns
+    // "ERR unknown subcommand 'SLOTSTATE'. Try CLUSTER HELP." even
+    // when cluster mode is enabled. fr previously short-circuited
+    // SLOTSTATE to cluster_disabled_error(), masking the typo. The
+    // arm is removed so the catch-all unknown-subcommand fallthrough
+    // (frankenredis-cunk) handles it the same way as any other
+    // typo'd token.
     if sub.eq_ignore_ascii_case("SETSLOT") {
         // CLUSTER SETSLOT <slot> STABLE
         // CLUSTER SETSLOT <slot> NODE <node-id>
@@ -44230,10 +44236,42 @@ mod tests {
                 b"SET-CONFIG-EPOCH".to_vec(),
                 b"1".to_vec(),
             ],
-            vec![b"CLUSTER".to_vec(), b"SLOTSTATE".to_vec()],
+            // (frankenredis-cslotstate) SLOTSTATE is not a recognized
+            // CLUSTER subcommand in upstream 7.2.4, so it now falls
+            // through to the unknown-subcommand error path
+            // (cunk-pinned) regardless of cluster_enabled state.
         ] {
             let err = dispatch_argv(&argv, &mut store, 0).unwrap_err();
             assert_eq!(err, cluster_disabled_error(), "argv={argv:?}");
+        }
+    }
+
+    #[test]
+    fn cluster_slotstate_is_not_a_recognized_subcommand() {
+        // (frankenredis-cslotstate) Differential probe vs vendored
+        // Redis 7.2.4 confirms that SLOTSTATE is NOT a recognized
+        // CLUSTER subcommand — neither commands.def nor cluster.c
+        // references it. fr previously short-circuited it to
+        // cluster_disabled_error(), so callers got the misleading
+        // 'cluster support disabled' wording even when cluster mode
+        // was enabled. The arm is removed; SLOTSTATE now falls
+        // through to the unknown-subcommand wording (frankenredis-cunk).
+        for cluster_enabled in [false, true] {
+            let mut store = Store::new();
+            store.cluster_enabled = cluster_enabled;
+            let err = dispatch_argv(
+                &[b"CLUSTER".to_vec(), b"SLOTSTATE".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err();
+            assert_eq!(
+                err,
+                CommandError::Custom(
+                    "ERR unknown subcommand 'SLOTSTATE'. Try CLUSTER HELP.".to_string()
+                ),
+                "cluster_enabled={cluster_enabled}",
+            );
         }
     }
 
