@@ -12949,8 +12949,14 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         let _ = write!(info, "uptime_in_days:{}\r\n", uptime_s / 86400);
         let _ = write!(info, "hz:{}\r\n", store.server_hz);
         let _ = write!(info, "configured_hz:{}\r\n", store.server_hz);
-        // Redis LRU clock: seconds / 10, masked to 24 bits.
-        let lru_clock = (now_ms / 10_000) & 0xFF_FFFF;
+        // (frankenredis-debugobjlru) Upstream evict.c::getLRUClock:
+        //   return (mstime() / LRU_CLOCK_RESOLUTION) & LRU_CLOCK_MAX
+        // where LRU_CLOCK_RESOLUTION = 1000ms and LRU_CLOCK_MAX =
+        // (1<<24)-1 = 0xFFFFFF. fr previously divided by 10_000
+        // (10-second resolution), so INFO's lru_clock value was 10×
+        // smaller than vendored's and didn't match the per-object
+        // `lru:` field emitted by DEBUG OBJECT.
+        let lru_clock = (now_ms / 1_000) & 0xFF_FFFF;
         let _ = write!(info, "lru_clock:{lru_clock}\r\n");
         let exe = std::env::current_exe()
             .map(|p| p.to_string_lossy().into_owned())
@@ -18274,8 +18280,21 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // unconditionally for every value — non-hash types always show
         // 0 because they never accumulate the counter.
         let hexpired_fields = store.hash_field_expired_count(key);
+        // (frankenredis-debugobjlru) `lru` and `lru_seconds_idle` are
+        // distinct fields in upstream debug.c::debugCommand:
+        //   lru               = the per-object 24-bit LRU clock
+        //                       captured from getLRUClock() at access
+        //                       time (always a large value because
+        //                       getLRUClock() returns mstime/1000 mod
+        //                       2^24).
+        //   lru_seconds_idle  = (now_ms - last_access_ms) / 1000.
+        // fr previously emitted idle_secs in BOTH slots, which clashed
+        // with vendored output (e.g. lru:16645189 lru_seconds_idle:0).
+        // Use the new Store::object_lru_clock() helper for the lru
+        // field while keeping idle_secs for lru_seconds_idle.
+        let lru_clock = store.object_lru_clock(key).unwrap_or(0);
         let debug_info = format!(
-            "Value at:0x0 refcount:{refcount} encoding:{encoding} serializedlength:{serialized_len} lru:{idle_secs} lru_seconds_idle:{idle_secs} hexpired_fields:{hexpired_fields}"
+            "Value at:0x0 refcount:{refcount} encoding:{encoding} serializedlength:{serialized_len} lru:{lru_clock} lru_seconds_idle:{idle_secs} hexpired_fields:{hexpired_fields}"
         );
         // (frankenredis-gmqk1) Upstream debug.c::debugCommand uses
         // addReplyStatusFormat which emits a SimpleString frame
@@ -41722,6 +41741,63 @@ mod tests {
         assert!(info.contains("serializedlength:"), "{info}");
         assert!(info.contains("lru:"), "{info}");
         assert!(info.contains("lru_seconds_idle:"), "{info}");
+    }
+
+    /// (frankenredis-debugobjlru) `lru` and `lru_seconds_idle` are
+    /// distinct fields in vendored DEBUG OBJECT output. fr previously
+    /// emitted `idle_secs` for both; this test pins them apart.
+    #[test]
+    fn debug_object_emits_lru_clock_and_idle_seconds_as_separate_fields() {
+        let mut store = Store::new();
+        // Set at t=10_000 ms (epoch second 10 -> lru clock = 10).
+        dispatch_argv(
+            &[b"SET".to_vec(), b"dbg:lru".to_vec(), b"v".to_vec()],
+            &mut store,
+            10_000,
+        )
+        .expect("seed");
+
+        // Probe at t=15_000 ms (5 seconds later -> idle=5,
+        // lru clock unchanged because last_access stayed at 10_000).
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"dbg:lru".to_vec()],
+            &mut store,
+            15_000,
+        )
+        .expect("debug object");
+        let RespFrame::SimpleString(line) = out else {
+            panic!("expected SimpleString, got {out:?}");
+        };
+        assert!(
+            line.contains(" lru:10 "),
+            "expected `lru:10 ` (LRU clock = last_access_ms/1000 & 0xFFFFFF), got: {line}"
+        );
+        assert!(
+            line.contains(" lru_seconds_idle:5 "),
+            "expected `lru_seconds_idle:5 ` (idle = (now-last_access)/1000), got: {line}"
+        );
+    }
+
+    /// (frankenredis-debugobjlru) Upstream INFO server emits
+    ///   lru_clock:(mstime/1000) & 0xFFFFFF
+    /// fr previously divided by 10_000 (10-second resolution),
+    /// emitting a value 10× smaller than vendored.
+    #[test]
+    fn info_server_lru_clock_uses_one_second_resolution_per_upstream_evict() {
+        let mut store = Store::new();
+        let now_ms: u64 = 1_700_000_001_234;
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"server".to_vec()], &mut store, now_ms)
+            .expect("info server");
+        let RespFrame::BulkString(Some(bytes)) = out else {
+            panic!("expected BulkString, got {out:?}");
+        };
+        let body = std::str::from_utf8(&bytes).unwrap();
+        let want = (now_ms / 1_000) & 0xFF_FFFF;
+        let needle = format!("lru_clock:{want}\r\n");
+        assert!(
+            body.contains(&needle),
+            "expected `{needle}` (mstime/1000 & 0xFFFFFF) in INFO server, body:\n{body}"
+        );
     }
 
     #[test]

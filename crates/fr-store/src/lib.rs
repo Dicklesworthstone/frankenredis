@@ -3230,6 +3230,22 @@ impl Store {
         })
     }
 
+    /// Return the per-object LRU clock value used by upstream's DEBUG OBJECT
+    /// emission. Upstream stores `o->lru` as `getLRUClock()` at the moment
+    /// the object's lruclock was last refreshed:
+    ///   getLRUClock() == (mstime() / LRU_CLOCK_RESOLUTION) & LRU_CLOCK_MAX
+    /// where LRU_CLOCK_RESOLUTION = 1000ms and LRU_CLOCK_MAX = (1<<24)-1.
+    /// fr derives the clock from the entry's last_access_ms, which under
+    /// the default noeviction policy carries the creation/last-access
+    /// timestamp — matching what `DEBUG OBJECT lru:<n>` should report.
+    /// (frankenredis-debugobjlru)
+    pub fn object_lru_clock(&self, key: &[u8]) -> Option<u32> {
+        self.entries.get(key).map(|entry| {
+            const LRU_CLOCK_MAX: u64 = (1 << 24) - 1;
+            ((entry.last_access_ms / 1000) & LRU_CLOCK_MAX) as u32
+        })
+    }
+
     /// (frankenredis-ljrt6) Mirror upstream tryObjectEncoding's shared-
     /// integer rule. When the value is a canonical decimal string in
     /// [0, OBJ_SHARED_INTEGERS) and shared interning is enabled (default
