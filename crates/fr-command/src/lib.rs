@@ -18638,33 +18638,47 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 /// Compute a hex digest of database contents for DEBUG DIGEST.
 /// If keys is None, compute over all keys in sorted order.
 /// If keys is Some, compute only over the specified keys.
+///
+/// Upstream debug.c::computeDatasetDigest hashes each (key, dump) pair
+/// with SHA1 and XORs the 20-byte outputs into a cumulative digest, then
+/// hex-encodes the 20 bytes → 40 hex chars. fr previously used Rust's
+/// 64-bit DefaultHasher (SipHash), producing 16 hex chars — a wire-shape
+/// mismatch that breaks tooling parsing the reply (e.g., redis-cli
+/// --csv probes that pin output length). fr can't reproduce upstream's
+/// per-byte hash because the underlying RDB dump bytes differ slightly
+/// (encoding details, hash factors), but matching the 20-byte / 40-char
+/// frame width is wire-compatible. Use Sha256 truncated to 20 bytes
+/// (sha2 is already a workspace dep used by fr-runtime) and XOR into a
+/// cumulative digest, mirroring upstream's order-independent reduction.
+/// (frankenredis-dbgdiglen)
 fn compute_debug_digest(store: &mut Store, now_ms: u64, keys: Option<&[&[u8]]>) -> String {
-    use std::hash::{DefaultHasher, Hasher};
+    use sha2::{Digest, Sha256};
 
-    let mut hasher = DefaultHasher::new();
+    let mut digest = [0u8; 20];
 
-    // Get keys to process
     let keys_to_process: Vec<Vec<u8>> = match keys {
         Some(key_list) => key_list.iter().map(|k| k.to_vec()).collect(),
-        None => {
-            // Use all_keys() to get sorted keys across all databases
-            // This matches Redis behavior where DEBUG DIGEST covers entire dataset
-            store.all_keys()
-        }
+        None => store.all_keys(),
     };
 
-    // Hash each key and its serialized value
     for key in &keys_to_process {
-        // Drop expired keys before hashing
         store.expire_key_if_stale(key, now_ms);
-        // Only include keys that exist (have a dump)
         if let Some(dump) = store.dump_key(key, now_ms) {
-            hasher.write(key);
-            hasher.write(&dump);
+            let mut hasher = Sha256::new();
+            hasher.update(key);
+            hasher.update(&dump);
+            let out = hasher.finalize();
+            for j in 0..20 {
+                digest[j] ^= out[j];
+            }
         }
     }
 
-    format!("{:016x}", hasher.finish())
+    let mut hex = String::with_capacity(40);
+    for byte in &digest {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
 }
 
 fn role_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
@@ -34553,7 +34567,10 @@ mod tests {
             panic!("expected bulk string");
         };
         let digest_str = String::from_utf8(digest_bytes).expect("valid utf8");
-        assert_eq!(digest_str.len(), 16, "digest should be 16 hex chars");
+        // (frankenredis-dbgdiglen) Upstream debug.c::computeDatasetDigest
+        // emits a 20-byte SHA1 XOR digest hex-encoded to 40 chars. fr
+        // mirrors the frame width via Sha256 truncated to 20 bytes.
+        assert_eq!(digest_str.len(), 40, "digest should be 40 hex chars");
         assert!(
             digest_str.chars().all(|c| c.is_ascii_hexdigit()),
             "digest should be hex"
@@ -34612,7 +34629,7 @@ mod tests {
             panic!("expected bulk string per-key digest"); // ubs:ignore — AI triage
         };
         let digest_str = std::str::from_utf8(digest_bytes).expect("valid utf8");
-        assert_eq!(digest_str.len(), 16);
+        assert_eq!(digest_str.len(), 40);
 
         // DIGEST-VALUE with multiple keys returns one entry per key.
         let multi = dispatch_argv(
@@ -34631,7 +34648,7 @@ mod tests {
         };
         assert_eq!(multi_entries.len(), 2);
         for entry in &multi_entries {
-            assert!(matches!(entry, RespFrame::BulkString(Some(b)) if b.len() == 16));
+            assert!(matches!(entry, RespFrame::BulkString(Some(b)) if b.len() == 40));
         }
 
         // Digest of nonexistent key should still emit a BulkString
@@ -34740,7 +34757,7 @@ mod tests {
             panic!("expected bulk string");
         };
         let digest_str = String::from_utf8(digest_bytes).expect("valid utf8");
-        assert_eq!(digest_str.len(), 16);
+        assert_eq!(digest_str.len(), 40);
     }
 
     #[test]
