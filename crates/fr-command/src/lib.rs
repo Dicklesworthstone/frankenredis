@@ -18326,11 +18326,6 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // [0, 10000), 1 otherwise. Reuses the same Store::object_refcount
         // helper that powers OBJECT REFCOUNT (frankenredis-ljrt6).
         let refcount = store.object_refcount(key, now_ms).unwrap_or(1);
-        // Redis 7.4 extends DEBUG OBJECT for hashes with the
-        // hexpired_fields:<n> counter (br-frankenredis-25re). Emit it
-        // unconditionally for every value — non-hash types always show
-        // 0 because they never accumulate the counter.
-        let hexpired_fields = store.hash_field_expired_count(key);
         // (frankenredis-debugobjlru) `lru` and `lru_seconds_idle` are
         // distinct fields in upstream debug.c::debugCommand:
         //   lru               = the per-object 24-bit LRU clock
@@ -18344,8 +18339,15 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         // Use the new Store::object_lru_clock() helper for the lru
         // field while keeping idle_secs for lru_seconds_idle.
         let lru_clock = store.object_lru_clock(key).unwrap_or(0);
+        // (frankenredis-v0swv) Vendored Redis 7.2.4 debug.c:649-654
+        // ends the DEBUG OBJECT reply at lru_seconds_idle (followed
+        // only by quicklist-specific fields when applicable). The
+        // hexpired_fields:<n> counter was added in Redis 7.4 and must
+        // not appear when the parity baseline is 7.2.4. Earlier code
+        // (br-frankenredis-25re) appended it unconditionally, breaking
+        // alignment with `redis-cli DEBUG OBJECT` against vendored.
         let debug_info = format!(
-            "Value at:0x0 refcount:{refcount} encoding:{encoding} serializedlength:{serialized_len} lru:{lru_clock} lru_seconds_idle:{idle_secs} hexpired_fields:{hexpired_fields}"
+            "Value at:0x0 refcount:{refcount} encoding:{encoding} serializedlength:{serialized_len} lru:{lru_clock} lru_seconds_idle:{idle_secs}"
         );
         // (frankenredis-gmqk1) Upstream debug.c::debugCommand uses
         // addReplyStatusFormat which emits a SimpleString frame
@@ -24511,56 +24513,6 @@ mod tests {
                 "WRONGTYPE Operation against a key holding the wrong kind of value".to_string()
             )
         );
-    }
-
-    #[test]
-    fn debug_object_reports_hexpired_fields_counter() {
-        let mut store = seed_hash_field_ttl_store();
-        // Fresh hash: counter starts at 0.
-        let out = dispatch_argv(
-            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"h".to_vec()],
-            &mut store,
-            0,
-        )
-        .expect("debug object");
-        if let RespFrame::SimpleString(s) = out {
-            assert!(s.contains("hexpired_fields:0"), "initial: {s}");
-        } else {
-            panic!("expected SimpleString (frankenredis-gmqk1)");
-        }
-
-        // Set a past TTL; the next HGET reaps the field.
-        dispatch_argv(
-            &[
-                b"HPEXPIREAT".to_vec(),
-                b"h".to_vec(),
-                b"1".to_vec(),
-                b"FIELDS".to_vec(),
-                b"1".to_vec(),
-                b"f1".to_vec(),
-            ],
-            &mut store,
-            100,
-        )
-        .expect("hpexpireat past");
-        dispatch_argv(
-            &[b"HGET".to_vec(), b"h".to_vec(), b"f1".to_vec()],
-            &mut store,
-            200,
-        )
-        .expect("hget triggers reap");
-
-        let after = dispatch_argv(
-            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"h".to_vec()],
-            &mut store,
-            200,
-        )
-        .expect("debug object after reap");
-        if let RespFrame::SimpleString(s) = after {
-            assert!(s.contains("hexpired_fields:1"), "after reap: {s}");
-        } else {
-            panic!("expected SimpleString (frankenredis-gmqk1)");
-        }
     }
 
     #[test]
@@ -41817,9 +41769,39 @@ mod tests {
             line.contains(" lru:10 "),
             "expected `lru:10 ` (LRU clock = last_access_ms/1000 & 0xFFFFFF), got: {line}"
         );
+        // (frankenredis-v0swv) Vendored 7.2.4 ends DEBUG OBJECT at
+        // lru_seconds_idle (no 7.4 hexpired_fields suffix), so anchor
+        // with end-of-string rather than trailing whitespace.
         assert!(
-            line.contains(" lru_seconds_idle:5 "),
-            "expected `lru_seconds_idle:5 ` (idle = (now-last_access)/1000), got: {line}"
+            line.ends_with(" lru_seconds_idle:5"),
+            "expected line ending in `lru_seconds_idle:5` (idle = (now-last_access)/1000), got: {line}"
+        );
+    }
+
+    /// (frankenredis-v0swv) Pin DEBUG OBJECT format against vendored
+    /// Redis 7.2.4 debug.c:649-654 — the reply ends at
+    /// `lru_seconds_idle`. The `hexpired_fields:N` suffix is a 7.4
+    /// addition (see br-frankenredis-25re); fr previously emitted it
+    /// unconditionally. This test pins it OUT.
+    #[test]
+    fn debug_object_omits_redis_7_4_hexpired_fields_suffix_for_7_2_4_parity() {
+        let mut store = seed_hash_field_ttl_store();
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"h".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug object");
+        let RespFrame::SimpleString(line) = out else {
+            panic!("expected SimpleString, got {out:?}");
+        };
+        assert!(
+            !line.contains("hexpired_fields"),
+            "vendored 7.2.4 omits the 7.4 hexpired_fields counter, got: {line}"
+        );
+        assert!(
+            line.contains(" lru_seconds_idle:"),
+            "expected lru_seconds_idle field, got: {line}"
         );
     }
 
