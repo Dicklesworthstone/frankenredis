@@ -5077,13 +5077,35 @@ fn geo_search_reply(
     RespFrame::Array(Some(frames))
 }
 
+/// Variant of the geo search command, used by `parse_geo_search_flags`
+/// to gate which STORE/STOREDIST forms are valid.
+///
+/// Mirrors upstream geo.c::geoSearchGeneric flags:
+/// - `GeoRadius`        → GEORADIUS / GEORADIUSBYMEMBER: accept
+///   `STORE key` and `STOREDIST key` (each followed by a destination
+///   key argument).
+/// - `GeoSearch`        → GEOSEARCH: reject STORE and STOREDIST
+///   entirely (upstream geo.c:596-607 gates `store` on
+///   `!(flags & GEOSEARCH)`; standalone `storedist` is only allowed
+///   when both GEOSEARCH and GEOSEARCHSTORE flags are set).
+/// - `GeoSearchStore`   → GEOSEARCHSTORE: accept the bare `STOREDIST`
+///   token (no key argument); STORE is still rejected.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+#[allow(clippy::enum_variant_names)]
+enum GeoFlagContext {
+    GeoRadius,
+    GeoSearch,
+    GeoSearchStore,
+}
+
 /// Parse optional flags WITHCOORD, WITHDIST, WITHHASH, COUNT N [ANY], ASC, DESC from argv starting
-/// at `start`. STORE/STOREDIST key pairs are consumed and skipped (they are handled by callers).
+/// at `start`. STORE/STOREDIST consumption depends on `context` — see [`GeoFlagContext`].
 #[allow(clippy::type_complexity)]
 fn parse_geo_search_flags(
     argv: &[Vec<u8>],
     start: usize,
     default_unit: f64,
+    context: GeoFlagContext,
 ) -> Result<(bool, bool, bool, Option<usize>, bool, bool, f64), CommandError> {
     let mut withcoord = false;
     let mut withdist = false;
@@ -5119,16 +5141,43 @@ fn parse_geo_search_flags(
         } else if eq_ascii_command(&argv[i], b"DESC") {
             asc = false;
         } else if eq_ascii_command(&argv[i], b"STORE") {
-            // Skip STORE key (consumed by georadius/georadiusbymember callers)
+            // (frankenredis-ffr2k) Upstream geo.c:596-602 gates STORE
+            // on `!(flags & GEOSEARCH)` — only GEORADIUS variants
+            // accept STORE. GEOSEARCH/GEOSEARCHSTORE fall through to
+            // the syntax-error else.
+            if context != GeoFlagContext::GeoRadius {
+                return Err(CommandError::SyntaxError);
+            }
+            // GEORADIUS context: skip STORE's destination-key argument
+            // (consumed by georadius/georadiusbymember callers).
             i += 1;
         } else if eq_ascii_command(&argv[i], b"STOREDIST") {
-            // In GEORADIUS context, STOREDIST has a key arg; in GEOSEARCHSTORE context it's standalone.
-            // Peek ahead: if next arg doesn't look like a known flag/unit, consume it as a key.
-            if i + 1 < argv.len()
-                && !is_geo_flag(&argv[i + 1])
-                && geo_unit_to_meters(&argv[i + 1]).is_none()
-            {
-                i += 1; // skip the key
+            match context {
+                GeoFlagContext::GeoRadius => {
+                    // GEORADIUS context: STOREDIST takes a key arg;
+                    // peek ahead and skip it if it doesn't look like
+                    // another flag or unit token.
+                    if i + 1 < argv.len()
+                        && !is_geo_flag(&argv[i + 1])
+                        && geo_unit_to_meters(&argv[i + 1]).is_none()
+                    {
+                        i += 1; // skip the key
+                    }
+                }
+                GeoFlagContext::GeoSearchStore => {
+                    // (frankenredis-ffr2k) Upstream geo.c:612-616
+                    // accepts the bare STOREDIST token (no key arg)
+                    // when both GEOSEARCH and GEOSEARCHSTORE flags
+                    // are set. GEOSEARCHSTORE uses its own dedicated
+                    // pre-scan for the storedist boolean.
+                }
+                GeoFlagContext::GeoSearch => {
+                    // (frankenredis-ffr2k) Upstream rejects STOREDIST
+                    // for plain GEOSEARCH (no matching else-if branch
+                    // → falls through to addReplyErrorObject with
+                    // shared.syntaxerr).
+                    return Err(CommandError::SyntaxError);
+                }
             }
         } else if let Some(m) = geo_unit_to_meters(&argv[i]) {
             to_meter = m;
@@ -5306,7 +5355,7 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // key and silently accepting STORE/STOREDIST in _RO mode.
     validate_geo_store_args(argv, 6, /* nostore = */ is_geo_ro_variant(&argv[0]))?;
     let (withcoord, withdist, withhash, count, _any, asc, _) =
-        parse_geo_search_flags(argv, 6, unit_mult)?;
+        parse_geo_search_flags(argv, 6, unit_mult, GeoFlagContext::GeoRadius)?;
     let (store_key, storedist) = extract_geo_store(argv, 6);
     let results = geo_search_core(
         store, &argv[1], center_lon, center_lat, radius_m, count, asc, now_ms,
@@ -5369,7 +5418,7 @@ fn georadiusbymember(
     // (frankenredis-geostorearg) See georadius() above for rationale.
     validate_geo_store_args(argv, 5, /* nostore = */ is_geo_ro_variant(&argv[0]))?;
     let (withcoord, withdist, withhash, count, _any, asc, _) =
-        parse_geo_search_flags(argv, 5, unit_mult)?;
+        parse_geo_search_flags(argv, 5, unit_mult, GeoFlagContext::GeoRadius)?;
     let (store_key, storedist) = extract_geo_store(argv, 5);
     let results = geo_search_core(
         store, &argv[1], center_lon, center_lat, radius_m, count, asc, now_ms,
@@ -5534,7 +5583,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // missing so that syntax errors in the trailing options still
     // surface). (br-frankenredis-geofromnonexistent)
     let (withcoord, withdist, withhash, count, _any, asc, _) =
-        parse_geo_search_flags(argv, i, unit_mult)?;
+        parse_geo_search_flags(argv, i, unit_mult, GeoFlagContext::GeoSearch)?;
     let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
         // Missing source key with FROMMEMBER — return empty set.
         return Ok(RespFrame::Array(Some(Vec::new())));
@@ -5739,7 +5788,8 @@ fn geosearchstore(
     // (br-frankenredis-geofromnonexistent) — parse trailing flags
     // before the missing-center check so syntax errors surface even
     // when the source key is absent.
-    let (_, _, _, count, _any, asc, _) = parse_geo_search_flags(&synth, i, unit_mult)?;
+    let (_, _, _, count, _any, asc, _) =
+        parse_geo_search_flags(&synth, i, unit_mult, GeoFlagContext::GeoSearchStore)?;
 
     let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
         if !has_center {
@@ -53905,6 +53955,117 @@ mod tests {
         )
         .expect("ANY with COUNT");
         assert!(matches!(ok, RespFrame::Array(Some(_))));
+    }
+
+    #[test]
+    fn geosearch_rejects_store_and_storedist_outside_geosearchstore_per_upstream() {
+        // Pin upstream geo.c:596-616 STORE/STOREDIST gating:
+        //   - GEORADIUS/GEORADIUSBYMEMBER: STORE key + STOREDIST key OK.
+        //   - GEOSEARCH: both rejected with shared.syntaxerr (the
+        //     command falls through to addReplyErrorObject because
+        //     STORE is gated on `!(flags & GEOSEARCH)` and
+        //     standalone STOREDIST is gated on
+        //     `(flags & GEOSEARCH) && (flags & GEOSEARCHSTORE)`).
+        //   - GEOSEARCHSTORE: bare STOREDIST (no key arg) is OK.
+        //
+        // Differential probe vs vendored 7.2.4 16380:
+        //   GEOSEARCH geo FROMLONLAT 15 37 BYRADIUS 200 km STOREDIST
+        //     vendored: ERR syntax error
+        //     fr (pre-fix): silently dropped STOREDIST, returned
+        //       the search result.
+        // (frankenredis-ffr2k)
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"g".to_vec(),
+                b"13.5".to_vec(),
+                b"38.0".to_vec(),
+                b"a".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        // GEOSEARCH + STOREDIST should error.
+        let err = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"g".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"STOREDIST".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("GEOSEARCH STOREDIST must error");
+        assert_eq!(err, CommandError::SyntaxError);
+
+        // GEOSEARCH + STORE key should also error (not gated by NOSTORE
+        // here — the gating in upstream is purely on the GEOSEARCH flag).
+        let err_store = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"g".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"STORE".to_vec(),
+                b"dst".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("GEOSEARCH STORE must error");
+        assert_eq!(err_store, CommandError::SyntaxError);
+
+        // GEOSEARCHSTORE + bare STOREDIST is the legitimate form — no error.
+        let ok = dispatch_argv(
+            &[
+                b"GEOSEARCHSTORE".to_vec(),
+                b"dst".to_vec(),
+                b"g".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"STOREDIST".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("GEOSEARCHSTORE STOREDIST must succeed");
+        assert!(matches!(ok, RespFrame::Integer(_)));
+
+        // GEORADIUS + STORE/STOREDIST + key still works (regression guard).
+        for opt in [&b"STORE"[..], &b"STOREDIST"[..]] {
+            let _ = dispatch_argv(
+                &[
+                    b"GEORADIUS".to_vec(),
+                    b"g".to_vec(),
+                    b"13.5".to_vec(),
+                    b"38.0".to_vec(),
+                    b"100".to_vec(),
+                    b"km".to_vec(),
+                    opt.to_vec(),
+                    b"dst".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("GEORADIUS STORE/STOREDIST key form must succeed");
+        }
     }
 
     #[test]
