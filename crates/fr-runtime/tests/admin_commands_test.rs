@@ -321,15 +321,21 @@ fn debug_jmap_rejects_with_subcommand_envelope() {
 }
 
 #[test]
-fn debug_reload_requires_configured_persistence() {
+fn debug_reload_round_trips_in_memory_without_persistence_per_upstream() {
+    // Upstream Redis 7.2.4 debug.c::debugCommand reloads via an
+    // in-memory RDB save+load round-trip even when neither AOF nor
+    // RDB persistence is configured — the goal is integrity
+    // verification of the serializer/deserializer pair, not file IO.
+    // (Pinned by frankenredis-8hzzv; this used to assert the inverse,
+    // which was a fr-only divergence.)
     let mut rt = Runtime::default_strict();
     rt.set_enable_debug_command("yes");
+    rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
     let resp = rt.execute_frame(command(&[b"DEBUG", b"RELOAD"]), 0);
+    assert_eq!(resp, RespFrame::SimpleString("OK".to_string()));
     assert_eq!(
-        resp,
-        RespFrame::Error(
-            "ERR DEBUG RELOAD requires configured appendonly or RDB persistence".to_string()
-        )
+        rt.execute_frame(command(&[b"GET", b"k"]), 0),
+        RespFrame::BulkString(Some(b"v".to_vec())),
     );
 }
 

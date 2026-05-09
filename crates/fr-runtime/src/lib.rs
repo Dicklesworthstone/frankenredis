@@ -15494,6 +15494,9 @@ mod tests {
         // (br-frankenredis-th7q) Seed a hash with per-field TTLs, serialize
         // to an RDB byte stream, load into a fresh Runtime, and verify
         // every per-field deadline round-tripped through type 21.
+        // Per ja8yu, the wire-level HEXPIRE family is removed for 7.2.4
+        // parity, so this test seeds via the Store API directly and
+        // verifies via the same.
         let mut rt = Runtime::default_strict();
         rt.execute_frame(
             command(&[
@@ -15501,26 +15504,18 @@ mod tests {
             ]),
             0,
         );
-        rt.execute_frame(
-            command(&[
-                b"HPEXPIREAT",
-                b"h",
-                b"1700000500500",
-                b"FIELDS",
-                b"1",
-                b"alive",
-            ]),
+        rt.server.store.hash_field_set_abs_expiry(
+            b"h",
+            b"alive",
+            1_700_000_500_500,
+            fr_store::HashFieldTtlCondition::None,
             0,
         );
-        rt.execute_frame(
-            command(&[
-                b"HPEXPIREAT",
-                b"h",
-                b"1800000000000",
-                b"FIELDS",
-                b"1",
-                b"doomed",
-            ]),
+        rt.server.store.hash_field_set_abs_expiry(
+            b"h",
+            b"doomed",
+            1_800_000_000_000,
+            fr_store::HashFieldTtlCondition::None,
             0,
         );
 
@@ -15547,31 +15542,33 @@ mod tests {
         super::apply_rdb_entries_to_store(&mut rt2.server.store, &decoded_entries, 0)
             .expect("apply rdb");
 
-        // Verify the hash + TTLs reconstruct byte-for-byte.
+        // Verify the hash + TTLs reconstruct via the Store API.
         let hlen = rt2.execute_frame(command(&[b"HLEN", b"h"]), 0);
         assert_eq!(hlen, RespFrame::Integer(3));
-        let httl_alive = rt2.execute_frame(
-            command(&[b"HPEXPIRETIME", b"h", b"FIELDS", b"1", b"alive"]),
+        let alive_abs = rt2.server.store.hash_field_ttl(
+            b"h",
+            b"alive",
             0,
+            fr_store::HashFieldTtlUnit::Milliseconds,
+            true,
         );
-        assert_eq!(
-            httl_alive,
-            RespFrame::Array(Some(vec![RespFrame::Integer(1_700_000_500_500)]))
-        );
-        let httl_doomed = rt2.execute_frame(
-            command(&[b"HPEXPIRETIME", b"h", b"FIELDS", b"1", b"doomed"]),
+        assert_eq!(alive_abs, fr_store::HashFieldTtl::Remaining(1_700_000_500_500));
+        let doomed_abs = rt2.server.store.hash_field_ttl(
+            b"h",
+            b"doomed",
             0,
+            fr_store::HashFieldTtlUnit::Milliseconds,
+            true,
         );
-        assert_eq!(
-            httl_doomed,
-            RespFrame::Array(Some(vec![RespFrame::Integer(1_800_000_000_000)]))
+        assert_eq!(doomed_abs, fr_store::HashFieldTtl::Remaining(1_800_000_000_000));
+        let keep_ttl = rt2.server.store.hash_field_ttl(
+            b"h",
+            b"keep",
+            0,
+            fr_store::HashFieldTtlUnit::Seconds,
+            false,
         );
-        // `keep` has no TTL — HTTL returns -1.
-        let httl_keep = rt2.execute_frame(command(&[b"HTTL", b"h", b"FIELDS", b"1", b"keep"]), 0);
-        assert_eq!(
-            httl_keep,
-            RespFrame::Array(Some(vec![RespFrame::Integer(-1)]))
-        );
+        assert_eq!(keep_ttl, fr_store::HashFieldTtl::NoTtl);
     }
 
     #[test]
@@ -21459,6 +21456,44 @@ mod tests {
             ),
             RespFrame::SimpleString("OK".to_string()),
         );
+    }
+
+    #[test]
+    fn redis_7_4_hash_field_ttl_commands_return_unknown_command_per_7_2_4_parity() {
+        // (frankenredis-ja8yu) The Redis 7.4 hash field TTL family
+        // (HEXPIRE/HPEXPIRE/HEXPIREAT/HPEXPIREAT/HEXPIRETIME/
+        // HPEXPIRETIME/HTTL/HPTTL/HPERSIST/HGETEX/HGETDEL) must surface
+        // "ERR unknown command" on the wire to match vendored 7.2.4,
+        // even though fr-store still implements the underlying
+        // primitives so RDB type 21 round-trips can preserve per-field
+        // TTL data. Same class as v0swv (DEBUG OBJECT hexpired_fields)
+        // and c5746 (HSCAN NOVALUES).
+        let mut rt = Runtime::default_strict();
+        rt.execute_frame(command(&[b"HSET", b"h", b"f1", b"v1"]), 0);
+        let cases: &[&[&[u8]]] = &[
+            &[b"HEXPIRE", b"h", b"60", b"FIELDS", b"1", b"f1"],
+            &[b"HPEXPIRE", b"h", b"60000", b"FIELDS", b"1", b"f1"],
+            &[b"HEXPIREAT", b"h", b"9999999999", b"FIELDS", b"1", b"f1"],
+            &[b"HPEXPIREAT", b"h", b"9999999999000", b"FIELDS", b"1", b"f1"],
+            &[b"HEXPIRETIME", b"h", b"FIELDS", b"1", b"f1"],
+            &[b"HPEXPIRETIME", b"h", b"FIELDS", b"1", b"f1"],
+            &[b"HTTL", b"h", b"FIELDS", b"1", b"f1"],
+            &[b"HPTTL", b"h", b"FIELDS", b"1", b"f1"],
+            &[b"HPERSIST", b"h", b"FIELDS", b"1", b"f1"],
+            &[b"HGETEX", b"h", b"FIELDS", b"1", b"f1"],
+            &[b"HGETDEL", b"h", b"FIELDS", b"1", b"f1"],
+        ];
+        for argv in cases {
+            let frame = rt.execute_frame(command(argv), 0);
+            let RespFrame::Error(msg) = &frame else {
+                panic!("expected Error reply for {:?}, got {:?}", argv, frame);
+            };
+            assert!(
+                msg.starts_with("ERR unknown command"),
+                "expected 'ERR unknown command' prefix for {:?}, got: {msg}",
+                argv,
+            );
+        }
     }
 
     #[test]
