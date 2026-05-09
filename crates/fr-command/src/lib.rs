@@ -138,6 +138,23 @@ pub fn command_key_indexes(argv: &[Vec<u8>]) -> Vec<usize> {
         Err(_) => return Vec::new(),
     };
 
+    // (frankenredis-infosections) Pubsub commands have channel
+    // arguments (not keyspace keys) at the same positions advertised
+    // by COMMAND INFO. Returning [] here keeps the key-ACL gate from
+    // misclassifying channel names as keys; channel ACLs run
+    // independently via dispatch_acl_channel_permission_error_for_argv.
+    if cmd_name.eq_ignore_ascii_case("PUBLISH")
+        || cmd_name.eq_ignore_ascii_case("SPUBLISH")
+        || cmd_name.eq_ignore_ascii_case("SUBSCRIBE")
+        || cmd_name.eq_ignore_ascii_case("UNSUBSCRIBE")
+        || cmd_name.eq_ignore_ascii_case("SSUBSCRIBE")
+        || cmd_name.eq_ignore_ascii_case("SUNSUBSCRIBE")
+        || cmd_name.eq_ignore_ascii_case("PSUBSCRIBE")
+        || cmd_name.eq_ignore_ascii_case("PUNSUBSCRIBE")
+    {
+        return Vec::new();
+    }
+
     // Handle special cases not fully described by first/last/step in COMMAND_TABLE.
     if cmd_name.eq_ignore_ascii_case("EVAL")
         || cmd_name.eq_ignore_ascii_case("EVALSHA")

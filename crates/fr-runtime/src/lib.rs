@@ -38,10 +38,11 @@ use fr_repl::{
     evaluate_wait, evaluate_waitaof, parse_psync_reply,
 };
 use fr_store::{
-    ClientReplyState, ClientTrackingState, CommandHistogram, DispatchAclLogContext,
-    DispatchAclPermissionReason, DispatchAclPermissions, DispatchClientContext,
-    EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus, EvictionSafetyGateState,
-    MaxmemoryPolicy, PendingAclLogEvent, Store, decode_db_key, encode_db_key, glob_match,
+    ClientReplyState, ClientTrackingState, CommandHistogram, CommandRecordKind,
+    DispatchAclLogContext, DispatchAclPermissionReason, DispatchAclPermissions,
+    DispatchClientContext, EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus,
+    EvictionSafetyGateState, MaxmemoryPolicy, PendingAclLogEvent, Store, decode_db_key,
+    encode_db_key, glob_match,
 };
 use sha2::{Digest, Sha256};
 
@@ -2442,8 +2443,25 @@ impl ServerState {
             .record_latency_sample(event, duration_ms, now_ms / 1000);
     }
 
-    /// Record command execution latency for LATENCY HISTOGRAM.
-    fn record_command_histogram(&mut self, argv: &[Vec<u8>], duration_us: u64) {
+    /// Record command execution latency for LATENCY HISTOGRAM and
+    /// INFO commandstats. (frankenredis-infosections) The reply is
+    /// inspected to classify Success vs Failed — anything that lands as
+    /// a RespFrame::Error counts as a failed call (matching upstream
+    /// server.c::call which checks the reply buffer for a leading
+    /// error byte).
+    fn record_command_histogram(&mut self, argv: &[Vec<u8>], duration_us: u64, reply: &RespFrame) {
+        let failed = matches!(reply, RespFrame::Error(_));
+        self.record_command_histogram_outcome(argv, duration_us, failed);
+    }
+
+    /// Cheaper wrapper over `record_command_histogram` for callers that
+    /// already know the failure bit without materialising a RespFrame.
+    fn record_command_histogram_outcome(
+        &mut self,
+        argv: &[Vec<u8>],
+        duration_us: u64,
+        failed: bool,
+    ) {
         if !self.latency_tracking {
             return;
         }
@@ -2451,7 +2469,30 @@ impl ServerState {
         let Ok(cmd_str) = std::str::from_utf8(cmd) else {
             return;
         };
-        self.store.record_command_histogram(cmd_str, duration_us);
+        let kind = if failed {
+            CommandRecordKind::Failed
+        } else {
+            CommandRecordKind::Success
+        };
+        self.store
+            .record_command_histogram_with_kind(cmd_str, duration_us, kind);
+    }
+
+    /// Record a pre-handler rejection (wrong arity surfaced by the
+    /// admission gate, ACL deny, NOSCRIPT, NOAUTH, NOPERM, ...).
+    /// (frankenredis-infosections) Rejected calls do NOT contribute to
+    /// the `calls` / `usec` columns of INFO commandstats — only the
+    /// `rejected_calls` counter moves.
+    fn record_command_rejected(&mut self, argv: &[Vec<u8>]) {
+        if !self.latency_tracking {
+            return;
+        }
+        let Some(cmd) = argv.first() else { return };
+        let Ok(cmd_str) = std::str::from_utf8(cmd) else {
+            return;
+        };
+        self.store
+            .record_command_histogram_with_kind(cmd_str, 0, CommandRecordKind::Rejected);
     }
 
     fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
@@ -4543,7 +4584,7 @@ impl Runtime {
                 let elapsed_us = start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
-                self.server.record_command_histogram(&argv, elapsed_us);
+                self.server.record_command_histogram(&argv, elapsed_us, &reply);
                 return reply;
             }
             Some(RuntimeSpecialCommand::Hello) => {
@@ -4556,7 +4597,7 @@ impl Runtime {
                 let elapsed_us = start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
-                self.server.record_command_histogram(&argv, elapsed_us);
+                self.server.record_command_histogram(&argv, elapsed_us, &reply);
                 return reply;
             }
             _ => {}
@@ -4575,6 +4616,10 @@ impl Runtime {
         if !cmd_no_auth && self.session.requires_auth(&self.server.auth_state) {
             let reply = RespFrame::Error(NOAUTH_ERROR.to_string());
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
+            // (frankenredis-infosections) NOAUTH gate is a pre-handler
+            // rejection — bump cmdstat_<cmd>:rejected_calls without
+            // touching calls/usec, mirroring upstream's call() path.
+            self.server.record_command_rejected(&argv);
             self.record_threat_event(ThreatEventInput {
                 now_ms,
                 packet_id,
@@ -4636,6 +4681,9 @@ impl Runtime {
                 }
             };
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
+            // (frankenredis-infosections) NOPERM is a pre-handler
+            // rejection — bump cmdstat_<cmd>:rejected_calls per upstream.
+            self.server.record_command_rejected(&argv);
             self.record_acl_log_event(
                 log_reason,
                 object,
@@ -4872,7 +4920,7 @@ impl Runtime {
                 let elapsed_us = special_start.elapsed().as_micros() as u64;
                 self.record_slowlog(&argv, elapsed_us, now_ms);
                 self.server.record_latency_sample(&argv, elapsed_us, now_ms);
-                self.server.record_command_histogram(&argv, elapsed_us);
+                self.server.record_command_histogram(&argv, elapsed_us, &reply);
                 return reply;
             }
         }
@@ -4899,7 +4947,15 @@ impl Runtime {
         let dirty_after = self.server.store.dirty;
         self.record_slowlog(&argv, elapsed_us, now_ms);
         self.server.record_latency_sample(&argv, elapsed_us, now_ms);
-        self.server.record_command_histogram(&argv, elapsed_us);
+        // (frankenredis-infosections) Classify the eventual reply so the
+        // commandstats counters distinguish Success vs Failed without
+        // cloning the (potentially large) reply frame.
+        let failed = match &result {
+            Ok(RespFrame::Error(_)) | Err(_) => true,
+            Ok(_) => false,
+        };
+        self.server
+            .record_command_histogram_outcome(&argv, elapsed_us, failed);
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
             self.record_threat_event(ThreatEventInput {
@@ -10949,18 +11005,34 @@ impl Runtime {
 
     fn handle_info_commandstats_section(&mut self) -> RespFrame {
         // Mirrors upstream server.c::genRedisInfoStringCommandStats
-        // (5329-5353). fr only tracks per-command call counts in
-        // CommandHistogramTracker, so usec/usec_per_call/rejected_calls/
-        // failed_calls are emitted as 0 stubs to preserve field
-        // parseability. (frankenredis-ot3y)
+        // (5329-5353). All four metric columns now come from real
+        // CommandHistogram counters tracked at command-dispatch time.
+        // (frankenredis-ot3y, frankenredis-infosections)
         let mut info = String::from("# Commandstats\r\n");
+        // Skip commands whose only activity is `rejected_calls > 0` —
+        // upstream omits a row entirely until at least one call lands.
+        // We mirror that: emit a row when calls + rejected_calls +
+        // failed_calls > 0 (so a rejected-only command still surfaces,
+        // matching upstream's "any counter moved" semantics).
         let histograms = self.server.store.all_command_histograms();
         for (cmd, hist) in histograms {
+            if hist.calls == 0 && hist.rejected_calls == 0 && hist.failed_calls == 0 {
+                continue;
+            }
+            let usec_per_call = if hist.calls > 0 {
+                hist.total_usec as f64 / hist.calls as f64
+            } else {
+                0.0
+            };
             let _ = write!(
                 info,
-                "cmdstat_{}:calls={},usec=0,usec_per_call=0.00,rejected_calls=0,failed_calls=0\r\n",
+                "cmdstat_{}:calls={},usec={},usec_per_call={:.2},rejected_calls={},failed_calls={}\r\n",
                 cmd.to_ascii_lowercase(),
-                hist.calls
+                hist.calls,
+                hist.total_usec,
+                usec_per_call,
+                hist.rejected_calls,
+                hist.failed_calls,
             );
         }
         info.push_str("\r\n");
@@ -11986,7 +12058,15 @@ replica_announced:1\r\n",
             let dirty_after = self.server.store.dirty;
             self.record_slowlog(argv, elapsed_us, now_ms);
             self.server.record_latency_sample(argv, elapsed_us, now_ms);
-            self.server.record_command_histogram(argv, elapsed_us);
+            // (frankenredis-infosections) Classify the EXEC-queued
+            // command's outcome for INFO commandstats without cloning
+            // the eventual reply.
+            let failed = match &result {
+                Ok(RespFrame::Error(_)) | Err(_) => true,
+                Ok(_) => false,
+            };
+            self.server
+                .record_command_histogram_outcome(argv, elapsed_us, failed);
 
             match result {
                 Ok(mut reply) => {
@@ -13386,7 +13466,9 @@ mod tests {
     #[test]
     fn info_commandstats_emits_per_command_call_counts() {
         // Pin upstream INFO commandstats parity (server.c::genRedisInfoStringCommandStats:5329-5353).
-        // fr only tracks calls; usec/rejected_calls/failed_calls are 0 stubs. (frankenredis-ot3y)
+        // (frankenredis-ot3y) updated by frankenredis-infosections to use real
+        // counters: calls / total_usec / usec_per_call / rejected_calls /
+        // failed_calls all come from CommandHistogram now.
         let mut rt = Runtime::default_strict();
 
         assert_eq!(
@@ -13409,18 +13491,29 @@ mod tests {
         let body = String::from_utf8(bytes).expect("utf8 info");
 
         assert!(body.starts_with("# Commandstats\r\n"), "{body}");
-        assert!(
-            body.contains(
-                "cmdstat_get:calls=3,usec=0,usec_per_call=0.00,rejected_calls=0,failed_calls=0\r\n"
-            ),
-            "{body}"
-        );
-        assert!(
-            body.contains(
-                "cmdstat_set:calls=1,usec=0,usec_per_call=0.00,rejected_calls=0,failed_calls=0\r\n"
-            ),
-            "{body}"
-        );
+        // Match the field shape — usec/usec_per_call are wall-clock
+        // dependent, so check the discrete counters (calls/rejected/
+        // failed) exactly and the variable middle via prefix+suffix.
+        for line in body.lines() {
+            if let Some(rest) = line.strip_prefix("cmdstat_get:") {
+                assert!(rest.starts_with("calls=3,usec="), "{line}");
+                assert!(
+                    rest.ends_with(",rejected_calls=0,failed_calls=0"),
+                    "{line}"
+                );
+                assert!(rest.contains(",usec_per_call="), "{line}");
+            }
+            if let Some(rest) = line.strip_prefix("cmdstat_set:") {
+                assert!(rest.starts_with("calls=1,usec="), "{line}");
+                assert!(
+                    rest.ends_with(",rejected_calls=0,failed_calls=0"),
+                    "{line}"
+                );
+                assert!(rest.contains(",usec_per_call="), "{line}");
+            }
+        }
+        assert!(body.contains("cmdstat_get:"), "{body}");
+        assert!(body.contains("cmdstat_set:"), "{body}");
 
         // Section omitted from default INFO; only present when requested or via all/everything.
         let default_info = rt.execute_frame(command(&[b"INFO"]), 3);
@@ -13439,6 +13532,99 @@ mod tests {
         };
         let all_body = String::from_utf8(bytes).expect("utf8 info");
         assert!(all_body.contains("# Commandstats"), "{all_body}");
+    }
+
+    /// (frankenredis-infosections) Mirror upstream server.c::call —
+    /// commands that return RespFrame::Error increment `failed_calls`
+    /// while still bumping `calls`/`total_usec`. Probe both a wrong-type
+    /// failure (handler ran, returned WRONGTYPE) and a successful call,
+    /// then confirm the cmdstat_<cmd> row reports the exact counts.
+    #[test]
+    fn info_commandstats_failed_calls_increments_on_error_replies() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"latency-tracking", b"yes"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Seed a list under "lk", then probe wrong-type + successful
+        // GETs against it. The wrong-type probe is a real failed call;
+        // the successful GET against "lk-string" is a successful call.
+        rt.execute_frame(command(&[b"RPUSH", b"lk", b"a"]), 1);
+        rt.execute_frame(command(&[b"SET", b"lk-string", b"hello"]), 1);
+        // Two failures: GET on a list key.
+        for _ in 0..2 {
+            assert!(matches!(
+                rt.execute_frame(command(&[b"GET", b"lk"]), 1),
+                RespFrame::Error(_)
+            ));
+        }
+        // One success: GET on a string key.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"lk-string"]), 1),
+            RespFrame::BulkString(Some(b"hello".to_vec()))
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"commandstats"]), 2);
+        let RespFrame::BulkString(Some(bytes)) = info else {
+            panic!("expected bulk info response");
+        };
+        let body = String::from_utf8(bytes).expect("utf8 info");
+
+        let row = body
+            .lines()
+            .find(|l| l.starts_with("cmdstat_get:"))
+            .unwrap_or_else(|| panic!("expected cmdstat_get row in:\n{body}"));
+        // 3 total calls (2 failed + 1 success), 2 failed.
+        assert!(row.starts_with("cmdstat_get:calls=3,usec="), "{row}");
+        assert!(row.ends_with(",rejected_calls=0,failed_calls=2"), "{row}");
+    }
+
+    /// (frankenredis-infosections) `rejected_calls` increments for the
+    /// admission-gate paths (NOAUTH, NOPERM, etc.) but does NOT contribute
+    /// to `calls` or `usec`. Probe via a requirepass instance: pre-AUTH
+    /// GET reaches the NOAUTH gate and is rejected.
+    #[test]
+    fn info_commandstats_rejected_calls_increments_on_admission_gate_rejection() {
+        let mut rt = Runtime::default_strict();
+        rt.set_requirepass(Some(b"secret".to_vec()));
+
+        // Pre-AUTH GETs are rejected at the admission gate.
+        for _ in 0..3 {
+            assert!(matches!(
+                rt.execute_frame(command(&[b"GET", b"k"]), 0),
+                RespFrame::Error(_)
+            ));
+        }
+
+        // Authenticate, then run a successful GET.
+        assert!(matches!(
+            rt.execute_frame(command(&[b"AUTH", b"secret"]), 1),
+            RespFrame::SimpleString(_)
+        ));
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"k"]), 1),
+            RespFrame::BulkString(None)
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"commandstats"]), 2);
+        let RespFrame::BulkString(Some(bytes)) = info else {
+            panic!("expected bulk info response");
+        };
+        let body = String::from_utf8(bytes).expect("utf8 info");
+
+        let row = body
+            .lines()
+            .find(|l| l.starts_with("cmdstat_get:"))
+            .unwrap_or_else(|| panic!("expected cmdstat_get row in:\n{body}"));
+        // 1 successful call, 3 rejected. Rejected do NOT contribute to
+        // calls or usec — only to rejected_calls.
+        assert!(row.starts_with("cmdstat_get:calls=1,usec="), "{row}");
+        assert!(row.ends_with(",rejected_calls=3,failed_calls=0"), "{row}");
     }
 
     #[test]

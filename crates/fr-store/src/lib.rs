@@ -984,14 +984,59 @@ impl LatencyTracker {
 pub struct CommandHistogram {
     /// Bucket counts: bucket[i] covers [2^(i-1), 2^i) microseconds, except bucket[0] is [0, 1).
     buckets: [u64; 24],
-    /// Total number of calls recorded.
+    /// Total number of calls recorded (success + failed; matches upstream's `calls` field).
     pub calls: u64,
+    /// Sum of latencies in microseconds for all recorded calls.
+    /// (frankenredis-infosections) Mirrors upstream redisCommand::microseconds —
+    /// emitted as the `usec` column of INFO commandstats.
+    pub total_usec: u64,
+    /// Calls that were rejected before reaching the handler (wrong arity, ACL deny,
+    /// NOSCRIPT, NOAUTH, NOPERM, etc.). (frankenredis-infosections)
+    pub rejected_calls: u64,
+    /// Calls that ran but returned an error reply. (frankenredis-infosections)
+    pub failed_calls: u64,
+}
+
+/// Outcome classification for `CommandHistogram::record`. Drives the
+/// upstream `calls`/`rejected_calls`/`failed_calls` counters separately
+/// so `cmdstat_<cmd>` lines mirror server.c::genRedisInfoStringCommandStats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandRecordKind {
+    /// Handler ran and returned a non-error reply.
+    Success,
+    /// Pre-handler rejection (wrong arity, ACL deny, NOSCRIPT, NOAUTH, NOPERM, ...).
+    /// Rejected calls do NOT increment the `calls`/`total_usec` columns; they are
+    /// counted only in `rejected_calls` per upstream's call() / processCommand().
+    Rejected,
+    /// Handler ran but returned an error reply.
+    Failed,
 }
 
 impl CommandHistogram {
     /// Record a latency sample in microseconds.
+    /// (frankenredis-infosections) Convenience wrapper for the common
+    /// success path; equivalent to record_with_kind(latency_us, Success).
     pub fn record(&mut self, latency_us: u64) {
+        self.record_with_kind(latency_us, CommandRecordKind::Success);
+    }
+
+    /// Record a latency sample in microseconds with an explicit outcome.
+    pub fn record_with_kind(&mut self, latency_us: u64, kind: CommandRecordKind) {
+        match kind {
+            CommandRecordKind::Rejected => {
+                // Upstream's call() does NOT call durationAdd or
+                // bump `calls` for rejected commands — only the
+                // rejected counter moves. Mirror that semantics.
+                self.rejected_calls += 1;
+                return;
+            }
+            CommandRecordKind::Failed => {
+                self.failed_calls += 1;
+            }
+            CommandRecordKind::Success => {}
+        }
         self.calls += 1;
+        self.total_usec = self.total_usec.saturating_add(latency_us);
         let bucket_idx = if latency_us == 0 {
             0
         } else {
@@ -1023,6 +1068,9 @@ impl CommandHistogram {
     pub fn reset(&mut self) {
         self.buckets = [0; 24];
         self.calls = 0;
+        self.total_usec = 0;
+        self.rejected_calls = 0;
+        self.failed_calls = 0;
     }
 }
 
@@ -1033,12 +1081,25 @@ pub struct CommandHistogramTracker {
 }
 
 impl CommandHistogramTracker {
-    /// Record a command latency in microseconds.
+    /// Record a successful command latency in microseconds.
+    /// (frankenredis-infosections) Convenience wrapper that classifies
+    /// the call as a Success outcome; new code should prefer
+    /// `record_with_kind` so rejected/failed counters move.
     pub fn record(&mut self, command: &str, latency_us: u64) {
+        self.record_with_kind(command, latency_us, CommandRecordKind::Success);
+    }
+
+    /// Record a command latency with an explicit outcome classification.
+    pub fn record_with_kind(
+        &mut self,
+        command: &str,
+        latency_us: u64,
+        kind: CommandRecordKind,
+    ) {
         self.histograms
             .entry(command.to_ascii_uppercase())
             .or_default()
-            .record(latency_us);
+            .record_with_kind(latency_us, kind);
     }
 
     /// Get histogram for a specific command.
@@ -1892,9 +1953,27 @@ impl Store {
         self.latency_tracker.reset(events)
     }
 
-    /// Record a command execution latency for LATENCY HISTOGRAM.
+    /// Record a successful command execution latency for LATENCY HISTOGRAM
+    /// and INFO commandstats. (frankenredis-infosections) Existing callers
+    /// keep working; new code that needs to classify rejected/failed should
+    /// call `record_command_histogram_with_kind`.
     pub fn record_command_histogram(&mut self, command: &str, latency_us: u64) {
         self.command_histograms.record(command, latency_us);
+    }
+
+    /// Record a command execution latency with an explicit outcome
+    /// classification. (frankenredis-infosections) Drives the
+    /// upstream `calls`/`rejected_calls`/`failed_calls`/`usec`
+    /// counters distinctly so INFO commandstats matches
+    /// server.c::genRedisInfoStringCommandStats.
+    pub fn record_command_histogram_with_kind(
+        &mut self,
+        command: &str,
+        latency_us: u64,
+        kind: CommandRecordKind,
+    ) {
+        self.command_histograms
+            .record_with_kind(command, latency_us, kind);
     }
 
     /// Get histogram data for a specific command.
