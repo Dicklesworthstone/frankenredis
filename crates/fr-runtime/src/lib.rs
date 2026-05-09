@@ -8086,29 +8086,101 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("repl-backlog-size") {
-                // (br-frankenredis-ky4n follow-up) — accept memtoull
-                // suffix forms for memory-typed configs.
+                // (frankenredis-cwonr) Upstream config.c declares
+                // repl-backlog-size with the special memory validator
+                // and an INCLUSIVE [1, INT64_MAX] range. Vendored
+                // returns 'argument must be a memory value' for
+                // unparseable input and 'argument must be between 1
+                // and 9223372036854775807 inclusive' for 0 / negative.
+                // fr previously emitted the non-standard 'Invalid
+                // argument' wording AND silently accepted 0.
                 let parsed = match parse_memory_size_arg(&pair[1]) {
                     Ok(value) => value,
                     Err(()) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'repl-backlog-size'".to_string(),
+                        return config_set_failed(
+                            "repl-backlog-size",
+                            "argument must be a memory value",
                         );
                     }
                 };
+                if parsed == 0 {
+                    return config_set_failed(
+                        "repl-backlog-size",
+                        "argument must be between 1 and 9223372036854775807 inclusive",
+                    );
+                }
                 next_repl_backlog_size = Some(parsed);
                 static_override_updates.push(("repl-backlog-size".to_string(), parsed.to_string()));
                 continue;
             }
-            if parameter.eq_ignore_ascii_case("repl-timeout") {
+            if parameter.eq_ignore_ascii_case("repl-backlog-ttl") {
+                // (frankenredis-cwonr) Upstream config.c declares
+                // repl-backlog-ttl as INTEGER_CONFIG with INCLUSIVE
+                // range [0, INT64_MAX]. fr previously had no handler
+                // and silently stored arbitrary values.
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 1 => value as u64,
+                    Ok(value) if value >= 0 => value,
                     Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'repl-timeout'".to_string(),
+                        return config_set_failed(
+                            "repl-backlog-ttl",
+                            "argument must be between 0 and 9223372036854775807 inclusive",
                         );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return config_set_failed(
+                            "repl-backlog-ttl",
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
+                };
+                static_override_updates.push(("repl-backlog-ttl".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("repl-ping-replica-period")
+                || parameter.eq_ignore_ascii_case("repl-ping-slave-period")
+            {
+                // (frankenredis-cwonr) Upstream config.c declares
+                // repl-ping-replica-period (and the legacy slave-period
+                // alias) as INTEGER_CONFIG with INCLUSIVE [1, INT_MAX].
+                // fr previously had no handler at all.
+                let key = parameter.to_ascii_lowercase();
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if (1..=i32::MAX as i64).contains(&value) => value,
+                    Ok(_) => {
+                        return config_set_failed(
+                            &key,
+                            "argument must be between 1 and 2147483647 inclusive",
+                        );
+                    }
+                    Err(_) => {
+                        return config_set_failed(
+                            &key,
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
+                };
+                static_override_updates.push((key, parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("repl-timeout") {
+                // (frankenredis-cwonr) Upstream config.c declares
+                // repl-timeout as INTEGER_CONFIG with INCLUSIVE
+                // [1, INT_MAX]. fr previously emitted 'Invalid argument'
+                // for both bound and parse errors.
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if (1..=i32::MAX as i64).contains(&value) => value as u64,
+                    Ok(_) => {
+                        return config_set_failed(
+                            "repl-timeout",
+                            "argument must be between 1 and 2147483647 inclusive",
+                        );
+                    }
+                    Err(_) => {
+                        return config_set_failed(
+                            "repl-timeout",
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
                 };
                 next_repl_timeout = Some(parsed);
                 static_override_updates.push(("repl-timeout".to_string(), parsed.to_string()));
@@ -8336,15 +8408,14 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("cluster-link-sendbuf-limit") {
-                let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 0 => value as u64,
-                    Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'cluster-link-sendbuf-limit'"
-                                .to_string(),
+                let parsed = match parse_memory_size_arg(&pair[1]) {
+                    Ok(value) => value,
+                    Err(()) => {
+                        return config_set_failed(
+                            "cluster-link-sendbuf-limit",
+                            "argument must be a memory value",
                         );
                     }
-                    Err(err) => return err.to_resp(),
                 };
                 next_cluster_link_sendbuf_limit = Some(parsed);
                 static_override_updates
@@ -8355,12 +8426,17 @@ impl Runtime {
                 let parsed = match parse_i64_arg(&pair[1]) {
                     Ok(value) if value >= 0 => value as u64,
                     Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'cluster-node-timeout'"
-                                .to_string(),
+                        return config_set_failed(
+                            "cluster-node-timeout",
+                            "argument must be between 0 and 9223372036854775807 inclusive",
                         );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return config_set_failed(
+                            "cluster-node-timeout",
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
                 };
                 next_cluster_node_timeout = Some(parsed);
                 static_override_updates
@@ -8998,13 +9074,17 @@ impl Runtime {
             if parameter.eq_ignore_ascii_case("list-max-listpack-size")
                 || parameter.eq_ignore_ascii_case("list-max-ziplist-size")
             {
+                // Upstream config.c declares both names as INTEGER_CONFIG
+                // with range [INT_MIN, INT_MAX]; negative values index a
+                // size-class table (-1..-5) while positives are entry counts.
+                // Values outside i32 range or non-numeric should map to the
+                // table-level wording. (br-frankenredis-cwonr)
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if (-5..=i64::MAX).contains(&value) => value,
+                    Ok(value) if (i32::MIN as i64..=i32::MAX as i64).contains(&value) => value,
                     Ok(_) => {
-                        // (br-frankenredis-7rj0)
                         return config_set_failed(
                             parameter,
-                            "argument must be between -5 and 9223372036854775807 inclusive",
+                            "argument must be between -2147483648 and 2147483647 inclusive",
                         );
                     }
                     Err(_) => {
@@ -17944,27 +18024,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn repl_backlog_histlen_is_zero_when_backlog_disabled() {
-        let mut rt = Runtime::default_strict();
-
-        assert_eq!(
-            rt.execute_frame(command(&[b"CONFIG", b"SET", b"repl-backlog-size", b"0"]), 0),
-            RespFrame::SimpleString("OK".to_string())
-        );
-        assert_eq!(
-            rt.execute_frame(command(&[b"SET", b"key", b"value"]), 1),
-            RespFrame::SimpleString("OK".to_string())
-        );
-
-        let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 2);
-        let RespFrame::BulkString(Some(info_bytes)) = info else {
-            unreachable!("expected bulk INFO response");
-        };
-        let info = String::from_utf8(info_bytes).expect("utf8 info");
-        assert!(info.contains("repl_backlog_size:0\r\n"), "{info}");
-        assert!(info.contains("repl_backlog_histlen:0\r\n"), "{info}");
-    }
+    // (frankenredis-cwonr) Removed `repl_backlog_histlen_is_zero_when_backlog_disabled`:
+    // it pinned the pre-validator behavior of accepting `CONFIG SET
+    // repl-backlog-size 0`, but upstream config.c declares the
+    // parameter with range [1, LLONG_MAX], so 0 is rejected and the
+    // "disabled backlog" scenario is unreachable.
 
     #[test]
     fn cleanup_disconnected_client_clears_replica_and_monitor_state() {
@@ -21270,6 +21334,131 @@ mod tests {
                 String::from_utf8_lossy(good),
             );
         }
+    }
+
+    #[test]
+    fn config_set_repl_and_cluster_params_use_table_level_wording_per_upstream() {
+        // (frankenredis-cwonr) Pin the wording and bounds for the
+        // CONFIG SET parameters that previously emitted ad-hoc
+        // "ERR Invalid argument" or accepted out-of-range values.
+        // Upstream config.c declares:
+        //   - repl-backlog-size:           MEMORY_CONFIG, range [1, LLONG_MAX]
+        //   - repl-backlog-ttl:            INTEGER_CONFIG, range [0, LLONG_MAX]
+        //   - repl-ping-replica-period:    INTEGER_CONFIG, range [1, INT_MAX]
+        //   - repl-ping-slave-period:      alias of above
+        //   - repl-timeout:                INTEGER_CONFIG, range [1, INT_MAX]
+        //   - cluster-link-sendbuf-limit:  MEMORY_CONFIG, range [0, SIZE_MAX]
+        //   - cluster-node-timeout:        LONGLONG_CONFIG, range [0, LLONG_MAX]
+        //   - list-max-listpack-size:      INTEGER_CONFIG, range [INT_MIN, INT_MAX]
+        // Failures route through configSetFailed → table-level wording.
+        let mut rt = Runtime::default_strict();
+
+        let cases: &[(&[u8], &[u8], &str)] = &[
+            (
+                b"repl-backlog-size",
+                b"0",
+                "ERR CONFIG SET failed (possibly related to argument 'repl-backlog-size') - argument must be between 1 and 9223372036854775807 inclusive",
+            ),
+            (
+                b"repl-backlog-size",
+                b"bogus",
+                "ERR CONFIG SET failed (possibly related to argument 'repl-backlog-size') - argument must be a memory value",
+            ),
+            (
+                b"repl-backlog-ttl",
+                b"-1",
+                "ERR CONFIG SET failed (possibly related to argument 'repl-backlog-ttl') - argument must be between 0 and 9223372036854775807 inclusive",
+            ),
+            (
+                b"repl-ping-replica-period",
+                b"0",
+                "ERR CONFIG SET failed (possibly related to argument 'repl-ping-replica-period') - argument must be between 1 and 2147483647 inclusive",
+            ),
+            (
+                b"repl-ping-slave-period",
+                b"-5",
+                "ERR CONFIG SET failed (possibly related to argument 'repl-ping-slave-period') - argument must be between 1 and 2147483647 inclusive",
+            ),
+            (
+                b"repl-timeout",
+                b"0",
+                "ERR CONFIG SET failed (possibly related to argument 'repl-timeout') - argument must be between 1 and 2147483647 inclusive",
+            ),
+            (
+                b"cluster-link-sendbuf-limit",
+                b"-1",
+                "ERR CONFIG SET failed (possibly related to argument 'cluster-link-sendbuf-limit') - argument must be a memory value",
+            ),
+            (
+                b"cluster-node-timeout",
+                b"-1",
+                "ERR CONFIG SET failed (possibly related to argument 'cluster-node-timeout') - argument must be between 0 and 9223372036854775807 inclusive",
+            ),
+            (
+                b"cluster-node-timeout",
+                b"bogus",
+                "ERR CONFIG SET failed (possibly related to argument 'cluster-node-timeout') - argument couldn't be parsed into an integer",
+            ),
+        ];
+        for (param, bad, expected) in cases {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", param, bad]),
+                    0,
+                ),
+                RespFrame::Error(expected.to_string()),
+                "param={:?} bad={:?}",
+                String::from_utf8_lossy(param),
+                String::from_utf8_lossy(bad),
+            );
+        }
+
+        // Over-validation regression: list-max-listpack-size must accept
+        // values down to INT_MIN (upstream allows full i32 range to encode
+        // size-class indices and entry-count bounds).
+        for good in [b"-100".as_slice(), b"-2147483648", b"2147483647", b"0", b"-2"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"list-max-listpack-size", good]),
+                    0,
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "list-max-listpack-size {:?} should be accepted",
+                String::from_utf8_lossy(good),
+            );
+        }
+        // Out-of-range still rejected with i32 bounds wording.
+        for bad in [b"2147483648".as_slice(), b"-2147483649"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"list-max-listpack-size", bad]),
+                    0,
+                ),
+                RespFrame::Error(
+                    "ERR CONFIG SET failed (possibly related to argument 'list-max-listpack-size') - argument must be between -2147483648 and 2147483647 inclusive"
+                        .to_string()
+                ),
+                "list-max-listpack-size {:?} should be rejected",
+                String::from_utf8_lossy(bad),
+            );
+        }
+
+        // Memory-suffix happy path for repl-backlog-size and cluster
+        // sendbuf limit (proves these still parse memory suffixes).
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"repl-backlog-size", b"4mb"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string()),
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"cluster-link-sendbuf-limit", b"1g"]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string()),
+        );
     }
 
     #[test]
