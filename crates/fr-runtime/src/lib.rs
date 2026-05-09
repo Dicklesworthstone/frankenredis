@@ -4309,15 +4309,15 @@ impl Runtime {
             // the leading whitespace-delimited error code token (uppercase).
             // Fr's RespFrame::Error body already excludes the '-' prefix.
             // (frankenredis-errorstatslines)
-            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next() {
-                if !code.is_empty() {
-                    *self
-                        .server
-                        .store
-                        .errorstats_per_type
-                        .entry(code.to_string())
-                        .or_insert(0) += 1;
-                }
+            if let Some(code) = msg.split(|c: char| c.is_ascii_whitespace()).next()
+                && !code.is_empty()
+            {
+                *self
+                    .server
+                    .store
+                    .errorstats_per_type
+                    .entry(code.to_string())
+                    .or_insert(0) += 1;
             }
         }
         self.server.store.stat_total_reads_processed += processed_counts.0;
@@ -20459,7 +20459,6 @@ mod tests {
         );
     }
 
-    #[test]
     // (frankenredis-8xgpr) Upstream config.c::configGetCommand uses a
     // `matches` dict to dedupe entries across multiple patterns, so
     // `CONFIG GET maxmemory maxmemory` and overlapping pattern lists
