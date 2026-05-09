@@ -2907,26 +2907,59 @@ impl Runtime {
             };
         }
 
-        let Some(path) = self.server.rdb_path.clone() else {
-            return RespFrame::Error(
-                "ERR DEBUG RELOAD requires configured appendonly or RDB persistence".to_string(),
-            );
-        };
-
-        match read_rdb_file(&path) {
-            Ok((entries, _aux)) => {
-                let mut store = Store::new();
-                if apply_rdb_entries_to_store(&mut store, &entries, now_ms.saturating_add(1))
-                    .is_err()
-                {
-                    return RespFrame::Error("ERR failed to reload dataset from RDB".to_string());
+        if let Some(path) = self.server.rdb_path.clone() {
+            return match read_rdb_file(&path) {
+                Ok((entries, _aux)) => {
+                    let mut store = Store::new();
+                    if apply_rdb_entries_to_store(&mut store, &entries, now_ms.saturating_add(1))
+                        .is_err()
+                    {
+                        return RespFrame::Error(
+                            "ERR failed to reload dataset from RDB".to_string(),
+                        );
+                    }
+                    self.server.store = store;
+                    self.session.selected_db = 0;
+                    RespFrame::SimpleString("OK".to_string())
                 }
-                self.server.store = store;
-                self.session.selected_db = 0;
-                RespFrame::SimpleString("OK".to_string())
-            }
-            Err(_) => RespFrame::Error("ERR failed to reload dataset from RDB".to_string()),
+                Err(_) => RespFrame::Error("ERR failed to reload dataset from RDB".to_string()),
+            };
         }
+
+        // (frankenredis-8hzzv) Vendored debug.c::DEBUG RELOAD does not
+        // require persistence to be configured at startup — it always
+        // round-trips through an RDB tempfile (server.rdb_filename
+        // defaults to 'dump.rdb'). The semantic intent is to validate
+        // the rdbSave/rdbLoad encoder pair, not to reload from a
+        // configured path. fr previously short-circuited with
+        // 'requires configured appendonly or RDB persistence' when no
+        // --rdb / --aof was supplied.
+        //
+        // For parity, perform the round-trip entirely in memory:
+        // serialize the live store via encode_rdb, decode the bytes
+        // back, then replace the store. This validates the
+        // encoder/decoder pair without touching disk.
+        let entries = store_to_rdb_entries(&mut self.server.store, now_ms);
+        let bytes = encode_rdb(&entries, &[]);
+        let (decoded_entries, _aux) = match decode_rdb(&bytes) {
+            Ok(out) => out,
+            Err(_) => {
+                return RespFrame::Error(
+                    "ERR failed to reload dataset from in-memory RDB round-trip".to_string(),
+                );
+            }
+        };
+        let mut store = Store::new();
+        if apply_rdb_entries_to_store(&mut store, &decoded_entries, now_ms.saturating_add(1))
+            .is_err()
+        {
+            return RespFrame::Error(
+                "ERR failed to reload dataset from in-memory RDB round-trip".to_string(),
+            );
+        }
+        self.server.store = store;
+        self.session.selected_db = 0;
+        RespFrame::SimpleString("OK".to_string())
     }
 
     #[must_use]
@@ -20761,6 +20794,96 @@ mod tests {
                 RespFrame::SimpleString("OK".to_string()),
                 "{name} 42 should be accepted"
             );
+        }
+    }
+
+    #[test]
+    fn debug_reload_no_persistence_round_trips_in_memory_per_upstream() {
+        // (frankenredis-8hzzv) Vendored Redis's debug.c::DEBUG RELOAD
+        // does not require persistence to be configured — it always
+        // round-trips through an RDB file (server.rdb_filename defaults
+        // to 'dump.rdb'). fr previously short-circuited with
+        // 'ERR DEBUG RELOAD requires configured appendonly or RDB
+        // persistence' whenever neither --rdb nor --aof was supplied.
+        //
+        // The fix performs the round-trip entirely in memory via
+        // encode_rdb → decode_rdb → apply_rdb_entries_to_store, which
+        // validates the encoder/decoder pair (the actual semantic
+        // intent of the upstream command) without touching disk.
+        //
+        // Differential probe vs vendored 16380:
+        //   DEBUG RELOAD               → vendored OK,  fr OK (was ERR)
+        //   DEBUG RELOAD NOSAVE        → vendored OK,  fr OK (was ERR)
+        //   DEBUG RELOAD NOSAVE NOFLUSH MERGE → both OK
+        let mut rt = Runtime::default_strict();
+        rt.set_enable_debug_command("yes");
+
+        // Seed with several different value types to exercise the
+        // full RDB encoder.
+        for cmd in [
+            &[b"SET".as_slice(), b"k", b"v"][..],
+            &[b"LPUSH", b"lst", b"a", b"b", b"c"],
+            &[b"SADD", b"st", b"m1", b"m2"],
+            &[b"HSET", b"h", b"f1", b"v1", b"f2", b"v2"],
+            &[b"ZADD", b"z", b"1", b"a", b"2", b"b"],
+        ] {
+            let argv: Vec<Vec<u8>> = cmd.iter().map(|b| b.to_vec()).collect();
+            let frame = RespFrame::Array(Some(
+                argv.into_iter()
+                    .map(|b| RespFrame::BulkString(Some(b)))
+                    .collect(),
+            ));
+            rt.execute_frame(frame, 0);
+        }
+
+        // DEBUG RELOAD with no persistence configured — should now succeed.
+        let reload = rt.execute_frame(command(&[b"DEBUG", b"RELOAD"]), 1);
+        assert_eq!(
+            reload,
+            RespFrame::SimpleString("OK".to_string()),
+            "DEBUG RELOAD must succeed in-memory; got {reload:?}"
+        );
+
+        // Each value type round-tripped — sanity check the survivors.
+        for (cmd, expected) in [
+            (
+                &[b"GET".as_slice(), b"k"][..],
+                RespFrame::BulkString(Some(b"v".to_vec())),
+            ),
+            (
+                &[b"LRANGE", b"lst", b"0", b"-1"],
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"c".to_vec())),
+                    RespFrame::BulkString(Some(b"b".to_vec())),
+                    RespFrame::BulkString(Some(b"a".to_vec())),
+                ])),
+            ),
+            (&[b"HGET", b"h", b"f1"], RespFrame::BulkString(Some(b"v1".to_vec()))),
+            (&[b"ZSCORE", b"z", b"a"], RespFrame::BulkString(Some(b"1".to_vec()))),
+        ] {
+            let argv: Vec<Vec<u8>> = cmd.iter().map(|b| b.to_vec()).collect();
+            let frame = RespFrame::Array(Some(
+                argv.into_iter()
+                    .map(|b| RespFrame::BulkString(Some(b)))
+                    .collect(),
+            ));
+            let out = rt.execute_frame(frame, 2);
+            assert_eq!(out, expected, "post-reload value for {cmd:?}");
+        }
+
+        // NOSAVE / NOFLUSH / MERGE keywords still accepted alongside.
+        for argv in [
+            &[b"DEBUG".as_slice(), b"RELOAD", b"NOSAVE"][..],
+            &[b"DEBUG", b"RELOAD", b"NOSAVE", b"NOFLUSH", b"MERGE"],
+        ] {
+            let argv: Vec<Vec<u8>> = argv.iter().map(|b| b.to_vec()).collect();
+            let frame = RespFrame::Array(Some(
+                argv.into_iter()
+                    .map(|b| RespFrame::BulkString(Some(b)))
+                    .collect(),
+            ));
+            let out = rt.execute_frame(frame, 3);
+            assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
         }
     }
 
