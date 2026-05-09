@@ -4232,11 +4232,20 @@ fn geo_hash_string_from_score(score: f64) -> Option<Vec<u8>> {
 
     let mut buf = [0_u8; 11];
     for (i, slot) in buf.iter_mut().enumerate() {
-        let shift = 52_i32 - ((i as i32 + 1) * 5);
-        let idx = if shift >= 0 {
-            ((bits >> shift as u32) & 0x1f) as usize
+        // (frankenredis-lw241) Match upstream geo.c::geohashCommand
+        // (lines 920-925): only 52 bits of geohash data are encoded
+        // into 26-step precision, but the public API has always
+        // emitted an 11-character base32 string (10 chars cover the
+        // first 50 bits, the 11th char would need bits 51-55). For
+        // backward compatibility upstream hard-codes idx=0 for i==10
+        // so the trailing character is always '0'. fr previously
+        // computed `(bits << 3) & 0x1f`, which produces a non-zero
+        // index when bits 0-1 of the score happen to be set — making
+        // the last character drift away from vendored.
+        let idx = if i == 10 {
+            0
         } else {
-            ((bits << (-shift) as u32) & 0x1f) as usize
+            ((bits >> (52 - (i + 1) * 5)) & 0x1f) as usize
         };
         *slot = GEO_BASE32_ALPHABET[idx];
     }
@@ -26645,10 +26654,19 @@ mod tests {
             0,
         )
         .expect("geohash");
+        // (frankenredis-lw241) Vendored 7.2.4 forces idx=0 for the
+        // 11th character (geo.c:920-925 — only 52 bits encoded into a
+        // 26-step hash, last 5-bit slot would need bits 51-55 which
+        // don't exist, so upstream emits '0' for backward compat).
+        // fr previously emitted a non-zero 11th char by left-shifting
+        // bits 0-1, producing `sqc8b49rnys` (last char `s`) for
+        // Palermo while vendored returned `sqc8b49rny0`. Catania's
+        // hash bits happened to evaluate to idx=0 anyway, masking the
+        // bug for that particular member.
         assert_eq!(
             hashes,
             RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"sqc8b49rnys".to_vec())),
+                RespFrame::BulkString(Some(b"sqc8b49rny0".to_vec())),
                 RespFrame::BulkString(Some(b"sqdtr74hyu0".to_vec())),
                 RespFrame::BulkString(None),
             ]))
