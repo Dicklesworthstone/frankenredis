@@ -659,7 +659,7 @@ impl Entry {
         if counter < 255 {
             let baseval = u64::from(counter.saturating_sub(LFU_INIT_VAL));
             let denom = baseval.saturating_mul(log_factor).saturating_add(1);
-            if rand_sample % denom == 0 {
+            if rand_sample.is_multiple_of(denom) {
                 self.lfu_freq = counter.saturating_add(1);
             } else {
                 self.lfu_freq = counter;
@@ -10591,8 +10591,7 @@ impl Store {
             if let Some(start) = trimmed.find("register_function") {
                 let after_call = &trimmed[start + "register_function".len()..];
                 let trimmed_after = after_call.trim_start();
-                if trimmed_after.starts_with('{') {
-                    let body = &trimmed_after[1..];
+                if let Some(body) = trimmed_after.strip_prefix('{') {
                     if !has_table_key(body, "function_name") {
                         return Err(StoreError::GenericError(
                             "ERR Error registering functions: ERR redis.register_function must get a function name argument"
@@ -10699,7 +10698,7 @@ impl Store {
                             }
                         }
                     }
-                } else if trimmed_after.starts_with('(') {
+                } else if let Some(inner) = trimmed_after.strip_prefix('(') {
                     // Positional form: validate the second argument is
                     // `function(...)` rather than a quote/number/table
                     // /nil literal. Upstream function_lua.c rejects
@@ -10709,7 +10708,6 @@ impl Store {
                     // only the first quoted arg and pushed a
                     // FunctionEntry whose body was missing from the
                     // wrapper script. (frankenredis-fnposcb)
-                    let inner = &trimmed_after[1..];
                     let inner = inner.trim_start();
                     // Empty argument list → upstream surfaces the
                     // generic 'wrong number of arguments' wording.
@@ -10810,8 +10808,7 @@ impl Store {
                 let flags = if let Some(start) = trimmed.find("register_function") {
                     let after_call = &trimmed[start + "register_function".len()..];
                     let trimmed_after = after_call.trim_start();
-                    if trimmed_after.starts_with('{') {
-                        let body = &trimmed_after[1..];
+                    if let Some(body) = trimmed_after.strip_prefix('{') {
                         if let Some(value) = extract_table_value_raw(body, "flags") {
                             extract_flag_strings(value.trim_start())
                         } else {
@@ -13335,7 +13332,7 @@ fn find_unknown_table_key(buf: &str, allowed: &[&str]) -> Option<String> {
                     j += 1;
                 }
                 if j < bytes.len() && bytes[j] == b'=' && bytes.get(j + 1).copied() != Some(b'=')
-                    && !allowed.iter().any(|a| *a == ident)
+                    && !allowed.contains(&ident)
                 {
                     return Some(ident.to_string());
                 }
