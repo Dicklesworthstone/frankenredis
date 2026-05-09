@@ -5005,8 +5005,23 @@ fn geodist(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     Ok(geo_distance_reply(distance))
 }
 
+/// Direction parameter for GEORADIUS / GEOSEARCH result ordering.
+///
+/// Mirrors upstream geo.c's SORT_NONE / SORT_ASC / SORT_DESC enum.
+/// `Unspecified` (= SORT_NONE) means the user did not pass ASC or
+/// DESC — results are returned in the underlying zset iteration
+/// order (geohash-score order). Upstream geo.c:714-718 promotes
+/// `Unspecified` to `Asc` when `COUNT` is specified without `ANY`,
+/// because returning the closest-N requires sorting by distance.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub(crate) enum GeoSort {
+    Unspecified,
+    Asc,
+    Desc,
+}
+
 /// Shared core for GEORADIUS, GEORADIUSBYMEMBER, GEOSEARCH, GEOSEARCHSTORE.
-/// Returns filtered (member, score, distance, lon, lat) tuples sorted by distance.
+/// Returns filtered (member, score, distance, lon, lat) tuples in the requested order.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn geo_search_core(
     store: &mut Store,
@@ -5015,7 +5030,8 @@ fn geo_search_core(
     center_lat: f64,
     radius_m: f64,
     count: Option<usize>,
-    asc: bool,
+    sort: GeoSort,
+    any: bool,
     now_ms: u64,
 ) -> Result<Vec<(Vec<u8>, f64, f64, f64, f64)>, CommandError> {
     let members = store.zrange_withscores(key, 0, -1, now_ms)?;
@@ -5029,10 +5045,31 @@ fn geo_search_core(
             results.push((member, score, dist, lon, lat));
         }
     }
-    if asc {
-        results.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+    // (frankenredis-1axne) Match upstream geo.c:714-718: if the
+    // user supplied COUNT without explicit ordering and without ANY,
+    // promote SORT_NONE → SORT_ASC. Otherwise SORT_NONE leaves the
+    // zset iteration order intact (geohash-score order), matching
+    // vendored where the result of `membersOfAllNeighbors` is iterated
+    // and not sorted. fr previously defaulted asc=true unconditionally,
+    // which always sorted by distance and broke parity with vendored
+    // for the no-ASC/DESC case.
+    let effective = if matches!(sort, GeoSort::Unspecified) && count.is_some() && !any {
+        GeoSort::Asc
     } else {
-        results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        sort
+    };
+    match effective {
+        GeoSort::Asc => {
+            results.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        GeoSort::Desc => {
+            results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        }
+        GeoSort::Unspecified => {
+            // Leave in zset iteration order (already produced above
+            // by zrange_withscores(0, -1) which emits members in
+            // ascending score order).
+        }
     }
     if let Some(limit) = count {
         results.truncate(limit);
@@ -5100,19 +5137,23 @@ enum GeoFlagContext {
 
 /// Parse optional flags WITHCOORD, WITHDIST, WITHHASH, COUNT N [ANY], ASC, DESC from argv starting
 /// at `start`. STORE/STOREDIST consumption depends on `context` — see [`GeoFlagContext`].
+///
+/// Returns `(withcoord, withdist, withhash, count, any, sort, to_meter)` where `sort` is
+/// `GeoSort::Unspecified` when neither ASC nor DESC was supplied (mirroring upstream's
+/// SORT_NONE default — see geo.c:569,585-587).
 #[allow(clippy::type_complexity)]
 fn parse_geo_search_flags(
     argv: &[Vec<u8>],
     start: usize,
     default_unit: f64,
     context: GeoFlagContext,
-) -> Result<(bool, bool, bool, Option<usize>, bool, bool, f64), CommandError> {
+) -> Result<(bool, bool, bool, Option<usize>, bool, GeoSort, f64), CommandError> {
     let mut withcoord = false;
     let mut withdist = false;
     let mut withhash = false;
     let mut count: Option<usize> = None;
     let mut any = false;
-    let mut asc = true;
+    let mut sort = GeoSort::Unspecified;
     let mut to_meter = default_unit;
     let mut i = start;
     while i < argv.len() {
@@ -5137,9 +5178,9 @@ fn parse_geo_search_flags(
         } else if eq_ascii_command(&argv[i], b"ANY") {
             any = true;
         } else if eq_ascii_command(&argv[i], b"ASC") {
-            asc = true;
+            sort = GeoSort::Asc;
         } else if eq_ascii_command(&argv[i], b"DESC") {
-            asc = false;
+            sort = GeoSort::Desc;
         } else if eq_ascii_command(&argv[i], b"STORE") {
             // (frankenredis-ffr2k) Upstream geo.c:596-602 gates STORE
             // on `!(flags & GEOSEARCH)` — only GEORADIUS variants
@@ -5199,7 +5240,7 @@ fn parse_geo_search_flags(
             "ERR the ANY argument requires COUNT argument".to_string(),
         ));
     }
-    Ok((withcoord, withdist, withhash, count, any, asc, to_meter))
+    Ok((withcoord, withdist, withhash, count, any, sort, to_meter))
 }
 
 /// Check whether a byte slice is a recognized geo search flag keyword.
@@ -5354,11 +5395,11 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // shared.syntaxerr. fr was silently dropping a missing dest
     // key and silently accepting STORE/STOREDIST in _RO mode.
     validate_geo_store_args(argv, 6, /* nostore = */ is_geo_ro_variant(&argv[0]))?;
-    let (withcoord, withdist, withhash, count, _any, asc, _) =
+    let (withcoord, withdist, withhash, count, any, sort, _) =
         parse_geo_search_flags(argv, 6, unit_mult, GeoFlagContext::GeoRadius)?;
     let (store_key, storedist) = extract_geo_store(argv, 6);
     let results = geo_search_core(
-        store, &argv[1], center_lon, center_lat, radius_m, count, asc, now_ms,
+        store, &argv[1], center_lon, center_lat, radius_m, count, sort, any, now_ms,
     )?;
     if let Some(dest) = store_key {
         geo_store_results(store, &dest, &results, unit_mult, storedist, now_ms)
@@ -5417,11 +5458,11 @@ fn georadiusbymember(
     let radius_m = radius * unit_mult;
     // (frankenredis-geostorearg) See georadius() above for rationale.
     validate_geo_store_args(argv, 5, /* nostore = */ is_geo_ro_variant(&argv[0]))?;
-    let (withcoord, withdist, withhash, count, _any, asc, _) =
+    let (withcoord, withdist, withhash, count, any, sort, _) =
         parse_geo_search_flags(argv, 5, unit_mult, GeoFlagContext::GeoRadius)?;
     let (store_key, storedist) = extract_geo_store(argv, 5);
     let results = geo_search_core(
-        store, &argv[1], center_lon, center_lat, radius_m, count, asc, now_ms,
+        store, &argv[1], center_lon, center_lat, radius_m, count, sort, any, now_ms,
     )?;
     if let Some(dest) = store_key {
         geo_store_results(store, &dest, &results, unit_mult, storedist, now_ms)
@@ -5582,7 +5623,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // Parse remaining flags (must run even when the source key is
     // missing so that syntax errors in the trailing options still
     // surface). (br-frankenredis-geofromnonexistent)
-    let (withcoord, withdist, withhash, count, _any, asc, _) =
+    let (withcoord, withdist, withhash, count, any, sort, _) =
         parse_geo_search_flags(argv, i, unit_mult, GeoFlagContext::GeoSearch)?;
     let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
         // Missing source key with FROMMEMBER — return empty set.
@@ -5590,7 +5631,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     };
 
     if let Some(rm) = radius_m {
-        let results = geo_search_core(store, &argv[1], cx, cy, rm, count, asc, now_ms)?;
+        let results = geo_search_core(store, &argv[1], cx, cy, rm, count, sort, any, now_ms)?;
         Ok(geo_search_reply(
             &results, withcoord, withdist, withhash, unit_mult,
         ))
@@ -5612,10 +5653,25 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                 results.push((member, score, dist, lon, lat));
             }
         }
-        if asc {
-            results.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        // (frankenredis-1axne) Apply the same SORT_NONE handling as
+        // geo_search_core: leave zset-iteration order intact unless
+        // ASC/DESC was explicit, OR COUNT-without-ANY promotes to ASC
+        // per upstream geo.c:714-718.
+        let effective = if matches!(sort, GeoSort::Unspecified) && count.is_some() && !any {
+            GeoSort::Asc
         } else {
-            results.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            sort
+        };
+        match effective {
+            GeoSort::Asc => {
+                results
+                    .sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            GeoSort::Desc => {
+                results
+                    .sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            GeoSort::Unspecified => {}
         }
         if let Some(limit) = count {
             results.truncate(limit);
@@ -5788,7 +5844,7 @@ fn geosearchstore(
     // (br-frankenredis-geofromnonexistent) — parse trailing flags
     // before the missing-center check so syntax errors surface even
     // when the source key is absent.
-    let (_, _, _, count, _any, asc, _) =
+    let (_, _, _, count, any, sort, _) =
         parse_geo_search_flags(&synth, i, unit_mult, GeoFlagContext::GeoSearchStore)?;
 
     let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
@@ -5804,7 +5860,7 @@ fn geosearchstore(
     };
 
     let results = if let Some(rm) = radius_m {
-        geo_search_core(store, &synth[1], cx, cy, rm, count, asc, now_ms)?
+        geo_search_core(store, &synth[1], cx, cy, rm, count, sort, any, now_ms)?
     } else if let (Some(w), Some(h)) = (box_width_m, box_height_m) {
         let members = store.zrange_withscores(&synth[1], 0, -1, now_ms)?;
         let half_w = w / 2.0;
@@ -5821,10 +5877,21 @@ fn geosearchstore(
                 res.push((member, score, dist, lon, lat));
             }
         }
-        if asc {
-            res.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+        // (frankenredis-1axne) Apply same SORT_NONE handling as
+        // geo_search_core / GEOSEARCH BYBOX (upstream geo.c:714-718).
+        let effective = if matches!(sort, GeoSort::Unspecified) && count.is_some() && !any {
+            GeoSort::Asc
         } else {
-            res.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            sort
+        };
+        match effective {
+            GeoSort::Asc => {
+                res.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            GeoSort::Desc => {
+                res.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            GeoSort::Unspecified => {}
         }
         if let Some(limit) = count {
             res.truncate(limit);
@@ -54066,6 +54133,232 @@ mod tests {
             )
             .expect("GEORADIUS STORE/STOREDIST key form must succeed");
         }
+    }
+
+    #[test]
+    fn georadius_geosearch_no_sort_returns_zset_iteration_order_per_upstream() {
+        // (frankenredis-1axne) Pin upstream geo.c:569,718 SORT_NONE
+        // semantics: when neither ASC nor DESC is supplied, results
+        // are returned in zset iteration order (geohash-score order),
+        // NOT distance order. fr previously defaulted asc=true and
+        // always sorted by distance, which broke parity for the
+        // common no-flag case.
+        //
+        // The promotion rule (geo.c:714-718) — COUNT without ANY
+        // promotes SORT_NONE to SORT_ASC — is also pinned.
+        //
+        // Layout: Palermo (13.36,38.12, geohash 3479099956230698)
+        //         Catania (15.09,37.50, geohash 3479447370796909)
+        // Search center (15,37): Catania ~56km, Palermo ~142km.
+        // zset score order: Palermo first (smaller geohash), then Catania.
+        // Distance order: Catania first, Palermo second.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"g".to_vec(),
+                b"13.361389".to_vec(),
+                b"38.115556".to_vec(),
+                b"Palermo".to_vec(),
+                b"15.087269".to_vec(),
+                b"37.502669".to_vec(),
+                b"Catania".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        // No-sort: GEORADIUS without ASC/DESC.
+        let out = dispatch_argv(
+            &[
+                b"GEORADIUS".to_vec(),
+                b"g".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("georadius");
+        let RespFrame::Array(Some(items)) = out else {
+            panic!("expected array, got {out:?}");
+        };
+        let names: Vec<_> = items
+            .iter()
+            .map(|f| match f {
+                RespFrame::BulkString(Some(b)) => b.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![b"Palermo".to_vec(), b"Catania".to_vec()],
+            "no-sort GEORADIUS should return Palermo (lower geohash score) first"
+        );
+
+        // No-sort: GEOSEARCH BYRADIUS without ASC/DESC.
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"g".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geosearch byradius");
+        let RespFrame::Array(Some(items)) = out else {
+            panic!("expected array");
+        };
+        let names: Vec<_> = items
+            .iter()
+            .map(|f| match f {
+                RespFrame::BulkString(Some(b)) => b.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![b"Palermo".to_vec(), b"Catania".to_vec()],
+            "no-sort GEOSEARCH BYRADIUS should return zset iteration order"
+        );
+
+        // No-sort + COUNT N (no ANY): upstream promotes to ASC, so
+        // closest-first wins → Catania first.
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"g".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"COUNT".to_vec(),
+                b"2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("count-promotes-asc");
+        let RespFrame::Array(Some(items)) = out else {
+            panic!("expected array");
+        };
+        let names: Vec<_> = items
+            .iter()
+            .map(|f| match f {
+                RespFrame::BulkString(Some(b)) => b.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![b"Catania".to_vec(), b"Palermo".to_vec()],
+            "COUNT without ANY/ASC/DESC must promote to ASC (closest-first)"
+        );
+
+        // No-sort + COUNT N + ANY: stays SORT_NONE → zset iteration
+        // order, then truncated.
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"g".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"COUNT".to_vec(),
+                b"1".to_vec(),
+                b"ANY".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("count-any-no-sort");
+        let RespFrame::Array(Some(items)) = out else {
+            panic!("expected array");
+        };
+        // ANY + COUNT 1 takes whichever of the two is first in zset
+        // iteration order — Palermo (lower geohash score).
+        assert_eq!(items.len(), 1);
+        assert!(matches!(&items[0], RespFrame::BulkString(Some(b)) if b == b"Palermo"));
+
+        // Explicit ASC still works.
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"g".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"ASC".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geosearch asc");
+        let RespFrame::Array(Some(items)) = out else {
+            panic!("expected array");
+        };
+        let names: Vec<_> = items
+            .iter()
+            .map(|f| match f {
+                RespFrame::BulkString(Some(b)) => b.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![b"Catania".to_vec(), b"Palermo".to_vec()],
+            "ASC = closest-first"
+        );
+
+        // Explicit DESC reverses.
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"g".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"DESC".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("geosearch desc");
+        let RespFrame::Array(Some(items)) = out else {
+            panic!("expected array");
+        };
+        let names: Vec<_> = items
+            .iter()
+            .map(|f| match f {
+                RespFrame::BulkString(Some(b)) => b.clone(),
+                _ => Vec::new(),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec![b"Palermo".to_vec(), b"Catania".to_vec()],
+            "DESC = farthest-first"
+        );
     }
 
     #[test]
