@@ -13245,10 +13245,11 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             "used_memory_scripts_human:{}\r\n",
             format_bytes_human(scripts_bytes)
         );
-        info.push_str("maxmemory_reservation:0\r\n");
-        info.push_str("maxmemory_reservation_human:0B\r\n");
-        info.push_str("maxmemory_desired:0\r\n");
-        info.push_str("maxmemory_desired_human:0B\r\n");
+        // (frankenredis-ngoap) Vendored Redis 7.2.4 INFO memory does
+        // not include maxmemory_desired{,_human} or
+        // maxmemory_reservation{,_human} — these were fr-specific
+        // extensions that broke field-name parity. Removed so the INFO
+        // memory section field set matches vendored exactly.
         info.push_str("allocator_frag_ratio:1.00\r\n");
         info.push_str("allocator_frag_bytes:0\r\n");
         info.push_str("allocator_rss_ratio:1.00\r\n");
@@ -13410,8 +13411,10 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         );
         let _ = write!(info, "evicted_keys:{}\r\n", store.stat_evicted_keys);
         info.push_str("evicted_clients:0\r\n");
-        let _ = write!(info, "total_keys_expired:{}\r\n", store.stat_expired_keys);
-        let _ = write!(info, "total_keys_evicted:{}\r\n", store.stat_evicted_keys);
+        // (frankenredis-ngoap) total_keys_expired / total_keys_evicted
+        // were fr-specific duplicates of expired_keys / evicted_keys
+        // (which are already emitted above). Vendored Redis 7.2.4 has
+        // no such fields; removed for INFO stats field-set parity.
         let _ = write!(info, "keyspace_hits:{}\r\n", store.stat_keyspace_hits);
         let _ = write!(info, "keyspace_misses:{}\r\n", store.stat_keyspace_misses);
         let _ = write!(
@@ -13424,13 +13427,10 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             "pubsub_patterns:{}\r\n",
             store.subscribed_patterns.len()
         );
-        let _ = write!(
-            info,
-            "pubsub_shardchannels:{}\r\n",
-            store.subscribed_shard_channels.len()
-        );
-        // Upstream Redis 7.2 also emits pubsubshard_channels (legacy
-        // alias for pubsub_shardchannels). (br-frankenredis-infostats)
+        // (frankenredis-ngoap) Upstream Redis 7.2.4 emits ONLY
+        // 'pubsubshard_channels' — the underscore-after-pubsub spelling
+        // 'pubsub_shardchannels' is fr-specific and was emitted as a
+        // duplicate. Removed; the canonical line stays.
         let _ = write!(
             info,
             "pubsubshard_channels:{}\r\n",
@@ -48047,8 +48047,12 @@ mod tests {
         assert!(info.contains("expired_stale_perc:50.00\r\n"));
         assert!(info.contains("expire_cycle_cpu_milliseconds:7\r\n"));
         assert!(info.contains("evicted_keys:2\r\n"));
-        assert!(info.contains("total_keys_expired:3\r\n"));
-        assert!(info.contains("total_keys_evicted:2\r\n"));
+        // (frankenredis-ngoap) total_keys_expired / total_keys_evicted
+        // were fr-specific duplicates and have been removed for parity
+        // with vendored 7.2.4. The canonical expired_keys / evicted_keys
+        // counters above carry the same values.
+        assert!(!info.contains("total_keys_expired"), "{info}");
+        assert!(!info.contains("total_keys_evicted"), "{info}");
         assert!(info.contains("keyspace_hits:11\r\n"));
         assert!(info.contains("keyspace_misses:4\r\n"));
         assert!(info.contains("unexpected_error_replies:2\r\n"));
