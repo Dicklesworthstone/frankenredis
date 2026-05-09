@@ -8140,16 +8140,34 @@ impl Runtime {
             if parameter.eq_ignore_ascii_case("replica-priority")
                 || parameter.eq_ignore_ascii_case("slave-priority")
             {
+                // (frankenredis-ap2eo) Upstream config.c declares
+                // replica-priority (and the slave-priority alias) as
+                // INTEGER_CONFIG with inclusive range [0, INT_MAX].
+                // Out-of-range values surface the table-level
+                // 'argument must be between 0 and 2147483647 inclusive'
+                // wording; unparseable values surface the integer-parse
+                // wording — both via config_set_failed. fr previously
+                // emitted the non-standard 'Invalid argument' wording
+                // and the parse error fell through to the generic
+                // 'value is not an integer or out of range' message.
+                let canonical = parameter.to_ascii_lowercase();
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 0 => value as usize,
+                    Ok(value) if (0..=i32::MAX as i64).contains(&value) => value as usize,
                     Ok(_) => {
-                        return RespFrame::Error(format!(
-                            "ERR Invalid argument for CONFIG SET '{parameter}'"
-                        ));
+                        return config_set_failed(
+                            &canonical,
+                            "argument must be between 0 and 2147483647 inclusive",
+                        );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return config_set_failed(
+                            &canonical,
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
                 };
                 next_replica_priority = Some(parsed);
+                static_override_updates.push((canonical, parsed.to_string()));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("repl-diskless-sync") {
@@ -8438,7 +8456,60 @@ impl Runtime {
                         return config_set_failed(canonical, "argument must be a memory value");
                     }
                 };
+                // (frankenredis-ap2eo) Upstream config.c declares
+                // active-defrag-ignore-bytes as INTEGER_CONFIG with
+                // INCLUSIVE range [1, INT64_MAX] — a value of 0 means
+                // 'never trigger defrag', which Redis represents as
+                // active-defrag disabled, not as a 0 byte threshold.
+                // Vendored emits 'argument must be between 1 and
+                // 9223372036854775807 inclusive'. fr previously accepted
+                // 0 and silently stored it.
+                if canonical == "active-defrag-ignore-bytes" && parsed == 0 {
+                    return config_set_failed(
+                        canonical,
+                        "argument must be between 1 and 9223372036854775807 inclusive",
+                    );
+                }
                 static_override_updates.push((canonical.to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("maxmemory-clients") {
+                // (frankenredis-ap2eo) Upstream config.c declares
+                // maxmemory-clients with a special validator that
+                // accepts memory sizes (e.g. '1g', '100mb') OR
+                // percentages of total memory (e.g. '50%'). Invalid
+                // forms surface 'argument must be a memory or percent
+                // value'. fr previously had no validator and silently
+                // stored arbitrary strings into config_overrides.
+                let value_str = match std::str::from_utf8(&pair[1]) {
+                    Ok(v) => v,
+                    Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                };
+                let trimmed = value_str.trim();
+                let is_percent = trimmed.ends_with('%');
+                let canonical = if is_percent {
+                    let body = &trimmed[..trimmed.len() - 1];
+                    if body.is_empty()
+                        || body.parse::<i64>().map(|v| v < 0).unwrap_or(true)
+                    {
+                        return config_set_failed(
+                            "maxmemory-clients",
+                            "argument must be a memory or percent value",
+                        );
+                    }
+                    trimmed.to_string()
+                } else {
+                    match parse_memory_size_arg(trimmed.as_bytes()) {
+                        Ok(value) => value.to_string(),
+                        Err(()) => {
+                            return config_set_failed(
+                                "maxmemory-clients",
+                                "argument must be a memory or percent value",
+                            );
+                        }
+                    }
+                };
+                static_override_updates.push(("maxmemory-clients".to_string(), canonical));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("client-output-buffer-limit") {
@@ -21086,6 +21157,118 @@ mod tests {
                     String::from_utf8_lossy(ok),
                 );
             }
+        }
+    }
+
+    #[test]
+    fn config_set_replica_priority_uses_table_level_wording_per_upstream() {
+        // (frankenredis-ap2eo) Upstream config.c declares
+        // replica-priority (and the slave-priority alias) as
+        // INTEGER_CONFIG with [0, INT_MAX]. fr previously emitted the
+        // non-standard 'Invalid argument' wording for out-of-range and
+        // the generic 'value is not an integer or out of range' for
+        // unparseable input. Both should route through config_set_failed
+        // to match vendored.
+        let mut rt = Runtime::default_strict();
+
+        for name in ["replica-priority", "slave-priority"] {
+            let bound = format!(
+                "ERR CONFIG SET failed (possibly related to argument '{name}') - argument must be between 0 and 2147483647 inclusive"
+            );
+            let parse = format!(
+                "ERR CONFIG SET failed (possibly related to argument '{name}') - argument couldn't be parsed into an integer"
+            );
+            for bad in [b"-1".as_slice(), b"-100", b"2147483648"] {
+                assert_eq!(
+                    rt.execute_frame(
+                        command(&[b"CONFIG", b"SET", name.as_bytes(), bad]),
+                        0,
+                    ),
+                    RespFrame::Error(bound.clone()),
+                    "{name} {:?} should be bound-rejected",
+                    String::from_utf8_lossy(bad),
+                );
+            }
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", name.as_bytes(), b"abc"]),
+                    0,
+                ),
+                RespFrame::Error(parse.clone()),
+            );
+            for good in [b"0".as_slice(), b"100", b"2147483647"] {
+                assert_eq!(
+                    rt.execute_frame(
+                        command(&[b"CONFIG", b"SET", name.as_bytes(), good]),
+                        0,
+                    ),
+                    RespFrame::SimpleString("OK".to_string()),
+                    "{name} {:?} should succeed",
+                    String::from_utf8_lossy(good),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn config_set_active_defrag_ignore_bytes_rejects_zero_per_upstream() {
+        // (frankenredis-ap2eo) Upstream config.c declares
+        // active-defrag-ignore-bytes as INTEGER_CONFIG with INCLUSIVE
+        // range [1, INT64_MAX] — value 0 is not 'never trigger', it's
+        // a separate disabled state. fr previously accepted 0.
+        let mut rt = Runtime::default_strict();
+        let msg = "ERR CONFIG SET failed (possibly related to argument 'active-defrag-ignore-bytes') - argument must be between 1 and 9223372036854775807 inclusive";
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"active-defrag-ignore-bytes", b"0"]),
+                0,
+            ),
+            RespFrame::Error(msg.to_string())
+        );
+        // Positive values still accepted.
+        for ok in [b"1".as_slice(), b"104857600", b"100kb", b"1g"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"active-defrag-ignore-bytes", ok]),
+                    0,
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "{:?} should succeed",
+                String::from_utf8_lossy(ok),
+            );
+        }
+    }
+
+    #[test]
+    fn config_set_maxmemory_clients_validates_memory_or_percent_per_upstream() {
+        // (frankenredis-ap2eo) Upstream config.c declares
+        // maxmemory-clients with a special validator that accepts
+        // memory sizes (1g, 100mb) OR percentages (50%). Invalid forms
+        // surface 'argument must be a memory or percent value'. fr
+        // previously had no validator and silently stored garbage.
+        let mut rt = Runtime::default_strict();
+        let msg = "ERR CONFIG SET failed (possibly related to argument 'maxmemory-clients') - argument must be a memory or percent value";
+        for bad in [b"-1".as_slice(), b"bogus", b"%", b"-50%", b"50pct"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"maxmemory-clients", bad]),
+                    0,
+                ),
+                RespFrame::Error(msg.to_string()),
+                "{:?} should be rejected",
+                String::from_utf8_lossy(bad),
+            );
+        }
+        for good in [b"0".as_slice(), b"100mb", b"1g", b"50%", b"100%"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"maxmemory-clients", good]),
+                    0,
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "{:?} should succeed",
+                String::from_utf8_lossy(good),
+            );
         }
     }
 
