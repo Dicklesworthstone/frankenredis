@@ -8111,36 +8111,67 @@ impl Runtime {
                     .push(("repl-diskless-sync-delay".to_string(), parsed.to_string()));
                 continue;
             }
-            if parameter.eq_ignore_ascii_case("min-replicas-to-write") {
+            // (frankenredis-pgl7g) min-replicas-to-write,
+            // min-replicas-max-lag, and the legacy aliases
+            // min-slaves-to-write / min-slaves-max-lag are all
+            // INTEGER_CONFIG with inclusive range [0, INT_MAX] in
+            // upstream config.c. Out-of-range values surface
+            // 'argument must be between 0 and 2147483647 inclusive'.
+            //
+            // Two prior bugs:
+            //   - the *replicas* handlers used the non-standard
+            //     'Invalid argument' wording instead of the table-level
+            //     bound message;
+            //   - the *slaves* aliases had no handler at all and were
+            //     silently accepted (returning OK for negative values).
+            if parameter.eq_ignore_ascii_case("min-replicas-to-write")
+                || parameter.eq_ignore_ascii_case("min-slaves-to-write")
+            {
+                // Use the user-supplied key in static_override_updates
+                // so CONFIG GET <alias> reflects the SET via that
+                // alias; the in-memory next_min_replicas_to_write
+                // shares the same value across both aliases.
+                let key = parameter.to_ascii_lowercase();
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 0 => value as usize,
+                    Ok(value) if (0..=i32::MAX as i64).contains(&value) => value as usize,
                     Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'min-replicas-to-write'"
-                                .to_string(),
+                        return config_set_failed(
+                            &key,
+                            "argument must be between 0 and 2147483647 inclusive",
                         );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return config_set_failed(
+                            &key,
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
                 };
                 next_min_replicas_to_write = Some(parsed);
-                static_override_updates
-                    .push(("min-replicas-to-write".to_string(), parsed.to_string()));
+                static_override_updates.push((key, parsed.to_string()));
                 continue;
             }
-            if parameter.eq_ignore_ascii_case("min-replicas-max-lag") {
+            if parameter.eq_ignore_ascii_case("min-replicas-max-lag")
+                || parameter.eq_ignore_ascii_case("min-slaves-max-lag")
+            {
+                let key = parameter.to_ascii_lowercase();
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) if value >= 0 => value as u64,
+                    Ok(value) if (0..=i32::MAX as i64).contains(&value) => value as u64,
                     Ok(_) => {
-                        return RespFrame::Error(
-                            "ERR Invalid argument for CONFIG SET 'min-replicas-max-lag'"
-                                .to_string(),
+                        return config_set_failed(
+                            &key,
+                            "argument must be between 0 and 2147483647 inclusive",
                         );
                     }
-                    Err(err) => return err.to_resp(),
+                    Err(_) => {
+                        return config_set_failed(
+                            &key,
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
                 };
                 next_min_replicas_max_lag = Some(parsed);
-                static_override_updates
-                    .push(("min-replicas-max-lag".to_string(), parsed.to_string()));
+                static_override_updates.push((key, parsed.to_string()));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("stop-writes-on-bgsave-error") {
@@ -20630,6 +20661,86 @@ mod tests {
         assert!(matches!(&items[0], RespFrame::BulkString(Some(b)) if b == b"cluster-preferred-endpoint-type"));
         // Last accepted value was 'HostName' → lowercased to 'hostname'.
         assert!(matches!(&items[1], RespFrame::BulkString(Some(b)) if b == b"hostname"));
+    }
+
+    #[test]
+    fn config_set_min_replicas_slaves_family_validates_range_and_aliases() {
+        // (frankenredis-pgl7g) min-replicas-to-write,
+        // min-replicas-max-lag, and the legacy aliases
+        // min-slaves-to-write / min-slaves-max-lag are all
+        // INTEGER_CONFIG with inclusive range [0, INT_MAX] in upstream
+        // config.c. Out-of-range values surface
+        // 'argument must be between 0 and 2147483647 inclusive'.
+        //
+        // Two prior bugs:
+        //   - the *replicas* handlers used the non-standard
+        //     'Invalid argument' wording instead of the table-level
+        //     bound message;
+        //   - the *slaves* aliases had no handler at all and were
+        //     silently accepted (returning OK for any value, including -1).
+        //
+        // Differential probe vs vendored 16380:
+        //   SET min-slaves-max-lag -1
+        //     vendored: ERR ... bound message
+        //     fr (pre-fix): OK
+        //   SET min-replicas-max-lag -1
+        //     vendored: ERR ... bound message
+        //     fr (pre-fix): ERR Invalid argument
+        let mut rt = Runtime::default_strict();
+
+        let bound_msg = |name: &str| {
+            format!(
+                "ERR CONFIG SET failed (possibly related to argument '{name}') - argument must be between 0 and 2147483647 inclusive"
+            )
+        };
+        let parse_msg = |name: &str| {
+            format!(
+                "ERR CONFIG SET failed (possibly related to argument '{name}') - argument couldn't be parsed into an integer"
+            )
+        };
+
+        for name in [
+            "min-replicas-to-write",
+            "min-replicas-max-lag",
+            "min-slaves-to-write",
+            "min-slaves-max-lag",
+        ] {
+            // Negative — bound message with the alias the user supplied.
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", name.as_bytes(), b"-1"]),
+                    0,
+                ),
+                RespFrame::Error(bound_msg(name)),
+                "{name} -1 should be bound-rejected"
+            );
+            // Unparseable — parse message.
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", name.as_bytes(), b"abc"]),
+                    0,
+                ),
+                RespFrame::Error(parse_msg(name)),
+                "{name} 'abc' should be parse-rejected"
+            );
+            // Valid (0 and a small positive both accepted).
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", name.as_bytes(), b"0"]),
+                    0,
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "{name} 0 should be accepted"
+            );
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", name.as_bytes(), b"42"]),
+                    0,
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "{name} 42 should be accepted"
+            );
+        }
     }
 
     #[test]
