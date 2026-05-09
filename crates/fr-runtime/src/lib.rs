@@ -8760,6 +8760,21 @@ impl Runtime {
                         "argument(s) must be one of the following: default, save, nosave, now, force",
                     );
                 }
+                // (frankenredis-9a33k) Upstream config.c:2378-2385
+                // (validateShutdownOnSigFlags) explicitly rejects the
+                // SAVE + NOSAVE combination with this exact wording —
+                // the two flags are mutually exclusive (one preserves
+                // RDB on shutdown, the other discards). All other
+                // combinations of {default, save, nosave, now, force}
+                // are valid.
+                let has_save = lower.split_whitespace().any(|tok| tok == "save");
+                let has_nosave = lower.split_whitespace().any(|tok| tok == "nosave");
+                if has_save && has_nosave {
+                    return config_set_failed(
+                        canonical,
+                        "shutdown options SAVE and NOSAVE can't be used simultaneously",
+                    );
+                }
                 static_override_updates.push((canonical.to_string(), lower));
                 continue;
             }
@@ -21008,6 +21023,69 @@ mod tests {
                 ])),
                 "GET should reflect last accepted SET",
             );
+        }
+    }
+
+    #[test]
+    fn config_set_shutdown_on_sig_rejects_save_nosave_combination_per_upstream() {
+        // (frankenredis-9a33k) Upstream config.c:2378-2385
+        // (validateShutdownOnSigFlags) rejects the SAVE + NOSAVE combo
+        // with the dedicated wording 'shutdown options SAVE and NOSAVE
+        // can't be used simultaneously'. The two flags are mutually
+        // exclusive (one preserves the RDB on shutdown, the other
+        // discards). fr previously accepted any token combination from
+        // {default, save, nosave, now, force} without checking the
+        // pair conflict.
+        //
+        // Differential probe vs vendored 16380:
+        //   CONFIG SET shutdown-on-sigterm 'save now nosave'
+        //     vendored: ERR ... SAVE and NOSAVE can't be used simultaneously
+        //     fr (pre-fix): OK
+        let mut rt = Runtime::default_strict();
+        let conflict = |name: &str| {
+            format!(
+                "ERR CONFIG SET failed (possibly related to argument '{name}') - shutdown options SAVE and NOSAVE can't be used simultaneously"
+            )
+        };
+
+        for name in ["shutdown-on-sigterm", "shutdown-on-sigint"] {
+            // SAVE + NOSAVE in any order rejected.
+            for combo in [
+                b"save nosave".as_slice(),
+                b"nosave save",
+                b"save now nosave",
+                b"nosave force save",
+            ] {
+                assert_eq!(
+                    rt.execute_frame(
+                        command(&[b"CONFIG", b"SET", name.as_bytes(), combo]),
+                        0,
+                    ),
+                    RespFrame::Error(conflict(name)),
+                    "{name} {:?} should error",
+                    String::from_utf8_lossy(combo),
+                );
+            }
+            // Non-conflicting combos still accepted.
+            for ok in [
+                b"default".as_slice(),
+                b"save",
+                b"nosave",
+                b"save now",
+                b"nosave now force",
+                b"save force",
+                b"now force",
+            ] {
+                assert_eq!(
+                    rt.execute_frame(
+                        command(&[b"CONFIG", b"SET", name.as_bytes(), ok]),
+                        0,
+                    ),
+                    RespFrame::SimpleString("OK".to_string()),
+                    "{name} {:?} should succeed",
+                    String::from_utf8_lossy(ok),
+                );
+            }
         }
     }
 
