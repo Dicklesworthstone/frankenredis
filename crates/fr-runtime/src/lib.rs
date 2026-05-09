@@ -8375,6 +8375,34 @@ impl Runtime {
                 static_override_updates.push(("maxmemory-samples".to_string(), parsed.to_string()));
                 continue;
             }
+            if parameter.eq_ignore_ascii_case("active-expire-effort") {
+                // (frankenredis-dnbcg) Upstream config.c declares
+                // active-expire-effort as INTEGER_CONFIG with inclusive
+                // range [1, 10]. Out-of-range values surface the
+                // table-level
+                // 'argument must be between 1 and 10 inclusive' wording;
+                // unparseable values use the generic integer-parse
+                // wording. fr previously had no validation, so any
+                // integer (including 0 and 11) was silently accepted.
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if (1..=10).contains(&value) => value,
+                    Ok(_) => {
+                        return config_set_failed(
+                            "active-expire-effort",
+                            "argument must be between 1 and 10 inclusive",
+                        );
+                    }
+                    Err(_) => {
+                        return config_set_failed(
+                            "active-expire-effort",
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
+                };
+                static_override_updates
+                    .push(("active-expire-effort".to_string(), parsed.to_string()));
+                continue;
+            }
             if parameter.eq_ignore_ascii_case("busy-reply-threshold")
                 || parameter.eq_ignore_ascii_case("lua-time-limit")
             {
@@ -20421,6 +20449,70 @@ mod tests {
                 RespFrame::BulkString(Some(b"500".to_vec())),
             ]))
         );
+    }
+
+    #[test]
+    fn config_set_active_expire_effort_enforces_1_to_10_inclusive_per_upstream() {
+        // (frankenredis-dnbcg) Vendored Redis declares
+        // active-expire-effort as INTEGER_CONFIG with inclusive range
+        // [1, 10] (config.c). Out-of-range values surface the
+        // table-level wording 'argument must be between 1 and 10
+        // inclusive'; unparseable values surface the integer-parse
+        // wording. fr previously had no validation for this option.
+        //
+        // Differential probe vs vendored 16380:
+        //   CONFIG SET active-expire-effort 0
+        //     vendored: ERR ... argument must be between 1 and 10 inclusive
+        //     fr (pre-fix): OK
+        //   CONFIG SET active-expire-effort 11  same divergence.
+        let mut rt = Runtime::default_strict();
+
+        let bound_msg = "ERR CONFIG SET failed (possibly related to argument 'active-expire-effort') - argument must be between 1 and 10 inclusive";
+        let parse_msg = "ERR CONFIG SET failed (possibly related to argument 'active-expire-effort') - argument couldn't be parsed into an integer";
+
+        for bad in [b"0".as_slice(), b"-1", b"11", b"100"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"active-expire-effort", bad]),
+                    0,
+                ),
+                RespFrame::Error(bound_msg.to_string()),
+                "bad value {:?} should be rejected with bound message",
+                String::from_utf8_lossy(bad),
+            );
+        }
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"active-expire-effort", b"abc"]),
+                0,
+            ),
+            RespFrame::Error(parse_msg.to_string())
+        );
+
+        // Bounds are inclusive: 1 and 10 must both be accepted.
+        for good in [b"1".as_slice(), b"5", b"10"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"active-expire-effort", good]),
+                    0,
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "good value {:?} should be accepted",
+                String::from_utf8_lossy(good),
+            );
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"GET", b"active-expire-effort"]),
+                    0,
+                ),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"active-expire-effort".to_vec())),
+                    RespFrame::BulkString(Some(good.to_vec())),
+                ])),
+                "GET should reflect last accepted SET",
+            );
+        }
     }
 
     #[test]
