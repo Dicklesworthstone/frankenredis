@@ -14222,11 +14222,29 @@ fn dispatch_acl_permission_error_for_argv(
         .map(DispatchAclPermissionError::Channel)
 }
 
+/// Return whether a COMMAND_TABLE row should be visible to introspection.
+///
+/// (frankenredis-bx2i8) Mirrors upstream server.c: the `sentinel`
+/// command is added to the command table only when the server is
+/// running in --sentinel mode. The runtime dispatch already gates on
+/// `store.sentinel_mode` at the dispatch site (see `Some(CommandId::Sentinel)
+/// if store.sentinel_mode` branch), so when the gate is off, invoking
+/// SENTINEL returns 'ERR unknown command' — but COMMAND LIST/COUNT/
+/// INFO/DOCS were still advertising the row, lying about its
+/// availability. Filter the row out so introspection matches dispatch.
+fn command_table_row_is_visible(name: &str, store: &Store) -> bool {
+    if name == "sentinel" {
+        return store.sentinel_mode;
+    }
+    true
+}
+
 fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     if argv.len() == 1 {
         // COMMAND with no sub-command: return full command info for all commands
         let entries: Vec<RespFrame> = COMMAND_TABLE
             .iter()
+            .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
             .map(|&(name, arity, flags, first_key, last_key, step)| {
                 command_info_entry(name, arity, flags, first_key, last_key, step)
             })
@@ -14245,7 +14263,11 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 subcommand: sub.to_string(),
             });
         }
-        Ok(RespFrame::Integer(COMMAND_TABLE.len() as i64))
+        let visible = COMMAND_TABLE
+            .iter()
+            .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
+            .count();
+        Ok(RespFrame::Integer(visible as i64))
     } else if sub.eq_ignore_ascii_case("LIST") {
         // COMMAND LIST [FILTERBY MODULE modname | ACLCAT category | PATTERN pattern]
         // Upstream server.c::commandListCommand requires either
@@ -14300,6 +14322,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 let pattern_lc: Vec<u8> = argv[4].to_ascii_lowercase();
                 let names: Vec<RespFrame> = COMMAND_TABLE
                     .iter()
+                    .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
                     .filter(|&&(name, ..)| fr_store::glob_match(&pattern_lc, name.as_bytes()))
                     .map(|&(name, ..)| RespFrame::BulkString(Some(name.as_bytes().to_vec())))
                     .collect();
@@ -14310,6 +14333,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
         }
         let names: Vec<RespFrame> = COMMAND_TABLE
             .iter()
+            .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
             .map(|&(name, ..)| RespFrame::BulkString(Some(name.as_bytes().to_vec())))
             .collect();
         Ok(RespFrame::Array(Some(names)))
@@ -14317,6 +14341,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
         if argv.len() < 3 {
             let entries: Vec<RespFrame> = COMMAND_TABLE
                 .iter()
+                .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
                 .map(|&(name, arity, flags, first_key, last_key, step)| {
                     command_info_entry(name, arity, flags, first_key, last_key, step)
                 })
@@ -14329,6 +14354,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
             let found = COMMAND_TABLE
                 .iter()
+                .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
                 .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name));
             match found {
                 Some(&(name, arity, flags, first_key, last_key, step)) => {
@@ -14351,6 +14377,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
         let docs_pairs: Vec<(RespFrame, RespFrame)> = if argv.len() == 2 {
             COMMAND_TABLE
                 .iter()
+                .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
                 .map(|&(name, arity, flags, first_key, last_key, step)| {
                     (
                         RespFrame::BulkString(Some(name.as_bytes().to_vec())),
@@ -14365,6 +14392,7 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                     let cmd_name = std::str::from_utf8(arg).ok()?;
                     let &(name, arity, flags, first_key, last_key, step) = COMMAND_TABLE
                         .iter()
+                        .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
                         .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))?;
                     Some((
                         RespFrame::BulkString(Some(name.as_bytes().to_vec())),
@@ -58541,6 +58569,115 @@ mod tests {
         )
         .expect("command list filterby pattern NOSUCHCMD*");
         assert_eq!(extract_names(no_match), Vec::<String>::new());
+    }
+
+    #[test]
+    fn command_table_hides_sentinel_in_standalone_mode_per_upstream() {
+        // (frankenredis-bx2i8) Vendored Redis only adds the `sentinel`
+        // command to its command table when the server is started in
+        // sentinel mode (server.c registers the sentinel command table
+        // conditionally). fr's runtime dispatch already gates SENTINEL
+        // on `store.sentinel_mode`, so invoking it returns 'ERR unknown
+        // command' in standalone — but COMMAND LIST/COUNT/INFO/DOCS
+        // were still advertising the row, lying about its
+        // availability. Filter the row out so introspection matches
+        // dispatch.
+        //
+        // Differential probe vs vendored 7.2.4 16380:
+        //   COMMAND COUNT          vendored: 241   fr (pre-fix): 242
+        //   COMMAND LIST | grep sentinel  vendored: ()  fr (pre-fix): sentinel
+        //   COMMAND INFO sentinel  vendored: nil  fr (pre-fix): full row
+        let mut store = Store::new();
+        assert!(
+            !store.sentinel_mode,
+            "default Store should not be in sentinel mode"
+        );
+
+        // COMMAND COUNT must NOT count sentinel.
+        let count = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"COUNT".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command count");
+        let RespFrame::Integer(n) = count else {
+            panic!("expected Integer, got {count:?}");
+        };
+        assert_eq!(
+            usize::try_from(n).unwrap(),
+            COMMAND_TABLE.len() - 1,
+            "standalone COMMAND COUNT must equal table-len minus the hidden sentinel row"
+        );
+
+        // COMMAND LIST must NOT contain sentinel.
+        let list = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"LIST".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command list");
+        let RespFrame::Array(Some(items)) = list else {
+            panic!("expected Array, got {list:?}");
+        };
+        let names: Vec<String> = items
+            .into_iter()
+            .filter_map(|f| match f {
+                RespFrame::BulkString(Some(b)) => String::from_utf8(b).ok(),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !names.iter().any(|n| n == "sentinel"),
+            "standalone COMMAND LIST must not contain 'sentinel'"
+        );
+
+        // COMMAND INFO sentinel must return nil bulk string.
+        let info = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"INFO".to_vec(),
+                b"sentinel".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("command info sentinel");
+        assert_eq!(info, RespFrame::Array(Some(vec![RespFrame::BulkString(None)])));
+
+        // Sanity: a real command (e.g. GET) is still reachable via
+        // COMMAND INFO so the filter doesn't over-hide.
+        let info_get = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"INFO".to_vec(),
+                b"get".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("command info get");
+        let RespFrame::Array(Some(items)) = info_get else {
+            panic!("expected Array");
+        };
+        assert!(matches!(&items[0], RespFrame::Array(Some(_))));
+
+        // When sentinel_mode is on (e.g. fr-sentinel binary), the row
+        // becomes visible again. Toggle and re-check COUNT.
+        store.sentinel_mode = true;
+        let count_sentinel = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"COUNT".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command count in sentinel mode");
+        let RespFrame::Integer(n) = count_sentinel else {
+            panic!("expected Integer");
+        };
+        assert_eq!(
+            usize::try_from(n).unwrap(),
+            COMMAND_TABLE.len(),
+            "sentinel-mode COMMAND COUNT must include the sentinel row"
+        );
     }
 
     mod metamorphic {
