@@ -1096,8 +1096,16 @@ impl CommandHistogramTracker {
         latency_us: u64,
         kind: CommandRecordKind,
     ) {
+        // (frankenredis-6n2qm) Upstream canonicalises command names to
+        // their lowercase commands.def form (`cmd->fullname`) before
+        // updating the per-command histogram. fr previously upper-cased
+        // the key, so callers like LATENCY HISTOGRAM and INFO
+        // Latencystats emitted UPPERCASE rows when the user happened
+        // to send commands uppercase, breaking grep parity with
+        // vendored. INFO Commandstats already lowercased on emission,
+        // masking the bug for that one path.
         self.histograms
-            .entry(command.to_ascii_uppercase())
+            .entry(command.to_ascii_lowercase())
             .or_default()
             .record_with_kind(latency_us, kind);
     }
@@ -1105,7 +1113,7 @@ impl CommandHistogramTracker {
     /// Get histogram for a specific command.
     #[must_use]
     pub fn get(&self, command: &str) -> Option<&CommandHistogram> {
-        self.histograms.get(&command.to_ascii_uppercase())
+        self.histograms.get(&command.to_ascii_lowercase())
     }
 
     /// Get all histograms, sorted by command name.
@@ -1130,7 +1138,9 @@ impl CommandHistogramTracker {
         commands
             .iter()
             .filter_map(|cmd| {
-                let key = cmd.to_ascii_uppercase();
+                // (frankenredis-6n2qm) Lookup key matches the
+                // canonical lowercase form used by record_with_kind.
+                let key = cmd.to_ascii_lowercase();
                 self.histograms.get_mut(&key).map(|h| {
                     h.reset();
                     1

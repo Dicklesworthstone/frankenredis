@@ -2469,13 +2469,26 @@ impl ServerState {
         let Ok(cmd_str) = std::str::from_utf8(cmd) else {
             return;
         };
+        // (frankenredis-6n2qm) Upstream stores command histograms keyed
+        // by the canonical lowercase command name (server.c sets
+        // `cmd->fullname` from the lowercase commands.def entry on
+        // dispatch). fr was keying on the raw user-supplied case, so
+        // INFO Commandstats / Latencystats / LATENCY HISTOGRAM all
+        // emitted UPPERCASE rows when callers happened to send their
+        // commands uppercase, breaking grep parity with vendored. INFO
+        // Commandstats already lowercased on emission, but the
+        // latency-histogram emitter and Latencystats section did not,
+        // so observable wire shape diverged. Lowercase at the
+        // recording site so every downstream emitter sees the
+        // canonical key.
+        let lowered = cmd_str.to_ascii_lowercase();
         let kind = if failed {
             CommandRecordKind::Failed
         } else {
             CommandRecordKind::Success
         };
         self.store
-            .record_command_histogram_with_kind(cmd_str, duration_us, kind);
+            .record_command_histogram_with_kind(&lowered, duration_us, kind);
     }
 
     /// Record a pre-handler rejection (wrong arity surfaced by the
@@ -2491,8 +2504,10 @@ impl ServerState {
         let Ok(cmd_str) = std::str::from_utf8(cmd) else {
             return;
         };
+        // (frankenredis-6n2qm) — see record_command_histogram_outcome.
+        let lowered = cmd_str.to_ascii_lowercase();
         self.store
-            .record_command_histogram_with_kind(cmd_str, 0, CommandRecordKind::Rejected);
+            .record_command_histogram_with_kind(&lowered, 0, CommandRecordKind::Rejected);
     }
 
     fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
@@ -13537,7 +13552,13 @@ mod tests {
             panic!("expected bulk info response");
         };
         let before_reset = String::from_utf8(before_reset_bytes).expect("utf8 info");
-        assert!(before_reset.contains("latency_percentiles_usec_GET:"));
+        // (frankenredis-6n2qm) Histogram keys are canonicalised to
+        // lowercase at the recording site (mirroring upstream's
+        // `cmd->fullname`), so Latencystats emits `_get:` not `_GET:`.
+        assert!(
+            before_reset.contains("latency_percentiles_usec_get:"),
+            "before_reset:\n{before_reset}"
+        );
 
         assert_eq!(
             rt.execute_frame(command(&[b"CONFIG", b"RESETSTAT"]), 3),
@@ -13550,7 +13571,7 @@ mod tests {
         };
         let after_reset = String::from_utf8(after_reset_bytes).expect("utf8 info");
         assert!(
-            !after_reset.contains("latency_percentiles_usec_GET:"),
+            !after_reset.contains("latency_percentiles_usec_get:"),
             "{after_reset}"
         );
     }
@@ -21432,8 +21453,10 @@ mod tests {
             disabled_info.contains("# Latencystats\r\n"),
             "{disabled_info}"
         );
+        // (frankenredis-6n2qm) Histogram keys are canonicalised to
+        // lowercase at the recording site.
         assert!(
-            !disabled_info.contains("latency_percentiles_usec_GET:"),
+            !disabled_info.contains("latency_percentiles_usec_get:"),
             "{disabled_info}"
         );
 
@@ -21455,7 +21478,7 @@ mod tests {
             unreachable!("expected bulk INFO response");
         };
         let enabled_info = String::from_utf8(enabled_info_bytes).expect("utf8 info");
-        assert!(enabled_info.contains("latency_percentiles_usec_GET:p50="));
+        assert!(enabled_info.contains("latency_percentiles_usec_get:p50="));
         assert!(enabled_info.contains("p99.9="));
     }
 
