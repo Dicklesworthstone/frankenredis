@@ -3879,7 +3879,7 @@ fn try_parse_hex_float(text: &str) -> Option<f64> {
     if after_prefix.is_empty() {
         return None;
     }
-    let (significand, exp_str) = match after_prefix.find(|c: char| c == 'p' || c == 'P') {
+    let (significand, exp_str) = match after_prefix.find(['p', 'P']) {
         Some(idx) => (&after_prefix[..idx], Some(&after_prefix[idx + 1..])),
         None => (after_prefix, None),
     };
@@ -3902,7 +3902,7 @@ fn try_parse_hex_float(text: &str) -> Option<f64> {
         f * 16f64.powi(-(frac_part.len() as i32))
     };
     let exp_val: i32 = match exp_str {
-        Some(s) if s.is_empty() => return None,
+        Some("") => return None,
         Some(s) => s.parse::<i32>().ok()?,
         None => 0,
     };
@@ -9958,81 +9958,79 @@ fn transform_register_function_table_form(body: &str) -> Option<String> {
                     {
                         name = Some(after_eq[1..1 + end].to_string());
                     }
-                } else if ident == "callback" {
-                    if let Some(rest) = after_eq.strip_prefix("function") {
-                        // rest = (params) body end[, ...]
-                        let rest = rest.trim_start();
-                        if rest.starts_with('(') {
-                            // Find matching ')'
-                            let pbytes = rest.as_bytes();
-                            let mut k = 1;
-                            let mut pdepth: i32 = 1;
-                            while k < pbytes.len() && pdepth > 0 {
-                                match pbytes[k] {
-                                    b'(' => pdepth += 1,
-                                    b')' => pdepth -= 1,
+                } else if ident == "callback"
+                    && let Some(rest) = after_eq.strip_prefix("function")
+                {
+                    // rest = (params) body end[, ...]
+                    let rest = rest.trim_start();
+                    if rest.starts_with('(') {
+                        // Find matching ')'
+                        let pbytes = rest.as_bytes();
+                        let mut k = 1;
+                        let mut pdepth: i32 = 1;
+                        while k < pbytes.len() && pdepth > 0 {
+                            match pbytes[k] {
+                                b'(' => pdepth += 1,
+                                b')' => pdepth -= 1,
+                                _ => {}
+                            }
+                            k += 1;
+                        }
+                        params = Some(&rest[..k]);
+                        // body extends from k to the matching `end` token
+                        // closing the function. Coarse keyword-block depth
+                        // counter (matches the helper in fr-store).
+                        let after_params = &rest[k..];
+                        let abytes = after_params.as_bytes();
+                        let mut m = 0;
+                        let mut bdepth: i32 = 1;
+                        while m < abytes.len() && bdepth > 0 {
+                            let bb = abytes[m];
+                            if bb == b'\'' || bb == b'"' {
+                                let q = bb;
+                                m += 1;
+                                while m < abytes.len() && abytes[m] != q {
+                                    if abytes[m] == b'\\' && m + 1 < abytes.len() {
+                                        m += 1;
+                                    }
+                                    m += 1;
+                                }
+                                if m < abytes.len() {
+                                    m += 1;
+                                }
+                                continue;
+                            }
+                            let lok = m == 0
+                                || !matches!(
+                                    abytes[m - 1],
+                                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'
+                                );
+                            if lok && matches!(bb, b'A'..=b'Z' | b'a'..=b'z' | b'_') {
+                                let s = m;
+                                while m < abytes.len()
+                                    && matches!(
+                                        abytes[m],
+                                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'
+                                    )
+                                {
+                                    m += 1;
+                                }
+                                let id = &after_params[s..m];
+                                match id {
+                                    "function" | "if" | "while" | "for" | "do" => bdepth += 1,
+                                    "end" => bdepth -= 1,
                                     _ => {}
                                 }
-                                k += 1;
+                                continue;
                             }
-                            params = Some(&rest[..k]);
-                            // body extends from k to the matching `end` token
-                            // closing the function. Coarse keyword-block depth
-                            // counter (matches the helper in fr-store).
-                            let after_params = &rest[k..];
-                            let abytes = after_params.as_bytes();
-                            let mut m = 0;
-                            let mut bdepth: i32 = 1;
-                            while m < abytes.len() && bdepth > 0 {
-                                let bb = abytes[m];
-                                if bb == b'\'' || bb == b'"' {
-                                    let q = bb;
-                                    m += 1;
-                                    while m < abytes.len() && abytes[m] != q {
-                                        if abytes[m] == b'\\' && m + 1 < abytes.len() {
-                                            m += 1;
-                                        }
-                                        m += 1;
-                                    }
-                                    if m < abytes.len() {
-                                        m += 1;
-                                    }
-                                    continue;
-                                }
-                                let lok = m == 0
-                                    || !matches!(
-                                        abytes[m - 1],
-                                        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'
-                                    );
-                                if lok && matches!(bb, b'A'..=b'Z' | b'a'..=b'z' | b'_') {
-                                    let s = m;
-                                    while m < abytes.len()
-                                        && matches!(
-                                            abytes[m],
-                                            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'
-                                        )
-                                    {
-                                        m += 1;
-                                    }
-                                    let id = &after_params[s..m];
-                                    match id {
-                                        "function" | "if" | "while" | "for" | "do" => {
-                                            bdepth += 1
-                                        }
-                                        "end" => bdepth -= 1,
-                                        _ => {}
-                                    }
-                                    continue;
-                                }
-                                m += 1;
-                            }
-                            fn_body = Some(&after_params[..m]);
-                            i = j + 1 + (after_eq.as_ptr() as usize - body[j + 1..].as_ptr() as usize)
-                                + (rest.as_ptr() as usize - after_eq.as_ptr() as usize)
-                                + k
-                                + m;
-                            continue;
+                            m += 1;
                         }
+                        fn_body = Some(&after_params[..m]);
+                        i = j + 1 + (after_eq.as_ptr() as usize - body[j + 1..].as_ptr() as usize)
+                            + (rest.as_ptr() as usize - after_eq.as_ptr() as usize)
+                            + k
+                            + m;
+                        continue;
                     }
                 }
             }
@@ -16641,7 +16639,7 @@ fn object_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     }
 }
 
-fn wait_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
+fn wait_cmd(argv: &[Vec<u8>], _store: &Store) -> Result<RespFrame, CommandError> {
     // Upstream commands.def declares WAIT with arity=3 (exact) and
     // flags=0 — notably NO CMD_NOSCRIPT (compare WAITAOF on the
     // adjacent line which does carry CMD_NOSCRIPT). A previous
@@ -19655,11 +19653,6 @@ fn bitfield_sign_extend(value: i64, bits: u8) -> i64 {
     }
 }
 
-/// Clamp a value to the range of the specified type encoding.
-fn bitfield_clamp(value: i64, bits: u8, signed: bool, overflow: BitfieldOverflow) -> i64 {
-    bitfield_clamp_with_overflow(value, false, bits, signed, overflow).0
-}
-
 /// Clamp a value and report whether overflow occurred.
 fn bitfield_clamp_with_overflow(
     value: i64,
@@ -22656,7 +22649,6 @@ mod tests {
         );
     }
 
-    #[test]
     // (frankenredis-l157c) Upstream db.c::swapdbCommand:1614-1618
     // rejects SWAPDB unconditionally in cluster mode. dispatch_argv
     // route (Lua / AOF replay / MULTI EXEC) needs the same guard.

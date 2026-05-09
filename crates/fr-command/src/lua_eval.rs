@@ -5124,10 +5124,10 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
             // representable in fr's frame enum; the BulkString of the
             // raw payload is the documented RESP2 fallback.
             let vs_field = t.get(&LuaValue::Str(b"verbatim_string".to_vec()));
-            if let LuaValue::Table(inner) = vs_field {
-                if let LuaValue::Str(s) = inner.get(&LuaValue::Str(b"string".to_vec())) {
-                    return RespFrame::BulkString(Some(s));
-                }
+            if let LuaValue::Table(inner) = vs_field
+                && let LuaValue::Str(s) = inner.get(&LuaValue::Str(b"string".to_vec()))
+            {
+                return RespFrame::BulkString(Some(s));
             }
 
             // Convert array part to RESP array (stop at first nil, matching Redis)
