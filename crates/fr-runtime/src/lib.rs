@@ -7876,23 +7876,53 @@ impl Runtime {
                 continue;
             }
             if parameter.eq_ignore_ascii_case("lfu-decay-time") {
+                // (frankenredis-qqt06) Upstream config.c declares
+                // lfu-decay-time as INTEGER_CONFIG with range [0, INT_MAX]
+                // (i.e. i32::MAX, not i64::MAX). fr previously emitted the
+                // i64-bound wording in the out-of-range error, which is
+                // both numerically wrong and a wire-shape diverge from
+                // vendored.
                 let parsed = match parse_i64_arg(&pair[1]) {
-                    Ok(value) => value,
+                    Ok(value) if (0..=i32::MAX as i64).contains(&value) => value,
+                    Ok(_) => {
+                        return config_set_failed(
+                            "lfu-decay-time",
+                            "argument must be between 0 and 2147483647 inclusive",
+                        );
+                    }
                     Err(_) => {
-                        return RespFrame::Error(
-                            "ERR CONFIG SET failed (possibly related to argument 'lfu-decay-time') - argument couldn't be parsed into an integer"
-                                .to_string(),
+                        return config_set_failed(
+                            "lfu-decay-time",
+                            "argument couldn't be parsed into an integer",
                         );
                     }
                 };
-                if parsed < 0 {
-                    return RespFrame::Error(
-                        "ERR CONFIG SET failed (possibly related to argument 'lfu-decay-time') - argument must be between 0 and 9223372036854775807 inclusive"
-                            .to_string(),
-                    );
-                }
                 next_lfu_decay_time = Some(parsed as u64);
                 static_override_updates.push(("lfu-decay-time".to_string(), parsed.to_string()));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("stream-node-max-entries") {
+                // (frankenredis-qqt06) Upstream config.c declares
+                // stream-node-max-entries as INTEGER_CONFIG with range
+                // [0, INT64_MAX]. fr previously had no validation,
+                // silently accepting negative values into config_overrides.
+                let parsed = match parse_i64_arg(&pair[1]) {
+                    Ok(value) if value >= 0 => value,
+                    Ok(_) => {
+                        return config_set_failed(
+                            "stream-node-max-entries",
+                            "argument must be between 0 and 9223372036854775807 inclusive",
+                        );
+                    }
+                    Err(_) => {
+                        return config_set_failed(
+                            "stream-node-max-entries",
+                            "argument couldn't be parsed into an integer",
+                        );
+                    }
+                };
+                static_override_updates
+                    .push(("stream-node-max-entries".to_string(), parsed.to_string()));
                 continue;
             }
             if parameter.eq_ignore_ascii_case("slowlog-log-slower-than") {
@@ -20884,6 +20914,100 @@ mod tests {
             ));
             let out = rt.execute_frame(frame, 3);
             assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        }
+    }
+
+    #[test]
+    fn config_set_lfu_decay_time_uses_i32_max_bound_per_upstream() {
+        // (frankenredis-qqt06) Upstream config.c declares lfu-decay-time
+        // as INTEGER_CONFIG with range [0, INT_MAX] (i32::MAX, not
+        // i64::MAX). fr previously rejected negative values with the
+        // i64-bound wording, which is both numerically wrong and a
+        // wire-shape diverge from vendored.
+        let mut rt = Runtime::default_strict();
+        let bound = "ERR CONFIG SET failed (possibly related to argument 'lfu-decay-time') - argument must be between 0 and 2147483647 inclusive";
+        let parse_msg = "ERR CONFIG SET failed (possibly related to argument 'lfu-decay-time') - argument couldn't be parsed into an integer";
+
+        for bad in [b"-1".as_slice(), b"2147483648", b"99999999999"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"lfu-decay-time", bad]),
+                    0,
+                ),
+                RespFrame::Error(bound.to_string()),
+                "{:?} should hit i32::MAX bound",
+                String::from_utf8_lossy(bad),
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"lfu-decay-time", b"abc"]),
+                0,
+            ),
+            RespFrame::Error(parse_msg.to_string()),
+        );
+        for good in [b"0".as_slice(), b"1", b"2147483647"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"lfu-decay-time", good]),
+                    0,
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "{:?} should be accepted",
+                String::from_utf8_lossy(good),
+            );
+        }
+    }
+
+    #[test]
+    fn config_set_stream_node_max_entries_validates_non_negative_per_upstream() {
+        // (frankenredis-qqt06) Upstream config.c declares
+        // stream-node-max-entries as INTEGER_CONFIG with range
+        // [0, INT64_MAX]. fr previously had no validation — any signed
+        // value was silently accepted into config_overrides.
+        let mut rt = Runtime::default_strict();
+        let bound = "ERR CONFIG SET failed (possibly related to argument 'stream-node-max-entries') - argument must be between 0 and 9223372036854775807 inclusive";
+        let parse_msg = "ERR CONFIG SET failed (possibly related to argument 'stream-node-max-entries') - argument couldn't be parsed into an integer";
+
+        for bad in [b"-1".as_slice(), b"-100", b"-9223372036854775808"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"stream-node-max-entries", bad]),
+                    0,
+                ),
+                RespFrame::Error(bound.to_string()),
+                "{:?} should be rejected",
+                String::from_utf8_lossy(bad),
+            );
+        }
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"stream-node-max-entries", b"abc"]),
+                0,
+            ),
+            RespFrame::Error(parse_msg.to_string()),
+        );
+        for good in [b"0".as_slice(), b"100", b"9223372036854775807"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"stream-node-max-entries", good]),
+                    0,
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "{:?} should be accepted",
+                String::from_utf8_lossy(good),
+            );
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"GET", b"stream-node-max-entries"]),
+                    0,
+                ),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"stream-node-max-entries".to_vec())),
+                    RespFrame::BulkString(Some(good.to_vec())),
+                ])),
+                "GET should reflect last accepted SET",
+            );
         }
     }
 
