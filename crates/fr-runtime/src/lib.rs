@@ -8469,14 +8469,47 @@ impl Runtime {
                 } else if value_str.eq_ignore_ascii_case("resetchannels") {
                     AclPubsubDefault::ResetChannels
                 } else {
-                    return RespFrame::Error(format!(
-                        "ERR Invalid argument '{value_str}' for CONFIG SET 'acl-pubsub-default'"
-                    ));
+                    // (frankenredis-xqgra) Upstream config.c declares
+                    // acl-pubsub-default as ENUM_CONFIG; invalid values
+                    // surface the table-level wording 'argument(s) must
+                    // be one of the following: <values>' via
+                    // configEnumGetError. fr previously emitted
+                    // 'Invalid argument <value>' which diverged from
+                    // every other enum-style config error.
+                    return config_set_failed(
+                        "acl-pubsub-default",
+                        "argument(s) must be one of the following: allchannels, resetchannels",
+                    );
                 };
                 next_acl_pubsub_default = Some(mode);
                 static_override_updates.push((
                     "acl-pubsub-default".to_string(),
                     mode.as_config_value().to_string(),
+                ));
+                continue;
+            }
+            if parameter.eq_ignore_ascii_case("cluster-preferred-endpoint-type") {
+                // (frankenredis-xqgra) Upstream config.c declares
+                // cluster-preferred-endpoint-type as ENUM_CONFIG with
+                // valid values {ip, hostname, unknown-endpoint}. fr
+                // previously had no validation, silently storing
+                // arbitrary values into config_overrides.
+                let value_str = match std::str::from_utf8(&pair[1]) {
+                    Ok(value) => value,
+                    Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
+                };
+                if !value_str.eq_ignore_ascii_case("ip")
+                    && !value_str.eq_ignore_ascii_case("hostname")
+                    && !value_str.eq_ignore_ascii_case("unknown-endpoint")
+                {
+                    return config_set_failed(
+                        "cluster-preferred-endpoint-type",
+                        "argument(s) must be one of the following: ip, hostname, unknown-endpoint",
+                    );
+                }
+                static_override_updates.push((
+                    "cluster-preferred-endpoint-type".to_string(),
+                    value_str.to_ascii_lowercase(),
                 ));
                 continue;
             }
@@ -20513,6 +20546,90 @@ mod tests {
                 "GET should reflect last accepted SET",
             );
         }
+    }
+
+    #[test]
+    fn config_set_enum_validation_uses_upstream_table_level_wording() {
+        // (frankenredis-xqgra) ENUM_CONFIG values in upstream Redis
+        // surface via configEnumGetError as
+        //   'argument(s) must be one of the following: <values>'
+        // (matching the existing appendfsync handler in fr). Two enum
+        // configs were previously bypassing this template:
+        //   - acl-pubsub-default emitted 'Invalid argument <value>'
+        //     (non-standard wording).
+        //   - cluster-preferred-endpoint-type had no validation at all
+        //     (silently accepted arbitrary values into config_overrides).
+        //
+        // Differential probe vs vendored 16380:
+        //   CONFIG SET cluster-preferred-endpoint-type bogus
+        //     vendored: ERR ... argument(s) must be one of the following: ip, hostname, unknown-endpoint
+        //     fr (pre-fix): OK
+        //   CONFIG SET acl-pubsub-default bogus
+        //     vendored: ERR ... argument(s) must be one of the following: allchannels, resetchannels
+        //     fr (pre-fix): ERR Invalid argument 'bogus' for CONFIG SET 'acl-pubsub-default'
+        let mut rt = Runtime::default_strict();
+
+        // acl-pubsub-default — bad value uses table-level wording.
+        let acl_msg = "ERR CONFIG SET failed (possibly related to argument 'acl-pubsub-default') - argument(s) must be one of the following: allchannels, resetchannels";
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"acl-pubsub-default", b"bogus"]),
+                0,
+            ),
+            RespFrame::Error(acl_msg.to_string()),
+        );
+        // Valid values still accepted.
+        for good in [b"allchannels".as_slice(), b"resetchannels", b"AllChannels"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"acl-pubsub-default", good]),
+                    0,
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "acl-pubsub-default {:?} should be accepted (case-insensitive)",
+                String::from_utf8_lossy(good),
+            );
+        }
+
+        // cluster-preferred-endpoint-type — bad value rejected with
+        // upstream wording; valid values accepted.
+        let endpoint_msg = "ERR CONFIG SET failed (possibly related to argument 'cluster-preferred-endpoint-type') - argument(s) must be one of the following: ip, hostname, unknown-endpoint";
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"cluster-preferred-endpoint-type", b"bogus"]),
+                0,
+            ),
+            RespFrame::Error(endpoint_msg.to_string()),
+        );
+        for good in [
+            b"ip".as_slice(),
+            b"hostname",
+            b"unknown-endpoint",
+            b"IP",
+            b"HostName",
+        ] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"cluster-preferred-endpoint-type", good]),
+                    0,
+                ),
+                RespFrame::SimpleString("OK".to_string()),
+                "cluster-preferred-endpoint-type {:?} should be accepted",
+                String::from_utf8_lossy(good),
+            );
+        }
+        // GET round-trips the canonical lowercase form.
+        let get_reply = rt.execute_frame(
+            command(&[b"CONFIG", b"GET", b"cluster-preferred-endpoint-type"]),
+            0,
+        );
+        let RespFrame::Array(Some(items)) = get_reply else {
+            panic!("expected Array");
+        };
+        assert_eq!(items.len(), 2);
+        assert!(matches!(&items[0], RespFrame::BulkString(Some(b)) if b == b"cluster-preferred-endpoint-type"));
+        // Last accepted value was 'HostName' → lowercased to 'hostname'.
+        assert!(matches!(&items[1], RespFrame::BulkString(Some(b)) if b == b"hostname"));
     }
 
     #[test]
