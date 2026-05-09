@@ -16373,7 +16373,13 @@ fn empty_scan_reply() -> RespFrame {
 }
 
 fn parse_scan_args(argv: &[Vec<u8>], start_idx: usize) -> Result<ScanArgs, CommandError> {
-    parse_scan_args_with_novalues(argv, start_idx, true)
+    // (frankenredis-c5746) NOVALUES is a Redis 7.4 HSCAN option (see
+    // upstream commit ffd44d76 — t_hash.c::hscanCommand parses
+    // 'NOVALUES' alongside MATCH/COUNT). The project's parity baseline
+    // is Redis 7.2.4, so the option must be rejected as an unknown
+    // trailing token via the existing syntax-error path. Same class
+    // as v0swv (DEBUG OBJECT hexpired_fields).
+    parse_scan_args_with_novalues(argv, start_idx, false)
 }
 
 fn parse_scan_args_with_novalues(
@@ -31464,13 +31470,14 @@ mod tests {
     }
 
     #[test]
-    fn scan_family_rejects_novalues_except_hscan_and_function_list_libraryname_wording() {
+    fn scan_family_rejects_novalues_for_7_2_4_baseline_and_function_list_libraryname_wording() {
         // Pin upstream parity for two scoped wording divergences
-        // (frankenredis-bvw2):
+        // (frankenredis-bvw2 + frankenredis-c5746):
         //
-        // (a) NOVALUES is a Redis 7.4 HSCAN-only option; SCAN/SSCAN/
-        //     ZSCAN must reject it as 'ERR syntax error'. Source-level
-        //     guard at parse_scan_args_with_novalues + per-call sites
+        // (a) NOVALUES is a Redis 7.4 HSCAN-only option; the project's
+        //     parity baseline is 7.2.4, so SCAN/SSCAN/ZSCAN/HSCAN must
+        //     all reject it as 'ERR syntax error'. Source-level guard
+        //     at parse_scan_args_with_novalues + per-call sites
         //     passing accept_novalues=false. Differential probe vs
         //     vendored 7.2.4 confirmed (with populated keys, since
         //     missing-key short-circuits to empty-scan before parse).
@@ -31515,10 +31522,20 @@ mod tests {
         )
         .expect("hset seed");
 
+        // (frankenredis-c5746) NOVALUES is a Redis 7.4 HSCAN option;
+        // the project's parity baseline is 7.2.4, so HSCAN must also
+        // reject it (alongside SCAN/SSCAN/ZSCAN which never accepted
+        // it). Differential probe vs vendored 7.2.4 16380 confirmed:
+        //   HSCAN h 0 NOVALUES -> ERR syntax error.
+        // Earlier versions of fr accepted HSCAN+NOVALUES as a forward-
+        // compat to 7.4, but that broke parity for the 7.2.4 baseline
+        // — same class as v0swv (DEBUG OBJECT hexpired_fields) and
+        // is now disabled across the entire SCAN family.
         let novalues_reject_cases: &[&[&[u8]]] = &[
             &[b"SCAN", b"0", b"NOVALUES"],
             &[b"SSCAN", b"s", b"0", b"NOVALUES"],
             &[b"ZSCAN", b"z", b"0", b"NOVALUES"],
+            &[b"HSCAN", b"h", b"0", b"NOVALUES"],
         ];
         for argv_in in novalues_reject_cases {
             let argv: Vec<Vec<u8>> = argv_in.iter().map(|b| b.to_vec()).collect();
@@ -31529,21 +31546,6 @@ mod tests {
                 "argv={argv_in:?} should reject NOVALUES with syntax error"
             );
         }
-
-        // HSCAN keeps NOVALUES as a Redis 7.4 forward-compat feature
-        // (intentional divergence from 7.2.4 — separate parity decision).
-        let hscan_ok = dispatch_argv(
-            &[
-                b"HSCAN".to_vec(),
-                b"h".to_vec(),
-                b"0".to_vec(),
-                b"NOVALUES".to_vec(),
-            ],
-            &mut store,
-            0,
-        )
-        .expect("hscan novalues forward-compat");
-        assert!(matches!(hscan_ok, RespFrame::Array(Some(_))));
 
         // FUNCTION LIST LIBRARYNAME with no argument: dedicated wording.
         let func_err = dispatch_argv(
