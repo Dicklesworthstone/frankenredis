@@ -12712,14 +12712,10 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("used_memory_startup:0\r\n");
         let _ = write!(info, "used_memory_dataset:{used_memory}\r\n");
         info.push_str("used_memory_dataset_perc:100.00%\r\n");
-        let maxmemory = store.maxmemory_bytes_live;
-        let _ = write!(info, "maxmemory:{maxmemory}\r\n");
-        let _ = write!(
-            info,
-            "maxmemory_human:{}\r\n",
-            format_bytes_human(maxmemory)
-        );
-        let _ = write!(info, "maxmemory_policy:{policy_str}\r\n");
+        // (frankenredis-fqwyf) maxmemory/maxmemory_human/maxmemory_policy
+        // are emitted later in the section per upstream
+        // server.c::genRedisInfoString — right after
+        // used_memory_scripts_human, just before allocator_frag_ratio.
         // Allocator-derived stats (placeholders since fr uses the
         // Rust system allocator). Upstream Redis 7.2 always emits
         // these, even with libc malloc — values are 0 / 1.0 then.
@@ -12772,6 +12768,17 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             "used_memory_scripts_human:{}\r\n",
             format_bytes_human(scripts_bytes)
         );
+        // (frankenredis-fqwyf) Upstream emits the maxmemory triple
+        // here, between used_memory_scripts_human and the
+        // allocator_frag_ratio block.
+        let maxmemory = store.maxmemory_bytes_live;
+        let _ = write!(info, "maxmemory:{maxmemory}\r\n");
+        let _ = write!(
+            info,
+            "maxmemory_human:{}\r\n",
+            format_bytes_human(maxmemory)
+        );
+        let _ = write!(info, "maxmemory_policy:{policy_str}\r\n");
         // (frankenredis-ngoap) Vendored Redis 7.2.4 INFO memory does
         // not include maxmemory_desired{,_human} or
         // maxmemory_reservation{,_human} — these were fr-specific
@@ -47842,6 +47849,48 @@ mod tests {
         assert!(info.contains("tracking_clients:1\r\n"));
         assert!(info.contains("maxmemory:2048\r\n"));
         assert!(info.contains("maxmemory_human:2.00K\r\n"));
+    }
+
+    /// (frankenredis-fqwyf) Upstream server.c::genRedisInfoString
+    /// emits the maxmemory triple (maxmemory / maxmemory_human /
+    /// maxmemory_policy) right after used_memory_scripts_human, just
+    /// before allocator_frag_ratio — not in the middle of the
+    /// dataset/allocator block. Pin the relative position so a future
+    /// reorder trips a targeted test.
+    #[test]
+    fn info_memory_emits_maxmemory_triple_after_scripts_human_per_upstream() {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"INFO".to_vec(), b"memory".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("info memory");
+        let RespFrame::BulkString(Some(bytes)) = out else {
+            panic!("expected bulk INFO memory reply"); // ubs:ignore — AI triage
+        };
+        let body = String::from_utf8(bytes).expect("utf8 memory");
+        let dataset_perc = body
+            .find("used_memory_dataset_perc:")
+            .expect("missing used_memory_dataset_perc");
+        let alloc_allocated = body
+            .find("allocator_allocated:")
+            .expect("missing allocator_allocated");
+        let scripts_human = body
+            .find("used_memory_scripts_human:")
+            .expect("missing used_memory_scripts_human");
+        let maxmemory = body.find("maxmemory:").expect("missing maxmemory");
+        let alloc_frag_ratio = body
+            .find("allocator_frag_ratio:")
+            .expect("missing allocator_frag_ratio");
+        assert!(
+            dataset_perc < alloc_allocated,
+            "used_memory_dataset_perc must precede allocator_allocated; body=\n{body}"
+        );
+        assert!(
+            alloc_allocated < scripts_human && scripts_human < maxmemory && maxmemory < alloc_frag_ratio,
+            "expected order allocator_allocated < used_memory_scripts_human < maxmemory < allocator_frag_ratio, got {alloc_allocated}/{scripts_human}/{maxmemory}/{alloc_frag_ratio}; body=\n{body}"
+        );
     }
 
     #[test]
