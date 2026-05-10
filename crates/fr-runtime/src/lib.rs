@@ -2138,8 +2138,13 @@ impl Default for ServerState {
         let mut store = Store::new();
         store.maxmemory_bytes_live = 0;
         Self {
+            // (frankenredis-d1505) Mirror upstream replication.c which
+            // calls getRandomHexChars(server.replid, CONFIG_RUN_ID_SIZE)
+            // at startup. The master_replid lives independently of
+            // server_run_id so it can rotate via DEBUG CHANGE-REPL-ID
+            // / failover without disturbing the run identity.
             replication_runtime_state: ReplicationRuntimeState::new(
-                "0000000000000000000000000000000000000000".to_string(),
+                fr_store::generate_run_id_hex(),
             ),
             store,
             aof_records: Vec::new(),

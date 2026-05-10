@@ -12403,11 +12403,38 @@ pub fn sha1_hex_public(data: &[u8]) -> String {
 
 /// Generate a 40-character hex run ID (like Redis's run_id).
 /// Uses process ID and a timestamp-based seed for uniqueness.
+/// Generate a 40-char hex run-id / replid, mirroring upstream
+/// util.c::getRandomHexChars(CONFIG_RUN_ID_SIZE). Public so
+/// fr-runtime can seed the replication master_replid with a unique
+/// value at startup independent of server_run_id.
+/// (frankenredis-d1505)
+pub fn generate_run_id_hex() -> String {
+    generate_run_id()
+}
+
 fn generate_run_id() -> String {
+    // (frankenredis-d1505) Each call must produce a distinct hex
+    // identifier — vendored populates server_run_id, cluster_shard_id,
+    // master_replid, and other identity strings via independent
+    // getRandomHexChars() calls and clients compare them. Earlier
+    // versions reseeded the LCG from PID alone every call, so all four
+    // identifiers collapsed to the same value. Combine the PID seed
+    // with a process-lifetime counter that advances on every call,
+    // and additionally mix in a non-deterministic time component so
+    // restarts get fresh ids.
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let pid = std::process::id() as u64;
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
     let seed = pid
         .wrapping_mul(0x5851_f42d_4c95_7f2d)
-        .wrapping_add(0xDEAD_BEEF);
+        .wrapping_add(0xDEAD_BEEF)
+        .wrapping_add(counter.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        .wrapping_add(now_nanos);
     let mut state = seed;
     let mut hex = String::with_capacity(40);
     for _ in 0..5 {
