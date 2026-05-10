@@ -2595,8 +2595,9 @@
       }
     },
     {
-      "name": "hscan_novalues_returns_keys_only",
+      "name": "hscan_novalues_rejected_as_syntax_error",
       "now_ms": 450,
+      "comment": "Upstream Redis 7.2.4 rejects HSCAN NOVALUES as a syntax error; NOVALUES is a Redis 7.4-only HSCAN option. (frankenredis-wt3wh)",
       "argv": [
         "HSCAN",
         "h_novalues",
@@ -2604,31 +2605,14 @@
         "NOVALUES"
       ],
       "expect": {
-        "kind": "array",
-        "value": [
-          {
-            "kind": "bulk",
-            "value": "0"
-          },
-          {
-            "kind": "array",
-            "value": [
-              {
-                "kind": "bulk",
-                "value": "field1"
-              },
-              {
-                "kind": "bulk",
-                "value": "field2"
-              }
-            ]
-          }
-        ]
+        "kind": "error",
+        "value": "ERR syntax error"
       }
     },
     {
-      "name": "hscan_novalues_with_match",
+      "name": "hscan_novalues_with_match_rejected_as_syntax_error",
       "now_ms": 450,
+      "comment": "MATCH does not make the Redis 7.4-only NOVALUES token valid under the Redis 7.2.4 oracle. (frankenredis-wt3wh)",
       "argv": [
         "HSCAN",
         "h_novalues",
@@ -2638,22 +2622,8 @@
         "NOVALUES"
       ],
       "expect": {
-        "kind": "array",
-        "value": [
-          {
-            "kind": "bulk",
-            "value": "0"
-          },
-          {
-            "kind": "array",
-            "value": [
-              {
-                "kind": "bulk",
-                "value": "field1"
-              }
-            ]
-          }
-        ]
+        "kind": "error",
+        "value": "ERR syntax error"
       }
     },
     {

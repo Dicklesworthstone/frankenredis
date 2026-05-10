@@ -9269,16 +9269,6 @@ mod tests {
             }
         };
         const XFAIL: &[&str] = &[
-            // HSCAN NOVALUES is a Redis 7.4 feature. Vendored server
-            // is 7.2.4 and rejects it as a syntax error. fr DOES
-            // implement HSCAN NOVALUES, so these stay XFAIL until the
-            // vendored server bumps. (frankenredis-uoe58: the ZSCAN
-            // entries were renamed to *_rejected_as_syntax_error and
-            // moved off the XFAIL list — both fr and upstream 7.2.4
-            // reject ZSCAN NOVALUES with a syntax error, since
-            // NOVALUES is HSCAN-only even in 7.4.)
-            "hscan_novalues_returns_keys_only",
-            "hscan_novalues_with_match",
             // SCAN cursor-streaming divergence: our SCAN returns the
             // full keyspace in one pass with a terminal cursor, so
             // COUNT-2 returns 3 items + cursor=2 (our encoding) while
