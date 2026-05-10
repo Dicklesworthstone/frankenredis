@@ -160,18 +160,34 @@ pub struct ConformanceCase {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExpectedFrame {
-    Simple { value: String },
-    Error { value: String },
-    Integer { value: i64 },
-    Bulk { value: Option<String> },
-    BulkContainsAll { value: Vec<String> },
-    BulkNotContainsAll { value: Vec<String> },
+    Simple {
+        value: String,
+    },
+    Error {
+        value: String,
+    },
+    Integer {
+        value: i64,
+    },
+    Bulk {
+        value: Option<String>,
+    },
+    BulkContainsAll {
+        value: Vec<String>,
+    },
+    BulkNotContainsAll {
+        value: Vec<String>,
+    },
     /// Match a SimpleString whose payload contains every needle in `value`.
     /// Mirror of BulkContainsAll for status-format replies — needed after
     /// frankenredis-gmqk1 switched DEBUG OBJECT to emit SimpleString
     /// matching upstream addReplyStatusFormat. (frankenredis-i5icx)
-    SimpleContainsAll { value: Vec<String> },
-    Array { value: Vec<ExpectedFrame> },
+    SimpleContainsAll {
+        value: Vec<String>,
+    },
+    Array {
+        value: Vec<ExpectedFrame>,
+    },
     NullArray,
     AnyInteger,
     AnyBulk,
@@ -3068,9 +3084,7 @@ fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
         ExpectedFrame::BulkNotContainsAll { value } => {
             RespFrame::BulkString(Some(value.join(" ").into_bytes()))
         }
-        ExpectedFrame::SimpleContainsAll { value } => {
-            RespFrame::SimpleString(value.join(" "))
-        }
+        ExpectedFrame::SimpleContainsAll { value } => RespFrame::SimpleString(value.join(" ")),
         ExpectedFrame::Array { value } => {
             RespFrame::Array(Some(value.iter().map(expected_to_frame).collect()))
         }
@@ -7960,9 +7974,7 @@ mod tests {
         ));
         // BulkString must not satisfy the simple-string matcher.
         assert!(!frame_matches_expected(
-            &RespFrame::BulkString(Some(
-                b"encoding:embstr serializedlength:5".to_vec()
-            )),
+            &RespFrame::BulkString(Some(b"encoding:embstr serializedlength:5".to_vec())),
             &expected
         ));
         // Missing needle must fail.
@@ -9778,29 +9790,116 @@ mod tests {
         });
     }
 
-    /// `core_expiry.json` is skipped in the live oracle: the 256-case
-    /// fixture interleaves EXPIRE / PEXPIRE / EXPIREAT / PEXPIREAT
-    /// with the observing TTL / PTTL / EXPIRETIME / PEXPIRETIME /
-    /// PERSIST / GETEX cases that exercise absolute-time semantics
-    /// at millisecond granularity. Every case uses the fixture's
-    /// pinned `now_ms`, but upstream's server only reads wall-clock
-    /// time — so a fixture that sets `EXPIREAT <future-time>` and
-    /// then queries TTL a few fixture-ticks later looks expired from
-    /// the fixture's vantage while upstream still reports the full
-    /// TTL. The entire fixture cascades into 200+ divergences that
-    /// would need either a TIME/CLOCK override on the upstream side
-    /// or an explicit fixture-clock rewrite. Tracked under the
-    /// shared 7rp6 TTL-accounting work + this family's own bead.
-    /// (br-frankenredis-wgxf)
+    /// `core_expiry.json` contains absolute-time cases that remain
+    /// fixture-clock-vs-wall-clock asymmetric against a real upstream
+    /// server, but the immediate relative-TTL, PERSIST, wrong-arity,
+    /// and parser-error paths are stable enough to run live today.
+    /// Keep future EXPIREAT/PEXPIREAT/EXPIRETIME/PEXPIRETIME coverage
+    /// deferred until the harness can override upstream time.
+    /// (br-frankenredis-wgxf, frankenredis-4kzt9)
     #[test]
     fn live_redis_core_expiry_matches_runtime() {
-        eprintln!(
-            "[live-oracle:core_expiry] skipping — 256-case fixture is \
-             fundamentally fixture-clock-vs-wall-clock asymmetric; \
-             harness needs upstream time-override before this suite \
-             can run end-to-end (tracked as br-frankenredis-wgxf + \
-             7rp6)."
-        );
+        let cfg = HarnessConfig::default_paths();
+        let Some(oracle_handle) = skip_if_no_oracle(&cfg) else {
+            return;
+        };
+        let mut oracle = oracle_handle.oracle_config();
+        // These cases assert immediate replies only; sleeping according
+        // to fixture timestamps would make the subset slow without
+        // improving parity, and the full absolute-time suite is still
+        // intentionally deferred.
+        oracle.align_timing_from_fixture = false;
+        const STABLE_CASES: &[&str] = &[
+            "pttl_missing_key_returns_minus2",
+            "ttl_missing_key_returns_minus2",
+            "set_key_for_expiry_tests",
+            "pttl_no_expiry_returns_minus1",
+            "ttl_no_expiry_returns_minus1",
+            "expire_sets_ttl_returns_1",
+            "pttl_after_expire_returns_remaining",
+            "ttl_after_expire_returns_seconds",
+            "persist_removes_expiry_returns_1",
+            "pttl_after_persist_returns_minus1",
+            "persist_no_expiry_returns_0",
+            "persist_missing_key_returns_0",
+            "expire_missing_key_returns_0",
+            "expire_nx_xx_conflict_setup",
+            "expire_nx_xx_conflict",
+            "expire_gt_lt_conflict",
+            "expire_wrong_arity",
+            "pttl_wrong_arity",
+            "ttl_wrong_arity",
+            "persist_wrong_arity",
+            "type_wrong_arity",
+            "expire_nx_option_only_set_when_no_expiry",
+            "expire_nx_on_no_expiry_succeeds",
+            "expire_nx_on_existing_expiry_fails",
+            "expire_xx_on_existing_expiry_succeeds",
+            "expire_gt_sets_longer_ttl",
+            "expire_gt_rejects_shorter_ttl",
+            "expire_lt_sets_shorter_ttl",
+            "expire_lt_rejects_longer_ttl",
+            "pexpire_missing_key",
+            "pexpire_wrong_arity",
+            "getex_no_option_setup",
+            "getex_no_option",
+            "getex_no_option_verify_no_expiry",
+            "getex_missing_key",
+            "getex_wrong_arity",
+            "set_keepttl_setup",
+            "set_keepttl_verify_initial_ttl",
+            "set_keepttl_overwrite",
+            "set_keepttl_ttl_preserved",
+            "set_keepttl_value_updated",
+            "expire_invalid_combo_setup",
+            "expire_nx_gt_error",
+            "expire_non_integer_error",
+            "pexpire_non_integer_error",
+            "expire_gt_lt_error",
+            "pexpire_nx_xx_error",
+            "expire_zero_setup",
+            "expire_zero_set_key",
+            "expire_zero_deletes_key",
+            "expire_zero_key_gone",
+            "expire_negative_set_key",
+            "expire_negative_deletes_key",
+            "expire_negative_key_gone",
+            "pexpire_zero_set_key",
+            "pexpire_zero_deletes_key",
+            "pexpire_zero_key_gone",
+            "pexpire_negative_set_key",
+            "pexpire_negative_deletes_key",
+            "pexpire_negative_key_gone",
+            "expireat_zero_set_key",
+            "expireat_zero_deletes_key",
+            "expireat_zero_key_gone",
+            "persist_no_ttl_setup",
+            "persist_no_ttl_returns_zero",
+            "persist_with_ttl_setup",
+            "persist_with_ttl_returns_one",
+            "persist_ttl_removed",
+            "persist_nonexistent_returns_zero",
+            "ttl_nonexistent_returns_minus2",
+            "pttl_nonexistent_returns_minus2",
+            "expire_nonexistent_returns_zero",
+            "expireat_invalid_int_setup",
+            "expireat_rejects_leading_plus",
+            "expireat_rejects_leading_zero",
+            "expireat_rejects_non_numeric",
+            "expireat_rejects_float",
+            "expireat_rejects_empty_string",
+            "pexpireat_rejects_leading_plus",
+            "pexpireat_rejects_leading_zero",
+            "pexpireat_rejects_non_numeric",
+            "pexpireat_rejects_float",
+            "expire_rejects_leading_plus",
+            "expire_rejects_leading_zero",
+            "pexpire_rejects_leading_plus",
+            "pexpire_rejects_leading_zero",
+        ];
+        run_live_diff_tolerant("core_expiry_stable_subset", || {
+            run_live_redis_diff_for_cases(&cfg, "core_expiry.json", STABLE_CASES, &oracle)
+        });
     }
 
     /// Wire the `core_function.json` fixture through the self-spawning
