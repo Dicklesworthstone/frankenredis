@@ -12583,20 +12583,15 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         } else {
             "redis_mode:standalone\r\n"
         });
-        // (frankenredis-efkwg) Map Rust's lowercase OS const to
-        // upstream's uname-style capitalized form (upstream emits the
-        // full `uname -s` output here, e.g. "Linux", "Darwin").
-        let os_name = match std::env::consts::OS {
-            "linux" => "Linux",
-            "macos" => "Darwin",
-            "windows" => "Windows",
-            "freebsd" => "FreeBSD",
-            "openbsd" => "OpenBSD",
-            "netbsd" => "NetBSD",
-            "dragonfly" => "DragonFly",
-            "solaris" => "SunOS",
-            other => other,
-        };
+        // (frankenredis-efkwg, frankenredis-6xj9o) Upstream
+        // server.c::genRedisInfoString concatenates uname struct
+        // sysname + release + machine (equivalent to `uname -srm`,
+        // e.g. "Linux 6.17.0-14-generic x86_64"). Read sysname and
+        // release from /proc on Linux and fall back to a static
+        // mapping where /proc isn't available; pair with std::env's
+        // ARCH for the machine field. Defensive fallbacks keep the
+        // string non-empty if any read fails.
+        let os_name = format_info_os_string();
         let _ = write!(info, "os:{os_name}\r\n");
         let _ = write!(
             info,
@@ -17342,6 +17337,60 @@ fn parse_linux_proc_self_stat_cpu_times(stat_line: &str) -> Option<(f64, f64)> {
         user_ticks as f64 / LINUX_CLOCK_TICKS_PER_SECOND,
         sys_ticks as f64 / LINUX_CLOCK_TICKS_PER_SECOND,
     ))
+}
+
+/// Format the INFO Server `os` field to match upstream
+/// `genRedisInfoString` which concatenates uname's sysname + release +
+/// machine (equivalent to `uname -srm`, e.g.
+/// `Linux 6.17.0-14-generic x86_64`). On Linux we read the values
+/// from /proc/sys/kernel; on other platforms we fall back to the
+/// static OS name. (frankenredis-6xj9o)
+fn format_info_os_string() -> String {
+    fn fallback_os_name() -> &'static str {
+        match std::env::consts::OS {
+            "linux" => "Linux",
+            "macos" => "Darwin",
+            "windows" => "Windows",
+            "freebsd" => "FreeBSD",
+            "openbsd" => "OpenBSD",
+            "netbsd" => "NetBSD",
+            "dragonfly" => "DragonFly",
+            "solaris" => "SunOS",
+            other => other,
+        }
+    }
+    fn arch_machine() -> &'static str {
+        // Map Rust's std::env::consts::ARCH to upstream's uname
+        // `machine` token (Linux kernel returns x86_64 / aarch64 /
+        // armv7l / etc.). Rust uses x86_64 / aarch64 / arm — close
+        // enough for INFO parity; rare arches fall through unchanged.
+        match std::env::consts::ARCH {
+            "x86_64" => "x86_64",
+            "aarch64" => "aarch64",
+            "arm" => "armv7l",
+            "x86" => "i686",
+            "powerpc64" => "ppc64le",
+            other => other,
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let sysname = std::fs::read_to_string("/proc/sys/kernel/ostype")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|_| fallback_os_name().to_string());
+        let release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if release.is_empty() {
+            format!("{sysname} {}", arch_machine())
+        } else {
+            format!("{sysname} {release} {}", arch_machine())
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        format!("{} {}", fallback_os_name(), arch_machine())
+    }
 }
 
 fn read_cpu_times() -> (f64, f64) {
@@ -49980,8 +50029,11 @@ mod tests {
         };
         let info = String::from_utf8(bytes).expect("utf8");
 
-        // Map the same way the handler does so the assertion is
-        // stable across Linux / macOS / Windows / *BSD targets.
+        // (frankenredis-6xj9o) Upstream's os field is `uname -srm`
+        // (sysname + release + machine). Pin only the leading sysname
+        // token + that the line starts with `os:` and ends with the
+        // expected machine (or arch-mapped equivalent), since the
+        // kernel release rolls forward.
         let expected_os = match std::env::consts::OS {
             "linux" => "Linux",
             "macos" => "Darwin",
@@ -49993,9 +50045,13 @@ mod tests {
             "solaris" => "SunOS",
             other => other,
         };
+        let os_line = info
+            .lines()
+            .find(|l| l.starts_with("os:"))
+            .unwrap_or_else(|| panic!("missing os: line in:\n{info}"));
         assert!(
-            info.contains(&format!("os:{expected_os}\r\n")),
-            "expected os:{expected_os} in: {info}"
+            os_line.starts_with(&format!("os:{expected_os}")),
+            "expected os: line to start with `os:{expected_os}`, got `{os_line}`"
         );
 
         // arch_bits derives from pointer width.
