@@ -1018,7 +1018,16 @@ fn command_key_references_with_exact_flags(
             return Err(CommandKeyLookupError::InvalidArguments);
         };
         let remaining = &argv[streams_idx + 1..];
-        if remaining.is_empty() || !remaining.len().is_multiple_of(2) {
+        // (frankenredis-hila4) Mirror upstream commands.def XREAD_Keyspecs
+        // (line 9780): begin_search KEYWORD "STREAMS", find_keys RANGE
+        // lastkey=-1 keystep=1 limit=2 — limit=2 means num_keys =
+        // remaining_args / 2 (integer division) when consumed via
+        // getKeysUsingKeySpecs. The cmd->getkeys_proc fallback is
+        // stricter and demands an even tail, but COMMAND GETKEYS prefers
+        // the keyspec, so vendored accepts odd tails like
+        // "STREAMS s 0 EXTRA" and returns just ["s"]. fr's previous
+        // strict even-count check rejected that as "Invalid arguments".
+        if remaining.len() < 2 {
             return Err(CommandKeyLookupError::InvalidArguments);
         }
         let num_keys = remaining.len() / 2;
@@ -49222,6 +49231,75 @@ mod tests {
         // arity check. Just assert it doesn't crash and surfaces an
         // error.
         assert!(matches!(out, Ok(RespFrame::Error(_)) | Err(_)));
+    }
+
+    /// (frankenredis-hila4) Mirror upstream commands.def XREAD_Keyspecs
+    /// (line 9780): begin_search KEYWORD "STREAMS", find_keys RANGE
+    /// lastkey=-1 keystep=1 limit=2. The limit=2 means num_keys =
+    /// remaining_args / 2 (integer division), so XREAD COUNT 5 STREAMS
+    /// s 0 EXTRA returns ["s"] even with the odd trailing tail.
+    /// Pre-fix, fr enforced an even-tail check and rejected with
+    /// "Invalid arguments specified for command".
+    #[test]
+    fn command_getkeys_xread_uses_keyspec_integer_division_for_odd_tails_per_upstream() {
+        let mut store = Store::new();
+
+        type GetKeysCase = (Vec<&'static [u8]>, Vec<&'static [u8]>);
+        let cases: Vec<GetKeysCase> = vec![
+            // (input argv after COMMAND GETKEYS, expected key list)
+            (vec![b"XREAD", b"STREAMS", b"s", b"0"], vec![b"s"]),
+            (vec![b"XREAD", b"STREAMS", b"s", b"0", b"EXTRA"], vec![b"s"]),
+            (
+                vec![b"XREAD", b"STREAMS", b"s", b"a", b"0", b"1"],
+                vec![b"s", b"a"],
+            ),
+            (
+                vec![b"XREAD", b"STREAMS", b"s", b"a", b"0", b"EXTRA"],
+                vec![b"s", b"a"],
+            ),
+            (
+                vec![b"XREAD", b"COUNT", b"5", b"STREAMS", b"s", b"0", b"EXTRA"],
+                vec![b"s"],
+            ),
+            (
+                vec![
+                    b"XREADGROUP",
+                    b"GROUP",
+                    b"g",
+                    b"c",
+                    b"STREAMS",
+                    b"s",
+                    b"0",
+                    b"EXTRA",
+                ],
+                vec![b"s"],
+            ),
+        ];
+        for (input, expected) in &cases {
+            let mut argv: Vec<Vec<u8>> =
+                vec![b"COMMAND".to_vec(), b"GETKEYS".to_vec()];
+            for arg in input.iter() {
+                argv.push(arg.to_vec());
+            }
+            let out = dispatch_argv(&argv, &mut store, 0).unwrap_or_else(|e| {
+                panic!("expected COMMAND GETKEYS reply for {input:?}, got err: {e:?}")
+            });
+            let RespFrame::Array(Some(keys)) = out else {
+                panic!("expected Array reply for {input:?}, got {out:?}");
+            };
+            let key_bytes: Vec<&[u8]> = keys
+                .iter()
+                .filter_map(|f| match f {
+                    RespFrame::BulkString(Some(b)) => Some(b.as_slice()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                key_bytes,
+                expected.as_slice(),
+                "COMMAND GETKEYS {input:?} key list mismatch"
+            );
+        }
     }
 
     #[test]
