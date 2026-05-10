@@ -406,13 +406,13 @@ proptest! {
         dst in prop::collection::vec(any::<u8>(), 1..32),
         value in prop::collection::vec(any::<u8>(), 1..128),
         ttl_ms in 1u64..20_000,
-        op_elapsed_ms in 0u64..20_000,
+        op_elapsed_seed in any::<u64>(),
         observe_extra_ms in 0u64..20_000
     ) {
         prop_assume!(src != dst);
-        prop_assume!(op_elapsed_ms < ttl_ms);
 
         let set_now = 1_000u64;
+        let op_elapsed_ms = op_elapsed_seed % ttl_ms;
         let op_now = set_now.saturating_add(op_elapsed_ms);
         let observe_now = op_now.saturating_add(observe_extra_ms);
 

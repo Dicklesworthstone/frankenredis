@@ -12478,56 +12478,250 @@ fn sha1_hex(data: &[u8]) -> String {
     format!("{h0:08x}{h1:08x}{h2:08x}{h3:08x}{h4:08x}")
 }
 
-const ENTRY_BASE_OVERHEAD_BYTES: usize = 32;
-const EXPIRY_METADATA_BYTES: usize = 8;
-const SORTED_SET_SCORE_BYTES: usize = 8;
-const STREAM_ID_BYTES: usize = 16;
-const HASHMAP_BUCKET_OVERHEAD_BYTES: usize = 16;
+const REDIS_OBJECT_OVERHEAD_BYTES: usize = 16;
+const REDIS_DICT_ENTRY_BYTES: usize = 24;
+const REDIS_SDS_ALLOC_OVERHEAD_BYTES: usize = 7;
+const REDIS_EMBSTR_ALLOC_OVERHEAD_BYTES: usize = 19;
+const REDIS_LISTPACK_HEADER_AND_EOF_BYTES: usize = 7;
+const REDIS_DICT_STRUCT_OVERHEAD_BYTES: usize = 64;
+const REDIS_QUICKLIST_BASE_OVERHEAD_BYTES: usize = 32;
+const REDIS_QUICKLIST_NODE_OVERHEAD_BYTES: usize = 32;
+const REDIS_SKIPLIST_BASE_OVERHEAD_BYTES: usize = 128;
+const REDIS_SKIPLIST_NODE_OVERHEAD_BYTES: usize = 32;
+const REDIS_SCORE_BYTES: usize = 8;
+const REDIS_STREAM_BASE_OVERHEAD_BYTES: usize = 4_656;
+const REDIS_STREAM_ENTRY_ID_BYTES: usize = 16;
 
 fn estimate_entry_memory_usage_bytes(key: &[u8], entry: &Entry) -> usize {
-    key.len()
-        .saturating_add(ENTRY_BASE_OVERHEAD_BYTES)
-        .saturating_add(EXPIRY_METADATA_BYTES)
-        .saturating_add(estimate_value_memory_usage_bytes(&entry.value))
+    estimate_key_memory_usage_bytes(key)
+        .saturating_add(estimate_expiry_memory_usage_bytes(entry))
+        .saturating_add(estimate_value_memory_usage_bytes(entry))
 }
 
-fn estimate_value_memory_usage_bytes(value: &Value) -> usize {
-    match value {
-        Value::String(bytes) => bytes.len(),
-        Value::Hash(fields) => fields
+fn estimate_key_memory_usage_bytes(key: &[u8]) -> usize {
+    REDIS_DICT_ENTRY_BYTES.saturating_add(estimate_sds_allocation_bytes(key.len()))
+}
+
+fn estimate_expiry_memory_usage_bytes(entry: &Entry) -> usize {
+    if entry.expires_at_ms.is_some() {
+        REDIS_DICT_ENTRY_BYTES
+    } else {
+        0
+    }
+}
+
+fn estimate_value_memory_usage_bytes(entry: &Entry) -> usize {
+    match &entry.value {
+        Value::String(bytes) => estimate_string_value_memory_usage_bytes(bytes, entry),
+        Value::Hash(fields) => estimate_hash_memory_usage_bytes(fields),
+        Value::List(items) => estimate_list_memory_usage_bytes(items),
+        Value::Set(members) => estimate_set_memory_usage_bytes(members),
+        Value::SortedSet(members) => estimate_sorted_set_memory_usage_bytes(members),
+        Value::Stream(entries) => estimate_stream_memory_usage_bytes(entries),
+    }
+}
+
+fn estimate_string_value_memory_usage_bytes(bytes: &[u8], entry: &Entry) -> usize {
+    if !entry.force_raw_encoding && !entry.force_string_encoding && is_int_encoded_string(bytes) {
+        REDIS_OBJECT_OVERHEAD_BYTES
+    } else if !entry.force_raw_encoding && bytes.len() <= 44 {
+        redis_allocation_size(
+            bytes
+                .len()
+                .saturating_add(REDIS_EMBSTR_ALLOC_OVERHEAD_BYTES),
+        )
+    } else {
+        REDIS_OBJECT_OVERHEAD_BYTES.saturating_add(estimate_sds_allocation_bytes(bytes.len()))
+    }
+}
+
+fn is_int_encoded_string(bytes: &[u8]) -> bool {
+    let Ok(s) = std::str::from_utf8(bytes) else {
+        return false;
+    };
+    let Ok(n) = s.parse::<i64>() else {
+        return false;
+    };
+    n.to_string() == s
+}
+
+fn estimate_hash_memory_usage_bytes(fields: &BTreeMap<Vec<u8>, Vec<u8>>) -> usize {
+    if fields
+        .iter()
+        .all(|(field, value)| field.len() <= 64 && value.len() <= 64)
+        && fields.len() <= 512
+    {
+        let payload = fields
             .iter()
             .map(|(field, value)| {
-                field
-                    .len()
-                    .saturating_add(value.len())
-                    .saturating_add(HASHMAP_BUCKET_OVERHEAD_BYTES)
+                estimate_listpack_entry_bytes(field)
+                    .saturating_add(estimate_listpack_entry_bytes(value))
             })
-            .sum(),
-        Value::List(items) => items.iter().map(Vec::len).sum(),
-        Value::Set(members) => members
+            .sum();
+        return estimate_listpack_object_memory_usage_bytes(payload);
+    }
+
+    REDIS_OBJECT_OVERHEAD_BYTES
+        .saturating_add(REDIS_DICT_STRUCT_OVERHEAD_BYTES)
+        .saturating_add(
+            fields
+                .iter()
+                .map(|(field, value)| {
+                    REDIS_DICT_ENTRY_BYTES
+                        .saturating_add(estimate_sds_allocation_bytes(field.len()))
+                        .saturating_add(estimate_sds_allocation_bytes(value.len()))
+                })
+                .sum(),
+        )
+}
+
+fn estimate_list_memory_usage_bytes(items: &VecDeque<Vec<u8>>) -> usize {
+    let payload: usize = items
+        .iter()
+        .map(|item| estimate_listpack_entry_bytes(item))
+        .sum();
+    let listpack_bytes =
+        redis_allocation_size(REDIS_LISTPACK_HEADER_AND_EOF_BYTES.saturating_add(payload));
+    if listpack_bytes <= 8 * 1024 {
+        estimate_listpack_object_memory_usage_bytes(payload)
+    } else {
+        REDIS_OBJECT_OVERHEAD_BYTES
+            .saturating_add(REDIS_QUICKLIST_BASE_OVERHEAD_BYTES)
+            .saturating_add(REDIS_QUICKLIST_NODE_OVERHEAD_BYTES)
+            .saturating_add(listpack_bytes)
+    }
+}
+
+fn estimate_set_memory_usage_bytes(members: &BTreeSet<Vec<u8>>) -> usize {
+    if members.len() <= 512 && members.iter().all(|member| parse_i64(member).is_ok()) {
+        let payload = 8usize.saturating_add(members.len().saturating_mul(REDIS_SCORE_BYTES));
+        return REDIS_OBJECT_OVERHEAD_BYTES.saturating_add(redis_allocation_size(payload));
+    }
+    if members.len() <= 128 && members.iter().all(|member| member.len() <= 64) {
+        let payload = members
             .iter()
-            .map(|member| member.len().saturating_add(HASHMAP_BUCKET_OVERHEAD_BYTES))
-            .sum(),
-        Value::SortedSet(members) => members
-            .keys()
-            .map(|member| {
-                member
-                    .len()
-                    .saturating_add(SORTED_SET_SCORE_BYTES)
-                    .saturating_add(HASHMAP_BUCKET_OVERHEAD_BYTES)
+            .map(|member| estimate_listpack_entry_bytes(member))
+            .sum();
+        return estimate_listpack_object_memory_usage_bytes(payload);
+    }
+
+    REDIS_OBJECT_OVERHEAD_BYTES
+        .saturating_add(REDIS_DICT_STRUCT_OVERHEAD_BYTES)
+        .saturating_add(
+            members
+                .iter()
+                .map(|member| {
+                    REDIS_DICT_ENTRY_BYTES
+                        .saturating_add(estimate_sds_allocation_bytes(member.len()))
+                })
+                .sum(),
+        )
+}
+
+fn estimate_sorted_set_memory_usage_bytes(members: &SortedSet) -> usize {
+    if members.len() <= 128 && members.keys().all(|member| member.len() <= 64) {
+        let payload = members
+            .iter()
+            .map(|(member, score)| {
+                estimate_listpack_entry_bytes(member)
+                    .saturating_add(estimate_listpack_score_bytes(*score))
             })
-            .sum(),
-        Value::Stream(entries) => entries
-            .values()
-            .map(|fields| {
-                STREAM_ID_BYTES.saturating_add(
-                    fields
-                        .iter()
-                        .map(|(field, value)| field.len().saturating_add(value.len()))
-                        .sum::<usize>(),
-                )
-            })
-            .sum(),
+            .sum();
+        return estimate_listpack_object_memory_usage_bytes(payload);
+    }
+
+    REDIS_OBJECT_OVERHEAD_BYTES
+        .saturating_add(REDIS_SKIPLIST_BASE_OVERHEAD_BYTES)
+        .saturating_add(
+            members
+                .keys()
+                .map(|member| {
+                    REDIS_DICT_ENTRY_BYTES
+                        .saturating_add(REDIS_SKIPLIST_NODE_OVERHEAD_BYTES)
+                        .saturating_add(REDIS_SCORE_BYTES)
+                        .saturating_add(estimate_sds_allocation_bytes(member.len()))
+                })
+                .sum(),
+        )
+}
+
+fn estimate_stream_memory_usage_bytes(entries: &StreamEntries) -> usize {
+    if entries.is_empty() {
+        return REDIS_STREAM_BASE_OVERHEAD_BYTES;
+    }
+
+    let payload = entries
+        .values()
+        .map(|fields| {
+            REDIS_STREAM_ENTRY_ID_BYTES.saturating_add(
+                fields
+                    .iter()
+                    .map(|(field, value)| {
+                        estimate_listpack_entry_bytes(field)
+                            .saturating_add(estimate_listpack_entry_bytes(value))
+                    })
+                    .sum::<usize>(),
+            )
+        })
+        .sum::<usize>();
+
+    REDIS_STREAM_BASE_OVERHEAD_BYTES.saturating_add(redis_allocation_size(
+        REDIS_LISTPACK_HEADER_AND_EOF_BYTES.saturating_add(payload),
+    ))
+}
+
+fn estimate_listpack_object_memory_usage_bytes(payload: usize) -> usize {
+    REDIS_OBJECT_OVERHEAD_BYTES.saturating_add(redis_allocation_size(
+        REDIS_LISTPACK_HEADER_AND_EOF_BYTES.saturating_add(payload),
+    ))
+}
+
+fn estimate_listpack_entry_bytes(bytes: &[u8]) -> usize {
+    bytes.len().max(1)
+}
+
+fn estimate_listpack_score_bytes(score: f64) -> usize {
+    if score.is_finite() && score.fract() == 0.0 {
+        format!("{score:.0}").len().max(1)
+    } else {
+        score.to_string().len().max(1)
+    }
+}
+
+fn estimate_sds_allocation_bytes(len: usize) -> usize {
+    redis_allocation_size(len.saturating_add(REDIS_SDS_ALLOC_OVERHEAD_BYTES))
+}
+
+fn redis_allocation_size(bytes: usize) -> usize {
+    if bytes == 0 {
+        0
+    } else if bytes <= 8 {
+        8
+    } else if bytes <= 16 {
+        16
+    } else if bytes <= 24 {
+        24
+    } else if bytes <= 32 {
+        32
+    } else if bytes <= 48 {
+        48
+    } else if bytes <= 64 {
+        64
+    } else if bytes <= 80 {
+        80
+    } else if bytes <= 96 {
+        96
+    } else if bytes <= 112 {
+        112
+    } else if bytes <= 128 {
+        128
+    } else {
+        let remainder = bytes % 16;
+        if remainder == 0 {
+            bytes
+        } else {
+            bytes.saturating_add(16 - remainder)
+        }
     }
 }
 
@@ -13886,6 +14080,62 @@ mod tests {
 
         assert_eq!(store.stat_keyspace_hits, 7);
         assert_eq!(store.stat_keyspace_misses, 3);
+    }
+
+    #[test]
+    fn memory_usage_small_encoding_baselines_match_vendored_redis() {
+        let mut store = Store::new();
+
+        store.set(b"sk".to_vec(), b"hello".to_vec(), None, 0);
+        assert_eq!(store.memory_usage_for_key(b"sk", 0), Some(64));
+
+        store.lpush(b"el", &[Vec::new()], 0).expect("lpush empty");
+        assert_eq!(store.memory_usage_for_key(b"el", 0), Some(64));
+
+        store
+            .lpush(
+                b"lp",
+                &[
+                    b"a".to_vec(),
+                    b"b".to_vec(),
+                    b"c".to_vec(),
+                    b"d".to_vec(),
+                    b"e".to_vec(),
+                ],
+                0,
+            )
+            .expect("lpush listpack");
+        assert_eq!(store.memory_usage_for_key(b"lp", 0), Some(72));
+
+        assert!(
+            store
+                .hset(b"hk", b"f1".to_vec(), b"v1".to_vec(), 0)
+                .expect("hset f1")
+        );
+        assert!(
+            store
+                .hset(b"hk", b"f2".to_vec(), b"v2".to_vec(), 0)
+                .expect("hset f2")
+        );
+        assert_eq!(store.memory_usage_for_key(b"hk", 0), Some(72));
+
+        store
+            .zadd(
+                b"zk",
+                &[
+                    (1.0, b"a".to_vec()),
+                    (2.0, b"b".to_vec()),
+                    (3.0, b"c".to_vec()),
+                ],
+                0,
+            )
+            .expect("zadd listpack");
+        assert_eq!(store.memory_usage_for_key(b"zk", 0), Some(72));
+
+        store
+            .xadd(b"xs", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
+            .expect("xadd stream");
+        assert_eq!(store.memory_usage_for_key(b"xs", 0), Some(4_728));
     }
 
     #[test]
