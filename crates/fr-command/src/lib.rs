@@ -15410,6 +15410,73 @@ fn upstream_command_docs_arguments(name: &str) -> Option<Vec<RespFrame>> {
                 ],
             ),
         ],
+        // (frankenredis-kb8fl) Mirror the pubsub family arg layouts from
+        // legacy_redis_code/redis/src/commands.def. SUBSCRIBE/SSUBSCRIBE
+        // are single-arg multiple; UNSUBSCRIBE/SUNSUBSCRIBE add the
+        // optional flag; PSUBSCRIBE/PUNSUBSCRIBE use the 'pattern' arg
+        // type; PUBLISH/SPUBLISH have channel/shardchannel + message.
+        "subscribe" => vec![command_docs_arg(
+            "channel",
+            "string",
+            None,
+            None,
+            None,
+            &["multiple"],
+            Vec::new(),
+        )],
+        "ssubscribe" => vec![command_docs_arg(
+            "shardchannel",
+            "string",
+            None,
+            None,
+            None,
+            &["multiple"],
+            Vec::new(),
+        )],
+        "unsubscribe" => vec![command_docs_arg(
+            "channel",
+            "string",
+            None,
+            None,
+            None,
+            &["optional", "multiple"],
+            Vec::new(),
+        )],
+        "sunsubscribe" => vec![command_docs_arg(
+            "shardchannel",
+            "string",
+            None,
+            None,
+            None,
+            &["optional", "multiple"],
+            Vec::new(),
+        )],
+        "psubscribe" => vec![command_docs_arg(
+            "pattern",
+            "pattern",
+            None,
+            None,
+            None,
+            &["multiple"],
+            Vec::new(),
+        )],
+        "punsubscribe" => vec![command_docs_arg(
+            "pattern",
+            "pattern",
+            None,
+            None,
+            None,
+            &["optional", "multiple"],
+            Vec::new(),
+        )],
+        "publish" => vec![
+            command_docs_arg("channel", "string", None, None, None, &[], Vec::new()),
+            command_docs_arg("message", "string", None, None, None, &[], Vec::new()),
+        ],
+        "spublish" => vec![
+            command_docs_arg("shardchannel", "string", None, None, None, &[], Vec::new()),
+            command_docs_arg("message", "string", None, None, None, &[], Vec::new()),
+        ],
         // (frankenredis-i0roi) Mirror BITCOUNT_Args from commands.def.
         // Layout: key + range block (start, end, unit oneof BYTE/BIT).
         "bitcount" => vec![
