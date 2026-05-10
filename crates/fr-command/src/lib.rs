@@ -13327,6 +13327,149 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("zrangestore", -5, "write denyoom", 1, 2, 1),
 ];
 
+/// Subcommand-level COMMAND INFO/LIST entries — the namespaced
+/// "parent|sub" rows that upstream emits from server.c::commandCommand
+/// by walking each container's `subcommand_dict`. fr previously
+/// omitted these 129 rows entirely, so `COMMAND LIST` reported 241
+/// entries vs vendored 7.2.4's 370 and `COMMAND INFO 'client|kill'`
+/// returned nil. Each row mirrors vendored Redis 7.2.4 byte-for-byte
+/// for (name, arity, flags, first_key, last_key, step) — verified by
+/// programmatic sweep against `redis-cli COMMAND INFO`. ACL categories,
+/// tips, and key_specs sub-arrays remain empty for now (covers the
+/// common-case introspection clients use; full sub-array fidelity is
+/// out of scope for this bead). (frankenredis-99to6)
+const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
+    ("acl|cat", -2, "noscript loading stale", 0, 0, 0),
+    ("acl|deluser", -3, "admin noscript loading stale", 0, 0, 0),
+    ("acl|dryrun", -4, "admin noscript loading stale", 0, 0, 0),
+    ("acl|genpass", -2, "noscript loading stale", 0, 0, 0),
+    ("acl|getuser", 3, "admin noscript loading stale", 0, 0, 0),
+    ("acl|help", 2, "loading stale", 0, 0, 0),
+    ("acl|list", 2, "admin noscript loading stale", 0, 0, 0),
+    ("acl|load", 2, "admin noscript loading stale", 0, 0, 0),
+    ("acl|log", -2, "admin noscript loading stale", 0, 0, 0),
+    ("acl|save", 2, "admin noscript loading stale", 0, 0, 0),
+    ("acl|setuser", -3, "admin noscript loading stale", 0, 0, 0),
+    ("acl|users", 2, "admin noscript loading stale", 0, 0, 0),
+    ("acl|whoami", 2, "noscript loading stale", 0, 0, 0),
+    ("client|caching", 3, "noscript loading stale", 0, 0, 0),
+    ("client|getname", 2, "noscript loading stale", 0, 0, 0),
+    ("client|getredir", 2, "noscript loading stale", 0, 0, 0),
+    ("client|help", 2, "loading stale", 0, 0, 0),
+    ("client|id", 2, "noscript loading stale", 0, 0, 0),
+    ("client|info", 2, "noscript loading stale", 0, 0, 0),
+    ("client|kill", -3, "admin noscript loading stale", 0, 0, 0),
+    ("client|list", -2, "admin noscript loading stale", 0, 0, 0),
+    ("client|no-evict", 3, "admin noscript loading stale", 0, 0, 0),
+    ("client|no-touch", 3, "noscript loading stale", 0, 0, 0),
+    ("client|pause", -3, "admin noscript loading stale", 0, 0, 0),
+    ("client|reply", 3, "noscript loading stale", 0, 0, 0),
+    ("client|setinfo", 4, "noscript loading stale", 0, 0, 0),
+    ("client|setname", 3, "noscript loading stale", 0, 0, 0),
+    ("client|tracking", -3, "noscript loading stale", 0, 0, 0),
+    ("client|trackinginfo", 2, "noscript loading stale", 0, 0, 0),
+    ("client|unblock", -3, "admin noscript loading stale", 0, 0, 0),
+    ("client|unpause", 2, "admin noscript loading stale", 0, 0, 0),
+    ("cluster|addslots", -3, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|addslotsrange", -4, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|bumpepoch", 2, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|count-failure-reports", 3, "admin stale", 0, 0, 0),
+    ("cluster|countkeysinslot", 3, "stale", 0, 0, 0),
+    ("cluster|delslots", -3, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|delslotsrange", -4, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|failover", -2, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|flushslots", 2, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|forget", 3, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|getkeysinslot", 4, "stale", 0, 0, 0),
+    ("cluster|help", 2, "loading stale", 0, 0, 0),
+    ("cluster|info", 2, "stale", 0, 0, 0),
+    ("cluster|keyslot", 3, "stale", 0, 0, 0),
+    ("cluster|links", 2, "stale", 0, 0, 0),
+    ("cluster|meet", -4, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|myid", 2, "stale", 0, 0, 0),
+    ("cluster|myshardid", 2, "stale", 0, 0, 0),
+    ("cluster|nodes", 2, "stale", 0, 0, 0),
+    ("cluster|replicas", 3, "admin stale", 0, 0, 0),
+    ("cluster|replicate", 3, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|reset", -2, "admin noscript stale", 0, 0, 0),
+    ("cluster|saveconfig", 2, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|set-config-epoch", 3, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|setslot", -4, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|shards", 2, "loading stale", 0, 0, 0),
+    ("cluster|slaves", 3, "admin stale", 0, 0, 0),
+    ("cluster|slots", 2, "loading stale", 0, 0, 0),
+    ("command|count", 2, "loading stale", 0, 0, 0),
+    ("command|docs", -2, "loading stale", 0, 0, 0),
+    ("command|getkeys", -3, "loading stale", 0, 0, 0),
+    ("command|getkeysandflags", -3, "loading stale", 0, 0, 0),
+    ("command|help", 2, "loading stale", 0, 0, 0),
+    ("command|info", -2, "loading stale", 0, 0, 0),
+    ("command|list", -2, "loading stale", 0, 0, 0),
+    ("config|get", -3, "admin noscript loading stale", 0, 0, 0),
+    ("config|help", 2, "loading stale", 0, 0, 0),
+    ("config|resetstat", 2, "admin noscript loading stale", 0, 0, 0),
+    ("config|rewrite", 2, "admin noscript loading stale", 0, 0, 0),
+    ("config|set", -4, "admin noscript loading stale", 0, 0, 0),
+    ("function|delete", 3, "write noscript", 0, 0, 0),
+    ("function|dump", 2, "noscript", 0, 0, 0),
+    ("function|flush", -2, "write noscript", 0, 0, 0),
+    ("function|help", 2, "loading stale", 0, 0, 0),
+    ("function|kill", 2, "noscript allow_busy", 0, 0, 0),
+    ("function|list", -2, "noscript", 0, 0, 0),
+    ("function|load", -3, "write denyoom noscript", 0, 0, 0),
+    ("function|restore", -3, "write denyoom noscript", 0, 0, 0),
+    ("function|stats", 2, "noscript allow_busy", 0, 0, 0),
+    ("latency|doctor", 2, "admin noscript loading stale", 0, 0, 0),
+    ("latency|graph", 3, "admin noscript loading stale", 0, 0, 0),
+    ("latency|help", 2, "loading stale", 0, 0, 0),
+    ("latency|histogram", -2, "admin noscript loading stale", 0, 0, 0),
+    ("latency|history", 3, "admin noscript loading stale", 0, 0, 0),
+    ("latency|latest", 2, "admin noscript loading stale", 0, 0, 0),
+    ("latency|reset", -2, "admin noscript loading stale", 0, 0, 0),
+    ("memory|doctor", 2, "", 0, 0, 0),
+    ("memory|help", 2, "loading stale", 0, 0, 0),
+    ("memory|malloc-stats", 2, "", 0, 0, 0),
+    ("memory|purge", 2, "", 0, 0, 0),
+    ("memory|stats", 2, "", 0, 0, 0),
+    ("memory|usage", -3, "readonly", 2, 2, 1),
+    ("module|help", 2, "loading stale", 0, 0, 0),
+    ("module|list", 2, "admin noscript", 0, 0, 0),
+    ("module|load", -3, "admin noscript no_async_loading", 0, 0, 0),
+    ("module|loadex", -3, "admin noscript no_async_loading", 0, 0, 0),
+    ("module|unload", 3, "admin noscript no_async_loading", 0, 0, 0),
+    ("object|encoding", 3, "readonly", 2, 2, 1),
+    ("object|freq", 3, "readonly", 2, 2, 1),
+    ("object|help", 2, "loading stale", 0, 0, 0),
+    ("object|idletime", 3, "readonly", 2, 2, 1),
+    ("object|refcount", 3, "readonly", 2, 2, 1),
+    ("pubsub|channels", -2, "pubsub loading stale", 0, 0, 0),
+    ("pubsub|help", 2, "loading stale", 0, 0, 0),
+    ("pubsub|numpat", 2, "pubsub loading stale", 0, 0, 0),
+    ("pubsub|numsub", -2, "pubsub loading stale", 0, 0, 0),
+    ("pubsub|shardchannels", -2, "pubsub loading stale", 0, 0, 0),
+    ("pubsub|shardnumsub", -2, "pubsub loading stale", 0, 0, 0),
+    ("script|debug", 3, "noscript", 0, 0, 0),
+    ("script|exists", -3, "noscript", 0, 0, 0),
+    ("script|flush", -2, "noscript", 0, 0, 0),
+    ("script|help", 2, "loading stale", 0, 0, 0),
+    ("script|kill", 2, "noscript allow_busy", 0, 0, 0),
+    ("script|load", 3, "noscript stale", 0, 0, 0),
+    ("slowlog|get", -2, "admin loading stale", 0, 0, 0),
+    ("slowlog|help", 2, "loading stale", 0, 0, 0),
+    ("slowlog|len", 2, "admin loading stale", 0, 0, 0),
+    ("slowlog|reset", 2, "admin loading stale", 0, 0, 0),
+    ("xgroup|create", -5, "write denyoom", 2, 2, 1),
+    ("xgroup|createconsumer", 5, "write denyoom", 2, 2, 1),
+    ("xgroup|delconsumer", 5, "write", 2, 2, 1),
+    ("xgroup|destroy", 4, "write", 2, 2, 1),
+    ("xgroup|help", 2, "loading stale", 0, 0, 0),
+    ("xgroup|setid", -5, "write", 2, 2, 1),
+    ("xinfo|consumers", 4, "readonly", 2, 2, 1),
+    ("xinfo|groups", 3, "readonly", 2, 2, 1),
+    ("xinfo|help", 2, "loading stale", 0, 0, 0),
+    ("xinfo|stream", -3, "readonly", 2, 2, 1),
+];
+
 /// Check if the argument count (including command name) satisfies the command's arity.
 /// Returns Ok(()) if valid, Err(command_name) if arity mismatch.
 pub fn check_command_arity(name: &[u8], argc: usize) -> Result<(), &'static str> {
@@ -13723,10 +13866,14 @@ fn command_table_row_is_visible(name: &str, store: &Store) -> bool {
 
 fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandError> {
     if argv.len() == 1 {
-        // COMMAND with no sub-command: return full command info for all commands
+        // COMMAND with no sub-command: return full command info for all commands.
+        // (frankenredis-99to6) Upstream server.c::commandCommand walks
+        // both the top-level commands dict AND each container's
+        // subcommand_dict, so the reply contains both groups.
         let entries: Vec<RespFrame> = COMMAND_TABLE
             .iter()
             .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
+            .chain(SUBCOMMAND_TABLE.iter())
             .map(|&(name, arity, flags, first_key, last_key, step)| {
                 command_info_entry(name, arity, flags, first_key, last_key, step)
             })
@@ -13800,11 +13947,14 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 // 'GET*' matches the lowercase command name 'get'. fr stores
                 // command names lowercase already, so lowercasing only the
                 // pattern is equivalent to upstream's two-sided tolower.
-                // (frankenredis-cmdlistnocase)
+                // (frankenredis-cmdlistnocase) The walk includes the
+                // namespaced parent|sub rows so patterns like 'client|*'
+                // match per upstream. (frankenredis-99to6)
                 let pattern_lc: Vec<u8> = argv[4].to_ascii_lowercase();
                 let names: Vec<RespFrame> = COMMAND_TABLE
                     .iter()
                     .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
+                    .chain(SUBCOMMAND_TABLE.iter())
                     .filter(|&&(name, ..)| fr_store::glob_match(&pattern_lc, name.as_bytes()))
                     .map(|&(name, ..)| RespFrame::BulkString(Some(name.as_bytes().to_vec())))
                     .collect();
@@ -13813,17 +13963,23 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 return Ok(RespFrame::Error("ERR syntax error".to_string()));
             }
         }
+        // (frankenredis-99to6) COMMAND LIST with no FILTERBY emits both
+        // top-level rows and the synthesised parent|sub entries.
         let names: Vec<RespFrame> = COMMAND_TABLE
             .iter()
             .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
+            .chain(SUBCOMMAND_TABLE.iter())
             .map(|&(name, ..)| RespFrame::BulkString(Some(name.as_bytes().to_vec())))
             .collect();
         Ok(RespFrame::Array(Some(names)))
     } else if sub.eq_ignore_ascii_case("INFO") {
         if argv.len() < 3 {
+            // (frankenredis-99to6) Bare COMMAND INFO mirrors the
+            // top-level + subcommand walk.
             let entries: Vec<RespFrame> = COMMAND_TABLE
                 .iter()
                 .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
+                .chain(SUBCOMMAND_TABLE.iter())
                 .map(|&(name, arity, flags, first_key, last_key, step)| {
                     command_info_entry(name, arity, flags, first_key, last_key, step)
                 })
@@ -13834,9 +13990,15 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
         for arg in &argv[2..] {
             let cmd_name =
                 std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
+            // (frankenredis-99to6) Look up subcommand-style names
+            // (e.g. 'client|kill') in SUBCOMMAND_TABLE before falling
+            // back to nil — vendored 7.2.4 returns the per-sub metadata
+            // from server.c::commandInfoCommand by walking the
+            // container's subcommand_dict.
             let found = COMMAND_TABLE
                 .iter()
                 .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
+                .chain(SUBCOMMAND_TABLE.iter())
                 .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name));
             match found {
                 Some(&(name, arity, flags, first_key, last_key, step)) => {
@@ -20302,6 +20464,7 @@ mod tests {
         CLIENT_TRACKING_OPT_SWITCH_REQUIRES_DISABLE, CLIENT_TRACKING_OPTIN_OPTOUT_CONFLICT,
         CLIENT_TRACKING_PREFIX_REQUIRES_BCAST, CLIENT_TRACKING_REDIRECT_MISSING,
         CLIENT_UNBLOCK_REASON_INVALID, COMMAND_TABLE, CommandError, CommandId, MigrateKeySpec,
+        SUBCOMMAND_TABLE,
         SCRIPT_NOSCRIPT_ERROR, acl_command_selectors_for_argv, classify_command,
         client_wrong_subcommand_arity, cluster_disabled_error, cluster_reset_with_keys_error,
         cluster_wrong_subcommand_arity, command_acl_categories, commands_in_acl_category,
@@ -57184,6 +57347,139 @@ mod tests {
             COMMAND_TABLE.len(),
             "sentinel-mode COMMAND COUNT must include the sentinel row"
         );
+    }
+
+    #[test]
+    fn command_list_includes_namespaced_subcommands_per_upstream() {
+        // (frankenredis-99to6) Upstream server.c::commandCommand walks
+        // the top-level commands AND each container's subcommand_dict,
+        // so `COMMAND LIST` reports 370 entries vs fr's pre-fix 241.
+        // Pin the count and the ACL/parent breakdown so future
+        // additions (modules, more containers) keep parity. COMMAND
+        // COUNT must stay top-level only per upstream commands.def
+        // (commandCountCommand only counts the top-level dict).
+        let mut store = Store::new();
+
+        let list = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"LIST".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command list");
+        let RespFrame::Array(Some(items)) = list else {
+            panic!("expected Array, got {list:?}");
+        };
+        let names: Vec<String> = items
+            .iter()
+            .filter_map(|f| match f {
+                RespFrame::BulkString(Some(b)) => String::from_utf8(b.clone()).ok(),
+                _ => None,
+            })
+            .collect();
+        let namespaced = names.iter().filter(|n| n.contains('|')).count();
+        assert_eq!(
+            namespaced,
+            SUBCOMMAND_TABLE.len(),
+            "COMMAND LIST must emit one parent|sub row per SUBCOMMAND_TABLE entry"
+        );
+        // Spot-check a representative row from each container to catch
+        // future drift in the table.
+        for needle in [
+            "acl|cat",
+            "client|kill",
+            "cluster|nodes",
+            "command|info",
+            "config|set",
+            "function|stats",
+            "latency|histogram",
+            "memory|usage",
+            "module|loadex",
+            "object|encoding",
+            "pubsub|shardchannels",
+            "script|exists",
+            "slowlog|get",
+            "xgroup|setid",
+            "xinfo|stream",
+        ] {
+            assert!(
+                names.iter().any(|n| n == needle),
+                "COMMAND LIST must include namespaced sub {needle}",
+            );
+        }
+
+        // COMMAND COUNT must stay at the top-level row count
+        // (subcommands are advertised via LIST but not counted —
+        // upstream commandCountCommand returns dictSize(commands) only).
+        let count = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"COUNT".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("command count");
+        let RespFrame::Integer(n) = count else {
+            panic!("expected Integer");
+        };
+        assert_eq!(
+            usize::try_from(n).unwrap(),
+            COMMAND_TABLE.len() - 1,
+            "COMMAND COUNT in standalone must remain top-level only"
+        );
+
+        // COMMAND INFO 'client|kill' must return the per-sub metadata
+        // instead of the pre-fix nil bulk reply.
+        let info = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"INFO".to_vec(),
+                b"client|kill".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("command info client|kill");
+        let RespFrame::Array(Some(items)) = info else {
+            panic!("expected Array");
+        };
+        assert_eq!(items.len(), 1);
+        let RespFrame::Array(Some(fields)) = &items[0] else {
+            panic!("expected per-command Array, got {:?}", &items[0]);
+        };
+        assert_eq!(
+            fields[0],
+            RespFrame::BulkString(Some(b"client|kill".to_vec())),
+            "name field"
+        );
+        assert_eq!(fields[1], RespFrame::Integer(-3), "arity field");
+
+        // COMMAND LIST FILTERBY PATTERN includes namespaced subs.
+        let pattern_list = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"LIST".to_vec(),
+                b"FILTERBY".to_vec(),
+                b"PATTERN".to_vec(),
+                b"client|*".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("command list filterby pattern client|*");
+        let RespFrame::Array(Some(items)) = pattern_list else {
+            panic!("expected Array");
+        };
+        let pattern_names: Vec<String> = items
+            .iter()
+            .filter_map(|f| match f {
+                RespFrame::BulkString(Some(b)) => String::from_utf8(b.clone()).ok(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            pattern_names.len(),
+            18,
+            "client|* should match the 18 client subcommands"
+        );
+        assert!(pattern_names.iter().all(|n| n.starts_with("client|")));
     }
 
     mod metamorphic {
