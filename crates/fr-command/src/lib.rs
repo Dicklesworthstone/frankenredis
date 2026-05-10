@@ -9552,7 +9552,10 @@ fn transform_register_function(line: &str) -> Option<String> {
     let rest = rest.strip_prefix("function")?;
     let rest = rest.trim_end();
     let rest = rest.strip_suffix(')')?;
-    Some(format!("function {name}{rest}"))
+    // (frankenredis-j02x9) Use `local function` to keep the function out
+    // of the locked globals table — fr's strict-globals enforcement now
+    // blocks bare `function name() ...` writes during script execution.
+    Some(format!("local function {name}{rest}"))
 }
 
 /// Transform a table-form `register_function{...}` call into a
@@ -9704,7 +9707,9 @@ fn transform_register_function_table_form(body: &str) -> Option<String> {
     let name = name?;
     let params = params?;
     let body = fn_body?;
-    Some(format!("function {name}{params}{body}"))
+    // (frankenredis-j02x9) Use `local function` to keep the function out
+    // of the locked globals table.
+    Some(format!("local function {name}{params}{body}"))
 }
 
 // ── SSUBSCRIBE / SUNSUBSCRIBE / SPUBLISH (shard Pub/Sub) ───────────
@@ -39371,6 +39376,106 @@ mod tests {
         )
         .expect("eval");
         assert_eq!(out, RespFrame::Integer(1));
+    }
+
+    /// (frankenredis-j02x9) The Lua sandbox locks the globals table at
+    /// the start of every script, mirroring upstream
+    /// script_lua.c::luaSetTableProtectionRecursively. After lock:
+    ///   - Reading an undefined global raises "Script attempted to
+    ///     access nonexistent global variable 'NAME'"
+    ///   - Writing to ANY global (existing or new) raises "Attempt to
+    ///     modify a readonly table"
+    ///   - Top-level `function f() end` is a global write and is also
+    ///     blocked.
+    ///   - Locals (`local X = 5`, `local function f() end`) work
+    ///     normally.
+    #[test]
+    fn eval_strict_globals_match_upstream_sandbox() {
+        let mut store = Store::new();
+
+        let undef = dispatch_argv(
+            &[b"EVAL".to_vec(), b"return UNDEFINED".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("dispatch undef");
+        assert!(
+            matches!(&undef, RespFrame::Error(s) if s.contains("Script attempted to access nonexistent global variable 'UNDEFINED'")),
+            "undefined global must raise upstream error, got {undef:?}"
+        );
+
+        let write_global = dispatch_argv(
+            &[
+                b"EVAL".to_vec(),
+                b"X = 5; return X".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("dispatch write");
+        assert!(
+            matches!(&write_global, RespFrame::Error(s) if s.contains("Attempt to modify a readonly table")),
+            "global write must raise readonly error, got {write_global:?}"
+        );
+
+        let func_decl = dispatch_argv(
+            &[
+                b"EVAL".to_vec(),
+                b"function f() return 1 end; return 2".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("dispatch func decl");
+        assert!(
+            matches!(&func_decl, RespFrame::Error(s) if s.contains("Attempt to modify a readonly table")),
+            "global function decl must raise readonly error, got {func_decl:?}"
+        );
+
+        // Locals must continue to work.
+        let local_var = dispatch_argv(
+            &[
+                b"EVAL".to_vec(),
+                b"local Y = 5; return Y".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("dispatch local var");
+        assert_eq!(local_var, RespFrame::Integer(5));
+
+        let local_func = dispatch_argv(
+            &[
+                b"EVAL".to_vec(),
+                b"local function f() return 7 end; return f()".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("dispatch local func");
+        assert_eq!(local_func, RespFrame::Integer(7));
+
+        // KEYS / ARGV / redis must remain readable (they're populated
+        // BEFORE execute() locks the table).
+        let keys_argv = dispatch_argv(
+            &[
+                b"EVAL".to_vec(),
+                b"return #KEYS + #ARGV".to_vec(),
+                b"2".to_vec(),
+                b"k1".to_vec(),
+                b"k2".to_vec(),
+                b"a1".to_vec(),
+                b"a2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("dispatch keys argv");
+        assert_eq!(keys_argv, RespFrame::Integer(4));
     }
 
     /// Lock the contract for the structured corpus seeds in

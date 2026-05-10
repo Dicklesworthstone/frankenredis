@@ -1649,6 +1649,14 @@ pub struct LuaState<'a> {
     pub store: &'a mut Store,
     pub now_ms: u64,
     globals: HashMap<String, LuaValue>,
+    /// (frankenredis-j02x9) Set to true at the start of execute(); once
+    /// locked, any write to a top-level global raises "Attempt to modify
+    /// a readonly table" and any read of an undefined global raises
+    /// "Script attempted to access nonexistent global variable 'NAME'".
+    /// Mirrors upstream script_lua.c::luaSetTableProtectionRecursively
+    /// applied to the globals table after init, plus the
+    /// luaProtectedTableError __index handler.
+    globals_locked: bool,
     call_depth: usize,
     iterations: u64,
     rng_seed: u64,
@@ -1867,6 +1875,7 @@ impl<'a> LuaState<'a> {
             store,
             now_ms,
             globals,
+            globals_locked: false,
             call_depth: 0,
             iterations: 0,
             rng_seed,
@@ -2006,6 +2015,12 @@ impl<'a> LuaState<'a> {
         if !parser.check(&Token::Eof) {
             return Err(format!("unexpected token: {:?}", parser.peek()));
         }
+        // (frankenredis-j02x9) Lock the globals table — from this point
+        // forward any user-script write to globals raises a readonly-
+        // table error and any read of an undefined global raises the
+        // upstream sandbox error. Mirrors script_lua.c::
+        // luaSetTableProtectionRecursively run after script env init.
+        self.globals_locked = true;
         let mut env = Env::new();
         let mut varargs = Vec::new();
         match self.exec_block(&stmts, &mut env, &mut varargs)? {
@@ -2241,6 +2256,12 @@ impl<'a> LuaState<'a> {
                     self_name: None,
                 });
                 if names.len() == 1 {
+                    // (frankenredis-j02x9) `function f() end` is
+                    // equivalent to `f = function() end`; both write
+                    // to the globals table. Block once locked.
+                    if self.globals_locked {
+                        return Err("Attempt to modify a readonly table".to_string());
+                    }
                     self.globals.insert(names[0].clone(), func);
                 } else {
                     // Nested field assignment: a.b.c = func
@@ -2326,6 +2347,13 @@ impl<'a> LuaState<'a> {
         match lhs {
             Expr::Name(name) => {
                 if !env.set_existing_local(name, value.clone()) {
+                    // (frankenredis-j02x9) Once locked, the globals
+                    // table is read-only — both new and overwriting
+                    // assignments raise. Locals (Stmt::LocalAssign)
+                    // bypass this path entirely.
+                    if self.globals_locked {
+                        return Err("Attempt to modify a readonly table".to_string());
+                    }
                     self.globals.insert(name.clone(), value);
                 }
             }
@@ -2410,6 +2438,14 @@ impl<'a> LuaState<'a> {
                     Ok(val.clone())
                 } else if let Some(val) = self.globals.get(name) {
                     Ok(val.clone())
+                } else if self.globals_locked {
+                    // (frankenredis-j02x9) Mirror upstream's
+                    // luaProtectedTableError __index handler — reading
+                    // an undefined global from a sandboxed user script
+                    // is a hard error, not silent nil.
+                    Err(format!(
+                        "Script attempted to access nonexistent global variable '{name}'"
+                    ))
                 } else {
                     Ok(LuaValue::Nil)
                 }
