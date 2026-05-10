@@ -10144,30 +10144,103 @@ impl Runtime {
             if argv.len() != 2 {
                 return client_wrong_subcommand_arity(sub);
             }
+            // (frankenredis-wvjpe) Mirror upstream networking.c
+            // clientCommand HELP path verbatim — SimpleString frames
+            // (addReplyStatusFormat) and per-subcommand description
+            // lines. fr-command::client_cmd already emits this exact
+            // sequence; the runtime path was a stale short BulkString
+            // form that diverged from vendored.
             RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(
-                    b"CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_vec(),
-                )),
-                RespFrame::BulkString(Some(b"CACHING (YES|NO)".to_vec())),
-                RespFrame::BulkString(Some(b"GETNAME".to_vec())),
-                RespFrame::BulkString(Some(b"GETREDIR".to_vec())),
-                RespFrame::BulkString(Some(b"ID".to_vec())),
-                RespFrame::BulkString(Some(b"INFO".to_vec())),
-                RespFrame::BulkString(Some(b"KILL <option> ...".to_vec())),
-                RespFrame::BulkString(Some(
-                    b"LIST [TYPE (NORMAL|MASTER|REPLICA|PUBSUB)] [ID <client-id> ...]".to_vec(),
-                )),
-                RespFrame::BulkString(Some(b"NO-EVICT (ON|OFF)".to_vec())),
-                RespFrame::BulkString(Some(b"NO-TOUCH (ON|OFF)".to_vec())),
-                RespFrame::BulkString(Some(b"PAUSE <timeout> [WRITE|ALL]".to_vec())),
-                RespFrame::BulkString(Some(b"REPLY (ON|OFF|SKIP)".to_vec())),
-                RespFrame::BulkString(Some(b"SETINFO <option> <value>".to_vec())),
-                RespFrame::BulkString(Some(b"SETNAME <connection-name>".to_vec())),
-                RespFrame::BulkString(Some(b"TRACKING (ON|OFF) ...".to_vec())),
-                RespFrame::BulkString(Some(b"TRACKINGINFO".to_vec())),
-                RespFrame::BulkString(Some(b"UNBLOCK <client-id> [TIMEOUT|ERROR]".to_vec())),
-                RespFrame::BulkString(Some(b"UNPAUSE".to_vec())),
-                RespFrame::BulkString(Some(b"HELP".to_vec())),
+                RespFrame::SimpleString(
+                    "CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_string(),
+                ),
+                RespFrame::SimpleString("CACHING (YES|NO)".to_string()),
+                RespFrame::SimpleString(
+                    "    Enable/disable tracking of the keys for next command in OPTIN/OPTOUT modes.".to_string(),
+                ),
+                RespFrame::SimpleString("GETREDIR".to_string()),
+                RespFrame::SimpleString(
+                    "    Return the client ID we are redirecting to when tracking is enabled.".to_string(),
+                ),
+                RespFrame::SimpleString("GETNAME".to_string()),
+                RespFrame::SimpleString("    Return the name of the current connection.".to_string()),
+                RespFrame::SimpleString("ID".to_string()),
+                RespFrame::SimpleString("    Return the ID of the current connection.".to_string()),
+                RespFrame::SimpleString("INFO".to_string()),
+                RespFrame::SimpleString(
+                    "    Return information about the current client connection.".to_string(),
+                ),
+                RespFrame::SimpleString("KILL <ip:port>".to_string()),
+                RespFrame::SimpleString("    Kill connection made from <ip:port>.".to_string()),
+                RespFrame::SimpleString("KILL <option> <value> [<option> <value> [...]]".to_string()),
+                RespFrame::SimpleString("    Kill connections. Options are:".to_string()),
+                RespFrame::SimpleString("    * ADDR (<ip:port>|<unixsocket>:0)".to_string()),
+                RespFrame::SimpleString(
+                    "      Kill connections made from the specified address".to_string(),
+                ),
+                RespFrame::SimpleString("    * LADDR (<ip:port>|<unixsocket>:0)".to_string()),
+                RespFrame::SimpleString(
+                    "      Kill connections made to specified local address".to_string(),
+                ),
+                RespFrame::SimpleString("    * TYPE (NORMAL|MASTER|REPLICA|PUBSUB)".to_string()),
+                RespFrame::SimpleString("      Kill connections by type.".to_string()),
+                RespFrame::SimpleString("    * USER <username>".to_string()),
+                RespFrame::SimpleString(
+                    "      Kill connections authenticated by <username>.".to_string(),
+                ),
+                RespFrame::SimpleString("    * SKIPME (YES|NO)".to_string()),
+                RespFrame::SimpleString(
+                    "      Skip killing current connection (default: yes).".to_string(),
+                ),
+                RespFrame::SimpleString("LIST [options ...]".to_string()),
+                RespFrame::SimpleString(
+                    "    Return information about client connections. Options:".to_string(),
+                ),
+                RespFrame::SimpleString("    * TYPE (NORMAL|MASTER|REPLICA|PUBSUB)".to_string()),
+                RespFrame::SimpleString("      Return clients of specified type.".to_string()),
+                RespFrame::SimpleString("UNPAUSE".to_string()),
+                RespFrame::SimpleString(
+                    "    Stop the current client pause, resuming traffic.".to_string(),
+                ),
+                RespFrame::SimpleString("PAUSE <timeout> [WRITE|ALL]".to_string()),
+                RespFrame::SimpleString(
+                    "    Suspend all, or just write, clients for <timeout> milliseconds.".to_string(),
+                ),
+                RespFrame::SimpleString("REPLY (ON|OFF|SKIP)".to_string()),
+                RespFrame::SimpleString(
+                    "    Control the replies sent to the current connection.".to_string(),
+                ),
+                RespFrame::SimpleString("SETNAME <name>".to_string()),
+                RespFrame::SimpleString(
+                    "    Assign the name <name> to the current connection.".to_string(),
+                ),
+                RespFrame::SimpleString("SETINFO <option> <value>".to_string()),
+                RespFrame::SimpleString("    Set client meta attr. Options are:".to_string()),
+                RespFrame::SimpleString("    * LIB-NAME: the client lib name.".to_string()),
+                RespFrame::SimpleString("    * LIB-VER: the client lib version.".to_string()),
+                RespFrame::SimpleString("UNBLOCK <clientid> [TIMEOUT|ERROR]".to_string()),
+                RespFrame::SimpleString("    Unblock the specified blocked client.".to_string()),
+                RespFrame::SimpleString(
+                    "TRACKING (ON|OFF) [REDIRECT <id>] [BCAST] [PREFIX <prefix> [...]]".to_string(),
+                ),
+                RespFrame::SimpleString("         [OPTIN] [OPTOUT] [NOLOOP]".to_string()),
+                RespFrame::SimpleString(
+                    "    Control server assisted client side caching.".to_string(),
+                ),
+                RespFrame::SimpleString("TRACKINGINFO".to_string()),
+                RespFrame::SimpleString(
+                    "    Report tracking status for the current connection.".to_string(),
+                ),
+                RespFrame::SimpleString("NO-EVICT (ON|OFF)".to_string()),
+                RespFrame::SimpleString(
+                    "    Protect current client connection from eviction.".to_string(),
+                ),
+                RespFrame::SimpleString("NO-TOUCH (ON|OFF)".to_string()),
+                RespFrame::SimpleString(
+                    "    Will not touch LRU/LFU stats when this mode is on.".to_string(),
+                ),
+                RespFrame::SimpleString("HELP".to_string()),
+                RespFrame::SimpleString("    Print this help.".to_string()),
             ]))
         } else {
             CommandError::UnknownSubcommand {
@@ -17287,6 +17360,56 @@ mod tests {
             rt.execute_frame(command(&[b"CLIENT", b"LIST", b"EXTRA"]), 3),
             RespFrame::Error("ERR syntax error".to_string())
         );
+    }
+
+    #[test]
+    fn client_help_emits_simplestring_descriptive_form_per_upstream() {
+        // (frankenredis-wvjpe) Upstream networking.c::clientCommand
+        // HELP path uses addReplyStatusFormat (SimpleString) and emits
+        // a per-subcommand description line under each subcommand. fr's
+        // runtime path previously emitted a short BulkString form
+        // without descriptions; this pin asserts the long-form
+        // SimpleString sequence matching vendored 7.2.4 byte-for-byte.
+        let mut rt = Runtime::default_strict();
+        let reply = rt.execute_frame(command(&[b"CLIENT", b"HELP"]), 0);
+        let RespFrame::Array(Some(items)) = &reply else {
+            panic!("expected Array, got {reply:?}");
+        };
+        // Vendored 7.2.4 emits 54 lines: header + per-subcommand
+        // title and description rows + sub-bullet rows for KILL,
+        // LIST, and SETINFO option lists.
+        assert_eq!(items.len(), 54, "wire-shape mismatch (got {} items)", items.len());
+        for (idx, frame) in items.iter().enumerate() {
+            assert!(
+                matches!(frame, RespFrame::SimpleString(_)),
+                "item {idx}: expected SimpleString frame (addReplyStatusFormat), got {frame:?}",
+            );
+        }
+        // Spot-check the header and a representative description line.
+        let RespFrame::SimpleString(header) = &items[0] else {
+            unreachable!()
+        };
+        assert_eq!(
+            header,
+            "CLIENT <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+        );
+        // CACHING line + its description line should be back-to-back.
+        let RespFrame::SimpleString(caching_desc) = &items[2] else {
+            unreachable!()
+        };
+        assert_eq!(
+            caching_desc,
+            "    Enable/disable tracking of the keys for next command in OPTIN/OPTOUT modes.",
+        );
+        // Find HELP description.
+        let last_two = &items[items.len() - 2..];
+        let (RespFrame::SimpleString(help_title), RespFrame::SimpleString(help_desc)) =
+            (&last_two[0], &last_two[1])
+        else {
+            unreachable!()
+        };
+        assert_eq!(help_title, "HELP");
+        assert_eq!(help_desc, "    Print this help.");
     }
 
     #[test]
