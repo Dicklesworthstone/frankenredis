@@ -13643,6 +13643,14 @@ const ACL_CATEGORIES: &[&str] = &[
 struct AclCategoryMaps {
     by_category: HashMap<&'static str, Vec<&'static str>>,
     by_command: HashMap<&'static str, Vec<&'static str>>,
+    /// (frankenredis-ywh2b) Mirror of by_command WITHOUT the
+    /// STATIC_ACL_OVERRIDES overlay. Container parents (cluster, client,
+    /// acl, config, slowlog, latency, module, function, script, object)
+    /// emit only `@slow` (or `@admin` for debug) via COMMAND INFO
+    /// categories per upstream — the overlay is needed for ACL CAT to
+    /// surface them under @admin/@dangerous/etc., but COMMAND INFO
+    /// emission must not include those overlay categories.
+    by_command_info: HashMap<&'static str, Vec<&'static str>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13672,7 +13680,18 @@ fn acl_category_maps() -> &'static AclCategoryMaps {
             }
             by_command.insert(name, categories.to_vec());
         }
+        // (frankenredis-ywh2b) Snapshot the by_command map BEFORE applying
+        // the static ACL overlay. by_command_info is the COMMAND INFO
+        // categories source; by_command is the ACL CAT lookup source.
+        let mut by_command_info: HashMap<&'static str, Vec<&'static str>> =
+            HashMap::with_capacity(by_command.len() + COMMAND_TABLE.len());
+        for (k, v) in &by_command {
+            by_command_info.insert(*k, v.clone());
+        }
         for &(name, _arity, flags, _first, _last, _step) in COMMAND_TABLE {
+            let info_cats = by_command_info.entry(name).or_default();
+            merge_command_table_acl_categories(info_cats, flags);
+
             let categories = by_command.entry(name).or_default();
             merge_command_table_acl_categories(categories, flags);
             // (frankenredis-flagsbatch2) The COMMAND_TABLE flags column
@@ -13694,6 +13713,7 @@ fn acl_category_maps() -> &'static AclCategoryMaps {
         AclCategoryMaps {
             by_category,
             by_command,
+            by_command_info,
         }
     })
 }
@@ -13724,6 +13744,22 @@ pub fn command_acl_categories(command: &str) -> &'static [&'static str] {
     }
     let cmd_lower = command.to_ascii_lowercase();
     maps.by_command
+        .get(cmd_lower.as_str())
+        .map(|cats| cats.as_slice())
+        .unwrap_or(&[])
+}
+
+/// (frankenredis-ywh2b) ACL categories for COMMAND INFO emission. Same
+/// shape as command_acl_categories but skips the STATIC_ACL_OVERRIDES
+/// overlay so container parents (cluster, client, acl, config, etc.)
+/// emit only @slow (or @admin for debug) per upstream Redis 7.2.4.
+fn command_info_acl_categories(command: &str) -> &'static [&'static str] {
+    let maps = acl_category_maps();
+    if let Some(cats) = maps.by_command_info.get(command) {
+        return cats.as_slice();
+    }
+    let cmd_lower = command.to_ascii_lowercase();
+    maps.by_command_info
         .get(cmd_lower.as_str())
         .map(|cats| cats.as_slice())
         .unwrap_or(&[])
@@ -14255,7 +14291,11 @@ fn command_info_categories(name: &str) -> Vec<RespFrame> {
     if name == "command" || is_command_info_subcommand(name) {
         return vec![hello_simple("@slow"), hello_simple("@connection")];
     }
-    command_acl_categories(name)
+    // (frankenredis-ywh2b) Use the overlay-free map for COMMAND INFO
+    // emission. The static ACL overlay (cluster→@admin, object→@keyspace,
+    // …) is intended for ACL CAT only; upstream emits only the parent's
+    // own flag-derived categories via COMMAND INFO.
+    command_info_acl_categories(name)
         .iter()
         .map(|category| RespFrame::SimpleString(format!("@{category}")))
         .collect()
@@ -59925,6 +59965,91 @@ mod tests {
                 expected_subs.iter().map(|s| (*s).to_string()).collect();
             assert_eq!(actual_names, expected_names, "{cmd} subcommand names");
         }
+    }
+
+    /// (frankenredis-ywh2b) Container parent commands emit only the
+    /// flag-derived ACL categories via COMMAND INFO; the
+    /// STATIC_ACL_OVERRIDES overlay (cluster→@admin, object→@keyspace,
+    /// etc.) applies only to ACL CAT lookup. Pre-fix: fr leaked the
+    /// overlay into COMMAND INFO output, so e.g. cluster emitted
+    /// [@slow, @admin, @dangerous] instead of upstream's [@slow].
+    /// ACL CAT @admin must still surface the subcommand-level entries
+    /// (cluster|reset, config|set, etc.) since by_category is built
+    /// from UPSTREAM_ACL_CATEGORY_ENTRIES which preserves them.
+    #[test]
+    fn command_info_container_parents_emit_only_flag_derived_categories() {
+        let mut store = Store::new();
+        let cases: &[(&str, &[&str])] = &[
+            ("OBJECT", &["@slow"]),
+            ("CLUSTER", &["@slow"]),
+            ("CLIENT", &["@slow"]),
+            ("ACL", &["@slow"]),
+            ("CONFIG", &["@slow"]),
+            ("MEMORY", &["@slow"]),
+            ("SLOWLOG", &["@slow"]),
+            ("LATENCY", &["@slow"]),
+            ("MODULE", &["@slow"]),
+            ("FUNCTION", &["@slow"]),
+            ("SCRIPT", &["@slow"]),
+            // DEBUG has admin in its flags column → admin (and dangerous).
+            ("DEBUG", &["@admin"]),
+        ];
+        for (cmd, expected_cats) in cases {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) =
+                rows.into_iter().next().expect("one row")
+            else {
+                panic!("expected sub-Array for {cmd}");
+            };
+            let RespFrame::Array(Some(cats_arr)) = &fields[6] else {
+                panic!("{cmd} categories not Array");
+            };
+            let actual: Vec<String> = cats_arr
+                .iter()
+                .filter_map(|c| match c {
+                    RespFrame::SimpleString(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            // For DEBUG, allow @admin only (we don't pin @dangerous since
+            // it's already exhaustively tested elsewhere — just confirm
+            // the @keyspace/@admin/@dangerous overlay isn't leaking).
+            if *cmd == "DEBUG" {
+                assert!(
+                    actual.contains(&"@admin".to_string()),
+                    "DEBUG must include @admin, got {actual:?}"
+                );
+            } else {
+                let expected: Vec<String> =
+                    expected_cats.iter().map(|s| (*s).to_string()).collect();
+                assert_eq!(actual, expected, "{cmd} categories");
+            }
+        }
+
+        // ACL CAT lookup must still find the per-subcommand entries
+        // under @admin (the overlay-bearing parents pull their subcommand
+        // children in via UPSTREAM_ACL_CATEGORY_ENTRIES).
+        let admin_cmds = commands_in_acl_category("admin");
+        assert!(
+            admin_cmds.contains(&"cluster|reset"),
+            "ACL CAT @admin must include cluster|reset"
+        );
+        assert!(
+            admin_cmds.contains(&"config|set"),
+            "ACL CAT @admin must include config|set"
+        );
     }
 
     /// (frankenredis-flagsbatch3) Third slice of frankenredis-commandflagsaudit.
