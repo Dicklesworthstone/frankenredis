@@ -7758,6 +7758,16 @@ impl Runtime {
                 self.server.enable_debug_command.as_bytes().to_vec(),
             )));
         }
+        // (frankenredis-rpv1o) Dynamic `port` — must reflect the actual
+        // listening port set via runtime.set_server_port at startup,
+        // not the hardcoded "6379" default in CONFIG_STATIC_PARAMS.
+        // The static loop below skips this name to avoid double-emit.
+        if Self::config_pattern_matches(pattern, "port") {
+            entries.push(RespFrame::BulkString(Some(b"port".to_vec())));
+            entries.push(RespFrame::BulkString(Some(
+                self.server.store.server_port.to_string().into_bytes(),
+            )));
+        }
         // Static configuration parameters that clients commonly probe.
         // If a parameter has been overridden via CONFIG SET, use the override.
         for &(name, default_value) in CONFIG_STATIC_PARAMS {
@@ -7805,6 +7815,7 @@ impl Runtime {
                 || name == "proto-max-bulk-len"
                 || name == "client-output-buffer-limit"
                 || name == "enable-debug-command"
+                || name == "port"
             {
                 continue;
             }
@@ -20502,6 +20513,42 @@ mod tests {
             Some("appendonly")
         );
         assert_eq!(canonical_static_config_param("does-not-exist"), None);
+    }
+
+    /// (frankenredis-rpv1o) CONFIG GET port must return the actual
+    /// listening port set via runtime.set_server_port at startup, not
+    /// the static "6379" default. Without this, downstream tooling that
+    /// uses CONFIG GET to discover the port reads stale data.
+    #[test]
+    fn config_get_port_returns_live_runtime_listening_port() {
+        let mut rt = Runtime::default_strict();
+        rt.set_server_port(16480);
+        let get = rt.execute_frame(
+            command(&[b"CONFIG", b"GET", b"port"]),
+            0,
+        );
+        assert_eq!(
+            get,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"port".to_vec())),
+                RespFrame::BulkString(Some(b"16480".to_vec())),
+            ])),
+            "CONFIG GET port must reflect the runtime's actual listening port"
+        );
+
+        // Default-port runtime should report 6379.
+        let mut rt_default = Runtime::default_strict();
+        let get_default = rt_default.execute_frame(
+            command(&[b"CONFIG", b"GET", b"port"]),
+            0,
+        );
+        assert_eq!(
+            get_default,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"port".to_vec())),
+                RespFrame::BulkString(Some(b"6379".to_vec())),
+            ]))
+        );
     }
 
     #[test]
