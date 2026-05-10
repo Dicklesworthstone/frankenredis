@@ -229,6 +229,8 @@ pub struct SlowlogEntry {
     pub timestamp_sec: u64,
     pub duration_us: u64,
     pub argv: Vec<Vec<u8>>,
+    pub client_address: Vec<u8>,
+    pub client_name: Vec<u8>,
 }
 
 /// Score bound for sorted set range queries (ZRANGEBYSCORE, ZCOUNT, etc.).
@@ -2115,6 +2117,23 @@ impl Store {
     }
 
     pub fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
+        let client_address = self.dispatch_client_ctx.peer_addr.as_bytes().to_vec();
+        let client_name = self
+            .dispatch_client_ctx
+            .client_name
+            .clone()
+            .unwrap_or_default();
+        self.record_slowlog_with_client(argv, duration_us, now_ms, client_address, client_name);
+    }
+
+    pub fn record_slowlog_with_client(
+        &mut self,
+        argv: &[Vec<u8>],
+        duration_us: u64,
+        now_ms: u64,
+        client_address: Vec<u8>,
+        client_name: Vec<u8>,
+    ) {
         if self.slowlog_log_slower_than_us < 0 {
             return;
         }
@@ -2126,6 +2145,8 @@ impl Store {
             timestamp_sec: now_ms / 1000,
             duration_us,
             argv: argv.to_vec(),
+            client_address,
+            client_name,
         };
         self.slowlog_id_counter = self.slowlog_id_counter.saturating_add(1);
         self.slowlog.push_back(entry);

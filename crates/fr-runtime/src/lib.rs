@@ -10327,8 +10327,8 @@ impl Runtime {
                         RespFrame::Integer(entry.timestamp_sec as i64),
                         RespFrame::Integer(entry.duration_us as i64),
                         RespFrame::Array(Some(argv_frames)),
-                        RespFrame::BulkString(Some(b"".to_vec())), // client addr
-                        RespFrame::BulkString(Some(b"".to_vec())), // client name
+                        RespFrame::BulkString(Some(entry.client_address)),
+                        RespFrame::BulkString(Some(entry.client_name)),
                     ]))
                 })
                 .collect();
@@ -10397,7 +10397,19 @@ impl Runtime {
 
     /// Record a command execution in the slow log if it exceeded the threshold.
     fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
-        self.server.store.record_slowlog(argv, duration_us, now_ms);
+        let client_address = self
+            .session
+            .peer_addr
+            .map(|addr| addr.to_string().into_bytes())
+            .unwrap_or_default();
+        let client_name = self.session.client_name.clone().unwrap_or_default();
+        self.server.store.record_slowlog_with_client(
+            argv,
+            duration_us,
+            now_ms,
+            client_address,
+            client_name,
+        );
     }
 
     /// Gate the DEBUG command on the `enable-debug-command` config.
@@ -17651,6 +17663,33 @@ mod tests {
             unreachable!("expected all slowlog array");
         };
         assert_eq!(all_entries.len(), 13);
+    }
+
+    #[test]
+    fn slowlog_get_reports_client_address_and_name() {
+        let mut rt = Runtime::default_strict();
+        rt.server.store.slowlog_log_slower_than_us = 0;
+        rt.session.peer_addr = Some(std::net::SocketAddr::from(([127, 0, 0, 1], 54636)));
+        rt.session.client_name = Some(b"slow-client".to_vec());
+        rt.record_slowlog(&[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()], 50, 1_000);
+
+        let out = rt.execute_frame(command(&[b"SLOWLOG", b"GET", b"1"]), 2_000);
+        let RespFrame::Array(Some(entries)) = out else {
+            unreachable!("expected slowlog array");
+        };
+        assert_eq!(entries.len(), 1);
+        let RespFrame::Array(Some(fields)) = &entries[0] else {
+            unreachable!("expected slowlog entry array");
+        };
+        assert_eq!(fields.len(), 6);
+        assert_eq!(
+            fields[4],
+            RespFrame::BulkString(Some(b"127.0.0.1:54636".to_vec()))
+        );
+        assert_eq!(
+            fields[5],
+            RespFrame::BulkString(Some(b"slow-client".to_vec()))
+        );
     }
 
     #[test]

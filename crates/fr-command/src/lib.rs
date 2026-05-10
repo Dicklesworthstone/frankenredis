@@ -16533,8 +16533,8 @@ fn slowlog_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
                     RespFrame::Integer(entry.timestamp_sec as i64),
                     RespFrame::Integer(entry.duration_us as i64),
                     RespFrame::Array(Some(argv_frames)),
-                    RespFrame::BulkString(Some(b"".to_vec())),
-                    RespFrame::BulkString(Some(b"".to_vec())),
+                    RespFrame::BulkString(Some(entry.client_address)),
+                    RespFrame::BulkString(Some(entry.client_name)),
                 ]))
             })
             .collect();
@@ -46944,6 +46944,8 @@ mod tests {
     fn slowlog_dispatch_uses_store_backed_entries() {
         let mut store = Store::new();
         store.slowlog_log_slower_than_us = 0;
+        store.dispatch_client_ctx.peer_addr = "10.1.2.3:6380".to_string();
+        store.dispatch_client_ctx.client_name = Some(b"worker-1".to_vec());
         store.record_slowlog(&[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()], 42, 2_000);
 
         let len = dispatch_argv(&[b"SLOWLOG".to_vec(), b"LEN".to_vec()], &mut store, 0).unwrap();
@@ -46965,8 +46967,8 @@ mod tests {
                     RespFrame::BulkString(Some(b"k".to_vec())),
                     RespFrame::BulkString(Some(b"v".to_vec())),
                 ])),
-                RespFrame::BulkString(Some(b"".to_vec())),
-                RespFrame::BulkString(Some(b"".to_vec())),
+                RespFrame::BulkString(Some(b"10.1.2.3:6380".to_vec())),
+                RespFrame::BulkString(Some(b"worker-1".to_vec())),
             ]))
         );
 
