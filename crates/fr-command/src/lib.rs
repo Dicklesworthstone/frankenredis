@@ -27440,6 +27440,12 @@ mod tests {
             0,
         )
         .expect("xinfo groups");
+        // (frankenredis-o3m0f) When the stream has no XDEL'd entries
+        // and entries-added is reliably tracked, vendored Redis 7.2.4
+        // t_stream.c::xinfoCommand emits entries-read and lag as
+        // integers (group->entries_read = 3, lag = 0 since the group
+        // has consumed all 3 entries). Pinning to nil was a stale
+        // assertion that masked actual fr correctness.
         assert_eq!(
             groups,
             RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
@@ -27452,9 +27458,9 @@ mod tests {
                 RespFrame::BulkString(Some(b"last-delivered-id".to_vec())),
                 RespFrame::BulkString(Some(b"2000-2".to_vec())),
                 RespFrame::BulkString(Some(b"entries-read".to_vec())),
-                RespFrame::BulkString(None),
+                RespFrame::Integer(3),
                 RespFrame::BulkString(Some(b"lag".to_vec())),
-                RespFrame::BulkString(None),
+                RespFrame::Integer(0),
             ]))]))
         );
     }
@@ -28062,6 +28068,9 @@ mod tests {
             0,
         )
         .expect("xinfo groups");
+        // (frankenredis-o3m0f) See companion test: vendored 7.2.4
+        // emits entries-read/lag as integers when the stream has not
+        // had XDEL operations that would invalidate the running count.
         assert_eq!(
             groups,
             RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
@@ -28074,9 +28083,9 @@ mod tests {
                 RespFrame::BulkString(Some(b"last-delivered-id".to_vec())),
                 RespFrame::BulkString(Some(b"1000-2".to_vec())),
                 RespFrame::BulkString(Some(b"entries-read".to_vec())),
-                RespFrame::BulkString(None),
+                RespFrame::Integer(3),
                 RespFrame::BulkString(Some(b"lag".to_vec())),
-                RespFrame::BulkString(None),
+                RespFrame::Integer(0),
             ]))]))
         );
     }
@@ -29018,6 +29027,14 @@ mod tests {
         )
         .expect("xinfo stream");
 
+        // (frankenredis-o3m0f) entries-added is the running XADD count
+        // and is NOT decremented by XDEL — vendored Redis 7.2.4
+        // t_stream.c::streamCreateID() unconditionally bumps
+        // s->entries_added even when the corresponding entry is later
+        // XDEL'd (XDEL only sets the SAMEID-tombstone bit and updates
+        // max_deleted_entry_id). The previous pin asserted 2, which
+        // never matched upstream nor fr's actual behavior; pinned to
+        // 3 to match vendored XINFO STREAM.
         assert_eq!(
             info,
             RespFrame::Array(Some(vec![
@@ -29032,7 +29049,7 @@ mod tests {
                 RespFrame::BulkString(Some(b"max-deleted-entry-id".to_vec())),
                 RespFrame::BulkString(Some(b"1000-1".to_vec())),
                 RespFrame::BulkString(Some(b"entries-added".to_vec())),
-                RespFrame::Integer(2),
+                RespFrame::Integer(3),
                 RespFrame::BulkString(Some(b"recorded-first-entry-id".to_vec())),
                 RespFrame::BulkString(Some(b"1000-0".to_vec())),
                 RespFrame::BulkString(Some(b"groups".to_vec())),
@@ -54989,7 +55006,14 @@ mod tests {
         assert_eq!(entries[1].0, (2, 0));
         assert_eq!(entries[1].1, vec![(b"name".to_vec(), b"bob".to_vec())]);
         let groups = restored.xinfo_groups(b"s", 300).unwrap().expect("groups");
-        assert_eq!(groups, vec![(b"g".to_vec(), 1, 2, (2, 0), None)]);
+        // (frankenredis-o3m0f) The 5-tuple is
+        // (group_name, consumers, pending, last_delivered_id, entries_read).
+        // The vendored DUMP payload carries the group's entries_read
+        // counter (=2 after two XADD + XREADGROUP calls), so the
+        // restored Store now reconstructs it instead of leaving it
+        // as None — matches what vendored XINFO GROUPS would emit
+        // after the same operation sequence on a live oracle.
+        assert_eq!(groups, vec![(b"g".to_vec(), 1, 2, (2, 0), Some(2))]);
         let pending = restored
             .xpending_summary(b"s", b"g", 300)
             .unwrap()
