@@ -11683,26 +11683,91 @@ fn getex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     // conflict. fr previously hardcoded a strict argc check that
     // rejected `GETEX k EX 5 EX 10`, `GETEX k PERSIST PERSIST`, etc.,
     // diverging from vendored Redis 7.2.4.
-    enum ExpiryMode {
+    //
+    // (frankenredis-qw3kt) The keyword/value parse here mirrors
+    // parseExtendedStringArgumentsOrReply, which only checks the option
+    // keyword + arg presence and stashes the raw value as a robj*. The
+    // integer + sign + bound checks (getExpireMillisecondsOrReply) and
+    // the WRONGTYPE / nil-on-missing reply come AFTER the lookup in
+    // getexCommand at t_string.c:381. Validate values lazily so a
+    // missing key short-circuits to nil and a wrong-type key surfaces
+    // WRONGTYPE before any "invalid expire time" error.
+    enum ExpiryKind {
         None,
         Persist,
-        Ex(u64),
-        Px(u64),
-        Exat(u64),
-        Pxat(u64),
+        Ex,
+        Px,
+        Exat,
+        Pxat,
     }
-    let mut expiry_mode = ExpiryMode::None;
+    let mut expiry_kind = ExpiryKind::None;
+    let mut raw_value: Option<&[u8]> = None;
     let mut options = argv[2..].iter();
     while let Some(option_arg) = options.next() {
         let option =
             std::str::from_utf8(option_arg).map_err(|_| CommandError::SyntaxError)?;
         if option.eq_ignore_ascii_case("EX") {
-            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Ex(_)) {
+            if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Ex) {
                 return Err(CommandError::SyntaxError);
             }
             let Some(arg) = options.next() else {
                 return Err(CommandError::SyntaxError);
             };
+            raw_value = Some(arg);
+            expiry_kind = ExpiryKind::Ex;
+        } else if option.eq_ignore_ascii_case("PX") {
+            if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Px) {
+                return Err(CommandError::SyntaxError);
+            }
+            let Some(arg) = options.next() else {
+                return Err(CommandError::SyntaxError);
+            };
+            raw_value = Some(arg);
+            expiry_kind = ExpiryKind::Px;
+        } else if option.eq_ignore_ascii_case("EXAT") {
+            if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Exat) {
+                return Err(CommandError::SyntaxError);
+            }
+            let Some(arg) = options.next() else {
+                return Err(CommandError::SyntaxError);
+            };
+            raw_value = Some(arg);
+            expiry_kind = ExpiryKind::Exat;
+        } else if option.eq_ignore_ascii_case("PXAT") {
+            if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Pxat) {
+                return Err(CommandError::SyntaxError);
+            }
+            let Some(arg) = options.next() else {
+                return Err(CommandError::SyntaxError);
+            };
+            raw_value = Some(arg);
+            expiry_kind = ExpiryKind::Pxat;
+        } else if option.eq_ignore_ascii_case("PERSIST") {
+            if !matches!(expiry_kind, ExpiryKind::None | ExpiryKind::Persist) {
+                return Err(CommandError::SyntaxError);
+            }
+            expiry_kind = ExpiryKind::Persist;
+        } else {
+            return Err(CommandError::SyntaxError);
+        }
+    }
+
+    // Upstream lookupKeyReadOrReply / checkType run before
+    // getExpireMillisecondsOrReply: a missing key short-circuits to
+    // BulkString(None) and a non-string value surfaces WRONGTYPE,
+    // regardless of whether the requested expiry value would have been
+    // rejected as invalid.
+    match store.key_type(key, now_ms) {
+        None => return Ok(RespFrame::BulkString(None)),
+        Some("string") => {}
+        Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
+    }
+
+    let new_expires: Option<Option<u64>> = match expiry_kind {
+        ExpiryKind::None => None,
+        ExpiryKind::Persist => Some(None),
+        ExpiryKind::Ex => {
+            let arg = raw_value.expect("EX value collected above");
             let secs = parse_expire_time_arg(arg, "getex")?;
             if secs > i64::MAX as u64 / 1000 {
                 return Err(CommandError::Custom(
@@ -11710,56 +11775,28 @@ fn getex(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                 ));
             }
             validate_relative_expire_basetime(secs * 1000, now_ms, "getex")?;
-            expiry_mode = ExpiryMode::Ex(secs);
-        } else if option.eq_ignore_ascii_case("PX") {
-            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Px(_)) {
-                return Err(CommandError::SyntaxError);
-            }
-            let Some(arg) = options.next() else {
-                return Err(CommandError::SyntaxError);
-            };
+            Some(Some(now_ms.saturating_add(secs.saturating_mul(1000))))
+        }
+        ExpiryKind::Px => {
+            let arg = raw_value.expect("PX value collected above");
             let ms = parse_expire_time_arg(arg, "getex")?;
             validate_relative_expire_basetime(ms, now_ms, "getex")?;
-            expiry_mode = ExpiryMode::Px(ms);
-        } else if option.eq_ignore_ascii_case("EXAT") {
-            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Exat(_)) {
-                return Err(CommandError::SyntaxError);
-            }
-            let Some(arg) = options.next() else {
-                return Err(CommandError::SyntaxError);
-            };
+            Some(Some(now_ms.saturating_add(ms)))
+        }
+        ExpiryKind::Exat => {
+            let arg = raw_value.expect("EXAT value collected above");
             let ts = parse_expire_time_arg(arg, "getex")?;
             if ts > i64::MAX as u64 / 1000 {
                 return Err(CommandError::Custom(
                     "ERR invalid expire time in 'getex' command".to_string(),
                 ));
             }
-            expiry_mode = ExpiryMode::Exat(ts);
-        } else if option.eq_ignore_ascii_case("PXAT") {
-            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Pxat(_)) {
-                return Err(CommandError::SyntaxError);
-            }
-            let Some(arg) = options.next() else {
-                return Err(CommandError::SyntaxError);
-            };
-            expiry_mode = ExpiryMode::Pxat(parse_expire_time_arg(arg, "getex")?);
-        } else if option.eq_ignore_ascii_case("PERSIST") {
-            if !matches!(expiry_mode, ExpiryMode::None | ExpiryMode::Persist) {
-                return Err(CommandError::SyntaxError);
-            }
-            expiry_mode = ExpiryMode::Persist;
-        } else {
-            return Err(CommandError::SyntaxError);
+            Some(Some(ts.saturating_mul(1000)))
         }
-    }
-
-    let new_expires: Option<Option<u64>> = match expiry_mode {
-        ExpiryMode::None => None,
-        ExpiryMode::Persist => Some(None),
-        ExpiryMode::Ex(secs) => Some(Some(now_ms.saturating_add(secs.saturating_mul(1000)))),
-        ExpiryMode::Px(ms) => Some(Some(now_ms.saturating_add(ms))),
-        ExpiryMode::Exat(ts) => Some(Some(ts.saturating_mul(1000))),
-        ExpiryMode::Pxat(ts_ms) => Some(Some(ts_ms)),
+        ExpiryKind::Pxat => {
+            let arg = raw_value.expect("PXAT value collected above");
+            Some(Some(parse_expire_time_arg(arg, "getex")?))
+        }
     };
 
     match store.getex(key, new_expires, now_ms)? {
@@ -14478,6 +14515,7 @@ fn command_docs_entry(
     }
     entry.push(hello_bulk("arguments"));
     entry.push(RespFrame::Array(Some(command_docs_arguments(
+        name,
         arity, first_key, last_key, step,
     ))));
     // (frankenredis-q11am) Upstream server.c::commandDocsCommand
@@ -14500,7 +14538,16 @@ fn command_docs_entry(
     }
 }
 
-fn command_docs_arguments(arity: i64, first_key: i64, last_key: i64, step: i64) -> Vec<RespFrame> {
+fn command_docs_arguments(
+    name: &str,
+    arity: i64,
+    first_key: i64,
+    last_key: i64,
+    step: i64,
+) -> Vec<RespFrame> {
+    if let Some(arguments) = upstream_command_docs_arguments(name) {
+        return arguments;
+    }
     let fixed_arg_count = if arity > 0 { arity - 1 } else { (-arity) - 1 };
     let mut docs = Vec::new();
     for position in 1..=fixed_arg_count {
@@ -14532,6 +14579,226 @@ fn command_docs_arguments(arity: i64, first_key: i64, last_key: i64, step: i64) 
         docs.push(RespFrame::Array(Some(entry)));
     }
     docs
+}
+
+fn command_docs_arg_flags(flags: &[&str]) -> RespFrame {
+    RespFrame::Array(Some(flags.iter().map(|flag| hello_bulk(flag)).collect()))
+}
+
+fn command_docs_arg(
+    name: &str,
+    arg_type: &str,
+    key_spec_index: Option<i64>,
+    token: Option<&str>,
+    since: Option<&str>,
+    flags: &[&str],
+    subargs: Vec<RespFrame>,
+) -> RespFrame {
+    let has_display_text = !matches!(arg_type, "oneof" | "block");
+    let mut entry = vec![
+        hello_bulk("name"),
+        hello_bulk(name),
+        hello_bulk("type"),
+        hello_bulk(arg_type),
+    ];
+    if has_display_text {
+        entry.push(hello_bulk("display_text"));
+        entry.push(hello_bulk(name));
+    }
+    if let Some(index) = key_spec_index {
+        entry.push(hello_bulk("key_spec_index"));
+        entry.push(RespFrame::Integer(index));
+    }
+    if let Some(token) = token {
+        entry.push(hello_bulk("token"));
+        entry.push(hello_bulk(token));
+    }
+    if let Some(since) = since {
+        entry.push(hello_bulk("since"));
+        entry.push(hello_bulk(since));
+    }
+    if !flags.is_empty() {
+        entry.push(hello_bulk("flags"));
+        entry.push(command_docs_arg_flags(flags));
+    }
+    if matches!(arg_type, "oneof" | "block") {
+        entry.push(hello_bulk("arguments"));
+        entry.push(RespFrame::Array(Some(subargs)));
+    }
+    RespFrame::Array(Some(entry))
+}
+
+fn command_docs_pure_token(name: &str, token: &str, since: Option<&str>) -> RespFrame {
+    command_docs_arg(name, "pure-token", None, Some(token), since, &[], Vec::new())
+}
+
+fn upstream_command_docs_arguments(name: &str) -> Option<Vec<RespFrame>> {
+    // (frankenredis-18wru) These argument trees mirror upstream Redis
+    // 7.2.4's addReplyCommandArgList output for the acceptance set.
+    // The fallback arity-derived builder below remains for commands
+    // whose JSON argument schema has not been harvested yet.
+    let arguments = match name {
+        "get" => vec![command_docs_arg(
+            "key",
+            "key",
+            Some(0),
+            None,
+            None,
+            &[],
+            Vec::new(),
+        )],
+        "set" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("value", "string", None, None, None, &[], Vec::new()),
+            command_docs_arg(
+                "condition",
+                "oneof",
+                None,
+                None,
+                Some("2.6.12"),
+                &["optional"],
+                vec![
+                    command_docs_pure_token("nx", "NX", None),
+                    command_docs_pure_token("xx", "XX", None),
+                ],
+            ),
+            command_docs_arg(
+                "get",
+                "pure-token",
+                None,
+                Some("GET"),
+                Some("6.2.0"),
+                &["optional"],
+                Vec::new(),
+            ),
+            command_docs_arg(
+                "expiration",
+                "oneof",
+                None,
+                None,
+                None,
+                &["optional"],
+                vec![
+                    command_docs_arg(
+                        "seconds",
+                        "integer",
+                        None,
+                        Some("EX"),
+                        Some("2.6.12"),
+                        &[],
+                        Vec::new(),
+                    ),
+                    command_docs_arg(
+                        "milliseconds",
+                        "integer",
+                        None,
+                        Some("PX"),
+                        Some("2.6.12"),
+                        &[],
+                        Vec::new(),
+                    ),
+                    command_docs_arg(
+                        "unix-time-seconds",
+                        "unix-time",
+                        None,
+                        Some("EXAT"),
+                        Some("6.2.0"),
+                        &[],
+                        Vec::new(),
+                    ),
+                    command_docs_arg(
+                        "unix-time-milliseconds",
+                        "unix-time",
+                        None,
+                        Some("PXAT"),
+                        Some("6.2.0"),
+                        &[],
+                        Vec::new(),
+                    ),
+                    command_docs_arg(
+                        "keepttl",
+                        "pure-token",
+                        None,
+                        Some("KEEPTTL"),
+                        Some("6.0.0"),
+                        &[],
+                        Vec::new(),
+                    ),
+                ],
+            ),
+        ],
+        "lpush" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg(
+                "element",
+                "string",
+                None,
+                None,
+                None,
+                &["multiple"],
+                Vec::new(),
+            ),
+        ],
+        "zadd" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg(
+                "condition",
+                "oneof",
+                None,
+                None,
+                Some("3.0.2"),
+                &["optional"],
+                vec![
+                    command_docs_pure_token("nx", "NX", None),
+                    command_docs_pure_token("xx", "XX", None),
+                ],
+            ),
+            command_docs_arg(
+                "comparison",
+                "oneof",
+                None,
+                None,
+                Some("6.2.0"),
+                &["optional"],
+                vec![
+                    command_docs_pure_token("gt", "GT", None),
+                    command_docs_pure_token("lt", "LT", None),
+                ],
+            ),
+            command_docs_arg(
+                "change",
+                "pure-token",
+                None,
+                Some("CH"),
+                Some("3.0.2"),
+                &["optional"],
+                Vec::new(),
+            ),
+            command_docs_arg(
+                "increment",
+                "pure-token",
+                None,
+                Some("INCR"),
+                Some("3.0.2"),
+                &["optional"],
+                Vec::new(),
+            ),
+            command_docs_arg(
+                "data",
+                "block",
+                None,
+                None,
+                None,
+                &["multiple"],
+                vec![
+                    command_docs_arg("score", "double", None, None, None, &[], Vec::new()),
+                    command_docs_arg("member", "string", None, None, None, &[], Vec::new()),
+                ],
+            ),
+        ],
+        _ => return None,
+    };
+    Some(arguments)
 }
 
 fn is_key_argument_position(
@@ -14683,7 +14950,7 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
     } else if name.starts_with('s') {
         "set"
     } else if name.starts_with('z') || matches!(name, "bzpopmin" | "bzpopmax" | "bzmpop") {
-        "sorted_set"
+        "sorted-set"
     } else if name.starts_with('x') {
         "stream"
     } else if name.starts_with("geo") {
@@ -14699,7 +14966,7 @@ fn command_group_summary_prefix(group: &str) -> &'static str {
     match group {
         "connection" => "Connection-management",
         "transactions" => "Transaction-control",
-        "sorted_set" => "Sorted-set",
+        "sorted-set" => "Sorted-set",
         _ => {
             if group.is_empty() {
                 "General"
@@ -32530,6 +32797,104 @@ mod tests {
         );
     }
 
+    /// (frankenredis-qw3kt) Upstream getexCommand
+    /// (t_string.c::361) calls parseExtendedStringArgumentsOrReply
+    /// (which only validates option keywords + arg presence), then
+    /// lookupKeyReadOrReply, then checkType, and only then
+    /// getExpireMillisecondsOrReply. fr previously parsed the integer
+    /// value during option parsing, so a missing key with a "bad"
+    /// expiry (EX 0, EX -1, integer overflow) surfaced
+    /// "ERR invalid expire time" instead of nil, and a wrong-type key
+    /// surfaced the same error instead of WRONGTYPE.
+    #[test]
+    fn getex_defers_value_validation_until_after_lookup_per_upstream() {
+        let mut store = Store::new();
+
+        // Missing key short-circuits to nil regardless of how invalid
+        // the expiry value would be.
+        for tail in [
+            &[b"EX".to_vec(), b"0".to_vec()][..],
+            &[b"EX".to_vec(), b"-1".to_vec()],
+            &[b"EX".to_vec(), b"9999999999999999999".to_vec()],
+            &[b"EXAT".to_vec(), b"0".to_vec()],
+            &[b"PX".to_vec(), b"0".to_vec()],
+            &[b"PXAT".to_vec(), b"0".to_vec()],
+        ] {
+            let mut argv: Vec<Vec<u8>> = vec![b"GETEX".to_vec(), b"missing".to_vec()];
+            argv.extend(tail.iter().cloned());
+            let r = dispatch_argv(&argv, &mut store, 1_000)
+                .unwrap_or_else(|_| panic!("GETEX missing {tail:?} must return nil"));
+            assert_eq!(
+                r,
+                RespFrame::BulkString(None),
+                "GETEX missing {tail:?} expected nil before any expiry validation"
+            );
+        }
+
+        // Syntax errors on keywords still surface before lookup, just
+        // like upstream's parseExtendedStringArgumentsOrReply.
+        let err = dispatch_argv(
+            &[b"GETEX".to_vec(), b"missing".to_vec(), b"FOOBAR".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect_err("GETEX missing FOOBAR must surface syntax error");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR syntax error".to_string())
+        );
+
+        // Wrong-type key surfaces WRONGTYPE before any expiry validation.
+        dispatch_argv(
+            &[b"LPUSH".to_vec(), b"lst".to_vec(), b"x".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("LPUSH lst x");
+        let err = dispatch_argv(
+            &[
+                b"GETEX".to_vec(),
+                b"lst".to_vec(),
+                b"EX".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            1_000,
+        )
+        .expect_err("GETEX list EX 0 must surface WRONGTYPE");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error(
+                "WRONGTYPE Operation against a key holding the wrong kind of value"
+                    .to_string()
+            )
+        );
+
+        // Existing string with EX 0 still rejected with the upstream
+        // wording (validation runs after lookup but still rejects).
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"v".to_vec()],
+            &mut store,
+            1_000,
+        )
+        .expect("SET k v");
+        let err = dispatch_argv(
+            &[
+                b"GETEX".to_vec(),
+                b"k".to_vec(),
+                b"EX".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            1_000,
+        )
+        .expect_err("GETEX existing-string EX 0 must reject after lookup");
+        assert_eq!(
+            err.to_resp(),
+            RespFrame::Error("ERR invalid expire time in 'getex' command".to_string())
+        );
+    }
+
     // ── Set algebra command tests ───────────────────────────────────────
 
     #[test]
@@ -48026,6 +48391,163 @@ mod tests {
         assert_eq!(kv(b"group"), Some(&b"string"[..]));
     }
 
+    fn command_docs_field(command: &[u8], field: &[u8]) -> RespFrame {
+        let mut store = Store::new();
+        let out = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"DOCS".to_vec(), command.to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::Array(Some(entries)) = out else {
+            panic!("expected docs array");
+        };
+        let RespFrame::Array(Some(doc_fields)) = &entries[1] else {
+            panic!("expected doc fields array");
+        };
+        for chunk in doc_fields.chunks(2) {
+            if let [
+                RespFrame::BulkString(Some(k)),
+                value,
+            ] = chunk
+                && k.as_slice() == field
+            {
+                return value.clone();
+            }
+        }
+        panic!(
+            "missing COMMAND DOCS field {:?} for {:?}",
+            String::from_utf8_lossy(field),
+            String::from_utf8_lossy(command)
+        );
+    }
+
+    fn docs_arg(fields: Vec<(&str, RespFrame)>) -> RespFrame {
+        let mut flat = Vec::with_capacity(fields.len() * 2);
+        for (key, value) in fields {
+            flat.push(hello_bulk(key));
+            flat.push(value);
+        }
+        RespFrame::Array(Some(flat))
+    }
+
+    fn docs_flags(flags: &[&str]) -> RespFrame {
+        RespFrame::Array(Some(flags.iter().map(|flag| hello_bulk(flag)).collect()))
+    }
+
+    #[test]
+    fn command_docs_arguments_for_get_set_lpush_zadd_match_upstream_schema() {
+        // (frankenredis-18wru) Upstream addReplyCommandArgList emits
+        // argument metadata as a map-like flat field list in RESP2:
+        // name, type, display_text for scalar args, key_spec_index for
+        // keys, flags arrays for optional/multiple markers, and nested
+        // arguments for oneof/block nodes. The old arity-derived docs
+        // only emitted name/type plus a non-upstream optional integer.
+        let get_args = command_docs_field(b"GET", b"arguments");
+        assert_eq!(
+            get_args,
+            RespFrame::Array(Some(vec![docs_arg(vec![
+                ("name", hello_bulk("key")),
+                ("type", hello_bulk("key")),
+                ("display_text", hello_bulk("key")),
+                ("key_spec_index", RespFrame::Integer(0)),
+            ])]))
+        );
+
+        let lpush_args = command_docs_field(b"LPUSH", b"arguments");
+        assert_eq!(
+            lpush_args,
+            RespFrame::Array(Some(vec![
+                docs_arg(vec![
+                    ("name", hello_bulk("key")),
+                    ("type", hello_bulk("key")),
+                    ("display_text", hello_bulk("key")),
+                    ("key_spec_index", RespFrame::Integer(0)),
+                ]),
+                docs_arg(vec![
+                    ("name", hello_bulk("element")),
+                    ("type", hello_bulk("string")),
+                    ("display_text", hello_bulk("element")),
+                    ("flags", docs_flags(&["multiple"])),
+                ]),
+            ]))
+        );
+
+        let set_args = command_docs_field(b"SET", b"arguments");
+        let RespFrame::Array(Some(set_items)) = set_args else {
+            panic!("SET arguments must be an array");
+        };
+        assert_eq!(set_items.len(), 5);
+        assert_eq!(
+            set_items[2],
+            docs_arg(vec![
+                ("name", hello_bulk("condition")),
+                ("type", hello_bulk("oneof")),
+                ("since", hello_bulk("2.6.12")),
+                ("flags", docs_flags(&["optional"])),
+                (
+                    "arguments",
+                    RespFrame::Array(Some(vec![
+                        docs_arg(vec![
+                            ("name", hello_bulk("nx")),
+                            ("type", hello_bulk("pure-token")),
+                            ("display_text", hello_bulk("nx")),
+                            ("token", hello_bulk("NX")),
+                        ]),
+                        docs_arg(vec![
+                            ("name", hello_bulk("xx")),
+                            ("type", hello_bulk("pure-token")),
+                            ("display_text", hello_bulk("xx")),
+                            ("token", hello_bulk("XX")),
+                        ]),
+                    ])),
+                ),
+            ])
+        );
+        assert_eq!(
+            set_items[3],
+            docs_arg(vec![
+                ("name", hello_bulk("get")),
+                ("type", hello_bulk("pure-token")),
+                ("display_text", hello_bulk("get")),
+                ("token", hello_bulk("GET")),
+                ("since", hello_bulk("6.2.0")),
+                ("flags", docs_flags(&["optional"])),
+            ])
+        );
+
+        let zadd_group = command_docs_field(b"ZADD", b"group");
+        assert_eq!(zadd_group, hello_bulk("sorted-set"));
+        let zadd_args = command_docs_field(b"ZADD", b"arguments");
+        let RespFrame::Array(Some(zadd_items)) = zadd_args else {
+            panic!("ZADD arguments must be an array");
+        };
+        assert_eq!(zadd_items.len(), 6);
+        assert_eq!(
+            zadd_items[5],
+            docs_arg(vec![
+                ("name", hello_bulk("data")),
+                ("type", hello_bulk("block")),
+                ("flags", docs_flags(&["multiple"])),
+                (
+                    "arguments",
+                    RespFrame::Array(Some(vec![
+                        docs_arg(vec![
+                            ("name", hello_bulk("score")),
+                            ("type", hello_bulk("double")),
+                            ("display_text", hello_bulk("score")),
+                        ]),
+                        docs_arg(vec![
+                            ("name", hello_bulk("member")),
+                            ("type", hello_bulk("string")),
+                            ("display_text", hello_bulk("member")),
+                        ]),
+                    ])),
+                ),
+            ])
+        );
+    }
+
     #[test]
     fn zpopmin_count_parse_failure_matches_upstream_must_be_positive_wording() {
         // Pins frankenredis-zpopminword. Upstream t_zset.c::genericZpopCommand
@@ -48534,7 +49056,7 @@ mod tests {
         // SWAPDB moves from generic → server.
         assert_eq!(group_for(&mut store, b"SWAPDB"), b"server".to_vec());
 
-        // Regression checks: real set / sorted_set / list / hash /
+        // Regression checks: real set / sorted-set / list / hash /
         // stream / hyperloglog / geo / pubsub / scripting / transaction
         // groupings still resolve correctly.
         for (name, expected) in [
@@ -48542,8 +49064,8 @@ mod tests {
             (b"SREM", b"set"),
             (b"SSCAN", b"set"),
             (b"SMOVE", b"set"),
-            (b"ZADD", b"sorted_set"),
-            (b"ZRANGE", b"sorted_set"),
+            (b"ZADD", b"sorted-set"),
+            (b"ZRANGE", b"sorted-set"),
             (b"LPUSH", b"list"),
             (b"BLPOP", b"list"),
             (b"HSET", b"hash"),
