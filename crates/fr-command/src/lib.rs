@@ -14661,6 +14661,83 @@ fn command_info_multi_keyspec(name: &str) -> Option<Vec<RespFrame>> {
     }
 }
 
+/// (frankenredis-b0wme) Build a key_spec frame whose begin_search is
+/// `keyword "<KW>" startfrom <N>` and find_keys is `range {lastkey,
+/// keystep, limit}`. Used by XREAD/XREADGROUP whose key list begins after
+/// the STREAMS keyword (variable argv position).
+fn make_keyspec_keyword_range(
+    flags: &[&'static str],
+    keyword: &'static str,
+    startfrom: i64,
+    lastkey: i64,
+    keystep: i64,
+    limit: i64,
+) -> RespFrame {
+    RespFrame::Array(Some(vec![
+        hello_bulk("flags"),
+        RespFrame::Array(Some(
+            flags.iter().copied().map(hello_simple).collect(),
+        )),
+        hello_bulk("begin_search"),
+        RespFrame::Array(Some(vec![
+            hello_bulk("type"),
+            hello_bulk("keyword"),
+            hello_bulk("spec"),
+            RespFrame::Array(Some(vec![
+                hello_bulk("keyword"),
+                RespFrame::BulkString(Some(keyword.as_bytes().to_vec())),
+                hello_bulk("startfrom"),
+                RespFrame::Integer(startfrom),
+            ])),
+        ])),
+        hello_bulk("find_keys"),
+        RespFrame::Array(Some(vec![
+            hello_bulk("type"),
+            hello_bulk("range"),
+            hello_bulk("spec"),
+            RespFrame::Array(Some(vec![
+                hello_bulk("lastkey"),
+                RespFrame::Integer(lastkey),
+                hello_bulk("keystep"),
+                RespFrame::Integer(keystep),
+                hello_bulk("limit"),
+                RespFrame::Integer(limit),
+            ])),
+        ])),
+    ]))
+}
+
+/// (frankenredis-b0wme) Movablekeys commands whose key positions cannot
+/// be encoded in the COMMAND_TABLE first/last/step triple. Upstream
+/// commands.def gives each one a hand-built keySpec entry; replicate
+/// that here so COMMAND INFO emits the right key_specs Array instead of
+/// an empty one.
+///
+/// Sources from legacy_redis_code/redis/src/commands.def:
+/// - sintercard / zdiff / zunion / zinter / zintercard: keynum at argv[1]
+/// - zmpop / lmpop: keynum at argv[1], RW+access+delete
+/// - blmpop / bzmpop: keynum at argv[2] (timeout at argv[1])
+/// - xread / xreadgroup: keyword "STREAMS" begin_search, range find_keys
+fn command_info_movable_keynum_keyspec(name: &str) -> Option<Vec<RespFrame>> {
+    let spec = match name {
+        "sintercard" | "zdiff" | "zunion" | "zinter" | "zintercard" => {
+            make_keyspec_index_keynum(&["RO", "access"], 1, 0, 1, 1)
+        }
+        "zmpop" | "lmpop" => {
+            make_keyspec_index_keynum(&["RW", "access", "delete"], 1, 0, 1, 1)
+        }
+        "blmpop" | "bzmpop" => {
+            make_keyspec_index_keynum(&["RW", "access", "delete"], 2, 0, 1, 1)
+        }
+        "xread" => make_keyspec_keyword_range(&["RO", "access"], "STREAMS", 1, -1, 1, 2),
+        "xreadgroup" => {
+            make_keyspec_keyword_range(&["RO", "access"], "STREAMS", 4, -1, 1, 2)
+        }
+        _ => return None,
+    };
+    Some(vec![spec])
+}
+
 fn command_info_key_specs(
     name: &str,
     flags: &str,
@@ -14671,6 +14748,12 @@ fn command_info_key_specs(
     // (frankenredis-imkpg) Multi-keyspec commands have a fixed Vec of
     // hand-built keyspec frames; bypass the single-spec path entirely.
     if let Some(specs) = command_info_multi_keyspec(name) {
+        return specs;
+    }
+
+    // (frankenredis-b0wme) Movablekeys commands whose tabular
+    // first/last/step is 0/0/0 use a hand-built keynum or keyword spec.
+    if let Some(specs) = command_info_movable_keynum_keyspec(name) {
         return specs;
     }
 
@@ -59423,6 +59506,155 @@ mod tests {
                     "{cmd}[{i}] begin_search index must be {expected_idx}"
                 );
             }
+        }
+    }
+
+    /// (frankenredis-b0wme) Movablekeys commands whose tabular
+    /// first/last/step is 0/0/0 use a hand-built keynum or keyword spec.
+    /// Pre-fix: fr emitted an empty key_specs array for these. Pin the
+    /// per-command keyspec list against vendored 7.2.4.
+    #[test]
+    fn command_info_movable_keynum_keyspec_match_upstream() {
+        let mut store = Store::new();
+        // (cmd, expected_flags, expected_begin_search_kind: ("index", N) or ("keyword", "STREAMS", startfrom))
+        let index_keynum_cases: &[(&str, &[&str], i64)] = &[
+            ("SINTERCARD", &["RO", "access"], 1),
+            ("ZDIFF", &["RO", "access"], 1),
+            ("ZUNION", &["RO", "access"], 1),
+            ("ZINTER", &["RO", "access"], 1),
+            ("ZINTERCARD", &["RO", "access"], 1),
+            ("ZMPOP", &["RW", "access", "delete"], 1),
+            ("LMPOP", &["RW", "access", "delete"], 1),
+            ("BLMPOP", &["RW", "access", "delete"], 2),
+            ("BZMPOP", &["RW", "access", "delete"], 2),
+        ];
+        for (cmd, expected_flags, begin_idx) in index_keynum_cases {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) =
+                rows.into_iter().next().expect("one row")
+            else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            let RespFrame::Array(Some(specs)) = &fields[8] else {
+                panic!("{cmd} expected key_specs Array");
+            };
+            assert_eq!(specs.len(), 1, "{cmd} must emit exactly one key_spec");
+            let RespFrame::Array(Some(spec)) = &specs[0] else {
+                panic!("{cmd} expected spec Array");
+            };
+            // Walk: spec[0]="flags", spec[1]=Array(flags), spec[2]="begin_search",
+            // spec[3]=Array(...), spec[4]="find_keys", spec[5]=Array(...).
+            let RespFrame::Array(Some(flag_arr)) = &spec[1] else {
+                panic!("{cmd} flags not Array");
+            };
+            let actual_flags: Vec<String> = flag_arr
+                .iter()
+                .filter_map(|f| match f {
+                    RespFrame::SimpleString(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            let expected_flag_strs: Vec<String> =
+                expected_flags.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(actual_flags, expected_flag_strs, "{cmd} flags");
+            // begin_search type=index, spec=[BulkString("index"), Integer(N)]
+            let RespFrame::Array(Some(bs)) = &spec[3] else {
+                panic!("{cmd} begin_search not Array");
+            };
+            assert_eq!(bs[1], RespFrame::BulkString(Some(b"index".to_vec())));
+            let RespFrame::Array(Some(bspec)) = &bs[3] else {
+                panic!("{cmd} begin_search.spec not Array");
+            };
+            assert_eq!(
+                bspec[1],
+                RespFrame::Integer(*begin_idx),
+                "{cmd} begin_search index"
+            );
+            // find_keys type=keynum
+            let RespFrame::Array(Some(fk)) = &spec[5] else {
+                panic!("{cmd} find_keys not Array");
+            };
+            assert_eq!(
+                fk[1],
+                RespFrame::BulkString(Some(b"keynum".to_vec())),
+                "{cmd} find_keys type"
+            );
+        }
+
+        // XREAD / XREADGROUP have keyword begin_search.
+        let keyword_cases: &[(&str, &[&str], i64)] = &[
+            ("XREAD", &["RO", "access"], 1),
+            ("XREADGROUP", &["RO", "access"], 4),
+        ];
+        for (cmd, expected_flags, startfrom) in keyword_cases {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) =
+                rows.into_iter().next().expect("one row")
+            else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            let RespFrame::Array(Some(specs)) = &fields[8] else {
+                panic!("{cmd} expected key_specs Array");
+            };
+            assert_eq!(specs.len(), 1, "{cmd} must emit exactly one key_spec");
+            let RespFrame::Array(Some(spec)) = &specs[0] else {
+                panic!("{cmd} expected spec Array");
+            };
+            let RespFrame::Array(Some(flag_arr)) = &spec[1] else {
+                panic!("{cmd} flags not Array");
+            };
+            let actual_flags: Vec<String> = flag_arr
+                .iter()
+                .filter_map(|f| match f {
+                    RespFrame::SimpleString(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            let expected_flag_strs: Vec<String> =
+                expected_flags.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(actual_flags, expected_flag_strs, "{cmd} flags");
+            // begin_search type=keyword, spec=[BulkString("keyword"), BulkString("STREAMS"), BulkString("startfrom"), Integer(N)]
+            let RespFrame::Array(Some(bs)) = &spec[3] else {
+                panic!("{cmd} begin_search not Array");
+            };
+            assert_eq!(bs[1], RespFrame::BulkString(Some(b"keyword".to_vec())));
+            let RespFrame::Array(Some(bspec)) = &bs[3] else {
+                panic!("{cmd} begin_search.spec not Array");
+            };
+            assert_eq!(
+                bspec[1],
+                RespFrame::BulkString(Some(b"STREAMS".to_vec())),
+                "{cmd} keyword"
+            );
+            assert_eq!(
+                bspec[3],
+                RespFrame::Integer(*startfrom),
+                "{cmd} startfrom"
+            );
         }
     }
 
