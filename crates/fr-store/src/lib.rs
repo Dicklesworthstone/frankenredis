@@ -12276,7 +12276,54 @@ fn encode_listpack_strings(entries: &[&[u8]]) -> Option<Vec<u8>> {
     Some(listpack)
 }
 
+fn parse_listpack_integer(entry: &[u8]) -> Option<i64> {
+    if entry.is_empty() || entry.len() >= 21 {
+        return None;
+    }
+    let value = std::str::from_utf8(entry).ok()?.parse::<i64>().ok()?;
+    if value.to_string().as_bytes() == entry {
+        Some(value)
+    } else {
+        None
+    }
+}
+
+fn encode_listpack_integer_entry(buf: &mut Vec<u8>, value: i64) {
+    let start = buf.len();
+    if (0..=127).contains(&value) {
+        buf.push(value as u8);
+    } else if (-4096..=4095).contains(&value) {
+        let encoded = if value < 0 {
+            ((1_i64 << 13) + value) as u16
+        } else {
+            value as u16
+        };
+        buf.push(((encoded >> 8) as u8) | 0xC0);
+        buf.push((encoded & 0xFF) as u8);
+    } else if let Ok(value) = i16::try_from(value) {
+        buf.push(0xF1);
+        buf.extend_from_slice(&value.to_le_bytes());
+    } else if (-8_388_608..=8_388_607).contains(&value) {
+        let bytes = (value as i32).to_le_bytes();
+        buf.push(0xF2);
+        buf.extend_from_slice(&bytes[..3]);
+    } else if let Ok(value) = i32::try_from(value) {
+        buf.push(0xF3);
+        buf.extend_from_slice(&value.to_le_bytes());
+    } else {
+        buf.push(0xF4);
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+    let data_len = buf.len() - start;
+    encode_listpack_backlen(buf, data_len);
+}
+
 fn encode_listpack_entry(buf: &mut Vec<u8>, entry: &[u8]) {
+    if let Some(value) = parse_listpack_integer(entry) {
+        encode_listpack_integer_entry(buf, value);
+        return;
+    }
+
     let start = buf.len();
     if entry.len() < 64 {
         buf.push(0x80 | entry.len() as u8);

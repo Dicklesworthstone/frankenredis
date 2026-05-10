@@ -41640,6 +41640,49 @@ mod tests {
         );
     }
 
+    /// (frankenredis-8rqp4) Mirror upstream listpack.c lpEncodeGetType
+    /// and lpInsert; integer-looking strings (those that round-trip
+    /// through strtoll without precision loss and fit in 64 bits) must
+    /// be stored using the compact listpack int encoding (uint7, uint13,
+    /// sint16, ...) rather than the string encoding (0x80|len plus raw
+    /// bytes). Pre-fix, fr-store's encode_listpack_entry always emitted
+    /// the string form, so DEBUG OBJECT serializedlength for a zset
+    /// with 2 integer scores reported 20 bytes instead of vendored's
+    /// 18 (each score wasted 1 extra byte for the 0x81 string header).
+    #[test]
+    fn zset_listpack_encodes_integer_scores_as_compact_int_per_upstream() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd");
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"z".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug object z");
+        let RespFrame::SimpleString(line) = out else {
+            panic!("expected SimpleString, got {out:?}");
+        };
+        assert!(
+            line.contains(" serializedlength:18 "),
+            "vendored Redis 7.2.4 emits compact int encoding for integer scores; \
+             two members 'a'+1 and 'b'+2 should serialise to 18 bytes (header 6 + \
+             entry 'a' 3 + entry int(1) 2 + entry 'b' 3 + entry int(2) 2 + EOF 1 + \
+             8-byte trailer); got: {line}"
+        );
+    }
+
     #[test]
     fn debug_object_omits_redis_7_4_hexpired_fields_suffix_for_7_2_4_parity() {
         let mut store = Store::new();
