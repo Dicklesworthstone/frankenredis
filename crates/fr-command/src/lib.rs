@@ -19733,19 +19733,34 @@ fn latency_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, Command
         // Returns histogram data for each command's latency distribution.
         // Format: array of [command_name, histogram_map] pairs.
         let commands_filter: Vec<_> = argv.iter().skip(2).collect();
-        let histograms = if commands_filter.is_empty() {
-            // Return all histograms
-            store.all_command_histograms()
-        } else {
-            // Filter to requested commands
-            commands_filter
-                .iter()
-                .filter_map(|cmd| {
-                    let cmd_str = std::str::from_utf8(cmd).ok()?;
-                    store.get_command_histogram(cmd_str).map(|h| (cmd_str, h))
-                })
-                .collect()
-        };
+        // (frankenredis-07ug4) Mirror upstream latency.c::latencyCommand
+        // HISTOGRAM dispatch — the outer key it emits is cmd->fullname,
+        // i.e. the canonical lowercase commands.def name, regardless of
+        // how the user spelled the filter argument. Pre-fix, fr echoed
+        // the user-supplied case ("LATENCY HISTOGRAM GET" → "GET"),
+        // diverging from vendored which always emits "get".
+        let lowered_filter: Vec<String> = commands_filter
+            .iter()
+            .filter_map(|cmd| {
+                std::str::from_utf8(cmd)
+                    .ok()
+                    .map(|s| s.to_ascii_lowercase())
+            })
+            .collect();
+        let histograms: Vec<(&str, &fr_store::CommandHistogram)> =
+            if lowered_filter.is_empty() {
+                // Return all histograms (already keyed lowercase)
+                store.all_command_histograms()
+            } else {
+                lowered_filter
+                    .iter()
+                    .filter_map(|cmd| {
+                        store
+                            .get_command_histogram(cmd)
+                            .map(|h| (cmd.as_str(), h))
+                    })
+                    .collect()
+            };
 
         // (frankenredis-cgjlc) Mirror upstream latency.c::fillCommandCDF +
         // latencyCommand HISTOGRAM dispatch. Inner CDF is a 2-entry Map of
@@ -42954,7 +42969,10 @@ mod tests {
             panic!("expected array");
         };
         assert_eq!(items.len(), 2);
-        assert_eq!(items[0], RespFrame::BulkString(Some(b"GET".to_vec())));
+        // (frankenredis-07ug4) Outer cmd label is the canonical lowercase
+        // form (cmd->fullname upstream), regardless of how the user spelled
+        // the filter argument.
+        assert_eq!(items[0], RespFrame::BulkString(Some(b"get".to_vec())));
 
         // Inner CDF is a 2-entry Map { calls, histogram_usec } — flat
         // alternating-array under RESP2.
@@ -43011,7 +43029,9 @@ mod tests {
             panic!("RESP3 outer must be Map, got non-Map"); // ubs:ignore — AI triage
         };
         assert_eq!(outer.len(), 1);
-        assert_eq!(outer[0].0, RespFrame::BulkString(Some(b"GET".to_vec())));
+        // (frankenredis-07ug4) Outer cmd label is the canonical lowercase
+        // form (cmd->fullname upstream).
+        assert_eq!(outer[0].0, RespFrame::BulkString(Some(b"get".to_vec())));
 
         let RespFrame::Map(Some(ref cdf)) = outer[0].1 else {
             panic!("RESP3 CDF must be Map"); // ubs:ignore — AI triage
