@@ -8108,9 +8108,9 @@ fn cluster_cmd(
             return Err(cluster_disabled_error());
         }
         // Mirror upstream cluster.c::genClusterInfoString:5806-5881.
-        // fr models a single self node with no peers, no failure
-        // tracking, and no epoch state — populate the deterministic
-        // fields and emit zeros for the rest. cluster_state is "ok"
+        // fr models a single self node with no peers and no failure
+        // tracking; epoch fields are still stateful because CLUSTER
+        // BUMPEPOCH / SET-CONFIG-EPOCH expose them. cluster_state is "ok"
         // only when the 16384 slots are fully covered (matches
         // upstream's cluster.c verifyClusterConfigWithData semantics
         // where partial coverage flips the state to "fail").
@@ -8118,6 +8118,8 @@ fn cluster_cmd(
         let slots_assigned = store.cluster_assigned_slots.len();
         let cluster_state = if slots_assigned >= 16384 { "ok" } else { "fail" };
         let cluster_size = if slots_assigned > 0 { 1 } else { 0 };
+        let cluster_current_epoch = store.cluster_current_epoch;
+        let cluster_my_epoch = store.cluster_my_config_epoch;
         let info = format!(
             "cluster_state:{cluster_state}\r\n\
              cluster_slots_assigned:{slots_assigned}\r\n\
@@ -8126,8 +8128,8 @@ fn cluster_cmd(
              cluster_slots_fail:0\r\n\
              cluster_known_nodes:1\r\n\
              cluster_size:{cluster_size}\r\n\
-             cluster_current_epoch:0\r\n\
-             cluster_my_epoch:0\r\n\
+             cluster_current_epoch:{cluster_current_epoch}\r\n\
+             cluster_my_epoch:{cluster_my_epoch}\r\n\
              cluster_stats_messages_sent:0\r\n\
              cluster_stats_messages_received:0\r\n\
              total_cluster_links_buffer_limit_exceeded:0\r\n",
@@ -8143,14 +8145,15 @@ fn cluster_cmd(
         }
         // Mirror upstream cluster.c::clusterGenNodeDescription:5251-5328
         // for the single self node:
-        //   <id> <ip:port@cport> myself,master - 0 0 0 connected <slot ranges>
+        //   <id> <ip:port@cport> myself,master - 0 0 <epoch> connected <slot ranges>
         // The cluster bus port follows upstream's default offset
         // convention (port + 10000). (frankenredis-bdokn)
         let cport = u32::from(store.server_port).saturating_add(10000);
         let mut line = format!(
-            "{id} 127.0.0.1:{port}@{cport} myself,master - 0 0 0 connected",
+            "{id} 127.0.0.1:{port}@{cport} myself,master - 0 0 {epoch} connected",
             id = store.server_run_id,
             port = store.server_port,
+            epoch = store.cluster_my_config_epoch,
         );
         // Emit assigned slot ranges (single slot prints as a single
         // integer; contiguous runs print as start-end, matching
@@ -8309,17 +8312,24 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        if let Some(mode) = argv.get(2) {
+        let hard_reset = if let Some(mode) = argv.get(2) {
             let mode = std::str::from_utf8(mode).map_err(|_| CommandError::InvalidUtf8Argument)?;
             if !mode.eq_ignore_ascii_case("SOFT") && !mode.eq_ignore_ascii_case("HARD") {
                 return Err(CommandError::SyntaxError);
             }
-        }
+            mode.eq_ignore_ascii_case("HARD")
+        } else {
+            false
+        };
         let db_index = store.dispatch_client_ctx.db_index;
         if store.dbsize_in_db(db_index) != 0 {
             return Err(cluster_reset_with_keys_error());
         }
         store.cluster_assigned_slots.clear();
+        if hard_reset {
+            store.cluster_current_epoch = 0;
+            store.cluster_my_config_epoch = 0;
+        }
         return Ok(RespFrame::SimpleString("OK".to_string()));
     }
     // ── CLUSTER admin subcommands (first-pass per br-frankenredis-jsr7) ──
@@ -8549,10 +8559,20 @@ fn cluster_cmd(
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
         }
-        // Upstream returns "BUMPED <epoch>" or "STILL <epoch>". We don't
-        // track a real config epoch yet; return BUMPED 1 as the smallest
-        // advance that still parses for clients that inspect the reply.
-        return Ok(RespFrame::SimpleString("BUMPED 1".to_string()));
+        let max_epoch = store
+            .cluster_current_epoch
+            .max(store.cluster_my_config_epoch);
+        let bumped =
+            store.cluster_my_config_epoch == 0 || store.cluster_my_config_epoch != max_epoch;
+        if bumped {
+            store.cluster_current_epoch = store.cluster_current_epoch.saturating_add(1);
+            store.cluster_my_config_epoch = store.cluster_current_epoch;
+        }
+        let verb = if bumped { "BUMPED" } else { "STILL" };
+        return Ok(RespFrame::SimpleString(format!(
+            "{verb} {}",
+            store.cluster_my_config_epoch
+        )));
     }
     if sub.eq_ignore_ascii_case("SET-CONFIG-EPOCH") {
         // Upstream cluster.c::clusterCommand:6420+ validates the
@@ -8577,10 +8597,14 @@ fn cluster_cmd(
                 "ERR Invalid config epoch specified: {epoch}"
             )));
         }
-        // fr does not yet model a per-node configEpoch or a peer
-        // node dict, so the "already non-zero" and "knows other
-        // nodes" branches can't be reproduced. The happy-path OK
-        // reply matches upstream once those preconditions hold.
+        if store.cluster_my_config_epoch != 0 {
+            return Err(CommandError::Custom(
+                "ERR Node config epoch is already non-zero".to_string(),
+            ));
+        }
+        let epoch = epoch.unsigned_abs();
+        store.cluster_my_config_epoch = epoch;
+        store.cluster_current_epoch = store.cluster_current_epoch.max(epoch);
         return Ok(RespFrame::SimpleString("OK".to_string()));
     }
     // (frankenredis-cslotstate) CLUSTER SLOTSTATE is not a recognized
@@ -45980,6 +46004,8 @@ mod tests {
         .unwrap();
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
 
+        store.cluster_current_epoch = 7;
+        store.cluster_my_config_epoch = 7;
         let out = dispatch_argv(
             &[b"CLUSTER".to_vec(), b"RESET".to_vec(), b"HARD".to_vec()],
             &mut store,
@@ -45987,6 +46013,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(store.cluster_current_epoch, 0);
+        assert_eq!(store.cluster_my_config_epoch, 0);
 
         let invalid_mode = dispatch_argv(
             &[b"CLUSTER".to_vec(), b"RESET".to_vec(), b"INVALID".to_vec()],
@@ -47008,7 +47036,7 @@ mod tests {
             CommandError::Custom("ERR DB must be empty to perform CLUSTER FLUSHSLOTS.".to_string())
         );
 
-        // SAVECONFIG + BUMPEPOCH simple replies.
+        // SAVECONFIG + BUMPEPOCH stateful replies.
         assert_eq!(
             dispatch_argv(
                 &[b"CLUSTER".to_vec(), b"SAVECONFIG".to_vec()],
@@ -47022,11 +47050,20 @@ mod tests {
             dispatch_argv(&[b"CLUSTER".to_vec(), b"BUMPEPOCH".to_vec()], &mut store, 0).unwrap(),
             RespFrame::SimpleString("BUMPED 1".to_string())
         );
+        assert_eq!(
+            dispatch_argv(&[b"CLUSTER".to_vec(), b"BUMPEPOCH".to_vec()], &mut store, 0).unwrap(),
+            RespFrame::SimpleString("STILL 1".to_string())
+        );
+        assert_eq!(store.cluster_current_epoch, 1);
+        assert_eq!(store.cluster_my_config_epoch, 1);
 
-        // SET-CONFIG-EPOCH: cluster_enabled, positive epoch → OK (the
-        // peer-dict and configEpoch state checks aren't modelled in
-        // fr's stub yet, so the happy path always succeeds).
-        // (frankenredis-pfamt)
+        let mut epoch_store = Store::new();
+        epoch_store.cluster_enabled = true;
+
+        // SET-CONFIG-EPOCH: a fresh single node accepts one non-negative
+        // epoch, records it in CLUSTER INFO/NODES, then rejects later
+        // attempts because configEpoch is non-zero.
+        // (frankenredis-pfamt, frankenredis-dc4q7)
         assert_eq!(
             dispatch_argv(
                 &[
@@ -47034,11 +47071,47 @@ mod tests {
                     b"SET-CONFIG-EPOCH".to_vec(),
                     b"5".to_vec()
                 ],
-                &mut store,
+                &mut epoch_store,
                 0,
             )
             .unwrap(),
             RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(epoch_store.cluster_current_epoch, 5);
+        assert_eq!(epoch_store.cluster_my_config_epoch, 5);
+        let RespFrame::BulkString(Some(info)) = dispatch_argv(
+            &[b"CLUSTER".to_vec(), b"INFO".to_vec()],
+            &mut epoch_store,
+            0,
+        )
+        .unwrap() else {
+            panic!("expected cluster info bulk string"); // ubs:ignore — AI triage
+        };
+        let info = String::from_utf8(info).expect("cluster info utf8");
+        assert!(info.contains("cluster_current_epoch:5\r\n"), "{info}");
+        assert!(info.contains("cluster_my_epoch:5\r\n"), "{info}");
+        let RespFrame::BulkString(Some(nodes)) = dispatch_argv(
+            &[b"CLUSTER".to_vec(), b"NODES".to_vec()],
+            &mut epoch_store,
+            0,
+        )
+        .unwrap() else {
+            panic!("expected cluster nodes bulk string"); // ubs:ignore — AI triage
+        };
+        let nodes = String::from_utf8(nodes).expect("cluster nodes utf8");
+        assert!(nodes.contains(" 0 0 5 connected"), "{nodes}");
+        assert_eq!(
+            dispatch_argv(
+                &[
+                    b"CLUSTER".to_vec(),
+                    b"SET-CONFIG-EPOCH".to_vec(),
+                    b"6".to_vec()
+                ],
+                &mut epoch_store,
+                0,
+            )
+            .unwrap_err(),
+            CommandError::Custom("ERR Node config epoch is already non-zero".to_string())
         );
         // Negative epoch is rejected with the upstream message.
         assert_eq!(
@@ -47048,7 +47121,7 @@ mod tests {
                     b"SET-CONFIG-EPOCH".to_vec(),
                     b"-1".to_vec(),
                 ],
-                &mut store,
+                &mut epoch_store,
                 0,
             )
             .unwrap_err(),
@@ -47062,7 +47135,7 @@ mod tests {
                     b"SET-CONFIG-EPOCH".to_vec(),
                     b"notanint".to_vec(),
                 ],
-                &mut store,
+                &mut epoch_store,
                 0,
             )
             .unwrap_err(),

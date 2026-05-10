@@ -1319,6 +1319,11 @@ pub struct Store {
     /// Hash slots assigned to this node in cluster mode. Empty on startup,
     /// matching Redis until CLUSTER ADDSLOTS/ADDSLOTSRANGE assigns ranges.
     pub cluster_assigned_slots: BTreeSet<u16>,
+    /// Minimal single-node Redis Cluster epoch state. Redis tracks both the
+    /// cluster currentEpoch and this node's configEpoch; command-layer
+    /// CLUSTER epoch admin paths need both even before a peer registry exists.
+    pub cluster_current_epoch: u64,
+    pub cluster_my_config_epoch: u64,
     stream_groups: HashMap<Vec<u8>, StreamGroupState>,
     /// Per-stream last-generated-id set by XSETID (may be higher than max entry).
     stream_last_ids: HashMap<Vec<u8>, StreamId>,
@@ -1611,6 +1616,8 @@ impl Default for Store {
             database_count: DEFAULT_NUM_DATABASES,
             cluster_enabled: false,
             cluster_assigned_slots: BTreeSet::new(),
+            cluster_current_epoch: 0,
+            cluster_my_config_epoch: 0,
             stream_groups: HashMap::new(),
             stream_last_ids: HashMap::new(),
             stream_entries_added: HashMap::new(),
