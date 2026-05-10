@@ -58692,7 +58692,7 @@ mod tests {
         };
         assert_eq!(items.len(), 1);
         let RespFrame::Array(Some(fields)) = &items[0] else {
-            panic!("expected per-command Array, got {:?}", &items[0]);
+            panic!("expected per-command Array, got {:?}", items[0]);
         };
         assert_eq!(
             fields[0],
