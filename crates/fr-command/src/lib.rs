@@ -8635,11 +8635,22 @@ fn cluster_cmd(
         // state, so any node-id other than self is unknown and the
         // STABLE / NODE paths accept-and-OK. (br-frankenredis-nzaw,
         // frankenredis-t1s3f)
-        if argv.len() != 4 && argv.len() != 5 {
+        //
+        // (frankenredis-0pnd6) Upstream's top-level guard is `c->argc
+        // >= 4` (loose); the exact arity per action (STABLE=4, others=5)
+        // is enforced AFTER the cluster_enabled check. With argv.len()
+        // == 6 (e.g. CLUSTER SETSLOT 0 NODE someid extra) upstream
+        // surfaces 'cluster support disabled', not 'wrong number of
+        // arguments', when cluster mode is off. Move the cluster_enabled
+        // gate ahead of the per-action exact-arity check.
+        if argv.len() < 4 {
             return Err(cluster_wrong_subcommand_arity(sub));
         }
         if !store.cluster_enabled {
             return Err(cluster_disabled_error());
+        }
+        if argv.len() != 4 && argv.len() != 5 {
+            return Err(cluster_wrong_subcommand_arity(sub));
         }
         let slot = parse_i64_arg(&argv[2])?;
         if !(0..=16383).contains(&slot) {
@@ -47358,6 +47369,87 @@ mod tests {
         .expect("client no-evict off");
         assert!(!store.dispatch_client_ctx.client_no_evict);
         assert!(store.dispatch_client_ctx.client_no_touch);
+    }
+
+    /// (frankenredis-0pnd6) Upstream cluster.c::clusterCommand uses a
+    /// loose `c->argc >= 4` guard at the top of the SETSLOT handler,
+    /// then checks server.cluster_enabled, then enforces per-action
+    /// exact arity (STABLE=4, NODE/IMPORTING/MIGRATING=5). With
+    /// argc==6 (e.g. CLUSTER SETSLOT 0 NODE someid extra), upstream
+    /// surfaces 'cluster support disabled' when cluster mode is off,
+    /// because cluster_enabled is checked BEFORE the per-action
+    /// exact-arity check. Pre-fix fr returned 'wrong number of
+    /// arguments' here (over-strict top-level arity check). Pin the
+    /// upstream order: <4 → wrong-arity; >=4 with cluster_disabled →
+    /// cluster-disabled; with cluster_enabled but odd shape → per-
+    /// action wrong-arity.
+    #[test]
+    fn cluster_setslot_overarity_in_non_cluster_mode_returns_cluster_disabled() {
+        // cluster_enabled defaults to false on a fresh Store.
+        let mut store = Store::new();
+        // 6 args → upstream's `c->argc >= 4` passes, then cluster_
+        // enabled check fires.
+        let err = dispatch_argv(
+            &[
+                b"CLUSTER".to_vec(),
+                b"SETSLOT".to_vec(),
+                b"0".to_vec(),
+                b"NODE".to_vec(),
+                b"someid".to_vec(),
+                b"extra".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR This instance has cluster support disabled".to_string()
+            ),
+            "6 args + cluster_disabled must surface 'cluster support disabled', not 'wrong arity'"
+        );
+
+        // <4 args still surfaces wrong-arity even when cluster disabled,
+        // matching upstream's table-level arity rejection that fires
+        // before clusterCommand is called at all.
+        let arity_err = dispatch_argv(
+            &[
+                b"CLUSTER".to_vec(),
+                b"SETSLOT".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&arity_err, CommandError::Custom(s) if s.contains("wrong number of arguments"))
+                || matches!(&arity_err, CommandError::WrongSubcommandArity { .. }),
+            "<4 args must surface wrong-arity, got {arity_err:?}"
+        );
+
+        // With cluster_enabled true, 6 args should fall through to
+        // the per-action exact-arity check (NODE expects exactly 5).
+        store.cluster_enabled = true;
+        let action_err = dispatch_argv(
+            &[
+                b"CLUSTER".to_vec(),
+                b"SETSLOT".to_vec(),
+                b"0".to_vec(),
+                b"NODE".to_vec(),
+                b"someid".to_vec(),
+                b"extra".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&action_err, CommandError::Custom(s) if s.contains("wrong number of arguments"))
+                || matches!(&action_err, CommandError::WrongSubcommandArity { .. }),
+            "6 args + cluster_enabled must surface per-action wrong-arity, got {action_err:?}"
+        );
     }
 
     // (frankenredis-t1s3f) Upstream cluster.c::clusterCommand:6073-6132
