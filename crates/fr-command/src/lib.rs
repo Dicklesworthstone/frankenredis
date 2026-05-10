@@ -15410,6 +15410,34 @@ fn upstream_command_docs_arguments(name: &str) -> Option<Vec<RespFrame>> {
                 ],
             ),
         ],
+        // (frankenredis-xifsa) Mirror LMPOP_Args from
+        // legacy_redis_code/redis/src/commands.def:4099-4104. Without this,
+        // the fallback emits generic arg1/arg2/arg3 placeholders.
+        "lmpop" => vec![
+            command_docs_arg("numkeys", "integer", None, None, None, &[], Vec::new()),
+            command_docs_arg("key", "key", Some(0), None, None, &["multiple"], Vec::new()),
+            command_docs_arg(
+                "where",
+                "oneof",
+                None,
+                None,
+                None,
+                &[],
+                vec![
+                    command_docs_pure_token("left", "LEFT", None),
+                    command_docs_pure_token("right", "RIGHT", None),
+                ],
+            ),
+            command_docs_arg(
+                "count",
+                "integer",
+                None,
+                Some("COUNT"),
+                None,
+                &["optional"],
+                Vec::new(),
+            ),
+        ],
         _ => return None,
     };
     Some(arguments)
