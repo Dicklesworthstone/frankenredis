@@ -11393,6 +11393,18 @@ impl Runtime {
             return Ok(RespFrame::BulkString(Some(Vec::new())));
         }
 
+        // (frankenredis-b83fj) Each per-section emitter in
+        // fr-command::info_command_str appends a trailing "\r\n" as
+        // its inter-section separator. Concatenating N sections
+        // therefore leaves an extra "\r\n" after the last section's
+        // content. Upstream INFO emits the separator BETWEEN sections
+        // only — never after the last — so trim a single trailing
+        // "\r\n" pair (i.e. the final empty-line separator) before
+        // returning the bulk reply.
+        if info.ends_with(b"\r\n\r\n") {
+            info.truncate(info.len() - 2);
+        }
+
         Ok(RespFrame::BulkString(Some(info)))
     }
 
@@ -14058,6 +14070,35 @@ mod tests {
     }
 
     #[test]
+    fn info_per_section_reply_omits_trailing_inter_section_separator_per_upstream() {
+        // (frankenredis-b83fj) Upstream INFO emits the "\r\n" blank-line
+        // separator BETWEEN sections only — the last section's content
+        // line is the final byte before the bulk-string terminator.
+        // fr-command::info_command_str appends the separator after every
+        // section unconditionally; handle_info_command must trim the
+        // trailing pair so the wire shape matches vendored.
+        let mut rt = Runtime::default_strict();
+        for section in [b"server".as_slice(), b"clients", b"cpu", b"errorstats"] {
+            let reply = rt.execute_frame(
+                command(&[b"INFO".as_slice(), section]),
+                0,
+            );
+            let RespFrame::BulkString(Some(bytes)) = reply else {
+                panic!("expected bulk INFO {section:?} reply");
+            };
+            assert!(
+                bytes.ends_with(b"\r\n"),
+                "INFO {section:?} should end with a single \\r\\n",
+            );
+            assert!(
+                !bytes.ends_with(b"\r\n\r\n"),
+                "INFO {section:?} should NOT have a trailing inter-section separator after the last content line; got tail {:?}",
+                String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(40)..]),
+            );
+        }
+    }
+
+    #[test]
     fn info_errorstats_emits_per_error_code_counts() {
         // Pin upstream INFO Errorstats parity (server.c::genRedisInfoString:
         // 6178-6191). Each emitted error reply should bump
@@ -14123,8 +14164,11 @@ mod tests {
             panic!("expected bulk info response");
         };
         let after_body = String::from_utf8(bytes).expect("utf8 info");
+        // (frankenredis-b83fj) Trailing inter-section separator is
+        // trimmed from single-section INFO replies — matches upstream
+        // which emits the separator BETWEEN sections only.
         assert_eq!(
-            after_body, "# Errorstats\r\n\r\n",
+            after_body, "# Errorstats\r\n",
             "RESETSTAT should empty errorstats: {after_body}",
         );
     }

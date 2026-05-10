@@ -3569,7 +3569,7 @@
       ],
       "expect": {
         "kind": "bulk",
-        "value": "# Cluster\r\ncluster_enabled:0\r\n\r\n"
+        "value": "# Cluster\r\ncluster_enabled:0\r\n"
       }
     },
     {
@@ -3581,7 +3581,7 @@
       ],
       "expect": {
         "kind": "bulk",
-        "value": "# Modules\r\n\r\n"
+        "value": "# Modules\r\n"
       }
     },
     {
@@ -4636,7 +4636,7 @@
       ],
       "expect": {
         "kind": "bulk",
-        "value": "# Keyspace\r\ndb1:keys=8,expires=0,avg_ttl=0\r\n\r\n"
+        "value": "# Keyspace\r\ndb1:keys=8,expires=0,avg_ttl=0\r\n"
       }
     },
     {
@@ -4661,7 +4661,7 @@
       ],
       "expect": {
         "kind": "bulk",
-        "value": "# Keyspace\r\ndb0:keys=1,expires=0,avg_ttl=0\r\ndb1:keys=8,expires=0,avg_ttl=0\r\n\r\n"
+        "value": "# Keyspace\r\ndb0:keys=1,expires=0,avg_ttl=0\r\ndb1:keys=8,expires=0,avg_ttl=0\r\n"
       }
     },
     {
