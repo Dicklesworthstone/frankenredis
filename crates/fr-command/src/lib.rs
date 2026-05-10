@@ -9948,10 +9948,8 @@ fn incrbyfloat(
         return Err(CommandError::Store(StoreError::WrongType));
     }
     let delta = parse_f64_arg(&argv[2])?;
-    let new_val = store.incrbyfloat(&argv[1], delta, now_ms)?;
-    Ok(RespFrame::BulkString(Some(
-        new_val.to_string().into_bytes(),
-    )))
+    let new_val = store.incrbyfloat_text(&argv[1], &argv[2], delta, now_ms)?;
+    Ok(RespFrame::BulkString(Some(new_val)))
 }
 
 fn sinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -10557,7 +10555,7 @@ fn hincrbyfloat(
         ));
     }
     let new_val = store
-        .hincrbyfloat(&argv[1], &argv[2], delta, now_ms)
+        .hincrbyfloat_text(&argv[1], &argv[2], &argv[3], delta, now_ms)
         .map_err(|err| match err {
             StoreError::IncrFloatNaN => {
                 CommandError::Custom("ERR value is NaN or Infinity".to_string())
@@ -10571,9 +10569,7 @@ fn hincrbyfloat(
             }
             other => CommandError::Store(other),
         })?;
-    Ok(RespFrame::BulkString(Some(
-        new_val.to_string().into_bytes(),
-    )))
+    Ok(RespFrame::BulkString(Some(new_val)))
 }
 
 fn hrandfield(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
@@ -31785,6 +31781,46 @@ mod tests {
         assert_eq!(out, RespFrame::BulkString(Some(b"3.5".to_vec())));
     }
 
+    #[test]
+    fn incrbyfloat_preserves_long_double_precision_near_i64_limit() {
+        // (frankenredis-oy3pj) Vendored Redis 7.2.4 uses long double
+        // for INCRBYFLOAT. f64 cannot preserve the fractional increment
+        // near i64::MIN/MAX magnitudes.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"SET".to_vec(),
+                b"counter".to_vec(),
+                b"-9223372036854775707".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("set counter");
+
+        let out = dispatch_argv(
+            &[
+                b"INCRBYFLOAT".to_vec(),
+                b"counter".to_vec(),
+                b"1.5".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("incrbyfloat");
+        assert_eq!(
+            out,
+            RespFrame::BulkString(Some(b"-9223372036854775705.5".to_vec()))
+        );
+
+        let stored =
+            dispatch_argv(&[b"GET".to_vec(), b"counter".to_vec()], &mut store, 0).expect("get");
+        assert_eq!(
+            stored,
+            RespFrame::BulkString(Some(b"-9223372036854775705.5".to_vec()))
+        );
+    }
+
     /// (frankenredis-incrbyfloatorder) Upstream
     /// t_string.c::incrbyfloatCommand checks WRONGTYPE *before* parsing
     /// the increment, so a bad delta on a list/hash/set key surfaces
@@ -33292,6 +33328,52 @@ mod tests {
         } else {
             panic!("expected bulk string"); // ubs:ignore — AI triage
         }
+    }
+
+    #[test]
+    fn hincrbyfloat_preserves_long_double_precision_near_i64_limit() {
+        // (frankenredis-oy3pj) HINCRBYFLOAT uses the same upstream
+        // long-double arithmetic and stores/replies with the final
+        // decimal text, not an f64-rounded value.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"h".to_vec(),
+                b"f".to_vec(),
+                b"-9223372036854775707".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hset");
+
+        let out = dispatch_argv(
+            &[
+                b"HINCRBYFLOAT".to_vec(),
+                b"h".to_vec(),
+                b"f".to_vec(),
+                b"1.5".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hincrbyfloat");
+        assert_eq!(
+            out,
+            RespFrame::BulkString(Some(b"-9223372036854775705.5".to_vec()))
+        );
+
+        let stored = dispatch_argv(
+            &[b"HGET".to_vec(), b"h".to_vec(), b"f".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("hget");
+        assert_eq!(
+            stored,
+            RespFrame::BulkString(Some(b"-9223372036854775705.5".to_vec()))
+        );
     }
 
     #[test]

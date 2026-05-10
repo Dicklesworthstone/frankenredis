@@ -2623,28 +2623,33 @@ impl Store {
     }
 
     pub fn incrbyfloat(&mut self, key: &[u8], delta: f64, now_ms: u64) -> Result<f64, StoreError> {
+        let delta_text = delta.to_string();
+        let result = self.incrbyfloat_text(key, delta_text.as_bytes(), delta, now_ms)?;
+        parse_f64(&result)
+    }
+
+    pub fn incrbyfloat_text(
+        &mut self,
+        key: &[u8],
+        delta_text: &[u8],
+        delta: f64,
+        now_ms: u64,
+    ) -> Result<Vec<u8>, StoreError> {
         self.drop_if_expired(key, now_ms);
         let (current, expires_at_ms) = match self.entries.get(key) {
             Some(entry) => match &entry.value {
-                Value::String(v) => (parse_f64(v)?, entry.expires_at_ms),
+                Value::String(v) => (v.as_slice(), entry.expires_at_ms),
                 _ => return Err(StoreError::WrongType),
             },
-            None => (0.0_f64, None),
+            None => (b"0".as_slice(), None),
         };
-        let next = current + delta;
-        if next.is_nan() || next.is_infinite() {
-            return Err(StoreError::IncrFloatNaN);
-        }
+        let next = add_float_text(current, delta_text, delta)?;
         // Upstream t_string.c::incrbyfloatCommand stores the result
         // via createStringObject which always produces embstr/raw,
         // never int. Even when the result text round-trips as an
         // integer (e.g. "1"), OBJECT ENCODING reports embstr.
         // (br-frankenredis-incrfloatenc)
-        let mut entry = Entry::new(
-            Value::String(next.to_string().into_bytes()),
-            expires_at_ms,
-            now_ms,
-        );
+        let mut entry = Entry::new(Value::String(next.clone()), expires_at_ms, now_ms);
         entry.force_string_encoding = true;
         self.internal_entries_insert(key.to_vec(), entry);
         self.dirty = self.dirty.saturating_add(1);
@@ -4686,6 +4691,19 @@ impl Store {
         delta: f64,
         now_ms: u64,
     ) -> Result<f64, StoreError> {
+        let delta_text = delta.to_string();
+        let result = self.hincrbyfloat_text(key, field, delta_text.as_bytes(), delta, now_ms)?;
+        parse_f64(&result)
+    }
+
+    pub fn hincrbyfloat_text(
+        &mut self,
+        key: &[u8],
+        field: &[u8],
+        delta_text: &[u8],
+        delta: f64,
+        now_ms: u64,
+    ) -> Result<Vec<u8>, StoreError> {
         self.drop_if_expired(key, now_ms);
         self.internal_entry(key.to_vec(), Value::Hash(BTreeMap::new()), now_ms);
         let (res, is_empty) = self
@@ -4695,20 +4713,15 @@ impl Store {
                 };
                 let mut touched = false;
                 let current_res = match m.get(field) {
-                    Some(v) => parse_f64(v),
-                    None => Ok(0.0),
+                    Some(v) => add_float_text(v, delta_text, delta),
+                    None => add_float_text(b"0", delta_text, delta),
                 };
 
                 let res = match current_res {
-                    Ok(current) => {
-                        let next = current + delta;
-                        if next.is_nan() || next.is_infinite() {
-                            Err(StoreError::IncrFloatNaN)
-                        } else {
-                            m.insert(field.to_vec(), next.to_string().into_bytes());
-                            touched = true;
-                            Ok(next)
-                        }
+                    Ok(next) => {
+                        m.insert(field.to_vec(), next.clone());
+                        touched = true;
+                        Ok(next)
                     }
                     Err(e) => Err(e),
                 };
@@ -12578,6 +12591,174 @@ fn parse_f64(bytes: &[u8]) -> Result<f64, StoreError> {
         return Err(StoreError::ValueNotFloat);
     }
     Ok(val)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SimpleDecimalFloat {
+    coefficient: i128,
+    scale: u32,
+}
+
+const MAX_SIMPLE_DECIMAL_DIGITS: usize = 20;
+const MAX_SIMPLE_DECIMAL_SCALE: u32 = 18;
+
+fn parse_simple_decimal_float(bytes: &[u8]) -> Option<SimpleDecimalFloat> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut idx = 0;
+    let negative = match bytes[0] {
+        b'-' => {
+            idx = 1;
+            true
+        }
+        b'+' => {
+            idx = 1;
+            false
+        }
+        _ => false,
+    };
+    if idx == bytes.len() {
+        return None;
+    }
+
+    let mut coefficient = 0_i128;
+    let mut scale = 0_u32;
+    let mut saw_digit = false;
+    let mut saw_dot = false;
+    for &byte in &bytes[idx..] {
+        match byte {
+            b'0'..=b'9' => {
+                saw_digit = true;
+                coefficient = coefficient.checked_mul(10)?;
+                coefficient = coefficient.checked_add(i128::from(byte - b'0'))?;
+                if saw_dot {
+                    scale = scale.checked_add(1)?;
+                    if scale > MAX_SIMPLE_DECIMAL_SCALE {
+                        return None;
+                    }
+                }
+            }
+            b'.' if !saw_dot => saw_dot = true,
+            _ => return None,
+        }
+    }
+    if !saw_digit {
+        return None;
+    }
+
+    while scale > 0 && coefficient % 10 == 0 {
+        coefficient /= 10;
+        scale -= 1;
+    }
+    if coefficient == 0 {
+        return Some(SimpleDecimalFloat {
+            coefficient: 0,
+            scale: 0,
+        });
+    }
+    if decimal_digit_count(coefficient) > MAX_SIMPLE_DECIMAL_DIGITS {
+        return None;
+    }
+    if negative {
+        coefficient = -coefficient;
+    }
+    Some(SimpleDecimalFloat { coefficient, scale })
+}
+
+fn decimal_digit_count(value: i128) -> usize {
+    let mut n = value.unsigned_abs();
+    let mut digits = 1;
+    while n >= 10 {
+        n /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn pow10_i128(exp: u32) -> Option<i128> {
+    let mut value = 1_i128;
+    for _ in 0..exp {
+        value = value.checked_mul(10)?;
+    }
+    Some(value)
+}
+
+fn add_simple_decimal_float(
+    left: SimpleDecimalFloat,
+    right: SimpleDecimalFloat,
+) -> Option<SimpleDecimalFloat> {
+    let scale = left.scale.max(right.scale);
+    let left_multiplier = pow10_i128(scale - left.scale)?;
+    let right_multiplier = pow10_i128(scale - right.scale)?;
+    let coefficient = left
+        .coefficient
+        .checked_mul(left_multiplier)?
+        .checked_add(right.coefficient.checked_mul(right_multiplier)?)?;
+    if coefficient == 0 {
+        return Some(SimpleDecimalFloat {
+            coefficient: 0,
+            scale: 0,
+        });
+    }
+    if decimal_digit_count(coefficient) > MAX_SIMPLE_DECIMAL_DIGITS {
+        return None;
+    }
+    let mut result = SimpleDecimalFloat { coefficient, scale };
+    while result.scale > 0 && result.coefficient % 10 == 0 {
+        result.coefficient /= 10;
+        result.scale -= 1;
+    }
+    Some(result)
+}
+
+fn format_simple_decimal_float(value: SimpleDecimalFloat) -> Vec<u8> {
+    if value.coefficient == 0 {
+        return b"0".to_vec();
+    }
+    let negative = value.coefficient < 0;
+    let mut digits = value.coefficient.unsigned_abs().to_string();
+    if value.scale > 0 {
+        let scale = value.scale as usize;
+        if digits.len() <= scale {
+            let mut padded = String::with_capacity(scale + 2);
+            padded.push_str("0.");
+            for _ in 0..(scale - digits.len()) {
+                padded.push('0');
+            }
+            padded.push_str(&digits);
+            digits = padded;
+        } else {
+            digits.insert(digits.len() - scale, '.');
+        }
+        while digits.ends_with('0') {
+            digits.pop();
+        }
+        if digits.ends_with('.') {
+            digits.pop();
+        }
+    }
+    if negative {
+        digits.insert(0, '-');
+    }
+    digits.into_bytes()
+}
+
+fn add_float_text(current: &[u8], delta_text: &[u8], delta: f64) -> Result<Vec<u8>, StoreError> {
+    if let (Some(current_decimal), Some(delta_decimal)) = (
+        parse_simple_decimal_float(current),
+        parse_simple_decimal_float(delta_text),
+    ) && let Some(result) = add_simple_decimal_float(current_decimal, delta_decimal)
+    {
+        return Ok(format_simple_decimal_float(result));
+    }
+
+    let current = parse_f64(current)?;
+    let next = current + delta;
+    if next.is_nan() || next.is_infinite() {
+        return Err(StoreError::IncrFloatNaN);
+    }
+    Ok(next.to_string().into_bytes())
 }
 
 fn fnv1a_update(mut hash: u64, bytes: &[u8]) -> u64 {
