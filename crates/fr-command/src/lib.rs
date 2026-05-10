@@ -7810,13 +7810,9 @@ fn waitaof_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 .to_string(),
         ));
     }
-    // Standalone stub: no real fsync/replica ack tracking yet (see
-    // project_wait_commands_stub). Return [0, 0] for both numlocal=0
-    // and the AOF-enabled numlocal=1 path.
-    Ok(RespFrame::Array(Some(vec![
-        RespFrame::Integer(0),
-        RespFrame::Integer(0),
-    ])))
+    Err(CommandError::Custom(
+        "ERR WAITAOF requires runtime replication context".to_string(),
+    ))
 }
 
 fn cluster_disabled_error() -> CommandError {
@@ -14182,10 +14178,97 @@ fn command_info_categories(name: &str) -> Vec<RespFrame> {
 }
 
 fn command_info_tips(name: &str) -> Vec<RespFrame> {
+    // Sourced from upstream src/commands/*.json command_tips field
+    // (legacy_redis_code/redis/src/commands), lowercased per addReplyCommandTips.
     match name {
-        "command" | "command|info" | "command|list" | "command|docs" => {
-            vec![hello_bulk("nondeterministic_output_order")]
+        "client|info" | "client|list" | "cluster|bumpepoch"
+        | "cluster|count-failure-reports" | "cluster|getkeysinslot" | "cluster|info"
+        | "cluster|links" | "cluster|myshardid" | "cluster|nodes" | "cluster|replicas"
+        | "cluster|shards" | "cluster|slaves" | "cluster|slots" | "dump" | "hrandfield"
+        | "hscan" | "lastsave" | "migrate" | "object|encoding" | "object|freq"
+        | "object|idletime" | "object|refcount" | "pttl" | "spop" | "srandmember"
+        | "sscan" | "time" | "ttl" | "xadd" | "xautoclaim" | "xclaim"
+        | "xinfo|consumers" | "xpending" | "xtrim" | "zrandmember" | "zscan" => {
+            vec![hello_bulk("nondeterministic_output")]
         }
+        "command" | "command|docs" | "command|info" | "command|list" | "function|list"
+        | "hgetall" | "hkeys" | "hvals" | "module|list" | "sdiff" | "sinter"
+        | "smembers" | "sunion" => vec![hello_bulk("nondeterministic_output_order")],
+        "acl|deluser" | "acl|save" | "acl|setuser" | "client|setinfo" | "client|setname"
+        | "config|resetstat" | "config|rewrite" | "config|set" | "script|flush"
+        | "script|load" | "slowlog|reset" => vec![
+            hello_bulk("request_policy:all_nodes"),
+            hello_bulk("response_policy:all_succeeded"),
+        ],
+        "flushall" | "flushdb" | "function|delete" | "function|flush" | "function|load"
+        | "function|restore" | "memory|purge" | "ping" => vec![
+            hello_bulk("request_policy:all_shards"),
+            hello_bulk("response_policy:all_succeeded"),
+        ],
+        "latency|doctor" | "latency|graph" | "latency|histogram" | "latency|history"
+        | "latency|latest" => vec![
+            hello_bulk("nondeterministic_output"),
+            hello_bulk("request_policy:all_nodes"),
+            hello_bulk("response_policy:special"),
+        ],
+        "function|stats" | "info" | "memory|doctor" | "memory|malloc-stats"
+        | "memory|stats" => vec![
+            hello_bulk("nondeterministic_output"),
+            hello_bulk("request_policy:all_shards"),
+            hello_bulk("response_policy:special"),
+        ],
+        "del" | "exists" | "touch" | "unlink" => vec![
+            hello_bulk("request_policy:multi_shard"),
+            hello_bulk("response_policy:agg_sum"),
+        ],
+        "wait" | "waitaof" => vec![
+            hello_bulk("request_policy:all_shards"),
+            hello_bulk("response_policy:agg_min"),
+        ],
+        "function|kill" | "script|kill" => vec![
+            hello_bulk("request_policy:all_shards"),
+            hello_bulk("response_policy:one_succeeded"),
+        ],
+        "scan" => vec![
+            hello_bulk("nondeterministic_output"),
+            hello_bulk("request_policy:special"),
+            hello_bulk("response_policy:special"),
+        ],
+        "slowlog|get" => vec![
+            hello_bulk("request_policy:all_nodes"),
+            hello_bulk("nondeterministic_output"),
+        ],
+        "latency|reset" => vec![
+            hello_bulk("request_policy:all_nodes"),
+            hello_bulk("response_policy:agg_sum"),
+        ],
+        "slowlog|len" => vec![
+            hello_bulk("request_policy:all_nodes"),
+            hello_bulk("response_policy:agg_sum"),
+            hello_bulk("nondeterministic_output"),
+        ],
+        "keys" => vec![
+            hello_bulk("request_policy:all_shards"),
+            hello_bulk("nondeterministic_output_order"),
+        ],
+        "script|exists" => vec![
+            hello_bulk("request_policy:all_shards"),
+            hello_bulk("response_policy:agg_logical_and"),
+        ],
+        "dbsize" => vec![
+            hello_bulk("request_policy:all_shards"),
+            hello_bulk("response_policy:agg_sum"),
+        ],
+        "randomkey" => vec![
+            hello_bulk("request_policy:all_shards"),
+            hello_bulk("response_policy:special"),
+            hello_bulk("nondeterministic_output"),
+        ],
+        "mget" => vec![hello_bulk("request_policy:multi_shard")],
+        "mset" => vec![
+            hello_bulk("request_policy:multi_shard"),
+            hello_bulk("response_policy:all_succeeded"),
+        ],
         _ => Vec::new(),
     }
 }
@@ -16477,9 +16560,10 @@ fn wait_cmd(argv: &[Vec<u8>], _store: &Store) -> Result<RespFrame, CommandError>
     if timeout_ms < 0 {
         return Err(CommandError::Custom("ERR timeout is negative".to_string()));
     }
-    // WAIT numreplicas timeout - in standalone mode, return 0 replicas
     let _ = numreplicas;
-    Ok(RespFrame::Integer(0))
+    Err(CommandError::Custom(
+        "ERR WAIT requires runtime replication context".to_string(),
+    ))
 }
 
 fn slowlog_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
@@ -44592,7 +44676,7 @@ mod tests {
     // ── WAITAOF test ────────────────────────────────────────────────
 
     #[test]
-    fn wait_clamps_negative_numreplicas_and_uses_timeout_specific_errors() {
+    fn wait_valid_direct_dispatch_requires_runtime_context_after_argument_checks() {
         let mut store = Store::new();
 
         let invalid_numreplicas = dispatch_argv(
@@ -44608,8 +44692,11 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("negative numreplicas should clamp to zero");
-        assert_eq!(negative, RespFrame::Integer(0));
+        .expect_err("valid WAIT shape needs runtime replication state");
+        assert_eq!(
+            negative,
+            CommandError::Custom("ERR WAIT requires runtime replication context".to_string())
+        );
 
         let invalid_timeout = dispatch_argv(
             &[b"WAIT".to_vec(), b"0".to_vec(), b"abc".to_vec()],
@@ -44624,7 +44711,7 @@ mod tests {
     }
 
     #[test]
-    fn wait_rejects_extra_args_and_runs_inside_script() {
+    fn wait_rejects_extra_args_and_does_not_fake_script_ack_counts() {
         // (frankenredis-waitsc) Upstream commands.def declares WAIT
         // with arity=3 (exact) and flags=0 — notably NOT
         // CMD_NOSCRIPT (compare the adjacent WAITAOF entry which
@@ -44649,16 +44736,20 @@ mod tests {
         .unwrap_err();
         assert_eq!(extra, CommandError::WrongArity("WAIT"));
 
-        // Inside a Lua script, WAIT must SUCCEED — upstream allows
-        // it (no CMD_NOSCRIPT). Standalone reply is 0 replicas.
+        // WAIT is not CMD_NOSCRIPT, so direct dispatch reaches the
+        // handler in script context. It still must not fake a
+        // successful replica count without runtime ack state.
         store.script_nesting_level = 1;
         let scripted = dispatch_argv(
             &[b"WAIT".to_vec(), b"0".to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
-        .unwrap();
-        assert_eq!(scripted, RespFrame::Integer(0));
+        .expect_err("direct WAIT dispatch requires runtime replication state");
+        assert_eq!(
+            scripted,
+            CommandError::Custom("ERR WAIT requires runtime replication context".to_string())
+        );
     }
 
     #[test]
@@ -44705,7 +44796,7 @@ mod tests {
     }
 
     #[test]
-    fn waitaof_standalone_reports_no_local_ack_without_appendonly() {
+    fn waitaof_direct_dispatch_requires_runtime_context_without_local_fsync() {
         let mut store = Store::new();
         let zero_replicas = dispatch_argv(
             &[
@@ -44717,10 +44808,10 @@ mod tests {
             &mut store,
             0,
         )
-        .unwrap();
+        .expect_err("valid WAITAOF shape needs runtime replication state");
         assert_eq!(
             zero_replicas,
-            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0),]))
+            CommandError::Custom("ERR WAITAOF requires runtime replication context".to_string())
         );
 
         let unmet_replicas = dispatch_argv(
@@ -44733,21 +44824,22 @@ mod tests {
             &mut store,
             0,
         )
-        .unwrap();
+        .expect_err("valid WAITAOF shape needs runtime replication state");
         assert_eq!(
             unmet_replicas,
-            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0),]))
+            CommandError::Custom("ERR WAITAOF requires runtime replication context".to_string())
         );
     }
 
     #[test]
-    fn waitaof_with_numlocal_one_succeeds_when_aof_enabled() {
+    fn waitaof_with_numlocal_one_and_aof_enabled_still_requires_runtime_context() {
         // (frankenredis-0axo9) Upstream replication.c::waitaofCommand
         // line 3579 gates the 'appendonly is disabled' error on
         // `numlocal && !server.aof_enabled`. fr was rejecting
         // numlocal=1 unconditionally, so this test pins the new
-        // gating: with AOF enabled, WAITAOF 1 0 0 should fall through
-        // to the standalone [0, 0] short-circuit.
+        // gating: with AOF enabled, WAITAOF 1 0 0 should pass the
+        // appendonly-disabled guard, then fail closed because the
+        // command crate does not own runtime fsync/replica ack state.
         let mut store = Store::new();
         store.set_aof_enabled(true);
         let out = dispatch_argv(
@@ -44760,10 +44852,10 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("WAITAOF 1 0 0 with AOF enabled must not error");
+        .expect_err("WAITAOF 1 0 0 with AOF enabled still needs runtime context");
         assert_eq!(
             out,
-            RespFrame::Array(Some(vec![RespFrame::Integer(0), RespFrame::Integer(0)]))
+            CommandError::Custom("ERR WAITAOF requires runtime replication context".to_string())
         );
     }
 
@@ -56892,6 +56984,101 @@ mod tests {
                 RespFrame::Integer(want),
                 "{cmd} arity must be {want}, got {:?}",
                 fields[1]
+            );
+        }
+    }
+
+    /// (frankenredis-msoqu) Upstream src/commands/*.json populates a
+    /// `command_tips` array per command (lowercased on the wire by
+    /// addReplyCommandTips). fr previously left the tips slot empty for
+    /// every command except COMMAND/COMMAND|INFO/etc., so cluster-aware
+    /// callers couldn't infer request_policy/response_policy or
+    /// nondeterminism flags. Pin a representative subset across each
+    /// distinct tip-set so regressions in command_info_tips trip a
+    /// targeted test instead of waiting for the live oracle.
+    #[test]
+    fn command_info_tips_match_upstream_tip_table() {
+        let mut store = Store::new();
+        for (cmd, want) in [
+            (
+                "ACL|SETUSER",
+                vec!["request_policy:all_nodes", "response_policy:all_succeeded"],
+            ),
+            ("DBSIZE", vec!["request_policy:all_shards", "response_policy:agg_sum"]),
+            ("KEYS", vec!["request_policy:all_shards", "nondeterministic_output_order"]),
+            ("MGET", vec!["request_policy:multi_shard"]),
+            (
+                "MSET",
+                vec!["request_policy:multi_shard", "response_policy:all_succeeded"],
+            ),
+            (
+                "PING",
+                vec!["request_policy:all_shards", "response_policy:all_succeeded"],
+            ),
+            (
+                "RANDOMKEY",
+                vec![
+                    "request_policy:all_shards",
+                    "response_policy:special",
+                    "nondeterministic_output",
+                ],
+            ),
+            (
+                "SCAN",
+                vec![
+                    "nondeterministic_output",
+                    "request_policy:special",
+                    "response_policy:special",
+                ],
+            ),
+            (
+                "SLOWLOG|LEN",
+                vec![
+                    "request_policy:all_nodes",
+                    "response_policy:agg_sum",
+                    "nondeterministic_output",
+                ],
+            ),
+            ("TIME", vec!["nondeterministic_output"]),
+            (
+                "WAIT",
+                vec!["request_policy:all_shards", "response_policy:agg_min"],
+            ),
+            ("HGETALL", vec!["nondeterministic_output_order"]),
+        ] {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row")
+            else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            let RespFrame::Array(Some(tips)) = fields[7].clone() else {
+                panic!("tips slot must be an Array for {cmd}, got {:?}", fields[7]);
+            };
+            let got: Vec<String> = tips
+                .iter()
+                .map(|f| match f {
+                    RespFrame::BulkString(Some(b)) => {
+                        String::from_utf8_lossy(b).into_owned()
+                    }
+                    other => panic!("expected BulkString tip for {cmd}, got {other:?}"),
+                })
+                .collect();
+            let want_strs: Vec<String> = want.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(
+                got, want_strs,
+                "{cmd} tips must match upstream order"
             );
         }
     }
