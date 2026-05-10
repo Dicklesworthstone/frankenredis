@@ -10672,7 +10672,13 @@ impl Runtime {
         if argv.len() != 1 {
             return CommandError::WrongArity("LASTSAVE").to_resp();
         }
-        RespFrame::Integer(self.server.last_save_time_sec as i64)
+        // (frankenredis-30hub) Source the value from the store so the
+        // boot-time seed (server.c::initServerConfig "consider DB saved at
+        // startup") is visible before any SAVE/BGSAVE has run. The runtime
+        // copy in self.server.last_save_time_sec is only refreshed by the
+        // bgsave handlers, so it stays at 0 between Server construction
+        // and the first save without this read-through.
+        RespFrame::Integer(self.server.store.last_save_time_sec as i64)
     }
 
     fn handle_bgrewriteaof_command(&mut self, argv: &[Vec<u8>], now_ms: u64) -> RespFrame {
@@ -23218,6 +23224,34 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&rdb_path);
+    }
+
+    /// (frankenredis-30hub) Mirror upstream server.c::initServerConfig
+    /// line 2668 — `server.lastsave = time(NULL); /* At startup we
+    /// consider the DB saved. */`. Pre-fix, fr's Store::new() seeded
+    /// last_save_time_sec to 0, so a freshly-booted server reported
+    /// LASTSAVE = 0 and INFO persistence rdb_last_save_time = 0. Tools
+    /// that watch this as a freshness signal interpret 0 as 1970-01-01.
+    #[test]
+    fn fresh_server_lastsave_returns_recent_unix_time_per_upstream() {
+        let mut rt = Runtime::default_strict();
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0) as i64;
+
+        let r = rt.execute_frame(command(&[b"LASTSAVE"]), 0);
+        let RespFrame::Integer(secs) = r else {
+            panic!("expected Integer reply from LASTSAVE, got {r:?}");
+        };
+        // The seed was captured at Store::new() — must be within a
+        // reasonable window of "now" (a few seconds tolerance for slow CI
+        // runners) and definitely non-zero.
+        assert!(secs > 0, "LASTSAVE on fresh server must be non-zero");
+        assert!(
+            (now_unix - secs).abs() < 60,
+            "LASTSAVE on fresh server must be within 60s of current Unix time; got {secs}, now={now_unix}",
+        );
     }
 
     #[test]

@@ -36544,6 +36544,11 @@ mod tests {
     fn save_rejected_from_scripts_after_arity_validation() {
         let mut store = Store::new();
         store.script_nesting_level = 1;
+        // (frankenredis-30hub) Store::new() now seeds last_save_time_sec to
+        // the current Unix time per upstream's "consider DB saved at boot"
+        // semantic, so capture the initial value and assert it is UNCHANGED
+        // by the script-rejected SAVE/BGSAVE rather than asserting ==0.
+        let initial = store.last_save_time_sec;
 
         let arity = dispatch_argv(&[b"SAVE".to_vec(), b"extra".to_vec()], &mut store, 0)
             .expect_err("save arity");
@@ -36552,7 +36557,7 @@ mod tests {
         let err =
             dispatch_argv(&[b"SAVE".to_vec()], &mut store, 42_000).expect_err("save noscript");
         assert_eq!(err, CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string()));
-        assert_eq!(store.last_save_time_sec, 0);
+        assert_eq!(store.last_save_time_sec, initial);
     }
 
     #[test]
@@ -36614,6 +36619,9 @@ mod tests {
         // bad args returns NOSCRIPT, not SyntaxError. (frankenredis-avxsq)
         let mut store = Store::new();
         store.script_nesting_level = 1;
+        // (frankenredis-30hub) See save_rejected_from_scripts_after_arity_validation —
+        // capture initial last_save_time_sec rather than asserting ==0.
+        let initial = store.last_save_time_sec;
 
         let invalid = dispatch_argv(&[b"BGSAVE".to_vec(), b"NOW".to_vec()], &mut store, 0)
             .expect_err("invalid option should still be NOSCRIPT under script");
@@ -36650,7 +36658,7 @@ mod tests {
             scheduled,
             CommandError::Custom(SCRIPT_NOSCRIPT_ERROR.to_string())
         );
-        assert_eq!(store.last_save_time_sec, 0);
+        assert_eq!(store.last_save_time_sec, initial);
     }
 
     #[test]

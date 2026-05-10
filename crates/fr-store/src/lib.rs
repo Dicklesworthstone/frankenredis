@@ -1637,7 +1637,16 @@ impl Default for Store {
             zset_max_listpack_value: 64,
             rng_seed: 0xDEADBEEF_C0FFEE11,
             dirty: 0,
-            last_save_time_sec: 0,
+            // (frankenredis-30hub) Mirror upstream server.c::initServerConfig
+            // line 2668 — `server.lastsave = time(NULL); /* At startup we
+            // consider the DB saved. */`. Tools that scrape LASTSAVE / INFO
+            // persistence rdb_last_save_time as a freshness signal interpret
+            // 0 as 1970-01-01 (i.e. "never saved"); upstream stamps the
+            // current Unix time so a fresh boot looks like a successful save.
+            last_save_time_sec: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
             stat_rdb_saves: 0,
             stat_aof_rewrites: 0,
             stat_rdb_last_bgsave_time_sec: None,
