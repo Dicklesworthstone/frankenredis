@@ -199,6 +199,17 @@ pub fn apply_info_to_instance(instance: &mut SentinelRedisInstance, info: &Parse
     }
 }
 
+pub fn record_info_response(
+    instance: &mut SentinelRedisInstance,
+    info: impl Into<String>,
+    now: u64,
+) {
+    let info = info.into();
+    let parsed = parse_info_response(&info);
+    apply_info_to_instance(instance, &parsed, now);
+    instance.info = Some(info);
+}
+
 pub fn check_role_mismatch(instance: &SentinelRedisInstance) -> Option<&'static str> {
     if instance.is_master() && instance.role_reported == Role::Slave {
         return Some("instance reports role=slave but we expect master");
@@ -361,6 +372,19 @@ slave_priority:100
         assert_eq!(instance.runid, Some("test123".to_string()));
         assert_eq!(instance.slave_repl_offset, 99999);
         assert_eq!(instance.info_refresh, 5000);
+    }
+
+    #[test]
+    fn record_info_response_preserves_raw_cache_payload() {
+        let mut instance = make_instance();
+        let raw = "role:master\nrun_id:cached123\nmaster_repl_offset:42\n";
+
+        record_info_response(&mut instance, raw, 7000);
+
+        assert_eq!(instance.info_refresh, 7000);
+        assert_eq!(instance.info.as_deref(), Some(raw));
+        assert_eq!(instance.runid.as_deref(), Some("cached123"));
+        assert_eq!(instance.slave_repl_offset, 42);
     }
 
     #[test]

@@ -334,11 +334,56 @@ fn cmd_pending_scripts(state: &SentinelState) -> RespFrame {
     RespFrame::Array(Some(scripts))
 }
 
-fn cmd_info_cache(_state: &SentinelState, args: &[&[u8]]) -> RespFrame {
-    if args.len() != 1 {
-        return wrong_arity("sentinel info-cache");
+fn cmd_info_cache(state: &SentinelState, args: &[&[u8]]) -> RespFrame {
+    let mut masters: Vec<&crate::SentinelRedisInstance> = if args.is_empty() {
+        state.masters.values().collect()
+    } else {
+        args.iter()
+            .filter_map(|name| {
+                let name = String::from_utf8_lossy(name);
+                state.get_master(&name)
+            })
+            .collect()
+    };
+    masters.sort_by(|left, right| left.name.cmp(&right.name));
+    masters.dedup_by(|left, right| left.name == right.name);
+
+    let mut reply = Vec::with_capacity(masters.len() * 2);
+    for master in masters {
+        reply.push(RespFrame::BulkString(Some(master.name.as_bytes().to_vec())));
+        reply.push(RespFrame::Array(Some(info_cache_rows(
+            master,
+            state.previous_time,
+        ))));
     }
-    RespFrame::Array(Some(vec![]))
+    RespFrame::Array(Some(reply))
+}
+
+fn info_cache_rows(instance: &crate::SentinelRedisInstance, now_ms: u64) -> Vec<RespFrame> {
+    let mut rows = Vec::with_capacity(instance.slaves.len() + 1);
+    rows.push(info_cache_row(instance, now_ms));
+
+    let mut replicas: Vec<_> = instance.slaves.values().collect();
+    replicas.sort_by(|left, right| left.name.cmp(&right.name));
+    rows.extend(
+        replicas
+            .into_iter()
+            .map(|replica| info_cache_row(replica, now_ms)),
+    );
+    rows
+}
+
+fn info_cache_row(instance: &crate::SentinelRedisInstance, now_ms: u64) -> RespFrame {
+    let age_ms = if instance.info_refresh == 0 {
+        0
+    } else {
+        now_ms.saturating_sub(instance.info_refresh)
+    };
+    let age_ms = i64::try_from(age_ms).unwrap_or(i64::MAX);
+    RespFrame::Array(Some(vec![
+        RespFrame::Integer(age_ms),
+        RespFrame::BulkString(instance.info.as_ref().map(|info| info.as_bytes().to_vec())),
+    ]))
 }
 
 fn cmd_debug(_state: &SentinelState, _args: &[&[u8]]) -> RespFrame {
@@ -513,6 +558,13 @@ mod tests {
             RespFrame::Array(Some(items)) => Some(items.len()),
             _ => None,
         }
+    }
+
+    fn expected_info_cache_row(age_ms: i64, info: Option<&str>) -> RespFrame {
+        RespFrame::Array(Some(vec![
+            RespFrame::Integer(age_ms),
+            RespFrame::BulkString(info.map(|value| value.as_bytes().to_vec())),
+        ]))
     }
 
     #[test]
@@ -762,5 +814,79 @@ mod tests {
         let mut state = SentinelState::new();
         let result = dispatch_sentinel_command(&mut state, &[b"HELP"]);
         assert!(array_len(&result).is_some_and(|len| len > 0));
+    }
+
+    #[test]
+    fn sentinel_info_cache_returns_all_masters_with_self_and_replica_rows() {
+        let mut state = SentinelState::new();
+        state.previous_time = 10_000;
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"zeta", b"127.0.0.2", b"6379", b"2"],
+        );
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"alpha", b"127.0.0.1", b"6380", b"1"],
+        );
+
+        {
+            assert!(state.get_master("alpha").is_some());
+            let Some(alpha) = state.get_master_mut("alpha") else {
+                return;
+            };
+            alpha.info_refresh = 9_000;
+            alpha.info = Some("role:master\r\nrun_id:alpha\r\n".to_string());
+
+            let mut replica_b =
+                sentinel_instance("replica-b", "127.0.0.11", 6382, InstanceFlags::SLAVE);
+            replica_b.info_refresh = 9_500;
+            replica_b.info = Some("role:slave\r\nrun_id:replica-b\r\n".to_string());
+            alpha.slaves.insert("replica-b".to_string(), replica_b);
+
+            let mut replica_a =
+                sentinel_instance("replica-a", "127.0.0.10", 6381, InstanceFlags::SLAVE);
+            replica_a.info_refresh = 0;
+            replica_a.info = None;
+            alpha.slaves.insert("replica-a".to_string(), replica_a);
+        }
+
+        let result = dispatch_sentinel_command(&mut state, &[b"INFO-CACHE"]);
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"alpha".to_vec())),
+                RespFrame::Array(Some(vec![
+                    expected_info_cache_row(1_000, Some("role:master\r\nrun_id:alpha\r\n")),
+                    expected_info_cache_row(0, None),
+                    expected_info_cache_row(500, Some("role:slave\r\nrun_id:replica-b\r\n")),
+                ])),
+                RespFrame::BulkString(Some(b"zeta".to_vec())),
+                RespFrame::Array(Some(vec![expected_info_cache_row(0, None)])),
+            ]))
+        );
+    }
+
+    #[test]
+    fn sentinel_info_cache_filters_requested_masters_and_ignores_unknown_names() {
+        let mut state = SentinelState::new();
+        state.previous_time = 2_000;
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"alpha", b"127.0.0.1", b"6379", b"1"],
+        );
+        let _ = dispatch_sentinel_command(
+            &mut state,
+            &[b"MONITOR", b"beta", b"127.0.0.2", b"6380", b"1"],
+        );
+
+        let result =
+            dispatch_sentinel_command(&mut state, &[b"INFO-CACHE", b"missing", b"beta", b"beta"]);
+        assert_eq!(
+            result,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"beta".to_vec())),
+                RespFrame::Array(Some(vec![expected_info_cache_row(0, None)])),
+            ]))
+        );
     }
 }

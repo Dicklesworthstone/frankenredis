@@ -140,6 +140,7 @@ pub struct SentinelRedisInstance {
     pub o_down_since_time: u64,
     pub down_after_period: u64,
     pub info_refresh: u64,
+    pub info: Option<String>,
 
     pub role_reported: Role,
     pub role_reported_time: u64,
@@ -189,6 +190,7 @@ impl SentinelRedisInstance {
             o_down_since_time: 0,
             down_after_period: DEFAULT_DOWN_AFTER_MS,
             info_refresh: 0,
+            info: None,
             role_reported: Role::Unknown,
             role_reported_time: 0,
             sentinels: HashMap::new(),
