@@ -15410,6 +15410,98 @@ fn upstream_command_docs_arguments(name: &str) -> Option<Vec<RespFrame>> {
                 ],
             ),
         ],
+        // (frankenredis-wb78v) Mirror EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT
+        // arg layouts from legacy_redis_code/redis/src/commands.def. All
+        // four share the same condition oneof (NX/XX/GT/LT pure-tokens,
+        // since 7.0.0, optional); only the second argument differs.
+        "expire" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("seconds", "integer", None, None, None, &[], Vec::new()),
+            command_docs_arg(
+                "condition",
+                "oneof",
+                None,
+                None,
+                Some("7.0.0"),
+                &["optional"],
+                vec![
+                    command_docs_pure_token("nx", "NX", None),
+                    command_docs_pure_token("xx", "XX", None),
+                    command_docs_pure_token("gt", "GT", None),
+                    command_docs_pure_token("lt", "LT", None),
+                ],
+            ),
+        ],
+        "pexpire" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("milliseconds", "integer", None, None, None, &[], Vec::new()),
+            command_docs_arg(
+                "condition",
+                "oneof",
+                None,
+                None,
+                Some("7.0.0"),
+                &["optional"],
+                vec![
+                    command_docs_pure_token("nx", "NX", None),
+                    command_docs_pure_token("xx", "XX", None),
+                    command_docs_pure_token("gt", "GT", None),
+                    command_docs_pure_token("lt", "LT", None),
+                ],
+            ),
+        ],
+        "expireat" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg(
+                "unix-time-seconds",
+                "unix-time",
+                None,
+                None,
+                None,
+                &[],
+                Vec::new(),
+            ),
+            command_docs_arg(
+                "condition",
+                "oneof",
+                None,
+                None,
+                Some("7.0.0"),
+                &["optional"],
+                vec![
+                    command_docs_pure_token("nx", "NX", None),
+                    command_docs_pure_token("xx", "XX", None),
+                    command_docs_pure_token("gt", "GT", None),
+                    command_docs_pure_token("lt", "LT", None),
+                ],
+            ),
+        ],
+        "pexpireat" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg(
+                "unix-time-milliseconds",
+                "unix-time",
+                None,
+                None,
+                None,
+                &[],
+                Vec::new(),
+            ),
+            command_docs_arg(
+                "condition",
+                "oneof",
+                None,
+                None,
+                Some("7.0.0"),
+                &["optional"],
+                vec![
+                    command_docs_pure_token("nx", "NX", None),
+                    command_docs_pure_token("xx", "XX", None),
+                    command_docs_pure_token("gt", "GT", None),
+                    command_docs_pure_token("lt", "LT", None),
+                ],
+            ),
+        ],
         // (frankenredis-xifsa) Mirror LMPOP_Args from
         // legacy_redis_code/redis/src/commands.def:4099-4104. Without this,
         // the fallback emits generic arg1/arg2/arg3 placeholders.
