@@ -12938,6 +12938,14 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         );
         let _ = write!(info, "evicted_keys:{}\r\n", store.stat_evicted_keys);
         info.push_str("evicted_clients:0\r\n");
+        // (frankenredis-gpseq) Upstream server.c::genRedisInfoString
+        // emits the eviction-time pair contiguously with the eviction
+        // counters block (right after evicted_clients), not at the end
+        // of the Stats section. fr previously appended both fields
+        // after acl_access_denied_channel, which broke field-order
+        // parity for any tool that consumes INFO Stats positionally.
+        info.push_str("total_eviction_exceeded_time:0\r\n");
+        info.push_str("current_eviction_exceeded_time:0\r\n");
         // (frankenredis-ngoap) total_keys_expired / total_keys_evicted
         // were fr-specific duplicates of expired_keys / evicted_keys
         // (which are already emitted above). Vendored Redis 7.2.4 has
@@ -13010,8 +13018,6 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("acl_access_denied_cmd:0\r\n");
         info.push_str("acl_access_denied_key:0\r\n");
         info.push_str("acl_access_denied_channel:0\r\n");
-        info.push_str("current_eviction_exceeded_time:0\r\n");
-        info.push_str("total_eviction_exceeded_time:0\r\n");
         info.push_str("\r\n");
     }
 
@@ -47754,6 +47760,40 @@ mod tests {
                 "INFO stats missing upstream field {required:?}; body=\n{info}"
             );
         }
+    }
+
+    /// (frankenredis-gpseq) Upstream server.c::genRedisInfoString
+    /// emits the eviction-time pair contiguously with the eviction
+    /// counters (right after evicted_clients), not at the end of the
+    /// Stats section. Pin the relative order so future reorderings
+    /// trip a targeted test instead of waiting for the live oracle.
+    #[test]
+    fn info_stats_emits_eviction_exceeded_time_right_after_evicted_clients_per_upstream() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"stats".to_vec()], &mut store, 0)
+            .expect("info stats");
+        let RespFrame::BulkString(Some(bytes)) = out else {
+            panic!("expected bulk string"); // ubs:ignore — AI triage
+        };
+        let body = String::from_utf8(bytes).expect("utf8 stats");
+        let evicted_clients_pos = body
+            .find("evicted_clients:")
+            .expect("missing evicted_clients line");
+        let total_evict_pos = body
+            .find("total_eviction_exceeded_time:")
+            .expect("missing total_eviction_exceeded_time line");
+        let current_evict_pos = body
+            .find("current_eviction_exceeded_time:")
+            .expect("missing current_eviction_exceeded_time line");
+        let keyspace_hits_pos = body
+            .find("keyspace_hits:")
+            .expect("missing keyspace_hits line");
+        assert!(
+            evicted_clients_pos < total_evict_pos
+                && total_evict_pos < current_evict_pos
+                && current_evict_pos < keyspace_hits_pos,
+            "expected order evicted_clients < total_eviction_exceeded_time < current_eviction_exceeded_time < keyspace_hits, got positions {evicted_clients_pos}, {total_evict_pos}, {current_evict_pos}, {keyspace_hits_pos}; body=\n{body}"
+        );
     }
 
     #[test]
