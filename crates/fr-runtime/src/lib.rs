@@ -7185,22 +7185,28 @@ impl Runtime {
     }
 
     fn config_help_lines() -> Vec<RespFrame> {
-        fn bulk(text: &str) -> RespFrame {
-            RespFrame::BulkString(Some(text.as_bytes().to_vec()))
+        // (frankenredis-v0zn2) Mirror upstream config.c::configHelpCommand
+        // (lines 3368-3382). Frames are SimpleString (addReplyHelp emits
+        // status replies, not bulk strings) and the body uses upstream's
+        // single-pattern / single-directive wording. The multi-arg forms
+        // ARE supported at runtime via Redis 7+, but vendored 7.2.4's
+        // HELP text still shows the singular form.
+        fn simple(text: &str) -> RespFrame {
+            RespFrame::SimpleString(text.to_string())
         }
 
         vec![
-            bulk("CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
-            bulk("GET <pattern> [<pattern> ...]"),
-            bulk("    Return configuration parameters matching the specified patterns."),
-            bulk("SET <parameter> <value> [<parameter> <value> ...]"),
-            bulk("    Set configuration parameters to the specified values."),
-            bulk("RESETSTAT"),
-            bulk("    Reset statistics reported by INFO."),
-            bulk("REWRITE"),
-            bulk("    Rewrite the configuration file with the current in-memory settings."),
-            bulk("HELP"),
-            bulk("    Print this help."),
+            simple("CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
+            simple("GET <pattern>"),
+            simple("    Return parameters matching the glob-like <pattern> and their values."),
+            simple("SET <directive> <value>"),
+            simple("    Set the configuration <directive> to <value>."),
+            simple("RESETSTAT"),
+            simple("    Reset statistics reported by the INFO command."),
+            simple("REWRITE"),
+            simple("    Rewrite the configuration file."),
+            simple("HELP"),
+            simple("    Print this help."),
         ]
     }
 
@@ -21115,6 +21121,41 @@ mod tests {
         let mut rt = Runtime::default_strict();
         let help = rt.execute_frame(command(&[b"CONFIG", b"HELP"]), 0);
         assert_eq!(help, RespFrame::Array(Some(Runtime::config_help_lines())));
+    }
+
+    /// (frankenredis-v0zn2) CONFIG HELP frames must be SimpleString (per
+    /// upstream addReplyHelp semantics) and the body must mirror config.c
+    /// configHelpCommand line-for-line. Pre-fix, fr-runtime emitted
+    /// BulkString frames + custom wording (multi-arg form), so monitoring
+    /// tools that diff HELP text against vendored saw a divergence.
+    #[test]
+    fn config_help_frames_are_simple_strings_matching_upstream_wording() {
+        let mut rt = Runtime::default_strict();
+        let RespFrame::Array(Some(lines)) =
+            rt.execute_frame(command(&[b"CONFIG", b"HELP"]), 0)
+        else {
+            panic!("expected Array reply for CONFIG HELP");
+        };
+        let expected: &[&str] = &[
+            "CONFIG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:",
+            "GET <pattern>",
+            "    Return parameters matching the glob-like <pattern> and their values.",
+            "SET <directive> <value>",
+            "    Set the configuration <directive> to <value>.",
+            "RESETSTAT",
+            "    Reset statistics reported by the INFO command.",
+            "REWRITE",
+            "    Rewrite the configuration file.",
+            "HELP",
+            "    Print this help.",
+        ];
+        assert_eq!(lines.len(), expected.len(), "line count must match upstream");
+        for (i, (got, want)) in lines.iter().zip(expected.iter()).enumerate() {
+            match got {
+                RespFrame::SimpleString(s) => assert_eq!(s, want, "line {i}"),
+                other => panic!("line {i} must be SimpleString (addReplyHelp), got {other:?}"),
+            }
+        }
     }
 
     #[test]
