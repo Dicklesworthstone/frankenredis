@@ -19297,28 +19297,124 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         if argv.len() != 2 {
             return Err(debug_subcommand_envelope_error(sub));
         }
+        // (frankenredis-6i6tm) DEBUG HELP text mirrors upstream
+        // debug.c::debugCommand lines 393-498 verbatim, in upstream's
+        // order, with the header and HELP/Print-this-help footer added
+        // by addReplyHelp's wrapper. fr's previous abbreviated list was
+        // 23 lines; upstream is 106. Some advertised subcommands aren't
+        // implemented in fr — that's fine, HELP is documentation, not
+        // a capability advertisement (clients that scrape HELP for the
+        // subcommand list still need the canonical names).
         Ok(RespFrame::Array(Some(vec![
             hello_simple("DEBUG <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
-            hello_simple("OBJECT <key>"),
-            hello_simple("    Return low-level info about <key>."),
+            hello_simple("AOF-FLUSH-SLEEP <microsec>"),
+            hello_simple("    Server will sleep before flushing the AOF, this is used for testing."),
+            hello_simple("ASSERT"),
+            hello_simple("    Crash by assertion failed."),
+            hello_simple("CHANGE-REPL-ID"),
+            hello_simple("    Change the replication IDs of the instance."),
+            hello_simple("    Dangerous: should be used only for testing the replication subsystem."),
+            hello_simple("CONFIG-REWRITE-FORCE-ALL"),
+            hello_simple("    Like CONFIG REWRITE but writes all configuration options, including"),
+            hello_simple("    keywords not listed in original configuration file or default values."),
+            hello_simple("CRASH-AND-RECOVER [<milliseconds>]"),
+            hello_simple("    Hard crash and restart after a <milliseconds> delay (default 0)."),
             hello_simple("DIGEST"),
-            hello_simple("    Return a hex digest of the entire database."),
+            hello_simple("    Output a hex signature representing the current DB content."),
             hello_simple("DIGEST-VALUE <key> [<key> ...]"),
-            hello_simple("    Return hex digest of specific keys."),
-            hello_simple("POPULATE <count> [<prefix>] [<size>]"),
-            hello_simple("    Create <count> dummy keys."),
-            hello_simple("SLEEP <seconds>"),
-            hello_simple("    Sleep for <seconds>."),
-            hello_simple("RELOAD"),
-            hello_simple("    Save and reload the database."),
-            hello_simple("SET-ACTIVE-EXPIRE 0|1"),
-            hello_simple("    Disable/enable active expiry."),
-            hello_simple("PANIC"),
-            hello_simple("    Abort the server process immediately."),
-            hello_simple("SEGFAULT"),
-            hello_simple("    Abort the server process immediately."),
+            hello_simple("    Output a hex signature of the values of all the specified keys."),
+            hello_simple("ERROR <string>"),
+            hello_simple("    Return a Redis protocol error with <string> as message. Useful for clients"),
+            hello_simple("    unit tests to simulate Redis errors."),
+            hello_simple("LEAK <string>"),
+            hello_simple("    Create a memory leak of the input string."),
+            hello_simple("LOG <message>"),
+            hello_simple("    Write <message> to the server log."),
+            hello_simple("HTSTATS <dbid> [full]"),
+            hello_simple("    Return hash table statistics of the specified Redis database."),
+            hello_simple("HTSTATS-KEY <key> [full]"),
+            hello_simple("    Like HTSTATS but for the hash table stored at <key>'s value."),
+            hello_simple("LOADAOF"),
+            hello_simple("    Flush the AOF buffers on disk and reload the AOF in memory."),
+            hello_simple("REPLICATE <string>"),
+            hello_simple("    Replicates the provided string to replicas, allowing data divergence."),
+            // (frankenredis-6i6tm) Upstream gates MALLCTL on
+            // #ifdef USE_JEMALLOC; vendored Redis 7.2.4 ships with
+            // jemalloc, so its DEBUG HELP includes these. fr's HELP
+            // mirrors that vendored output for byte-equivalence even
+            // though fr's allocator is system-default.
+            hello_simple("MALLCTL <key> [<val>]"),
+            hello_simple("    Get or set a malloc tuning integer."),
+            hello_simple("MALLCTL-STR <key> [<val>]"),
+            hello_simple("    Get or set a malloc tuning string."),
+            hello_simple("OBJECT <key>"),
+            hello_simple("    Show low level info about `key` and associated value."),
+            hello_simple("DROP-CLUSTER-PACKET-FILTER <packet-type>"),
+            hello_simple("    Drop all packets that match the filtered type. Set to -1 allow all packets."),
             hello_simple("OOM"),
-            hello_simple("    Abort via the allocation failure handler."),
+            hello_simple("    Crash the server simulating an out-of-memory error."),
+            hello_simple("PANIC"),
+            hello_simple("    Crash the server simulating a panic."),
+            hello_simple("POPULATE <count> [<prefix>] [<size>]"),
+            hello_simple("    Create <count> string keys named key:<num>. If <prefix> is specified then"),
+            hello_simple("    it is used instead of the 'key' prefix. These are not propagated to"),
+            hello_simple("    replicas. Cluster slots are not respected so keys not belonging to the"),
+            hello_simple("    current node can be created in cluster mode."),
+            hello_simple("PROTOCOL <type>"),
+            hello_simple("    Reply with a test value of the specified type. <type> can be: string,"),
+            hello_simple("    integer, double, bignum, null, array, set, map, attrib, push, verbatim,"),
+            hello_simple("    true, false."),
+            hello_simple("RELOAD [option ...]"),
+            hello_simple("    Save the RDB on disk and reload it back to memory. Valid <option> values:"),
+            hello_simple("    * MERGE: conflicting keys will be loaded from RDB."),
+            hello_simple("    * NOFLUSH: the existing database will not be removed before load, but"),
+            hello_simple("      conflicting keys will generate an exception and kill the server."),
+            hello_simple("    * NOSAVE: the database will be loaded from an existing RDB file."),
+            hello_simple("    Examples:"),
+            hello_simple("    * DEBUG RELOAD: verify that the server is able to persist, flush and reload"),
+            hello_simple("      the database."),
+            hello_simple("    * DEBUG RELOAD NOSAVE: replace the current database with the contents of an"),
+            hello_simple("      existing RDB file."),
+            hello_simple("    * DEBUG RELOAD NOSAVE NOFLUSH MERGE: add the contents of an existing RDB"),
+            hello_simple("      file to the database."),
+            hello_simple("RESTART [<milliseconds>]"),
+            hello_simple("    Graceful restart: save config, db, restart after a <milliseconds> delay (default 0)."),
+            hello_simple("SDSLEN <key>"),
+            hello_simple("    Show low level SDS string info representing `key` and value."),
+            hello_simple("SEGFAULT"),
+            hello_simple("    Crash the server with sigsegv."),
+            hello_simple("SET-ACTIVE-EXPIRE <0|1>"),
+            hello_simple("    Setting it to 0 disables expiring keys in background when they are not"),
+            hello_simple("    accessed (otherwise the Redis behavior). Setting it to 1 reenables back the"),
+            hello_simple("    default."),
+            hello_simple("QUICKLIST-PACKED-THRESHOLD <size>"),
+            hello_simple("    Sets the threshold for elements to be inserted as plain vs packed nodes"),
+            hello_simple("    Default value is 1GB, allows values up to 4GB. Setting to 0 restores to default."),
+            hello_simple("SET-SKIP-CHECKSUM-VALIDATION <0|1>"),
+            hello_simple("    Enables or disables checksum checks for RDB files and RESTORE's payload."),
+            hello_simple("SLEEP <seconds>"),
+            hello_simple("    Stop the server for <seconds>. Decimals allowed."),
+            hello_simple("STRINGMATCH-TEST"),
+            hello_simple("    Run a fuzz tester against the stringmatchlen() function."),
+            hello_simple("STRUCTSIZE"),
+            hello_simple("    Return the size of different Redis core C structures."),
+            hello_simple("LISTPACK <key>"),
+            hello_simple("    Show low level info about the listpack encoding of <key>."),
+            hello_simple("QUICKLIST <key> [<0|1>]"),
+            hello_simple("    Show low level info about the quicklist encoding of <key>."),
+            hello_simple("    The optional argument (0 by default) sets the level of detail"),
+            hello_simple("CLIENT-EVICTION"),
+            hello_simple("    Show low level client eviction pools info (maxmemory-clients)."),
+            hello_simple("PAUSE-CRON <0|1>"),
+            hello_simple("    Stop periodic cron job processing."),
+            hello_simple("REPLYBUFFER PEAK-RESET-TIME <NEVER||RESET|time>"),
+            hello_simple("    Sets the time (in milliseconds) to wait between client reply buffer peak resets."),
+            hello_simple("    In case NEVER is provided the last observed peak will never be reset"),
+            hello_simple("    In case RESET is provided the peak reset time will be restored to the default value"),
+            hello_simple("REPLYBUFFER RESIZING <0|1>"),
+            hello_simple("    Enable or disable the reply buffer resize cron job"),
+            hello_simple("CLUSTERLINK KILL <to|from|all> <node-id>"),
+            hello_simple("    Kills the link based on the direction to/from (both) with the provided node."),
             hello_simple("HELP"),
             hello_simple("    Print this help."),
         ])))
@@ -41650,6 +41746,85 @@ mod tests {
             items.last(),
             Some(&RespFrame::SimpleString("    Print this help.".to_string())),
             "{items:?}"
+        );
+    }
+
+    /// (frankenredis-6i6tm) DEBUG HELP must mirror upstream Redis 7.2.4
+    /// debug.c::debugCommand lines 393-498 verbatim. Pre-fix: fr emitted
+    /// 23 lines with abbreviated wording in a non-upstream order;
+    /// upstream emits 106 lines (inclusive of header + HELP/Print-this-
+    /// help footer added by addReplyHelp). Pin a representative subset
+    /// of upstream-only entries and the canonical upstream order to
+    /// guard against regression to the old abbreviated form.
+    #[test]
+    fn debug_help_text_matches_upstream_redis_7_2_4() {
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"DEBUG".to_vec(), b"HELP".to_vec()], &mut store, 0)
+            .expect("debug help");
+        let RespFrame::Array(Some(items)) = out else {
+            panic!("expected array");
+        };
+        // Total line count (header + body + HELP/Print-this-help
+        // footer) must match upstream's 106 lines.
+        assert_eq!(
+            items.len(),
+            106,
+            "DEBUG HELP must emit 106 lines (header + 53 body entries with descriptions + 2 footer); got {}",
+            items.len()
+        );
+        // Upstream-only entries fr previously omitted.
+        for upstream_only in [
+            "AOF-FLUSH-SLEEP <microsec>",
+            "ASSERT",
+            "CHANGE-REPL-ID",
+            "CONFIG-REWRITE-FORCE-ALL",
+            "CRASH-AND-RECOVER [<milliseconds>]",
+            "ERROR <string>",
+            "LEAK <string>",
+            "LOG <message>",
+            "HTSTATS <dbid> [full]",
+            "HTSTATS-KEY <key> [full]",
+            "LOADAOF",
+            "REPLICATE <string>",
+            "MALLCTL <key> [<val>]",
+            "MALLCTL-STR <key> [<val>]",
+            "DROP-CLUSTER-PACKET-FILTER <packet-type>",
+            "PROTOCOL <type>",
+            "RESTART [<milliseconds>]",
+            "SDSLEN <key>",
+            "QUICKLIST-PACKED-THRESHOLD <size>",
+            "SET-SKIP-CHECKSUM-VALIDATION <0|1>",
+            "STRINGMATCH-TEST",
+            "STRUCTSIZE",
+            "LISTPACK <key>",
+            "QUICKLIST <key> [<0|1>]",
+            "CLIENT-EVICTION",
+            "PAUSE-CRON <0|1>",
+            "REPLYBUFFER PEAK-RESET-TIME <NEVER||RESET|time>",
+            "REPLYBUFFER RESIZING <0|1>",
+            "CLUSTERLINK KILL <to|from|all> <node-id>",
+        ] {
+            assert!(
+                items.contains(&RespFrame::SimpleString(upstream_only.to_string())),
+                "missing upstream entry '{upstream_only}'"
+            );
+        }
+        // Order: AOF-FLUSH-SLEEP comes first body line (after header),
+        // CLUSTERLINK KILL is last body line (before HELP footer).
+        assert_eq!(
+            items[1],
+            RespFrame::SimpleString("AOF-FLUSH-SLEEP <microsec>".to_string()),
+            "first body entry must be AOF-FLUSH-SLEEP per upstream order"
+        );
+        // Footer is always HELP / "    Print this help." (added by
+        // addReplyHelp wrapper).
+        assert_eq!(
+            items[items.len() - 2],
+            RespFrame::SimpleString("HELP".to_string())
+        );
+        assert_eq!(
+            items[items.len() - 1],
+            RespFrame::SimpleString("    Print this help.".to_string())
         );
     }
 
