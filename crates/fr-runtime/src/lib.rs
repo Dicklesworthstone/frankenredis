@@ -5943,7 +5943,14 @@ impl Runtime {
         // because createClient assigns c->buf_usable_size during
         // initClientReplyBuffer. (br-frankenredis-4upy, frankenredis-22v4o)
         format!(
-            "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\r\n",
+            // (frankenredis-cudmd) Upstream networking.c::catClientInfoString
+            // builds the per-client info string with sdscatfmt and
+            // terminates each entry with a single '\n' (CLIENT LIST joins
+            // entries with single LFs; CLIENT INFO returns one entry +
+            // single LF). Earlier versions emitted CRLF here, leaving
+            // a stray 0x0d byte in the bulk-string payload that broke
+            // raw-byte parsers diffing against vendored.
+            "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
             session.client_id,
             peer,
             self.server.store.server_port,
