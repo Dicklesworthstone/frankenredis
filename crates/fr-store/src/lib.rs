@@ -12959,6 +12959,501 @@ fn format_simple_decimal_float(value: SimpleDecimalFloat) -> Vec<u8> {
     digits.into_bytes()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BigNat {
+    limbs: Vec<u32>,
+}
+
+impl BigNat {
+    fn zero() -> Self {
+        Self { limbs: Vec::new() }
+    }
+
+    fn from_u64(value: u64) -> Self {
+        if value == 0 {
+            return Self::zero();
+        }
+        let mut limbs = vec![value as u32];
+        let high = (value >> 32) as u32;
+        if high != 0 {
+            limbs.push(high);
+        }
+        Self { limbs }
+    }
+
+    fn from_decimal_digits(digits: &[u8]) -> Option<Self> {
+        let mut value = Self::zero();
+        for &digit in digits {
+            value.mul_small(10);
+            value.add_small(u32::from(digit.checked_sub(b'0')?));
+        }
+        Some(value)
+    }
+
+    fn is_zero(&self) -> bool {
+        self.limbs.is_empty()
+    }
+
+    fn normalize(&mut self) {
+        while self.limbs.last() == Some(&0) {
+            self.limbs.pop();
+        }
+    }
+
+    fn mul_small(&mut self, rhs: u32) {
+        if rhs == 0 || self.is_zero() {
+            self.limbs.clear();
+            return;
+        }
+        let mut carry = 0_u64;
+        for limb in &mut self.limbs {
+            let next = u64::from(*limb) * u64::from(rhs) + carry;
+            *limb = next as u32;
+            carry = next >> 32;
+        }
+        if carry != 0 {
+            self.limbs.push(carry as u32);
+        }
+    }
+
+    fn add_small(&mut self, rhs: u32) {
+        let mut carry = u64::from(rhs);
+        for limb in &mut self.limbs {
+            let next = u64::from(*limb) + carry;
+            *limb = next as u32;
+            carry = next >> 32;
+            if carry == 0 {
+                return;
+            }
+        }
+        if carry != 0 {
+            self.limbs.push(carry as u32);
+        }
+    }
+
+    fn mul_pow10(&mut self, exp: usize) {
+        for _ in 0..exp {
+            self.mul_small(10);
+        }
+    }
+
+    fn shl_bits(&mut self, bits: usize) {
+        if bits == 0 || self.is_zero() {
+            return;
+        }
+        let limb_shift = bits / 32;
+        let bit_shift = bits % 32;
+        let mut shifted = vec![0; limb_shift];
+        let mut carry = 0_u64;
+        for &limb in &self.limbs {
+            let next = (u64::from(limb) << bit_shift) | carry;
+            shifted.push(next as u32);
+            carry = next >> 32;
+        }
+        if carry != 0 {
+            shifted.push(carry as u32);
+        }
+        self.limbs = shifted;
+    }
+
+    fn bit_len(&self) -> usize {
+        let Some(&last) = self.limbs.last() else {
+            return 0;
+        };
+        32 * (self.limbs.len() - 1) + (32 - last.leading_zeros() as usize)
+    }
+
+    fn bit(&self, index: usize) -> bool {
+        let limb = index / 32;
+        if limb >= self.limbs.len() {
+            return false;
+        }
+        (self.limbs[limb] & (1_u32 << (index % 32))) != 0
+    }
+
+    fn any_bits_below(&self, bit_count: usize) -> bool {
+        let full_limbs = bit_count / 32;
+        if self.limbs.iter().take(full_limbs).any(|&limb| limb != 0) {
+            return true;
+        }
+        let partial_bits = bit_count % 32;
+        if partial_bits == 0 || full_limbs >= self.limbs.len() {
+            return false;
+        }
+        let mask = (1_u32 << partial_bits) - 1;
+        (self.limbs[full_limbs] & mask) != 0
+    }
+
+    fn shr_to_u128(&self, shift: usize) -> u128 {
+        let bit_len = self.bit_len();
+        if shift >= bit_len {
+            return 0;
+        }
+        let out_bits = bit_len - shift;
+        let mut value = 0_u128;
+        for offset in (0..out_bits).rev() {
+            value <<= 1;
+            if self.bit(shift + offset) {
+                value |= 1;
+            }
+        }
+        value
+    }
+
+    fn cmp_abs(&self, other: &Self) -> std::cmp::Ordering {
+        match self.limbs.len().cmp(&other.limbs.len()) {
+            std::cmp::Ordering::Equal => self.limbs.iter().rev().cmp(other.limbs.iter().rev()),
+            ord => ord,
+        }
+    }
+
+    fn add_abs(left: &Self, right: &Self) -> Self {
+        let len = left.limbs.len().max(right.limbs.len());
+        let mut limbs = Vec::with_capacity(len + 1);
+        let mut carry = 0_u64;
+        for idx in 0..len {
+            let a = left.limbs.get(idx).copied().unwrap_or(0);
+            let b = right.limbs.get(idx).copied().unwrap_or(0);
+            let next = u64::from(a) + u64::from(b) + carry;
+            limbs.push(next as u32);
+            carry = next >> 32;
+        }
+        if carry != 0 {
+            limbs.push(carry as u32);
+        }
+        Self { limbs }
+    }
+
+    fn sub_abs(left: &Self, right: &Self) -> Self {
+        debug_assert!(left.cmp_abs(right) != std::cmp::Ordering::Less);
+        let mut limbs = Vec::with_capacity(left.limbs.len());
+        let mut borrow = 0_i64;
+        for idx in 0..left.limbs.len() {
+            let a = i64::from(left.limbs[idx]) - borrow;
+            let b = i64::from(right.limbs.get(idx).copied().unwrap_or(0));
+            if a >= b {
+                limbs.push((a - b) as u32);
+                borrow = 0;
+            } else {
+                limbs.push(((1_i64 << 32) + a - b) as u32);
+                borrow = 1;
+            }
+        }
+        let mut result = Self { limbs };
+        result.normalize();
+        result
+    }
+
+    fn to_u128(&self) -> Option<u128> {
+        if self.bit_len() > 128 {
+            return None;
+        }
+        Some(self.shr_to_u128(0))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IntegerLongDouble {
+    negative: bool,
+    mantissa: u64,
+    exponent: i32,
+}
+
+const LONG_DOUBLE_MANTISSA_BITS: i32 = 64;
+const MAX_LARGE_FLOAT_DECIMAL_DIGITS: usize = 400;
+
+impl IntegerLongDouble {
+    fn is_zero(self) -> bool {
+        self.mantissa == 0
+    }
+
+    fn integer_magnitude(self) -> Option<BigNat> {
+        if self.is_zero() {
+            return Some(BigNat::zero());
+        }
+        let shift = self.exponent.checked_sub(LONG_DOUBLE_MANTISSA_BITS - 1)?;
+        if shift < 0 {
+            return None;
+        }
+        let mut value = BigNat::from_u64(self.mantissa);
+        value.shl_bits(shift as usize);
+        Some(value)
+    }
+
+    fn format_human(self) -> Vec<u8> {
+        if self.is_zero() {
+            return b"0".to_vec();
+        }
+        let shift = self.exponent - (LONG_DOUBLE_MANTISSA_BITS - 1);
+        debug_assert!(shift >= 0);
+        let mut digits = decimal_string_from_mantissa_shift(self.mantissa, shift as usize);
+        if self.negative {
+            digits.insert(0, b'-');
+        }
+        digits
+    }
+}
+
+fn decimal_string_from_mantissa_shift(mantissa: u64, shift: usize) -> Vec<u8> {
+    let mut digits: Vec<u8> = mantissa
+        .to_string()
+        .bytes()
+        .rev()
+        .map(|digit| digit - b'0')
+        .collect();
+    for _ in 0..shift {
+        let mut carry = 0_u8;
+        for digit in &mut digits {
+            let next = *digit * 2 + carry;
+            *digit = next % 10;
+            carry = next / 10;
+        }
+        if carry != 0 {
+            digits.push(carry);
+        }
+    }
+    digits.into_iter().rev().map(|digit| b'0' + digit).collect()
+}
+
+fn parse_decimal_exponent(bytes: &[u8]) -> Option<i32> {
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut idx = 0;
+    let negative = match bytes[0] {
+        b'-' => {
+            idx = 1;
+            true
+        }
+        b'+' => {
+            idx = 1;
+            false
+        }
+        _ => false,
+    };
+    if idx == bytes.len() {
+        return None;
+    }
+    let mut value = 0_i32;
+    for &byte in &bytes[idx..] {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?;
+        value = value.checked_add(i32::from(byte - b'0'))?;
+    }
+    if negative {
+        value.checked_neg()
+    } else {
+        Some(value)
+    }
+}
+
+fn parse_decimal_integer_long_double(bytes: &[u8]) -> Option<IntegerLongDouble> {
+    if bytes.is_empty()
+        || bytes[0].is_ascii_whitespace()
+        || bytes[bytes.len() - 1].is_ascii_whitespace()
+    {
+        return None;
+    }
+
+    let mut idx = 0;
+    let negative = match bytes[0] {
+        b'-' => {
+            idx = 1;
+            true
+        }
+        b'+' => {
+            idx = 1;
+            false
+        }
+        _ => false,
+    };
+    if idx == bytes.len() {
+        return None;
+    }
+
+    let rest = &bytes[idx..];
+    let exponent_marker = rest.iter().position(|&byte| byte == b'e' || byte == b'E');
+    let (significand, exponent) = match exponent_marker {
+        Some(pos) => (&rest[..pos], parse_decimal_exponent(&rest[pos + 1..])?),
+        None => (rest, 0),
+    };
+    if significand.is_empty() {
+        return None;
+    }
+
+    let mut digits = Vec::with_capacity(significand.len());
+    let mut saw_dot = false;
+    let mut fractional_digits = 0_i32;
+    for &byte in significand {
+        match byte {
+            b'0'..=b'9' => {
+                digits.push(byte);
+                if saw_dot {
+                    fractional_digits = fractional_digits.checked_add(1)?;
+                }
+            }
+            b'.' if !saw_dot => saw_dot = true,
+            _ => return None,
+        }
+    }
+    if digits.is_empty() {
+        return None;
+    }
+
+    let first_nonzero = digits.iter().position(|&digit| digit != b'0');
+    let Some(first_nonzero) = first_nonzero else {
+        return Some(IntegerLongDouble {
+            negative: false,
+            mantissa: 0,
+            exponent: 0,
+        });
+    };
+    let digits = &digits[first_nonzero..];
+    let decimal_exp = exponent.checked_sub(fractional_digits)?;
+    if decimal_exp < 0 {
+        return None;
+    }
+    let decimal_exp = decimal_exp as usize;
+    if digits.len().checked_add(decimal_exp)? > MAX_LARGE_FLOAT_DECIMAL_DIGITS {
+        return None;
+    }
+
+    let mut magnitude = BigNat::from_decimal_digits(digits)?;
+    magnitude.mul_pow10(decimal_exp);
+    if magnitude.bit_len() <= LONG_DOUBLE_MANTISSA_BITS as usize {
+        return None;
+    }
+    round_integer_magnitude_to_long_double(negative, &magnitude)
+}
+
+fn round_integer_magnitude_to_long_double(
+    negative: bool,
+    magnitude: &BigNat,
+) -> Option<IntegerLongDouble> {
+    if magnitude.is_zero() {
+        return Some(IntegerLongDouble {
+            negative: false,
+            mantissa: 0,
+            exponent: 0,
+        });
+    }
+    let mut exponent = i32::try_from(magnitude.bit_len().checked_sub(1)?).ok()?;
+    let shift = usize::try_from(exponent.checked_sub(LONG_DOUBLE_MANTISSA_BITS - 1)?).ok()?;
+    let mut mantissa = magnitude.shr_to_u128(shift);
+    if shift > 0 {
+        let halfway = magnitude.bit(shift - 1);
+        let sticky = magnitude.any_bits_below(shift - 1);
+        if halfway && (sticky || mantissa % 2 == 1) {
+            mantissa = mantissa.checked_add(1)?;
+        }
+    }
+    if mantissa == (1_u128 << LONG_DOUBLE_MANTISSA_BITS) {
+        mantissa >>= 1;
+        exponent = exponent.checked_add(1)?;
+    }
+    if mantissa < (1_u128 << (LONG_DOUBLE_MANTISSA_BITS - 1)) {
+        return None;
+    }
+    Some(IntegerLongDouble {
+        negative,
+        mantissa: mantissa as u64,
+        exponent,
+    })
+}
+
+fn format_signed_integer_magnitude(negative: bool, magnitude: &BigNat) -> Option<Vec<u8>> {
+    if magnitude.is_zero() {
+        return Some(b"0".to_vec());
+    }
+    let mut text = magnitude.to_u128()?.to_string().into_bytes();
+    if negative {
+        text.insert(0, b'-');
+    }
+    Some(text)
+}
+
+fn add_integer_long_doubles(left: IntegerLongDouble, right: IntegerLongDouble) -> Option<Vec<u8>> {
+    let left_magnitude = left.integer_magnitude()?;
+    let right_magnitude = right.integer_magnitude()?;
+    let (negative, magnitude) = if left.negative == right.negative {
+        (
+            left.negative,
+            BigNat::add_abs(&left_magnitude, &right_magnitude),
+        )
+    } else {
+        match left_magnitude.cmp_abs(&right_magnitude) {
+            std::cmp::Ordering::Greater => (
+                left.negative,
+                BigNat::sub_abs(&left_magnitude, &right_magnitude),
+            ),
+            std::cmp::Ordering::Less => (
+                right.negative,
+                BigNat::sub_abs(&right_magnitude, &left_magnitude),
+            ),
+            std::cmp::Ordering::Equal => return Some(b"0".to_vec()),
+        }
+    };
+    if magnitude.bit_len() <= LONG_DOUBLE_MANTISSA_BITS as usize {
+        return format_signed_integer_magnitude(negative, &magnitude);
+    }
+    round_integer_magnitude_to_long_double(negative, &magnitude)
+        .map(IntegerLongDouble::format_human)
+}
+
+fn operand_absorbed_by_large_integer(other: &[u8], dominant: IntegerLongDouble) -> bool {
+    let Ok(other) = parse_f64(other) else {
+        return false;
+    };
+    if matches!(other.classify(), std::num::FpCategory::Zero) {
+        return true;
+    }
+    if !other.is_finite() {
+        return false;
+    }
+    let other_exponent = other.abs().log2().floor() as i32;
+    other_exponent < dominant.exponent - LONG_DOUBLE_MANTISSA_BITS
+}
+
+fn add_large_float_text(current: &[u8], delta_text: &[u8]) -> Option<Vec<u8>> {
+    let current_ld = parse_decimal_integer_long_double(current);
+    let delta_ld = parse_decimal_integer_long_double(delta_text);
+    match (current_ld, delta_ld) {
+        (Some(current_ld), Some(delta_ld)) => {
+            if current_ld.is_zero() {
+                return Some(delta_ld.format_human());
+            }
+            if delta_ld.is_zero() {
+                return Some(current_ld.format_human());
+            }
+            let exp_delta = current_ld.exponent.checked_sub(delta_ld.exponent)?;
+            if exp_delta >= LONG_DOUBLE_MANTISSA_BITS {
+                return Some(current_ld.format_human());
+            }
+            if exp_delta <= -LONG_DOUBLE_MANTISSA_BITS {
+                return Some(delta_ld.format_human());
+            }
+            add_integer_long_doubles(current_ld, delta_ld)
+        }
+        (Some(current_ld), None) => {
+            if operand_absorbed_by_large_integer(delta_text, current_ld) {
+                Some(current_ld.format_human())
+            } else {
+                None
+            }
+        }
+        (None, Some(delta_ld)) => {
+            if operand_absorbed_by_large_integer(current, delta_ld) {
+                Some(delta_ld.format_human())
+            } else {
+                None
+            }
+        }
+        (None, None) => None,
+    }
+}
+
 fn add_float_text(current: &[u8], delta_text: &[u8], delta: f64) -> Result<Vec<u8>, StoreError> {
     if let (Some(current_decimal), Some(delta_decimal)) = (
         parse_simple_decimal_float(current),
@@ -12966,6 +13461,10 @@ fn add_float_text(current: &[u8], delta_text: &[u8], delta: f64) -> Result<Vec<u
     ) && let Some(result) = add_simple_decimal_float(current_decimal, delta_decimal)
     {
         return Ok(format_simple_decimal_float(result));
+    }
+
+    if let Some(result) = add_large_float_text(current, delta_text) {
+        return Ok(result);
     }
 
     let current = parse_f64(current)?;
@@ -17554,6 +18053,43 @@ mod tests {
         let mut store = Store::new();
         store.sadd(b"k", &[b"m".to_vec()], 0).unwrap();
         assert_eq!(store.incrbyfloat(b"k", 1.0, 0), Err(StoreError::WrongType));
+    }
+
+    fn vendored_long_double_1e308_text() -> Vec<u8> {
+        concat!(
+            "99999999999999999996685879655845645660560099847415567207797047994921734868838061",
+            "87210012692188853932044674722505401322315213474959396058359742081443019641876795",
+            "91000196031907786631096045071066679391533957889389145605435630612683649016186302",
+            "17086589253444881623791300855757318142424510452728255046343928578048",
+        )
+        .as_bytes()
+        .to_vec()
+    }
+
+    #[test]
+    fn incrbyfloat_large_exponent_matches_vendored_long_double_text() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"1.5".to_vec(), None, 0);
+
+        let next = store
+            .incrbyfloat_text(b"k", b"1e308", 1.0e308_f64, 0)
+            .unwrap();
+        let expected = vendored_long_double_1e308_text();
+        assert_eq!(next, expected);
+        assert_eq!(store.get(b"k", 0).unwrap(), Some(expected));
+    }
+
+    #[test]
+    fn hincrbyfloat_large_exponent_matches_vendored_long_double_text() {
+        let mut store = Store::new();
+        store.hset(b"h", b"f".to_vec(), b"1.5".to_vec(), 0).unwrap();
+
+        let next = store
+            .hincrbyfloat_text(b"h", b"f", b"1e308", 1.0e308_f64, 0)
+            .unwrap();
+        let expected = vendored_long_double_1e308_text();
+        assert_eq!(next, expected);
+        assert_eq!(store.hget(b"h", b"f", 0).unwrap(), Some(expected));
     }
 
     #[test]
