@@ -11214,6 +11214,21 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// Compute the value-only RDB-serialized byte length for a key,
+    /// matching upstream debug.c::rdbSavedObjectLen which calls
+    /// rdbSaveObject(NULL, o, key, dbid). Returns None if the key
+    /// doesn't exist (or has expired). Used by DEBUG OBJECT to emit
+    /// the `serializedlength:N` field. (frankenredis-xp6mu)
+    ///
+    /// `dump_key` produces `[type_byte][payload][2-byte version][8-byte CRC]`,
+    /// so the value-only payload bytes are total - 1 - 10 = total - 11.
+    pub fn rdb_serialized_object_len(&mut self, key: &[u8], now_ms: u64) -> Option<usize> {
+        // dump_key always emits a non-empty payload between the leading
+        // type byte and the trailing 10-byte version+CRC footer; the
+        // arithmetic below is sound for every successfully-dumped key.
+        self.dump_key(key, now_ms).map(|bytes| bytes.len() - 11)
+    }
+
     /// Serialize a key's value for DUMP. Returns None if key doesn't exist.
     /// Format: [type_byte][payload][2-byte RDB version][8-byte CRC64].
     pub fn dump_key(&mut self, key: &[u8], now_ms: u64) -> Option<Vec<u8>> {

@@ -18123,7 +18123,13 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         let Some(encoding) = store.object_encoding(key, now_ms) else {
             return Ok(RespFrame::Error("ERR no such key".to_string()));
         };
-        let serialized_len = store.memory_usage_for_key(key, now_ms).unwrap_or(0);
+        // (frankenredis-xp6mu) Upstream debug.c::debugCommand emits
+        // serializedlength via rdbSavedObjectLen which counts only
+        // the value-only RDB payload bytes (no type byte, no key, no
+        // version, no CRC) — not the in-memory footprint that
+        // memory_usage_for_key returns. Store::rdb_serialized_object_len
+        // computes the same byte count by inspecting dump_key output.
+        let serialized_len = store.rdb_serialized_object_len(key, now_ms).unwrap_or(0);
         let idle_secs = store.object_idletime(key, now_ms).unwrap_or(0);
         // (frankenredis-az4t9) Mirror upstream debug.c::debugCommand which
         // emits val->refcount — INT_MAX for shared integer objects in
@@ -40609,6 +40615,98 @@ mod tests {
         assert!(
             line.ends_with(" lru_seconds_idle:5"),
             "expected line ending in `lru_seconds_idle:5` (idle = (now-last_access)/1000), got: {line}"
+        );
+    }
+
+    /// (frankenredis-xp6mu) Pin DEBUG OBJECT serializedlength to the
+    /// rdbSavedObjectLen value-only payload byte count, NOT the
+    /// in-memory footprint. Vendored Redis 7.2.4 emits compact RDB
+    /// payload sizes (e.g. 'hello' → 6 bytes = 1 length-prefix +
+    /// 5 chars), where fr previously emitted ~50 bytes (slab/header
+    /// overhead from memory_usage_for_key). The new implementation
+    /// uses Store::rdb_serialized_object_len which derives the count
+    /// from dump_key output (total - 11 = total - 1 type byte - 10
+    /// version+CRC footer).
+    #[test]
+    fn debug_object_serializedlength_uses_rdb_payload_byte_count_per_upstream() {
+        let mut store = Store::new();
+        // Short string: rdb_encode_string(b"hello") writes a 1-byte
+        // length prefix (5 fits in 6-bit) + 5 raw bytes = 6 bytes.
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), b"hello".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set");
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"k".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug object");
+        let RespFrame::SimpleString(line) = out else {
+            panic!("expected SimpleString, got {out:?}");
+        };
+        assert!(
+            line.contains(" serializedlength:6 "),
+            "expected serializedlength:6 for 'hello' (1-byte length + 5 chars), got: {line}",
+        );
+
+        // Two-byte string 'hi': 1 + 2 = 3 bytes. Vendored matches.
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k2".to_vec(), b"hi".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set k2");
+        let out2 = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"k2".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug object k2");
+        let RespFrame::SimpleString(line2) = out2 else {
+            panic!("expected SimpleString, got {out2:?}");
+        };
+        assert!(
+            line2.contains(" serializedlength:3 "),
+            "expected serializedlength:3 for 'hi', got: {line2}",
+        );
+
+        // Hash with 2 fields encoded as listpack — well below the
+        // pre-fix in-memory inflated count (was 81; vendored = 24).
+        // We don't pin a specific number for the hash because fr's
+        // listpack encoding may differ slightly from upstream's, but
+        // we DO pin that the value is not a 3-digit slab number.
+        dispatch_argv(
+            &[
+                b"HSET".to_vec(),
+                b"h".to_vec(),
+                b"f1".to_vec(),
+                b"v1".to_vec(),
+                b"f2".to_vec(),
+                b"v2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("hset");
+        let out3 = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"h".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug object h");
+        let RespFrame::SimpleString(line3) = out3 else {
+            panic!("expected SimpleString, got {out3:?}");
+        };
+        // Extract the integer after "serializedlength:".
+        let n_start = line3.find(" serializedlength:").unwrap() + " serializedlength:".len();
+        let n_end = n_start + line3[n_start..].find(' ').unwrap();
+        let n: usize = line3[n_start..n_end].parse().unwrap();
+        assert!(
+            n < 50,
+            "hash serializedlength must be the listpack RDB byte count (≈24), not the slab footprint; got {n} in: {line3}",
         );
     }
 

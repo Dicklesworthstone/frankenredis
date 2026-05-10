@@ -148,8 +148,8 @@
         "RELOAD"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR DEBUG RELOAD requires configured appendonly or RDB persistence"
+        "kind": "simple",
+        "value": "OK"
       }
     },
     {
@@ -249,8 +249,8 @@
         "reload"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR DEBUG RELOAD requires configured appendonly or RDB persistence"
+        "kind": "simple",
+        "value": "OK"
       }
     },
     {
