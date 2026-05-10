@@ -15410,6 +15410,84 @@ fn upstream_command_docs_arguments(name: &str) -> Option<Vec<RespFrame>> {
                 ],
             ),
         ],
+        // (frankenredis-i0roi) Mirror BITCOUNT_Args from commands.def.
+        // Layout: key + range block (start, end, unit oneof BYTE/BIT).
+        "bitcount" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg(
+                "range",
+                "block",
+                None,
+                None,
+                None,
+                &["optional"],
+                vec![
+                    command_docs_arg("start", "integer", None, None, None, &[], Vec::new()),
+                    command_docs_arg("end", "integer", None, None, None, &[], Vec::new()),
+                    command_docs_arg(
+                        "unit",
+                        "oneof",
+                        None,
+                        None,
+                        Some("7.0.0"),
+                        &["optional"],
+                        vec![
+                            command_docs_pure_token("byte", "BYTE", None),
+                            command_docs_pure_token("bit", "BIT", None),
+                        ],
+                    ),
+                ],
+            ),
+        ],
+        // (frankenredis-i0roi) Mirror BITPOS_Args from commands.def.
+        // Layout: key + bit integer + nested range block where the
+        // optional end-unit-block contains end integer + unit oneof.
+        "bitpos" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("bit", "integer", None, None, None, &[], Vec::new()),
+            command_docs_arg(
+                "range",
+                "block",
+                None,
+                None,
+                None,
+                &["optional"],
+                vec![
+                    command_docs_arg("start", "integer", None, None, None, &[], Vec::new()),
+                    command_docs_arg(
+                        "end-unit-block",
+                        "block",
+                        None,
+                        None,
+                        None,
+                        &["optional"],
+                        vec![
+                            command_docs_arg(
+                                "end",
+                                "integer",
+                                None,
+                                None,
+                                None,
+                                &[],
+                                Vec::new(),
+                            ),
+                            command_docs_arg(
+                                "unit",
+                                "oneof",
+                                None,
+                                None,
+                                Some("7.0.0"),
+                                &["optional"],
+                                vec![
+                                    command_docs_pure_token("byte", "BYTE", None),
+                                    command_docs_pure_token("bit", "BIT", None),
+                                ],
+                            ),
+                        ],
+                    ),
+                ],
+            ),
+        ],
         // (frankenredis-wb78v) Mirror EXPIRE/PEXPIRE/EXPIREAT/PEXPIREAT
         // arg layouts from legacy_redis_code/redis/src/commands.def. All
         // four share the same condition oneof (NX/XX/GT/LT pure-tokens,
