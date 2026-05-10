@@ -11582,7 +11582,11 @@ impl Runtime {
                     info.push(',');
                 }
                 let val = histogram_percentile_us(hist, p);
-                let _ = write!(info, "p{p}={val:.2}");
+                // (frankenredis-7flec) Upstream server.c::
+                // fillPercentileDistributionLatencies uses %.3f for the
+                // percentile value (line 5287); mirror to keep INFO
+                // latencystats byte-equivalent.
+                let _ = write!(info, "p{p}={val:.3}");
             }
             info.push_str("\r\n");
         }
@@ -22907,6 +22911,30 @@ mod tests {
         let enabled_info = String::from_utf8(enabled_info_bytes).expect("utf8 info");
         assert!(enabled_info.contains("latency_percentiles_usec_get:p50="));
         assert!(enabled_info.contains("p99.9="));
+        // (frankenredis-7flec) Upstream server.c::
+        // fillPercentileDistributionLatencies emits %.3f for the
+        // percentile value. Pin the format width so we don't drift
+        // back to %.2f. The exact bucket boundary depends on histogram
+        // state, but every value must end in 3 fractional digits and
+        // never 2 ('.NN,' would mean we regressed to %.2f).
+        for line in enabled_info.lines() {
+            if !line.starts_with("latency_percentiles_usec_") {
+                continue;
+            }
+            for chunk in line.split(',') {
+                if let Some(eq) = chunk.find('=') {
+                    let val = &chunk[eq + 1..];
+                    if let Some(dot) = val.find('.') {
+                        let frac = &val[dot + 1..];
+                        assert_eq!(
+                            frac.len(),
+                            3,
+                            "latencystats value '{val}' must have 3 fractional digits to match upstream %.3f"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     // ── AOF persistence round-trip tests ────────────────────────────────
