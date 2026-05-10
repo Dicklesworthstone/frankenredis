@@ -15395,10 +15395,11 @@ fn client_info_line(store: &Store, sub: &str) -> Vec<u8> {
     let lib_ver = ctx.client_lib_ver.as_deref().unwrap_or("");
     let redir = client_tracking_getredir_value(&ctx.client_tracking);
     // Field order matches upstream Redis 7.2 networking.c::catClientInfoString.
-    // See client_info_line_for_session in fr-runtime for the rationale.
-    // (br-frankenredis-4upy)
+    // See client_info_line_for_session in fr-runtime for the rationale,
+    // including the rbs/rbp = 16384 (PROTO_REPLY_CHUNK_BYTES) baseline
+    // mirrored from createClient. (br-frankenredis-4upy, frankenredis-22v4o)
     format!(
-        "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user={} redir={} resp={} lib-name={} lib-ver={}\r\n",
+        "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user={} redir={} resp={} lib-name={} lib-ver={}\r\n",
         ctx.client_id,
         ctx.peer_addr,
         store.server_port,
@@ -52083,8 +52084,8 @@ mod tests {
         assert!(!info.contains("watch="), "{info}");
         assert!(info.contains("argv-mem=0 "), "{info}");
         assert!(info.contains("multi-mem=0 "), "{info}");
-        assert!(info.contains("rbs=0 "), "{info}");
-        assert!(info.contains("rbp=0 "), "{info}");
+        assert!(info.contains("rbs=16384 "), "{info}");
+        assert!(info.contains("rbp=16384 "), "{info}");
         assert!(info.contains("user=alice "), "{info}");
         assert!(info.contains("redir=-1 "), "{info}");
         assert!(info.contains("resp=3 "), "{info}");

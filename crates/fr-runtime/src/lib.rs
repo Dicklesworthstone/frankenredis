@@ -233,6 +233,31 @@ fn config_set_failed(field: &str, detail: &str) -> RespFrame {
     ))
 }
 
+/// Compose the upstream `cmd->fullname` for an argv vector: the bare
+/// lowercased command for top-level entries, or `parent|sub` for any
+/// known container subcommand. Used by the subscribe-context error
+/// wording (frankenredis-gcll9), command-stat recording
+/// (frankenredis-8who6), and any other site that needs to mirror
+/// `cmd->fullname` from server.c.
+fn canonical_command_fullname(argv: &[Vec<u8>]) -> String {
+    let command = String::from_utf8_lossy(argv.first().map_or(b"", Vec::as_slice));
+    let lower = command.to_ascii_lowercase();
+    const CONTAINERS: &[&str] = &[
+        "acl", "client", "cluster", "command", "config", "debug", "function", "latency",
+        "memory", "module", "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
+    ];
+    if CONTAINERS.iter().any(|c| *c == lower)
+        && let Some(subcommand) = argv.get(1)
+    {
+        return format!(
+            "{}|{}",
+            lower,
+            String::from_utf8_lossy(subcommand).to_ascii_lowercase()
+        );
+    }
+    lower
+}
+
 impl Runtime {
     /// Whether PROTECTED_CONFIG fields (dbfilename, dir) can be set
     /// via CONFIG SET. Mirrors upstream's `enable-protected-configs`
@@ -2465,30 +2490,26 @@ impl ServerState {
         if !self.latency_tracking {
             return;
         }
-        let Some(cmd) = argv.first() else { return };
-        let Ok(cmd_str) = std::str::from_utf8(cmd) else {
+        if argv.is_empty() {
             return;
-        };
+        }
         // (frankenredis-6n2qm) Upstream stores command histograms keyed
         // by the canonical lowercase command name (server.c sets
         // `cmd->fullname` from the lowercase commands.def entry on
-        // dispatch). fr was keying on the raw user-supplied case, so
-        // INFO Commandstats / Latencystats / LATENCY HISTOGRAM all
-        // emitted UPPERCASE rows when callers happened to send their
-        // commands uppercase, breaking grep parity with vendored. INFO
-        // Commandstats already lowercased on emission, but the
-        // latency-histogram emitter and Latencystats section did not,
-        // so observable wire shape diverged. Lowercase at the
-        // recording site so every downstream emitter sees the
-        // canonical key.
-        let lowered = cmd_str.to_ascii_lowercase();
+        // dispatch). For container subcommands (CLIENT, MEMORY, OBJECT,
+        // ...) `cmd->fullname` is the `parent|sub` form, so INFO
+        // commandstats emits rows like `cmdstat_memory|usage` not
+        // `cmdstat_memory`. (frankenredis-8who6) Reuse the shared
+        // canonical_command_fullname helper that already drives the
+        // subscribe-context error wording.
+        let key = canonical_command_fullname(argv);
         let kind = if failed {
             CommandRecordKind::Failed
         } else {
             CommandRecordKind::Success
         };
         self.store
-            .record_command_histogram_with_kind(&lowered, duration_us, kind);
+            .record_command_histogram_with_kind(&key, duration_us, kind);
     }
 
     /// Record a pre-handler rejection (wrong arity surfaced by the
@@ -2500,14 +2521,14 @@ impl ServerState {
         if !self.latency_tracking {
             return;
         }
-        let Some(cmd) = argv.first() else { return };
-        let Ok(cmd_str) = std::str::from_utf8(cmd) else {
+        if argv.is_empty() {
             return;
-        };
-        // (frankenredis-6n2qm) — see record_command_histogram_outcome.
-        let lowered = cmd_str.to_ascii_lowercase();
+        }
+        // (frankenredis-6n2qm, frankenredis-8who6) — see
+        // record_command_histogram_outcome.
+        let key = canonical_command_fullname(argv);
         self.store
-            .record_command_histogram_with_kind(&lowered, 0, CommandRecordKind::Rejected);
+            .record_command_histogram_with_kind(&key, 0, CommandRecordKind::Rejected);
     }
 
     fn capture_aof_record(&mut self, argv: &[Vec<u8>]) {
@@ -3989,22 +4010,7 @@ impl Runtime {
         // previously namespaced only PUBSUB; CLIENT/CONFIG/etc.
         // surfaced just the bare parent name and broke parity for
         // common monitoring tools that grep the error wording.
-        let command = String::from_utf8_lossy(argv.first().map_or(b"", Vec::as_slice));
-        let lower = command.to_ascii_lowercase();
-        const CONTAINERS: &[&str] = &[
-            "acl", "client", "cluster", "command", "config", "debug", "function", "latency",
-            "memory", "module", "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
-        ];
-        if CONTAINERS.iter().any(|c| *c == lower)
-            && let Some(subcommand) = argv.get(1)
-        {
-            return format!(
-                "{}|{}",
-                lower,
-                String::from_utf8_lossy(subcommand).to_ascii_lowercase()
-            );
-        }
-        lower
+        canonical_command_fullname(argv)
     }
 
     fn pubsub_command_allowed_in_subscription_mode(
@@ -5864,11 +5870,16 @@ impl Runtime {
         //   argv-mem multi-mem rbs rbp obl oll omem tot-mem events cmd user redir resp lib-name lib-ver
         // Notes: (1) the `watch=N` field upstream emitted in earlier
         // releases was dropped in 7.2; (2) fr does not track per-client
-        // input/output-buffer accounting, so argv-mem/multi-mem/rbs/rbp
-        // are always 0 — consistent with fr's existing 0-value fields
-        // (qbuf, qbuf-free, obl, oll, omem, tot-mem). (br-frankenredis-4upy)
+        // input/output-buffer accounting, so argv-mem and multi-mem are
+        // always 0 — consistent with fr's existing 0-value fields
+        // (qbuf, qbuf-free, obl, oll, omem, tot-mem). (3) rbs and rbp
+        // (read-buffer size + peak) are pinned to PROTO_REPLY_CHUNK_BYTES
+        // (16384) to mirror upstream's default-allocation idle baseline
+        // — vendored emits 16384 even on a freshly-connected client
+        // because createClient assigns c->buf_usable_size during
+        // initClientReplyBuffer. (br-frankenredis-4upy, frankenredis-22v4o)
         format!(
-            "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=0 rbp=0 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\r\n",
+            "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\r\n",
             session.client_id,
             peer,
             self.server.store.server_port,
@@ -14079,6 +14090,64 @@ mod tests {
         // calls or usec — only to rejected_calls.
         assert!(row.starts_with("cmdstat_get:calls=1,usec="), "{row}");
         assert!(row.ends_with(",rejected_calls=3,failed_calls=0"), "{row}");
+    }
+
+    /// (frankenredis-8who6) Upstream
+    /// server.c::genRedisInfoStringCommandStats keys cmdstat_<key> on
+    /// `cmd->fullname`, which for any container subcommand is
+    /// `parent|sub`. fr was bucketing every container call into the
+    /// parent (`cmdstat_memory`, `cmdstat_object`, ...), so monitoring
+    /// tools that grep specific subcommands saw 0-count entries even
+    /// after thousands of calls.
+    #[test]
+    fn info_commandstats_namespaces_container_subcommands_per_upstream() {
+        let mut rt = Runtime::default_strict();
+
+        // Container subcommands: histogram key must be `parent|sub`.
+        rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
+        rt.execute_frame(command(&[b"OBJECT", b"ENCODING", b"k"]), 1);
+        rt.execute_frame(command(&[b"OBJECT", b"REFCOUNT", b"k"]), 2);
+        rt.execute_frame(command(&[b"MEMORY", b"USAGE", b"k"]), 3);
+        rt.execute_frame(command(&[b"CLIENT", b"INFO"]), 4);
+        rt.execute_frame(command(&[b"COMMAND", b"INFO", b"GET"]), 5);
+
+        let info = rt.execute_frame(command(&[b"INFO", b"commandstats"]), 6);
+        let RespFrame::BulkString(Some(bytes)) = info else {
+            panic!("expected bulk info response");
+        };
+        let body = String::from_utf8(bytes).expect("utf8 info");
+
+        for expected in [
+            "cmdstat_object|encoding:",
+            "cmdstat_object|refcount:",
+            "cmdstat_memory|usage:",
+            "cmdstat_client|info:",
+            "cmdstat_command|info:",
+        ] {
+            assert!(
+                body.lines().any(|l| l.starts_with(expected)),
+                "expected `{expected}` row in INFO commandstats, got:\n{body}"
+            );
+        }
+        // Bare parent rows for container commands MUST NOT appear:
+        // upstream never emits `cmdstat_object:` etc. as a standalone
+        // bucket — that wire shape is reserved for top-level commands.
+        for forbidden in [
+            "cmdstat_object:",
+            "cmdstat_memory:",
+            "cmdstat_client:",
+            "cmdstat_command:",
+        ] {
+            assert!(
+                !body.lines().any(|l| l.starts_with(forbidden)),
+                "container parent `{forbidden}` must not appear as a standalone bucket; got:\n{body}"
+            );
+        }
+        // Top-level commands still bucket bare.
+        assert!(
+            body.lines().any(|l| l.starts_with("cmdstat_set:")),
+            "expected bare `cmdstat_set:` row for top-level SET, got:\n{body}"
+        );
     }
 
     #[test]
