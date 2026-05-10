@@ -14449,6 +14449,15 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
         "hdel" | "srem" | "zrem" | "lrem" | "ltrim" | "xautoclaim" | "xtrim"
         | "xdel" => &["RW", "delete"],
 
+        // (frankenredis-imkpg) CMD_KEY_OW | CMD_KEY_UPDATE / CMD_KEY_INSERT —
+        // the value is overwritten outright (OW). MSET assumes the key may
+        // exist (UPDATE); MSETNX requires the key to be absent (INSERT).
+        // Both are single-keyspec entries with keystep=2 (already encoded
+        // via first_key/last_key/step at the COMMAND_TABLE level), so the
+        // existing range find_keys is correct.
+        "mset" => &["OW", "update"],
+        "msetnx" => &["OW", "insert"],
+
         _ => return None,
     };
     Some(("", flags))
@@ -14497,6 +14506,161 @@ fn command_info_keynum_keyspec(name: &str) -> Option<RespFrame> {
     ])))
 }
 
+/// (frankenredis-imkpg) Build a single key_spec frame whose begin_search
+/// is `index <begin_index>` and whose find_keys is
+/// `range {lastkey, keystep, limit=0}`. Used by every multi-keyspec
+/// commands.def entry whose key positions are at fixed argv indices.
+fn make_keyspec_index_range(
+    flags: &[&'static str],
+    begin_index: i64,
+    lastkey: i64,
+    keystep: i64,
+) -> RespFrame {
+    RespFrame::Array(Some(vec![
+        hello_bulk("flags"),
+        RespFrame::Array(Some(
+            flags.iter().copied().map(hello_simple).collect(),
+        )),
+        hello_bulk("begin_search"),
+        RespFrame::Array(Some(vec![
+            hello_bulk("type"),
+            hello_bulk("index"),
+            hello_bulk("spec"),
+            RespFrame::Array(Some(vec![
+                hello_bulk("index"),
+                RespFrame::Integer(begin_index),
+            ])),
+        ])),
+        hello_bulk("find_keys"),
+        RespFrame::Array(Some(vec![
+            hello_bulk("type"),
+            hello_bulk("range"),
+            hello_bulk("spec"),
+            RespFrame::Array(Some(vec![
+                hello_bulk("lastkey"),
+                RespFrame::Integer(lastkey),
+                hello_bulk("keystep"),
+                RespFrame::Integer(keystep),
+                hello_bulk("limit"),
+                RespFrame::Integer(0),
+            ])),
+        ])),
+    ]))
+}
+
+/// (frankenredis-imkpg) Build a single key_spec frame whose begin_search
+/// is `index <begin_index>` and whose find_keys is
+/// `keynum {keynumidx, firstkey, keystep}`. Used by *STORE-style commands
+/// where the source set is encoded as `numkeys key1 key2 ...`.
+fn make_keyspec_index_keynum(
+    flags: &[&'static str],
+    begin_index: i64,
+    keynumidx: i64,
+    firstkey: i64,
+    keystep: i64,
+) -> RespFrame {
+    RespFrame::Array(Some(vec![
+        hello_bulk("flags"),
+        RespFrame::Array(Some(
+            flags.iter().copied().map(hello_simple).collect(),
+        )),
+        hello_bulk("begin_search"),
+        RespFrame::Array(Some(vec![
+            hello_bulk("type"),
+            hello_bulk("index"),
+            hello_bulk("spec"),
+            RespFrame::Array(Some(vec![
+                hello_bulk("index"),
+                RespFrame::Integer(begin_index),
+            ])),
+        ])),
+        hello_bulk("find_keys"),
+        RespFrame::Array(Some(vec![
+            hello_bulk("type"),
+            hello_bulk("keynum"),
+            hello_bulk("spec"),
+            RespFrame::Array(Some(vec![
+                hello_bulk("keynumidx"),
+                RespFrame::Integer(keynumidx),
+                hello_bulk("firstkey"),
+                RespFrame::Integer(firstkey),
+                hello_bulk("keystep"),
+                RespFrame::Integer(keystep),
+            ])),
+        ])),
+    ]))
+}
+
+/// (frankenredis-imkpg) Multi-keyspec command override. Returns the full
+/// Vec of key_spec frames when the command's upstream commands.def entry
+/// carries multiple keySpec definitions (typically a destination key + a
+/// source key/range/keynum). Each tuple in the returned Vec is one
+/// complete key_spec frame.
+///
+/// Sources for the per-command structures:
+/// - copy/rename/renamenx: legacy_redis_code/redis/src/commands.def
+///   (two-key src/dst, both at fixed argv positions 1 and 2)
+/// - lmove/rpoplpush: same structure as rename, RW+access+delete src,
+///   RW+insert dst
+/// - pfmerge: dst@1 + variadic srcs at 2..-1, RW+access+insert + RO+access
+/// - bitop: dst@2 (operation at 1) + variadic srcs at 3..-1
+/// - sinterstore: dst@1 + variadic srcs at 2..-1, RW+update + RO+access
+/// - sunionstore/sdiffstore: dst@1 + variadic srcs at 2..-1, OW+update + RO+access
+/// - zinterstore/zunionstore/zdiffstore/zrangestore/geosearchstore: dst@1
+///   + numkeys+keys at 2 (keynum begin_search index=2, keynumidx=0)
+fn command_info_multi_keyspec(name: &str) -> Option<Vec<RespFrame>> {
+    match name {
+        // copy: src@1 [RO, access], dst@2 [OW, update]
+        "copy" => Some(vec![
+            make_keyspec_index_range(&["RO", "access"], 1, 0, 1),
+            make_keyspec_index_range(&["OW", "update"], 2, 0, 1),
+        ]),
+        // rename: src@1 [RW, access, delete], dst@2 [OW, update]
+        "rename" => Some(vec![
+            make_keyspec_index_range(&["RW", "access", "delete"], 1, 0, 1),
+            make_keyspec_index_range(&["OW", "update"], 2, 0, 1),
+        ]),
+        // renamenx: src@1 [RW, access, delete], dst@2 [OW, insert]
+        "renamenx" => Some(vec![
+            make_keyspec_index_range(&["RW", "access", "delete"], 1, 0, 1),
+            make_keyspec_index_range(&["OW", "insert"], 2, 0, 1),
+        ]),
+        // lmove / rpoplpush: src@1 [RW, access, delete], dst@2 [RW, insert]
+        "lmove" | "rpoplpush" => Some(vec![
+            make_keyspec_index_range(&["RW", "access", "delete"], 1, 0, 1),
+            make_keyspec_index_range(&["RW", "insert"], 2, 0, 1),
+        ]),
+        // pfmerge: dst@1 [RW, access, insert] (single key), srcs@2..-1 [RO, access]
+        "pfmerge" => Some(vec![
+            make_keyspec_index_range(&["RW", "access", "insert"], 1, 0, 1),
+            make_keyspec_index_range(&["RO", "access"], 2, -1, 1),
+        ]),
+        // bitop: operation@1, dst@2 [OW, update] (single), srcs@3..-1 [RO, access]
+        "bitop" => Some(vec![
+            make_keyspec_index_range(&["OW", "update"], 2, 0, 1),
+            make_keyspec_index_range(&["RO", "access"], 3, -1, 1),
+        ]),
+        // sinterstore: dst@1 [RW, update], srcs@2..-1 [RO, access]
+        "sinterstore" => Some(vec![
+            make_keyspec_index_range(&["RW", "update"], 1, 0, 1),
+            make_keyspec_index_range(&["RO", "access"], 2, -1, 1),
+        ]),
+        // sunionstore / sdiffstore: dst@1 [OW, update], srcs@2..-1 [RO, access]
+        "sunionstore" | "sdiffstore" => Some(vec![
+            make_keyspec_index_range(&["OW", "update"], 1, 0, 1),
+            make_keyspec_index_range(&["RO", "access"], 2, -1, 1),
+        ]),
+        // zinterstore / zunionstore / zdiffstore / zrangestore / geosearchstore:
+        // dst@1 [OW, update] (single key), then numkeys @2 with keynum srcs.
+        "zinterstore" | "zunionstore" | "zdiffstore" | "zrangestore"
+        | "geosearchstore" => Some(vec![
+            make_keyspec_index_range(&["OW", "update"], 1, 0, 1),
+            make_keyspec_index_keynum(&["RO", "access"], 2, 0, 1, 1),
+        ]),
+        _ => None,
+    }
+}
+
 fn command_info_key_specs(
     name: &str,
     flags: &str,
@@ -14504,6 +14668,12 @@ fn command_info_key_specs(
     last_key: i64,
     step: i64,
 ) -> Vec<RespFrame> {
+    // (frankenredis-imkpg) Multi-keyspec commands have a fixed Vec of
+    // hand-built keyspec frames; bypass the single-spec path entirely.
+    if let Some(specs) = command_info_multi_keyspec(name) {
+        return specs;
+    }
+
     // (frankenredis-89b8r) EVAL/EVAL_RO/FCALL/FCALL_RO have movablekeys
     // and use the keynum find_keys spec. Their tabular first/last/step
     // are all 0, so we'd otherwise short-circuit to an empty Vec.
@@ -59078,6 +59248,181 @@ mod tests {
             let expected: Vec<String> =
                 expected_flags.iter().map(|s| (*s).to_string()).collect();
             assert_eq!(actual_flags, expected, "{cmd} flag set must match upstream");
+        }
+    }
+
+    /// (frankenredis-imkpg) Multi-keyspec commands have multiple key_spec
+    /// entries with per-position OW/RW/RO flags and begin_search indices
+    /// pointing at fixed argv positions. Pre-fix: fr emitted a single
+    /// fallback keyspec for these commands, missing the destination/source
+    /// distinction. Pin the per-spec flag list and begin_search index for
+    /// each command, captured directly from `redis-cli -p 16380 COMMAND
+    /// INFO <cmd>` against vendored 7.2.4.
+    #[test]
+    fn command_info_multi_keyspec_flags_and_begin_search_match_upstream() {
+        // (flags, begin_search index)
+        type ExpectedSpec = (&'static [&'static str], i64);
+        type MultiKeyspecCase = (&'static str, &'static [ExpectedSpec]);
+        let mut store = Store::new();
+        let cases: &[MultiKeyspecCase] = &[
+            ("COPY", &[(&["RO", "access"], 1), (&["OW", "update"], 2)]),
+            (
+                "RENAME",
+                &[
+                    (&["RW", "access", "delete"], 1),
+                    (&["OW", "update"], 2),
+                ],
+            ),
+            (
+                "RENAMENX",
+                &[
+                    (&["RW", "access", "delete"], 1),
+                    (&["OW", "insert"], 2),
+                ],
+            ),
+            (
+                "LMOVE",
+                &[
+                    (&["RW", "access", "delete"], 1),
+                    (&["RW", "insert"], 2),
+                ],
+            ),
+            (
+                "RPOPLPUSH",
+                &[
+                    (&["RW", "access", "delete"], 1),
+                    (&["RW", "insert"], 2),
+                ],
+            ),
+            (
+                "PFMERGE",
+                &[
+                    (&["RW", "access", "insert"], 1),
+                    (&["RO", "access"], 2),
+                ],
+            ),
+            ("BITOP", &[(&["OW", "update"], 2), (&["RO", "access"], 3)]),
+            (
+                "SINTERSTORE",
+                &[(&["RW", "update"], 1), (&["RO", "access"], 2)],
+            ),
+            (
+                "SUNIONSTORE",
+                &[(&["OW", "update"], 1), (&["RO", "access"], 2)],
+            ),
+            (
+                "SDIFFSTORE",
+                &[(&["OW", "update"], 1), (&["RO", "access"], 2)],
+            ),
+            (
+                "ZINTERSTORE",
+                &[(&["OW", "update"], 1), (&["RO", "access"], 2)],
+            ),
+            (
+                "ZUNIONSTORE",
+                &[(&["OW", "update"], 1), (&["RO", "access"], 2)],
+            ),
+            (
+                "ZDIFFSTORE",
+                &[(&["OW", "update"], 1), (&["RO", "access"], 2)],
+            ),
+            (
+                "ZRANGESTORE",
+                &[(&["OW", "update"], 1), (&["RO", "access"], 2)],
+            ),
+            (
+                "GEOSEARCHSTORE",
+                &[(&["OW", "update"], 1), (&["RO", "access"], 2)],
+            ),
+            // Single-keyspec OW commands moved to the override.
+            ("MSET", &[(&["OW", "update"], 1)]),
+            ("MSETNX", &[(&["OW", "insert"], 1)]),
+        ];
+        for (cmd, expected_specs) in cases {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) =
+                rows.into_iter().next().expect("one row")
+            else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            let RespFrame::Array(Some(specs)) = &fields[8] else {
+                panic!("expected key_specs Array for {cmd}, got {:?}", fields[8]);
+            };
+            assert_eq!(
+                specs.len(),
+                expected_specs.len(),
+                "{cmd} must emit exactly {} key_specs, got {}",
+                expected_specs.len(),
+                specs.len()
+            );
+            for (i, (expected_flags, expected_idx)) in expected_specs.iter().enumerate() {
+                let RespFrame::Array(Some(spec)) = &specs[i] else {
+                    panic!("{cmd}[{i}] expected key_spec Array");
+                };
+                // Walk the spec to find 'flags' and 'begin_search'.
+                let mut spec_flags: Option<Vec<String>> = None;
+                let mut spec_begin_index: Option<i64> = None;
+                let mut j = 0;
+                while j < spec.len() {
+                    let RespFrame::BulkString(Some(name)) = &spec[j] else {
+                        j += 1;
+                        continue;
+                    };
+                    match name.as_slice() {
+                        b"flags" => {
+                            let RespFrame::Array(Some(arr)) = &spec[j + 1] else {
+                                panic!("{cmd}[{i}] flags must be Array");
+                            };
+                            spec_flags = Some(
+                                arr.iter()
+                                    .filter_map(|f| match f {
+                                        RespFrame::SimpleString(s) => Some(s.clone()),
+                                        _ => None,
+                                    })
+                                    .collect(),
+                            );
+                        }
+                        b"begin_search" => {
+                            let RespFrame::Array(Some(bs)) = &spec[j + 1] else {
+                                panic!("{cmd}[{i}] begin_search must be Array");
+                            };
+                            if let RespFrame::Array(Some(bspec)) = &bs[3]
+                                && let Some(RespFrame::Integer(idx)) = bspec.get(1)
+                            {
+                                spec_begin_index = Some(*idx);
+                            }
+                        }
+                        _ => {}
+                    }
+                    j += 2;
+                }
+                let actual_flags = spec_flags
+                    .unwrap_or_else(|| panic!("{cmd}[{i}] missing flags field"));
+                let actual_idx = spec_begin_index
+                    .unwrap_or_else(|| panic!("{cmd}[{i}] missing begin_search index"));
+                let expected_flag_strs: Vec<String> =
+                    expected_flags.iter().map(|s| (*s).to_string()).collect();
+                assert_eq!(
+                    actual_flags, expected_flag_strs,
+                    "{cmd}[{i}] flags must match upstream"
+                );
+                assert_eq!(
+                    actual_idx, *expected_idx,
+                    "{cmd}[{i}] begin_search index must be {expected_idx}"
+                );
+            }
         }
     }
 
