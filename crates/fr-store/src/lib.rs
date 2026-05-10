@@ -1899,7 +1899,10 @@ impl Store {
     }
 
     pub fn reset_info_stats(&mut self) {
-        self.reset_slowlog();
+        // Upstream config.c::configResetStatCommand calls resetServerStats +
+        // resetCommandTableStats + resetErrorTableStats only; it does not
+        // touch the slowlog list or its id counter (server.c::resetServerStats
+        // line 2492+). SLOWLOG RESET is the only path that clears entries.
         self.command_histograms = CommandHistogramTracker::default();
         self.stat_total_commands_processed = 0;
         self.stat_total_connections_received = 0;
@@ -2112,8 +2115,11 @@ impl Store {
     }
 
     pub fn reset_slowlog(&mut self) {
+        // Upstream slowlog.c::slowlogReset (line 135) only deletes entries
+        // from server.slowlog list; it does NOT touch server.slowlog_entry_id,
+        // which is initialised once in slowlogInit (line 116) and otherwise
+        // increments forever. So SLOWLOG RESET retains the id counter.
         self.slowlog.clear();
-        self.slowlog_id_counter = 0;
     }
 
     pub fn record_slowlog(&mut self, argv: &[Vec<u8>], duration_us: u64, now_ms: u64) {
@@ -14885,7 +14891,14 @@ mod tests {
         store.reset_slowlog();
         assert_eq!(store.slowlog_len(), 0);
         assert!(store.get_slowlog(1).is_empty());
-        assert_eq!(store.slowlog_id_counter, 0);
+        // (frankenredis-0vneu) Upstream slowlog.c::slowlogReset only frees the
+        // entries — it does NOT touch server.slowlog_entry_id. So after RESET,
+        // the next entry id resumes from where the counter left off (3 here:
+        // we recorded 3 entries above, ids 0, 1, 2; counter advanced to 3).
+        assert_eq!(store.slowlog_id_counter, 3);
+        store.record_slowlog(&[b"SET".to_vec(), b"d".to_vec(), b"4".to_vec()], 80, 5_000);
+        let after = store.get_slowlog(1);
+        assert_eq!(after[0].id, 3);
     }
 
     #[test]

@@ -47605,6 +47605,50 @@ mod tests {
         assert_eq!(store.slowlog_len(), 0);
     }
 
+    /// (frankenredis-0vneu) Mirror upstream slowlog.c::slowlogReset
+    /// (line 135) and config.c::configResetStatCommand (line 3388).
+    /// SLOWLOG RESET only deletes entries from the slowlog list — it
+    /// must NOT touch server.slowlog_entry_id, which is initialised
+    /// once in slowlogInit and otherwise increments forever. CONFIG
+    /// RESETSTAT calls resetServerStats + resetCommandTableStats +
+    /// resetErrorTableStats only — none of which touch the slowlog
+    /// list or its id counter. Pre-fix, fr's reset_slowlog also
+    /// zeroed the id counter, and reset_info_stats (CONFIG RESETSTAT)
+    /// transitively cleared the slowlog list.
+    #[test]
+    fn slowlog_reset_retains_id_counter_and_config_resetstat_preserves_entries_per_upstream() {
+        let mut store = Store::new();
+        store.slowlog_log_slower_than_us = 0;
+        store.record_slowlog(&[b"SET".to_vec(), b"a".to_vec(), b"1".to_vec()], 10, 1_000);
+        store.record_slowlog(&[b"SET".to_vec(), b"b".to_vec(), b"2".to_vec()], 20, 2_000);
+        assert_eq!(store.slowlog_len(), 2);
+
+        // SLOWLOG RESET deletes the entries but the next record continues
+        // from id=2 (matches vendored 7.2.4 — id counter is server-lifetime).
+        dispatch_argv(&[b"SLOWLOG".to_vec(), b"RESET".to_vec()], &mut store, 0)
+            .expect("slowlog reset");
+        assert_eq!(store.slowlog_len(), 0);
+        store.record_slowlog(&[b"SET".to_vec(), b"c".to_vec(), b"3".to_vec()], 30, 3_000);
+        let entries = store.get_slowlog(1);
+        assert_eq!(entries[0].id, 2, "id counter must NOT reset on SLOWLOG RESET");
+
+        // CONFIG RESETSTAT must not clear the slowlog list (vendored only
+        // resets stats counters; the slowlog survives).
+        dispatch_argv(&[b"CONFIG".to_vec(), b"RESETSTAT".to_vec()], &mut store, 0)
+            .expect("config resetstat");
+        assert_eq!(
+            store.slowlog_len(),
+            1,
+            "CONFIG RESETSTAT must leave slowlog entries intact"
+        );
+        store.record_slowlog(&[b"SET".to_vec(), b"d".to_vec(), b"4".to_vec()], 40, 4_000);
+        let entries = store.get_slowlog(1);
+        assert_eq!(
+            entries[0].id, 3,
+            "id counter must also survive CONFIG RESETSTAT"
+        );
+    }
+
     #[test]
     fn config_resetstat_rejects_extra_arguments() {
         let mut store = Store::new();
