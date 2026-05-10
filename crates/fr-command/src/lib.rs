@@ -15162,7 +15162,9 @@ const CONFIG_STATIC_DEFAULTS: &[(&str, &str)] = &[
     ("maxmemory-samples", "5"),
     ("maxmemory-eviction-tenacity", "10"),
     ("maxclients", "10000"),
-    ("save", ""),
+    // (frankenredis-ao0vl) Mirror upstream CONFIG_DEFAULT_SAVE_PARAMS;
+    // see fr-runtime/src/lib.rs:378 for rationale.
+    ("save", "3600 1 300 100 60 10000"),
     ("stop-writes-on-bgsave-error", "yes"),
     ("rdbcompression", "yes"),
     ("rdbchecksum", "yes"),

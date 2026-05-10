@@ -375,7 +375,12 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("maxmemory-eviction-tenacity", "10"),
     ("maxclients", "10000"),
     // Persistence - RDB
-    ("save", ""),
+    // (frankenredis-ao0vl) Upstream config.c initServerConfig sets
+    // server.save_params from CONFIG_DEFAULT_SAVE_PARAMS = "3600 1
+    // 300 100 60 10000" — three thresholds (1 change in 1h, 100 in
+    // 5m, 10000 in 1m). Empty disables snapshotting; vendored never
+    // boots empty by default.
+    ("save", "3600 1 300 100 60 10000"),
     ("stop-writes-on-bgsave-error", "yes"),
     ("rdbcompression", "yes"),
     ("rdbchecksum", "yes"),
@@ -18385,12 +18390,17 @@ mod tests {
     #[test]
     fn replication_sync_alias_triggers_fullresync() {
         let mut rt = Runtime::default_strict();
-
+        // (frankenredis-d1505) master_replid is now seeded with a
+        // unique random hex at startup, so the FULLRESYNC reply must
+        // carry the runtime's actual replid rather than a 40-zero
+        // placeholder.
+        let expected = format!(
+            "FULLRESYNC {} 0",
+            rt.server.replication_runtime_state.backlog.replid
+        );
         assert_eq!(
             rt.execute_frame(command(&[b"SYNC"]), 0),
-            RespFrame::SimpleString(
-                "FULLRESYNC 0000000000000000000000000000000000000000 0".to_string()
-            )
+            RespFrame::SimpleString(expected)
         );
     }
 
@@ -18780,23 +18790,24 @@ mod tests {
 
         // Master role keeps working.
         let mut rt = Runtime::default_strict();
-        let ok = rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 0);
-        assert_eq!(
-            ok,
-            RespFrame::SimpleString(
-                "FULLRESYNC 0000000000000000000000000000000000000000 0".to_string()
-            )
+        let expected = format!(
+            "FULLRESYNC {} 0",
+            rt.server.replication_runtime_state.backlog.replid
         );
+        let ok = rt.execute_frame(command(&[b"PSYNC", b"?", b"-1"]), 0);
+        assert_eq!(ok, RespFrame::SimpleString(expected));
     }
 
     #[test]
     fn replication_psync_accepts_trailing_arguments_like_legacy_redis() {
         let mut rt = Runtime::default_strict();
+        let expected = format!(
+            "FULLRESYNC {} 0",
+            rt.server.replication_runtime_state.backlog.replid
+        );
         assert_eq!(
             rt.execute_frame(command(&[b"PSYNC", b"?", b"-1", b"extra"]), 0),
-            RespFrame::SimpleString(
-                "FULLRESYNC 0000000000000000000000000000000000000000 0".to_string()
-            )
+            RespFrame::SimpleString(expected)
         );
     }
 
