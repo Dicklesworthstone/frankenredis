@@ -17814,6 +17814,19 @@ fn eval_cmd(
     }
     let (_numkeys, keys, args) = parse_eval_args(argv)?;
 
+    // (frankenredis-b3ryz) Pre-validate via the same lex+parse path
+    // SCRIPT LOAD uses so parse-time failures route through the
+    // upstream "ERR Error compiling script (new function): user_script:1:
+    // <lua-msg>" wording rather than the luaCallFunction runtime envelope.
+    // eval_script_error_reply only recognises a handful of compile-error
+    // string prefixes; lua_eval Parser also emits "<X> expected near …",
+    // "malformed number near …", etc. that previously fell through.
+    if let Err(parse_err) = lua_eval::compile_check(script) {
+        return Ok(RespFrame::Error(format!(
+            "ERR Error compiling script (new function): user_script:1: {parse_err}"
+        )));
+    }
+
     // Cache the script (Redis caches on EVAL too)
     store.script_load(script);
 
@@ -39187,6 +39200,46 @@ mod tests {
             !msg.contains(", on @user_script:1."),
             "compile error must not append runtime sha1 envelope: {msg}"
         );
+    }
+
+    /// (frankenredis-b3ryz) The eval_script_error_reply heuristic only
+    /// recognised "unexpected symbol near", "unexpected character", and
+    /// "syntax error" prefixes; the lua_eval Parser also produces
+    /// "<X> expected near …" / "expected name in for, got X" /
+    /// "malformed number near X" wordings that previously fell through
+    /// and got wrapped in the runtime envelope. Pre-validating with
+    /// compile_check in eval_cmd routes every parse failure through the
+    /// upstream "Error compiling script (new function): user_script:1: …"
+    /// shape regardless of which Parser branch tripped.
+    #[test]
+    fn eval_compile_errors_route_through_compile_branch_for_all_parser_wordings() {
+        let mut store = Store::new();
+        for src in [
+            // Trips "'=' expected near 'blah'" path.
+            &b"blah blah"[..],
+            // Trips "malformed number near '1.2.3'" lexer path.
+            &b"return 1.2.3"[..],
+            // Trips "unexpected symbol near '~'" path.
+            &b"return ~1"[..],
+        ] {
+            let out = dispatch_argv(
+                &[b"EVAL".to_vec(), src.to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("eval");
+            let RespFrame::Error(msg) = out else {
+                panic!("expected error for {src:?}, got {out:?}");
+            };
+            assert!(
+                msg.starts_with("ERR Error compiling script (new function): user_script:1: "),
+                "compile error must use upstream prefix for {src:?}: {msg}"
+            );
+            assert!(
+                !msg.contains(", on @user_script:1."),
+                "compile error must not append runtime sha1 envelope for {src:?}: {msg}"
+            );
+        }
     }
 
     #[test]
