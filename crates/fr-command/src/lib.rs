@@ -14324,6 +14324,87 @@ fn command_info_tips(name: &str) -> Vec<RespFrame> {
     }
 }
 
+/// (frankenredis-89b8r) Per-command override of key-spec notes + flags
+/// for the 9 commands whose upstream commands.def keySpec carries a
+/// non-default flag set. Returns (notes, flags) when the command has a
+/// custom spec, else None (caller falls back to the heuristic).
+fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [&'static str])> {
+    match name {
+        "set" => Some((
+            "RW and ACCESS due to the optional `GET` argument",
+            &["RW", "access", "update", "variable_flags"],
+        )),
+        "xadd" => Some((
+            "UPDATE instead of INSERT because of the optional trimming feature",
+            &["RW", "update"],
+        )),
+        "getex" => Some((
+            "RW and UPDATE because it changes the TTL",
+            &["RW", "access", "update"],
+        )),
+        "bitfield" => Some((
+            "This command allows both access and modification of the key",
+            &["RW", "access", "update", "variable_flags"],
+        )),
+        "pfcount" => Some((
+            "RW because it may change the internal representation of the key, and propagate to replicas",
+            &["RW", "access"],
+        )),
+        "eval" | "fcall" => Some((
+            "We cannot tell how the keys will be used so we assume the worst, RW and UPDATE",
+            &["RW", "access", "update"],
+        )),
+        "eval_ro" | "fcall_ro" => Some((
+            "We cannot tell how the keys will be used so we assume the worst, RO and ACCESS",
+            &["RO", "access"],
+        )),
+        _ => None,
+    }
+}
+
+/// (frankenredis-89b8r) Build the keynum-style key-spec emitted by
+/// EVAL/EVAL_RO/FCALL/FCALL_RO. Mirrors upstream commands.def lines
+/// 4773, 4854, 4881, 4908: begin_search index=2 (after the script id),
+/// find_keys keynum {keynumidx=0, firstkey=1, keystep=1}.
+fn command_info_keynum_keyspec(name: &str) -> Option<RespFrame> {
+    let (notes, flags) = command_info_keyspec_override(name)?;
+    if !matches!(name, "eval" | "eval_ro" | "fcall" | "fcall_ro") {
+        return None;
+    }
+    Some(RespFrame::Array(Some(vec![
+        hello_bulk("notes"),
+        RespFrame::BulkString(Some(notes.as_bytes().to_vec())),
+        hello_bulk("flags"),
+        RespFrame::Array(Some(
+            flags.iter().copied().map(hello_simple).collect(),
+        )),
+        hello_bulk("begin_search"),
+        RespFrame::Array(Some(vec![
+            hello_bulk("type"),
+            hello_bulk("index"),
+            hello_bulk("spec"),
+            RespFrame::Array(Some(vec![
+                hello_bulk("index"),
+                RespFrame::Integer(2),
+            ])),
+        ])),
+        hello_bulk("find_keys"),
+        RespFrame::Array(Some(vec![
+            hello_bulk("type"),
+            hello_bulk("keynum"),
+            hello_bulk("spec"),
+            RespFrame::Array(Some(vec![
+                hello_bulk("keynumidx"),
+                RespFrame::Integer(0),
+                hello_bulk("firstkey"),
+                RespFrame::Integer(1),
+                hello_bulk("keystep"),
+                RespFrame::Integer(1),
+            ])),
+        ])),
+    ])))
+}
+
 fn command_info_key_specs(
     name: &str,
     flags: &str,
@@ -14331,11 +14412,21 @@ fn command_info_key_specs(
     last_key: i64,
     step: i64,
 ) -> Vec<RespFrame> {
+    // (frankenredis-89b8r) EVAL/EVAL_RO/FCALL/FCALL_RO have movablekeys
+    // and use the keynum find_keys spec. Their tabular first/last/step
+    // are all 0, so we'd otherwise short-circuit to an empty Vec.
+    if let Some(spec) = command_info_keynum_keyspec(name) {
+        return vec![spec];
+    }
+
     if first_key == 0 && last_key == 0 {
         return Vec::new();
     }
 
-    let key_flags: Vec<&str> = if flags.split_whitespace().any(|flag| flag == "readonly") {
+    let override_spec = command_info_keyspec_override(name);
+    let key_flags: Vec<&str> = if let Some((_notes, flags)) = override_spec {
+        flags.to_vec()
+    } else if flags.split_whitespace().any(|flag| flag == "readonly") {
         vec!["RO", "access"]
     } else if matches!(name, "restore" | "restore-asking") {
         // (frankenredis-restoreasking) Upstream RESTORE/RESTORE-ASKING
@@ -14357,9 +14448,7 @@ fn command_info_key_specs(
             | "rpush"
             | "rpushx"
             | "sadd"
-            | "set"
             | "setnx"
-            | "xadd"
             | "zadd"
     ) {
         vec!["RW", "insert"]
@@ -14372,34 +14461,41 @@ fn command_info_key_specs(
         last_key
     };
 
-    vec![RespFrame::Array(Some(vec![
-        hello_bulk("flags"),
-        RespFrame::Array(Some(key_flags.into_iter().map(hello_simple).collect())),
-        hello_bulk("begin_search"),
+    let mut spec = Vec::with_capacity(10);
+    if let Some((notes, _)) = override_spec {
+        spec.push(hello_bulk("notes"));
+        spec.push(RespFrame::BulkString(Some(notes.as_bytes().to_vec())));
+    }
+    spec.push(hello_bulk("flags"));
+    spec.push(RespFrame::Array(Some(
+        key_flags.into_iter().map(hello_simple).collect(),
+    )));
+    spec.push(hello_bulk("begin_search"));
+    spec.push(RespFrame::Array(Some(vec![
+        hello_bulk("type"),
+        hello_bulk("index"),
+        hello_bulk("spec"),
         RespFrame::Array(Some(vec![
-            hello_bulk("type"),
             hello_bulk("index"),
-            hello_bulk("spec"),
-            RespFrame::Array(Some(vec![
-                hello_bulk("index"),
-                RespFrame::Integer(first_key),
-            ])),
+            RespFrame::Integer(first_key),
         ])),
-        hello_bulk("find_keys"),
+    ])));
+    spec.push(hello_bulk("find_keys"));
+    spec.push(RespFrame::Array(Some(vec![
+        hello_bulk("type"),
+        hello_bulk("range"),
+        hello_bulk("spec"),
         RespFrame::Array(Some(vec![
-            hello_bulk("type"),
-            hello_bulk("range"),
-            hello_bulk("spec"),
-            RespFrame::Array(Some(vec![
-                hello_bulk("lastkey"),
-                RespFrame::Integer(relative_last_key),
-                hello_bulk("keystep"),
-                RespFrame::Integer(step),
-                hello_bulk("limit"),
-                RespFrame::Integer(0),
-            ])),
+            hello_bulk("lastkey"),
+            RespFrame::Integer(relative_last_key),
+            hello_bulk("keystep"),
+            RespFrame::Integer(step),
+            hello_bulk("limit"),
+            RespFrame::Integer(0),
         ])),
-    ]))]
+    ])));
+
+    vec![RespFrame::Array(Some(spec))]
 }
 
 fn command_info_subcommand_entry(name: &str, arity: i64) -> RespFrame {
@@ -58465,6 +58561,124 @@ mod tests {
                 "{cmd} step must be {step}, got {:?}",
                 fields[5]
             );
+        }
+    }
+
+    /// (frankenredis-89b8r) Per upstream commands.def, nine commands carry
+    /// a non-default keySpec with a 'notes' description string and a
+    /// custom flag bitmask. Pin all nine via COMMAND INFO key_specs[0].
+    /// Pre-fix: SET/XADD emitted [RW, insert] (wrong); GETEX/BITFIELD/PFCOUNT
+    /// fell through to the [RW, access] / [RO, access] defaults (missing
+    /// update/variable_flags/RW); EVAL family emitted empty key_specs
+    /// because their tabular first/last/step are 0/0/0 and the fn early-
+    /// returned before adding the keynum find_keys spec.
+    #[test]
+    fn command_info_key_specs_notes_and_flags_for_set_xadd_getex_bitfield_pfcount_eval_fcall_match_upstream(
+    ) {
+        let mut store = Store::new();
+        let cases: &[(&str, &str, &[&str])] = &[
+            (
+                "SET",
+                "RW and ACCESS due to the optional `GET` argument",
+                &["RW", "access", "update", "variable_flags"],
+            ),
+            (
+                "XADD",
+                "UPDATE instead of INSERT because of the optional trimming feature",
+                &["RW", "update"],
+            ),
+            (
+                "GETEX",
+                "RW and UPDATE because it changes the TTL",
+                &["RW", "access", "update"],
+            ),
+            (
+                "BITFIELD",
+                "This command allows both access and modification of the key",
+                &["RW", "access", "update", "variable_flags"],
+            ),
+            (
+                "PFCOUNT",
+                "RW because it may change the internal representation of the key, and propagate to replicas",
+                &["RW", "access"],
+            ),
+            (
+                "EVAL",
+                "We cannot tell how the keys will be used so we assume the worst, RW and UPDATE",
+                &["RW", "access", "update"],
+            ),
+            (
+                "EVAL_RO",
+                "We cannot tell how the keys will be used so we assume the worst, RO and ACCESS",
+                &["RO", "access"],
+            ),
+            (
+                "FCALL",
+                "We cannot tell how the keys will be used so we assume the worst, RW and UPDATE",
+                &["RW", "access", "update"],
+            ),
+            (
+                "FCALL_RO",
+                "We cannot tell how the keys will be used so we assume the worst, RO and ACCESS",
+                &["RO", "access"],
+            ),
+        ];
+        for (cmd, expected_notes, expected_flags) in cases {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) =
+                rows.into_iter().next().expect("one row")
+            else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            let RespFrame::Array(Some(specs)) = &fields[8] else {
+                panic!("expected key_specs Array for {cmd}, got {:?}", fields[8]);
+            };
+            assert_eq!(specs.len(), 1, "{cmd} must emit exactly one key_spec");
+            let RespFrame::Array(Some(spec)) = &specs[0] else {
+                panic!("expected key_spec Array for {cmd}");
+            };
+            // First field-name must be 'notes'.
+            assert_eq!(
+                spec[0],
+                RespFrame::BulkString(Some(b"notes".to_vec())),
+                "{cmd} key_spec[0] must be 'notes' field name"
+            );
+            assert_eq!(
+                spec[1],
+                RespFrame::BulkString(Some(expected_notes.as_bytes().to_vec())),
+                "{cmd} notes must match upstream"
+            );
+            // Second field is 'flags'.
+            assert_eq!(
+                spec[2],
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                "{cmd} key_spec[2] must be 'flags' field name"
+            );
+            let RespFrame::Array(Some(flags)) = &spec[3] else {
+                panic!("expected flags Array for {cmd}");
+            };
+            let actual_flags: Vec<String> = flags
+                .iter()
+                .filter_map(|f| match f {
+                    RespFrame::SimpleString(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            let expected: Vec<String> =
+                expected_flags.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(actual_flags, expected, "{cmd} flag set must match upstream");
         }
     }
 
