@@ -12514,11 +12514,7 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     // listener0 fields previously missing. (br-frankenredis-infoserver)
     if section_requested("server") {
         info.push_str("# Server\r\n");
-        let _ = write!(
-            info,
-            "redis_version:{}-frankenredis\r\n",
-            fr_store::REDIS_COMPAT_VERSION
-        );
+        let _ = write!(info, "redis_version:{}\r\n", fr_store::REDIS_COMPAT_VERSION);
         info.push_str("redis_git_sha1:00000000\r\n");
         info.push_str("redis_git_dirty:0\r\n");
         info.push_str("redis_build_id:0\r\n");
@@ -35562,6 +35558,26 @@ mod tests {
         assert!(info.contains("# Server\r\n"));
         assert!(info.contains("# Clients\r\n"));
         assert!(!info.contains("# Memory\r\n"));
+    }
+
+    #[test]
+    fn info_server_reports_plain_redis_compat_version() {
+        // (frankenredis-1ihzb) Strict Redis parity: vendored 7.2.4 reports
+        // `redis_version:7.2.4` with no implementation suffix. Suffixes break
+        // semver-only client parsers.
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"INFO".to_vec(), b"server".to_vec()], &mut store, 0)
+            .expect("info server");
+        let RespFrame::BulkString(Some(bytes)) = out else {
+            panic!("expected bulk string"); // ubs:ignore - existing test style
+        };
+        let info = String::from_utf8(bytes).expect("utf8 info");
+        let expected = format!("redis_version:{}\r\n", fr_store::REDIS_COMPAT_VERSION);
+        assert!(info.contains(&expected), "expected {expected:?} in {info:?}");
+        assert!(
+            !info.contains("redis_version:7.2.4-frankenredis\r\n"),
+            "INFO server must not append frankenredis suffix: {info:?}"
+        );
     }
 
     // (frankenredis-xa8u4) Upstream server.c::genRedisInfoString:

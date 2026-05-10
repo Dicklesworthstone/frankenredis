@@ -2496,11 +2496,10 @@ fn live_oracle_client_id_drift_matches(
 }
 
 /// HELLO replies are `[server, redis, version, X, proto, N, id, ID, ...]`.
-/// The `version` field reports the server's SOFTWARE version (ours
-/// reports 7.2.0, upstream reports 7.2.4) and the `id` field is the
-/// same per-connection counter canonicalized above. Both differences
-/// are environmental, not behavioral. Accept matching shape with any
-/// version string and positive id. (br-frankenredis-w579)
+/// The `id` field is the same per-connection counter canonicalized above.
+/// Accept matching shape with positive IDs while requiring the version field
+/// to match the vendored 7.2.4 oracle. (br-frankenredis-w579,
+/// frankenredis-1ihzb)
 fn live_oracle_hello_id_drift_matches(
     case: &ConformanceCase,
     runtime_actual: &RespFrame,
@@ -2526,13 +2525,7 @@ fn live_oracle_hello_id_drift_matches(
     for (a, b) in ours.iter().zip(theirs.iter()) {
         match (a, b) {
             (RespFrame::BulkString(Some(x)), RespFrame::BulkString(Some(y))) => {
-                // Version strings (e.g. "7.2.0" vs "7.2.4") and the
-                // "redis" server-name echo — let any version-shaped
-                // ASCII-digits-plus-dots pass, but require exact
-                // matches everywhere else.
-                let looks_like_version =
-                    |s: &[u8]| !s.is_empty() && s.iter().all(|b| b.is_ascii_digit() || *b == b'.');
-                if x != y && !(looks_like_version(x) && looks_like_version(y)) {
+                if x != y {
                     return false;
                 }
             }
@@ -5524,7 +5517,7 @@ mod tests {
         assert_eq!(parts[0], &RespFrame::BulkString(Some(b"server".to_vec())));
         assert_eq!(parts[1], &RespFrame::BulkString(Some(b"redis".to_vec())));
         assert_eq!(parts[2], &RespFrame::BulkString(Some(b"version".to_vec())));
-        assert_eq!(parts[3], &RespFrame::BulkString(Some(b"7.2.0".to_vec())));
+        assert_eq!(parts[3], &RespFrame::BulkString(Some(b"7.2.4".to_vec())));
         assert_eq!(parts[4], &RespFrame::BulkString(Some(b"proto".to_vec())));
         assert_eq!(parts[5], &RespFrame::Integer(3));
         assert_eq!(parts[6], &RespFrame::BulkString(Some(b"id".to_vec())));
