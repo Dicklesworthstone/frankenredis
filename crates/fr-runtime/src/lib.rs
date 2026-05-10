@@ -759,7 +759,15 @@ impl AclUser {
 
         if self.all_commands {
             parts.push("+@all".to_string());
-        } else if self.allowed_categories.is_empty() && self.allowed_commands.is_empty() {
+        } else {
+            // (frankenredis-dv0ve) Mirror upstream
+            // acl.c::ACLDescribeUserCommandRules: when the user does NOT
+            // have allcommands, ACL LIST opens with the deny-all
+            // baseline ("-@all") even when explicit positive grants
+            // follow, so callers can re-apply the rule string to
+            // reproduce the exact permission set. fr previously emitted
+            // "-@all" only when zero explicit grants existed, making
+            // "+@read" round-trip as the wrong (broader) permission.
             parts.push("-@all".to_string());
         }
 
@@ -25597,7 +25605,7 @@ mod tests {
                     b"d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1".to_vec(),
                 ))])),
                 RespFrame::BulkString(Some(b"commands".to_vec())),
-                RespFrame::BulkString(Some(b"+get +set".to_vec())),
+                RespFrame::BulkString(Some(b"-@all +get +set".to_vec())),
                 RespFrame::BulkString(Some(b"keys".to_vec())),
                 RespFrame::BulkString(Some(b"~foo:* ~bar:*".to_vec())),
                 RespFrame::BulkString(Some(b"channels".to_vec())),
@@ -25624,7 +25632,7 @@ mod tests {
             .expect("expected alice in ACL LIST");
         assert_eq!(
             alice,
-            "user alice on #<hidden> sanitize-payload resetkeys ~foo:* ~bar:* resetchannels +get +set"
+            "user alice on #<hidden> sanitize-payload resetkeys ~foo:* ~bar:* resetchannels -@all +get +set"
         );
 
         assert_eq!(
@@ -25634,7 +25642,7 @@ mod tests {
         let saved = std::fs::read_to_string(&acl_path).expect("ACL SAVE should write acl file");
         assert!(
             saved.contains(
-                "user alice reset on #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 sanitize-payload resetkeys ~foo:* ~bar:* resetchannels +get +set"
+                "user alice reset on #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 sanitize-payload resetkeys ~foo:* ~bar:* resetchannels -@all +get +set"
             ),
             "saved ACL file should preserve key patterns, got: {saved}"
         );
@@ -26316,7 +26324,7 @@ mod tests {
         let saved = std::fs::read_to_string(&acl_path).expect("ACL SAVE should write acl file");
         assert!(
             saved.contains(
-                "user alice reset on #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 sanitize-payload ~* &* +get"
+                "user alice reset on #d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1 sanitize-payload ~* &* -@all +get"
             ),
             "saved ACL file should contain serialized alice rules, got: {saved}"
         );
@@ -26369,7 +26377,7 @@ mod tests {
                 _ => None,
             })
             .expect("expected alice in ACL LIST after ACL LOAD");
-        assert_eq!(alice, "user alice on #<hidden> sanitize-payload ~* &* +get");
+        assert_eq!(alice, "user alice on #<hidden> sanitize-payload ~* &* -@all +get");
 
         let _ = std::fs::remove_file(&acl_path);
     }
