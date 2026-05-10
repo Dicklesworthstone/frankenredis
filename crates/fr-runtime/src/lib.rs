@@ -582,12 +582,30 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("tracking-table-max-keys", "1000000"),
 ];
 
+/// (frankenredis-9m6lw) Hidden config entries (HIDDEN_CONFIG flag in
+/// upstream config.c). These respond to an exact-name CONFIG GET but
+/// are excluded from glob/wildcard sweeps — vendored config.c line 998
+/// `if (config->flags & HIDDEN_CONFIG) continue;` skips them when
+/// iterating the table. Defaults are pulled from createBoolConfig /
+/// createIntConfig / createOffTConfig third-from-last argument at
+/// upstream config.c lines 3091, 3096, 3177, 3178, 3183, 3203, 3232.
+const CONFIG_STATIC_HIDDEN_PARAMS: &[(&str, &str)] = &[
+    ("use-exit-on-panic", "no"),
+    ("aof-disable-auto-gc", "no"),
+    ("rdb-key-save-delay", "0"),
+    ("key-load-delay", "0"),
+    ("watchdog-period", "0"),
+    ("cluster-ping-interval", "0"),
+    ("loading-process-events-interval-bytes", "2097152"),
+];
+
 fn canonical_static_config_param(parameter: &str) -> Option<&'static str> {
     if parameter.eq_ignore_ascii_case("slave-serve-stale-data") {
         return Some("replica-serve-stale-data");
     }
     CONFIG_STATIC_PARAMS
         .iter()
+        .chain(CONFIG_STATIC_HIDDEN_PARAMS.iter())
         .find(|&&(name, _)| name.eq_ignore_ascii_case(parameter))
         .map(|&(name, _)| name)
 }
@@ -7793,6 +7811,25 @@ impl Runtime {
                     .map(|v| v.as_bytes().to_vec())
                     .unwrap_or_else(|| default_value.as_bytes().to_vec());
                 entries.push(RespFrame::BulkString(Some(value)));
+            }
+        }
+        // (frankenredis-9m6lw) Hidden configs respond to exact-name CONFIG GET
+        // but are skipped by glob/wildcard sweeps, mirroring upstream
+        // config.c::configGetCommand line 998 — `if (config->flags &
+        // HIDDEN_CONFIG) continue;` skips them when iterating the table.
+        let pattern_is_literal = !pattern.chars().any(|c| matches!(c, '*' | '?' | '['));
+        if pattern_is_literal {
+            for &(name, default_value) in CONFIG_STATIC_HIDDEN_PARAMS {
+                if pattern.eq_ignore_ascii_case(name) {
+                    entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
+                    let value = self
+                        .server
+                        .config_overrides
+                        .get(name)
+                        .map(|v| v.as_bytes().to_vec())
+                        .unwrap_or_else(|| default_value.as_bytes().to_vec());
+                    entries.push(RespFrame::BulkString(Some(value)));
+                }
             }
         }
     }
@@ -22136,6 +22173,72 @@ mod tests {
                 fetch(&mut rt, name.as_bytes()),
                 expected.as_bytes(),
                 "CONFIG GET {name} default mismatch"
+            );
+        }
+    }
+
+    /// (frankenredis-9m6lw) Hidden config entries (HIDDEN_CONFIG flag in
+    /// upstream config.c lines 3091, 3096, 3177, 3178, 3183, 3203, 3232)
+    /// respond to an exact-name CONFIG GET but are excluded from glob /
+    /// wildcard sweeps (config.c::configGetCommand line 998).
+    #[test]
+    fn config_get_returns_hidden_params_only_for_exact_name_per_upstream() {
+        let mut rt = Runtime::default_strict();
+
+        for (name, expected) in [
+            ("use-exit-on-panic", "no"),
+            ("aof-disable-auto-gc", "no"),
+            ("rdb-key-save-delay", "0"),
+            ("key-load-delay", "0"),
+            ("watchdog-period", "0"),
+            ("cluster-ping-interval", "0"),
+            ("loading-process-events-interval-bytes", "2097152"),
+        ] {
+            let RespFrame::Array(Some(items)) =
+                rt.execute_frame(command(&[b"CONFIG", b"GET", name.as_bytes()]), 0)
+            else {
+                panic!("expected array reply from CONFIG GET {name}");
+            };
+            assert_eq!(
+                items.len(),
+                2,
+                "exact CONFIG GET {name} must yield (key, value)"
+            );
+            let RespFrame::BulkString(Some(value)) = items[1].clone() else {
+                panic!("CONFIG GET {name} value is not a bulk string");
+            };
+            assert_eq!(
+                value,
+                expected.as_bytes(),
+                "hidden default for {name} must match upstream"
+            );
+        }
+
+        // Wildcard sweep MUST NOT include any of the hidden names.
+        let RespFrame::Array(Some(all)) =
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"*"]), 0)
+        else {
+            panic!("expected array reply from CONFIG GET *");
+        };
+        let names: Vec<String> = all
+            .chunks(2)
+            .filter_map(|pair| match pair.first()? {
+                RespFrame::BulkString(Some(b)) => std::str::from_utf8(b).ok().map(String::from),
+                _ => None,
+            })
+            .collect();
+        for hidden in [
+            "use-exit-on-panic",
+            "aof-disable-auto-gc",
+            "rdb-key-save-delay",
+            "key-load-delay",
+            "watchdog-period",
+            "cluster-ping-interval",
+            "loading-process-events-interval-bytes",
+        ] {
+            assert!(
+                !names.iter().any(|n| n.eq_ignore_ascii_case(hidden)),
+                "hidden config {hidden} must NOT appear in CONFIG GET * wildcard sweep",
             );
         }
     }
