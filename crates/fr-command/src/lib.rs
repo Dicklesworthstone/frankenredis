@@ -19031,15 +19031,25 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             "Quicklist structure printed on stdout".to_string(),
         ))
     } else if sub.eq_ignore_ascii_case("CONFIG-REWRITE-FORCE-ALL") {
-        // Upstream debug.c::debugCommand:962-967 calls
-        // rewriteConfig(server.configfile, 1) and returns +OK or an
-        // error. fr has no on-disk config rewrite path (config is in-
-        // memory via CONFIG SET); accept-and-OK matches the wire
-        // contract. (frankenredis-eejfm)
+        // (frankenredis-i7oxt) Upstream debug.c::debugCommand line 962-967
+        // calls rewriteConfig(server.configfile, 1) directly and replies
+        // with `addReplyErrorFormat(c, "CONFIG-REWRITE-FORCE-ALL failed:
+        // %s", strerror(errno))` on failure. When server.configfile is
+        // NULL (no --include / no config file passed at startup),
+        // rewriteConfig dereferences NULL → EFAULT → strerror(EFAULT) is
+        // "Bad address". Note this DIFFERS from the regular CONFIG
+        // REWRITE handler (config.c::configRewriteCommand) which checks
+        // for NULL configfile first and emits the friendlier "ERR The
+        // server is running without a config file" — DEBUG bypasses that
+        // check. fr's config is purely in-memory (CONFIG SET only), so
+        // there's never a configfile to rewrite, so we always emit the
+        // EFAULT-equivalent error.
         if argv.len() != 2 {
             return Err(debug_subcommand_envelope_error(sub));
         }
-        Ok(RespFrame::SimpleString("OK".to_string()))
+        Ok(RespFrame::Error(
+            "ERR CONFIG-REWRITE-FORCE-ALL failed: Bad address".to_string(),
+        ))
     } else if sub.eq_ignore_ascii_case("DROP-CLUSTER-PACKET-FILTER") {
         // Upstream debug.c::debugCommand:597-602 parses argv[2] as a
         // long via getLongFromObjectOrReply and stores it on
@@ -42004,7 +42014,9 @@ mod tests {
         // (frankenredis-eejfm)
         let mut store = Store::new();
 
-        // CONFIG-REWRITE-FORCE-ALL → +OK
+        // (frankenredis-i7oxt) CONFIG-REWRITE-FORCE-ALL → ERR matching
+        // upstream's strerror(EFAULT) reply when there's no config file
+        // loaded (which is always true for fr's purely-in-memory config).
         let crfa = dispatch_argv(
             &[
                 b"DEBUG".to_vec(),
@@ -42014,7 +42026,10 @@ mod tests {
             0,
         )
         .expect("debug crfa");
-        assert_eq!(crfa, RespFrame::SimpleString("OK".to_string()));
+        assert_eq!(
+            crfa,
+            RespFrame::Error("ERR CONFIG-REWRITE-FORCE-ALL failed: Bad address".to_string()),
+        );
 
         // CONFIG-REWRITE-FORCE-ALL with extra arg → unknown-subcommand error
         let crfa_bad = dispatch_argv(
