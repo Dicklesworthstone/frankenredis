@@ -6084,6 +6084,27 @@ fn stream_full_count_limit(full_count: usize) -> usize {
     }
 }
 
+fn stream_radix_tree_metrics(live_len: usize, entries_added: u64) -> (i64, i64) {
+    if live_len == 0 {
+        return (0, 1);
+    }
+
+    // Redis streams pack many sequential entries into one radix-tree
+    // leaf/listpack until stream-node-max-entries is reached. fr stores
+    // stream entries directly in a BTreeMap, so approximate the default
+    // 100-entry listpack split instead of treating every live entry as a
+    // radix key. Deleted entries still occupied a listpack before XDEL,
+    // so entries-added is the better proxy for small tombstone cases.
+    const STREAM_NODE_MAX_ENTRIES: u64 = 100;
+    let retained_entries = entries_added.max(u64::try_from(live_len).unwrap_or(u64::MAX));
+    let radix_keys = retained_entries.div_ceil(STREAM_NODE_MAX_ENTRIES).max(1);
+    let radix_nodes = radix_keys.saturating_add(1);
+    (
+        i64::try_from(radix_keys).unwrap_or(i64::MAX),
+        i64::try_from(radix_nodes).unwrap_or(i64::MAX),
+    )
+}
+
 fn stream_entries_read_frame(entries_read: Option<u64>) -> RespFrame {
     entries_read.map_or(RespFrame::BulkString(None), |read| {
         RespFrame::Integer(i64::try_from(read).unwrap_or(i64::MAX))
@@ -7281,8 +7302,7 @@ fn xinfo(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let len_i64 = i64::try_from(len).unwrap_or(i64::MAX);
     let entries_added = store.stream_entries_added(&argv[2], len);
     let entries_added_i64 = i64::try_from(entries_added).unwrap_or(i64::MAX);
-    let radix_tree_keys = i64::try_from(len).unwrap_or(i64::MAX);
-    let radix_tree_nodes = i64::try_from(len.saturating_add(1)).unwrap_or(i64::MAX);
+    let (radix_tree_keys, radix_tree_nodes) = stream_radix_tree_metrics(len, entries_added);
     let max_deleted_id = store.stream_max_deleted_id(&argv[2]).unwrap_or((0, 0));
     let max_deleted_entry_id = format_stream_id(max_deleted_id);
 
@@ -29034,9 +29054,9 @@ mod tests {
                 RespFrame::BulkString(Some(b"length".to_vec())),
                 RespFrame::Integer(2),
                 RespFrame::BulkString(Some(b"radix-tree-keys".to_vec())),
-                RespFrame::Integer(2),
+                RespFrame::Integer(1),
                 RespFrame::BulkString(Some(b"radix-tree-nodes".to_vec())),
-                RespFrame::Integer(3),
+                RespFrame::Integer(2),
                 RespFrame::BulkString(Some(b"last-generated-id".to_vec())),
                 RespFrame::BulkString(Some(b"1001-0".to_vec())),
                 RespFrame::BulkString(Some(b"max-deleted-entry-id".to_vec())),
@@ -29134,9 +29154,9 @@ mod tests {
                 RespFrame::BulkString(Some(b"length".to_vec())),
                 RespFrame::Integer(2),
                 RespFrame::BulkString(Some(b"radix-tree-keys".to_vec())),
-                RespFrame::Integer(2),
+                RespFrame::Integer(1),
                 RespFrame::BulkString(Some(b"radix-tree-nodes".to_vec())),
-                RespFrame::Integer(3),
+                RespFrame::Integer(2),
                 RespFrame::BulkString(Some(b"last-generated-id".to_vec())),
                 RespFrame::BulkString(Some(b"1001-0".to_vec())),
                 RespFrame::BulkString(Some(b"max-deleted-entry-id".to_vec())),
