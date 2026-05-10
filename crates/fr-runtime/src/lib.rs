@@ -4328,6 +4328,24 @@ impl Runtime {
     }
 
     pub fn execute_frame(&mut self, frame: RespFrame, now_ms: u64) -> RespFrame {
+        self.execute_frame_with_optional_unix_time_us(frame, now_ms, None)
+    }
+
+    pub fn execute_frame_with_unix_time_us(
+        &mut self,
+        frame: RespFrame,
+        now_ms: u64,
+        unix_time_us: u64,
+    ) -> RespFrame {
+        self.execute_frame_with_optional_unix_time_us(frame, now_ms, Some(unix_time_us))
+    }
+
+    fn execute_frame_with_optional_unix_time_us(
+        &mut self,
+        frame: RespFrame,
+        now_ms: u64,
+        unix_time_us: Option<u64>,
+    ) -> RespFrame {
         self.server.store.stat_total_commands_processed += 1;
         if self.session.connected_at_ms == 0 {
             self.session.connected_at_ms = now_ms;
@@ -4364,7 +4382,7 @@ impl Runtime {
                 .map(|cmd| !eq_ascii_token(cmd, b"TOUCH"))
                 .unwrap_or(false);
         let reply = fr_store::with_touch_disabled(disable_touch, || {
-            self.execute_frame_internal(frame, argv_result, now_ms, packet_id)
+            self.execute_frame_internal(frame, argv_result, now_ms, packet_id, unix_time_us)
         });
         if let RespFrame::Error(msg) = &reply {
             self.server.store.stat_total_error_replies += 1;
@@ -4400,6 +4418,18 @@ impl Runtime {
         let output = f(self);
         self.execution_source = previous;
         output
+    }
+
+    fn handle_time_command_with_unix_time_us(argv: &[Vec<u8>], unix_time_us: u64) -> RespFrame {
+        if argv.len() != 1 {
+            return CommandError::WrongArity("TIME").to_resp();
+        }
+        let seconds = unix_time_us / 1_000_000;
+        let microseconds = unix_time_us % 1_000_000;
+        RespFrame::Array(Some(vec![
+            RespFrame::BulkString(Some(seconds.to_string().into_bytes())),
+            RespFrame::BulkString(Some(microseconds.to_string().into_bytes())),
+        ]))
     }
 
     fn command_requires_replica_write_quorum(
@@ -4583,6 +4613,7 @@ impl Runtime {
         argv_result: Result<Vec<Vec<u8>>, CommandError>,
         now_ms: u64,
         packet_id: u64,
+        unix_time_us: Option<u64>,
     ) -> RespFrame {
         if let Some(reply) = self.preflight_gate(&frame, now_ms, packet_id) {
             return reply;
@@ -4898,6 +4929,21 @@ impl Runtime {
                 self.apply_existing_client_reply_suppression_to_undispatched_reply();
                 return RespFrame::SimpleString("QUEUED".to_string());
             }
+        }
+
+        if let Some(unix_time_us) = unix_time_us
+            && argv
+                .first()
+                .is_some_and(|command| eq_ascii_token(command, b"TIME"))
+        {
+            let start = Instant::now();
+            let reply = Self::handle_time_command_with_unix_time_us(&argv, unix_time_us);
+            let elapsed_us = start.elapsed().as_micros() as u64;
+            self.record_slowlog(&argv, elapsed_us, now_ms);
+            self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+            self.server
+                .record_command_histogram(&argv, elapsed_us, &reply);
+            return reply;
         }
 
         // Dispatch runtime-special commands that execute outside of MULTI,
@@ -5541,7 +5587,7 @@ impl Runtime {
         match fr_protocol::parse_frame_with_config(input, &parser_config) {
             Ok(parsed) => {
                 let argv_result = frame_to_argv(&parsed.frame);
-                self.execute_frame_internal(parsed.frame, argv_result, now_ms, packet_id)
+                self.execute_frame_internal(parsed.frame, argv_result, now_ms, packet_id, None)
                     .to_bytes()
             }
             Err(err) => {
@@ -14147,6 +14193,31 @@ mod tests {
         assert!(
             body.lines().any(|l| l.starts_with("cmdstat_set:")),
             "expected bare `cmdstat_set:` row for top-level SET, got:\n{body}"
+        );
+    }
+
+    #[test]
+    fn time_uses_microsecond_precision_when_runtime_supplies_it() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame_with_unix_time_us(
+                command(&[b"TIME"]),
+                1_778_390_164_120,
+                1_778_390_164_118_366,
+            ),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"1778390164".to_vec())),
+                RespFrame::BulkString(Some(b"118366".to_vec())),
+            ]))
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"TIME"]), 12_345),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"12".to_vec())),
+                RespFrame::BulkString(Some(b"345000".to_vec())),
+            ]))
         );
     }
 
