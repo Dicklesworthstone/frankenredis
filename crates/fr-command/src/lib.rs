@@ -14725,7 +14725,13 @@ fn command_docs_arguments(
 }
 
 fn command_docs_arg_flags(flags: &[&str]) -> RespFrame {
-    RespFrame::Array(Some(flags.iter().map(|flag| hello_bulk(flag)).collect()))
+    // (frankenredis-vqyem) Mirror upstream server.c::addReplyCommandArgList
+    // — per-arg flag tokens ('optional', 'multiple', ...) are emitted as
+    // status replies (SimpleString) via addReplyStatusFormat, same shape
+    // as the COMMAND INFO key_spec flags array. Pre-fix, fr emitted them
+    // as BulkString which made COMMAND DOCS for every command with at
+    // least one flagged arg diverge from vendored on the wire.
+    RespFrame::Array(Some(flags.iter().map(|flag| hello_simple(flag)).collect()))
 }
 
 fn command_docs_arg(
@@ -48870,7 +48876,9 @@ mod tests {
     }
 
     fn docs_flags(flags: &[&str]) -> RespFrame {
-        RespFrame::Array(Some(flags.iter().map(|flag| hello_bulk(flag)).collect()))
+        // (frankenredis-vqyem) Mirror upstream addReplyCommandArgList — flag
+        // tokens are status replies (SimpleString), not bulk strings.
+        RespFrame::Array(Some(flags.iter().map(|flag| hello_simple(flag)).collect()))
     }
 
     #[test]
