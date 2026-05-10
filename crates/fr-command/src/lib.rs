@@ -9,7 +9,7 @@ use fr_store::{
     DispatchAclPermissionReason, DispatchAclPermissions, ExpireTimeValue, MaxmemoryPolicy,
     PendingAclLogEvent, PttlValue, PubSubMessage, ScoreBound, Store, StoreError,
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
-    StreamGroupReadCursor, StreamGroupReadOptions, StreamId, StreamPendingRecord, ValueType,
+    StreamGroupReadCursor, StreamGroupReadOptions, StreamId, StreamPendingRecord, Value, ValueType,
     glob_match, read_rss_bytes, sha1_hex_public,
 };
 use std::collections::{BTreeSet, HashMap};
@@ -18717,45 +18717,140 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 
 /// Compute a hex digest of database contents for DEBUG DIGEST.
 /// If keys is None, compute over all keys in sorted order.
-/// If keys is Some, compute only over the specified keys.
-///
-/// Upstream debug.c::computeDatasetDigest hashes each (key, dump) pair
-/// with SHA1 and XORs the 20-byte outputs into a cumulative digest, then
-/// hex-encodes the 20 bytes → 40 hex chars. fr previously used Rust's
-/// 64-bit DefaultHasher (SipHash), producing 16 hex chars — a wire-shape
-/// mismatch that breaks tooling parsing the reply (e.g., redis-cli
-/// --csv probes that pin output length). fr can't reproduce upstream's
-/// per-byte hash because the underlying RDB dump bytes differ slightly
-/// (encoding details, hash factors), but matching the 20-byte / 40-char
-/// frame width is wire-compatible. Use Sha256 truncated to 20 bytes
-/// (sha2 is already a workspace dep used by fr-runtime) and XOR into a
-/// cumulative digest, mirroring upstream's order-independent reduction.
-/// (frankenredis-dbgdiglen)
 fn compute_debug_digest(store: &mut Store, now_ms: u64, keys: Option<&[&[u8]]>) -> String {
-    use sha2::{Digest, Sha256};
-
     let mut digest = [0u8; 20];
 
-    let keys_to_process: Vec<Vec<u8>> = match keys {
-        Some(key_list) => key_list.iter().map(|k| k.to_vec()).collect(),
-        None => store.all_keys(),
-    };
+    if let Some(key_list) = keys {
+        for key in key_list {
+            store.expire_key_if_stale(key, now_ms);
+            if store.get_value_and_expiry(key).is_some() {
+                let mut object_digest = [0u8; 20];
+                mix_debug_object_digest(store, key, now_ms, &mut object_digest);
+                for (dst, src) in digest.iter_mut().zip(object_digest) {
+                    *dst ^= src;
+                }
+            }
+        }
+        return digest_to_hex(&digest);
+    }
+
+    let keys_to_process = store.all_keys();
+    if !keys_to_process.is_empty() {
+        mix_digest(&mut digest, &0_u32.to_be_bytes());
+    }
 
     for key in &keys_to_process {
         store.expire_key_if_stale(key, now_ms);
-        if let Some(dump) = store.dump_key(key, now_ms) {
-            let mut hasher = Sha256::new();
-            hasher.update(key);
-            hasher.update(&dump);
-            let out = hasher.finalize();
-            for j in 0..20 {
-                digest[j] ^= out[j];
+        if store.get_value_and_expiry(key).is_some() {
+            let mut key_value_digest = [0u8; 20];
+            mix_digest(&mut key_value_digest, key);
+            mix_debug_object_digest(store, key, now_ms, &mut key_value_digest);
+            xor_digest(&mut digest, &key_value_digest);
+        }
+    }
+
+    digest_to_hex(&digest)
+}
+
+fn mix_debug_object_digest(store: &mut Store, key: &[u8], now_ms: u64, digest: &mut [u8; 20]) {
+    let Some((value, expires_at_ms)) = store
+        .get_value_and_expiry(key)
+        .map(|(value, expires_at_ms)| (value.clone(), expires_at_ms))
+    else {
+        return;
+    };
+
+    mix_digest(digest, &debug_object_type_code(&value).to_be_bytes());
+    match value {
+        Value::String(bytes) => mix_digest(digest, &bytes),
+        Value::List(items) => {
+            for item in items {
+                mix_digest(digest, &item);
+            }
+        }
+        Value::Set(members) => {
+            for member in members {
+                xor_digest(digest, &member);
+            }
+        }
+        Value::Hash(fields) => {
+            for (field, value) in fields {
+                let mut element_digest = [0u8; 20];
+                mix_digest(&mut element_digest, &field);
+                mix_digest(&mut element_digest, &value);
+                xor_digest(digest, &element_digest);
+            }
+        }
+        Value::SortedSet(_) => {
+            let pairs = store.zrange_withscores(key, 0, -1, now_ms).unwrap_or_default();
+            for (member, score) in pairs {
+                let mut element_digest = [0u8; 20];
+                mix_digest(&mut element_digest, &member);
+                mix_digest(&mut element_digest, debug_score_string(score).as_bytes());
+                xor_digest(digest, &element_digest);
+            }
+        }
+        Value::Stream(entries) => {
+            for ((ms, seq), fields) in entries {
+                let item_id = format!("{ms}.{seq}");
+                mix_digest(digest, item_id.as_bytes());
+                for (field, value) in fields {
+                    mix_digest(digest, &field);
+                    mix_digest(digest, &value);
+                }
             }
         }
     }
 
+    if expires_at_ms.is_some() {
+        xor_digest(digest, b"!!expire!!");
+    }
+}
+
+fn debug_object_type_code(value: &Value) -> u32 {
+    match value {
+        Value::String(_) => 0,
+        Value::List(_) => 1,
+        Value::Set(_) => 2,
+        Value::SortedSet(_) => 3,
+        Value::Hash(_) => 4,
+        Value::Stream(_) => 6,
+    }
+}
+
+fn debug_score_string(score: f64) -> String {
+    if score == 0.0 {
+        "0".to_string()
+    } else {
+        score.to_string()
+    }
+}
+
+fn xor_digest(digest: &mut [u8; 20], data: &[u8]) {
+    let hash = sha1_digest(data);
+    for (dst, src) in digest.iter_mut().zip(hash) {
+        *dst ^= src;
+    }
+}
+
+fn mix_digest(digest: &mut [u8; 20], data: &[u8]) {
+    xor_digest(digest, data);
+    *digest = sha1_digest(digest);
+}
+
+fn sha1_digest(data: &[u8]) -> [u8; 20] {
+    let hex = sha1_hex_public(data);
+    let mut out = [0u8; 20];
+    for (idx, slot) in out.iter_mut().enumerate() {
+        let hex_idx = idx * 2;
+        *slot = u8::from_str_radix(&hex[hex_idx..hex_idx + 2], 16).unwrap_or(0);
+    }
+    out
+}
+
+fn digest_to_hex(digest: &[u8; 20]) -> String {
     let mut hex = String::with_capacity(40);
-    for byte in &digest {
+    for byte in digest {
         hex.push_str(&format!("{byte:02x}"));
     }
     hex
@@ -34038,6 +34133,70 @@ mod tests {
         )
         .expect("debug digest-value with no keys must succeed");
         assert_eq!(empty, RespFrame::Array(Some(Vec::new())));
+    }
+
+    #[test]
+    fn debug_digest_string_values_match_vendored_redis_724() {
+        // (frankenredis-729zz) Pin Redis 7.2.4 debug.c digest
+        // algorithm for simple string objects: key mixing for DEBUG
+        // DIGEST, object-only digest for DIGEST-VALUE, SHA1
+        // xor/mixDigest flow, and object type aux header.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k1".to_vec(), b"v1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set k1");
+
+        let one_key_digest = dispatch_argv(&[b"DEBUG".to_vec(), b"DIGEST".to_vec()], &mut store, 0)
+            .expect("debug digest");
+        assert_eq!(
+            one_key_digest,
+            RespFrame::BulkString(Some(
+                b"f501b7e652f1e4874b8a6890245c152b5b89fe96".to_vec()
+            ))
+        );
+
+        let k1_value = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"DIGEST-VALUE".to_vec(), b"k1".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug digest-value k1");
+        assert_eq!(
+            k1_value,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
+                b"1b39f6ecf00cfce8fa56c4c62c40126162d878fe".to_vec()
+            ))]))
+        );
+
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k2".to_vec(), b"v2".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set k2");
+        let two_key_digest = dispatch_argv(&[b"DEBUG".to_vec(), b"DIGEST".to_vec()], &mut store, 0)
+            .expect("debug digest after k2");
+        assert_eq!(
+            two_key_digest,
+            RespFrame::BulkString(Some(
+                b"91720c7142b6dfec5df4d6409a6f52e2da2a829f".to_vec()
+            ))
+        );
+        let k2_value = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"DIGEST-VALUE".to_vec(), b"k2".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug digest-value k2");
+        assert_eq!(
+            k2_value,
+            RespFrame::Array(Some(vec![RespFrame::BulkString(Some(
+                b"becefaf9bf124b8996f547b6b4876ef6a6b60c37".to_vec()
+            ))]))
+        );
     }
 
     #[test]
