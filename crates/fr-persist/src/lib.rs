@@ -1809,7 +1809,7 @@ fn rdb_decode_length(data: &[u8]) -> Option<(usize, usize)> {
 /// after the 0xC3 + length prefix overhead is folded in.
 ///
 /// (br-frankenredis-1uin)
-fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
+pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
     const HLOG: u32 = 14;
     const HSIZE: usize = 1 << HLOG;
     const MAX_LIT: usize = 32;

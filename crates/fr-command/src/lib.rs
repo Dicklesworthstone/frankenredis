@@ -40716,6 +40716,72 @@ mod tests {
     /// addition (see br-frankenredis-25re); fr previously emitted it
     /// unconditionally. This test pins it OUT.
     #[test]
+    fn debug_object_serializedlength_compresses_repetitive_strings_via_lzf_per_upstream() {
+        // (frankenredis-9zltv) Mirror upstream's rdbSaveLzfStringObject:
+        // strings longer than 20 bytes attempt LZF compression and emit
+        // the 0xC3 [comp_len][orig_len][payload] special encoding when
+        // it shrinks the wire form. Pre-fix, fr-store's
+        // encode_rdb_string skipped LZF and emitted raw length-prefix
+        // + raw bytes, so DEBUG OBJECT serializedlength for a 100-byte
+        // 'x' run reported 102 bytes vs vendored's 13. The exact LZF
+        // byte count differs slightly across implementations (fr's
+        // compressor is more aggressive than upstream's by a few bytes
+        // on highly repetitive input) — we just pin that the value is
+        // < 30 (well below the pre-fix 102) and that non-compressible
+        // strings still take the raw path.
+        let mut store = Store::new();
+        let long = vec![b'x'; 100];
+        dispatch_argv(
+            &[b"SET".to_vec(), b"k".to_vec(), long],
+            &mut store,
+            0,
+        )
+        .expect("set 100x");
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"k".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug object");
+        let RespFrame::SimpleString(line) = out else {
+            panic!("expected SimpleString, got {out:?}");
+        };
+        let n_start = line.find(" serializedlength:").unwrap() + " serializedlength:".len();
+        let n_end = n_start + line[n_start..].find(' ').unwrap();
+        let n: usize = line[n_start..n_end].parse().unwrap();
+        assert!(
+            n < 30,
+            "100-byte repetitive string must LZF-compress to < 30 bytes (vendored ≈ 13); got {n} in: {line}",
+        );
+
+        // Sanity: a non-compressible 25-byte string still goes raw
+        // (LZF would grow the payload, so the 0xC3 path falls back).
+        let raw = b"abcdefghijklmnopqrstuvwxy".to_vec(); // 25 bytes
+        dispatch_argv(
+            &[b"SET".to_vec(), b"r".to_vec(), raw],
+            &mut store,
+            0,
+        )
+        .expect("set raw 25");
+        let out2 = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"OBJECT".to_vec(), b"r".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug object r");
+        let RespFrame::SimpleString(line2) = out2 else {
+            panic!("expected SimpleString, got {out2:?}");
+        };
+        let n_start = line2.find(" serializedlength:").unwrap() + " serializedlength:".len();
+        let n_end = n_start + line2[n_start..].find(' ').unwrap();
+        let raw_n: usize = line2[n_start..n_end].parse().unwrap();
+        assert_eq!(
+            raw_n, 26,
+            "25-byte non-compressible string should emit length-prefix + raw bytes = 1 + 25 = 26; got {raw_n}",
+        );
+    }
+
+    #[test]
     fn debug_object_omits_redis_7_4_hexpired_fields_suffix_for_7_2_4_parity() {
         let mut store = Store::new();
         dispatch_argv(

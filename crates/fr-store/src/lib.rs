@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Included, Unbounded};
 
 /// Redis-compatible version string. Single source of truth for all version reporting.
-pub const REDIS_COMPAT_VERSION: &str = "7.2.0";
+pub const REDIS_COMPAT_VERSION: &str = "7.2.4";
 
 const RDB_DUMP_VERSION: u16 = 11;
 const RDB_TYPE_STRING: u8 = 0;
@@ -11908,9 +11908,48 @@ fn encode_length(buf: &mut Vec<u8>, len: usize) {
 fn encode_rdb_string(buf: &mut Vec<u8>, data: &[u8]) {
     if let Some(encoded) = encode_integer_rdb_string(data) {
         buf.extend_from_slice(&encoded);
+        return;
+    }
+    // (frankenredis-9zltv) Mirror upstream's rdbSaveLzfStringObject
+    // policy: try LZF compression for inputs > 20 bytes, emit the
+    // 0xC3 [comp_len][orig_len][payload] special encoding when the
+    // compressed wire form is strictly smaller than the raw form.
+    // Without this, DUMP/DEBUG OBJECT serializedlength for long
+    // repetitive strings was ~8x larger than vendored 7.2.4 (e.g.
+    // 'x' * 100 emitted 102 bytes vs vendored's 13).
+    if data.len() > 20 {
+        let budget = data.len() - 4;
+        if let Some(compressed) = fr_persist::lzf_compress(data, budget) {
+            let raw_size = encoded_length_size(data.len()) + data.len();
+            let lzf_size = 1
+                + encoded_length_size(compressed.len())
+                + encoded_length_size(data.len())
+                + compressed.len();
+            if lzf_size < raw_size {
+                buf.push(0xC3);
+                encode_length(buf, compressed.len());
+                encode_length(buf, data.len());
+                buf.extend_from_slice(&compressed);
+                return;
+            }
+        }
+    }
+    encode_length(buf, data.len());
+    buf.extend_from_slice(data);
+}
+
+/// Number of bytes `encode_length` would emit for the given length.
+/// Used by `encode_rdb_string` to decide whether the LZF wire form is
+/// strictly smaller than the raw form. (frankenredis-9zltv)
+fn encoded_length_size(len: usize) -> usize {
+    if len < 64 {
+        1
+    } else if len < 16_384 {
+        2
+    } else if len <= u32::MAX as usize {
+        5
     } else {
-        encode_length(buf, data.len());
-        buf.extend_from_slice(data);
+        9
     }
 }
 
