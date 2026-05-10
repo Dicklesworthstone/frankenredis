@@ -19002,19 +19002,25 @@ fn latency_graph(event: &str, samples: &[fr_store::LatencySample]) -> String {
     )
 }
 
+const LATENCY_DOCTOR_NO_SPIKE_REPORT: &str = concat!(
+    "Dave, no latency spike was observed during the lifetime of this Redis instance, ",
+    "not in the slightest bit. I honestly think you ought to sit down calmly, ",
+    "take a stress pill, and think things over.\n"
+);
+
 fn latency_doctor_report(store: &Store) -> String {
     // Mirror upstream Redis 7.2 latency.c::latencyCommand DOCTOR:
     // when latency-monitor-threshold == 0 (the default), emit the
     // canonical "I'm sorry, Dave..." disabled-monitoring message.
-    // Otherwise, when there are no latency reports, emit the
-    // "no latency reports to analyze" message. Else emit the
+    // Otherwise, when there are no latency events yet, emit the
+    // canonical "no latency spike was observed" report. Else emit the
     // event-summary report. (br-frankenredis-latdoc)
     if store.latency_tracker.threshold_ms == 0 {
         return "I'm sorry, Dave, I can't do that. Latency monitoring is disabled in this Redis instance. You may use \"CONFIG SET latency-monitor-threshold <milliseconds>.\" in order to enable it. If we weren't in a deep space mission I'd suggest to take a look at https://redis.io/topics/latency-monitor.\n".to_string();
     }
     let latest = store.latency_latest();
     if latest.is_empty() {
-        return "Dave, no latency issues detected.\n".to_string();
+        return LATENCY_DOCTOR_NO_SPIKE_REPORT.to_string();
     }
 
     let mut report = String::from("I have reports for the following latency events:\n");
@@ -42088,6 +42094,20 @@ mod tests {
                 .starts_with("I'm sorry, Dave, I can't do that. Latency monitoring is disabled"),
             "{body_str}"
         );
+
+        let mut enabled_empty = Store::new();
+        enabled_empty.latency_tracker.threshold_ms = 1;
+        let doctor_enabled_empty = dispatch_argv(
+            &[b"LATENCY".to_vec(), b"DOCTOR".to_vec()],
+            &mut enabled_empty,
+            0,
+        )
+        .expect("latency doctor enabled empty");
+        let RespFrame::BulkString(Some(body)) = doctor_enabled_empty else {
+            panic!("expected bulk string"); // ubs:ignore - existing test style
+        };
+        let body_str = String::from_utf8_lossy(&body);
+        assert_eq!(body_str, super::LATENCY_DOCTOR_NO_SPIKE_REPORT);
 
         let mut store = Store::new();
         store.latency_tracker.threshold_ms = 100;
