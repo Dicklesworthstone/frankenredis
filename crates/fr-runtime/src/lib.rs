@@ -11699,9 +11699,12 @@ impl Runtime {
         );
         // aof_rewrites / aof_rewrites_consecutive_failures sit between
         // aof_last_bgrewrite_status and aof_last_write_status in upstream
-        // server.c::genRedisInfoString. fr does not yet track AOF rewrite
-        // counts, so report zero.
-        info.push_str("aof_rewrites:0\r\n");
+        // server.c::genRedisInfoString.
+        let _ = write!(
+            info,
+            "aof_rewrites:{}\r\n",
+            self.server.store.stat_aof_rewrites
+        );
         info.push_str("aof_rewrites_consecutive_failures:0\r\n");
         let _ = write!(
             info,
@@ -23364,6 +23367,34 @@ mod tests {
         assert!(pos("aof_rewrites_consecutive_failures:") < pos("aof_last_write_status:"));
         assert!(pos("aof_last_cow_size:") < pos("module_fork_in_progress:"));
         assert!(pos("module_fork_in_progress:") < pos("module_fork_last_cow_size:"));
+    }
+
+    #[test]
+    fn info_persistence_reports_completed_aof_rewrite_count() {
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_info_aof_rewrites_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let mut rt = Runtime::default_strict();
+        rt.set_aof_path(dir.join("appendonly.aof"));
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"BGREWRITEAOF"]), 10_000),
+            RespFrame::SimpleString("Background append only file rewriting started".to_string())
+        );
+
+        let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 10_001);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            unreachable!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("aof_rewrites:1\r\n"), "{info}");
+        assert!(
+            info.contains("aof_rewrites_consecutive_failures:0\r\n"),
+            "{info}"
+        );
     }
 
     #[test]
