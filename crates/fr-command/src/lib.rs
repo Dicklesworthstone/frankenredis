@@ -5108,14 +5108,20 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         i += 1;
     }
 
+    // (frankenredis-w6v9p) Parse the trailing flags BEFORE the
+    // has_center/has_shape arity check so an unknown shape keyword
+    // (e.g. `BYSHAPE`, mistyped `BY_RADIUS`) surfaces as the upstream
+    // syntax-error reply instead of being misreported as wrong arity.
+    // The shape parse loop above breaks out on anything it doesn't
+    // recognise, leaving `i` pointing at the first unrecognised token;
+    // parse_geo_search_flags's else-branch then routes that to
+    // SyntaxError, matching upstream addReplyErrorObject(c,
+    // shared.syntaxerr) on the unknown-token branch.
+    let (withcoord, withdist, withhash, count, any, sort, _) =
+        parse_geo_search_flags(argv, i, unit_mult, GeoFlagContext::GeoSearch)?;
     if !has_center || !has_shape {
         return Err(CommandError::WrongArity("GEOSEARCH"));
     }
-    // Parse remaining flags (must run even when the source key is
-    // missing so that syntax errors in the trailing options still
-    // surface). (br-frankenredis-geofromnonexistent)
-    let (withcoord, withdist, withhash, count, any, sort, _) =
-        parse_geo_search_flags(argv, i, unit_mult, GeoFlagContext::GeoSearch)?;
     let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
         // Missing source key with FROMMEMBER — return empty set.
         return Ok(RespFrame::Array(Some(Vec::new())));
@@ -54313,6 +54319,47 @@ mod tests {
             vec![b"Palermo".to_vec(), b"Catania".to_vec()],
             "DESC = farthest-first"
         );
+    }
+
+    /// (frankenredis-w6v9p) Upstream geo.c::geoSearchGeneric routes
+    /// any unrecognised shape keyword (e.g. `BYSHAPE`, mistyped
+    /// `BY_RADIUS`) through addReplyErrorObject(c, shared.syntaxerr)
+    /// in the trailing-flags loop. fr's parse loop used to break on
+    /// the unknown token and run the has_center/has_shape arity check
+    /// first, so probe `GEOSEARCH key FROMLONLAT lon lat BYSHAPE 200 km`
+    /// surfaced "wrong number of arguments" instead of "syntax error".
+    #[test]
+    fn geosearch_unknown_shape_keyword_surfaces_syntax_error_per_upstream() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"GEOADD".to_vec(),
+                b"g".to_vec(),
+                b"13.5".to_vec(),
+                b"38.0".to_vec(),
+                b"x".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("GEOADD seed");
+
+        let err = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"g".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYSHAPE".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("GEOSEARCH BYSHAPE must surface syntax error");
+        assert_eq!(err, CommandError::SyntaxError);
     }
 
     #[test]
