@@ -4784,9 +4784,12 @@ impl Runtime {
         }
         // Upstream networking.c::pingCommand emits a 2-element array
         // ["pong", optional-msg] when the client is in subscribe mode
-        // and RESP2, rather than the +PONG simple-string reply.
-        // (br-frankenredis-subpubping)
+        // AND on RESP2 — RESP3 subscribers fall through to the
+        // standard +PONG simple-string reply since RESP3 supports
+        // interleaved replies. (br-frankenredis-subpubping,
+        // frankenredis-idok8)
         if command_arity_ok
+            && resp2
             && self.is_in_subscription_mode()
             && argv
                 .first()
@@ -14793,6 +14796,68 @@ mod tests {
                 argv,
             );
         }
+    }
+
+    #[test]
+    fn ping_in_subscribe_mode_uses_resp2_array_form_only_per_upstream() {
+        // (frankenredis-idok8) Upstream networking.c::pingCommand
+        // gates the array-form ['pong', msg] reply on
+        // (CLIENT_PUBSUB && c->resp == 2). RESP3 subscribers fall
+        // through to +PONG simple-string since RESP3 supports
+        // interleaved replies. Pre-fix, fr emitted the array-form
+        // for both RESP2 and RESP3 subscribers; this pin asserts:
+        //   1. RESP2 + subscribe + PING       → ["pong", ""]
+        //   2. RESP2 + subscribe + PING msg   → ["pong", "msg"]
+        //   3. RESP3 + subscribe + PING       → "PONG" SimpleString
+        //   4. RESP3 + subscribe + PING msg   → BulkString("msg")
+        //   5. RESP2 + non-subscribe + PING   → "PONG" SimpleString
+
+        // 1: RESP2 + subscribe + PING
+        let mut rt = Runtime::default_strict();
+        let _ = rt.execute_frame(command(&[b"SUBSCRIBE", b"c"]), 0);
+        let pong_resp2 = rt.execute_frame(command(&[b"PING"]), 1);
+        assert_eq!(
+            pong_resp2,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"pong".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
+            ])),
+            "RESP2 + subscribe + PING should be 2-element array",
+        );
+
+        // 2: RESP2 + subscribe + PING msg
+        let pong_resp2_msg = rt.execute_frame(command(&[b"PING", b"hello"]), 2);
+        assert_eq!(
+            pong_resp2_msg,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"pong".to_vec())),
+                RespFrame::BulkString(Some(b"hello".to_vec())),
+            ])),
+        );
+
+        // 3: RESP3 + subscribe + PING
+        let mut rt3 = Runtime::default_strict();
+        let _ = rt3.execute_frame(command(&[b"HELLO", b"3"]), 0);
+        let _ = rt3.execute_frame(command(&[b"SUBSCRIBE", b"c"]), 1);
+        let pong_resp3 = rt3.execute_frame(command(&[b"PING"]), 2);
+        assert_eq!(
+            pong_resp3,
+            RespFrame::SimpleString("PONG".to_string()),
+            "RESP3 + subscribe + PING should be +PONG SimpleString",
+        );
+
+        // 4: RESP3 + subscribe + PING msg
+        let pong_resp3_msg = rt3.execute_frame(command(&[b"PING", b"hello"]), 3);
+        assert_eq!(
+            pong_resp3_msg,
+            RespFrame::BulkString(Some(b"hello".to_vec())),
+            "RESP3 + subscribe + PING msg should be BulkString(msg)",
+        );
+
+        // 5: RESP2 + non-subscribe + PING (sanity check the default path)
+        let mut rt_normal = Runtime::default_strict();
+        let pong_normal = rt_normal.execute_frame(command(&[b"PING"]), 0);
+        assert_eq!(pong_normal, RespFrame::SimpleString("PONG".to_string()));
     }
 
     #[test]
