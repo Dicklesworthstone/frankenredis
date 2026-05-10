@@ -2834,10 +2834,41 @@ fn check_subscription_mode_gate(frame: &RespFrame, _in_sub_mode: bool) -> Option
     {
         return None; // allowed
     }
-    // Upstream networking.c uses c->cmd->name (the canonical
-    // lowercase name from the command table) when formatting the
-    // subscribe-mode rejection. (br-frankenredis-pubsublower)
-    let cmd_str = String::from_utf8_lossy(cmd).to_ascii_lowercase();
+    // Upstream networking.c uses c->cmd->fullname when formatting
+    // the subscribe-mode rejection — for any container subcommand
+    // that expands to "parent|sub" (br-frankenredis-pubsublower,
+    // frankenredis-gcll9). The runtime helper does the same in
+    // fr-runtime::pubsub_blocked_command_name; the TCP-server gate
+    // mirrors that logic here.
+    const CONTAINERS: &[&[u8]] = &[
+        b"acl",
+        b"client",
+        b"cluster",
+        b"command",
+        b"config",
+        b"debug",
+        b"function",
+        b"latency",
+        b"memory",
+        b"module",
+        b"object",
+        b"pubsub",
+        b"script",
+        b"slowlog",
+        b"xgroup",
+        b"xinfo",
+    ];
+    let cmd_lower = String::from_utf8_lossy(cmd).to_ascii_lowercase();
+    let cmd_str = if CONTAINERS.contains(&cmd_lower.as_bytes())
+        && let Some(sub) = argv.get(1)
+    {
+        format!(
+            "{cmd_lower}|{}",
+            String::from_utf8_lossy(sub).to_ascii_lowercase()
+        )
+    } else {
+        cmd_lower
+    };
     Some(RespFrame::Error(format!(
         "ERR Can't execute '{cmd_str}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
     )))

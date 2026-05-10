@@ -3983,16 +3983,28 @@ impl Runtime {
     }
 
     fn pubsub_blocked_command_name(argv: &[Vec<u8>]) -> String {
+        // (frankenredis-gcll9) Mirror upstream server.c: the
+        // subscribe-context error wording uses c->cmd->fullname,
+        // which for any container subcommand is "parent|sub". fr
+        // previously namespaced only PUBSUB; CLIENT/CONFIG/etc.
+        // surfaced just the bare parent name and broke parity for
+        // common monitoring tools that grep the error wording.
         let command = String::from_utf8_lossy(argv.first().map_or(b"", Vec::as_slice));
-        if command.eq_ignore_ascii_case("PUBSUB")
+        let lower = command.to_ascii_lowercase();
+        const CONTAINERS: &[&str] = &[
+            "acl", "client", "cluster", "command", "config", "debug", "function", "latency",
+            "memory", "module", "object", "pubsub", "script", "slowlog", "xgroup", "xinfo",
+        ];
+        if CONTAINERS.iter().any(|c| *c == lower)
             && let Some(subcommand) = argv.get(1)
         {
             return format!(
-                "pubsub|{}",
+                "{}|{}",
+                lower,
                 String::from_utf8_lossy(subcommand).to_ascii_lowercase()
             );
         }
-        command.to_ascii_lowercase()
+        lower
     }
 
     fn pubsub_command_allowed_in_subscription_mode(
@@ -14740,6 +14752,47 @@ mod tests {
                 "ERR Can't execute 'pubsub|channels': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context".to_string()
             )
         );
+    }
+
+    #[test]
+    fn pubsub_context_error_namespaces_container_subcommands_per_upstream() {
+        // (frankenredis-gcll9) Upstream server.c emits the
+        // pubsub-context error with c->cmd->fullname, which for any
+        // container subcommand expands to "parent|sub". Pre-fix, fr
+        // namespaced only PUBSUB; CLIENT/CONFIG/etc. surfaced the
+        // bare parent name and broke parity for monitoring tools.
+        let cases: &[(&[&[u8]], &str)] = &[
+            (&[b"CLIENT", b"INFO"], "client|info"),
+            (&[b"CLIENT", b"LIST"], "client|list"),
+            (&[b"CLIENT", b"KILL", b"ID", b"1"], "client|kill"),
+            (&[b"CONFIG", b"GET", b"maxmemory"], "config|get"),
+            (&[b"DEBUG", b"OBJECT", b"k"], "debug|object"),
+            (&[b"OBJECT", b"ENCODING", b"k"], "object|encoding"),
+            (&[b"MEMORY", b"USAGE", b"k"], "memory|usage"),
+            (&[b"SLOWLOG", b"GET"], "slowlog|get"),
+            (&[b"LATENCY", b"RESET"], "latency|reset"),
+            (&[b"COMMAND", b"COUNT"], "command|count"),
+            (&[b"FUNCTION", b"LIST"], "function|list"),
+            (&[b"MODULE", b"LIST"], "module|list"),
+            (&[b"SCRIPT", b"EXISTS", b"abc"], "script|exists"),
+            (&[b"XGROUP", b"HELP"], "xgroup|help"),
+            (&[b"XINFO", b"STREAM", b"s"], "xinfo|stream"),
+            (&[b"ACL", b"WHOAMI"], "acl|whoami"),
+            (&[b"CLUSTER", b"MYID"], "cluster|myid"),
+        ];
+        for (argv, expected_name) in cases {
+            let mut rt = Runtime::default_strict();
+            let _ = rt.execute_frame(command(&[b"SUBSCRIBE", b"alpha"]), 0);
+            let blocked = rt.execute_frame(command(argv), 1);
+            assert_eq!(
+                blocked,
+                RespFrame::Error(format!(
+                    "ERR Can't execute '{expected_name}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
+                )),
+                "argv={:?}",
+                argv,
+            );
+        }
     }
 
     #[test]
