@@ -14449,6 +14449,21 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
         "hdel" | "srem" | "zrem" | "lrem" | "ltrim" | "xautoclaim" | "xtrim"
         | "xdel" => &["RW", "delete"],
 
+        // (frankenredis-o3xwt) Per upstream commands.def OBJECT
+        // subcommands (object.c::objectCommand) only need RO bare —
+        // they read object metadata, not the value bytes.
+        "object|encoding" | "object|freq" | "object|idletime"
+        | "object|refcount" => &["RO"],
+
+        // (frankenredis-o3xwt) Per upstream commands.def XGROUP
+        // subcommands (t_stream.c::xgroupCommand). DESTROY/DELCONSUMER
+        // remove the group/consumer (RW+delete); SETID rewrites the
+        // last-delivered id (RW+update); CREATE/CREATECONSUMER add a
+        // new group/consumer to the stream key (RW+insert).
+        "xgroup|destroy" | "xgroup|delconsumer" => &["RW", "delete"],
+        "xgroup|setid" => &["RW", "update"],
+        "xgroup|create" | "xgroup|createconsumer" => &["RW", "insert"],
+
         // (frankenredis-imkpg) CMD_KEY_OW | CMD_KEY_UPDATE / CMD_KEY_INSERT —
         // the value is overwritten outright (OW). MSET assumes the key may
         // exist (UPDATE); MSETNX requires the key to be absent (INSERT).
@@ -14657,8 +14672,72 @@ fn command_info_multi_keyspec(name: &str) -> Option<Vec<RespFrame>> {
             make_keyspec_index_range(&["OW", "update"], 1, 0, 1),
             make_keyspec_index_keynum(&["RO", "access"], 2, 0, 1, 1),
         ]),
+        // (frankenredis-o3xwt) SORT: 3 keyspecs. The input key has a
+        // standard index begin_search. The optional BY/GET keyword and
+        // optional STORE keyword get 'unknown' specs because the
+        // positions depend on either argument values (BY/GET expand
+        // through the sorted key) or keyword search at runtime.
+        "sort" => Some(vec![
+            make_keyspec_index_range(&["RO", "access"], 1, 0, 1),
+            make_keyspec_unknown_with_notes(
+                "For the optional BY/GET keyword. It is marked 'unknown' \
+                 because the key names derive from the content of the \
+                 key we sort",
+                &["RO", "access"],
+            ),
+            make_keyspec_unknown_with_notes(
+                "For the optional STORE keyword. It is marked 'unknown' \
+                 because the keyword can appear anywhere in the argument \
+                 array",
+                &["OW", "update"],
+            ),
+        ]),
+        // (frankenredis-o3xwt) SORT_RO: 2 keyspecs (no STORE since
+        // SORT_RO is read-only). Same input + BY/GET pattern as SORT.
+        "sort_ro" => Some(vec![
+            make_keyspec_index_range(&["RO", "access"], 1, 0, 1),
+            make_keyspec_unknown_with_notes(
+                "For the optional BY/GET keyword. It is marked 'unknown' \
+                 because the key names derive from the content of the \
+                 key we sort",
+                &["RO", "access"],
+            ),
+        ]),
         _ => None,
     }
+}
+
+/// (frankenredis-o3xwt) Build a key_spec frame whose begin_search and
+/// find_keys are both `unknown` with empty spec arrays. Upstream uses
+/// this for SORT's optional BY/GET and STORE keywords whose key
+/// positions cannot be inferred without inspecting argument values.
+/// Includes a `notes` field for the human-readable explanation.
+fn make_keyspec_unknown_with_notes(
+    notes: &'static str,
+    flags: &[&'static str],
+) -> RespFrame {
+    RespFrame::Array(Some(vec![
+        hello_bulk("notes"),
+        RespFrame::BulkString(Some(notes.as_bytes().to_vec())),
+        hello_bulk("flags"),
+        RespFrame::Array(Some(
+            flags.iter().copied().map(hello_simple).collect(),
+        )),
+        hello_bulk("begin_search"),
+        RespFrame::Array(Some(vec![
+            hello_bulk("type"),
+            hello_bulk("unknown"),
+            hello_bulk("spec"),
+            RespFrame::Array(Some(Vec::new())),
+        ])),
+        hello_bulk("find_keys"),
+        RespFrame::Array(Some(vec![
+            hello_bulk("type"),
+            hello_bulk("unknown"),
+            hello_bulk("spec"),
+            RespFrame::Array(Some(Vec::new())),
+        ])),
+    ]))
 }
 
 /// (frankenredis-b0wme) Build a key_spec frame whose begin_search is
@@ -14840,35 +14919,56 @@ fn command_info_key_specs(
     vec![RespFrame::Array(Some(spec))]
 }
 
-fn command_info_subcommand_entry(name: &str, arity: i64) -> RespFrame {
+/// (frankenredis-o3xwt) Build a subcommand entry. Pulls flags + first/
+/// last/step from the SUBCOMMAND_TABLE row for the parent|sub name and
+/// reuses the existing key_specs builder so each subcommand emits the
+/// right keyspec array (matching upstream's per-subcommand emission).
+fn command_info_subcommand_entry(
+    name: &str,
+    arity: i64,
+    flags: &str,
+    first_key: i64,
+    last_key: i64,
+    step: i64,
+) -> RespFrame {
     RespFrame::Array(Some(vec![
         RespFrame::BulkString(Some(name.as_bytes().to_vec())),
         RespFrame::Integer(arity),
-        RespFrame::Array(Some(command_info_flags(name, ""))),
-        RespFrame::Integer(0),
-        RespFrame::Integer(0),
-        RespFrame::Integer(0),
+        RespFrame::Array(Some(command_info_flags(name, flags))),
+        RespFrame::Integer(first_key),
+        RespFrame::Integer(last_key),
+        RespFrame::Integer(step),
         RespFrame::Array(Some(command_info_categories(name))),
         RespFrame::Array(Some(command_info_tips(name))),
-        RespFrame::Array(Some(Vec::new())),
+        RespFrame::Array(Some(command_info_key_specs(
+            name, flags, first_key, last_key, step,
+        ))),
         RespFrame::Array(Some(Vec::new())),
     ]))
 }
 
+/// (frankenredis-o3xwt) Container commands whose subcommand entries we
+/// emit in COMMAND INFO. Pre-fix: only "command" emitted subcommands
+/// (hand-listed). Now any parent in this set fans out the matching
+/// `<parent>|*` rows from SUBCOMMAND_TABLE. Per-subcommand keyspec
+/// flags come through command_info_key_specs's override path so e.g.
+/// xgroup|create emits [RW, insert] and object|encoding emits bare [RO].
+const SUBCOMMAND_PARENTS_WITH_INFO: &[&str] =
+    &["command", "object", "xgroup", "xinfo"];
+
 fn command_info_subcommands(name: &str) -> Vec<RespFrame> {
-    if name != "command" {
+    if !SUBCOMMAND_PARENTS_WITH_INFO.contains(&name) {
         return Vec::new();
     }
 
-    vec![
-        command_info_subcommand_entry("command|count", 2),
-        command_info_subcommand_entry("command|getkeys", -3),
-        command_info_subcommand_entry("command|docs", -2),
-        command_info_subcommand_entry("command|getkeysandflags", -3),
-        command_info_subcommand_entry("command|list", -2),
-        command_info_subcommand_entry("command|help", 2),
-        command_info_subcommand_entry("command|info", -2),
-    ]
+    let prefix = format!("{name}|");
+    SUBCOMMAND_TABLE
+        .iter()
+        .filter(|&&(sub_name, ..)| sub_name.starts_with(&prefix))
+        .map(|&(sub_name, arity, flags, first, last, step)| {
+            command_info_subcommand_entry(sub_name, arity, flags, first, last, step)
+        })
+        .collect()
 }
 
 /// Build a Redis COMMAND INFO entry.
@@ -58241,28 +58341,14 @@ mod tests {
                 ])),
                 RespFrame::Array(Some(vec![hello_bulk("nondeterministic_output_order")])),
                 RespFrame::Array(Some(Vec::new())),
+                // (frankenredis-o3xwt) Subcommand emission now filters
+                // SUBCOMMAND_TABLE for command|*, which iterates the
+                // alphabetically-sorted table. Order: count, docs,
+                // getkeys, getkeysandflags, help, info, list.
                 RespFrame::Array(Some(vec![
                     RespFrame::Array(Some(vec![
                         hello_bulk("command|count"),
                         RespFrame::Integer(2),
-                        RespFrame::Array(Some(vec![
-                            hello_simple("loading"),
-                            hello_simple("stale"),
-                        ])),
-                        RespFrame::Integer(0),
-                        RespFrame::Integer(0),
-                        RespFrame::Integer(0),
-                        RespFrame::Array(Some(vec![
-                            hello_simple("@slow"),
-                            hello_simple("@connection"),
-                        ])),
-                        RespFrame::Array(Some(Vec::new())),
-                        RespFrame::Array(Some(Vec::new())),
-                        RespFrame::Array(Some(Vec::new())),
-                    ])),
-                    RespFrame::Array(Some(vec![
-                        hello_bulk("command|getkeys"),
-                        RespFrame::Integer(-3),
                         RespFrame::Array(Some(vec![
                             hello_simple("loading"),
                             hello_simple("stale"),
@@ -58297,7 +58383,7 @@ mod tests {
                         RespFrame::Array(Some(Vec::new())),
                     ])),
                     RespFrame::Array(Some(vec![
-                        hello_bulk("command|getkeysandflags"),
+                        hello_bulk("command|getkeys"),
                         RespFrame::Integer(-3),
                         RespFrame::Array(Some(vec![
                             hello_simple("loading"),
@@ -58315,8 +58401,8 @@ mod tests {
                         RespFrame::Array(Some(Vec::new())),
                     ])),
                     RespFrame::Array(Some(vec![
-                        hello_bulk("command|list"),
-                        RespFrame::Integer(-2),
+                        hello_bulk("command|getkeysandflags"),
+                        RespFrame::Integer(-3),
                         RespFrame::Array(Some(vec![
                             hello_simple("loading"),
                             hello_simple("stale"),
@@ -58328,7 +58414,7 @@ mod tests {
                             hello_simple("@slow"),
                             hello_simple("@connection"),
                         ])),
-                        RespFrame::Array(Some(vec![hello_bulk("nondeterministic_output_order")])),
+                        RespFrame::Array(Some(Vec::new())),
                         RespFrame::Array(Some(Vec::new())),
                         RespFrame::Array(Some(Vec::new())),
                     ])),
@@ -58352,6 +58438,24 @@ mod tests {
                     ])),
                     RespFrame::Array(Some(vec![
                         hello_bulk("command|info"),
+                        RespFrame::Integer(-2),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("loading"),
+                            hello_simple("stale"),
+                        ])),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("@slow"),
+                            hello_simple("@connection"),
+                        ])),
+                        RespFrame::Array(Some(vec![hello_bulk("nondeterministic_output_order")])),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("command|list"),
                         RespFrame::Integer(-2),
                         RespFrame::Array(Some(vec![
                             hello_simple("loading"),
@@ -59655,6 +59759,171 @@ mod tests {
                 RespFrame::Integer(*startfrom),
                 "{cmd} startfrom"
             );
+        }
+    }
+
+    /// (frankenredis-o3xwt) SORT and SORT_RO emit multiple key_specs:
+    /// the input key has a normal index begin_search, the optional
+    /// BY/GET keyword gets an `unknown` spec (key positions derive from
+    /// content), and SORT additionally has an `unknown` spec for the
+    /// optional STORE keyword. Pin the per-spec flags + begin_search
+    /// type against vendored 7.2.4.
+    #[test]
+    fn command_info_sort_keyspecs_match_upstream() {
+        let mut store = Store::new();
+        // SORT: 3 specs — input [RO, access] + BY/GET unknown [RO, access]
+        // + STORE unknown [OW, update]
+        let r = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"SORT".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("COMMAND INFO SORT");
+        let RespFrame::Array(Some(rows)) = r else {
+            panic!("expected Array");
+        };
+        let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row")
+        else {
+            panic!("expected sub-Array");
+        };
+        let RespFrame::Array(Some(specs)) = &fields[8] else {
+            panic!("expected key_specs Array");
+        };
+        assert_eq!(specs.len(), 3, "SORT must emit 3 key_specs");
+
+        // SORT_RO: 2 specs — input [RO, access] + BY/GET unknown [RO, access]
+        let r = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"SORT_RO".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("COMMAND INFO SORT_RO");
+        let RespFrame::Array(Some(rows)) = r else {
+            panic!("expected Array");
+        };
+        let RespFrame::Array(Some(fields)) = rows.into_iter().next().expect("one row")
+        else {
+            panic!("expected sub-Array");
+        };
+        let RespFrame::Array(Some(specs)) = &fields[8] else {
+            panic!("expected key_specs Array");
+        };
+        assert_eq!(specs.len(), 2, "SORT_RO must emit 2 key_specs");
+
+        // Walk SORT_RO[1] — verify it has 'notes', 'unknown' begin_search,
+        // and 'unknown' find_keys with empty spec arrays.
+        let RespFrame::Array(Some(unknown_spec)) = &specs[1] else {
+            panic!("SORT_RO[1] not Array");
+        };
+        // Field 0 should be 'notes', field 1 the BulkString notes, field
+        // 2 'flags', field 3 [RO, access], field 4 'begin_search',
+        // field 5 = Array(["type", "unknown", "spec", []]).
+        assert_eq!(
+            unknown_spec[0],
+            RespFrame::BulkString(Some(b"notes".to_vec()))
+        );
+        let RespFrame::Array(Some(bs)) = &unknown_spec[5] else {
+            panic!("expected begin_search Array");
+        };
+        assert_eq!(
+            bs[1],
+            RespFrame::BulkString(Some(b"unknown".to_vec())),
+            "begin_search type must be 'unknown'"
+        );
+        let RespFrame::Array(Some(bspec)) = &bs[3] else {
+            panic!("begin_search.spec not Array");
+        };
+        assert!(bspec.is_empty(), "begin_search.spec must be empty Array");
+        let RespFrame::Array(Some(fk)) = &unknown_spec[7] else {
+            panic!("expected find_keys Array");
+        };
+        assert_eq!(
+            fk[1],
+            RespFrame::BulkString(Some(b"unknown".to_vec())),
+            "find_keys type must be 'unknown'"
+        );
+        let RespFrame::Array(Some(fkspec)) = &fk[3] else {
+            panic!("find_keys.spec not Array");
+        };
+        assert!(fkspec.is_empty(), "find_keys.spec must be empty Array");
+    }
+
+    /// (frankenredis-o3xwt) Container parents (xinfo, xgroup, object,
+    /// command) now emit subcommand entries via SUBCOMMAND_TABLE filter.
+    /// Pre-fix: only `command` emitted subcommand entries (hand-listed).
+    /// This test pins the subcommand-name set per parent. Order is the
+    /// alphabetical SUBCOMMAND_TABLE order; upstream uses dict-hash
+    /// iteration which differs but the content is the same.
+    #[test]
+    fn command_info_container_parents_emit_subcommand_entries() {
+        let mut store = Store::new();
+        let cases: &[(&str, &[&str])] = &[
+            ("XINFO", &["xinfo|consumers", "xinfo|groups", "xinfo|help", "xinfo|stream"]),
+            (
+                "XGROUP",
+                &[
+                    "xgroup|create",
+                    "xgroup|createconsumer",
+                    "xgroup|delconsumer",
+                    "xgroup|destroy",
+                    "xgroup|help",
+                    "xgroup|setid",
+                ],
+            ),
+            (
+                "OBJECT",
+                &[
+                    "object|encoding",
+                    "object|freq",
+                    "object|help",
+                    "object|idletime",
+                    "object|refcount",
+                ],
+            ),
+        ];
+        for (cmd, expected_subs) in cases {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) =
+                rows.into_iter().next().expect("one row")
+            else {
+                panic!("expected sub-Array for {cmd}");
+            };
+            // fields[9] = subcommands array
+            let RespFrame::Array(Some(subs)) = &fields[9] else {
+                panic!("{cmd} expected subcommands Array");
+            };
+            assert_eq!(
+                subs.len(),
+                expected_subs.len(),
+                "{cmd} subcommand count"
+            );
+            let actual_names: Vec<String> = subs
+                .iter()
+                .map(|sub| {
+                    let RespFrame::Array(Some(sub_fields)) = sub else {
+                        panic!("{cmd} subcommand entry not Array");
+                    };
+                    let RespFrame::BulkString(Some(name)) = &sub_fields[0] else {
+                        panic!("{cmd} subcommand[0] not BulkString");
+                    };
+                    String::from_utf8_lossy(name).to_string()
+                })
+                .collect();
+            let expected_names: Vec<String> =
+                expected_subs.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(actual_names, expected_names, "{cmd} subcommand names");
         }
     }
 
