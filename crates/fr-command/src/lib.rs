@@ -14357,12 +14357,19 @@ fn command_info_tips(name: &str) -> Vec<RespFrame> {
     }
 }
 
-/// (frankenredis-89b8r) Per-command override of key-spec notes + flags
-/// for the 9 commands whose upstream commands.def keySpec carries a
-/// non-default flag set. Returns (notes, flags) when the command has a
-/// custom spec, else None (caller falls back to the heuristic).
+/// (frankenredis-zbq1t) Per-command override of key-spec notes + flags.
+/// Notes are omitted from the emitted RESP frame when empty. The upstream
+/// canonical flag set comes from legacy_redis_code/redis/src/commands.def
+/// keySpec entries. fr's heuristic fallback ([RO, access] for readonly,
+/// [RW, insert] for the writeable group, [RW, access] otherwise) is correct
+/// for many commands but diverges from upstream in roughly 50 cases.
+///
+/// Returns (notes, flags) when the command has a custom spec, else None
+/// (caller falls back to the heuristic).
 fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [&'static str])> {
-    match name {
+    // (frankenredis-89b8r) Commands whose upstream commands.def keySpec
+    // carries a notes field — emitted as a `notes` BulkString in the spec.
+    let with_notes: Option<(&'static str, &'static [&'static str])> = match name {
         "set" => Some((
             "RW and ACCESS due to the optional `GET` argument",
             &["RW", "access", "update", "variable_flags"],
@@ -14392,7 +14399,59 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
             &["RO", "access"],
         )),
         _ => None,
+    };
+    if with_notes.is_some() {
+        return with_notes;
     }
+
+    // (frankenredis-zbq1t) Notes-free flag overrides drawn directly from
+    // upstream commands.def keySpec entries. Empty notes are skipped at
+    // emission time.
+    let flags: &'static [&'static str] = match name {
+        // CMD_KEY_RM | CMD_KEY_DELETE — the key gets removed entirely.
+        "del" | "unlink" => &["RM", "delete"],
+
+        // CMD_KEY_RO — bare readonly probe (existence/cardinality only).
+        // Upstream omits the access flag for these because the value
+        // itself is not exposed to the caller.
+        "exists" | "touch" | "type" | "scard" | "hlen" | "hstrlen" | "hexists"
+        | "sismember" | "llen" | "strlen" | "xlen" | "zcard" => &["RO"],
+
+        // CMD_KEY_RW | CMD_KEY_UPDATE — value mutated in place; key must
+        // already exist (or no-op for the EXPIRE family).
+        "expire" | "expireat" | "pexpire" | "pexpireat" | "persist" | "lset"
+        | "xack" | "xclaim" | "xsetid" => &["RW", "update"],
+
+        // HSET / HMSET / GEOADD: upstream uses UPDATE here even though
+        // they create the key when absent (the heuristic's INSERT is a
+        // fr-side wart).
+        "hset" | "hmset" | "geoadd" => &["RW", "update"],
+
+        // CMD_KEY_RW | CMD_KEY_INSERT — value mutated, new entries added
+        // but the key itself is not created from nothing (HSETNX, LINSERT,
+        // PFADD all require — or create only on demand — an existing key).
+        "hsetnx" | "linsert" | "pfadd" => &["RW", "insert"],
+
+        // CMD_KEY_RW | CMD_KEY_ACCESS | CMD_KEY_UPDATE — value read and
+        // mutated. Counter and bit-twiddle commands.
+        "incr" | "decr" | "incrby" | "decrby" | "incrbyfloat" | "hincrby"
+        | "hincrbyfloat" | "zincrby" | "setbit" | "getset" | "move" => {
+            &["RW", "access", "update"]
+        }
+
+        // CMD_KEY_RW | CMD_KEY_ACCESS | CMD_KEY_DELETE — value read and a
+        // member is removed; the key may be deleted when it goes empty.
+        "lpop" | "rpop" | "zpopmin" | "zpopmax" | "spop" | "getdel" | "blpop"
+        | "brpop" | "bzpopmin" | "bzpopmax" => &["RW", "access", "delete"],
+
+        // CMD_KEY_RW | CMD_KEY_DELETE — member removed without exposing
+        // the value back to the caller.
+        "hdel" | "srem" | "zrem" | "lrem" | "ltrim" | "xautoclaim" | "xtrim"
+        | "xdel" => &["RW", "delete"],
+
+        _ => return None,
+    };
+    Some(("", flags))
 }
 
 /// (frankenredis-89b8r) Build the keynum-style key-spec emitted by
@@ -14471,13 +14530,8 @@ fn command_info_key_specs(
     } else if matches!(
         name,
         "append"
-            | "geoadd"
-            | "hset"
-            | "hmset"
             | "lpush"
             | "lpushx"
-            | "mset"
-            | "msetnx"
             | "rpush"
             | "rpushx"
             | "sadd"
@@ -14495,7 +14549,9 @@ fn command_info_key_specs(
     };
 
     let mut spec = Vec::with_capacity(10);
-    if let Some((notes, _)) = override_spec {
+    if let Some((notes, _)) = override_spec
+        && !notes.is_empty()
+    {
         spec.push(hello_bulk("notes"));
         spec.push(RespFrame::BulkString(Some(notes.as_bytes().to_vec())));
     }
@@ -36757,10 +36813,15 @@ mod tests {
 
     #[test]
     fn lastsave_returns_timestamp() {
+        // (frankenredis-wqdrw) Store::new() seeds last_save_time_sec to the
+        // current Unix time at boot (frankenredis-30hub mirrors upstream
+        // server.lastsave = time(NULL)), so initial LASTSAVE returns the
+        // boot time, not 0.
         let mut store = Store::new();
+        let boot_time = store.last_save_time_sec as i64;
         let initial = dispatch_argv(&[b"LASTSAVE".to_vec()], &mut store, 1_700_000_000_000)
             .expect("initial lastsave");
-        assert_eq!(initial, RespFrame::Integer(0));
+        assert_eq!(initial, RespFrame::Integer(boot_time));
 
         dispatch_argv(&[b"SAVE".to_vec()], &mut store, 1_700_000_005_000).expect("save");
         let after_save = dispatch_argv(&[b"LASTSAVE".to_vec()], &mut store, 1_700_000_099_000)
@@ -47980,7 +48041,11 @@ mod tests {
         assert_eq!(store.stat_evicted_keys, 0);
         assert_eq!(store.stat_expired_stale_perc, 0);
         assert_eq!(store.stat_expire_cycle_cpu_milliseconds, 0);
-        assert_eq!(store.slowlog_len(), 0);
+        // (frankenredis-wqdrw) Per upstream, CONFIG RESETSTAT does NOT
+        // clear the slowlog (frankenredis-0vneu); the dedicated
+        // SLOWLOG RESET command handles that. The previously-recorded
+        // entry should still be there.
+        assert_eq!(store.slowlog_len(), 1);
         assert!(store.all_command_histograms().is_empty());
     }
 
@@ -58870,6 +58935,138 @@ mod tests {
             );
             let RespFrame::Array(Some(flags)) = &spec[3] else {
                 panic!("expected flags Array for {cmd}");
+            };
+            let actual_flags: Vec<String> = flags
+                .iter()
+                .filter_map(|f| match f {
+                    RespFrame::SimpleString(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            let expected: Vec<String> =
+                expected_flags.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(actual_flags, expected, "{cmd} flag set must match upstream");
+        }
+    }
+
+    /// (frankenredis-zbq1t) Differential probe vs vendored 7.2.4 found ~50
+    /// commands whose COMMAND INFO key_spec flags array diverged from the
+    /// upstream commands.def keySpec entry. Pre-fix: the heuristic
+    /// fallback returned [RW, access] (or [RO, access] / [RW, insert] for
+    /// the readonly / write-set groups), missing the canonical
+    /// access/update/delete/insert/RM bits that upstream emits per
+    /// command. The override table now mirrors the upstream bitmask
+    /// exactly. Each entry below is the canonical flag list captured
+    /// directly from `redis-cli -p 16380 COMMAND INFO <cmd>` against
+    /// vendored 7.2.4 with a single-key spec.
+    #[test]
+    fn command_info_keyspec_flags_for_single_keyspec_overrides_match_upstream() {
+        let mut store = Store::new();
+        let cases: &[(&str, &[&str])] = &[
+            // CMD_KEY_RM | CMD_KEY_DELETE
+            ("DEL", &["RM", "delete"]),
+            ("UNLINK", &["RM", "delete"]),
+            // CMD_KEY_RO bare (no access flag)
+            ("EXISTS", &["RO"]),
+            ("TOUCH", &["RO"]),
+            ("TYPE", &["RO"]),
+            ("SCARD", &["RO"]),
+            ("HLEN", &["RO"]),
+            ("HSTRLEN", &["RO"]),
+            ("HEXISTS", &["RO"]),
+            ("SISMEMBER", &["RO"]),
+            ("LLEN", &["RO"]),
+            ("STRLEN", &["RO"]),
+            ("XLEN", &["RO"]),
+            ("ZCARD", &["RO"]),
+            // CMD_KEY_RW | CMD_KEY_UPDATE
+            ("EXPIRE", &["RW", "update"]),
+            ("EXPIREAT", &["RW", "update"]),
+            ("PEXPIRE", &["RW", "update"]),
+            ("PEXPIREAT", &["RW", "update"]),
+            ("PERSIST", &["RW", "update"]),
+            ("LSET", &["RW", "update"]),
+            ("XACK", &["RW", "update"]),
+            ("XCLAIM", &["RW", "update"]),
+            ("XSETID", &["RW", "update"]),
+            ("HSET", &["RW", "update"]),
+            ("HMSET", &["RW", "update"]),
+            ("GEOADD", &["RW", "update"]),
+            // CMD_KEY_RW | CMD_KEY_INSERT
+            ("HSETNX", &["RW", "insert"]),
+            ("LINSERT", &["RW", "insert"]),
+            ("PFADD", &["RW", "insert"]),
+            // CMD_KEY_RW | CMD_KEY_ACCESS | CMD_KEY_UPDATE
+            ("INCR", &["RW", "access", "update"]),
+            ("DECR", &["RW", "access", "update"]),
+            ("INCRBY", &["RW", "access", "update"]),
+            ("DECRBY", &["RW", "access", "update"]),
+            ("INCRBYFLOAT", &["RW", "access", "update"]),
+            ("HINCRBY", &["RW", "access", "update"]),
+            ("HINCRBYFLOAT", &["RW", "access", "update"]),
+            ("ZINCRBY", &["RW", "access", "update"]),
+            ("SETBIT", &["RW", "access", "update"]),
+            ("GETSET", &["RW", "access", "update"]),
+            ("MOVE", &["RW", "access", "update"]),
+            // CMD_KEY_RW | CMD_KEY_ACCESS | CMD_KEY_DELETE
+            ("LPOP", &["RW", "access", "delete"]),
+            ("RPOP", &["RW", "access", "delete"]),
+            ("ZPOPMIN", &["RW", "access", "delete"]),
+            ("ZPOPMAX", &["RW", "access", "delete"]),
+            ("SPOP", &["RW", "access", "delete"]),
+            ("GETDEL", &["RW", "access", "delete"]),
+            ("BLPOP", &["RW", "access", "delete"]),
+            ("BRPOP", &["RW", "access", "delete"]),
+            ("BZPOPMIN", &["RW", "access", "delete"]),
+            ("BZPOPMAX", &["RW", "access", "delete"]),
+            // CMD_KEY_RW | CMD_KEY_DELETE
+            ("HDEL", &["RW", "delete"]),
+            ("SREM", &["RW", "delete"]),
+            ("ZREM", &["RW", "delete"]),
+            ("LREM", &["RW", "delete"]),
+            ("LTRIM", &["RW", "delete"]),
+            ("XAUTOCLAIM", &["RW", "delete"]),
+            ("XTRIM", &["RW", "delete"]),
+            ("XDEL", &["RW", "delete"]),
+        ];
+        for (cmd, expected_flags) in cases {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for COMMAND INFO {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) =
+                rows.into_iter().next().expect("one row")
+            else {
+                panic!("expected sub-Array entry for {cmd}");
+            };
+            let RespFrame::Array(Some(specs)) = &fields[8] else {
+                panic!("expected key_specs Array for {cmd}, got {:?}", fields[8]);
+            };
+            assert!(
+                !specs.is_empty(),
+                "{cmd} must emit at least one key_spec, got empty"
+            );
+            let RespFrame::Array(Some(spec)) = &specs[0] else {
+                panic!("expected key_spec Array for {cmd}");
+            };
+            // Flags-only override means no 'notes' field; first field is
+            // 'flags' directly.
+            assert_eq!(
+                spec[0],
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                "{cmd} key_spec[0] must be 'flags' (no 'notes' for single-keyspec override)"
+            );
+            let RespFrame::Array(Some(flags)) = &spec[1] else {
+                panic!("expected flags Array for {cmd}, got {:?}", spec[1]);
             };
             let actual_flags: Vec<String> = flags
                 .iter()
