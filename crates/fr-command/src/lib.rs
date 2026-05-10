@@ -19441,6 +19441,76 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             return Err(debug_subcommand_envelope_error(sub));
         }
         Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("PROTOCOL") {
+        // (frankenredis-49dqq) DEBUG PROTOCOL <type> emits a canned
+        // RESP frame for each named type, used by client-library
+        // authors to test their RESP parsers. Mirrors upstream
+        // debug.c::debugCommand lines 772-832.
+        if argv.len() != 3 {
+            return Err(debug_subcommand_envelope_error(sub));
+        }
+        let type_name = std::str::from_utf8(&argv[2])
+            .map_err(|_| CommandError::InvalidUtf8Argument)?;
+        let lower = type_name.to_ascii_lowercase();
+        match lower.as_str() {
+            "string" => Ok(RespFrame::BulkString(Some(b"Hello World".to_vec()))),
+            "integer" => Ok(RespFrame::Integer(12345)),
+            // RESP2 emits double as a BulkString with the numeric body.
+            // Upstream addReplyDouble for RESP2 formats with %.17Lg-ish
+            // precision but the literal 3.141 round-trips exactly to
+            // the 4-character text "3.141".
+            "double" => Ok(RespFrame::BulkString(Some(b"3.141".to_vec()))),
+            "bignum" => Ok(RespFrame::BulkString(Some(
+                b"1234567999999999999999999999999999999".to_vec(),
+            ))),
+            "null" => Ok(RespFrame::BulkString(None)),
+            "true" => Ok(RespFrame::Integer(1)),
+            "false" => Ok(RespFrame::Integer(0)),
+            "array" => Ok(RespFrame::Array(Some(vec![
+                RespFrame::Integer(0),
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+            ]))),
+            // Upstream emits a Set frame in RESP3; in RESP2 it
+            // degrades to an Array of the same elements (the wire
+            // type for an unordered collection).
+            "set" => Ok(RespFrame::Array(Some(vec![
+                RespFrame::Integer(0),
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+            ]))),
+            // Upstream emits a Map frame in RESP3 with three (k, v)
+            // pairs where k is the index (0,1,2) and v is the bool
+            // (k == 1). RESP2 flattens to a 6-element Array
+            // [0, false=0, 1, true=1, 2, false=0].
+            "map" => Ok(RespFrame::Array(Some(vec![
+                RespFrame::Integer(0),
+                RespFrame::Integer(0),
+                RespFrame::Integer(1),
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+                RespFrame::Integer(0),
+            ]))),
+            // Upstream wraps with an attribute frame in RESP3; RESP2
+            // sees only the trailing real reply.
+            "attrib" => Ok(RespFrame::BulkString(Some(
+                b"Some real reply following the attribute".to_vec(),
+            ))),
+            // Push frames have no RESP2 representation; upstream
+            // returns a hard error rather than degrading.
+            "push" => Ok(RespFrame::Error(
+                "ERR RESP2 is not supported by this command".to_string(),
+            )),
+            // Upstream's verbatim emits a Verbatim frame in RESP3
+            // ("=...txt:..."); RESP2 collapses to a plain BulkString
+            // of the body without the format tag.
+            "verbatim" => Ok(RespFrame::BulkString(Some(
+                b"This is a verbatim\nstring".to_vec(),
+            ))),
+            _ => Ok(RespFrame::Error(
+                "ERR Wrong protocol type name. Please use one of the following: string|integer|double|bignum|null|array|set|map|attrib|push|verbatim|true|false".to_string(),
+            )),
+        }
     } else if sub.eq_ignore_ascii_case("ERROR") {
         // Upstream debug.c::debugCommand:871-877 builds a raw RESP error
         // frame from the caller's string with newlines mapped to spaces so
@@ -41825,6 +41895,123 @@ mod tests {
         assert_eq!(
             items[items.len() - 1],
             RespFrame::SimpleString("    Print this help.".to_string())
+        );
+    }
+
+    /// (frankenredis-49dqq) DEBUG PROTOCOL <type> emits a canned RESP
+    /// frame for every named type, used by client-library authors to
+    /// test their RESP parsers. Mirrors upstream debug.c::debugCommand
+    /// lines 772-832. Pre-fix: fr returned "unknown subcommand" for
+    /// every form. RESP3 frame variants (Set, Map, Attribute, Push,
+    /// Verbatim with format tag) collapse to RESP2 equivalents in this
+    /// test; the bare protocol path should match vendored byte-for-
+    /// byte at RESP2.
+    #[test]
+    fn debug_protocol_emits_canned_resp2_frame_per_type() {
+        let mut store = Store::new();
+        let cases: &[(&str, RespFrame)] = &[
+            (
+                "string",
+                RespFrame::BulkString(Some(b"Hello World".to_vec())),
+            ),
+            ("integer", RespFrame::Integer(12345)),
+            ("double", RespFrame::BulkString(Some(b"3.141".to_vec()))),
+            (
+                "bignum",
+                RespFrame::BulkString(Some(
+                    b"1234567999999999999999999999999999999".to_vec(),
+                )),
+            ),
+            ("null", RespFrame::BulkString(None)),
+            ("true", RespFrame::Integer(1)),
+            ("false", RespFrame::Integer(0)),
+            (
+                "array",
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(0),
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(2),
+                ])),
+            ),
+            (
+                "set",
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(0),
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(2),
+                ])),
+            ),
+            (
+                "map",
+                RespFrame::Array(Some(vec![
+                    RespFrame::Integer(0),
+                    RespFrame::Integer(0),
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(1),
+                    RespFrame::Integer(2),
+                    RespFrame::Integer(0),
+                ])),
+            ),
+            (
+                "attrib",
+                RespFrame::BulkString(Some(
+                    b"Some real reply following the attribute".to_vec(),
+                )),
+            ),
+            (
+                "push",
+                RespFrame::Error(
+                    "ERR RESP2 is not supported by this command".to_string(),
+                ),
+            ),
+            (
+                "verbatim",
+                RespFrame::BulkString(Some(b"This is a verbatim\nstring".to_vec())),
+            ),
+        ];
+        for (type_name, expected) in cases {
+            let out = dispatch_argv(
+                &[
+                    b"DEBUG".to_vec(),
+                    b"PROTOCOL".to_vec(),
+                    type_name.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("DEBUG PROTOCOL {type_name}"));
+            assert_eq!(out, *expected, "DEBUG PROTOCOL {type_name}");
+        }
+
+        // Bad type name returns the canonical wording.
+        let bad = dispatch_argv(
+            &[
+                b"DEBUG".to_vec(),
+                b"PROTOCOL".to_vec(),
+                b"badname".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("DEBUG PROTOCOL badname");
+        assert_eq!(
+            bad,
+            RespFrame::Error(
+                "ERR Wrong protocol type name. Please use one of the following: string|integer|double|bignum|null|array|set|map|attrib|push|verbatim|true|false"
+                    .to_string()
+            )
+        );
+
+        // Wrong-arity routes through the subcommand envelope.
+        let arity_err = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"PROTOCOL".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&arity_err, CommandError::Custom(s) if s.contains("PROTOCOL")),
+            "wrong-arity must surface envelope error, got {arity_err:?}"
         );
     }
 
