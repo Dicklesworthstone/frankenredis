@@ -9688,6 +9688,105 @@ mod tests {
         });
     }
 
+    #[test]
+    fn live_redis_info_persistence_aof_rewrite_counters_match_runtime() {
+        let cfg = HarnessConfig::default_paths();
+        let timestamp_nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let runtime_dir = std::env::temp_dir().join(format!(
+            "fr_info_aof_runtime_{timestamp_nanos}_{}",
+            std::process::id()
+        ));
+        let oracle_dir = std::env::temp_dir().join(format!(
+            "fr_info_aof_oracle_{timestamp_nanos}_{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&runtime_dir).expect("create runtime AOF temp dir");
+        fs::create_dir_all(&oracle_dir).expect("create oracle AOF temp dir");
+
+        let Some(oracle_handle) = VendoredRedis::spawn_with_aof(&cfg.oracle_root, &oracle_dir)
+        else {
+            eprintln!(
+                "[SKIP] vendored redis-server unavailable; INFO persistence AOF gate skipped"
+            );
+            return;
+        };
+        let oracle = oracle_handle.oracle_config();
+        let mut oracle_conn =
+            connect_live_redis(&oracle).expect("connect to vendored redis for INFO persistence");
+        let mut runtime = Runtime::default_strict();
+        runtime.set_aof_path(runtime_dir.join("appendonly.aof"));
+
+        fn command(parts: &[&[u8]]) -> RespFrame {
+            RespFrame::Array(Some(
+                parts
+                    .iter()
+                    .map(|part| RespFrame::BulkString(Some((*part).to_vec())))
+                    .collect(),
+            ))
+        }
+
+        fn send_command(
+            conn: &mut std::net::TcpStream,
+            frame: &RespFrame,
+            context: &str,
+        ) -> RespFrame {
+            send_frame(conn, frame).unwrap_or_else(|err| panic!("send {context}: {err}"));
+            read_resp_frame_from_stream(conn).unwrap_or_else(|err| panic!("read {context}: {err}"))
+        }
+
+        fn persistence_field<'a>(
+            sections: &'a BTreeMap<String, BTreeMap<String, String>>,
+            field: &str,
+        ) -> &'a str {
+            sections
+                .get("Persistence")
+                .and_then(|section| section.get(field))
+                .map(String::as_str)
+                .unwrap_or_else(|| panic!("INFO persistence missing {field}"))
+        }
+
+        let rewrite = command(&[b"BGREWRITEAOF"]);
+        let runtime_rewrite = runtime.execute_frame(rewrite.clone(), 10_000);
+        let oracle_rewrite = send_command(&mut oracle_conn, &rewrite, "oracle BGREWRITEAOF");
+        assert_eq!(runtime_rewrite, oracle_rewrite);
+
+        let info = command(&[b"INFO", b"persistence"]);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let oracle_info = loop {
+            if std::time::Instant::now() >= deadline {
+                panic!("vendored Redis BGREWRITEAOF did not finish within 5s");
+            }
+            let frame = send_command(&mut oracle_conn, &info, "oracle INFO persistence");
+            let sections = super::parse_info_sections(&frame).expect("parse oracle INFO");
+            if persistence_field(&sections, "aof_rewrite_in_progress") == "0"
+                && persistence_field(&sections, "aof_rewrites") == "1"
+            {
+                break frame;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        let runtime_info = runtime.execute_frame(info, 10_001);
+
+        let oracle_sections = super::parse_info_sections(&oracle_info).expect("parse oracle INFO");
+        let runtime_sections =
+            super::parse_info_sections(&runtime_info).expect("parse runtime INFO");
+        for field in [
+            "aof_rewrite_in_progress",
+            "aof_last_bgrewrite_status",
+            "aof_rewrites",
+            "aof_rewrites_consecutive_failures",
+        ] {
+            assert_eq!(
+                persistence_field(&runtime_sections, field),
+                persistence_field(&oracle_sections, field),
+                "INFO persistence field {field} drifted"
+            );
+        }
+    }
+
     /// Wire the `core_object.json` fixture through the self-spawning
     /// vendored redis-server oracle. Covers OBJECT
     /// ENCODING / FREQ / IDLETIME / REFCOUNT / HELP. OBJECT IDLETIME
