@@ -9517,16 +9517,24 @@ impl Runtime {
                     }
                 }
                 if canonical == "save" {
-                    // Upstream parses save as a sequence of
-                    // <seconds> <changes> pairs. Empty value is OK
-                    // (disables snapshotting). Otherwise must be
-                    // pairs of non-negative integers.
+                    // (frankenredis-uxn6b) Mirror upstream
+                    // config.c::setConfigSaveOption (lines 2725-2736):
+                    // arguments come in (seconds, changes) pairs;
+                    // even-indexed values (seconds) must be >= 1,
+                    // odd-indexed (changes) must be >= 0. Pre-fix the
+                    // check was 'all parts >= 0', so '0 0' / '0 100'
+                    // slipped through even though upstream rejects.
+                    // Empty value is OK (disables snapshotting).
                     let s = String::from_utf8_lossy(value_bytes);
                     if !s.trim().is_empty() {
                         let parts: Vec<&str> = s.split_whitespace().collect();
                         let valid = !parts.is_empty()
                             && parts.len().is_multiple_of(2)
-                            && parts.iter().all(|p| p.parse::<i64>().is_ok_and(|v| v >= 0));
+                            && parts.iter().enumerate().all(|(idx, p)| {
+                                p.parse::<i64>().is_ok_and(|v| {
+                                    if idx % 2 == 0 { v >= 1 } else { v >= 0 }
+                                })
+                            });
                         if !valid {
                             return config_set_failed("save", "Invalid save parameters");
                         }
@@ -22289,6 +22297,45 @@ mod tests {
             assert!(
                 !names.iter().any(|n| n.eq_ignore_ascii_case(hidden)),
                 "hidden config {hidden} must NOT appear in CONFIG GET * wildcard sweep",
+            );
+        }
+    }
+
+    /// (frankenredis-uxn6b) Mirror upstream config.c::setConfigSaveOption
+    /// (lines 2725-2736): args come in (seconds, changes) pairs;
+    /// even-indexed values (seconds) must be >= 1, odd-indexed (changes)
+    /// must be >= 0. Pre-fix, fr's check was 'all parts >= 0', so '0 0'
+    /// and '0 100' slipped through even though upstream rejects them.
+    #[test]
+    fn config_set_save_enforces_seconds_at_least_one_per_upstream() {
+        let mut rt = Runtime::default_strict();
+        let err_reply = RespFrame::Error(
+            "ERR CONFIG SET failed (possibly related to argument 'save') - Invalid save parameters"
+                .to_string(),
+        );
+        let ok_reply = RespFrame::SimpleString("OK".to_string());
+
+        // Rejected per upstream: even-indexed (seconds) must be >= 1.
+        for bad in ["0 0", "0 100", "-1 100", "3600 -1"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"save", bad.as_bytes()]),
+                    0,
+                ),
+                err_reply,
+                "save '{bad}' must be rejected as 'Invalid save parameters'",
+            );
+        }
+
+        // Accepted per upstream.
+        for ok in ["", "3600 1", "3600 1 300 100 60 10000", "3600 0"] {
+            assert_eq!(
+                rt.execute_frame(
+                    command(&[b"CONFIG", b"SET", b"save", ok.as_bytes()]),
+                    0,
+                ),
+                ok_reply,
+                "save '{ok}' must be accepted",
             );
         }
     }
