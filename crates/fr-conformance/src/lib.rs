@@ -9545,13 +9545,14 @@ mod tests {
             "eval_rawget_rejects_non_table_argument",
             "eval_rawlen_table",
             "eval_rawset_rejects_non_table_argument",
-            "eval_redis_call_config_get_appendfsync_static",
-            "eval_redis_call_config_get_databases_static",
-            "eval_redis_call_config_get_hash_max_listpack_entries",
-            "eval_redis_call_config_get_maxmemory_policy",
-            "eval_redis_call_config_get_nonexistent_returns_empty",
-            "eval_redis_call_config_get_wildcard_pattern",
-            "eval_redis_call_config_set_and_get_encoding_threshold",
+            // (frankenredis-4oudk) Removed in commit 478bc0d alongside
+            // their fixture entries — the 7 eval_redis_call_config_(get|set)_*
+            // cases were replaced with a single
+            // eval_redis_call_config_get_blocked_by_noscript pin that
+            // both fr and vendored agree on (CONFIG is in CMD_NOSCRIPT,
+            // not callable from scripts). XFAIL_CASES needed the same
+            // sweep — the orphan names made the assertion at line ~9580
+            // panic with 'XFAIL entries missing from fixture'.
             "eval_redis_call_xread_block_rejected_from_scripts",
             "eval_redis_call_xreadgroup_block_rejected_from_scripts",
             "eval_ro_wrong_arity",
