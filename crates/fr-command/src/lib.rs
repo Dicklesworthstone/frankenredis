@@ -15027,6 +15027,49 @@ fn command_info_subcommands(name: &str) -> Vec<RespFrame> {
         .collect()
 }
 
+/// (frankenredis-bpf4q) Container commands whose COMMAND DOCS reply
+/// fans out subcommand entries via SUBCOMMAND_TABLE. Set comes from
+/// the `container` field across legacy_redis_code/redis/src/commands/
+/// *.json — every parent that appears at least once in subcommand
+/// JSON files. SENTINEL is intentionally omitted (upstream's SENTINEL
+/// container is excluded from COMMAND DOCS for non-sentinel servers).
+const SUBCOMMAND_PARENTS_WITH_DOCS: &[&str] = &[
+    "acl",
+    "client",
+    "cluster",
+    "command",
+    "config",
+    "debug",
+    "function",
+    "latency",
+    "memory",
+    "module",
+    "object",
+    "pubsub",
+    "script",
+    "slowlog",
+    "xgroup",
+    "xinfo",
+];
+
+fn command_docs_subcommands(name: &str, resp: i64) -> Vec<RespFrame> {
+    if !SUBCOMMAND_PARENTS_WITH_DOCS.contains(&name) {
+        return Vec::new();
+    }
+    let prefix = format!("{name}|");
+    let mut out: Vec<RespFrame> = Vec::new();
+    for &(sub_name, arity, flags, first, last, step) in SUBCOMMAND_TABLE
+        .iter()
+        .filter(|&&(sub_name, ..)| sub_name.starts_with(&prefix))
+    {
+        out.push(RespFrame::BulkString(Some(sub_name.as_bytes().to_vec())));
+        out.push(command_docs_entry(
+            sub_name, arity, flags, first, last, step, resp,
+        ));
+    }
+    out
+}
+
 /// Build a Redis COMMAND INFO entry.
 fn command_info_entry(
     name: &str,
@@ -15157,6 +15200,29 @@ fn command_docs_entry(
     if !arguments.is_empty() {
         entry.push(hello_bulk("arguments"));
         entry.push(RespFrame::Array(Some(arguments)));
+    }
+    // (frankenredis-bpf4q) Containers emit a "subcommands" field after
+    // arguments. RESP2 wire: flat 2N alternating array of (name, docs);
+    // RESP3 wire: Map keyed by subcommand fullname → its docs map.
+    // Upstream server.c::commandDocsCommand uses dictGetIterator order
+    // for subcommands — fr's SUBCOMMAND_TABLE is sorted alphabetically.
+    let subcommands = command_docs_subcommands(name, resp_protocol_version);
+    if !subcommands.is_empty() {
+        entry.push(hello_bulk("subcommands"));
+        if resp_protocol_version == 3 {
+            assert!(
+                subcommands.len().is_multiple_of(2),
+                "subcommands must produce balanced k/v pairs"
+            );
+            let mut pairs = Vec::with_capacity(subcommands.len() / 2);
+            let mut iter = subcommands.into_iter();
+            while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
+                pairs.push((k, v));
+            }
+            entry.push(RespFrame::Map(Some(pairs)));
+        } else {
+            entry.push(RespFrame::Array(Some(subcommands)));
+        }
     }
     // (frankenredis-q11am) Upstream server.c::commandDocsCommand
     // wraps each per-command entry in addReplyMapLen — RESP3 wire
@@ -15815,6 +15881,12 @@ fn is_key_argument_position(
 }
 
 fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
+    // (frankenredis-bpf4q) For subcommands like "cluster|addslots", the
+    // upstream `group` is inherited from the parent. Recurse on the
+    // parent so per-subcommand DOCS entries land in the right group.
+    if let Some((parent, _)) = name.split_once('|') {
+        return command_group_for_docs(parent, flags);
+    }
     let flag_list: Vec<&str> = flags.split_whitespace().collect();
     // (frankenredis-cmddocgrp) Differential probe vs vendored 7.2.4
     // exposed several mis-classifications driven by name.starts_with('s'):
