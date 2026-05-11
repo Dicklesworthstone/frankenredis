@@ -15410,6 +15410,81 @@ fn upstream_command_docs_arguments(name: &str) -> Option<Vec<RespFrame>> {
                 ],
             ),
         ],
+        // (frankenredis-5ozae) Mirror flat arg layouts for ~28 simple
+        // commands from legacy_redis_code/redis/src/commands.def.
+        // Tier 1: single key only.
+        "strlen" | "getdel" | "type" | "expiretime" | "pexpiretime" | "persist" | "dump"
+        | "incr" | "decr" | "ttl" | "pttl" => vec![command_docs_arg(
+            "key",
+            "key",
+            Some(0),
+            None,
+            None,
+            &[],
+            Vec::new(),
+        )],
+        // Tier 2: key + 1 scalar.
+        "getbit" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("offset", "integer", None, None, None, &[], Vec::new()),
+        ],
+        "incrby" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("increment", "integer", None, None, None, &[], Vec::new()),
+        ],
+        "decrby" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("decrement", "integer", None, None, None, &[], Vec::new()),
+        ],
+        "incrbyfloat" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("increment", "double", None, None, None, &[], Vec::new()),
+        ],
+        "append" | "getset" | "setnx" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("value", "string", None, None, None, &[], Vec::new()),
+        ],
+        // Tier 3: key + 2 scalars.
+        "getrange" | "substr" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("start", "integer", None, None, None, &[], Vec::new()),
+            command_docs_arg("end", "integer", None, None, None, &[], Vec::new()),
+        ],
+        "setrange" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("offset", "integer", None, None, None, &[], Vec::new()),
+            command_docs_arg("value", "string", None, None, None, &[], Vec::new()),
+        ],
+        "setbit" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("offset", "integer", None, None, None, &[], Vec::new()),
+            command_docs_arg("value", "integer", None, None, None, &[], Vec::new()),
+        ],
+        "setex" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("seconds", "integer", None, None, None, &[], Vec::new()),
+            command_docs_arg("value", "string", None, None, None, &[], Vec::new()),
+        ],
+        "psetex" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("milliseconds", "integer", None, None, None, &[], Vec::new()),
+            command_docs_arg("value", "string", None, None, None, &[], Vec::new()),
+        ],
+        // Tier 4: key + key (newkey is key_spec_index=1).
+        "rename" | "renamenx" => vec![
+            command_docs_arg("key", "key", Some(0), None, None, &[], Vec::new()),
+            command_docs_arg("newkey", "key", Some(1), None, None, &[], Vec::new()),
+        ],
+        // Tier 5: key with multiple flag.
+        "mget" | "del" | "unlink" | "exists" => vec![command_docs_arg(
+            "key",
+            "key",
+            Some(0),
+            None,
+            None,
+            &["multiple"],
+            Vec::new(),
+        )],
         // (frankenredis-kb8fl) Mirror the pubsub family arg layouts from
         // legacy_redis_code/redis/src/commands.def. SUBSCRIBE/SSUBSCRIBE
         // are single-arg multiple; UNSUBSCRIBE/SUNSUBSCRIBE add the
@@ -15807,6 +15882,10 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
             | "memory"
             | "flushdb"
             | "flushall"
+            // (frankenredis-5ozae) DEL and EXISTS are upstream-classified
+            // "generic", not the catch-all→string fallback.
+            | "del"
+            | "exists"
     ) {
         "generic"
     } else if matches!(
