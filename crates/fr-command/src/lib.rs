@@ -15888,9 +15888,19 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
             | "sync"
             | "replicaof"
             | "slaveof"
-            | "wait"
-            | "waitaof"
             | "swapdb"
+            // (frankenredis-7wcuq) Upstream commands/*.json places these
+            // in the `server` group rather than where fr's previous
+            // prefix/catch-all heuristics routed them:
+            //   memory, dbsize, flushdb, flushall — were "generic" pre-fix
+            //   time, restore-asking, lolwut — were prefix/catch-all
+            | "memory"
+            | "dbsize"
+            | "flushdb"
+            | "flushall"
+            | "time"
+            | "restore-asking"
+            | "lolwut"
     ) {
         "server"
     } else if matches!(
@@ -15907,7 +15917,6 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
             | "keys"
             | "randomkey"
             | "scan"
-            | "dbsize"
             | "type"
             | "rename"
             | "renamenx"
@@ -15920,18 +15929,24 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
             | "sort"
             | "sort_ro"
             | "object"
-            | "memory"
-            | "flushdb"
-            | "flushall"
             // (frankenredis-5ozae) DEL and EXISTS are upstream-classified
             // "generic", not the catch-all→string fallback.
             | "del"
             | "exists"
+            // (frankenredis-7wcuq) WAIT/WAITAOF and MIGRATE are upstream
+            // "generic", not "server" or the catch-all "string".
+            | "wait"
+            | "waitaof"
+            | "migrate"
     ) {
         "generic"
     } else if matches!(
         name,
         "set" | "setex" | "setnx" | "setrange" | "strlen" | "substr"
+            // (frankenredis-7wcuq) LCS starts with 'l' so the prefix
+            // arm below would route it to "list" — upstream classifies
+            // it as "string" (longest common subsequence on two strings).
+            | "lcs"
     ) {
         // s-prefix string commands — must come before the s-prefix→set
         // heuristic below.
@@ -15943,7 +15958,16 @@ fn command_group_for_docs(name: &str, flags: &str) -> &'static str {
     } else if name.starts_with('h') {
         "hash"
     } else if name.starts_with('l')
-        || matches!(name, "blpop" | "brpop" | "blmove" | "blmpop" | "brpoplpush")
+        || matches!(
+            name,
+            "blpop" | "brpop" | "blmove" | "blmpop" | "brpoplpush"
+                // (frankenredis-7wcuq) The r-prefix list commands have
+                // no explicit prefix arm so were falling to "string".
+                | "rpush"
+                | "rpushx"
+                | "rpop"
+                | "rpoplpush"
+        )
     {
         "list"
     } else if name.starts_with('s') {
