@@ -13680,6 +13680,151 @@ static ACL_CATEGORY_MAPS: OnceLock<AclCategoryMaps> = OnceLock::new();
 
 include!(concat!(env!("OUT_DIR"), "/acl_categories.rs"));
 
+// (frankenredis-50j77) Per-command arg trees harvested from the
+// upstream JSON. Parsed once via OnceLock on first access; the inner
+// converter walks the JSON tree and produces RespFrames identical in
+// shape to the hand-written command_docs_arg helpers.
+const UPSTREAM_COMMAND_DOCS_ARG_TREES_JSON: &str =
+    include_str!(concat!(env!("OUT_DIR"), "/docs_arg_trees.json"));
+
+fn upstream_command_docs_arg_trees()
+-> &'static std::collections::HashMap<String, serde_json::Value> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<std::collections::HashMap<String, serde_json::Value>> =
+        OnceLock::new();
+    CACHE.get_or_init(|| {
+        serde_json::from_str(UPSTREAM_COMMAND_DOCS_ARG_TREES_JSON)
+            .expect("docs_arg_trees.json must parse")
+    })
+}
+
+/// (frankenredis-50j77) Convert one JSON-shape arg node into a
+/// RespFrame mirroring command_docs_arg's hand-written output. Only
+/// the fields upstream emits are propagated; unknown JSON keys are
+/// ignored so future JSON additions don't break the build.
+fn json_arg_to_resp(node: &serde_json::Value) -> RespFrame {
+    let obj = match node.as_object() {
+        Some(o) => o,
+        None => return RespFrame::Array(Some(Vec::new())),
+    };
+    // (frankenredis-50j77) Upstream's generate-command-code.py lowers
+    // the `name` field at parse time (`self.name = desc["name"].lower()`),
+    // so the C struct and runtime emission always use the lowercase form.
+    // Some JSON files have name=UPPERCASE (e.g. CLIENT TRACKING's BCAST/
+    // OPTIN/OPTOUT/NOLOOP); fr must lowercase to match.
+    let name_owned = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let name = name_owned.as_str();
+    let type_ = obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let display = obj
+        .get("display")
+        .or_else(|| obj.get("display_text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(name);
+    let key_spec_index = obj.get("key_spec_index").and_then(|v| v.as_i64());
+    // (frankenredis-50j77) Upstream's generate-command-code.py applies
+    // `force_uppercase=True` to the `token` field when generating
+    // commands.def, and the runtime emits the uppercased literal in
+    // COMMAND DOCS replies. JSON tokens may be lowercase
+    // (e.g. CLIENT KILL TYPE's "normal"/"master"/"slave"/"replica") so
+    // we uppercase on the way out to match vendored byte-for-byte.
+    let token_upper = obj
+        .get("token")
+        .and_then(|v| v.as_str())
+        .map(|t| {
+            // (frankenredis-50j77) Upstream's Python code-gen formats
+            // the token as `"%s"` and the C compiler concatenates
+            // adjacent string literals, so the JSON literal `""` (two
+            // quote chars) becomes the C empty string. MIGRATE's
+            // "empty-string" pure-token uses this trick to indicate
+            // "no token" — vendored emits a zero-byte bulk reply.
+            if t == "\"\"" {
+                String::new()
+            } else {
+                t.to_ascii_uppercase()
+            }
+        });
+    let token = token_upper.as_deref();
+    let since = obj.get("since").and_then(|v| v.as_str());
+    let deprecated_since = obj.get("deprecated_since").and_then(|v| v.as_str());
+    let optional = obj.get("optional").and_then(|v| v.as_bool()).unwrap_or(false);
+    let multiple = obj.get("multiple").and_then(|v| v.as_bool()).unwrap_or(false);
+    let multiple_token = obj
+        .get("multiple_token")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let has_display_text = !matches!(type_, "oneof" | "block");
+    let mut entry: Vec<RespFrame> = vec![
+        hello_bulk("name"),
+        hello_bulk(name),
+        hello_bulk("type"),
+        hello_bulk(type_),
+    ];
+    if has_display_text {
+        entry.push(hello_bulk("display_text"));
+        entry.push(hello_bulk(display));
+    }
+    if let Some(idx) = key_spec_index {
+        entry.push(hello_bulk("key_spec_index"));
+        entry.push(RespFrame::Integer(idx));
+    }
+    if let Some(tok) = token {
+        entry.push(hello_bulk("token"));
+        entry.push(hello_bulk(tok));
+    }
+    if let Some(s) = since {
+        entry.push(hello_bulk("since"));
+        entry.push(hello_bulk(s));
+    }
+    if let Some(s) = deprecated_since {
+        entry.push(hello_bulk("deprecated_since"));
+        entry.push(hello_bulk(s));
+    }
+    // Build flags array: optional THEN multiple (matches upstream
+    // server.c::addReplyCommandArgList CMD_ARG_OPTIONAL vs
+    // CMD_ARG_MULTIPLE emission order).
+    let mut flags: Vec<&str> = Vec::new();
+    if optional {
+        flags.push("optional");
+    }
+    if multiple {
+        flags.push("multiple");
+    }
+    if multiple_token {
+        flags.push("multiple_token");
+    }
+    if !flags.is_empty() {
+        entry.push(hello_bulk("flags"));
+        entry.push(RespFrame::Array(Some(
+            flags
+                .iter()
+                .map(|f| RespFrame::SimpleString((*f).to_string()))
+                .collect(),
+        )));
+    }
+    if matches!(type_, "oneof" | "block") {
+        let subargs = obj
+            .get("arguments")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().map(json_arg_to_resp).collect())
+            .unwrap_or_default();
+        entry.push(hello_bulk("arguments"));
+        entry.push(RespFrame::Array(Some(subargs)));
+    }
+    RespFrame::Array(Some(entry))
+}
+
+fn upstream_command_docs_arguments_from_json(name: &str) -> Option<Vec<RespFrame>> {
+    let trees = upstream_command_docs_arg_trees();
+    let value = trees.get(name)?;
+    let arr = value.as_array()?;
+    Some(arr.iter().map(json_arg_to_resp).collect())
+}
+
 fn acl_category_maps() -> &'static AclCategoryMaps {
     ACL_CATEGORY_MAPS.get_or_init(|| {
         let mut by_category: HashMap<&'static str, Vec<&'static str>> = HashMap::new();
@@ -14178,10 +14323,20 @@ fn command_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErro
                 .iter()
                 .filter_map(|arg| {
                     let cmd_name = std::str::from_utf8(arg).ok()?;
-                    let &(name, arity, flags, first_key, last_key, step) = COMMAND_TABLE
+                    // (frankenredis-50j77) Vendored COMMAND DOCS
+                    // accepts subcommand fullnames like "module|help"
+                    // and "client|kill"; fall back to SUBCOMMAND_TABLE
+                    // when the top-level table doesn't carry the row.
+                    let row = COMMAND_TABLE
                         .iter()
                         .filter(|&&(name, ..)| command_table_row_is_visible(name, store))
-                        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))?;
+                        .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+                        .or_else(|| {
+                            SUBCOMMAND_TABLE
+                                .iter()
+                                .find(|&&(name, ..)| name.eq_ignore_ascii_case(cmd_name))
+                        })?;
+                    let &(name, arity, flags, first_key, last_key, step) = row;
                     Some((
                         RespFrame::BulkString(Some(name.as_bytes().to_vec())),
                         command_docs_entry(name, arity, flags, first_key, last_key, step, resp),
@@ -15252,6 +15407,12 @@ fn command_docs_arguments(
     step: i64,
 ) -> Vec<RespFrame> {
     if let Some(arguments) = upstream_command_docs_arguments(name) {
+        return arguments;
+    }
+    // (frankenredis-50j77) Fall back to JSON-harvested arg trees before
+    // the arity-derived placeholder fabrication. Hand-written overrides
+    // above still win for the small set of commands with custom layouts.
+    if let Some(arguments) = upstream_command_docs_arguments_from_json(name) {
         return arguments;
     }
     // (frankenredis-f7670) Skip arity-derived fallback args when the

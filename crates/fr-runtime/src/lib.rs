@@ -25870,7 +25870,7 @@ mod tests {
             rt.execute_frame(command(&[b"ACL", b"SETUSER", b"fresh"]), 5),
             RespFrame::SimpleString("OK".to_string())
         );
-        assert_eq!(channels_for(&mut rt, b"fresh", 6), Vec::new());
+        assert_eq!(channels_for(&mut rt, b"fresh", 6), Vec::<u8>::new());
     }
 
     #[test]

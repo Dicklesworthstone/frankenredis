@@ -99,6 +99,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // ROLE, ...) lack args; the consumer uses absence-from-this-set as
     // the signal to skip the fallback arg-fabrication.
     let mut docs_has_args = std::collections::BTreeSet::<String>::new();
+    // (frankenredis-50j77) Collect per-command arg trees verbatim from
+    // the JSON. Embedded as a single JSON blob; lib.rs parses once
+    // (OnceLock) and converts to RespFrame on demand.
+    let mut docs_arg_trees = BTreeMap::<String, serde_json::Value>::new();
     for path in command_json_paths(&commands_dir)? {
         println!("cargo:rerun-if-changed={}", path.display());
         let raw = fs::read_to_string(&path).map_err(|err| {
@@ -245,7 +249,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .and_then(Value::as_array)
                 .is_some_and(|arr| !arr.is_empty())
             {
-                docs_has_args.insert(command_name);
+                docs_has_args.insert(command_name.clone());
+            }
+
+            // (frankenredis-50j77) Capture the raw arguments JSON for
+            // every command that has it. lib.rs parses this blob lazily
+            // and converts to RespFrame, so the consumer doesn't need
+            // hand-written arg trees for each subcommand.
+            if let Some(args) = metadata.get("arguments").and_then(Value::as_array)
+                && !args.is_empty()
+            {
+                docs_arg_trees.insert(command_name, Value::Array(args.clone()));
             }
         }
     }
@@ -354,6 +368,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         io::Error::new(io::ErrorKind::NotFound, "OUT_DIR is not set for build.rs")
     })?);
     fs::write(out_dir.join("acl_categories.rs"), out)?;
+
+    // (frankenredis-50j77) Emit the harvested per-command arg trees as
+    // a single JSON blob. lib.rs picks the blob up via include_str! and
+    // lazily parses it on first access. Layout is { name: [argnode...] }.
+    let trees_json = serde_json::to_string(&docs_arg_trees).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("failed to serialize docs_arg_trees: {err}"),
+        )
+    })?;
+    fs::write(out_dir.join("docs_arg_trees.json"), trees_json)?;
+
     Ok(())
 }
 
