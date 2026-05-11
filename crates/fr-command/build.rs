@@ -82,6 +82,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     // the field entirely (matching upstream t_string.c::
     // commandDocsCommand). (frankenredis-az2a4)
     let mut docs_history = BTreeMap::<String, Vec<(String, String)>>::new();
+    // (frankenredis-qsl84) Deprecation/syscmd metadata harvested from
+    // doc_flags + deprecated_since + replaced_by in the upstream JSON.
+    // Tuple is (doc_flags lowercase, deprecated_since, replaced_by);
+    // an entry only lands here when at least one of those fields is
+    // present, so the consumer can binary_search and skip on miss.
+    let mut docs_deprecation = BTreeMap::<
+        String,
+        (Vec<String>, Option<String>, Option<String>),
+    >::new();
     for path in command_json_paths(&commands_dir)? {
         println!("cargo:rerun-if-changed={}", path.display());
         let raw = fs::read_to_string(&path).map_err(|err| {
@@ -193,7 +202,31 @@ fn main() -> Result<(), Box<dyn Error>> {
                 })
                 .unwrap_or_default();
             if !history_entries.is_empty() {
-                docs_history.insert(command_name, history_entries);
+                docs_history.insert(command_name.clone(), history_entries);
+            }
+
+            // (frankenredis-qsl84) doc_flags is an array of upper-case
+            // tokens like "DEPRECATED" / "SYSCMD" — vendored emits them
+            // lower-case in COMMAND DOCS replies. deprecated_since and
+            // replaced_by are simple strings.
+            let doc_flags: Vec<String> = string_array(metadata.get("doc_flags"))
+                .into_iter()
+                .map(|f| f.to_ascii_lowercase())
+                .collect();
+            let deprecated_since = metadata
+                .get("deprecated_since")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let replaced_by = metadata
+                .get("replaced_by")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if !doc_flags.is_empty()
+                || deprecated_since.is_some()
+                || replaced_by.is_some()
+            {
+                docs_deprecation
+                    .insert(command_name, (doc_flags, deprecated_since, replaced_by));
             }
         }
     }
@@ -256,6 +289,33 @@ fn main() -> Result<(), Box<dyn Error>> {
             out.push_str("\"), ");
         }
         out.push_str("]),\n");
+    }
+    out.push_str("];\n");
+
+    // (frankenredis-qsl84) Emit the COMMAND DOCS deprecation table.
+    // Each row is (name, &[doc_flag,...], deprecated_since, replaced_by).
+    // Empty strings stand in for None; the consumer skips empty values.
+    out.push_str(
+        "const UPSTREAM_COMMAND_DOCS_DEPRECATION: &[(&str, &[&str], &str, &str)] = &[\n",
+    );
+    for (command, (doc_flags, deprecated_since, replaced_by)) in &docs_deprecation {
+        out.push_str("    (\"");
+        out.push_str(&escape_rust_string(command));
+        out.push_str("\", &[");
+        for flag in doc_flags {
+            out.push('"');
+            out.push_str(&escape_rust_string(flag));
+            out.push_str("\", ");
+        }
+        out.push_str("], \"");
+        if let Some(s) = deprecated_since.as_deref() {
+            out.push_str(&escape_rust_string(s));
+        }
+        out.push_str("\", \"");
+        if let Some(s) = replaced_by.as_deref() {
+            out.push_str(&escape_rust_string(s));
+        }
+        out.push_str("\"),\n");
     }
     out.push_str("];\n");
 

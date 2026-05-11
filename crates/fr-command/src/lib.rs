@@ -15101,6 +15101,34 @@ fn command_docs_entry(
         entry.push(hello_bulk("complexity"));
         entry.push(hello_bulk(complexity));
     }
+    // (frankenredis-qsl84) Emit doc_flags / deprecated_since /
+    // replaced_by between complexity and history when the upstream
+    // JSON declared them. Vendored emission order matches server.c::
+    // commandDocsCommand: doc_flags array first, then the two
+    // deprecation strings (only when DEPRECATED is in doc_flags).
+    if let Ok(idx) = UPSTREAM_COMMAND_DOCS_DEPRECATION
+        .binary_search_by(|(entry_name, _, _, _)| entry_name.cmp(&name))
+    {
+        let (_, doc_flags, deprecated_since, replaced_by) =
+            UPSTREAM_COMMAND_DOCS_DEPRECATION[idx];
+        if !doc_flags.is_empty() {
+            entry.push(hello_bulk("doc_flags"));
+            entry.push(RespFrame::Array(Some(
+                doc_flags
+                    .iter()
+                    .map(|flag| RespFrame::SimpleString((*flag).to_string()))
+                    .collect(),
+            )));
+        }
+        if !deprecated_since.is_empty() {
+            entry.push(hello_bulk("deprecated_since"));
+            entry.push(hello_bulk(deprecated_since));
+        }
+        if !replaced_by.is_empty() {
+            entry.push(hello_bulk("replaced_by"));
+            entry.push(hello_bulk(replaced_by));
+        }
+    }
     // History is emitted between complexity and arguments to match
     // upstream t_string.c::commandDocsCommand emission order. Only
     // commands with at least one entry in UPSTREAM_COMMAND_DOCS_HISTORY
@@ -15121,11 +15149,15 @@ fn command_docs_entry(
             entry.push(RespFrame::Array(Some(history_frames)));
         }
     }
-    entry.push(hello_bulk("arguments"));
-    entry.push(RespFrame::Array(Some(command_docs_arguments(
-        name,
-        arity, first_key, last_key, step,
-    ))));
+    // (frankenredis-qsl84) Mirror upstream server.c::commandDocsCommand
+    // — the "arguments" field is only emitted when cmd->args is set.
+    // Commands with no positional args at all (QUIT, BGSAVE, etc.) skip
+    // the field entirely; pre-fix fr emitted an empty arguments array.
+    let arguments = command_docs_arguments(name, arity, first_key, last_key, step);
+    if !arguments.is_empty() {
+        entry.push(hello_bulk("arguments"));
+        entry.push(RespFrame::Array(Some(arguments)));
+    }
     // (frankenredis-q11am) Upstream server.c::commandDocsCommand
     // wraps each per-command entry in addReplyMapLen — RESP3 wire
     // shape is a Map of (key, value) pairs; RESP2 stays the flat
