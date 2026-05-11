@@ -15188,6 +15188,15 @@ fn command_docs_arguments(
     if let Some(arguments) = upstream_command_docs_arguments(name) {
         return arguments;
     }
+    // (frankenredis-f7670) Skip arity-derived fallback args when the
+    // upstream JSON has no `arguments` array — container commands
+    // (CLUSTER, CONFIG, DEBUG, ...) and no-arg commands (BGSAVE,
+    // RANDOMKEY, ROLE, ...). Vendored emits no `arguments` field for
+    // these; the caller already skips emission when this returns
+    // empty.
+    if UPSTREAM_COMMAND_DOCS_HAS_ARGS.binary_search(&name).is_err() {
+        return Vec::new();
+    }
     let fixed_arg_count = if arity > 0 { arity - 1 } else { (-arity) - 1 };
     let mut docs = Vec::new();
     for position in 1..=fixed_arg_count {

@@ -91,6 +91,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         String,
         (Vec<String>, Option<String>, Option<String>),
     >::new();
+    // (frankenredis-f7670) Set of command names whose upstream JSON
+    // declares an `arguments` field. Container commands (CLUSTER,
+    // CONFIG, CLIENT, DEBUG, MEMORY, OBJECT, SCRIPT, FUNCTION, ACL,
+    // LATENCY, SLOWLOG, MODULE, COMMAND, PUBSUB, XGROUP, XINFO,
+    // SENTINEL) and no-arg commands (BGSAVE, BGREWRITEAOF, RANDOMKEY,
+    // ROLE, ...) lack args; the consumer uses absence-from-this-set as
+    // the signal to skip the fallback arg-fabrication.
+    let mut docs_has_args = std::collections::BTreeSet::<String>::new();
     for path in command_json_paths(&commands_dir)? {
         println!("cargo:rerun-if-changed={}", path.display());
         let raw = fs::read_to_string(&path).map_err(|err| {
@@ -226,7 +234,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 || replaced_by.is_some()
             {
                 docs_deprecation
-                    .insert(command_name, (doc_flags, deprecated_since, replaced_by));
+                    .insert(command_name.clone(), (doc_flags, deprecated_since, replaced_by));
+            }
+
+            // (frankenredis-f7670) Mark commands with declared args so
+            // the consumer can skip fallback fabrication for containers
+            // and no-arg commands.
+            if metadata
+                .get("arguments")
+                .and_then(Value::as_array)
+                .is_some_and(|arr| !arr.is_empty())
+            {
+                docs_has_args.insert(command_name);
             }
         }
     }
@@ -295,6 +314,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     // (frankenredis-qsl84) Emit the COMMAND DOCS deprecation table.
     // Each row is (name, &[doc_flag,...], deprecated_since, replaced_by).
     // Empty strings stand in for None; the consumer skips empty values.
+    // (frankenredis-f7670) Sorted list of command names whose upstream
+    // JSON declared an arguments array. Consumed by command_docs_arguments
+    // to suppress the arity-derived fallback for containers and no-arg
+    // commands.
+    out.push_str("const UPSTREAM_COMMAND_DOCS_HAS_ARGS: &[&str] = &[\n");
+    for command in &docs_has_args {
+        out.push_str("    \"");
+        out.push_str(&escape_rust_string(command));
+        out.push_str("\",\n");
+    }
+    out.push_str("];\n");
+
     out.push_str(
         "const UPSTREAM_COMMAND_DOCS_DEPRECATION: &[(&str, &[&str], &str, &str)] = &[\n",
     );
