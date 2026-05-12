@@ -8,8 +8,8 @@ use std::process::ExitCode;
 
 use fr_conformance::{
     CaseOutcome, DIFFERENTIAL_REPORT_SCHEMA_VERSION, DifferentialReport, HarnessConfig,
-    LiveOracleConfig, run_live_redis_diff, run_live_redis_multi_client_diff,
-    run_live_redis_protocol_diff,
+    LiveOracleConfig, run_live_redis_diff, run_live_redis_diff_for_cases,
+    run_live_redis_multi_client_diff, run_live_redis_protocol_diff,
 };
 use serde::Serialize;
 
@@ -22,6 +22,7 @@ struct CliArgs {
     log_root: Option<PathBuf>,
     json_out: Option<PathBuf>,
     run_id: Option<String>,
+    case_names: Vec<String>,
 }
 
 fn main() -> ExitCode {
@@ -46,7 +47,7 @@ fn run() -> Result<ExitCode, String> {
     };
 
     let report = match cli.mode.as_str() {
-        "command" => match run_live_redis_diff(&cfg, &cli.fixture, &oracle) {
+        "command" => match run_command_diff(&cfg, &cli, &oracle) {
             Ok(report) => report,
             Err(err) => {
                 if let Some(path) = &cli.json_out {
@@ -56,7 +57,9 @@ fn run() -> Result<ExitCode, String> {
                 return Err(err);
             }
         },
-        "protocol" => match run_live_redis_protocol_diff(&cfg, &cli.fixture, &oracle) {
+        "protocol" => match reject_case_filter(&cli)
+            .and_then(|()| run_live_redis_protocol_diff(&cfg, &cli.fixture, &oracle))
+        {
             Ok(report) => report,
             Err(err) => {
                 if let Some(path) = &cli.json_out {
@@ -66,7 +69,9 @@ fn run() -> Result<ExitCode, String> {
                 return Err(err);
             }
         },
-        "multi_client" => match run_live_redis_multi_client_diff(&cfg, &cli.fixture, &oracle) {
+        "multi_client" => match reject_case_filter(&cli)
+            .and_then(|()| run_live_redis_multi_client_diff(&cfg, &cli.fixture, &oracle))
+        {
             Ok(report) => report,
             Err(err) => {
                 if let Some(path) = &cli.json_out {
@@ -140,11 +145,32 @@ fn run() -> Result<ExitCode, String> {
     Ok(ExitCode::SUCCESS)
 }
 
+fn run_command_diff(
+    cfg: &HarnessConfig,
+    cli: &CliArgs,
+    oracle: &LiveOracleConfig,
+) -> Result<DifferentialReport, String> {
+    if cli.case_names.is_empty() {
+        return run_live_redis_diff(cfg, &cli.fixture, oracle);
+    }
+    let refs: Vec<&str> = cli.case_names.iter().map(String::as_str).collect();
+    run_live_redis_diff_for_cases(cfg, &cli.fixture, &refs, oracle)
+}
+
+fn reject_case_filter(cli: &CliArgs) -> Result<(), String> {
+    if cli.case_names.is_empty() {
+        Ok(())
+    } else {
+        Err("--case is only supported for command-mode fixtures".to_string())
+    }
+}
+
 fn parse_args(raw_args: Vec<String>) -> Result<CliArgs, String> {
     let mut args = raw_args;
     let mut log_root: Option<PathBuf> = None;
     let mut json_out: Option<PathBuf> = None;
     let mut run_id: Option<String> = None;
+    let mut case_names: Vec<String> = Vec::new();
     let mut idx = 0;
     while idx < args.len() {
         match args[idx].as_str() {
@@ -169,6 +195,14 @@ fn parse_args(raw_args: Vec<String>) -> Result<CliArgs, String> {
                     return Err(usage("missing value after --run-id"));
                 }
                 run_id = Some(args[idx + 1].clone());
+                args.drain(idx..=idx + 1);
+                continue;
+            }
+            "--case" => {
+                if idx + 1 >= args.len() {
+                    return Err(usage("missing case name after --case"));
+                }
+                case_names.push(args[idx + 1].clone());
                 args.drain(idx..=idx + 1);
                 continue;
             }
@@ -200,6 +234,7 @@ fn parse_args(raw_args: Vec<String>) -> Result<CliArgs, String> {
         log_root,
         json_out,
         run_id,
+        case_names,
     })
 }
 
@@ -231,6 +266,7 @@ struct JsonReport {
     failed_count: usize,
     total_failures: usize,
     live_log_root: Option<String>,
+    case_filter: Vec<String>,
     reason_code_counts: BTreeMap<String, usize>,
     failed_without_reason_code: usize,
     failures: Vec<JsonFailure>,
@@ -268,6 +304,7 @@ fn write_json_report(
         failed_count: report.failed.len(),
         total_failures: report.failed.len(),
         live_log_root: cli.log_root.as_ref().map(|root| root.display().to_string()),
+        case_filter: cli.case_names.clone(),
         reason_code_counts: report.reason_code_counts.clone(),
         failed_without_reason_code: report.failed_without_reason_code,
         failures: report.failed.iter().map(json_failure).collect(),
@@ -308,6 +345,7 @@ fn write_json_error_report(path: &Path, cli: &CliArgs, run_error: &str) -> Resul
         failed_count: 0,
         total_failures: 0,
         live_log_root: cli.log_root.as_ref().map(|root| root.display().to_string()),
+        case_filter: cli.case_names.clone(),
         reason_code_counts: BTreeMap::new(),
         failed_without_reason_code: 0,
         failures: Vec::new(),
@@ -341,7 +379,7 @@ fn compute_pass_rate(passed: usize, total: usize) -> f64 {
 
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nusage: cargo run -p fr-conformance --bin live_oracle_diff -- [--log-root <path>] [--json-out <path>] [--run-id <id>] <command|protocol> <fixture.json> [host] [port]"
+        "{reason}\nusage: cargo run -p fr-conformance --bin live_oracle_diff -- [--log-root <path>] [--json-out <path>] [--run-id <id>] [--case <name>]... <command|protocol> <fixture.json> [host] [port]"
     )
 }
 
@@ -349,7 +387,7 @@ fn usage(reason: &str) -> String {
 mod tests {
     use fr_protocol::RespFrame;
 
-    use super::{json_failure, parse_args};
+    use super::{json_failure, parse_args, reject_case_filter};
     use fr_conformance::CaseOutcome;
 
     #[test]
@@ -361,6 +399,10 @@ mod tests {
             "artifacts/report.json".to_string(),
             "--run-id".to_string(),
             "run-123".to_string(),
+            "--case".to_string(),
+            "ping_no_args_returns_pong".to_string(),
+            "--case".to_string(),
+            "ping_with_message".to_string(),
             "protocol".to_string(),
             "protocol_negative.json".to_string(),
             "10.0.0.5".to_string(),
@@ -384,6 +426,10 @@ mod tests {
             "artifacts/report.json"
         );
         assert_eq!(parsed.run_id.as_deref(), Some("run-123"));
+        assert_eq!(
+            parsed.case_names,
+            vec!["ping_no_args_returns_pong", "ping_with_message"]
+        );
     }
 
     #[test]
@@ -394,6 +440,26 @@ mod tests {
         assert_eq!(parsed.host, "127.0.0.1");
         assert_eq!(parsed.port, 6379);
         assert_eq!(parsed.run_id, None);
+        assert!(parsed.case_names.is_empty());
+    }
+
+    #[test]
+    fn parse_args_rejects_case_without_name() {
+        let err = parse_args(vec!["--case".to_string()]).expect_err("bare --case must fail");
+        assert!(err.contains("missing case name after --case"), "{err}");
+    }
+
+    #[test]
+    fn case_filter_is_command_mode_only() {
+        let parsed = parse_args(vec![
+            "--case".to_string(),
+            "ping_no_args_returns_pong".to_string(),
+            "protocol".to_string(),
+            "protocol_negative.json".to_string(),
+        ])
+        .expect("arguments parse");
+        let err = reject_case_filter(&parsed).expect_err("protocol case filter rejected");
+        assert_eq!(err, "--case is only supported for command-mode fixtures");
     }
 
     #[test]

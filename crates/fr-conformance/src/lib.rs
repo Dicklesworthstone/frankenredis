@@ -9251,9 +9251,9 @@ mod tests {
     /// vendored redis-server oracle. Covers SCAN / HSCAN / SSCAN /
     /// ZSCAN with MATCH / COUNT / TYPE. Iteration-order divergences
     /// fold in `live_oracle_scan_family_order_matches`. SCAN cursor
-    /// stability and the 7.4 NOVALUES feature are the only remaining
-    /// fixture/server-version deltas against vendored 7.2.4; those
-    /// cases XFAIL here. (br-frankenredis-h2dv, hjzc)
+    /// stability and compact-collection cursor semantics are the
+    /// remaining fixture/server-version deltas against vendored 7.2.4;
+    /// those cases XFAIL here. (br-frankenredis-h2dv, hjzc)
     #[test]
     fn live_redis_core_scan_matches_runtime() {
         let cfg = HarnessConfig::default_paths();
@@ -9279,10 +9279,9 @@ mod tests {
             // fixtures freeze our linear cursor behavior instead.
             "scan_large_cursor_returns_0",
             "scan_negative_cursor",
-            // HSCAN/SSCAN/ZSCAN "large cursor returns 0 with all items"
-            // fixtures were captured against our single-pass semantics;
-            // upstream interprets a large cursor as already past the
-            // end and returns an empty reply.
+            // HSCAN/SSCAN/ZSCAN compact-collection cursor semantics:
+            // vendored Redis can return the collection for large cursor
+            // values where fr's linear cursor treats the scan as complete.
             "hscan_large_cursor_returns_0",
             "sscan_large_cursor_returns_0",
             "zscan_large_cursor_returns_0",
