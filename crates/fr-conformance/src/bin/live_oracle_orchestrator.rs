@@ -29,6 +29,8 @@ struct SuiteSpec {
     fixture: String,
     scenario_class: String,
     profiles: Vec<String>,
+    #[serde(default)]
+    case_names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -382,6 +384,27 @@ fn load_suite_manifest(path: &Path) -> Result<SuiteMatrixManifest, String> {
                 suite.name
             ));
         }
+        if !suite.case_names.is_empty() && suite.mode != "command" {
+            return Err(format!(
+                "suite '{}' uses case_names with unsupported mode '{}'",
+                suite.name, suite.mode
+            ));
+        }
+        let mut seen_case_names = std::collections::BTreeSet::new();
+        for case_name in &suite.case_names {
+            if case_name.trim().is_empty() {
+                return Err(format!(
+                    "suite '{}' contains an empty case_names entry",
+                    suite.name
+                ));
+            }
+            if !seen_case_names.insert(case_name) {
+                return Err(format!(
+                    "suite '{}' contains duplicate case_names entry '{}'",
+                    suite.name, case_name
+                ));
+            }
+        }
     }
 
     Ok(manifest)
@@ -540,7 +563,7 @@ fn suite_command_tokens(
     suite_report: &Path,
     suite: &SuiteSpec,
 ) -> Vec<String> {
-    let inner = vec![
+    let mut inner = vec![
         "env".to_string(),
         format!("FR_SEED={}", cli.run_seed),
         "cargo".to_string(),
@@ -556,11 +579,17 @@ fn suite_command_tokens(
         path_to_string(suite_report),
         "--run-id".to_string(),
         cli.run_id.clone(),
+    ];
+    for case_name in &suite.case_names {
+        inner.push("--case".to_string());
+        inner.push(case_name.clone());
+    }
+    inner.extend([
         suite.mode.to_string(),
         suite.fixture.to_string(),
         cli.host.clone(),
         cli.port.to_string(),
-    ];
+    ]);
     wrap_runner_tokens(&cli.runner, inner)
 }
 
@@ -737,8 +766,8 @@ fn shell_escape(token: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CliArgs, compute_run_fingerprint, default_suite_manifest_path, load_suite_manifest,
-        parse_args, select_suites, shell_escape,
+        CliArgs, SuiteSpec, compute_run_fingerprint, default_suite_manifest_path,
+        load_suite_manifest, parse_args, select_suites, shell_escape, suite_command_tokens,
     };
 
     #[test]
@@ -854,6 +883,83 @@ mod tests {
                 "fr_p2c_002_protocol_negative",
             ]
         );
+    }
+
+    #[test]
+    fn matrix_case_names_are_deserialized_for_filtered_suites() {
+        let manifest = load_suite_manifest(&default_suite_manifest_path()).expect("load manifest");
+        let replication = manifest
+            .suites
+            .iter()
+            .find(|suite| suite.name == "core_replication")
+            .expect("core_replication matrix suite");
+
+        assert!(
+            replication
+                .case_names
+                .iter()
+                .any(|case_name| case_name == "replconf_ack_ok"),
+            "core_replication matrix should retain its stable case filter"
+        );
+        assert!(
+            replication
+                .case_names
+                .iter()
+                .any(|case_name| case_name == "sync_alias_triggers_fullresync"),
+            "core_replication matrix should retain full stable case filter"
+        );
+    }
+
+    #[test]
+    fn suite_command_tokens_forward_matrix_case_filters() {
+        let cli = CliArgs {
+            host: "127.0.0.1".to_string(),
+            port: 6380,
+            output_root: "artifacts/e2e_orchestrator".into(),
+            run_id: "run-cases".to_string(),
+            runner: "local".to_string(),
+            run_seed: 17,
+            matrix: "parity".to_string(),
+            suite_manifest: default_suite_manifest_path(),
+            suites: Vec::new(),
+        };
+        let suite = SuiteSpec {
+            name: "core_replication".to_string(),
+            mode: "command".to_string(),
+            fixture: "core_replication.json".to_string(),
+            scenario_class: "replication".to_string(),
+            profiles: vec!["parity".to_string()],
+            case_names: vec![
+                "replconf_ack_ok".to_string(),
+                "sync_returns_fullresync".to_string(),
+            ],
+        };
+        let report = std::path::Path::new("report.json");
+        let log_root = std::path::Path::new("logs");
+        let tokens = suite_command_tokens(&cli, log_root, report, &suite);
+
+        let case_flags = tokens
+            .windows(2)
+            .filter(|window| window[0] == "--case")
+            .map(|window| window[1].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            case_flags,
+            vec!["replconf_ack_ok", "sync_returns_fullresync"]
+        );
+        let mode_idx = tokens
+            .iter()
+            .position(|token| token == "command")
+            .expect("command-mode token should be present");
+        assert_eq!(
+            tokens.get(mode_idx + 1).map(String::as_str),
+            Some("core_replication.json")
+        );
+        assert_eq!(
+            tokens.get(mode_idx + 2).map(String::as_str),
+            Some("127.0.0.1")
+        );
+        assert_eq!(tokens.get(mode_idx + 3).map(String::as_str), Some("6380"));
     }
 
     #[test]
