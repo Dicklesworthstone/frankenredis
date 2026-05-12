@@ -829,6 +829,7 @@ fn main() -> ExitCode {
             return ExitCode::from(1);
         }
 
+        let eventloop_start = std::time::Instant::now();
         let timestamp = now_unix_time();
         let ts = timestamp.ms;
         let ts_us = timestamp.us;
@@ -1017,6 +1018,10 @@ fn main() -> ExitCode {
                 closing_tokens.insert(token);
             }
         }
+
+        let eventloop_duration_us =
+            u64::try_from(eventloop_start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        runtime.record_eventloop_cycle(eventloop_duration_us);
 
         // Check for graceful shutdown request
         if runtime.server.shutdown_requested {

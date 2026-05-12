@@ -13066,11 +13066,27 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("io_threaded_writes_processed:0\r\n");
         info.push_str("reply_buffer_shrinks:0\r\n");
         info.push_str("reply_buffer_expands:0\r\n");
-        info.push_str("eventloop_cycles:0\r\n");
-        info.push_str("eventloop_duration_sum:0\r\n");
-        info.push_str("eventloop_duration_cmd_sum:0\r\n");
-        info.push_str("instantaneous_eventloop_cycles_per_sec:0\r\n");
-        info.push_str("instantaneous_eventloop_duration_usec:0\r\n");
+        let _ = write!(info, "eventloop_cycles:{}\r\n", store.stat_eventloop_cycles);
+        let _ = write!(
+            info,
+            "eventloop_duration_sum:{}\r\n",
+            store.stat_eventloop_duration_sum_usec
+        );
+        let _ = write!(
+            info,
+            "eventloop_duration_cmd_sum:{}\r\n",
+            store.eventloop_duration_cmd_sum_usec()
+        );
+        let _ = write!(
+            info,
+            "instantaneous_eventloop_cycles_per_sec:{}\r\n",
+            store.instantaneous_eventloop_cycles_per_sec()
+        );
+        let _ = write!(
+            info,
+            "instantaneous_eventloop_duration_usec:{}\r\n",
+            store.instantaneous_eventloop_duration_usec()
+        );
         let _ = write!(
             info,
             "acl_access_denied_auth:{}\r\n",
@@ -49855,6 +49871,8 @@ mod tests {
         let mut store = Store::new();
         store.stat_total_net_input_bytes = 12345;
         store.stat_total_net_output_bytes = 67890;
+        store.record_eventloop_cycle(40);
+        store.record_eventloop_cycle(60);
         // Simulate ops sampling: 500 cmds in 100ms = 5000 ops/sec per sample
         store.stat_total_commands_processed = 500;
         store.record_ops_sec_sample(100);
@@ -49869,6 +49887,17 @@ mod tests {
         assert!(info.contains("total_net_output_bytes:67890\r\n"), "{info}");
         // With only 1 of 16 samples filled, ops/sec = 5000/16 = 312
         assert!(info.contains("instantaneous_ops_per_sec:312\r\n"), "{info}");
+        assert!(info.contains("eventloop_cycles:2\r\n"), "{info}");
+        assert!(info.contains("eventloop_duration_sum:100\r\n"), "{info}");
+        assert!(info.contains("eventloop_duration_cmd_sum:0\r\n"), "{info}");
+        assert!(
+            info.contains("instantaneous_eventloop_cycles_per_sec:1\r\n"),
+            "{info}"
+        );
+        assert!(
+            info.contains("instantaneous_eventloop_duration_usec:3\r\n"),
+            "{info}"
+        );
     }
 
     #[test]

@@ -3456,6 +3456,11 @@ impl Runtime {
         self.server.store.record_ops_sec_sample(elapsed_ms);
     }
 
+    /// Track one completed server event loop cycle for INFO stats.
+    pub fn record_eventloop_cycle(&mut self, duration_usec: u64) {
+        self.server.store.record_eventloop_cycle(duration_usec);
+    }
+
     /// Track a rejected connection (maxclients exceeded).
     pub fn track_rejected_connection(&mut self) {
         self.server.store.stat_rejected_connections += 1;

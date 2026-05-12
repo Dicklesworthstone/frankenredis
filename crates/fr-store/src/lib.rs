@@ -1471,6 +1471,10 @@ pub struct Store {
     /// upstream server.c::errorstats[] tracked via incrementErrorCount.
     /// (frankenredis-errorstatslines)
     pub errorstats_per_type: HashMap<String, u64>,
+    /// Total event loop cycles completed by the TCP server.
+    pub stat_eventloop_cycles: u64,
+    /// Cumulative time spent inside completed event loop cycles, in microseconds.
+    pub stat_eventloop_duration_sum_usec: u64,
     /// AUTH failures rejected by ACL credential checks.
     pub stat_acl_access_denied_auth: u64,
     /// Commands rejected because the authenticated user lacks command permission.
@@ -1558,10 +1562,18 @@ pub struct Store {
     input_kbps_samples: [f64; 16],
     /// Ring buffer for instantaneous output kbps sampling (16 samples).
     output_kbps_samples: [f64; 16],
+    /// Ring buffer for instantaneous event loop cycles/sec sampling (16 samples).
+    eventloop_cycles_per_sec_samples: [u64; 16],
+    /// Ring buffer for per-cycle event loop duration sampling (16 samples).
+    eventloop_duration_usec_samples: [u64; 16],
     /// `stat_total_net_input_bytes` at the time of the last sample.
     net_input_last_sample_bytes: u64,
     /// `stat_total_net_output_bytes` at the time of the last sample.
     net_output_last_sample_bytes: u64,
+    /// `stat_eventloop_cycles` at the time of the last sample.
+    eventloop_last_sample_cycles: u64,
+    /// `stat_eventloop_duration_sum_usec` at the time of the last sample.
+    eventloop_last_sample_duration_usec: u64,
 }
 
 const DB_NAMESPACE_PREFIX: &[u8] = b"\0frdb\0";
@@ -1697,6 +1709,8 @@ impl Default for Store {
             stat_unexpected_error_replies: 0,
             stat_total_error_replies: 0,
             errorstats_per_type: HashMap::new(),
+            stat_eventloop_cycles: 0,
+            stat_eventloop_duration_sum_usec: 0,
             stat_acl_access_denied_auth: 0,
             stat_acl_access_denied_cmd: 0,
             stat_acl_access_denied_key: 0,
@@ -1737,8 +1751,12 @@ impl Default for Store {
             ops_sec_last_sample_count: 0,
             input_kbps_samples: [0.0; 16],
             output_kbps_samples: [0.0; 16],
+            eventloop_cycles_per_sec_samples: [0; 16],
+            eventloop_duration_usec_samples: [0; 16],
             net_input_last_sample_bytes: 0,
             net_output_last_sample_bytes: 0,
+            eventloop_last_sample_cycles: 0,
+            eventloop_last_sample_duration_usec: 0,
         }
     }
 }
@@ -1829,6 +1847,13 @@ impl Store {
         self.stat_aof_rewrites = self.stat_aof_rewrites.saturating_add(1);
     }
 
+    pub fn record_eventloop_cycle(&mut self, duration_usec: u64) {
+        self.stat_eventloop_cycles = self.stat_eventloop_cycles.saturating_add(1);
+        self.stat_eventloop_duration_sum_usec = self
+            .stat_eventloop_duration_sum_usec
+            .saturating_add(duration_usec);
+    }
+
     pub fn record_bgsave_status(&mut self, ok: bool) {
         self.stat_rdb_last_bgsave_ok = ok;
     }
@@ -1898,6 +1923,21 @@ impl Store {
         self.net_input_last_sample_bytes = self.stat_total_net_input_bytes;
         self.net_output_last_sample_bytes = self.stat_total_net_output_bytes;
 
+        let cycle_delta = self
+            .stat_eventloop_cycles
+            .saturating_sub(self.eventloop_last_sample_cycles);
+        let duration_delta = self
+            .stat_eventloop_duration_sum_usec
+            .saturating_sub(self.eventloop_last_sample_duration_usec);
+        self.eventloop_cycles_per_sec_samples[self.ops_sec_idx] = cycle_delta
+            .saturating_mul(1000)
+            .checked_div(elapsed_ms)
+            .unwrap_or(0);
+        self.eventloop_duration_usec_samples[self.ops_sec_idx] =
+            duration_delta.checked_div(cycle_delta).unwrap_or(0);
+        self.eventloop_last_sample_cycles = self.stat_eventloop_cycles;
+        self.eventloop_last_sample_duration_usec = self.stat_eventloop_duration_sum_usec;
+
         let used_memory = self.estimate_memory_usage_bytes();
         let used_memory_rss = read_rss_bytes().unwrap_or(used_memory);
         self.observe_memory_sample(used_memory_rss);
@@ -1926,6 +1966,27 @@ impl Store {
         sum / 16.0
     }
 
+    #[must_use]
+    pub fn eventloop_duration_cmd_sum_usec(&self) -> u64 {
+        self.command_histograms
+            .all()
+            .into_iter()
+            .map(|(_, hist)| hist.total_usec)
+            .sum()
+    }
+
+    #[must_use]
+    pub fn instantaneous_eventloop_cycles_per_sec(&self) -> u64 {
+        let sum: u64 = self.eventloop_cycles_per_sec_samples.iter().sum();
+        sum / 16
+    }
+
+    #[must_use]
+    pub fn instantaneous_eventloop_duration_usec(&self) -> u64 {
+        let sum: u64 = self.eventloop_duration_usec_samples.iter().sum();
+        sum / 16
+    }
+
     pub fn reset_info_stats(&mut self) {
         // Upstream config.c::configResetStatCommand calls resetServerStats +
         // resetCommandTableStats + resetErrorTableStats only; it does not
@@ -1937,6 +1998,8 @@ impl Store {
         self.stat_unexpected_error_replies = 0;
         self.stat_total_error_replies = 0;
         self.errorstats_per_type.clear();
+        self.stat_eventloop_cycles = 0;
+        self.stat_eventloop_duration_sum_usec = 0;
         self.stat_acl_access_denied_auth = 0;
         self.stat_acl_access_denied_cmd = 0;
         self.stat_acl_access_denied_key = 0;
@@ -1962,8 +2025,12 @@ impl Store {
         self.ops_sec_last_sample_count = 0;
         self.input_kbps_samples = [0.0; 16];
         self.output_kbps_samples = [0.0; 16];
+        self.eventloop_cycles_per_sec_samples = [0; 16];
+        self.eventloop_duration_usec_samples = [0; 16];
         self.net_input_last_sample_bytes = 0;
         self.net_output_last_sample_bytes = 0;
+        self.eventloop_last_sample_cycles = 0;
+        self.eventloop_last_sample_duration_usec = 0;
     }
 
     fn record_keyspace_lookup(&mut self, key: &[u8], now_ms: u64) -> bool {
@@ -19945,6 +20012,27 @@ mod tests {
             store.record_ops_sec_sample(100);
         }
         assert_eq!(store.instantaneous_ops_per_sec(), 1000);
+    }
+
+    #[test]
+    fn eventloop_sampling_tracks_cumulative_and_instantaneous_metrics() {
+        let mut store = Store::new();
+        for _ in 0..16 {
+            store.record_eventloop_cycle(40);
+            store.record_eventloop_cycle(60);
+            store.record_ops_sec_sample(100);
+        }
+
+        assert_eq!(store.stat_eventloop_cycles, 32);
+        assert_eq!(store.stat_eventloop_duration_sum_usec, 1600);
+        assert_eq!(store.instantaneous_eventloop_cycles_per_sec(), 20);
+        assert_eq!(store.instantaneous_eventloop_duration_usec(), 50);
+
+        store.reset_info_stats();
+        assert_eq!(store.stat_eventloop_cycles, 0);
+        assert_eq!(store.stat_eventloop_duration_sum_usec, 0);
+        assert_eq!(store.instantaneous_eventloop_cycles_per_sec(), 0);
+        assert_eq!(store.instantaneous_eventloop_duration_usec(), 0);
     }
 
     #[test]
