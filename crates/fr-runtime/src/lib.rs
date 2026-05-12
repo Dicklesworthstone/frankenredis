@@ -4772,51 +4772,58 @@ impl Runtime {
         }
 
         if let Some(permission_error) = self.acl_permission_error(&argv) {
-            let (log_reason, object, reason_code, threat_reason, reply) = match permission_error {
-                AclCommandPermissionError::Command => (
-                    "command",
-                    command_name.to_ascii_uppercase(),
-                    "auth.noperm_gate_violation",
-                    format!(
-                        "rejected '{}' prior to dispatch due to insufficient ACL permissions",
-                        command_name
+            let (acl_reason, log_reason, object, reason_code, threat_reason, reply) =
+                match permission_error {
+                    AclCommandPermissionError::Command => (
+                        DispatchAclPermissionReason::Command,
+                        "command",
+                        command_name.to_ascii_uppercase(),
+                        "auth.noperm_gate_violation",
+                        format!(
+                            "rejected '{}' prior to dispatch due to insufficient ACL permissions",
+                            command_name
+                        ),
+                        RespFrame::Error(format!(
+                            "NOPERM this user has no permissions to run the '{}' command",
+                            command_name
+                        )),
                     ),
-                    RespFrame::Error(format!(
-                        "NOPERM this user has no permissions to run the '{}' command",
-                        command_name
-                    )),
-                ),
-                AclCommandPermissionError::Key(key) => {
-                    let key_name = String::from_utf8_lossy(&key).into_owned();
-                    (
-                        "key",
-                        key_name.clone(),
-                        "auth.noperm_key_gate_violation",
-                        format!(
-                            "rejected '{}' prior to dispatch because key '{}' is outside the user's ACL patterns",
-                            command_name, key_name
-                        ),
-                        RespFrame::Error("NOPERM No permissions to access a key".to_string()),
-                    )
-                }
-                AclCommandPermissionError::Channel(channel) => {
-                    let channel_name = String::from_utf8_lossy(&channel).into_owned();
-                    (
-                        "channel",
-                        channel_name.clone(),
-                        "auth.noperm_channel_gate_violation",
-                        format!(
-                            "rejected '{}' prior to dispatch because channel '{}' is outside the user's ACL channel patterns",
-                            command_name, channel_name
-                        ),
-                        RespFrame::Error("NOPERM No permissions to access a channel".to_string()),
-                    )
-                }
-            };
+                    AclCommandPermissionError::Key(key) => {
+                        let key_name = String::from_utf8_lossy(&key).into_owned();
+                        (
+                            DispatchAclPermissionReason::Key,
+                            "key",
+                            key_name.clone(),
+                            "auth.noperm_key_gate_violation",
+                            format!(
+                                "rejected '{}' prior to dispatch because key '{}' is outside the user's ACL patterns",
+                                command_name, key_name
+                            ),
+                            RespFrame::Error("NOPERM No permissions to access a key".to_string()),
+                        )
+                    }
+                    AclCommandPermissionError::Channel(channel) => {
+                        let channel_name = String::from_utf8_lossy(&channel).into_owned();
+                        (
+                            DispatchAclPermissionReason::Channel,
+                            "channel",
+                            channel_name.clone(),
+                            "auth.noperm_channel_gate_violation",
+                            format!(
+                                "rejected '{}' prior to dispatch because channel '{}' is outside the user's ACL channel patterns",
+                                command_name, channel_name
+                            ),
+                            RespFrame::Error(
+                                "NOPERM No permissions to access a channel".to_string(),
+                            ),
+                        )
+                    }
+                };
             self.apply_existing_client_reply_suppression_to_undispatched_reply();
             // (frankenredis-infosections) NOPERM is a pre-handler
             // rejection — bump cmdstat_<cmd>:rejected_calls per upstream.
             self.server.record_command_rejected(&argv);
+            self.record_acl_access_denied(acl_reason);
             self.record_acl_log_event(
                 log_reason,
                 object,
@@ -6025,6 +6032,27 @@ impl Runtime {
         );
     }
 
+    fn record_acl_auth_denied(&mut self) {
+        self.server.store.stat_acl_access_denied_auth = self
+            .server
+            .store
+            .stat_acl_access_denied_auth
+            .saturating_add(1);
+    }
+
+    fn record_acl_access_denied(&mut self, reason: DispatchAclPermissionReason) {
+        let counter = match reason {
+            DispatchAclPermissionReason::Command => {
+                &mut self.server.store.stat_acl_access_denied_cmd
+            }
+            DispatchAclPermissionReason::Key => &mut self.server.store.stat_acl_access_denied_key,
+            DispatchAclPermissionReason::Channel => {
+                &mut self.server.store.stat_acl_access_denied_channel
+            }
+        };
+        *counter = counter.saturating_add(1);
+    }
+
     fn sync_dispatch_client_context_to_session(&mut self) {
         self.session.client_name = self.server.store.dispatch_client_ctx.client_name.clone();
         self.session.client_lib_name = self
@@ -6075,6 +6103,7 @@ impl Runtime {
     }
 
     fn record_deferred_acl_log_event(&mut self, event: PendingAclLogEvent, now_ms: u64) {
+        self.record_acl_access_denied(event.reason);
         let reason = match event.reason {
             DispatchAclPermissionReason::Command => "command",
             DispatchAclPermissionReason::Key => "key",
@@ -6210,6 +6239,7 @@ impl Runtime {
                     RespFrame::SimpleString("OK".to_string())
                 }
                 Err(AuthFailure::WrongPass) => {
+                    self.record_acl_auth_denied();
                     self.record_acl_log_event(
                         "auth",
                         "AUTH".to_string(),
@@ -6231,6 +6261,7 @@ impl Runtime {
                     RespFrame::Error(AUTH_NOT_CONFIGURED_ERROR.to_string())
                 }
                 Err(AuthFailure::WrongPass) => {
+                    self.record_acl_auth_denied();
                     self.record_acl_log_event(
                         "auth",
                         "AUTH".to_string(),
@@ -6343,6 +6374,7 @@ impl Runtime {
                     self.session.authenticated_user = Some(username.to_vec());
                 }
                 Err(AuthFailure::WrongPass) | Err(AuthFailure::NotConfigured) => {
+                    self.record_acl_auth_denied();
                     self.record_acl_log_event(
                         "auth",
                         "AUTH".to_string(),
@@ -26348,6 +26380,68 @@ mod tests {
             RespFrame::Error("NOPERM No permissions to access a channel".to_string())
         );
         let _shard_subscriber = rt.swap_session(previous);
+    }
+
+    #[test]
+    fn info_stats_tracks_acl_access_denial_counters() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL",
+                    b"SETUSER",
+                    b"alice",
+                    b"on",
+                    b">pass",
+                    b"-@all",
+                    b"+get",
+                    b"+publish",
+                    b"+info",
+                    b"resetkeys",
+                    b"~allowed:*",
+                    b"resetchannels",
+                    b"&chan:ok",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        assert!(matches!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"wrong"]), 1),
+            RespFrame::Error(err) if err.starts_with("WRONGPASS ")
+        ));
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"pass"]), 2),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert!(matches!(
+            rt.execute_frame(command(&[b"DEL", b"allowed:1"]), 3),
+            RespFrame::Error(err) if err == "NOPERM this user has no permissions to run the 'DEL' command"
+        ));
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"blocked:1"]), 4),
+            RespFrame::Error("NOPERM No permissions to access a key".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"PUBLISH", b"chan:no", b"msg"]), 5),
+            RespFrame::Error("NOPERM No permissions to access a channel".to_string())
+        );
+
+        let RespFrame::BulkString(Some(bytes)) =
+            rt.execute_frame(command(&[b"INFO", b"stats"]), 6)
+        else {
+            panic!("expected INFO stats bulk string");
+        };
+        let info = String::from_utf8(bytes).expect("INFO stats should be utf8");
+        assert!(info.contains("acl_access_denied_auth:1\r\n"), "{info}");
+        assert!(info.contains("acl_access_denied_cmd:1\r\n"), "{info}");
+        assert!(info.contains("acl_access_denied_key:1\r\n"), "{info}");
+        assert!(
+            info.contains("acl_access_denied_channel:1\r\n"),
+            "{info}"
+        );
     }
 
     #[test]

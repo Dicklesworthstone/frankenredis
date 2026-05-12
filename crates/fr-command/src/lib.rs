@@ -13071,10 +13071,26 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("eventloop_duration_cmd_sum:0\r\n");
         info.push_str("instantaneous_eventloop_cycles_per_sec:0\r\n");
         info.push_str("instantaneous_eventloop_duration_usec:0\r\n");
-        info.push_str("acl_access_denied_auth:0\r\n");
-        info.push_str("acl_access_denied_cmd:0\r\n");
-        info.push_str("acl_access_denied_key:0\r\n");
-        info.push_str("acl_access_denied_channel:0\r\n");
+        let _ = write!(
+            info,
+            "acl_access_denied_auth:{}\r\n",
+            store.stat_acl_access_denied_auth
+        );
+        let _ = write!(
+            info,
+            "acl_access_denied_cmd:{}\r\n",
+            store.stat_acl_access_denied_cmd
+        );
+        let _ = write!(
+            info,
+            "acl_access_denied_key:{}\r\n",
+            store.stat_acl_access_denied_key
+        );
+        let _ = write!(
+            info,
+            "acl_access_denied_channel:{}\r\n",
+            store.stat_acl_access_denied_channel
+        );
         info.push_str("\r\n");
     }
 
@@ -49767,10 +49783,8 @@ mod tests {
     fn info_stats_emits_full_upstream_field_set_including_acl_eventloop_and_pubsubshard() {
         // Pin the 12 INFO stats fields that vendored Redis 7.2 emits but
         // fr was missing — clients that grep on these names see fields
-        // disappear (frankenredis-qgep). All values are 0 stubs because
-        // fr doesn't model ACL access denials, eventloop instrumentation,
-        // active defrag time, or eviction-exceeded time; this pin locks
-        // the field-set parseability, not the value semantics.
+        // disappear (frankenredis-qgep). This pin locks the field-set
+        // parseability; value semantics are covered by targeted tests.
         // Differential probe vs vendored 7.2.4 captured the names from
         // server.c::genRedisInfoString (5760-5882).
         let mut store = Store::new();

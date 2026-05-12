@@ -1471,6 +1471,14 @@ pub struct Store {
     /// upstream server.c::errorstats[] tracked via incrementErrorCount.
     /// (frankenredis-errorstatslines)
     pub errorstats_per_type: HashMap<String, u64>,
+    /// AUTH failures rejected by ACL credential checks.
+    pub stat_acl_access_denied_auth: u64,
+    /// Commands rejected because the authenticated user lacks command permission.
+    pub stat_acl_access_denied_cmd: u64,
+    /// Commands rejected because a key is outside the authenticated user's ACL key patterns.
+    pub stat_acl_access_denied_key: u64,
+    /// Pub/sub commands rejected because a channel is outside the user's ACL channel patterns.
+    pub stat_acl_access_denied_channel: u64,
     /// Total number of client-visible readonly commands processed.
     pub stat_total_reads_processed: u64,
     /// Total number of client-visible write commands processed.
@@ -1689,6 +1697,10 @@ impl Default for Store {
             stat_unexpected_error_replies: 0,
             stat_total_error_replies: 0,
             errorstats_per_type: HashMap::new(),
+            stat_acl_access_denied_auth: 0,
+            stat_acl_access_denied_cmd: 0,
+            stat_acl_access_denied_key: 0,
+            stat_acl_access_denied_channel: 0,
             stat_total_reads_processed: 0,
             stat_total_writes_processed: 0,
             stat_expired_keys: 0,
@@ -1925,6 +1937,10 @@ impl Store {
         self.stat_unexpected_error_replies = 0;
         self.stat_total_error_replies = 0;
         self.errorstats_per_type.clear();
+        self.stat_acl_access_denied_auth = 0;
+        self.stat_acl_access_denied_cmd = 0;
+        self.stat_acl_access_denied_key = 0;
+        self.stat_acl_access_denied_channel = 0;
         self.stat_total_reads_processed = 0;
         self.stat_total_writes_processed = 0;
         self.stat_expired_keys = 0;
