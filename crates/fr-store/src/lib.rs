@@ -1404,6 +1404,10 @@ pub struct Store {
     pub stat_aof_last_bgrewrite_ok: bool,
     /// Status of the last AOF snapshot write reported via INFO persistence.
     pub stat_aof_last_write_ok: bool,
+    /// Keys skipped because they were expired during the most recent RDB load.
+    pub stat_rdb_last_load_keys_expired: u64,
+    /// Keys loaded during the most recent RDB load.
+    pub stat_rdb_last_load_keys_loaded: u64,
     /// Whether appendonly is currently enabled for live INFO/config reporting.
     pub aof_enabled: bool,
 
@@ -1681,6 +1685,8 @@ impl Default for Store {
             stat_rdb_last_bgsave_ok: true,
             stat_aof_last_bgrewrite_ok: true,
             stat_aof_last_write_ok: true,
+            stat_rdb_last_load_keys_expired: 0,
+            stat_rdb_last_load_keys_loaded: 0,
             aof_enabled: false,
             script_nesting_level: 0,
             script_read_only: false,
@@ -2018,6 +2024,8 @@ impl Store {
         self.stat_sync_partial_err = 0;
         self.stat_used_memory_rss = 0;
         self.stat_used_memory_peak = 0;
+        self.stat_rdb_last_load_keys_expired = 0;
+        self.stat_rdb_last_load_keys_loaded = 0;
         self.stat_total_net_input_bytes = 0;
         self.stat_total_net_output_bytes = 0;
         self.ops_sec_samples = [0; 16];

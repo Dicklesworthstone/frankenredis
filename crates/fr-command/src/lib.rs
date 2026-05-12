@@ -12889,6 +12889,16 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("rdb_current_bgsave_time_sec:-1\r\n");
         let _ = write!(info, "rdb_saves:{}\r\n", store.stat_rdb_saves);
         info.push_str("rdb_last_cow_size:0\r\n");
+        let _ = write!(
+            info,
+            "rdb_last_load_keys_expired:{}\r\n",
+            store.stat_rdb_last_load_keys_expired
+        );
+        let _ = write!(
+            info,
+            "rdb_last_load_keys_loaded:{}\r\n",
+            store.stat_rdb_last_load_keys_loaded
+        );
         let _ = write!(info, "aof_enabled:{}\r\n", usize::from(store.aof_enabled));
         info.push_str("aof_rewrite_in_progress:0\r\n");
         info.push_str("aof_rewrite_scheduled:0\r\n");
@@ -12926,8 +12936,6 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("aof_rewrites_consecutive_failures:0\r\n");
         info.push_str("module_fork_in_progress:0\r\n");
         info.push_str("module_fork_last_cow_size:0\r\n");
-        info.push_str("rdb_last_load_keys_expired:0\r\n");
-        info.push_str("rdb_last_load_keys_loaded:0\r\n");
         info.push_str("\r\n");
     }
 
@@ -38090,6 +38098,8 @@ mod tests {
         dispatch_argv(&[b"BGSAVE".to_vec()], &mut store, 1_700_000_007_000).expect("bgsave");
         store.record_aof_bgrewrite_status(false);
         store.record_aof_write_status(false);
+        store.stat_rdb_last_load_keys_expired = 2;
+        store.stat_rdb_last_load_keys_loaded = 5;
 
         let out = dispatch_argv(&[b"INFO".to_vec(), b"persistence".to_vec()], &mut store, 0)
             .expect("info persistence");
@@ -38104,6 +38114,8 @@ mod tests {
             "{info}"
         );
         assert!(info.contains("rdb_saves:2\r\n"), "{info}");
+        assert!(info.contains("rdb_last_load_keys_expired:2\r\n"), "{info}");
+        assert!(info.contains("rdb_last_load_keys_loaded:5\r\n"), "{info}");
         assert!(info.contains("aof_last_bgrewrite_status:err\r\n"), "{info}");
         assert!(info.contains("aof_last_write_status:err\r\n"), "{info}");
         assert!(info.contains("aof_last_rewrite_time_sec:-1\r\n"), "{info}");

@@ -2944,12 +2944,13 @@ impl Runtime {
             None => return Ok(0),
         };
         let (entries, _aux) = read_rdb_file(&path)?;
-        let count = entries.len();
         let mut store = Store::new();
-        apply_rdb_entries_to_store(&mut store, &entries, now_ms)?;
+        let counts = apply_rdb_entries_to_store(&mut store, &entries, now_ms)?;
+        store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
+        store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
         preserve_store_load_context(&mut store, &self.server.store);
         self.server.store = store;
-        Ok(count)
+        Ok(counts.loaded)
     }
 
     fn handle_debug_reload_requested(&mut self, now_ms: u64) -> RespFrame {
@@ -2968,13 +2969,22 @@ impl Runtime {
             return match read_rdb_file(&path) {
                 Ok((entries, _aux)) => {
                     let mut store = Store::new();
-                    if apply_rdb_entries_to_store(&mut store, &entries, now_ms.saturating_add(1))
-                        .is_err()
-                    {
-                        return RespFrame::Error(
-                            "ERR failed to reload dataset from RDB".to_string(),
-                        );
-                    }
+                    let counts = match apply_rdb_entries_to_store(
+                        &mut store,
+                        &entries,
+                        now_ms.saturating_add(1),
+                    ) {
+                        Ok(counts) => counts,
+                        Err(_) => {
+                            return RespFrame::Error(
+                                "ERR failed to reload dataset from RDB".to_string(),
+                            );
+                        }
+                    };
+                    store.stat_rdb_last_load_keys_expired =
+                        u64::try_from(counts.expired).unwrap_or(u64::MAX);
+                    store.stat_rdb_last_load_keys_loaded =
+                        u64::try_from(counts.loaded).unwrap_or(u64::MAX);
                     self.server.store = store;
                     self.session.selected_db = 0;
                     RespFrame::SimpleString("OK".to_string())
@@ -3007,13 +3017,18 @@ impl Runtime {
             }
         };
         let mut store = Store::new();
-        if apply_rdb_entries_to_store(&mut store, &decoded_entries, now_ms.saturating_add(1))
-            .is_err()
-        {
-            return RespFrame::Error(
-                "ERR failed to reload dataset from in-memory RDB round-trip".to_string(),
-            );
-        }
+        let counts =
+            match apply_rdb_entries_to_store(&mut store, &decoded_entries, now_ms.saturating_add(1))
+            {
+                Ok(counts) => counts,
+                Err(_) => {
+                    return RespFrame::Error(
+                        "ERR failed to reload dataset from in-memory RDB round-trip".to_string(),
+                    );
+                }
+            };
+        store.stat_rdb_last_load_keys_expired = u64::try_from(counts.expired).unwrap_or(u64::MAX);
+        store.stat_rdb_last_load_keys_loaded = u64::try_from(counts.loaded).unwrap_or(u64::MAX);
         self.server.store = store;
         self.session.selected_db = 0;
         RespFrame::SimpleString("OK".to_string())
@@ -3245,7 +3260,11 @@ impl Runtime {
             PsyncReply::FullResync { replid, offset } => {
                 let (entries, _aux) = decode_rdb(payload)?;
                 let mut store = Store::new();
-                apply_rdb_entries_to_store(&mut store, &entries, now_ms)?;
+                let counts = apply_rdb_entries_to_store(&mut store, &entries, now_ms)?;
+                store.stat_rdb_last_load_keys_expired =
+                    u64::try_from(counts.expired).unwrap_or(u64::MAX);
+                store.stat_rdb_last_load_keys_loaded =
+                    u64::try_from(counts.loaded).unwrap_or(u64::MAX);
                 self.server.store = store;
                 self.server.aof_records.clear();
                 // Track the base offset where the local AOF buffer starts.
@@ -11719,11 +11738,16 @@ impl Runtime {
         info.push_str("rdb_current_bgsave_time_sec:-1\r\n");
         let _ = write!(info, "rdb_saves:{}\r\n", self.server.store.stat_rdb_saves);
         info.push_str("rdb_last_cow_size:0\r\n");
-        // Upstream populates these from server.rdb_last_load_keys_*
-        // (server.c::genRedisInfoString); fr does not yet track keys
-        // expired/loaded during the most recent RDB load, so report 0.
-        info.push_str("rdb_last_load_keys_expired:0\r\n");
-        info.push_str("rdb_last_load_keys_loaded:0\r\n");
+        let _ = write!(
+            info,
+            "rdb_last_load_keys_expired:{}\r\n",
+            self.server.store.stat_rdb_last_load_keys_expired
+        );
+        let _ = write!(
+            info,
+            "rdb_last_load_keys_loaded:{}\r\n",
+            self.server.store.stat_rdb_last_load_keys_loaded
+        );
         let _ = write!(
             info,
             "aof_enabled:{}\r\n",
@@ -13307,12 +13331,24 @@ fn store_to_rdb_entries(store: &mut Store, now_ms: u64) -> Vec<RdbEntry> {
     entries
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct RdbLoadCounts {
+    loaded: usize,
+    expired: usize,
+}
+
 fn apply_rdb_entries_to_store(
     store: &mut Store,
     entries: &[RdbEntry],
     now_ms: u64,
-) -> Result<(), PersistError> {
+) -> Result<RdbLoadCounts, PersistError> {
+    let mut counts = RdbLoadCounts::default();
     for entry in entries {
+        if entry.expire_ms.is_some_and(|expires_at| expires_at <= now_ms) {
+            counts.expired = counts.expired.saturating_add(1);
+            continue;
+        }
+
         let key = encode_db_key(entry.db, &entry.key);
         match &entry.value {
             RdbValue::String(value) => {
@@ -13446,8 +13482,9 @@ fn apply_rdb_entries_to_store(
                 }
             }
         }
+        counts.loaded = counts.loaded.saturating_add(1);
     }
-    Ok(())
+    Ok(counts)
 }
 
 fn protocol_error_to_resp(error: RespParseError) -> RespFrame {
@@ -24069,12 +24106,20 @@ mod tests {
         let dir = std::env::temp_dir().join("fr_runtime_rdb_preserve_server_context_test");
         let _ = std::fs::create_dir_all(&dir);
         let rdb_path = dir.join("preserve_context.rdb");
-        let entries = vec![RdbEntry {
-            db: 0,
-            key: b"fresh".to_vec(),
-            value: RdbValue::String(b"value".to_vec()),
-            expire_ms: None,
-        }];
+        let entries = vec![
+            RdbEntry {
+                db: 0,
+                key: b"fresh".to_vec(),
+                value: RdbValue::String(b"value".to_vec()),
+                expire_ms: None,
+            },
+            RdbEntry {
+                db: 0,
+                key: b"expired".to_vec(),
+                value: RdbValue::String(b"old".to_vec()),
+                expire_ms: Some(10),
+            },
+        ];
         write_rdb_file(&rdb_path, &entries, &[]).expect("write test rdb");
 
         let mut rt = Runtime::default_strict();
@@ -24083,7 +24128,7 @@ mod tests {
         rt.set_rdb_path(rdb_path);
 
         let loaded = rt.load_rdb(50).expect("load should succeed");
-        assert_eq!(loaded, entries.len());
+        assert_eq!(loaded, 1);
         assert_eq!(rt.server_port(), 6381);
         assert_eq!(rt.server.store.server_run_id, run_id);
 
@@ -24094,6 +24139,14 @@ mod tests {
         let info = String::from_utf8(info_bytes).expect("utf8 info");
         assert!(info.contains("tcp_port:6381\r\n"), "{info}");
         assert!(info.contains(&format!("run_id:{run_id}\r\n")), "{info}");
+
+        let info = rt.execute_frame(command(&[b"INFO", b"persistence"]), 100);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            unreachable!("expected INFO persistence bulk response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8 info");
+        assert!(info.contains("rdb_last_load_keys_expired:1\r\n"), "{info}");
+        assert!(info.contains("rdb_last_load_keys_loaded:1\r\n"), "{info}");
     }
 
     #[test]
