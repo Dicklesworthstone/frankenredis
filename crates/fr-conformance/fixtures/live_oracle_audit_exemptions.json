@@ -10,30 +10,6 @@
       }
     },
     {
-      "fixture": "core_migrate.json",
-      "reason": "MIGRATE parity needs a second Redis endpoint and cross-instance orchestration before it can be promoted into the standard live-oracle matrix.",
-      "coverage": {
-        "kind": "dedicated_fixture",
-        "fixture": "core_migrate.json"
-      }
-    },
-    {
-      "fixture": "core_pubsub.json",
-      "reason": "Pub/Sub parity relies on dedicated subscriber connections and streaming replies that the command-oriented live-oracle matrix does not drive yet.",
-      "coverage": {
-        "kind": "replacement_fixture",
-        "fixture": "core_pubsub_multi_client.json"
-      }
-    },
-    {
-      "fixture": "core_wait.json",
-      "reason": "WAIT/WAITAOF parity needs matrix-level appendonly and replica-topology variations that are still handled by dedicated conformance tests.",
-      "coverage": {
-        "kind": "dedicated_fixture",
-        "fixture": "core_wait.json"
-      }
-    },
-    {
       "fixture": "fr_p2c_006_replication_handshake.json",
       "reason": "Replication handshake coverage runs through the specialized handshake harness rather than the generic live-oracle suite matrix.",
       "coverage": {
