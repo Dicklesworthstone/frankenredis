@@ -3468,6 +3468,24 @@ impl Runtime {
             .insert(session.client_id, session.clone());
     }
 
+    /// (frankenredis-jrqgd) Feed a pre-dispatch sample of a client's
+    /// read/write buffer sizes into the server-wide recent-max
+    /// accumulators so INFO clients emits real
+    /// `client_recent_max_input_buffer` / `client_recent_max_output_buffer`
+    /// values instead of hardcoded zeros. fr-server invokes this from
+    /// handle_readable *before* swapping the session into the runtime,
+    /// while read_buf still holds the inbound bytes that are about to
+    /// be consumed by the dispatch.
+    pub fn observe_client_buffer_sizes(
+        &mut self,
+        input_buffer_bytes: usize,
+        output_buffer_bytes: usize,
+    ) {
+        self.server
+            .store
+            .observe_client_buffer_sizes(input_buffer_bytes, output_buffer_bytes);
+    }
+
     /// Remove a disconnected session from the CLIENT LIST registry.
     pub fn remove_client_session(&mut self, client_id: u64) {
         self.server.client_sessions.remove(&client_id);

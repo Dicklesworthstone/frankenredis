@@ -1498,6 +1498,16 @@ pub struct Store {
     pub stat_blocked_clients: u64,
     /// Number of clients with client-side caching tracking enabled.
     pub stat_tracking_clients: u64,
+    /// (frankenredis-jrqgd) Max read-buffer length observed across any
+    /// client since the last reset. Drives INFO clients'
+    /// `client_recent_max_input_buffer:` field. Updated by the runtime
+    /// after each handle_readable turn via observe_client_buffer_sizes.
+    /// Cleared by CONFIG RESETSTAT and at server start.
+    pub stat_clients_recent_max_input_buffer: usize,
+    /// (frankenredis-jrqgd) Max write-buffer length observed across any
+    /// client since the last reset. Drives INFO clients'
+    /// `client_recent_max_output_buffer:` field.
+    pub stat_clients_recent_max_output_buffer: usize,
     /// Number of successful key lookups performed through store read/query APIs.
     pub stat_keyspace_hits: u64,
     /// Number of missing-key lookups performed through store read/query APIs.
@@ -1776,6 +1786,8 @@ impl Default for Store {
             stat_connected_clients: 0,
             stat_blocked_clients: 0,
             stat_tracking_clients: 0,
+            stat_clients_recent_max_input_buffer: 0,
+            stat_clients_recent_max_output_buffer: 0,
             stat_keyspace_hits: 0,
             stat_keyspace_misses: 0,
             stat_unexpected_error_replies: 0,
@@ -1960,6 +1972,28 @@ impl Store {
         self.stat_used_memory_peak = self.stat_used_memory_peak.max(used_memory_rss);
     }
 
+    /// (frankenredis-jrqgd) Record a per-client read/write buffer size
+    /// sample. Bumps `stat_clients_recent_max_input_buffer` /
+    /// `stat_clients_recent_max_output_buffer` to the running max. Mirrors
+    /// the contributions that upstream's clientsCron makes to
+    /// `server.stat_clients_max_input_buffer` etc. fr applies the simpler
+    /// "reset on CONFIG RESETSTAT only" semantics other counters already
+    /// use rather than upstream's decaying-max, which is acceptable
+    /// because the values are still monotonically informative between
+    /// resets.
+    pub fn observe_client_buffer_sizes(
+        &mut self,
+        input_buffer_bytes: usize,
+        output_buffer_bytes: usize,
+    ) {
+        if input_buffer_bytes > self.stat_clients_recent_max_input_buffer {
+            self.stat_clients_recent_max_input_buffer = input_buffer_bytes;
+        }
+        if output_buffer_bytes > self.stat_clients_recent_max_output_buffer {
+            self.stat_clients_recent_max_output_buffer = output_buffer_bytes;
+        }
+    }
+
     /// Record a periodic sample for ops/sec, throughput, and RSS high-water calculations.
     /// Call this once per server-hz tick (e.g. every 100ms at 10hz).
     /// `elapsed_ms` is the wall-clock time since the last sample (typically ~100ms).
@@ -2105,6 +2139,11 @@ impl Store {
         self.net_output_last_sample_bytes = 0;
         self.eventloop_last_sample_cycles = 0;
         self.eventloop_last_sample_duration_usec = 0;
+        // (frankenredis-jrqgd) Mirror upstream resetServerStats which
+        // zeroes the recent-max-input/output-buffer accumulators along
+        // with the rest of the per-server counters.
+        self.stat_clients_recent_max_input_buffer = 0;
+        self.stat_clients_recent_max_output_buffer = 0;
     }
 
     fn record_keyspace_lookup(&mut self, key: &[u8], now_ms: u64) -> bool {

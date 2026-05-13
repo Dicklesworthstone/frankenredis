@@ -12813,8 +12813,19 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         let _ = write!(info, "connected_clients:{connected}\r\n");
         info.push_str("cluster_connections:0\r\n");
         let _ = write!(info, "maxclients:{}\r\n", store.server_maxclients);
-        info.push_str("client_recent_max_input_buffer:0\r\n");
-        info.push_str("client_recent_max_output_buffer:0\r\n");
+        // (frankenredis-jrqgd) Real recent-max read/write buffer
+        // accumulators, fed by Runtime::record_client_session after
+        // every handle_readable turn. Resets on CONFIG RESETSTAT.
+        let _ = write!(
+            info,
+            "client_recent_max_input_buffer:{}\r\n",
+            store.stat_clients_recent_max_input_buffer
+        );
+        let _ = write!(
+            info,
+            "client_recent_max_output_buffer:{}\r\n",
+            store.stat_clients_recent_max_output_buffer
+        );
         let _ = write!(info, "blocked_clients:{}\r\n", store.stat_blocked_clients);
         let _ = write!(info, "tracking_clients:{}\r\n", store.stat_tracking_clients);
         info.push_str("clients_in_timeout_table:0\r\n");

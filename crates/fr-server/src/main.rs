@@ -1218,6 +1218,12 @@ fn handle_readable(
     conn.session.qbuf_bytes = conn.read_buf.len();
     conn.session.qbuf_free_bytes = conn.read_buf.capacity().saturating_sub(conn.read_buf.len());
     conn.session.output_buffer_bytes = conn.write_buf.len();
+    // (frankenredis-jrqgd) Sample the *pre-dispatch* read/write buffer
+    // sizes into the server-wide recent-max accumulators. We must do
+    // this BEFORE the dispatch drains read_buf — by the time we get
+    // to record_client_session below, qbuf_bytes is back to 0 because
+    // the parser consumed every byte.
+    runtime.observe_client_buffer_sizes(conn.read_buf.len(), conn.write_buf.len());
 
     // Swap in this client's session, process frames, swap back.
     let session = std::mem::take(&mut conn.session);
@@ -1249,6 +1255,12 @@ fn handle_readable(
     conn.session.qbuf_bytes = conn.read_buf.len();
     conn.session.qbuf_free_bytes = conn.read_buf.capacity().saturating_sub(conn.read_buf.len());
     conn.session.output_buffer_bytes = conn.write_buf.len();
+    // (frankenredis-jrqgd) Observe the *post-dispatch* write buffer
+    // here as well: handle_writable may drain it before the next
+    // handle_readable runs, so this is the only moment we see the
+    // reply's pre-flush size. We rely on observe_client_buffer_sizes
+    // taking the running max -- passing 0 for qbuf is fine.
+    runtime.observe_client_buffer_sizes(0, conn.write_buf.len());
     runtime.record_client_session(&conn.session);
 
     // If there's data to write, ensure we're registered for WRITABLE so the
