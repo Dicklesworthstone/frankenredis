@@ -12704,7 +12704,31 @@ const REDIS_QUICKLIST_NODE_OVERHEAD_BYTES: usize = 32;
 const REDIS_SKIPLIST_BASE_OVERHEAD_BYTES: usize = 128;
 const REDIS_SKIPLIST_NODE_OVERHEAD_BYTES: usize = 32;
 const REDIS_SCORE_BYTES: usize = 8;
-const REDIS_STREAM_BASE_OVERHEAD_BYTES: usize = 4_656;
+// (frankenredis-4h50d) The stream's "empty" VALUE-side baseline:
+//   robj(16) + stream struct(80) + 2 * rax base (~280 each for the
+//   main rax tree and the consumer-groups rax tree). Vendored Redis
+//   7.2.4 reports MEMORY USAGE = 656 for a freshly-created empty
+//   stream keyed by "xs" (2B); subtracting the key contribution
+//   (dict_entry 24 + sds_alloc for 2B 8 = 32) yields the value-side
+//   baseline of 624. Pre-fix fr used 4_656, which collapsed the
+//   listpack-node allocation INTO the empty baseline.
+const REDIS_STREAM_BASE_OVERHEAD_BYTES: usize = 624;
+
+// (frankenredis-4h50d) When a stream has at least one entry, upstream
+// allocates a listpack node whose initial reservation lands at
+// approximately 4072 bytes (jemalloc-rounded) regardless of how
+// little payload the first entry actually carries. The node then
+// holds entries up to `stream-node-max-entries` (default 100) before
+// a new node is allocated. For 1-100 small entries the stream's
+// MEMORY USAGE stays at 4728 = 656 + 4072.
+const REDIS_STREAM_LISTPACK_NODE_BASE_BYTES: usize = 4_072;
+
+// (frankenredis-4h50d) Default upstream cap; controllable via the
+// stream-node-max-entries config knob in real Redis. Once a listpack
+// node holds this many entries, a fresh node is allocated for the
+// next batch.
+const REDIS_STREAM_NODE_MAX_ENTRIES: usize = 100;
+
 const REDIS_STREAM_ENTRY_ID_BYTES: usize = 16;
 
 fn estimate_entry_memory_usage_bytes(key: &[u8], entry: &Entry) -> usize {
@@ -12865,6 +12889,19 @@ fn estimate_stream_memory_usage_bytes(entries: &StreamEntries) -> usize {
         return REDIS_STREAM_BASE_OVERHEAD_BYTES;
     }
 
+    // (frankenredis-4h50d) Upstream allocates one listpack node per
+    // `stream-node-max-entries` (default 100) entry batch. Each node
+    // has a fixed ~4072-byte initial reservation that easily holds
+    // 100 small entries; once content exceeds that, the allocation
+    // grows by the rounded payload delta. For the common small case,
+    // a single node yields MEMORY USAGE = 656 + 4072 = 4728. We
+    // approximate `n` entries by ceil(n / NODE_MAX_ENTRIES) listpack
+    // nodes, each contributing at least NODE_BASE_BYTES.
+    let entry_count = entries.len();
+    let node_count = entry_count.div_ceil(REDIS_STREAM_NODE_MAX_ENTRIES);
+
+    // Sum the listpack content footprint across all entries — this is
+    // only used when payload-per-node grows beyond the base reservation.
     let payload = entries
         .values()
         .map(|fields| {
@@ -12880,9 +12917,11 @@ fn estimate_stream_memory_usage_bytes(entries: &StreamEntries) -> usize {
         })
         .sum::<usize>();
 
-    REDIS_STREAM_BASE_OVERHEAD_BYTES.saturating_add(redis_allocation_size(
-        REDIS_LISTPACK_HEADER_AND_EOF_BYTES.saturating_add(payload),
-    ))
+    let base_nodes_alloc = node_count.saturating_mul(REDIS_STREAM_LISTPACK_NODE_BASE_BYTES);
+    let payload_alloc = redis_allocation_size(REDIS_LISTPACK_HEADER_AND_EOF_BYTES + payload);
+    let nodes_alloc = std::cmp::max(base_nodes_alloc, payload_alloc);
+
+    REDIS_STREAM_BASE_OVERHEAD_BYTES.saturating_add(nodes_alloc)
 }
 
 fn estimate_listpack_object_memory_usage_bytes(payload: usize) -> usize {
@@ -14902,13 +14941,10 @@ mod tests {
         store
             .xadd(b"xs", (1, 0), &[(b"f".to_vec(), b"v".to_vec())], 0)
             .expect("xadd stream");
-        // Vendored returns 4728 here; fr returns 4720. The 8-byte
-        // residual gap is the stream-specific listpack record
-        // overhead (master-entry preamble + per-record flags/lp-count
-        // markers) that fr does not yet model — tracked as a separate
-        // follow-up bead. The string/list/hash/set/zset cases above
-        // ARE byte-equivalent post-frankenredis-40v6f.
-        assert_eq!(store.memory_usage_for_key(b"xs", 0), Some(4_720));
+        // (frankenredis-4h50d) Vendored returns 4728 for a stream
+        // with a single tiny entry. fr now matches: base 656 + first
+        // listpack node 4072 = 4728.
+        assert_eq!(store.memory_usage_for_key(b"xs", 0), Some(4_728));
     }
 
     #[test]
