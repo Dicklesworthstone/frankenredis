@@ -1854,6 +1854,13 @@ impl<'a> LuaState<'a> {
             "modf",
             "frexp",
             "ldexp",
+            // (frankenredis-9dmqr) Trig helpers vendored Redis 7.2.4
+            // exposes through Lua 5.1's lmathlib but fr was missing.
+            "deg",
+            "rad",
+            "sinh",
+            "cosh",
+            "tanh",
         ] {
             math_table.set(
                 LuaValue::Str(name.as_bytes().to_vec()),
@@ -3652,6 +3659,29 @@ impl<'a> LuaState<'a> {
                 let y = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
                 let x = args.get(1).and_then(|v| v.to_number()).unwrap_or(1.0);
                 Ok(vec![LuaValue::Number(y.atan2(x))])
+            }
+            // (frankenredis-9dmqr) Five additional math helpers Lua 5.1
+            // exposes that fr's interpreter was missing dispatch arms
+            // for. Rust's f64 stdlib supplies each operation directly.
+            "math.deg" => {
+                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                Ok(vec![LuaValue::Number(n.to_degrees())])
+            }
+            "math.rad" => {
+                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                Ok(vec![LuaValue::Number(n.to_radians())])
+            }
+            "math.sinh" => {
+                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                Ok(vec![LuaValue::Number(n.sinh())])
+            }
+            "math.cosh" => {
+                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                Ok(vec![LuaValue::Number(n.cosh())])
+            }
+            "math.tanh" => {
+                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                Ok(vec![LuaValue::Number(n.tanh())])
             }
             "math.log10" => {
                 let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
@@ -5822,7 +5852,16 @@ fn json_escape_bytes(bytes: &[u8]) -> String {
 /// in the same canonical lowercase form Lua emits.
 pub(crate) fn lua_number_to_string(n: f64) -> String {
     if n.is_nan() {
-        return "nan".to_string();
+        // (frankenredis-9dmqr) C printf %g of a quiet NaN with the
+        // sign bit set (which IEEE 754 0/0 produces on x86-64) prints
+        // '-nan'. Lua 5.1's tostring goes through %.14g so its output
+        // matches. Use the sign bit to choose, with positive NaN as
+        // a fallback for hand-built NaN values.
+        return if n.is_sign_negative() {
+            "-nan".to_string()
+        } else {
+            "nan".to_string()
+        };
     }
     if n.is_infinite() {
         return if n > 0.0 { "inf".to_string() } else { "-inf".to_string() };
