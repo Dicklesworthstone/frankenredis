@@ -13617,7 +13617,11 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
     ("lolwut", -1, "readonly fast", 0, 0, 0),
     ("cluster", -2, "", 0, 0, 0),
     ("asking", 1, "fast", 0, 0, 0),
-    ("readonly", 1, "", 0, 0, 0),
+    // (frankenredis-5t2pb) Upstream commands.def declares both
+    // readonly and readwrite with CMD_FAST|CMD_LOADING|CMD_STALE
+    // (server.c::readonlyCommand / readwriteCommand entries). fr was
+    // missing the flags on readonly only.
+    ("readonly", 1, "loading stale fast", 0, 0, 0),
     ("readwrite", 1, "loading stale fast", 0, 0, 0),
     ("replconf", -1, "admin noscript loading stale allow_busy", 0, 0, 0),
     ("psync", -3, "admin noscript no_async_loading no_multi", 0, 0, 0),
@@ -14805,11 +14809,16 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
             "RW because it may change the internal representation of the key, and propagate to replicas",
             &["RW", "access"],
         )),
-        "eval" | "fcall" => Some((
+        // (frankenredis-5t2pb) EVAL/EVALSHA/FCALL share the same keyspec
+        // flags upstream (RW|ACCESS|UPDATE) because the script body can
+        // arbitrarily mutate the passed-in keys; ditto for the _RO
+        // variants which are pinned to RO|ACCESS so MULTI EXEC and ACL
+        // enforcement still treat them as read-only.
+        "eval" | "evalsha" | "fcall" => Some((
             "We cannot tell how the keys will be used so we assume the worst, RW and UPDATE",
             &["RW", "access", "update"],
         )),
-        "eval_ro" | "fcall_ro" => Some((
+        "eval_ro" | "evalsha_ro" | "fcall_ro" => Some((
             "We cannot tell how the keys will be used so we assume the worst, RO and ACCESS",
             &["RO", "access"],
         )),
@@ -14939,41 +14948,55 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
 /// find_keys keynum {keynumidx=0, firstkey=1, keystep=1}.
 fn command_info_keynum_keyspec(name: &str) -> Option<RespFrame> {
     let (notes, flags) = command_info_keyspec_override(name)?;
-    if !matches!(name, "eval" | "eval_ro" | "fcall" | "fcall_ro") {
+    // (frankenredis-5t2pb) EVALSHA / EVALSHA_RO share EVAL's keynum
+    // keyspec shape -- the script id sits at argv[1], numkeys at
+    // argv[2], then the keys themselves at argv[3..]. Upstream
+    // commands.def declares both with identical
+    // KSPEC_FK_KEYNUM .fk.keynum={0,1,1} entries.
+    if !matches!(
+        name,
+        "eval" | "eval_ro" | "evalsha" | "evalsha_ro" | "fcall" | "fcall_ro"
+    ) {
         return None;
     }
-    Some(RespFrame::Array(Some(vec![
-        hello_bulk("notes"),
-        RespFrame::BulkString(Some(notes.as_bytes().to_vec())),
-        hello_bulk("flags"),
-        RespFrame::Array(Some(
-            flags.iter().copied().map(hello_simple).collect(),
-        )),
-        hello_bulk("begin_search"),
+    // (frankenredis-5t2pb) Upstream commands.def declares notes=NULL
+    // for EVALSHA/EVALSHA_RO but a string for EVAL/EVAL_RO/FCALL/FCALL_RO.
+    // The keyspec emitter must omit the notes field entirely for the
+    // hash-id variants to remain byte-exact with vendored.
+    let mut entries: Vec<RespFrame> = Vec::with_capacity(10);
+    if !matches!(name, "evalsha" | "evalsha_ro") {
+        entries.push(hello_bulk("notes"));
+        entries.push(RespFrame::BulkString(Some(notes.as_bytes().to_vec())));
+    }
+    entries.push(hello_bulk("flags"));
+    entries.push(RespFrame::Array(Some(
+        flags.iter().copied().map(hello_simple).collect(),
+    )));
+    entries.push(hello_bulk("begin_search"));
+    entries.push(RespFrame::Array(Some(vec![
+        hello_bulk("type"),
+        hello_bulk("index"),
+        hello_bulk("spec"),
         RespFrame::Array(Some(vec![
-            hello_bulk("type"),
             hello_bulk("index"),
-            hello_bulk("spec"),
-            RespFrame::Array(Some(vec![
-                hello_bulk("index"),
-                RespFrame::Integer(2),
-            ])),
+            RespFrame::Integer(2),
         ])),
-        hello_bulk("find_keys"),
+    ])));
+    entries.push(hello_bulk("find_keys"));
+    entries.push(RespFrame::Array(Some(vec![
+        hello_bulk("type"),
+        hello_bulk("keynum"),
+        hello_bulk("spec"),
         RespFrame::Array(Some(vec![
-            hello_bulk("type"),
-            hello_bulk("keynum"),
-            hello_bulk("spec"),
-            RespFrame::Array(Some(vec![
-                hello_bulk("keynumidx"),
-                RespFrame::Integer(0),
-                hello_bulk("firstkey"),
-                RespFrame::Integer(1),
-                hello_bulk("keystep"),
-                RespFrame::Integer(1),
-            ])),
+            hello_bulk("keynumidx"),
+            RespFrame::Integer(0),
+            hello_bulk("firstkey"),
+            RespFrame::Integer(1),
+            hello_bulk("keystep"),
+            RespFrame::Integer(1),
         ])),
-    ])))
+    ])));
+    Some(RespFrame::Array(Some(entries)))
 }
 
 /// (frankenredis-imkpg) Build a single key_spec frame whose begin_search
@@ -61703,7 +61726,10 @@ mod tests {
                 "PSYNC",
                 &["admin", "noscript", "no_async_loading", "no_multi"],
             ),
-            ("READONLY", &[]),
+            // (frankenredis-5t2pb) Upstream commands.def declares
+            // readonly with CMD_FAST|CMD_LOADING|CMD_STALE, same as
+            // readwrite. fr previously emitted an empty flags array.
+            ("READONLY", &["loading", "stale", "fast"]),
             ("READWRITE", &["loading", "stale", "fast"]),
             (
                 "REPLICAOF",
