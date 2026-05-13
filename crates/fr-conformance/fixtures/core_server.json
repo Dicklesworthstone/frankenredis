@@ -1277,7 +1277,7 @@
       ],
       "expect": {
         "kind": "integer",
-        "value": 52
+        "value": 72
       }
     },
     {
@@ -1305,7 +1305,7 @@
       ],
       "expect": {
         "kind": "integer",
-        "value": 52
+        "value": 72
       }
     },
     {
