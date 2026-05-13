@@ -18510,8 +18510,14 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             pair("total.allocated", used),
             pair("startup.allocated", 0),
             pair("replication.backlog", 0),
-            pair("clients.slaves", 0),
-            pair("clients.normal", 0),
+            // (frankenredis-zfu61) Real per-client buffer summation
+            // maintained by Runtime::refresh_client_memory_aggregates
+            // after every record_client_session / remove_client_session.
+            // Mirrors upstream object.c::getMemoryOverheadData which
+            // accumulates clientMemUsage(c) into mh->clients_normal /
+            // mh->clients_slaves.
+            pair("clients.slaves", store.stat_clients_replica_mem_bytes as i64),
+            pair("clients.normal", store.stat_clients_normal_mem_bytes as i64),
             pair("cluster.links", 0),
             pair("aof.buffer", 0),
             // (frankenredis-t344m) Same data sources as INFO memory's

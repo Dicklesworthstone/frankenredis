@@ -1508,6 +1508,18 @@ pub struct Store {
     /// client since the last reset. Drives INFO clients'
     /// `client_recent_max_output_buffer:` field.
     pub stat_clients_recent_max_output_buffer: usize,
+    /// (frankenredis-zfu61) Sum of memory used by all currently-connected
+    /// normal (non-replica) clients. Recomputed by the runtime in
+    /// record_client_session / remove_client_session by iterating every
+    /// live session and adding per-client struct overhead + qbuf +
+    /// qbuf-free + obl. Drives MEMORY STATS' `clients.normal` field.
+    /// Mirrors upstream object.c::getMemoryOverheadData which sums
+    /// clientMemUsage(c) per client into mh->clients_normal.
+    pub stat_clients_normal_mem_bytes: usize,
+    /// (frankenredis-zfu61) Same as `stat_clients_normal_mem_bytes` but
+    /// for replica connections (CLIENT_TYPE_SLAVE). Drives MEMORY
+    /// STATS' `clients.slaves` field.
+    pub stat_clients_replica_mem_bytes: usize,
     /// Number of successful key lookups performed through store read/query APIs.
     pub stat_keyspace_hits: u64,
     /// Number of missing-key lookups performed through store read/query APIs.
@@ -1788,6 +1800,8 @@ impl Default for Store {
             stat_tracking_clients: 0,
             stat_clients_recent_max_input_buffer: 0,
             stat_clients_recent_max_output_buffer: 0,
+            stat_clients_normal_mem_bytes: 0,
+            stat_clients_replica_mem_bytes: 0,
             stat_keyspace_hits: 0,
             stat_keyspace_misses: 0,
             stat_unexpected_error_replies: 0,

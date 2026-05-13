@@ -3466,6 +3466,42 @@ impl Runtime {
         self.server
             .client_sessions
             .insert(session.client_id, session.clone());
+        self.refresh_client_memory_aggregates();
+    }
+
+    /// (frankenredis-zfu61) Recompute `stat_clients_normal_mem_bytes` and
+    /// `stat_clients_replica_mem_bytes` on Store by iterating every
+    /// currently-live client session. Drives MEMORY STATS' clients.normal
+    /// and clients.slaves fields. Per-client cost mirrors upstream
+    /// clientMemUsage(c) = querybuf_alloc + reply_buffer_size + per-client
+    /// struct overhead; fr's per-session contribution is 432 (struct
+    /// overhead, same baseline tepuj uses for tot-mem) + qbuf + qbuf-free
+    /// + output_buffer. The replica/normal bucket follows
+    /// Runtime::is_replica.
+    fn refresh_client_memory_aggregates(&mut self) {
+        const PER_CLIENT_STRUCT_BYTES: usize = 432;
+        let mut normal_total: usize = 0;
+        let mut replica_total: usize = 0;
+        let replica_client_ids: HashSet<u64> = self
+            .server
+            .replication_runtime_state
+            .replicas
+            .keys()
+            .copied()
+            .collect();
+        for (id, session) in &self.server.client_sessions {
+            let mem = PER_CLIENT_STRUCT_BYTES
+                .saturating_add(session.qbuf_bytes)
+                .saturating_add(session.qbuf_free_bytes)
+                .saturating_add(session.output_buffer_bytes);
+            if replica_client_ids.contains(id) {
+                replica_total = replica_total.saturating_add(mem);
+            } else {
+                normal_total = normal_total.saturating_add(mem);
+            }
+        }
+        self.server.store.stat_clients_normal_mem_bytes = normal_total;
+        self.server.store.stat_clients_replica_mem_bytes = replica_total;
     }
 
     /// (frankenredis-jrqgd) Feed a pre-dispatch sample of a client's
@@ -3490,6 +3526,9 @@ impl Runtime {
     pub fn remove_client_session(&mut self, client_id: u64) {
         self.server.client_sessions.remove(&client_id);
         self.remove_client_tracking_observer(client_id);
+        // (frankenredis-zfu61) Re-sum live sessions so MEMORY STATS'
+        // clients.normal / clients.slaves drop on disconnect.
+        self.refresh_client_memory_aggregates();
     }
 
     /// Track a new client connection for INFO stats.
