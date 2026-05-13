@@ -14863,9 +14863,29 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
         | "brpop" | "bzpopmin" | "bzpopmax" => &["RW", "access", "delete"],
 
         // CMD_KEY_RW | CMD_KEY_DELETE — member removed without exposing
-        // the value back to the caller.
+        // the value back to the caller. (frankenredis-n8vpq) Added
+        // zremrangeby{rank,score,lex}: upstream commands.def declares
+        // them ZREMRANGEBY*_Keyspecs = CMD_KEY_RW|CMD_KEY_DELETE (range
+        // member removal that may delete the key when empty); fr's
+        // heuristic was emitting 'RW access' which mis-modeled the
+        // effect as a read.
         "hdel" | "srem" | "zrem" | "lrem" | "ltrim" | "xautoclaim" | "xtrim"
-        | "xdel" => &["RW", "delete"],
+        | "xdel" | "zremrangebyrank" | "zremrangebyscore" | "zremrangebylex" => {
+            &["RW", "delete"]
+        }
+
+        // (frankenredis-n8vpq) WATCH only registers a watcher on the
+        // key for the upcoming MULTI/EXEC transaction; it does not
+        // mutate. Upstream commands.def declares WATCH_Keyspecs as
+        // CMD_KEY_RO. fr's heuristic was emitting 'RW access'.
+        "watch" => &["RO"],
+
+        // (frankenredis-n8vpq) MEMORY USAGE only inspects size, not
+        // value bytes. Upstream commands.def declares
+        // MEMORY_USAGE_Keyspecs as CMD_KEY_RO. fr's heuristic was
+        // emitting 'RO access' (the extra 'access' flag is wrong for
+        // a metadata-only read).
+        "memory|usage" => &["RO"],
 
         // (frankenredis-o3xwt) Per upstream commands.def OBJECT
         // subcommands (object.c::objectCommand) only need RO bare —
