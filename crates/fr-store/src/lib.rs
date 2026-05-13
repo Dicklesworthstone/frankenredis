@@ -331,16 +331,37 @@ pub struct StreamGroupReadOptions {
     pub count: Option<usize>,
 }
 
+/// (frankenredis-p4dpj) Mirrors upstream stream.c streamConsumer:
+/// seen_time is the ms timestamp when the consumer was last
+/// touched (creation, XREADGROUP, XCLAIM, XACK). active_time is the
+/// ms timestamp of the last time the consumer SUCCESSFULLY consumed
+/// or claimed entries; remains None until that happens (which
+/// upstream represents as active_time = -1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StreamConsumerMetadata {
+    pub seen_time_ms: u64,
+    pub active_time_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamGroup {
     pub last_delivered_id: StreamId,
     pub entries_read: Option<u64>,
     pub consumers: BTreeSet<Vec<u8>>,
+    /// (frankenredis-p4dpj) Per-consumer seen/active timestamps used
+    /// by XINFO CONSUMERS to emit `idle` and `inactive` matching
+    /// upstream Redis 7.2.4. Populated alongside `consumers` on
+    /// every consumer create/touch path.
+    pub consumer_metadata: BTreeMap<Vec<u8>, StreamConsumerMetadata>,
     pub pending: StreamPendingEntries,
 }
 
 pub type StreamGroupState = BTreeMap<Vec<u8>, StreamGroup>;
 pub type StreamGroupInfo = (Vec<u8>, usize, usize, StreamId, Option<u64>);
+/// (frankenredis-p4dpj) Extended XINFO CONSUMERS row: name, pending,
+/// idle_ms (since last seen), and inactive_ms_or_neg_one (-1 when
+/// the consumer was never active).
+pub type StreamConsumerInfoEx = (Vec<u8>, usize, u64, i64);
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ZaddOptions {
@@ -7756,12 +7777,22 @@ impl Store {
         pending: StreamPendingEntries,
     ) {
         let groups = self.stream_groups.entry(key.to_vec()).or_default();
+        // (frankenredis-p4dpj) RDB/AOF restore reconstructs consumer
+        // names from the dump format but does not carry per-consumer
+        // timestamps. Seed metadata with seen_time_ms = 0 and
+        // active_time_ms = None to mirror "freshly recovered" state.
+        let consumer_metadata = consumers
+            .iter()
+            .cloned()
+            .map(|name| (name, StreamConsumerMetadata::default()))
+            .collect();
         groups.insert(
             group_name,
             StreamGroup {
                 last_delivered_id,
                 entries_read,
                 consumers,
+                consumer_metadata,
                 pending,
             },
         );
@@ -8166,6 +8197,14 @@ impl Store {
         };
         let consumer = consumer.to_vec();
         group_state.consumers.insert(consumer.clone());
+        // (frankenredis-p4dpj) XREADGROUP is the canonical "active"
+        // path: stamp both seen_time and active_time to now_ms.
+        let meta = group_state
+            .consumer_metadata
+            .entry(consumer.clone())
+            .or_insert(StreamConsumerMetadata::default());
+        meta.seen_time_ms = now_ms;
+        meta.active_time_ms = Some(now_ms);
         if let StreamGroupReadCursor::NewEntries = cursor
             && let Some(last_seen_id) = last_seen_id
         {
@@ -8400,7 +8439,14 @@ impl Store {
         }
 
         if !claimed_ids.is_empty() {
-            group_state.consumers.insert(consumer_vec);
+            group_state.consumers.insert(consumer_vec.clone());
+            // (frankenredis-p4dpj) XCLAIM is also an "active" event.
+            let meta = group_state
+                .consumer_metadata
+                .entry(consumer_vec)
+                .or_insert(StreamConsumerMetadata::default());
+            meta.seen_time_ms = now_ms;
+            meta.active_time_ms = Some(now_ms);
             self.dirty = self.dirty.saturating_add(claimed_ids.len() as u64);
         }
 
@@ -8506,7 +8552,14 @@ impl Store {
             }
         }
         if !claimed_ids.is_empty() {
-            group_state.consumers.insert(consumer_vec);
+            group_state.consumers.insert(consumer_vec.clone());
+            // (frankenredis-p4dpj) XAUTOCLAIM is also an "active" event.
+            let meta = group_state
+                .consumer_metadata
+                .entry(consumer_vec)
+                .or_insert(StreamConsumerMetadata::default());
+            meta.seen_time_ms = now_ms;
+            meta.active_time_ms = Some(now_ms);
             self.dirty = self.dirty.saturating_add(claimed_ids.len() as u64);
         }
 
@@ -8632,6 +8685,7 @@ impl Store {
                 last_delivered_id: start_id,
                 entries_read,
                 consumers: BTreeSet::new(),
+                consumer_metadata: BTreeMap::new(),
                 pending: BTreeMap::new(),
             },
         );
@@ -8764,6 +8818,19 @@ impl Store {
                     };
                     let created = group_state.consumers.insert(consumer.to_vec());
                     if created {
+                        // (frankenredis-p4dpj) XGROUP CREATECONSUMER
+                        // seeds seen_time_ms at creation but leaves
+                        // active_time_ms as None until the consumer
+                        // first claims/reads entries. This is the path
+                        // where vendored's XINFO CONSUMERS emits
+                        // inactive = -1.
+                        group_state.consumer_metadata.insert(
+                            consumer.to_vec(),
+                            StreamConsumerMetadata {
+                                seen_time_ms: now_ms,
+                                active_time_ms: None,
+                            },
+                        );
                         self.dirty = self.dirty.saturating_add(1);
                     }
                     Ok(Some(created))
@@ -8779,7 +8846,7 @@ impl Store {
         key: &[u8],
         group: &[u8],
         now_ms: u64,
-    ) -> Result<Option<Vec<StreamConsumerInfo>>, StoreError> {
+    ) -> Result<Option<Vec<StreamConsumerInfoEx>>, StoreError> {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Err(StoreError::KeyNotFound);
         }
@@ -8792,7 +8859,7 @@ impl Store {
                     let Some(group_state) = groups.get(group) else {
                         return Ok(None);
                     };
-                    let mut result: Vec<StreamConsumerInfo> = Vec::new();
+                    let mut result: Vec<StreamConsumerInfoEx> = Vec::new();
                     for consumer_name in &group_state.consumers {
                         // Count pending entries for this consumer
                         let pending_count = group_state
@@ -8800,7 +8867,11 @@ impl Store {
                             .values()
                             .filter(|pe| pe.consumer == *consumer_name)
                             .count();
-                        // Compute idle time: time since last delivery to this consumer
+                        // (frankenredis-p4dpj) Idle = ms since seen_time;
+                        // for legacy compatibility (consumers restored
+                        // from RDB with seen_time = 0) fall back to
+                        // the last_delivered_ms across pending entries.
+                        let meta = group_state.consumer_metadata.get(consumer_name);
                         let last_delivery = group_state
                             .pending
                             .values()
@@ -8808,12 +8879,38 @@ impl Store {
                             .map(|pe| pe.last_delivered_ms)
                             .max()
                             .unwrap_or(0);
-                        let idle_ms = if last_delivery > 0 {
-                            now_ms.saturating_sub(last_delivery)
-                        } else {
-                            0
+                        let idle_ms = match meta {
+                            Some(m) if m.seen_time_ms > 0 => {
+                                now_ms.saturating_sub(m.seen_time_ms)
+                            }
+                            _ => {
+                                if last_delivery > 0 {
+                                    now_ms.saturating_sub(last_delivery)
+                                } else {
+                                    0
+                                }
+                            }
                         };
-                        result.push((consumer_name.clone(), pending_count, idle_ms));
+                        // (frankenredis-p4dpj) inactive = ms since
+                        // active_time when set; -1 sentinel otherwise
+                        // (matching upstream consumer->active_time =
+                        // -1 default until first XREADGROUP/XCLAIM).
+                        let inactive_ms_or_neg_one: i64 = match meta {
+                            Some(m) => match m.active_time_ms {
+                                Some(at) if at > 0 => {
+                                    i64::try_from(now_ms.saturating_sub(at))
+                                        .unwrap_or(i64::MAX)
+                                }
+                                _ => -1,
+                            },
+                            None => -1,
+                        };
+                        result.push((
+                            consumer_name.clone(),
+                            pending_count,
+                            idle_ms,
+                            inactive_ms_or_neg_one,
+                        ));
                     }
                     result.sort_by(|a, b| a.0.cmp(&b.0));
                     Ok(Some(result))
@@ -8842,6 +8939,8 @@ impl Store {
                         return Ok(None);
                     };
                     group_state.consumers.remove(consumer);
+                    // (frankenredis-p4dpj) Drop the metadata alongside.
+                    group_state.consumer_metadata.remove(consumer);
                     let mut removed_pending = 0_u64;
                     group_state.pending.retain(|_, pending_entry| {
                         let keep = pending_entry.consumer.as_slice() != consumer;
@@ -12125,12 +12224,22 @@ fn restore_stream_groups(groups: Vec<fr_persist::RdbStreamConsumerGroup>) -> Str
                     )
                 })
                 .collect();
+            let consumers_set: BTreeSet<Vec<u8>> = group.consumers.into_iter().collect();
+            // (frankenredis-p4dpj) Persisted dumps don't carry
+            // per-consumer timestamps yet; seed with defaults so
+            // XINFO CONSUMERS still produces a stable shape.
+            let consumer_metadata = consumers_set
+                .iter()
+                .cloned()
+                .map(|name| (name, StreamConsumerMetadata::default()))
+                .collect();
             (
                 group.name,
                 StreamGroup {
                     last_delivered_id: (group.last_delivered_id_ms, group.last_delivered_id_seq),
                     entries_read: group.entries_read,
-                    consumers: group.consumers.into_iter().collect(),
+                    consumers: consumers_set,
+                    consumer_metadata,
                     pending,
                 },
             )
@@ -18330,7 +18439,7 @@ mod tests {
         assert_eq!(
             consumers
                 .into_iter()
-                .map(|(name, _pending, _idle)| name)
+                .map(|(name, _pending, _idle, _inactive)| name)
                 .collect::<Vec<_>>(),
             vec![b"c1".to_vec(), b"c2".to_vec()]
         );

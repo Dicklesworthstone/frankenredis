@@ -5953,12 +5953,12 @@ fn stream_group_info_to_frame(
     }
 }
 
-/// (br-frankenredis-f6z6)
+/// (br-frankenredis-f6z6, extended by frankenredis-p4dpj)
 fn stream_consumer_info_to_frame(
-    info: (Vec<u8>, usize, u64),
+    info: (Vec<u8>, usize, u64, i64),
     resp_protocol_version: i64,
 ) -> RespFrame {
-    let (name, pending_count, idle_ms) = info;
+    let (name, pending_count, idle_ms, inactive_or_neg_one) = info;
     let pairs: Vec<(RespFrame, RespFrame)> = vec![
         (
             RespFrame::BulkString(Some(b"name".to_vec())),
@@ -5974,7 +5974,7 @@ fn stream_consumer_info_to_frame(
         ),
         (
             RespFrame::BulkString(Some(b"inactive".to_vec())),
-            RespFrame::Integer(i64::try_from(idle_ms).unwrap_or(i64::MAX)),
+            RespFrame::Integer(inactive_or_neg_one),
         ),
     ];
     if resp_protocol_version == 3 {
@@ -5995,13 +5995,22 @@ fn stream_consumer_info_to_frame(
 /// seen/active timestamps and per-consumer PEL details.
 /// (frankenredis-hgqc, frankenredis-xjmm)
 fn stream_full_consumer_info_to_frame(
-    info: (Vec<u8>, usize, u64),
+    info: (Vec<u8>, usize, u64, i64),
     pending: Vec<RespFrame>,
     now_ms: u64,
     resp_protocol_version: i64,
 ) -> RespFrame {
-    let (name, pending_count, idle_ms) = info;
+    let (name, pending_count, idle_ms, inactive_or_neg_one) = info;
     let seen_time = now_ms.saturating_sub(idle_ms);
+    // (frankenredis-p4dpj) active-time mirrors inactive: when -1
+    // (never active) emit -1, otherwise reconstruct the absolute
+    // timestamp from now_ms - inactive_ms.
+    let active_time: i64 = if inactive_or_neg_one < 0 {
+        -1
+    } else {
+        i64::try_from(now_ms.saturating_sub(inactive_or_neg_one as u64))
+            .unwrap_or(i64::MAX)
+    };
     let pairs: Vec<(RespFrame, RespFrame)> = vec![
         (
             RespFrame::BulkString(Some(b"name".to_vec())),
@@ -6013,7 +6022,7 @@ fn stream_full_consumer_info_to_frame(
         ),
         (
             RespFrame::BulkString(Some(b"active-time".to_vec())),
-            RespFrame::Integer(i64::try_from(seen_time).unwrap_or(i64::MAX)),
+            RespFrame::Integer(active_time),
         ),
         (
             RespFrame::BulkString(Some(b"pel-count".to_vec())),
@@ -31274,7 +31283,10 @@ mod tests {
                     RespFrame::BulkString(Some(b"idle".to_vec())),
                     RespFrame::Integer(0),
                     RespFrame::BulkString(Some(b"inactive".to_vec())),
-                    RespFrame::Integer(0),
+                    // (frankenredis-p4dpj) freshly-created consumer
+                    // via XGROUP CREATECONSUMER has active_time = None
+                    // -> inactive = -1 (matches vendored 7.2.4).
+                    RespFrame::Integer(-1),
                 ])),
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(b"name".to_vec())),
@@ -31284,7 +31296,7 @@ mod tests {
                     RespFrame::BulkString(Some(b"idle".to_vec())),
                     RespFrame::Integer(0),
                     RespFrame::BulkString(Some(b"inactive".to_vec())),
-                    RespFrame::Integer(0),
+                    RespFrame::Integer(-1),
                 ])),
             ]))
         );

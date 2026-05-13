@@ -1463,7 +1463,7 @@
               },
               {
                 "kind": "integer",
-                "value": 0
+                "value": -1
               }
             ]
           },
@@ -1500,7 +1500,7 @@
               },
               {
                 "kind": "integer",
-                "value": 0
+                "value": -1
               }
             ]
           }
@@ -1634,7 +1634,7 @@
               },
               {
                 "kind": "integer",
-                "value": 0
+                "value": -1
               }
             ]
           }
@@ -4653,245 +4653,551 @@
         "value": 1
       }
     },
-
-
-
     {
       "name": "xadd_maxlen_setup_flush",
       "now_ms": 90000,
-      "argv": ["FLUSHDB"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xadd_maxlen_seed_1",
       "now_ms": 90000,
-      "argv": ["XADD", "trimstream", "1-0", "k", "v1"],
-      "expect": { "kind": "bulk", "value": "1-0" }
+      "argv": [
+        "XADD",
+        "trimstream",
+        "1-0",
+        "k",
+        "v1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "1-0"
+      }
     },
     {
       "name": "xadd_maxlen_seed_2",
       "now_ms": 90000,
-      "argv": ["XADD", "trimstream", "2-0", "k", "v2"],
-      "expect": { "kind": "bulk", "value": "2-0" }
+      "argv": [
+        "XADD",
+        "trimstream",
+        "2-0",
+        "k",
+        "v2"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "2-0"
+      }
     },
     {
       "name": "xadd_maxlen_seed_3",
       "now_ms": 90000,
-      "argv": ["XADD", "trimstream", "3-0", "k", "v3"],
-      "expect": { "kind": "bulk", "value": "3-0" }
+      "argv": [
+        "XADD",
+        "trimstream",
+        "3-0",
+        "k",
+        "v3"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "3-0"
+      }
     },
     {
       "name": "xadd_with_maxlen_trims_to_2",
       "now_ms": 90000,
-      "argv": ["XADD", "trimstream", "MAXLEN", "2", "4-0", "k", "v4"],
-      "expect": { "kind": "bulk", "value": "4-0" }
+      "argv": [
+        "XADD",
+        "trimstream",
+        "MAXLEN",
+        "2",
+        "4-0",
+        "k",
+        "v4"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "4-0"
+      }
     },
     {
       "name": "xadd_maxlen_verify_length",
       "now_ms": 90000,
-      "argv": ["XLEN", "trimstream"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "XLEN",
+        "trimstream"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
     {
       "name": "xadd_maxlen_verify_oldest_removed",
       "now_ms": 90000,
-      "argv": ["XRANGE", "trimstream", "-", "+"],
+      "argv": [
+        "XRANGE",
+        "trimstream",
+        "-",
+        "+"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "array", "value": [
-            { "kind": "bulk", "value": "3-0" },
-            { "kind": "array", "value": [
-              { "kind": "bulk", "value": "k" },
-              { "kind": "bulk", "value": "v3" }
-            ]}
-          ]},
-          { "kind": "array", "value": [
-            { "kind": "bulk", "value": "4-0" },
-            { "kind": "array", "value": [
-              { "kind": "bulk", "value": "k" },
-              { "kind": "bulk", "value": "v4" }
-            ]}
-          ]}
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "3-0"
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "k"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "v3"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "4-0"
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "k"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "v4"
+                  }
+                ]
+              }
+            ]
+          }
         ]
       }
     },
     {
       "name": "xadd_maxlen_approx_trims",
       "now_ms": 90000,
-      "argv": ["XADD", "trimstream", "MAXLEN", "~", "1", "5-0", "k", "v5"],
-      "expect": { "kind": "bulk", "value": "5-0" }
+      "argv": [
+        "XADD",
+        "trimstream",
+        "MAXLEN",
+        "~",
+        "1",
+        "5-0",
+        "k",
+        "v5"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "5-0"
+      }
     },
     {
       "name": "xadd_maxlen_approx_verify_length",
       "now_ms": 90000,
-      "argv": ["XLEN", "trimstream"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "XLEN",
+        "trimstream"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "xadd_maxlen_equals_modifier",
       "now_ms": 90000,
-      "argv": ["XADD", "trimstream", "MAXLEN", "=", "1", "6-0", "k", "v6"],
-      "expect": { "kind": "bulk", "value": "6-0" }
+      "argv": [
+        "XADD",
+        "trimstream",
+        "MAXLEN",
+        "=",
+        "1",
+        "6-0",
+        "k",
+        "v6"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "6-0"
+      }
     },
     {
       "name": "xadd_maxlen_equals_verify_length",
       "now_ms": 90000,
-      "argv": ["XLEN", "trimstream"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "XLEN",
+        "trimstream"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
-
-
-
     {
       "name": "xadd_minid_flush",
       "now_ms": 91000,
-      "argv": ["FLUSHDB"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xadd_minid_seed_1",
       "now_ms": 91000,
-      "argv": ["XADD", "minids", "100-0", "k", "a"],
-      "expect": { "kind": "bulk", "value": "100-0" }
+      "argv": [
+        "XADD",
+        "minids",
+        "100-0",
+        "k",
+        "a"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "100-0"
+      }
     },
     {
       "name": "xadd_minid_seed_2",
       "now_ms": 91000,
-      "argv": ["XADD", "minids", "200-0", "k", "b"],
-      "expect": { "kind": "bulk", "value": "200-0" }
+      "argv": [
+        "XADD",
+        "minids",
+        "200-0",
+        "k",
+        "b"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "200-0"
+      }
     },
     {
       "name": "xadd_minid_seed_3",
       "now_ms": 91000,
-      "argv": ["XADD", "minids", "300-0", "k", "c"],
-      "expect": { "kind": "bulk", "value": "300-0" }
+      "argv": [
+        "XADD",
+        "minids",
+        "300-0",
+        "k",
+        "c"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "300-0"
+      }
     },
     {
       "name": "xadd_with_minid_trims_old",
       "now_ms": 91000,
-      "argv": ["XADD", "minids", "MINID", "200-0", "400-0", "k", "d"],
-      "expect": { "kind": "bulk", "value": "400-0" }
+      "argv": [
+        "XADD",
+        "minids",
+        "MINID",
+        "200-0",
+        "400-0",
+        "k",
+        "d"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "400-0"
+      }
     },
     {
       "name": "xadd_minid_verify_length",
       "now_ms": 91000,
-      "argv": ["XLEN", "minids"],
-      "expect": { "kind": "integer", "value": 3 }
+      "argv": [
+        "XLEN",
+        "minids"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 3
+      }
     },
     {
       "name": "xadd_minid_verify_entries",
       "now_ms": 91000,
-      "argv": ["XRANGE", "minids", "-", "+"],
+      "argv": [
+        "XRANGE",
+        "minids",
+        "-",
+        "+"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          { "kind": "array", "value": [
-            { "kind": "bulk", "value": "200-0" },
-            { "kind": "array", "value": [
-              { "kind": "bulk", "value": "k" },
-              { "kind": "bulk", "value": "b" }
-            ]}
-          ]},
-          { "kind": "array", "value": [
-            { "kind": "bulk", "value": "300-0" },
-            { "kind": "array", "value": [
-              { "kind": "bulk", "value": "k" },
-              { "kind": "bulk", "value": "c" }
-            ]}
-          ]},
-          { "kind": "array", "value": [
-            { "kind": "bulk", "value": "400-0" },
-            { "kind": "array", "value": [
-              { "kind": "bulk", "value": "k" },
-              { "kind": "bulk", "value": "d" }
-            ]}
-          ]}
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "200-0"
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "k"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "b"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "300-0"
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "k"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "c"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "400-0"
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "k"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "d"
+                  }
+                ]
+              }
+            ]
+          }
         ]
       }
     },
-
-
-
     {
       "name": "xadd_nomkstream_flush",
       "now_ms": 92000,
-      "argv": ["FLUSHDB"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xadd_nomkstream_nonexistent_returns_nil",
       "now_ms": 92000,
-      "argv": ["XADD", "noexist", "NOMKSTREAM", "*", "k", "v"],
-      "expect": { "kind": "bulk", "value": null }
+      "argv": [
+        "XADD",
+        "noexist",
+        "NOMKSTREAM",
+        "*",
+        "k",
+        "v"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": null
+      }
     },
     {
       "name": "xadd_nomkstream_verify_not_created",
       "now_ms": 92000,
-      "argv": ["EXISTS", "noexist"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "EXISTS",
+        "noexist"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "xadd_nomkstream_existing_stream_works",
       "now_ms": 92000,
-      "argv": ["XADD", "existing", "1-0", "k", "v"],
-      "expect": { "kind": "bulk", "value": "1-0" }
+      "argv": [
+        "XADD",
+        "existing",
+        "1-0",
+        "k",
+        "v"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "1-0"
+      }
     },
     {
       "name": "xadd_nomkstream_on_existing_succeeds",
       "now_ms": 92000,
-      "argv": ["XADD", "existing", "NOMKSTREAM", "2-0", "k", "v2"],
-      "expect": { "kind": "bulk", "value": "2-0" }
+      "argv": [
+        "XADD",
+        "existing",
+        "NOMKSTREAM",
+        "2-0",
+        "k",
+        "v2"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "2-0"
+      }
     },
     {
       "name": "xadd_nomkstream_verify_length",
       "now_ms": 92000,
-      "argv": ["XLEN", "existing"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "XLEN",
+        "existing"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
-
-
-
     {
       "name": "xadd_partial_auto_id_flush",
       "now_ms": 94000,
-      "argv": ["FLUSHDB"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xadd_partial_auto_first_entry",
       "now_ms": 94000,
-      "argv": ["XADD", "pstream", "5000-*", "k", "v1"],
-      "expect": { "kind": "bulk", "value": "5000-0" }
+      "argv": [
+        "XADD",
+        "pstream",
+        "5000-*",
+        "k",
+        "v1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "5000-0"
+      }
     },
     {
       "name": "xadd_partial_auto_same_ms_increments_seq",
       "now_ms": 94000,
-      "argv": ["XADD", "pstream", "5000-*", "k", "v2"],
-      "expect": { "kind": "bulk", "value": "5000-1" }
+      "argv": [
+        "XADD",
+        "pstream",
+        "5000-*",
+        "k",
+        "v2"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "5000-1"
+      }
     },
     {
       "name": "xadd_partial_auto_same_ms_increments_again",
       "now_ms": 94000,
-      "argv": ["XADD", "pstream", "5000-*", "k", "v3"],
-      "expect": { "kind": "bulk", "value": "5000-2" }
+      "argv": [
+        "XADD",
+        "pstream",
+        "5000-*",
+        "k",
+        "v3"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "5000-2"
+      }
     },
     {
       "name": "xadd_partial_auto_new_ms_resets_seq",
       "now_ms": 94000,
-      "argv": ["XADD", "pstream", "6000-*", "k", "v4"],
-      "expect": { "kind": "bulk", "value": "6000-0" }
+      "argv": [
+        "XADD",
+        "pstream",
+        "6000-*",
+        "k",
+        "v4"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "6000-0"
+      }
     },
     {
       "name": "xadd_partial_auto_verify_length",
       "now_ms": 94000,
-      "argv": ["XLEN", "pstream"],
-      "expect": { "kind": "integer", "value": 4 }
+      "argv": [
+        "XLEN",
+        "pstream"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 4
+      }
     },
     {
       "name": "xadd_partial_auto_lower_ms_rejected",
       "now_ms": 94000,
-      "argv": ["XADD", "pstream", "4000-*", "k", "v5"],
+      "argv": [
+        "XADD",
+        "pstream",
+        "4000-*",
+        "k",
+        "v5"
+      ],
       "expect": {
         "kind": "error",
         "value": "ERR The ID specified in XADD is equal or smaller than the target stream top item"
@@ -4900,845 +5206,2619 @@
     {
       "name": "xadd_partial_auto_with_maxlen",
       "now_ms": 94000,
-      "argv": ["XADD", "pstream", "MAXLEN", "2", "7000-*", "k", "v6"],
-      "expect": { "kind": "bulk", "value": "7000-0" }
+      "argv": [
+        "XADD",
+        "pstream",
+        "MAXLEN",
+        "2",
+        "7000-*",
+        "k",
+        "v6"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "7000-0"
+      }
     },
     {
       "name": "xadd_partial_auto_maxlen_verify",
       "now_ms": 94000,
-      "argv": ["XLEN", "pstream"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "XLEN",
+        "pstream"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
-
     {
       "name": "xtrim_minid_flush",
       "now_ms": 93000,
-      "argv": ["FLUSHDB"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "FLUSHDB"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xtrim_minid_seed_1",
       "now_ms": 93000,
-      "argv": ["XADD", "ts", "10-0", "k", "a"],
-      "expect": { "kind": "bulk", "value": "10-0" }
+      "argv": [
+        "XADD",
+        "ts",
+        "10-0",
+        "k",
+        "a"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "10-0"
+      }
     },
     {
       "name": "xtrim_minid_seed_2",
       "now_ms": 93000,
-      "argv": ["XADD", "ts", "20-0", "k", "b"],
-      "expect": { "kind": "bulk", "value": "20-0" }
+      "argv": [
+        "XADD",
+        "ts",
+        "20-0",
+        "k",
+        "b"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "20-0"
+      }
     },
     {
       "name": "xtrim_minid_seed_3",
       "now_ms": 93000,
-      "argv": ["XADD", "ts", "30-0", "k", "c"],
-      "expect": { "kind": "bulk", "value": "30-0" }
+      "argv": [
+        "XADD",
+        "ts",
+        "30-0",
+        "k",
+        "c"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "30-0"
+      }
     },
     {
       "name": "xtrim_minid_removes_below_threshold",
       "now_ms": 93000,
-      "argv": ["XTRIM", "ts", "MINID", "20-0"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "XTRIM",
+        "ts",
+        "MINID",
+        "20-0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "xtrim_minid_verify_length",
       "now_ms": 93000,
-      "argv": ["XLEN", "ts"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "XLEN",
+        "ts"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
     {
       "name": "xtrim_minid_approx",
       "now_ms": 93000,
-      "argv": ["XTRIM", "ts", "MINID", "~", "30-0"],
-      "expect": { "kind": "integer", "value": 0 }
+      "argv": [
+        "XTRIM",
+        "ts",
+        "MINID",
+        "~",
+        "30-0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 0
+      }
     },
     {
       "name": "xtrim_minid_verify_final",
       "now_ms": 93000,
-      "argv": ["XLEN", "ts"],
-      "expect": { "kind": "integer", "value": 2 }
+      "argv": [
+        "XLEN",
+        "ts"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 2
+      }
     },
-
-    {"name":"_comment_xinfo_stream_full","now_ms":95000,"argv":["DEL","xifull"],"expect":{"kind":"any_integer"}},
-
+    {
+      "name": "_comment_xinfo_stream_full",
+      "now_ms": 95000,
+      "argv": [
+        "DEL",
+        "xifull"
+      ],
+      "expect": {
+        "kind": "any_integer"
+      }
+    },
     {
       "name": "xinfo_full_setup_add1",
       "now_ms": 95000,
-      "argv": ["XADD", "xifull", "1-1", "a", "1"],
-      "expect": { "kind": "bulk", "value": "1-1" }
+      "argv": [
+        "XADD",
+        "xifull",
+        "1-1",
+        "a",
+        "1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "1-1"
+      }
     },
     {
       "name": "xinfo_full_setup_add2",
       "now_ms": 95000,
-      "argv": ["XADD", "xifull", "2-1", "b", "2"],
-      "expect": { "kind": "bulk", "value": "2-1" }
+      "argv": [
+        "XADD",
+        "xifull",
+        "2-1",
+        "b",
+        "2"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "2-1"
+      }
     },
     {
       "name": "xinfo_full_setup_add3",
       "now_ms": 95000,
-      "argv": ["XADD", "xifull", "3-1", "c", "3"],
-      "expect": { "kind": "bulk", "value": "3-1" }
+      "argv": [
+        "XADD",
+        "xifull",
+        "3-1",
+        "c",
+        "3"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "3-1"
+      }
     },
     {
       "name": "xinfo_full_no_groups",
       "now_ms": 95000,
-      "argv": ["XINFO", "STREAM", "xifull", "FULL"],
+      "argv": [
+        "XINFO",
+        "STREAM",
+        "xifull",
+        "FULL"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"bulk","value":"length"},
-          {"kind":"integer","value":3},
-          {"kind":"bulk","value":"radix-tree-keys"},
-          {"kind":"integer","value":1},
-          {"kind":"bulk","value":"radix-tree-nodes"},
-          {"kind":"integer","value":2},
-          {"kind":"bulk","value":"last-generated-id"},
-          {"kind":"bulk","value":"3-1"},
-          {"kind":"bulk","value":"max-deleted-entry-id"},
-          {"kind":"bulk","value":"0-0"},
-          {"kind":"bulk","value":"entries-added"},
-          {"kind":"integer","value":3},
-          {"kind":"bulk","value":"recorded-first-entry-id"},
-          {"kind":"bulk","value":"1-1"},
-          {"kind":"bulk","value":"entries"},
-          {"kind":"array","value":[
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"1-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"a"},{"kind":"bulk","value":"1"}]}
-            ]},
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"2-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"b"},{"kind":"bulk","value":"2"}]}
-            ]},
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"3-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"c"},{"kind":"bulk","value":"3"}]}
-            ]}
-          ]},
-          {"kind":"bulk","value":"groups"},
-          {"kind":"array","value":[]}
+          {
+            "kind": "bulk",
+            "value": "length"
+          },
+          {
+            "kind": "integer",
+            "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-keys"
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-nodes"
+          },
+          {
+            "kind": "integer",
+            "value": 2
+          },
+          {
+            "kind": "bulk",
+            "value": "last-generated-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "3-1"
+          },
+          {
+            "kind": "bulk",
+            "value": "max-deleted-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "0-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries-added"
+          },
+          {
+            "kind": "integer",
+            "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "recorded-first-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "1-1"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "1-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "a"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "1"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "2-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "b"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "2"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "3-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "c"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "3"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "groups"
+          },
+          {
+            "kind": "array",
+            "value": []
+          }
         ]
       }
     },
     {
       "name": "xinfo_full_count_2_limits_entries",
       "now_ms": 95000,
-      "argv": ["XINFO", "STREAM", "xifull", "FULL", "COUNT", "2"],
+      "argv": [
+        "XINFO",
+        "STREAM",
+        "xifull",
+        "FULL",
+        "COUNT",
+        "2"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"bulk","value":"length"},
-          {"kind":"integer","value":3},
-          {"kind":"bulk","value":"radix-tree-keys"},
-          {"kind":"integer","value":1},
-          {"kind":"bulk","value":"radix-tree-nodes"},
-          {"kind":"integer","value":2},
-          {"kind":"bulk","value":"last-generated-id"},
-          {"kind":"bulk","value":"3-1"},
-          {"kind":"bulk","value":"max-deleted-entry-id"},
-          {"kind":"bulk","value":"0-0"},
-          {"kind":"bulk","value":"entries-added"},
-          {"kind":"integer","value":3},
-          {"kind":"bulk","value":"recorded-first-entry-id"},
-          {"kind":"bulk","value":"1-1"},
-          {"kind":"bulk","value":"entries"},
-          {"kind":"array","value":[
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"1-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"a"},{"kind":"bulk","value":"1"}]}
-            ]},
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"2-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"b"},{"kind":"bulk","value":"2"}]}
-            ]}
-          ]},
-          {"kind":"bulk","value":"groups"},
-          {"kind":"array","value":[]}
+          {
+            "kind": "bulk",
+            "value": "length"
+          },
+          {
+            "kind": "integer",
+            "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-keys"
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-nodes"
+          },
+          {
+            "kind": "integer",
+            "value": 2
+          },
+          {
+            "kind": "bulk",
+            "value": "last-generated-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "3-1"
+          },
+          {
+            "kind": "bulk",
+            "value": "max-deleted-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "0-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries-added"
+          },
+          {
+            "kind": "integer",
+            "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "recorded-first-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "1-1"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "1-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "a"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "1"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "2-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "b"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "2"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "groups"
+          },
+          {
+            "kind": "array",
+            "value": []
+          }
         ]
       }
     },
     {
       "name": "xinfo_full_nonexistent_key",
       "now_ms": 95000,
-      "argv": ["XINFO", "STREAM", "no_such_stream_xifull", "FULL"],
-      "expect": { "kind": "error", "value": "ERR no such key" }
+      "argv": [
+        "XINFO",
+        "STREAM",
+        "no_such_stream_xifull",
+        "FULL"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR no such key"
+      }
     },
     {
       "name": "xinfo_full_wrongtype_setup",
       "now_ms": 95000,
-      "argv": ["SET", "xifull_str", "val"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "SET",
+        "xifull_str",
+        "val"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xinfo_full_wrongtype_check",
       "now_ms": 95000,
-      "argv": ["XINFO", "STREAM", "xifull_str", "FULL"],
-      "expect": { "kind": "error", "value": "WRONGTYPE Operation against a key holding the wrong kind of value" }
+      "argv": [
+        "XINFO",
+        "STREAM",
+        "xifull_str",
+        "FULL"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "WRONGTYPE Operation against a key holding the wrong kind of value"
+      }
     },
     {
       "name": "xinfo_full_bad_arity_missing_count_value",
       "now_ms": 95000,
-      "argv": ["XINFO", "STREAM", "xifull", "FULL", "COUNT"],
-      "expect": { "kind": "error", "value": "ERR unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP." }
+      "argv": [
+        "XINFO",
+        "STREAM",
+        "xifull",
+        "FULL",
+        "COUNT"
+      ],
+      "expect": {
+        "kind": "error",
+        "value": "ERR unknown subcommand or wrong number of arguments for 'STREAM'. Try XINFO HELP."
+      }
     },
     {
       "name": "xinfo_full_with_group_setup",
       "now_ms": 95000,
-      "argv": ["XGROUP", "CREATE", "xifull", "grp1", "0"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "XGROUP",
+        "CREATE",
+        "xifull",
+        "grp1",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xinfo_full_with_group",
       "now_ms": 95000,
-      "argv": ["XINFO", "STREAM", "xifull", "FULL"],
+      "argv": [
+        "XINFO",
+        "STREAM",
+        "xifull",
+        "FULL"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"bulk","value":"length"},
-          {"kind":"integer","value":3},
-          {"kind":"bulk","value":"radix-tree-keys"},
-          {"kind":"integer","value":1},
-          {"kind":"bulk","value":"radix-tree-nodes"},
-          {"kind":"integer","value":2},
-          {"kind":"bulk","value":"last-generated-id"},
-          {"kind":"bulk","value":"3-1"},
-          {"kind":"bulk","value":"max-deleted-entry-id"},
-          {"kind":"bulk","value":"0-0"},
-          {"kind":"bulk","value":"entries-added"},
-          {"kind":"integer","value":3},
-          {"kind":"bulk","value":"recorded-first-entry-id"},
-          {"kind":"bulk","value":"1-1"},
-          {"kind":"bulk","value":"entries"},
-          {"kind":"array","value":[
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"1-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"a"},{"kind":"bulk","value":"1"}]}
-            ]},
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"2-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"b"},{"kind":"bulk","value":"2"}]}
-            ]},
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"3-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"c"},{"kind":"bulk","value":"3"}]}
-            ]}
-          ]},
-          {"kind":"bulk","value":"groups"},
-          {"kind":"array","value":[
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"name"},
-              {"kind":"bulk","value":"grp1"},
-              {"kind":"bulk","value":"last-delivered-id"},
-              {"kind":"bulk","value":"0-0"},
-              {"kind":"bulk","value":"entries-read"},
-              {"kind":"bulk","value":null},
-              {"kind":"bulk","value":"lag"},
-              {"kind":"integer","value":3},
-              {"kind":"bulk","value":"pel-count"},
-              {"kind":"integer","value":0},
-              {"kind":"bulk","value":"pending"},
-              {"kind":"array","value":[]},
-              {"kind":"bulk","value":"consumers"},
-              {"kind":"array","value":[]}
-            ]}
-          ]}
+          {
+            "kind": "bulk",
+            "value": "length"
+          },
+          {
+            "kind": "integer",
+            "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-keys"
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-nodes"
+          },
+          {
+            "kind": "integer",
+            "value": 2
+          },
+          {
+            "kind": "bulk",
+            "value": "last-generated-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "3-1"
+          },
+          {
+            "kind": "bulk",
+            "value": "max-deleted-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "0-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries-added"
+          },
+          {
+            "kind": "integer",
+            "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "recorded-first-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "1-1"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "1-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "a"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "1"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "2-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "b"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "2"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "3-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "c"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "3"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "groups"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "name"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "grp1"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "last-delivered-id"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "0-0"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "entries-read"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": null
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "lag"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 3
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "pel-count"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 0
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "pending"
+                  },
+                  {
+                    "kind": "array",
+                    "value": []
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "consumers"
+                  },
+                  {
+                    "kind": "array",
+                    "value": []
+                  }
+                ]
+              }
+            ]
+          }
         ]
       }
     },
     {
       "name": "xinfo_full_count_0_empty_entries",
       "now_ms": 95000,
-      "argv": ["XINFO", "STREAM", "xifull", "FULL", "COUNT", "0"],
+      "argv": [
+        "XINFO",
+        "STREAM",
+        "xifull",
+        "FULL",
+        "COUNT",
+        "0"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"bulk","value":"length"},
-          {"kind":"integer","value":3},
-          {"kind":"bulk","value":"radix-tree-keys"},
-          {"kind":"integer","value":1},
-          {"kind":"bulk","value":"radix-tree-nodes"},
-          {"kind":"integer","value":2},
-          {"kind":"bulk","value":"last-generated-id"},
-          {"kind":"bulk","value":"3-1"},
-          {"kind":"bulk","value":"max-deleted-entry-id"},
-          {"kind":"bulk","value":"0-0"},
-          {"kind":"bulk","value":"entries-added"},
-          {"kind":"integer","value":3},
-          {"kind":"bulk","value":"recorded-first-entry-id"},
-          {"kind":"bulk","value":"1-1"},
-          {"kind":"bulk","value":"entries"},
-          {"kind":"array","value":[
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"1-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"a"},{"kind":"bulk","value":"1"}]}
-            ]},
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"2-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"b"},{"kind":"bulk","value":"2"}]}
-            ]},
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"3-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"c"},{"kind":"bulk","value":"3"}]}
-            ]}
-          ]},
-          {"kind":"bulk","value":"groups"},
-          {"kind":"array","value":[
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"name"},
-              {"kind":"bulk","value":"grp1"},
-              {"kind":"bulk","value":"last-delivered-id"},
-              {"kind":"bulk","value":"0-0"},
-              {"kind":"bulk","value":"entries-read"},
-              {"kind":"bulk","value":null},
-              {"kind":"bulk","value":"lag"},
-              {"kind":"integer","value":3},
-              {"kind":"bulk","value":"pel-count"},
-              {"kind":"integer","value":0},
-              {"kind":"bulk","value":"pending"},
-              {"kind":"array","value":[]},
-              {"kind":"bulk","value":"consumers"},
-              {"kind":"array","value":[]}
-            ]}
-          ]}
+          {
+            "kind": "bulk",
+            "value": "length"
+          },
+          {
+            "kind": "integer",
+            "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-keys"
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-nodes"
+          },
+          {
+            "kind": "integer",
+            "value": 2
+          },
+          {
+            "kind": "bulk",
+            "value": "last-generated-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "3-1"
+          },
+          {
+            "kind": "bulk",
+            "value": "max-deleted-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "0-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries-added"
+          },
+          {
+            "kind": "integer",
+            "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "recorded-first-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "1-1"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "1-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "a"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "1"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "2-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "b"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "2"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "3-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "c"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "3"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "groups"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "name"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "grp1"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "last-delivered-id"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "0-0"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "entries-read"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": null
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "lag"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 3
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "pel-count"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 0
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "pending"
+                  },
+                  {
+                    "kind": "array",
+                    "value": []
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "consumers"
+                  },
+                  {
+                    "kind": "array",
+                    "value": []
+                  }
+                ]
+              }
+            ]
+          }
         ]
       }
     },
     {
       "name": "xgroup_entriesread_setup_1",
       "now_ms": 96000,
-      "argv": ["XADD", "xientries", "1-1", "a", "1"],
-      "expect": { "kind": "bulk", "value": "1-1" }
+      "argv": [
+        "XADD",
+        "xientries",
+        "1-1",
+        "a",
+        "1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "1-1"
+      }
     },
     {
       "name": "xgroup_entriesread_setup_2",
       "now_ms": 96000,
-      "argv": ["XADD", "xientries", "2-1", "b", "2"],
-      "expect": { "kind": "bulk", "value": "2-1" }
+      "argv": [
+        "XADD",
+        "xientries",
+        "2-1",
+        "b",
+        "2"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "2-1"
+      }
     },
     {
       "name": "xgroup_entriesread_setup_3",
       "now_ms": 96000,
-      "argv": ["XADD", "xientries", "3-1", "c", "3"],
-      "expect": { "kind": "bulk", "value": "3-1" }
+      "argv": [
+        "XADD",
+        "xientries",
+        "3-1",
+        "c",
+        "3"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "3-1"
+      }
     },
     {
       "name": "xgroup_create_entriesread_zero",
       "now_ms": 96000,
-      "argv": ["XGROUP", "CREATE", "xientries", "grp1", "0", "ENTRIESREAD", "0"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "XGROUP",
+        "CREATE",
+        "xientries",
+        "grp1",
+        "0",
+        "ENTRIESREAD",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xinfo_groups_reports_entriesread_and_lag",
       "now_ms": 96000,
-      "argv": ["XINFO", "GROUPS", "xientries"],
+      "argv": [
+        "XINFO",
+        "GROUPS",
+        "xientries"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"array","value":[
-            {"kind":"bulk","value":"name"},
-            {"kind":"bulk","value":"grp1"},
-            {"kind":"bulk","value":"consumers"},
-            {"kind":"integer","value":0},
-            {"kind":"bulk","value":"pending"},
-            {"kind":"integer","value":0},
-            {"kind":"bulk","value":"last-delivered-id"},
-            {"kind":"bulk","value":"0-0"},
-            {"kind":"bulk","value":"entries-read"},
-            {"kind":"integer","value":0},
-            {"kind":"bulk","value":"lag"},
-            {"kind":"integer","value":3}
-          ]}
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "name"
+              },
+              {
+                "kind": "bulk",
+                "value": "grp1"
+              },
+              {
+                "kind": "bulk",
+                "value": "consumers"
+              },
+              {
+                "kind": "integer",
+                "value": 0
+              },
+              {
+                "kind": "bulk",
+                "value": "pending"
+              },
+              {
+                "kind": "integer",
+                "value": 0
+              },
+              {
+                "kind": "bulk",
+                "value": "last-delivered-id"
+              },
+              {
+                "kind": "bulk",
+                "value": "0-0"
+              },
+              {
+                "kind": "bulk",
+                "value": "entries-read"
+              },
+              {
+                "kind": "integer",
+                "value": 0
+              },
+              {
+                "kind": "bulk",
+                "value": "lag"
+              },
+              {
+                "kind": "integer",
+                "value": 3
+              }
+            ]
+          }
         ]
       }
     },
     {
       "name": "xinfo_full_reports_group_entriesread_and_lag",
       "now_ms": 96000,
-      "argv": ["XINFO", "STREAM", "xientries", "FULL", "COUNT", "0"],
+      "argv": [
+        "XINFO",
+        "STREAM",
+        "xientries",
+        "FULL",
+        "COUNT",
+        "0"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"bulk","value":"length"},
-          {"kind":"integer","value":3},
-          {"kind":"bulk","value":"radix-tree-keys"},
-          {"kind":"integer","value":1},
-          {"kind":"bulk","value":"radix-tree-nodes"},
-          {"kind":"integer","value":2},
-          {"kind":"bulk","value":"last-generated-id"},
-          {"kind":"bulk","value":"3-1"},
-          {"kind":"bulk","value":"max-deleted-entry-id"},
-          {"kind":"bulk","value":"0-0"},
-          {"kind":"bulk","value":"entries-added"},
-          {"kind":"integer","value":3},
-          {"kind":"bulk","value":"recorded-first-entry-id"},
-          {"kind":"bulk","value":"1-1"},
-          {"kind":"bulk","value":"entries"},
-          {"kind":"array","value":[
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"1-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"a"},{"kind":"bulk","value":"1"}]}
-            ]},
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"2-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"b"},{"kind":"bulk","value":"2"}]}
-            ]},
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"3-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"c"},{"kind":"bulk","value":"3"}]}
-            ]}
-          ]},
-          {"kind":"bulk","value":"groups"},
-          {"kind":"array","value":[
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"name"},
-              {"kind":"bulk","value":"grp1"},
-              {"kind":"bulk","value":"last-delivered-id"},
-              {"kind":"bulk","value":"0-0"},
-              {"kind":"bulk","value":"entries-read"},
-              {"kind":"integer","value":0},
-              {"kind":"bulk","value":"lag"},
-              {"kind":"integer","value":3},
-              {"kind":"bulk","value":"pel-count"},
-              {"kind":"integer","value":0},
-              {"kind":"bulk","value":"pending"},
-              {"kind":"array","value":[]},
-              {"kind":"bulk","value":"consumers"},
-              {"kind":"array","value":[]}
-            ]}
-          ]}
+          {
+            "kind": "bulk",
+            "value": "length"
+          },
+          {
+            "kind": "integer",
+            "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-keys"
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-nodes"
+          },
+          {
+            "kind": "integer",
+            "value": 2
+          },
+          {
+            "kind": "bulk",
+            "value": "last-generated-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "3-1"
+          },
+          {
+            "kind": "bulk",
+            "value": "max-deleted-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "0-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries-added"
+          },
+          {
+            "kind": "integer",
+            "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "recorded-first-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "1-1"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "1-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "a"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "1"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "2-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "b"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "2"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "3-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "c"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "3"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "groups"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "name"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "grp1"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "last-delivered-id"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "0-0"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "entries-read"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 0
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "lag"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 3
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "pel-count"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 0
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "pending"
+                  },
+                  {
+                    "kind": "array",
+                    "value": []
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "consumers"
+                  },
+                  {
+                    "kind": "array",
+                    "value": []
+                  }
+                ]
+              }
+            ]
+          }
         ]
       }
     },
     {
       "name": "xgroup_setid_entriesread_two",
       "now_ms": 96000,
-      "argv": ["XGROUP", "SETID", "xientries", "grp1", "2-1", "ENTRIESREAD", "2"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "XGROUP",
+        "SETID",
+        "xientries",
+        "grp1",
+        "2-1",
+        "ENTRIESREAD",
+        "2"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xinfo_groups_reports_setid_entriesread_lag",
       "now_ms": 96000,
-      "argv": ["XINFO", "GROUPS", "xientries"],
+      "argv": [
+        "XINFO",
+        "GROUPS",
+        "xientries"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"array","value":[
-            {"kind":"bulk","value":"name"},
-            {"kind":"bulk","value":"grp1"},
-            {"kind":"bulk","value":"consumers"},
-            {"kind":"integer","value":0},
-            {"kind":"bulk","value":"pending"},
-            {"kind":"integer","value":0},
-            {"kind":"bulk","value":"last-delivered-id"},
-            {"kind":"bulk","value":"2-1"},
-            {"kind":"bulk","value":"entries-read"},
-            {"kind":"integer","value":2},
-            {"kind":"bulk","value":"lag"},
-            {"kind":"integer","value":1}
-          ]}
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "name"
+              },
+              {
+                "kind": "bulk",
+                "value": "grp1"
+              },
+              {
+                "kind": "bulk",
+                "value": "consumers"
+              },
+              {
+                "kind": "integer",
+                "value": 0
+              },
+              {
+                "kind": "bulk",
+                "value": "pending"
+              },
+              {
+                "kind": "integer",
+                "value": 0
+              },
+              {
+                "kind": "bulk",
+                "value": "last-delivered-id"
+              },
+              {
+                "kind": "bulk",
+                "value": "2-1"
+              },
+              {
+                "kind": "bulk",
+                "value": "entries-read"
+              },
+              {
+                "kind": "integer",
+                "value": 2
+              },
+              {
+                "kind": "bulk",
+                "value": "lag"
+              },
+              {
+                "kind": "integer",
+                "value": 1
+              }
+            ]
+          }
         ]
       }
     },
     {
       "name": "xsetid_entriesadded_setup_1",
       "now_ms": 97000,
-      "argv": ["XADD", "xiadded", "1-1", "a", "1"],
-      "expect": { "kind": "bulk", "value": "1-1" }
+      "argv": [
+        "XADD",
+        "xiadded",
+        "1-1",
+        "a",
+        "1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "1-1"
+      }
     },
     {
       "name": "xsetid_entriesadded_setup_2",
       "now_ms": 97000,
-      "argv": ["XADD", "xiadded", "2-1", "b", "2"],
-      "expect": { "kind": "bulk", "value": "2-1" }
+      "argv": [
+        "XADD",
+        "xiadded",
+        "2-1",
+        "b",
+        "2"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "2-1"
+      }
     },
     {
       "name": "xsetid_entriesadded_create_group",
       "now_ms": 97000,
-      "argv": ["XGROUP", "CREATE", "xiadded", "grp1", "0", "ENTRIESREAD", "0"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "XGROUP",
+        "CREATE",
+        "xiadded",
+        "grp1",
+        "0",
+        "ENTRIESREAD",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xsetid_entriesadded_ten",
       "now_ms": 97000,
-      "argv": ["XSETID", "xiadded", "2-1", "ENTRIESADDED", "10"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "XSETID",
+        "xiadded",
+        "2-1",
+        "ENTRIESADDED",
+        "10"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xinfo_groups_reports_xsetid_entriesadded_lag",
       "now_ms": 97000,
-      "argv": ["XINFO", "GROUPS", "xiadded"],
+      "argv": [
+        "XINFO",
+        "GROUPS",
+        "xiadded"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"array","value":[
-            {"kind":"bulk","value":"name"},
-            {"kind":"bulk","value":"grp1"},
-            {"kind":"bulk","value":"consumers"},
-            {"kind":"integer","value":0},
-            {"kind":"bulk","value":"pending"},
-            {"kind":"integer","value":0},
-            {"kind":"bulk","value":"last-delivered-id"},
-            {"kind":"bulk","value":"0-0"},
-            {"kind":"bulk","value":"entries-read"},
-            {"kind":"integer","value":0},
-            {"kind":"bulk","value":"lag"},
-            {"kind":"integer","value":10}
-          ]}
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "name"
+              },
+              {
+                "kind": "bulk",
+                "value": "grp1"
+              },
+              {
+                "kind": "bulk",
+                "value": "consumers"
+              },
+              {
+                "kind": "integer",
+                "value": 0
+              },
+              {
+                "kind": "bulk",
+                "value": "pending"
+              },
+              {
+                "kind": "integer",
+                "value": 0
+              },
+              {
+                "kind": "bulk",
+                "value": "last-delivered-id"
+              },
+              {
+                "kind": "bulk",
+                "value": "0-0"
+              },
+              {
+                "kind": "bulk",
+                "value": "entries-read"
+              },
+              {
+                "kind": "integer",
+                "value": 0
+              },
+              {
+                "kind": "bulk",
+                "value": "lag"
+              },
+              {
+                "kind": "integer",
+                "value": 10
+              }
+            ]
+          }
         ]
       }
     },
     {
       "name": "xinfo_full_reports_xsetid_entriesadded_lag",
       "now_ms": 97000,
-      "argv": ["XINFO", "STREAM", "xiadded", "FULL", "COUNT", "0"],
+      "argv": [
+        "XINFO",
+        "STREAM",
+        "xiadded",
+        "FULL",
+        "COUNT",
+        "0"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"bulk","value":"length"},
-          {"kind":"integer","value":2},
-          {"kind":"bulk","value":"radix-tree-keys"},
-          {"kind":"integer","value":1},
-          {"kind":"bulk","value":"radix-tree-nodes"},
-          {"kind":"integer","value":2},
-          {"kind":"bulk","value":"last-generated-id"},
-          {"kind":"bulk","value":"2-1"},
-          {"kind":"bulk","value":"max-deleted-entry-id"},
-          {"kind":"bulk","value":"0-0"},
-          {"kind":"bulk","value":"entries-added"},
-          {"kind":"integer","value":10},
-          {"kind":"bulk","value":"recorded-first-entry-id"},
-          {"kind":"bulk","value":"1-1"},
-          {"kind":"bulk","value":"entries"},
-          {"kind":"array","value":[
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"1-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"a"},{"kind":"bulk","value":"1"}]}
-            ]},
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"2-1"},
-              {"kind":"array","value":[{"kind":"bulk","value":"b"},{"kind":"bulk","value":"2"}]}
-            ]}
-          ]},
-          {"kind":"bulk","value":"groups"},
-          {"kind":"array","value":[
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"name"},
-              {"kind":"bulk","value":"grp1"},
-              {"kind":"bulk","value":"last-delivered-id"},
-              {"kind":"bulk","value":"0-0"},
-              {"kind":"bulk","value":"entries-read"},
-              {"kind":"integer","value":0},
-              {"kind":"bulk","value":"lag"},
-              {"kind":"integer","value":10},
-              {"kind":"bulk","value":"pel-count"},
-              {"kind":"integer","value":0},
-              {"kind":"bulk","value":"pending"},
-              {"kind":"array","value":[]},
-              {"kind":"bulk","value":"consumers"},
-              {"kind":"array","value":[]}
-            ]}
-          ]}
+          {
+            "kind": "bulk",
+            "value": "length"
+          },
+          {
+            "kind": "integer",
+            "value": 2
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-keys"
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-nodes"
+          },
+          {
+            "kind": "integer",
+            "value": 2
+          },
+          {
+            "kind": "bulk",
+            "value": "last-generated-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "2-1"
+          },
+          {
+            "kind": "bulk",
+            "value": "max-deleted-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "0-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries-added"
+          },
+          {
+            "kind": "integer",
+            "value": 10
+          },
+          {
+            "kind": "bulk",
+            "value": "recorded-first-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "1-1"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "1-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "a"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "1"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "2-1"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "b"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "2"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "groups"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "name"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "grp1"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "last-delivered-id"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "0-0"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "entries-read"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 0
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "lag"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 10
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "pel-count"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 0
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "pending"
+                  },
+                  {
+                    "kind": "array",
+                    "value": []
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "consumers"
+                  },
+                  {
+                    "kind": "array",
+                    "value": []
+                  }
+                ]
+              }
+            ]
+          }
         ]
       }
     },
     {
       "name": "xinfo_lag_tombstone_behind_setup_1",
       "now_ms": 98000,
-      "argv": ["XADD", "xilagtomb", "1-0", "a", "1"],
-      "expect": { "kind": "bulk", "value": "1-0" }
+      "argv": [
+        "XADD",
+        "xilagtomb",
+        "1-0",
+        "a",
+        "1"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "1-0"
+      }
     },
     {
       "name": "xinfo_lag_tombstone_behind_setup_2",
       "now_ms": 98000,
-      "argv": ["XADD", "xilagtomb", "2-0", "b", "2"],
-      "expect": { "kind": "bulk", "value": "2-0" }
+      "argv": [
+        "XADD",
+        "xilagtomb",
+        "2-0",
+        "b",
+        "2"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "2-0"
+      }
     },
     {
       "name": "xinfo_lag_tombstone_behind_setup_3",
       "now_ms": 98000,
-      "argv": ["XADD", "xilagtomb", "3-0", "c", "3"],
-      "expect": { "kind": "bulk", "value": "3-0" }
+      "argv": [
+        "XADD",
+        "xilagtomb",
+        "3-0",
+        "c",
+        "3"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "3-0"
+      }
     },
     {
       "name": "xinfo_lag_tombstone_behind_setup_4",
       "now_ms": 98000,
-      "argv": ["XADD", "xilagtomb", "4-0", "d", "4"],
-      "expect": { "kind": "bulk", "value": "4-0" }
+      "argv": [
+        "XADD",
+        "xilagtomb",
+        "4-0",
+        "d",
+        "4"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "4-0"
+      }
     },
     {
       "name": "xinfo_lag_tombstone_behind_delete_first",
       "now_ms": 98000,
-      "argv": ["XDEL", "xilagtomb", "1-0"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "XDEL",
+        "xilagtomb",
+        "1-0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "xinfo_lag_tombstone_behind_create_group",
       "now_ms": 98000,
-      "argv": ["XGROUP", "CREATE", "xilagtomb", "grp1", "3-0", "ENTRIESREAD", "3"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "XGROUP",
+        "CREATE",
+        "xilagtomb",
+        "grp1",
+        "3-0",
+        "ENTRIESREAD",
+        "3"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xinfo_groups_reports_entriesread_lag_when_tombstone_behind_cursor",
       "now_ms": 98000,
-      "argv": ["XINFO", "GROUPS", "xilagtomb"],
+      "argv": [
+        "XINFO",
+        "GROUPS",
+        "xilagtomb"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"array","value":[
-            {"kind":"bulk","value":"name"},
-            {"kind":"bulk","value":"grp1"},
-            {"kind":"bulk","value":"consumers"},
-            {"kind":"integer","value":0},
-            {"kind":"bulk","value":"pending"},
-            {"kind":"integer","value":0},
-            {"kind":"bulk","value":"last-delivered-id"},
-            {"kind":"bulk","value":"3-0"},
-            {"kind":"bulk","value":"entries-read"},
-            {"kind":"integer","value":3},
-            {"kind":"bulk","value":"lag"},
-            {"kind":"integer","value":1}
-          ]}
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "name"
+              },
+              {
+                "kind": "bulk",
+                "value": "grp1"
+              },
+              {
+                "kind": "bulk",
+                "value": "consumers"
+              },
+              {
+                "kind": "integer",
+                "value": 0
+              },
+              {
+                "kind": "bulk",
+                "value": "pending"
+              },
+              {
+                "kind": "integer",
+                "value": 0
+              },
+              {
+                "kind": "bulk",
+                "value": "last-delivered-id"
+              },
+              {
+                "kind": "bulk",
+                "value": "3-0"
+              },
+              {
+                "kind": "bulk",
+                "value": "entries-read"
+              },
+              {
+                "kind": "integer",
+                "value": 3
+              },
+              {
+                "kind": "bulk",
+                "value": "lag"
+              },
+              {
+                "kind": "integer",
+                "value": 1
+              }
+            ]
+          }
         ]
       }
     },
     {
       "name": "xinfo_full_reports_entriesread_lag_when_tombstone_behind_cursor",
       "now_ms": 98000,
-      "argv": ["XINFO", "STREAM", "xilagtomb", "FULL", "COUNT", "0"],
+      "argv": [
+        "XINFO",
+        "STREAM",
+        "xilagtomb",
+        "FULL",
+        "COUNT",
+        "0"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"bulk","value":"length"},
-          {"kind":"integer","value":3},
-          {"kind":"bulk","value":"radix-tree-keys"},
-          {"kind":"integer","value":1},
-          {"kind":"bulk","value":"radix-tree-nodes"},
-          {"kind":"integer","value":2},
-          {"kind":"bulk","value":"last-generated-id"},
-          {"kind":"bulk","value":"4-0"},
-          {"kind":"bulk","value":"max-deleted-entry-id"},
-          {"kind":"bulk","value":"1-0"},
-          {"kind":"bulk","value":"entries-added"},
-          {"kind":"integer","value":4},
-          {"kind":"bulk","value":"recorded-first-entry-id"},
-          {"kind":"bulk","value":"2-0"},
-          {"kind":"bulk","value":"entries"},
-          {"kind":"array","value":[
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"2-0"},
-              {"kind":"array","value":[{"kind":"bulk","value":"b"},{"kind":"bulk","value":"2"}]}
-            ]},
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"3-0"},
-              {"kind":"array","value":[{"kind":"bulk","value":"c"},{"kind":"bulk","value":"3"}]}
-            ]},
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"4-0"},
-              {"kind":"array","value":[{"kind":"bulk","value":"d"},{"kind":"bulk","value":"4"}]}
-            ]}
-          ]},
-          {"kind":"bulk","value":"groups"},
-          {"kind":"array","value":[
-            {"kind":"array","value":[
-              {"kind":"bulk","value":"name"},
-              {"kind":"bulk","value":"grp1"},
-              {"kind":"bulk","value":"last-delivered-id"},
-              {"kind":"bulk","value":"3-0"},
-              {"kind":"bulk","value":"entries-read"},
-              {"kind":"integer","value":3},
-              {"kind":"bulk","value":"lag"},
-              {"kind":"integer","value":1},
-              {"kind":"bulk","value":"pel-count"},
-              {"kind":"integer","value":0},
-              {"kind":"bulk","value":"pending"},
-              {"kind":"array","value":[]},
-              {"kind":"bulk","value":"consumers"},
-              {"kind":"array","value":[]}
-            ]}
-          ]}
+          {
+            "kind": "bulk",
+            "value": "length"
+          },
+          {
+            "kind": "integer",
+            "value": 3
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-keys"
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-nodes"
+          },
+          {
+            "kind": "integer",
+            "value": 2
+          },
+          {
+            "kind": "bulk",
+            "value": "last-generated-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "4-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "max-deleted-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "1-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries-added"
+          },
+          {
+            "kind": "integer",
+            "value": 4
+          },
+          {
+            "kind": "bulk",
+            "value": "recorded-first-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "2-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "2-0"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "b"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "2"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "3-0"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "c"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "3"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "4-0"
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "d"
+                      },
+                      {
+                        "kind": "bulk",
+                        "value": "4"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "kind": "bulk",
+            "value": "groups"
+          },
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "bulk",
+                    "value": "name"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "grp1"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "last-delivered-id"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "3-0"
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "entries-read"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 3
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "lag"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 1
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "pel-count"
+                  },
+                  {
+                    "kind": "integer",
+                    "value": 0
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "pending"
+                  },
+                  {
+                    "kind": "array",
+                    "value": []
+                  },
+                  {
+                    "kind": "bulk",
+                    "value": "consumers"
+                  },
+                  {
+                    "kind": "array",
+                    "value": []
+                  }
+                ]
+              }
+            ]
+          }
         ]
       }
     },
     {
       "name": "xinfo_rename_max_deleted_setup",
       "now_ms": 99000,
-      "argv": ["XADD", "ximaxdelrename", "1-0", "f", "v"],
-      "expect": { "kind": "bulk", "value": "1-0" }
+      "argv": [
+        "XADD",
+        "ximaxdelrename",
+        "1-0",
+        "f",
+        "v"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "1-0"
+      }
     },
     {
       "name": "xinfo_rename_max_deleted_delete",
       "now_ms": 99000,
-      "argv": ["XDEL", "ximaxdelrename", "1-0"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "XDEL",
+        "ximaxdelrename",
+        "1-0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "xinfo_rename_max_deleted_rename",
       "now_ms": 99000,
-      "argv": ["RENAME", "ximaxdelrename", "ximaxdelrenamed"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "RENAME",
+        "ximaxdelrename",
+        "ximaxdelrenamed"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xinfo_stream_rename_preserves_max_deleted",
       "now_ms": 99000,
-      "argv": ["XINFO", "STREAM", "ximaxdelrenamed"],
+      "argv": [
+        "XINFO",
+        "STREAM",
+        "ximaxdelrenamed"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"bulk","value":"length"},
-          {"kind":"integer","value":0},
-          {"kind":"bulk","value":"radix-tree-keys"},
-          {"kind":"integer","value":0},
-          {"kind":"bulk","value":"radix-tree-nodes"},
-          {"kind":"integer","value":1},
-          {"kind":"bulk","value":"last-generated-id"},
-          {"kind":"bulk","value":"1-0"},
-          {"kind":"bulk","value":"max-deleted-entry-id"},
-          {"kind":"bulk","value":"1-0"},
-          {"kind":"bulk","value":"entries-added"},
-          {"kind":"integer","value":1},
-          {"kind":"bulk","value":"recorded-first-entry-id"},
-          {"kind":"bulk","value":"0-0"},
-          {"kind":"bulk","value":"groups"},
-          {"kind":"integer","value":0},
-          {"kind":"bulk","value":"first-entry"},
-          {"kind":"bulk","value":null},
-          {"kind":"bulk","value":"last-entry"},
-          {"kind":"bulk","value":null}
+          {
+            "kind": "bulk",
+            "value": "length"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-keys"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-nodes"
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "bulk",
+            "value": "last-generated-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "1-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "max-deleted-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "1-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries-added"
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "bulk",
+            "value": "recorded-first-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "0-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "groups"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "bulk",
+            "value": "first-entry"
+          },
+          {
+            "kind": "bulk",
+            "value": null
+          },
+          {
+            "kind": "bulk",
+            "value": "last-entry"
+          },
+          {
+            "kind": "bulk",
+            "value": null
+          }
         ]
       }
     },
     {
       "name": "xinfo_copy_max_deleted_setup",
       "now_ms": 99500,
-      "argv": ["XADD", "ximaxdelcopy", "1-0", "f", "v"],
-      "expect": { "kind": "bulk", "value": "1-0" }
+      "argv": [
+        "XADD",
+        "ximaxdelcopy",
+        "1-0",
+        "f",
+        "v"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "1-0"
+      }
     },
     {
       "name": "xinfo_copy_max_deleted_delete",
       "now_ms": 99500,
-      "argv": ["XDEL", "ximaxdelcopy", "1-0"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "XDEL",
+        "ximaxdelcopy",
+        "1-0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "xinfo_copy_max_deleted_copy",
       "now_ms": 99500,
-      "argv": ["COPY", "ximaxdelcopy", "ximaxdelcopied"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "COPY",
+        "ximaxdelcopy",
+        "ximaxdelcopied"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "xinfo_stream_copy_preserves_max_deleted",
       "now_ms": 99500,
-      "argv": ["XINFO", "STREAM", "ximaxdelcopied"],
+      "argv": [
+        "XINFO",
+        "STREAM",
+        "ximaxdelcopied"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"bulk","value":"length"},
-          {"kind":"integer","value":0},
-          {"kind":"bulk","value":"radix-tree-keys"},
-          {"kind":"integer","value":0},
-          {"kind":"bulk","value":"radix-tree-nodes"},
-          {"kind":"integer","value":1},
-          {"kind":"bulk","value":"last-generated-id"},
-          {"kind":"bulk","value":"1-0"},
-          {"kind":"bulk","value":"max-deleted-entry-id"},
-          {"kind":"bulk","value":"1-0"},
-          {"kind":"bulk","value":"entries-added"},
-          {"kind":"integer","value":1},
-          {"kind":"bulk","value":"recorded-first-entry-id"},
-          {"kind":"bulk","value":"0-0"},
-          {"kind":"bulk","value":"groups"},
-          {"kind":"integer","value":0},
-          {"kind":"bulk","value":"first-entry"},
-          {"kind":"bulk","value":null},
-          {"kind":"bulk","value":"last-entry"},
-          {"kind":"bulk","value":null}
+          {
+            "kind": "bulk",
+            "value": "length"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-keys"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "bulk",
+            "value": "radix-tree-nodes"
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "bulk",
+            "value": "last-generated-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "1-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "max-deleted-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "1-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "entries-added"
+          },
+          {
+            "kind": "integer",
+            "value": 1
+          },
+          {
+            "kind": "bulk",
+            "value": "recorded-first-entry-id"
+          },
+          {
+            "kind": "bulk",
+            "value": "0-0"
+          },
+          {
+            "kind": "bulk",
+            "value": "groups"
+          },
+          {
+            "kind": "integer",
+            "value": 0
+          },
+          {
+            "kind": "bulk",
+            "value": "first-entry"
+          },
+          {
+            "kind": "bulk",
+            "value": null
+          },
+          {
+            "kind": "bulk",
+            "value": "last-entry"
+          },
+          {
+            "kind": "bulk",
+            "value": null
+          }
         ]
       }
     },
     {
       "name": "xreadgroup_entriesread_tombstone_behind_setup_1",
       "now_ms": 99800,
-      "argv": ["XADD", "xireadlag", "1-0", "f", "v"],
-      "expect": { "kind": "bulk", "value": "1-0" }
+      "argv": [
+        "XADD",
+        "xireadlag",
+        "1-0",
+        "f",
+        "v"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "1-0"
+      }
     },
     {
       "name": "xreadgroup_entriesread_tombstone_behind_setup_2",
       "now_ms": 99800,
-      "argv": ["XADD", "xireadlag", "2-0", "f", "v"],
-      "expect": { "kind": "bulk", "value": "2-0" }
+      "argv": [
+        "XADD",
+        "xireadlag",
+        "2-0",
+        "f",
+        "v"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "2-0"
+      }
     },
     {
       "name": "xreadgroup_entriesread_tombstone_behind_setup_3",
       "now_ms": 99800,
-      "argv": ["XADD", "xireadlag", "3-0", "f", "v"],
-      "expect": { "kind": "bulk", "value": "3-0" }
+      "argv": [
+        "XADD",
+        "xireadlag",
+        "3-0",
+        "f",
+        "v"
+      ],
+      "expect": {
+        "kind": "bulk",
+        "value": "3-0"
+      }
     },
     {
       "name": "xreadgroup_entriesread_tombstone_behind_delete_first",
       "now_ms": 99800,
-      "argv": ["XDEL", "xireadlag", "1-0"],
-      "expect": { "kind": "integer", "value": 1 }
+      "argv": [
+        "XDEL",
+        "xireadlag",
+        "1-0"
+      ],
+      "expect": {
+        "kind": "integer",
+        "value": 1
+      }
     },
     {
       "name": "xreadgroup_entriesread_tombstone_behind_create_group",
       "now_ms": 99800,
-      "argv": ["XGROUP", "CREATE", "xireadlag", "grp1", "1-0", "ENTRIESREAD", "1"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "XGROUP",
+        "CREATE",
+        "xireadlag",
+        "grp1",
+        "1-0",
+        "ENTRIESREAD",
+        "1"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xreadgroup_entriesread_tombstone_behind_read_one",
       "now_ms": 99800,
-      "argv": ["XREADGROUP", "GROUP", "grp1", "c1", "COUNT", "1", "STREAMS", "xireadlag", ">"],
+      "argv": [
+        "XREADGROUP",
+        "GROUP",
+        "grp1",
+        "c1",
+        "COUNT",
+        "1",
+        "STREAMS",
+        "xireadlag",
+        ">"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"array","value":[
-            {"kind":"bulk","value":"xireadlag"},
-            {"kind":"array","value":[
-              {"kind":"array","value":[
-                {"kind":"bulk","value":"2-0"},
-                {"kind":"array","value":[{"kind":"bulk","value":"f"},{"kind":"bulk","value":"v"}]}
-              ]}
-            ]}
-          ]}
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "xireadlag"
+              },
+              {
+                "kind": "array",
+                "value": [
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "2-0"
+                      },
+                      {
+                        "kind": "array",
+                        "value": [
+                          {
+                            "kind": "bulk",
+                            "value": "f"
+                          },
+                          {
+                            "kind": "bulk",
+                            "value": "v"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
         ]
       }
     },
     {
       "name": "xinfo_groups_preserves_entriesread_after_tombstone_behind_read",
       "now_ms": 99800,
-      "argv": ["XINFO", "GROUPS", "xireadlag"],
+      "argv": [
+        "XINFO",
+        "GROUPS",
+        "xireadlag"
+      ],
       "expect": {
         "kind": "array",
         "value": [
-          {"kind":"array","value":[
-            {"kind":"bulk","value":"name"},
-            {"kind":"bulk","value":"grp1"},
-            {"kind":"bulk","value":"consumers"},
-            {"kind":"integer","value":1},
-            {"kind":"bulk","value":"pending"},
-            {"kind":"integer","value":1},
-            {"kind":"bulk","value":"last-delivered-id"},
-            {"kind":"bulk","value":"2-0"},
-            {"kind":"bulk","value":"entries-read"},
-            {"kind":"integer","value":2},
-            {"kind":"bulk","value":"lag"},
-            {"kind":"integer","value":1}
-          ]}
+          {
+            "kind": "array",
+            "value": [
+              {
+                "kind": "bulk",
+                "value": "name"
+              },
+              {
+                "kind": "bulk",
+                "value": "grp1"
+              },
+              {
+                "kind": "bulk",
+                "value": "consumers"
+              },
+              {
+                "kind": "integer",
+                "value": 1
+              },
+              {
+                "kind": "bulk",
+                "value": "pending"
+              },
+              {
+                "kind": "integer",
+                "value": 1
+              },
+              {
+                "kind": "bulk",
+                "value": "last-delivered-id"
+              },
+              {
+                "kind": "bulk",
+                "value": "2-0"
+              },
+              {
+                "kind": "bulk",
+                "value": "entries-read"
+              },
+              {
+                "kind": "integer",
+                "value": 2
+              },
+              {
+                "kind": "bulk",
+                "value": "lag"
+              },
+              {
+                "kind": "integer",
+                "value": 1
+              }
+            ]
+          }
         ]
       }
     },
     {
       "name": "xsetid_entriesadded_zero_empty_stream_create",
       "now_ms": 100000,
-      "argv": ["XGROUP", "CREATE", "xizero", "grp1", "$", "MKSTREAM"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "XGROUP",
+        "CREATE",
+        "xizero",
+        "grp1",
+        "$",
+        "MKSTREAM"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     },
     {
       "name": "xsetid_entriesadded_zero_empty_stream_ok",
       "now_ms": 100000,
-      "argv": ["XSETID", "xizero", "0-0", "ENTRIESADDED", "0"],
-      "expect": { "kind": "simple", "value": "OK" }
+      "argv": [
+        "XSETID",
+        "xizero",
+        "0-0",
+        "ENTRIESADDED",
+        "0"
+      ],
+      "expect": {
+        "kind": "simple",
+        "value": "OK"
+      }
     }
   ]
 }
