@@ -5468,7 +5468,34 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             lua_fmt_pad(&s, width, left_align, ' ')
                         }
                         's' => {
-                            let s = arg.to_display_string();
+                            // (frankenredis-u5qgq follow-up) Lua 5.1's
+                            // luaO_pushvfstring rejects non-string/non-
+                            // number args to %s with "bad argument #N
+                            // to 'format' (string expected, got <type>)".
+                            // fr was permissively accepting nil/tables.
+                            let s = match &arg {
+                                LuaValue::Str(b) => b.clone(),
+                                LuaValue::Number(n) => {
+                                    if *n == (*n as i64) as f64 && n.is_finite() {
+                                        format!("{}", *n as i64).into_bytes()
+                                    } else {
+                                        lua_number_to_string(*n).into_bytes()
+                                    }
+                                }
+                                LuaValue::Bool(b) => {
+                                    if *b { b"true".to_vec() } else { b"false".to_vec() }
+                                }
+                                _ => {
+                                    // arg_idx is already +1 (incremented before the match);
+                                    // add another +1 to account for the format-string itself
+                                    // being arg #1 in the Lua-call position scheme.
+                                    return Err(format!(
+                                        "bad argument #{} to 'format' (string expected, got {})",
+                                        arg_idx + 1,
+                                        arg.type_name()
+                                    ));
+                                }
+                            };
                             let mut s = String::from_utf8_lossy(&s).to_string();
                             if let Some(prec) = precision {
                                 s.truncate(prec);
@@ -5476,6 +5503,12 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             lua_fmt_pad(&s, width, left_align, ' ')
                         }
                         'q' => {
+                            // (frankenredis-u5qgq follow-up) Lua 5.1
+                            // string.format("%q", s) escapes newline as
+                            // a backslash followed by a *literal*
+                            // newline (so the output is multi-line),
+                            // not "\\n". This matches the original
+                            // luaO_str2d / addquoted in lstrlib.c.
                             let s = arg.to_display_string();
                             let mut q = String::new();
                             q.push('"');
@@ -5483,7 +5516,7 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                                 match b {
                                     b'\\' => q.push_str("\\\\"),
                                     b'"' => q.push_str("\\\""),
-                                    b'\n' => q.push_str("\\n"),
+                                    b'\n' => q.push_str("\\\n"),
                                     b'\r' => q.push_str("\\r"),
                                     b'\0' => q.push_str("\\0"),
                                     _ => q.push(b as char),
@@ -5582,7 +5615,25 @@ fn lua_fmt_g(n: f64, prec: usize, upper: bool) -> String {
     let abs = n.abs();
     let exp = abs.log10().floor() as i32;
     if exp < -4 || exp >= prec as i32 {
-        lua_fmt_scientific(n, prec.saturating_sub(1), upper)
+        // (frankenredis-u5qgq follow-up) C's %g also strips trailing
+        // zeros from the scientific notation mantissa — '1.00000e-05'
+        // collapses to '1e-05'. lua_fmt_scientific keeps the zeros for
+        // the explicit %e/%E formatters; do the cleanup inline here.
+        let s = lua_fmt_scientific(n, prec.saturating_sub(1), upper);
+        let e_char = if upper { 'E' } else { 'e' };
+        if let Some(epos) = s.find(e_char) {
+            let mantissa = &s[..epos];
+            let exp_part = &s[epos..];
+            let trimmed_mantissa = if mantissa.contains('.') {
+                let m = mantissa.trim_end_matches('0');
+                m.trim_end_matches('.').to_string()
+            } else {
+                mantissa.to_string()
+            };
+            format!("{trimmed_mantissa}{exp_part}")
+        } else {
+            s
+        }
     } else {
         let decimal_prec = (prec as i32 - 1 - exp).max(0) as usize;
         let s = format!("{n:.decimal_prec$}");
