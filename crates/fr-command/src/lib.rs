@@ -1000,6 +1000,35 @@ fn command_key_references_with_exact_flags(
         }]));
     }
 
+    // BITFIELD: keyspec is variable_flags — RO/access when only GET
+    // operations are present, RW/access/update when at least one
+    // SET or INCRBY operation is present. Upstream debug.c's
+    // bitfieldGetKeys inspects the operand list to decide.
+    // (frankenredis-bitfieldvarflag)
+    if cmd_name.eq_ignore_ascii_case("BITFIELD") {
+        if argv.is_empty() {
+            return Ok(None);
+        }
+        let mut has_write = false;
+        // Walk args looking for "SET" or "INCRBY". The op token
+        // immediately precedes the type/offset/value triple, so we
+        // do not need to track triple boundaries — a simple
+        // case-insensitive match is sufficient (and matches upstream
+        // behavior).
+        for arg in &argv[2..] {
+            if arg.eq_ignore_ascii_case(b"SET") || arg.eq_ignore_ascii_case(b"INCRBY") {
+                has_write = true;
+                break;
+            }
+        }
+        let flags: &'static [&'static str] = if has_write {
+            &["RW", "access", "update"]
+        } else {
+            KEY_FLAGS_RO_ACCESS
+        };
+        return Ok(Some(vec![CommandKeyReference { index: 1, flags }]));
+    }
+
     // PFCOUNT: RW/access (upstream). PFCOUNT may mutate the sparse
     // representation in place during merge, so upstream classifies
     // it as RW not RO. (frankenredis-existsroflag)
