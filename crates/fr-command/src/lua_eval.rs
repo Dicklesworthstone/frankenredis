@@ -1870,6 +1870,22 @@ impl<'a> LuaState<'a> {
         }
         globals.insert("cjson".to_string(), LuaValue::Table(cjson_table));
 
+        // (frankenredis-v95aj) Redis 7.2.4 exposes LuaJIT's bit library
+        // as a global 'bit' table. Operations are 32-bit; numbers are
+        // truncated to u32 before each op and the result is returned
+        // as a Lua number (f64-representable for the 0..=u32::MAX range).
+        let bit_table = LuaTable::new();
+        for name in &[
+            "band", "bor", "bxor", "bnot", "lshift", "rshift", "arshift", "rol", "ror", "bswap",
+            "tobit", "tohex",
+        ] {
+            bit_table.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::RustFunction(format!("bit.{name}")),
+            );
+        }
+        globals.insert("bit".to_string(), LuaValue::Table(bit_table));
+
         let rng_seed = store.rng_seed;
         Self {
             store,
@@ -4171,6 +4187,95 @@ impl<'a> LuaState<'a> {
                     Ok(vec![LuaValue::Number(0.0)])
                 }
             }
+            // ── bit library (LuaJIT 32-bit semantics) ─────────────────
+            // (frankenredis-v95aj) Mirrors Lua 5.1 LuaJIT bit library
+            // semantics: every numeric input is normalised to u32 via
+            // tobit_u32(), every numeric result is returned as the i32
+            // reinterpretation of that u32 so values >= 2^31 print as
+            // negative numbers (matching upstream's "all returns are
+            // signed 32-bit Lua numbers" rule).
+            "bit.band" => {
+                let r = args.iter().try_fold(0xFFFF_FFFFu32, |acc, a| {
+                    lua_value_to_u32(a).map(|v| acc & v)
+                })?;
+                Ok(vec![LuaValue::Number(r as i32 as f64)])
+            }
+            "bit.bor" => {
+                let r = args
+                    .iter()
+                    .try_fold(0u32, |acc, a| lua_value_to_u32(a).map(|v| acc | v))?;
+                Ok(vec![LuaValue::Number(r as i32 as f64)])
+            }
+            "bit.bxor" => {
+                let r = args
+                    .iter()
+                    .try_fold(0u32, |acc, a| lua_value_to_u32(a).map(|v| acc ^ v))?;
+                Ok(vec![LuaValue::Number(r as i32 as f64)])
+            }
+            "bit.bnot" => {
+                let r = !lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
+                Ok(vec![LuaValue::Number(r as i32 as f64)])
+            }
+            "bit.lshift" => {
+                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
+                let n =
+                    lua_value_to_u32(args.get(1).unwrap_or(&LuaValue::Number(0.0)))? & 31;
+                Ok(vec![LuaValue::Number((x << n) as i32 as f64)])
+            }
+            "bit.rshift" => {
+                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
+                let n =
+                    lua_value_to_u32(args.get(1).unwrap_or(&LuaValue::Number(0.0)))? & 31;
+                Ok(vec![LuaValue::Number((x >> n) as i32 as f64)])
+            }
+            "bit.arshift" => {
+                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))? as i32;
+                let n =
+                    lua_value_to_u32(args.get(1).unwrap_or(&LuaValue::Number(0.0)))? & 31;
+                Ok(vec![LuaValue::Number((x >> n) as f64)])
+            }
+            "bit.rol" => {
+                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
+                let n =
+                    lua_value_to_u32(args.get(1).unwrap_or(&LuaValue::Number(0.0)))? & 31;
+                Ok(vec![LuaValue::Number(x.rotate_left(n) as i32 as f64)])
+            }
+            "bit.ror" => {
+                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
+                let n =
+                    lua_value_to_u32(args.get(1).unwrap_or(&LuaValue::Number(0.0)))? & 31;
+                Ok(vec![LuaValue::Number(x.rotate_right(n) as i32 as f64)])
+            }
+            "bit.bswap" => {
+                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
+                Ok(vec![LuaValue::Number(x.swap_bytes() as i32 as f64)])
+            }
+            "bit.tobit" => {
+                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
+                // LuaJIT bit.tobit returns a signed 32-bit value as
+                // Lua number: the upper half of u32 maps to negative.
+                Ok(vec![LuaValue::Number(x as i32 as f64)])
+            }
+            "bit.tohex" => {
+                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
+                // Second arg (optional): digit count; negative = upper case.
+                let n = match args.get(1) {
+                    Some(LuaValue::Number(f)) => *f as i32,
+                    _ => 8,
+                };
+                let abs_n = n.unsigned_abs().min(8) as usize;
+                let s = if n < 0 {
+                    format!("{x:0width$X}", width = abs_n)
+                } else {
+                    format!("{x:0width$x}", width = abs_n)
+                };
+                let trimmed: String = if s.len() > abs_n {
+                    s.chars().rev().take(abs_n).collect::<String>().chars().rev().collect()
+                } else {
+                    s
+                };
+                Ok(vec![LuaValue::Str(trimmed.into_bytes())])
+            }
             // ── cjson library ───────────────────────────────────────────
             "cjson.encode" => {
                 let val = args.first().cloned().unwrap_or(LuaValue::Nil);
@@ -5452,6 +5557,35 @@ fn json_escape_bytes(bytes: &[u8]) -> String {
     }
     out.push('"');
     out
+}
+
+/// (frankenredis-v95aj) Normalise a LuaValue to u32 for bit library
+/// ops. Mirrors LuaJIT bit.tobit: numbers are first cast to int32 via
+/// truncate-toward-zero (matching f64 -> i32 semantics for finite
+/// values), then reinterpreted as u32. Strings are parsed if they look
+/// numeric, otherwise an error is raised.
+fn lua_value_to_u32(val: &LuaValue) -> Result<u32, String> {
+    match val {
+        LuaValue::Number(f) => {
+            if !f.is_finite() {
+                return Err("bad argument to bit op (number expected, got NaN/inf)".to_string());
+            }
+            Ok((*f as i64 as i32) as u32)
+        }
+        LuaValue::Str(s) => {
+            let text = String::from_utf8_lossy(s);
+            text.trim()
+                .parse::<i64>()
+                .map(|n| n as i32 as u32)
+                .or_else(|_| text.trim().parse::<f64>().map(|f| f as i64 as i32 as u32))
+                .map_err(|_| format!("bad argument to bit op (number expected, got string '{text}')"))
+        }
+        LuaValue::Bool(b) => Ok(if *b { 1 } else { 0 }),
+        LuaValue::Nil => {
+            Err("bad argument to bit op (number expected, got nil)".to_string())
+        }
+        _ => Err("bad argument to bit op (number expected, got non-number)".to_string()),
+    }
 }
 
 fn lua_value_to_json(val: &LuaValue) -> String {
