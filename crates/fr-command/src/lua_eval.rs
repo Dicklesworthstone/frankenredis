@@ -2577,17 +2577,25 @@ impl<'a> LuaState<'a> {
                 let val = self.eval_expr(inner, env, varargs)?;
                 match op {
                     UnaryOp::Neg => {
-                        let n = val
-                            .to_number()
-                            .ok_or("user_script:1: attempt to perform arithmetic on a non-number value")?;
+                        // (frankenredis-7w22v) Use the operand's actual
+                        // type name to match Lua 5.1's "a string value" /
+                        // "a boolean value" wording.
+                        let n = val.to_number().ok_or_else(|| {
+                            format!(
+                                "user_script:1: attempt to perform arithmetic on a {} value",
+                                val.type_name()
+                            )
+                        })?;
                         Ok(LuaValue::Number(-n))
                     }
                     UnaryOp::Not => Ok(LuaValue::Bool(!val.is_truthy())),
                     UnaryOp::Len => match &val {
                         LuaValue::Str(s) => Ok(LuaValue::Number(s.len() as f64)),
                         LuaValue::Table(t) => Ok(LuaValue::Number(t.len() as f64)),
+                        // (frankenredis-7w22v) Prepend user_script:1:
+                        // prefix on the length-of-wrong-type error.
                         _ => Err(format!(
-                            "attempt to get length of a {} value",
+                            "user_script:1: attempt to get length of a {} value",
                             val.type_name()
                         )),
                     },
@@ -2914,8 +2922,22 @@ impl<'a> LuaState<'a> {
                 Ok(LuaValue::Number(result))
             }
             BinOp::Concat => {
-                let mut a = lv.to_display_string();
-                a.extend_from_slice(&rv.to_display_string());
+                // (frankenredis-7w22v) Lua 5.1 only concatenates strings and
+                // numbers; nil/bool/table/function/thread operands raise
+                // "attempt to concatenate a <type> value". Check the right
+                // operand first to match upstream's evaluation order.
+                fn concat_bytes(v: &LuaValue) -> Result<Vec<u8>, String> {
+                    match v {
+                        LuaValue::Str(s) => Ok(s.clone()),
+                        LuaValue::Number(_) => Ok(v.to_display_string()),
+                        _ => Err(format!(
+                            "user_script:1: attempt to concatenate a {} value",
+                            v.type_name()
+                        )),
+                    }
+                }
+                let mut a = concat_bytes(lv)?;
+                a.extend_from_slice(&concat_bytes(rv)?);
                 Ok(LuaValue::Str(a))
             }
             BinOp::Eq => Ok(LuaValue::Bool(lua_raw_equal(lv, rv))),
@@ -2937,7 +2959,18 @@ impl<'a> LuaState<'a> {
                         _ => return Err("unsupported comparison operator".to_string()),
                     },
                     _ => {
-                        return Err("attempt to compare incompatible types".to_string());
+                        // (frankenredis-7w22v) Lua 5.1 uses two different
+                        // phrasings: "attempt to compare A with B" when the
+                        // operand types differ, and "attempt to compare two
+                        // T values" when both operands share a non-orderable
+                        // type (e.g. two booleans or two tables).
+                        let an = lv.type_name();
+                        let bn = rv.type_name();
+                        return Err(if an == bn {
+                            format!("user_script:1: attempt to compare two {} values", an)
+                        } else {
+                            format!("user_script:1: attempt to compare {} with {}", an, bn)
+                        });
                     }
                 };
                 Ok(LuaValue::Bool(result))
@@ -6412,6 +6445,106 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_compare_concat_unary_errors_match_upstream_wording() {
+        // Pins frankenredis-7w22v. Upstream Lua 5.1 (vendored Redis 7.2.4)
+        // emits per-type wording for unary/concat/comparison failures.
+        //   '-nil'        → "attempt to perform arithmetic on a nil value"
+        //   '-\"abc\"'    → "attempt to perform arithmetic on a string value"
+        //   '#nil'        → "attempt to get length of a nil value"
+        //   '#42'         → "attempt to get length of a number value"
+        //   '\"a\"..nil'  → "attempt to concatenate a nil value"
+        //   '\"a\"..{}'   → "attempt to concatenate a table value"
+        //   '1<\"a\"'     → "attempt to compare number with string"
+        //   'true<false'  → "attempt to compare two boolean values"
+        //   'nil<nil'     → "attempt to compare two nil values"
+        // All carry the standard "user_script:1: " prefix.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local v = -nil",
+                "user_script:1: attempt to perform arithmetic on a nil value",
+            ),
+            (
+                b"local v = -'abc'",
+                "user_script:1: attempt to perform arithmetic on a string value",
+            ),
+            (
+                b"local v = #nil",
+                "user_script:1: attempt to get length of a nil value",
+            ),
+            (
+                b"local v = #42",
+                "user_script:1: attempt to get length of a number value",
+            ),
+            (
+                b"local v = #true",
+                "user_script:1: attempt to get length of a boolean value",
+            ),
+            (
+                b"local v = 'a' .. nil",
+                "user_script:1: attempt to concatenate a nil value",
+            ),
+            (
+                b"local v = 'a' .. true",
+                "user_script:1: attempt to concatenate a boolean value",
+            ),
+            (
+                b"local v = 'a' .. {}",
+                "user_script:1: attempt to concatenate a table value",
+            ),
+            (
+                b"local v = nil .. 'a'",
+                "user_script:1: attempt to concatenate a nil value",
+            ),
+            (
+                b"local v = 1 < 'a'",
+                "user_script:1: attempt to compare number with string",
+            ),
+            (
+                b"local v = 1 < nil",
+                "user_script:1: attempt to compare number with nil",
+            ),
+            (
+                b"local v = 'a' < {}",
+                "user_script:1: attempt to compare string with table",
+            ),
+            (
+                b"local v = true < false",
+                "user_script:1: attempt to compare two boolean values",
+            ),
+            (
+                b"local v = nil < nil",
+                "user_script:1: attempt to compare two nil values",
+            ),
+            (
+                b"local v = ({}) < ({})",
+                "user_script:1: attempt to compare two table values",
+            ),
+        ];
+        for (src, expected) in cases {
+            let err = eval_script(src, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected error for {:?}",
+                String::from_utf8_lossy(src)
+            ));
+            assert!(
+                err.contains(expected),
+                "wrong wording for {:?}: got {err:?}, expected to contain {expected:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+
+        // Numeric strings still coerce for unary minus, and string..number
+        // still concatenates (regression checks for Lua semantics).
+        let frame = eval_script(b"return tostring(-'123')", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"-123".to_vec())));
+        let frame = eval_script(b"return 'a' .. 1", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"a1".to_vec())));
+        // Length-of-string still works.
+        let frame = eval_script(b"return #'abc'", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(3));
     }
 
     #[test]
