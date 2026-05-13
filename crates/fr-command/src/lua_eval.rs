@@ -429,7 +429,18 @@ impl LuaValue {
                 // i64 cast collapses -0.0 to 0 which then formats as
                 // "0", losing the sign.
                 let is_neg_zero = *n == 0.0 && n.is_sign_negative();
-                if !is_neg_zero && *n == (*n as i64) as f64 && n.is_finite() {
+                // (frankenredis-ie595) Also skip the fast path once
+                // the value would push C's %.14g into scientific
+                // notation (i.e. |n| >= 1e14). tostring(2^53) must
+                // emit '9.007199254741e+15', not the full 16-digit
+                // integer literal.
+                let abs = n.abs();
+                let needs_scientific = abs >= 1e14;
+                if !is_neg_zero
+                    && !needs_scientific
+                    && *n == (*n as i64) as f64
+                    && n.is_finite()
+                {
                     format!("{}", *n as i64).into_bytes()
                 } else {
                     lua_number_to_string(*n).into_bytes()
