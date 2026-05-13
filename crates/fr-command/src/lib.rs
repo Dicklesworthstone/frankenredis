@@ -869,11 +869,18 @@ fn command_key_references_with_exact_flags(
     }
 
     // Update-style writes that may overwrite existing fields/scores:
-    // HSET, HMSET, ZADD, XADD. RW/update. (br-frankenredis-keyflagsupd3)
+    // HSET, HMSET, ZADD, XADD, GEOADD. RW/update.
+    // (br-frankenredis-keyflagsupd3 + frankenredis-geoaddflag)
+    // Upstream commands.def declares GEOADD with CMD_KEY_RW|CMD_KEY_UPDATE
+    // and NO access flag (since the operation only writes, even though the
+    // ZADD-equivalent it stores into is technically also accessed). fr's
+    // heuristic for CMD_WRITE adds access by default — explicitly override
+    // here so COMMAND GETKEYSANDFLAGS GEOADD matches vendored.
     if cmd_name.eq_ignore_ascii_case("HSET")
         || cmd_name.eq_ignore_ascii_case("HMSET")
         || cmd_name.eq_ignore_ascii_case("ZADD")
         || cmd_name.eq_ignore_ascii_case("XADD")
+        || cmd_name.eq_ignore_ascii_case("GEOADD")
     {
         if argv.len() < 2 {
             return Ok(None);
@@ -936,8 +943,11 @@ fn command_key_references_with_exact_flags(
     }
 
     // Metadata-only readonly ops: XLEN, LLEN, HLEN, SCARD, ZCARD,
-    // STRLEN, EXISTS-style. Upstream uses just RO without 'access'.
-    // (br-frankenredis-keyflagsupd3)
+    // STRLEN, TYPE, OBJECT — and also EXISTS/TOUCH/HEXISTS/HSTRLEN/
+    // SISMEMBER which upstream commands.def declares with CMD_KEY_RO
+    // (no access) because the value content is not exposed back to
+    // the caller. WATCH likewise uses pure RO.
+    // (br-frankenredis-keyflagsupd3 + frankenredis-existsroflag)
     if cmd_name.eq_ignore_ascii_case("XLEN")
         || cmd_name.eq_ignore_ascii_case("LLEN")
         || cmd_name.eq_ignore_ascii_case("HLEN")
@@ -946,14 +956,65 @@ fn command_key_references_with_exact_flags(
         || cmd_name.eq_ignore_ascii_case("STRLEN")
         || cmd_name.eq_ignore_ascii_case("TYPE")
         || cmd_name.eq_ignore_ascii_case("OBJECT")
+        || cmd_name.eq_ignore_ascii_case("EXISTS")
+        || cmd_name.eq_ignore_ascii_case("TOUCH")
+        || cmd_name.eq_ignore_ascii_case("HEXISTS")
+        || cmd_name.eq_ignore_ascii_case("HSTRLEN")
+        || cmd_name.eq_ignore_ascii_case("SISMEMBER")
+        || cmd_name.eq_ignore_ascii_case("WATCH")
     {
         if argv.len() < 2 {
             return Ok(None);
+        }
+        // EXISTS/TOUCH/WATCH accept multiple key arguments.
+        let multi_key = cmd_name.eq_ignore_ascii_case("EXISTS")
+            || cmd_name.eq_ignore_ascii_case("TOUCH")
+            || cmd_name.eq_ignore_ascii_case("WATCH");
+        if multi_key {
+            return Ok(Some(
+                (1..argv.len())
+                    .map(|index| CommandKeyReference {
+                        index,
+                        flags: KEY_FLAGS_RO,
+                    })
+                    .collect(),
+            ));
         }
         return Ok(Some(vec![CommandKeyReference {
             index: 1,
             flags: KEY_FLAGS_RO,
         }]));
+    }
+
+    // PFADD: RW/insert (upstream commands.def keySpec). The heuristic's
+    // RW/access/update is wrong because PFADD does not access the
+    // existing value -- it just merges new elements into the sparse
+    // bitfield. (frankenredis-existsroflag)
+    if cmd_name.eq_ignore_ascii_case("PFADD") {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_INSERT,
+        }]));
+    }
+
+    // PFCOUNT: RW/access (upstream). PFCOUNT may mutate the sparse
+    // representation in place during merge, so upstream classifies
+    // it as RW not RO. (frankenredis-existsroflag)
+    if cmd_name.eq_ignore_ascii_case("PFCOUNT") {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(
+            (1..argv.len())
+                .map(|index| CommandKeyReference {
+                    index,
+                    flags: &["RW", "access"],
+                })
+                .collect(),
+        ));
     }
 
     // Element-pop ops (LPOP, RPOP, SPOP, ZPOPMIN, ZPOPMAX, blocking
