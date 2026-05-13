@@ -14887,6 +14887,15 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
         // a metadata-only read).
         "memory|usage" => &["RO"],
 
+        // (frankenredis-6x221) Shard pubsub commands take a channel
+        // *name* in the key argument slot, not an actual keyspace key.
+        // Upstream commands.def declares SSUBSCRIBE_Keyspecs,
+        // SUNSUBSCRIBE_Keyspecs, SPUBLISH_Keyspecs all with
+        // CMD_KEY_NOT_KEY. The vanilla SUBSCRIBE/PUBLISH/PSUBSCRIBE
+        // family has no keyspec at all (NULL upstream) because their
+        // args don't live in the key slot.
+        "ssubscribe" | "sunsubscribe" | "spublish" => &["not_key"],
+
         // (frankenredis-o3xwt) Per upstream commands.def OBJECT
         // subcommands (object.c::objectCommand) only need RO bare —
         // they read object metadata, not the value bytes.
