@@ -18505,28 +18505,51 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             ]
         }
         let mut items = Vec::with_capacity(60);
+        // (frankenredis-wkglo) Track overhead components as we emit them
+        // so the trailing `overhead.total` row is the real sum, matching
+        // upstream object.c::getMemoryOverheadData:
+        //   mh->overhead_total = mh->startup_allocated + mh->repl_backlog
+        //     + mh->clients_slaves + mh->clients_normal + mh->cluster_links
+        //     + mh->aof_buffer + mh->lua_caches + mh->functions_caches
+        //     + sum-over-dbs(main_bytes + expires_bytes).
+        let startup_allocated: i64 = 0;
+        let replication_backlog: i64 = 0;
+        let clients_slaves: i64 = store.stat_clients_replica_mem_bytes as i64;
+        let clients_normal: i64 = store.stat_clients_normal_mem_bytes as i64;
+        let cluster_links: i64 = 0;
+        let aof_buffer: i64 = 0;
+        let lua_caches: i64 = store.scripts_memory_bytes() as i64;
+        let functions_caches: i64 = store.functions_memory_bytes() as i64;
+        let mut overhead_total: i64 = startup_allocated
+            .saturating_add(replication_backlog)
+            .saturating_add(clients_slaves)
+            .saturating_add(clients_normal)
+            .saturating_add(cluster_links)
+            .saturating_add(aof_buffer)
+            .saturating_add(lua_caches)
+            .saturating_add(functions_caches);
         for kv in [
             pair("peak.allocated", used),
             pair("total.allocated", used),
-            pair("startup.allocated", 0),
-            pair("replication.backlog", 0),
+            pair("startup.allocated", startup_allocated),
+            pair("replication.backlog", replication_backlog),
             // (frankenredis-zfu61) Real per-client buffer summation
             // maintained by Runtime::refresh_client_memory_aggregates
             // after every record_client_session / remove_client_session.
             // Mirrors upstream object.c::getMemoryOverheadData which
             // accumulates clientMemUsage(c) into mh->clients_normal /
             // mh->clients_slaves.
-            pair("clients.slaves", store.stat_clients_replica_mem_bytes as i64),
-            pair("clients.normal", store.stat_clients_normal_mem_bytes as i64),
-            pair("cluster.links", 0),
-            pair("aof.buffer", 0),
+            pair("clients.slaves", clients_slaves),
+            pair("clients.normal", clients_normal),
+            pair("cluster.links", cluster_links),
+            pair("aof.buffer", aof_buffer),
             // (frankenredis-t344m) Same data sources as INFO memory's
             // used_memory_scripts (ymyrt) and used_memory_functions
             // (2usb3). Upstream object.c::getMemoryOverheadData feeds
             // both INFO memory and MEMORY STATS from
             // evalScriptsMemory() / functionsMemoryOverhead().
-            pair("lua.caches", store.scripts_memory_bytes() as i64),
-            pair("functions.caches", store.functions_memory_bytes() as i64),
+            pair("lua.caches", lua_caches),
+            pair("functions.caches", functions_caches),
         ] {
             items.extend(kv);
         }
@@ -18559,6 +18582,11 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             let expires = store.expires_in_db(db);
             let main_bytes = (keys as i64).saturating_mul(DICT_ENTRY_BYTES);
             let expires_bytes = (expires as i64).saturating_mul(DICT_ENTRY_BYTES);
+            // (frankenredis-wkglo) Per-db hashtable overhead contributes
+            // to overhead.total; sum here while we still have the values.
+            overhead_total = overhead_total
+                .saturating_add(main_bytes)
+                .saturating_add(expires_bytes);
             items.push(RespFrame::BulkString(Some(format!("db.{db}").into_bytes())));
             if resp_v3 {
                 items.push(RespFrame::Map(Some(vec![
@@ -18589,7 +18617,11 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             }
         }
         for kv in [
-            pair("overhead.total", 0),
+            // (frankenredis-wkglo) Real sum of all overhead components
+            // emitted above (startup + repl_backlog + clients +
+            // cluster_links + aof_buffer + lua + functions + per-db
+            // hashtable overheads).
+            pair("overhead.total", overhead_total),
             pair("keys.count", total_keys),
             pair("keys.bytes-per-key", bytes_per_key),
             pair("dataset.bytes", used),
