@@ -1893,6 +1893,13 @@ impl<'a> LuaState<'a> {
         for name in &[
             "sub", "len", "rep", "lower", "upper", "byte", "char", "reverse", "format", "find",
             "match", "gsub", "gmatch",
+            // (frankenredis-dqbdr) Vendored Redis 7.2.4 exposes
+            // string.dump from Lua 5.1's stdlib. The function has no
+            // useful semantics in fr's tree-walking interpreter (no
+            // bytecode form to serialize) so the dispatch handler
+            // errors at call time, but `type(string.dump)` must still
+            // return 'function' for scripts that probe the surface.
+            "dump",
         ] {
             string_table.set(
                 LuaValue::Str(name.as_bytes().to_vec()),
@@ -3918,6 +3925,14 @@ impl<'a> LuaState<'a> {
                 s.reverse();
                 Ok(vec![LuaValue::Str(s)])
             }
+            // (frankenredis-dqbdr) Lua 5.1 string.dump serialises a
+            // function to its bytecode form. fr's tree-walking
+            // interpreter has no bytecode representation, so the
+            // function is registered (so `type(string.dump)` returns
+            // 'function') but errors when invoked.
+            "string.dump" => Err(
+                "user_script:1: unable to dump given function".to_string(),
+            ),
             "string.byte" => {
                 let s = args
                     .first()
