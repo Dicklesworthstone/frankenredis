@@ -1818,8 +1818,12 @@ impl<'a> LuaState<'a> {
             "setmetatable",
             "getmetatable",
             "assert",
-            "print",
             "xpcall",
+            // (frankenredis-1khox) 'print' is *not* exposed in the
+            // Redis 7.2 Lua sandbox (script_lua.c blocks it alongside
+            // loadfile/dofile/io/os/require). The print RustFunction
+            // dispatch handler remains in case internal callers want
+            // it, but the global is not bound.
         ] {
             globals.insert(name.to_string(), LuaValue::RustFunction(name.to_string()));
         }
@@ -2053,14 +2057,11 @@ impl<'a> LuaState<'a> {
         self.globals
             .insert("redis".to_string(), LuaValue::Table(redis_table));
 
-        // Set up os table (Redis Lua only exposes os.clock)
-        let os_table = LuaTable::new();
-        os_table.set(
-            LuaValue::Str(b"clock".to_vec()),
-            LuaValue::RustFunction("os.clock".to_string()),
-        );
-        self.globals
-            .insert("os".to_string(), LuaValue::Table(os_table));
+        // (frankenredis-1khox) Redis 7.2.4's Lua sandbox does NOT
+        // expose the os table -- scripts that reference 'os' get the
+        // standard 'Script attempted to access nonexistent global
+        // variable' error. The os.clock dispatch handler is left in
+        // place but the table is not bound.
 
         // Coroutine table registration. Redis 7.2 keeps the Lua
         // coroutine library available inside the script sandbox.
@@ -2328,7 +2329,7 @@ impl<'a> LuaState<'a> {
                     // equivalent to `f = function() end`; both write
                     // to the globals table. Block once locked.
                     if self.globals_locked {
-                        return Err("Attempt to modify a readonly table".to_string());
+                        return Err("user_script:1: Attempt to modify a readonly table".to_string());
                     }
                     self.globals.insert(names[0].clone(), func);
                 } else {
@@ -2420,7 +2421,7 @@ impl<'a> LuaState<'a> {
                     // assignments raise. Locals (Stmt::LocalAssign)
                     // bypass this path entirely.
                     if self.globals_locked {
-                        return Err("Attempt to modify a readonly table".to_string());
+                        return Err("user_script:1: Attempt to modify a readonly table".to_string());
                     }
                     self.globals.insert(name.clone(), value);
                 }
@@ -2511,8 +2512,12 @@ impl<'a> LuaState<'a> {
                     // luaProtectedTableError __index handler — reading
                     // an undefined global from a sandboxed user script
                     // is a hard error, not silent nil.
+                    // (frankenredis-1khox) Prepend the standard
+                    // 'user_script:N: ' source-location prefix that
+                    // upstream's luaL_error / luaProtectedTableError
+                    // wraps around every C-side script error.
                     Err(format!(
-                        "Script attempted to access nonexistent global variable '{name}'"
+                        "user_script:1: Script attempted to access nonexistent global variable '{name}'"
                     ))
                 } else {
                     Ok(LuaValue::Nil)
