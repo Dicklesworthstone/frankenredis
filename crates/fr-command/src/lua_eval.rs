@@ -1870,6 +1870,29 @@ impl<'a> LuaState<'a> {
         }
         globals.insert("cjson".to_string(), LuaValue::Table(cjson_table));
 
+        // (frankenredis-vgnsc) Standard Lua 5.1 globals also exposed in
+        // Redis 7.2.4's sandbox: _VERSION constant, rawequal /
+        // gcinfo / collectgarbage function entries. fr's tree-walking
+        // interpreter has no real Lua heap accounting so gcinfo /
+        // collectgarbage('count') return a stable placeholder value
+        // and the control variants of collectgarbage are no-ops.
+        globals.insert(
+            "_VERSION".to_string(),
+            LuaValue::Str(b"Lua 5.1".to_vec()),
+        );
+        globals.insert(
+            "rawequal".to_string(),
+            LuaValue::RustFunction("rawequal".to_string()),
+        );
+        globals.insert(
+            "gcinfo".to_string(),
+            LuaValue::RustFunction("gcinfo".to_string()),
+        );
+        globals.insert(
+            "collectgarbage".to_string(),
+            LuaValue::RustFunction("collectgarbage".to_string()),
+        );
+
         // (frankenredis-v95aj) Redis 7.2.4 exposes LuaJIT's bit library
         // as a global 'bit' table. Operations are 32-bit; numbers are
         // truncated to u32 before each op and the result is returned
@@ -4186,6 +4209,43 @@ impl<'a> LuaState<'a> {
                 } else {
                     Ok(vec![LuaValue::Number(0.0)])
                 }
+            }
+            // ── plain top-level globals (frankenredis-vgnsc) ──────────
+            "rawequal" => {
+                let a = args.first().unwrap_or(&LuaValue::Nil);
+                let b = args.get(1).unwrap_or(&LuaValue::Nil);
+                // rawequal: identity / value equality with no metamethod
+                // dispatch. fr's LuaValue Eq derives the right semantics
+                // for primitive kinds; tables compare by Rc pointer
+                // identity through their underlying Rc<RefCell>.
+                let eq = match (a, b) {
+                    (LuaValue::Nil, LuaValue::Nil) => true,
+                    (LuaValue::Bool(x), LuaValue::Bool(y)) => x == y,
+                    (LuaValue::Number(x), LuaValue::Number(y)) => x == y,
+                    (LuaValue::Str(x), LuaValue::Str(y)) => x == y,
+                    (LuaValue::Table(x), LuaValue::Table(y)) => Rc::ptr_eq(&x.inner, &y.inner),
+                    _ => false,
+                };
+                Ok(vec![LuaValue::Bool(eq)])
+            }
+            "gcinfo" => {
+                // Upstream LuaJIT/Lua 5.1 returns the Lua heap usage in
+                // kilobytes as an integer. fr has no Lua-side GC so a
+                // stable placeholder keeps scripts that only branch on
+                // "is the value finite?" working.
+                Ok(vec![LuaValue::Number(32.0)])
+            }
+            "collectgarbage" => {
+                // Accept the standard option strings. fr has no real GC
+                // so control variants ('collect', 'stop', 'restart',
+                // 'step', 'setpause', 'setstepmul') are no-ops returning
+                // 0; 'count' returns a stable placeholder of kbytes used.
+                let opt = match args.first() {
+                    Some(LuaValue::Str(s)) => String::from_utf8_lossy(s).to_string(),
+                    _ => "collect".to_string(),
+                };
+                let n = if opt == "count" { 32.0 } else { 0.0 };
+                Ok(vec![LuaValue::Number(n)])
             }
             // ── bit library (LuaJIT 32-bit semantics) ─────────────────
             // (frankenredis-v95aj) Mirrors Lua 5.1 LuaJIT bit library
