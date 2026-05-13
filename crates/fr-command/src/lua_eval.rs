@@ -2970,9 +2970,20 @@ impl<'a> LuaState<'a> {
                     Err(e) => Err(e),
                 }
             }
-            LuaValue::Nil => Err("attempt to call a nil value".to_string()),
-            LuaValue::Coroutine(_) => Err("attempt to call a thread value".to_string()),
-            other => Err(format!("attempt to call a {} value", other.type_name())),
+            // (frankenredis-8w2ag) Prepend the standard
+            // 'user_script:N: ' source-location prefix that upstream
+            // Lua 5.1 wraps around every runtime error. (Vendored
+            // also adds 'field NAME ' context when the call site is
+            // a method-style access -- requires plumbing the field
+            // name through; deferred as a separate follow-up.)
+            LuaValue::Nil => Err("user_script:1: attempt to call a nil value".to_string()),
+            LuaValue::Coroutine(_) => {
+                Err("user_script:1: attempt to call a thread value".to_string())
+            }
+            other => Err(format!(
+                "user_script:1: attempt to call a {} value",
+                other.type_name()
+            )),
         };
         self.call_depth -= 1;
         result
