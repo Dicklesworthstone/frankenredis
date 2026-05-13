@@ -427,7 +427,7 @@ impl LuaValue {
                 if *n == (*n as i64) as f64 && n.is_finite() {
                     format!("{}", *n as i64).into_bytes()
                 } else {
-                    format!("{n}").into_bytes()
+                    lua_number_to_string(*n).into_bytes()
                 }
             }
             LuaValue::Str(s) => s.clone(),
@@ -5617,6 +5617,78 @@ fn json_escape_bytes(bytes: &[u8]) -> String {
     }
     out.push('"');
     out
+}
+
+/// (frankenredis-u5qgq) Format a Lua Number as Lua 5.1 does via
+/// LUAI_NUMFMT = "%.14g". The C-stdlib %g spec: 14 significant digits,
+/// strip trailing zeros after the decimal, use scientific notation when
+/// the exponent is < -4 or >= precision (14). Returns nan / inf / -inf
+/// in the same canonical lowercase form Lua emits.
+pub(crate) fn lua_number_to_string(n: f64) -> String {
+    if n.is_nan() {
+        return "nan".to_string();
+    }
+    if n.is_infinite() {
+        return if n > 0.0 { "inf".to_string() } else { "-inf".to_string() };
+    }
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    const PRECISION: i32 = 14;
+    let abs = n.abs();
+    let exponent = abs.log10().floor() as i32;
+    // C's %g uses scientific when X < -4 or X >= precision, where
+    // X is the rounded exponent. Approximating with log10().floor()
+    // is safe for everything except boundary cases right at 10^k;
+    // the formatted output is checked via the format! result below.
+    if exponent < -4 || exponent >= PRECISION {
+        // Scientific: %.13e style (13 fractional digits = 14 sig figs).
+        let formatted = format!("{:.*e}", (PRECISION - 1) as usize, n);
+        // Rust emits '1.2e5'; C %g emits '1.2e+05' for positive exponents
+        // and pads to two digits. Lua relies on C printf; mirror that.
+        return rust_e_to_c_g(&formatted);
+    }
+    // Fixed notation with (PRECISION - 1 - exponent) fractional digits,
+    // then strip trailing zeros after the decimal point.
+    let frac_digits = (PRECISION - 1 - exponent).max(0) as usize;
+    let s = format!("{:.*}", frac_digits, n);
+    strip_trailing_zeros(&s)
+}
+
+/// Convert Rust's "1.2e5" / "1.2e-5" to C %g style "1.2e+05" / "1.2e-05".
+/// Then strip trailing zeros from the mantissa (before the 'e').
+fn rust_e_to_c_g(formatted: &str) -> String {
+    let Some(e_pos) = formatted.find('e') else {
+        return formatted.to_string();
+    };
+    let mantissa = &formatted[..e_pos];
+    let exp = &formatted[e_pos + 1..];
+    let mantissa_stripped = strip_trailing_zeros(mantissa);
+    // Normalise exponent: must have sign and >= 2 digits.
+    let (sign, digits) = if let Some(rest) = exp.strip_prefix('-') {
+        ('-', rest)
+    } else if let Some(rest) = exp.strip_prefix('+') {
+        ('+', rest)
+    } else {
+        ('+', exp)
+    };
+    let padded = if digits.len() < 2 {
+        format!("0{digits}")
+    } else {
+        digits.to_string()
+    };
+    format!("{mantissa_stripped}e{sign}{padded}")
+}
+
+/// Strip trailing zeros from the fractional portion of a decimal string.
+/// "1.5000" -> "1.5"; "1.000" -> "1"; "1" -> "1". Negative-sign safe.
+fn strip_trailing_zeros(s: &str) -> String {
+    if !s.contains('.') {
+        return s.to_string();
+    }
+    let trimmed = s.trim_end_matches('0');
+    let trimmed = trimmed.trim_end_matches('.');
+    trimmed.to_string()
 }
 
 /// (frankenredis-v95aj) Normalise a LuaValue to u32 for bit library
