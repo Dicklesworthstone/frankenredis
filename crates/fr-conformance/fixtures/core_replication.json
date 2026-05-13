@@ -255,8 +255,8 @@
         "-1"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "FULLRESYNC 0000000000000000000000000000000000000000 0"
+        "kind": "simple_pattern",
+        "value": "FULLRESYNC {hex40} 0"
       }
     },
     {
@@ -268,8 +268,8 @@
         "100"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "FULLRESYNC 0000000000000000000000000000000000000000 0"
+        "kind": "simple_pattern",
+        "value": "FULLRESYNC {hex40} 0"
       }
     },
     {
@@ -281,8 +281,8 @@
         "12345"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "FULLRESYNC 0000000000000000000000000000000000000000 0"
+        "kind": "simple_pattern",
+        "value": "FULLRESYNC {hex40} 0"
       }
     },
     {
@@ -294,8 +294,8 @@
         "0"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "FULLRESYNC 0000000000000000000000000000000000000000 0"
+        "kind": "simple_pattern",
+        "value": "FULLRESYNC {hex40} 0"
       }
     },
     {
@@ -307,8 +307,8 @@
         "-1"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "FULLRESYNC 0000000000000000000000000000000000000000 0"
+        "kind": "simple_pattern",
+        "value": "FULLRESYNC {hex40} 0"
       }
     },
     {
@@ -333,8 +333,8 @@
         "extra"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "FULLRESYNC 0000000000000000000000000000000000000000 0"
+        "kind": "simple_pattern",
+        "value": "FULLRESYNC {hex40} 0"
       }
     },
     {
@@ -635,8 +635,8 @@
         "SYNC"
       ],
       "expect": {
-        "kind": "simple",
-        "value": "FULLRESYNC 0000000000000000000000000000000000000001 0"
+        "kind": "simple_pattern",
+        "value": "FULLRESYNC {hex40} 0"
       }
     },
     {

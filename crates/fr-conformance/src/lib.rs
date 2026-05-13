@@ -196,6 +196,19 @@ pub enum ExpectedFrame {
     /// (frankenredis-i5icx)
     AnySimple,
     AnyArray,
+    /// Match a SimpleString against a template pattern with placeholders.
+    /// Supported placeholders:
+    ///   {hex40} -- exactly 40 lowercase or uppercase hex characters
+    ///   {int}   -- an optionally signed decimal integer
+    /// Everything else in `value` is matched as a literal substring at
+    /// the corresponding position. Used by PSYNC fixtures so they can
+    /// accept any randomly-generated 40-char replid (per upstream
+    /// replication.c getRandomHexChars(server.replid, ...)) while
+    /// still asserting the surrounding FULLRESYNC structure.
+    /// (frankenredis-uqsi6)
+    SimplePattern {
+        value: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -3093,6 +3106,7 @@ fn expected_to_frame(expected: &ExpectedFrame) -> RespFrame {
         ExpectedFrame::AnyBulk => RespFrame::BulkString(Some(Vec::new())),
         ExpectedFrame::AnySimple => RespFrame::SimpleString(String::new()),
         ExpectedFrame::AnyArray => RespFrame::Array(Some(Vec::new())),
+        ExpectedFrame::SimplePattern { value } => RespFrame::SimpleString(value.clone()),
     }
 }
 
@@ -3123,6 +3137,10 @@ fn frame_matches_expected(actual: &RespFrame, expected: &ExpectedFrame) -> bool 
         },
         ExpectedFrame::SimpleContainsAll { value } => match actual {
             RespFrame::SimpleString(text) => value.iter().all(|needle| text.contains(needle)),
+            _ => false,
+        },
+        ExpectedFrame::SimplePattern { value } => match actual {
+            RespFrame::SimpleString(text) => simple_pattern_matches(value, text),
             _ => false,
         },
         ExpectedFrame::Array { value } => match actual {
@@ -3161,6 +3179,64 @@ fn frame_matches_expected(actual: &RespFrame, expected: &ExpectedFrame) -> bool 
         },
         _ => *actual == expected_to_frame(expected),
     }
+}
+
+/// (frankenredis-uqsi6) Match `actual` against a `pattern` template
+/// containing literal text plus `{hex40}` and `{int}` placeholders.
+/// Used by PSYNC FULLRESYNC fixtures so they accept any randomly
+/// generated 40-char replid (upstream replication.c calls
+/// getRandomHexChars(server.replid, CONFIG_RUN_ID_SIZE) at startup
+/// and the value carries through to FULLRESYNC replies).
+fn simple_pattern_matches(pattern: &str, actual: &str) -> bool {
+    let mut p = pattern;
+    let mut a = actual;
+    while !p.is_empty() {
+        if let Some(rest) = p.strip_prefix("{hex40}") {
+            if a.len() < 40 {
+                return false;
+            }
+            let (head, tail) = a.split_at(40);
+            if !head.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return false;
+            }
+            a = tail;
+            p = rest;
+            continue;
+        }
+        if let Some(rest) = p.strip_prefix("{int}") {
+            let bytes = a.as_bytes();
+            let mut idx = 0;
+            if let Some(&first) = bytes.first()
+                && (first == b'-' || first == b'+')
+            {
+                idx += 1;
+            }
+            let digits_start = idx;
+            while idx < bytes.len() && bytes[idx].is_ascii_digit() {
+                idx += 1;
+            }
+            if idx == digits_start {
+                return false;
+            }
+            a = &a[idx..];
+            p = rest;
+            continue;
+        }
+        let next_marker = p
+            .find('{')
+            .filter(|&i| p[i..].starts_with("{hex40}") || p[i..].starts_with("{int}"));
+        let literal = match next_marker {
+            Some(i) => &p[..i],
+            None => p,
+        };
+        if let Some(after) = a.strip_prefix(literal) {
+            a = after;
+            p = &p[literal.len()..];
+        } else {
+            return false;
+        }
+    }
+    a.is_empty()
 }
 
 impl ReplicationHandshakeStep {
