@@ -2280,9 +2280,10 @@ impl<'a> LuaState<'a> {
                         .ok_or("'for' step must be a number")?,
                     None => 1.0,
                 };
-                if st == 0.0 {
-                    return Err("'for' step is zero".to_string());
-                }
+                // (frankenredis-4hhz5) Lua 5.1 allows step=0; the body
+                // either breaks/returns or the loop is infinite (caller's
+                // responsibility, same as `while true do end`). Vendored
+                // does not reject step=0 at the runtime layer.
                 let mut i = s;
                 loop {
                     self.iterations += 1;
@@ -2393,7 +2394,7 @@ impl<'a> LuaState<'a> {
             .cloned()
             .unwrap_or(LuaValue::Nil);
         if !matches!(current, LuaValue::Table(_)) {
-            return Err(format!("attempt to index a {} value", current.type_name()));
+            return Err(format!("user_script:1: attempt to index a {} value", current.type_name()));
         }
         // Navigate to the parent table
         let mut path: Vec<LuaValue> = vec![current.clone()];
@@ -2401,25 +2402,25 @@ impl<'a> LuaState<'a> {
             let next = match &current {
                 LuaValue::Table(t) => t.get(&LuaValue::Str(name.as_bytes().to_vec())),
                 other => {
-                    return Err(format!("attempt to index a {} value", other.type_name()));
+                    return Err(format!("user_script:1: attempt to index a {} value", other.type_name()));
                 }
             };
             if !matches!(next, LuaValue::Table(_)) {
-                return Err(format!("attempt to index a {} value", next.type_name()));
+                return Err(format!("user_script:1: attempt to index a {} value", next.type_name()));
             }
             current = next;
             path.push(current.clone());
         }
         // Set the value in the innermost table
         let Some(last_entry) = path.last_mut() else {
-            return Err("attempt to index a nil value".to_string());
+            return Err("user_script:1: attempt to index a nil value".to_string());
         };
         if let LuaValue::Table(t) = last_entry {
             t.set(LuaValue::Str(last_field.as_bytes().to_vec()), value);
             // Rebuild the chain
             let mut val = path
                 .pop()
-                .ok_or_else(|| "attempt to index a nil value".to_string())?;
+                .ok_or_else(|| "user_script:1: attempt to index a nil value".to_string())?;
             for i in (0..parent_fields.len()).rev() {
                 if let Some(LuaValue::Table(parent)) = path.get_mut(i) {
                     parent.set(LuaValue::Str(parent_fields[i].as_bytes().to_vec()), val);
@@ -2480,7 +2481,7 @@ impl<'a> LuaState<'a> {
             self.write_back_table_expr(table_expr, table, env, varargs)?;
             Ok(())
         } else {
-            Err(format!("attempt to index a {} value", table.type_name()))
+            Err(format!("user_script:1: attempt to index a {} value", table.type_name()))
         }
     }
 
@@ -2578,7 +2579,7 @@ impl<'a> LuaState<'a> {
                     UnaryOp::Neg => {
                         let n = val
                             .to_number()
-                            .ok_or("attempt to perform arithmetic on a non-number")?;
+                            .ok_or("user_script:1: attempt to perform arithmetic on a non-number value")?;
                         Ok(LuaValue::Number(-n))
                     }
                     UnaryOp::Not => Ok(LuaValue::Bool(!val.is_truthy())),
@@ -2597,7 +2598,7 @@ impl<'a> LuaState<'a> {
                 let key = self.eval_expr(key_expr, env, varargs)?;
                 match &table {
                     LuaValue::Table(t) => Ok(t.get_with_index(&key)),
-                    _ => Err(format!("attempt to index a {} value", table.type_name())),
+                    _ => Err(format!("user_script:1: attempt to index a {} value", table.type_name())),
                 }
             }
             Expr::Field(table_expr, field) => {
@@ -2606,7 +2607,7 @@ impl<'a> LuaState<'a> {
                     LuaValue::Table(t) => {
                         Ok(t.get_with_index(&LuaValue::Str(field.as_bytes().to_vec())))
                     }
-                    _ => Err(format!("attempt to index a {} value", table.type_name())),
+                    _ => Err(format!("user_script:1: attempt to index a {} value", table.type_name())),
                 }
             }
             Expr::Call(func_expr, args) => {
@@ -2884,12 +2885,23 @@ impl<'a> LuaState<'a> {
     fn eval_binop(&self, lv: &LuaValue, op: &BinOp, rv: &LuaValue) -> Result<LuaValue, String> {
         match op {
             BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Pow => {
-                let a = lv
-                    .to_number()
-                    .ok_or("attempt to perform arithmetic on a non-number")?;
-                let b = rv
-                    .to_number()
-                    .ok_or("attempt to perform arithmetic on a non-number")?;
+                // (frankenredis-4hhz5) Mirror Lua 5.1's
+                // "attempt to perform arithmetic on a <type> value"
+                // wording rather than the generic "non-number". Use the
+                // first non-number operand's actual type. Numeric
+                // strings still coerce via to_number per Lua semantics.
+                let a = lv.to_number().ok_or_else(|| {
+                    format!(
+                        "user_script:1: attempt to perform arithmetic on a {} value",
+                        lv.type_name()
+                    )
+                })?;
+                let b = rv.to_number().ok_or_else(|| {
+                    format!(
+                        "user_script:1: attempt to perform arithmetic on a {} value",
+                        rv.type_name()
+                    )
+                })?;
                 let result = match op {
                     BinOp::Add => a + b,
                     BinOp::Sub => a - b,
@@ -6674,7 +6686,7 @@ mod tests {
         let err = eval_script(b"function a.b.c() return 1 end", &[], &[], &mut store, 0)
             .expect_err("expected error");
         assert!(
-            err.contains("attempt to index a nil value"),
+            err.contains("user_script:1: attempt to index a nil value"),
             "unexpected error: {err}"
         );
     }
