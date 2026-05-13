@@ -10,7 +10,8 @@ use fr_store::{
     PendingAclLogEvent, PttlValue, PubSubMessage, ScoreBound, Store, StoreError,
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
     StreamGroupReadCursor, StreamGroupReadOptions, StreamId, StreamPendingRecord, Value, ValueType,
-    glob_match, read_rss_bytes, redis_score_to_string, sha1_hex_public,
+    glob_match, read_rss_bytes, read_total_system_memory_bytes, redis_score_to_string,
+    sha1_hex_public,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -12782,8 +12783,17 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         let _ = write!(info, "allocator_allocated:{used_memory}\r\n");
         let _ = write!(info, "allocator_active:{used_memory}\r\n");
         let _ = write!(info, "allocator_resident:{used_memory_rss}\r\n");
-        info.push_str("total_system_memory:0\r\n");
-        info.push_str("total_system_memory_human:0B\r\n");
+        // (frankenredis-totalsysmem) Upstream populates this from
+        // sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGE_SIZE). fr reads
+        // /proc/meminfo MemTotal under #[forbid(unsafe_code)]. Falls
+        // back to 0 / "0B" on non-Linux or parse failure.
+        let total_system_memory = read_total_system_memory_bytes().unwrap_or(0);
+        let _ = write!(info, "total_system_memory:{total_system_memory}\r\n");
+        let _ = write!(
+            info,
+            "total_system_memory_human:{}\r\n",
+            format_bytes_human(total_system_memory)
+        );
         // (frankenredis-ymyrt) Mirror upstream eval.c::evalScriptsMemory.
         // Sum per-script sha (40 hex chars) + body bytes; dict overhead
         // is implementation-specific and skipped. used_memory_lua and

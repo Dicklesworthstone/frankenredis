@@ -1648,6 +1648,32 @@ pub fn read_rss_bytes() -> Option<usize> {
     }
 }
 
+/// (frankenredis-totalsysmem) Read system-wide total RAM in bytes,
+/// mirroring upstream INFO memory's `total_system_memory` field.
+/// Upstream Redis populates this from sysconf(_SC_PHYS_PAGES) *
+/// sysconf(_SC_PAGE_SIZE) on POSIX. fr uses the `MemTotal` line from
+/// /proc/meminfo (safe procfs read under #[forbid(unsafe_code)]).
+/// Returns None on non-Linux or when /proc/meminfo cannot be parsed.
+#[must_use]
+pub fn read_total_system_memory_bytes() -> Option<usize> {
+    #[cfg(target_os = "linux")]
+    {
+        let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
+        for line in meminfo.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                let kb_str = rest.trim().strip_suffix("kB")?.trim();
+                let kb: usize = kb_str.parse().ok()?;
+                return Some(kb * 1024);
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 impl Default for Store {
     fn default() -> Self {
         Self {
