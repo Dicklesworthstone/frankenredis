@@ -15158,6 +15158,23 @@ fn command_info_multi_keyspec(name: &str) -> Option<Vec<RespFrame>> {
                 &["RO", "access"],
             ),
         ]),
+        // (frankenredis-dtvnc) GEORADIUS / GEORADIUSBYMEMBER: 3
+        // keyspecs per upstream commands.def. Source geo key @1 is
+        // RO|ACCESS even though the command itself is CMD_WRITE (the
+        // write is conditional on STORE/STOREDIST). The two keyword-
+        // search keyspecs cover the optional STORE/STOREDIST
+        // destination keys. startfrom differs by 1 between the two
+        // (georadius has one extra leading positional arg).
+        "georadius" => Some(vec![
+            make_keyspec_index_range(&["RO", "access"], 1, 0, 1),
+            make_keyspec_keyword_range(&["OW", "update"], "STORE", 6, 0, 1, 0),
+            make_keyspec_keyword_range(&["OW", "update"], "STOREDIST", 6, 0, 1, 0),
+        ]),
+        "georadiusbymember" => Some(vec![
+            make_keyspec_index_range(&["RO", "access"], 1, 0, 1),
+            make_keyspec_keyword_range(&["OW", "update"], "STORE", 5, 0, 1, 0),
+            make_keyspec_keyword_range(&["OW", "update"], "STOREDIST", 5, 0, 1, 0),
+        ]),
         _ => None,
     }
 }
