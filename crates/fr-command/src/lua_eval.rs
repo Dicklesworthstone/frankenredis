@@ -431,10 +431,34 @@ impl LuaValue {
                 }
             }
             LuaValue::Str(s) => s.clone(),
-            LuaValue::Table(_) => b"table".to_vec(),
-            LuaValue::Function(_) | LuaValue::RustFunction(_) => b"function".to_vec(),
-            LuaValue::Coroutine(_) => b"thread".to_vec(),
-            LuaValue::WrappedCoroutine(_) => b"function".to_vec(),
+            // (frankenredis-7qoww) Lua 5.1 tostring on reference types
+            // emits '<type>: 0x<hex>'. fr previously emitted just the
+            // type name. Use the underlying Rc/Vec heap address so the
+            // value is stable across clones of the same logical value
+            // (Tables/Coroutines share an Rc; Functions clone their
+            // Vec params so the address changes per clone, which is OK
+            // because the FORMAT is what matters for scripts that
+            // string-match on tostring output).
+            LuaValue::Table(t) => {
+                let addr = Rc::as_ptr(&t.inner) as usize;
+                format!("table: 0x{addr:014x}").into_bytes()
+            }
+            LuaValue::Function(f) => {
+                let addr = f.params.as_ptr() as usize;
+                format!("function: 0x{addr:014x}").into_bytes()
+            }
+            LuaValue::RustFunction(n) => {
+                let addr = n.as_ptr() as usize;
+                format!("function: 0x{addr:014x}").into_bytes()
+            }
+            LuaValue::Coroutine(co) => {
+                let addr = Rc::as_ptr(&co.inner) as usize;
+                format!("thread: 0x{addr:014x}").into_bytes()
+            }
+            LuaValue::WrappedCoroutine(co) => {
+                let addr = Rc::as_ptr(&co.inner) as usize;
+                format!("function: 0x{addr:014x}").into_bytes()
+            }
         }
     }
 }
