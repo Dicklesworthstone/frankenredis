@@ -15120,12 +15120,21 @@ fn command_info_multi_keyspec(name: &str) -> Option<Vec<RespFrame>> {
             make_keyspec_index_range(&["OW", "update"], 1, 0, 1),
             make_keyspec_index_range(&["RO", "access"], 2, -1, 1),
         ]),
-        // zinterstore / zunionstore / zdiffstore / zrangestore / geosearchstore:
-        // dst@1 [OW, update] (single key), then numkeys @2 with keynum srcs.
-        "zinterstore" | "zunionstore" | "zdiffstore" | "zrangestore"
-        | "geosearchstore" => Some(vec![
+        // zinterstore / zunionstore / zdiffstore: dst@1 [OW, update]
+        // (single key), then numkeys @2 with keynum srcs.
+        "zinterstore" | "zunionstore" | "zdiffstore" => Some(vec![
             make_keyspec_index_range(&["OW", "update"], 1, 0, 1),
             make_keyspec_index_keynum(&["RO", "access"], 2, 0, 1, 1),
+        ]),
+        // (frankenredis-t7z1d) ZRANGESTORE / GEOSEARCHSTORE take a
+        // single source key, not a keynum-style multi-source list.
+        // Upstream commands.def declares both with two simple index
+        // keyspecs: dst@1 [OW|UPDATE], src@2 [RO|ACCESS] -- the find_keys
+        // is range, not keynum. fr was lumping them with
+        // zinterstore/zunionstore/zdiffstore which actually do use keynum.
+        "zrangestore" | "geosearchstore" => Some(vec![
+            make_keyspec_index_range(&["OW", "update"], 1, 0, 1),
+            make_keyspec_index_range(&["RO", "access"], 2, 0, 1),
         ]),
         // (frankenredis-o3xwt) SORT: 3 keyspecs. The input key has a
         // standard index begin_search. The optional BY/GET keyword and
