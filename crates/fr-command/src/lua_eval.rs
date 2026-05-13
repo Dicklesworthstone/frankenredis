@@ -424,7 +424,12 @@ impl LuaValue {
                 }
             }
             LuaValue::Number(n) => {
-                if *n == (*n as i64) as f64 && n.is_finite() {
+                // (frankenredis-n4eln) Skip the integer fast path for
+                // -0.0 so the helper preserves the sign bit -- Rust
+                // i64 cast collapses -0.0 to 0 which then formats as
+                // "0", losing the sign.
+                let is_neg_zero = *n == 0.0 && n.is_sign_negative();
+                if !is_neg_zero && *n == (*n as i64) as f64 && n.is_finite() {
                     format!("{}", *n as i64).into_bytes()
                 } else {
                     lua_number_to_string(*n).into_bytes()
@@ -3517,6 +3522,16 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Number(n.abs())])
             }
             "math.max" => {
+                // (frankenredis-n4eln) Lua 5.1's lmathlib.c::math_max
+                // uses luaL_checknumber on every arg starting at arg 1,
+                // so calling with zero args raises 'bad argument #1 to
+                // max (number expected, got no value)'.
+                if args.is_empty() {
+                    return Err(
+                        "user_script:1: bad argument #1 to 'max' (number expected, got no value)"
+                            .to_string(),
+                    );
+                }
                 let mut max = f64::NEG_INFINITY;
                 for a in args {
                     let n = a.to_number().ok_or("bad argument to 'math.max'")?;
@@ -3527,6 +3542,12 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Number(max)])
             }
             "math.min" => {
+                if args.is_empty() {
+                    return Err(
+                        "user_script:1: bad argument #1 to 'min' (number expected, got no value)"
+                            .to_string(),
+                    );
+                }
                 let mut min = f64::INFINITY;
                 for a in args {
                     let n = a.to_number().ok_or("bad argument to 'math.min'")?;
@@ -5805,7 +5826,15 @@ pub(crate) fn lua_number_to_string(n: f64) -> String {
         return if n > 0.0 { "inf".to_string() } else { "-inf".to_string() };
     }
     if n == 0.0 {
-        return "0".to_string();
+        // (frankenredis-n4eln) Preserve the sign of -0.0 so
+        // tostring(math.ceil(-0.5)) emits '-0' the way C printf %.14g
+        // does. Rust's `0.0 == -0.0` is true so an unguarded equality
+        // would conflate the two.
+        return if n.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        };
     }
     const PRECISION: i32 = 14;
     let abs = n.abs();
