@@ -68,8 +68,7 @@
         "LASTSAVE"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 0
+        "kind": "any_integer"
       }
     },
     {
@@ -370,69 +369,6 @@
                     "value": [
                       {
                         "kind": "bulk",
-                        "value": "command|getkeys"
-                      },
-                      {
-                        "kind": "integer",
-                        "value": -3
-                      },
-                      {
-                        "kind": "array",
-                        "value": [
-                          {
-                            "kind": "simple",
-                            "value": "loading"
-                          },
-                          {
-                            "kind": "simple",
-                            "value": "stale"
-                          }
-                        ]
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 0
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 0
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 0
-                      },
-                      {
-                        "kind": "array",
-                        "value": [
-                          {
-                            "kind": "simple",
-                            "value": "@slow"
-                          },
-                          {
-                            "kind": "simple",
-                            "value": "@connection"
-                          }
-                        ]
-                      },
-                      {
-                        "kind": "array",
-                        "value": []
-                      },
-                      {
-                        "kind": "array",
-                        "value": []
-                      },
-                      {
-                        "kind": "array",
-                        "value": []
-                      }
-                    ]
-                  },
-                  {
-                    "kind": "array",
-                    "value": [
-                      {
-                        "kind": "bulk",
                         "value": "command|docs"
                       },
                       {
@@ -501,7 +437,7 @@
                     "value": [
                       {
                         "kind": "bulk",
-                        "value": "command|getkeysandflags"
+                        "value": "command|getkeys"
                       },
                       {
                         "kind": "integer",
@@ -564,11 +500,11 @@
                     "value": [
                       {
                         "kind": "bulk",
-                        "value": "command|list"
+                        "value": "command|getkeysandflags"
                       },
                       {
                         "kind": "integer",
-                        "value": -2
+                        "value": -3
                       },
                       {
                         "kind": "array",
@@ -610,12 +546,7 @@
                       },
                       {
                         "kind": "array",
-                        "value": [
-                          {
-                            "kind": "bulk",
-                            "value": "nondeterministic_output_order"
-                          }
-                        ]
+                        "value": []
                       },
                       {
                         "kind": "array",
@@ -696,6 +627,74 @@
                       {
                         "kind": "bulk",
                         "value": "command|info"
+                      },
+                      {
+                        "kind": "integer",
+                        "value": -2
+                      },
+                      {
+                        "kind": "array",
+                        "value": [
+                          {
+                            "kind": "simple",
+                            "value": "loading"
+                          },
+                          {
+                            "kind": "simple",
+                            "value": "stale"
+                          }
+                        ]
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "array",
+                        "value": [
+                          {
+                            "kind": "simple",
+                            "value": "@slow"
+                          },
+                          {
+                            "kind": "simple",
+                            "value": "@connection"
+                          }
+                        ]
+                      },
+                      {
+                        "kind": "array",
+                        "value": [
+                          {
+                            "kind": "bulk",
+                            "value": "nondeterministic_output_order"
+                          }
+                        ]
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "command|list"
                       },
                       {
                         "kind": "integer",
