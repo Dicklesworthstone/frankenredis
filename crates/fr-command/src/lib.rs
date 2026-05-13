@@ -14888,8 +14888,16 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
         // Both are single-keyspec entries with keystep=2 (already encoded
         // via first_key/last_key/step at the COMMAND_TABLE level), so the
         // existing range find_keys is correct.
-        "mset" => &["OW", "update"],
-        "msetnx" => &["OW", "insert"],
+        "mset" | "setex" | "psetex" => &["OW", "update"],
+        // (frankenredis-o8q12) SETEX/PSETEX/SETNX/SETRANGE all need
+        // overrides because the heuristic falls back to 'RW access'.
+        // Upstream commands.def: SETEX_Keyspecs/PSETEX_Keyspecs =
+        // OW|UPDATE, SETNX_Keyspecs = OW|INSERT, SETRANGE_Keyspecs =
+        // RW|UPDATE. GETKEYSANDFLAGS already picks the right flags via
+        // its own handler at lib.rs:912-922 — only COMMAND INFO's
+        // keyspec emission was missing the override.
+        "msetnx" | "setnx" => &["OW", "insert"],
+        "setrange" => &["RW", "update"],
 
         _ => return None,
     };
