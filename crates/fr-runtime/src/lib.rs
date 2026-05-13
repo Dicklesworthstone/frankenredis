@@ -2629,6 +2629,12 @@ pub struct ClientSession {
     client_reply: ClientReplyState,
     /// Client peer address (set on connection accept).
     pub peer_addr: Option<std::net::SocketAddr>,
+    /// (frankenredis-lxccd) Per-client socket file descriptor, set by
+    /// the TCP server immediately after accept() via AsRawFd. Used by
+    /// CLIENT INFO / CLIENT LIST to emit the `fd=N` field matching
+    /// vendored Redis 7.2.4. None when the session was constructed in
+    /// a non-TCP context (e.g. unit tests, replica handshake).
+    pub socket_fd: Option<i32>,
     /// Connection acceptance timestamp in ms since epoch.
     pub connected_at_ms: u64,
     /// Last command interaction timestamp in ms since epoch.
@@ -2654,6 +2660,7 @@ impl Default for ClientSession {
             client_tracking: ClientTrackingState::default(),
             client_reply: ClientReplyState::default(),
             peer_addr: None,
+            socket_fd: None,
             connected_at_ms: 0,
             last_interaction_ms: 0,
             last_command_name: "NULL".to_string(),
@@ -5854,6 +5861,10 @@ impl Runtime {
                 .peer_addr
                 .map(|addr| addr.to_string())
                 .unwrap_or_else(|| "127.0.0.1:0".to_string()),
+            // (frankenredis-lxccd) Mirror the real socket fd into the
+            // dispatch context so CLIENT INFO / CLIENT LIST emit it
+            // through fr-command's client_info_line wrapper too.
+            socket_fd: session.socket_fd,
             authenticated_user: session.current_user_name().to_vec(),
             resp_protocol_version: session.resp_protocol_version,
             channel_subscriptions: self
@@ -5999,10 +6010,14 @@ impl Runtime {
             // single LF). Earlier versions emitted CRLF here, leaving
             // a stray 0x0d byte in the bulk-string payload that broke
             // raw-byte parsers diffing against vendored.
-            "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
+            "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
             session.client_id,
             peer,
             self.server.store.server_port,
+            // (frankenredis-lxccd) Real socket fd when known; 0 for
+            // non-TCP sessions (matches vendored behavior for the
+            // server-driven Lua / replica handshake clients).
+            session.socket_fd.unwrap_or(0),
             name,
             age_seconds,
             idle_seconds,

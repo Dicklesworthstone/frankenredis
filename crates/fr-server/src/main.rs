@@ -20,6 +20,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::{SocketAddr, TcpStream as StdTcpStream};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -1113,6 +1115,14 @@ fn accept_connections(
 
                 let mut session = runtime.new_session();
                 session.peer_addr = Some(peer_addr);
+                // (frankenredis-lxccd) Record the accepted socket's
+                // real file descriptor so CLIENT INFO / CLIENT LIST
+                // emit fd=<N> matching vendored Redis 7.2.4 instead
+                // of the previous hardcoded 0.
+                #[cfg(unix)]
+                {
+                    session.socket_fd = Some(stream.as_raw_fd());
+                }
                 let client_id = session.client_id;
                 let conn = ClientConnection::new(stream, session, now_ms());
                 runtime.record_client_session(&conn.session);

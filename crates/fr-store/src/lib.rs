@@ -1230,6 +1230,11 @@ pub struct DispatchClientContext {
     pub db_index: usize,
     pub flags: String,
     pub peer_addr: String,
+    /// (frankenredis-lxccd) Real socket fd when the dispatch context
+    /// belongs to a TCP-accepted client. Mirrored from
+    /// ClientSession::socket_fd by the runtime when constructing the
+    /// dispatch context.
+    pub socket_fd: Option<i32>,
     pub authenticated_user: Vec<u8>,
     pub resp_protocol_version: i64,
     pub channel_subscriptions: usize,
@@ -1261,6 +1266,7 @@ impl Default for DispatchClientContext {
             db_index: 0,
             flags: "N".to_string(),
             peer_addr: "127.0.0.1:0".to_string(),
+            socket_fd: None,
             authenticated_user: b"default".to_vec(),
             resp_protocol_version: 2,
             channel_subscriptions: 0,

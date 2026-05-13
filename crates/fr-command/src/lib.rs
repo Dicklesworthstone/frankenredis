@@ -16809,10 +16809,13 @@ fn client_info_line(store: &Store, sub: &str) -> Vec<u8> {
         // (frankenredis-cudmd) Upstream networking.c::catClientInfoString
         // terminates each per-client info string with a single '\n', not
         // CRLF — see the matching change in fr-runtime.
-        "id={} addr={} laddr=127.0.0.1:{} fd=0 name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user={} redir={} resp={} lib-name={} lib-ver={}\n",
+        "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user={} redir={} resp={} lib-name={} lib-ver={}\n",
         ctx.client_id,
         ctx.peer_addr,
         store.server_port,
+        // (frankenredis-lxccd) Real socket fd when set by the TCP
+        // server. None for non-TCP contexts (replay, Lua) -> 0.
+        ctx.socket_fd.unwrap_or(0),
         name,
         ctx.age_seconds,
         ctx.idle_seconds,
