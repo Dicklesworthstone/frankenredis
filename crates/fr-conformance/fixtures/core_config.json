@@ -1715,8 +1715,7 @@
             "value": "dir"
           },
           {
-            "kind": "bulk",
-            "value": "."
+            "kind": "any_bulk"
           }
         ]
       }

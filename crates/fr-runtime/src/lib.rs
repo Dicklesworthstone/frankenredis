@@ -7758,7 +7758,14 @@ impl Runtime {
         }
         if Self::config_pattern_matches(pattern, "dir") {
             entries.push(RespFrame::BulkString(Some(b"dir".to_vec())));
-            let dirname = self
+            // (frankenredis-vlh11) Upstream config.c resolves `dir`
+            // to its absolute canonical path via chdir+getcwd at
+            // startup and reports the result through CONFIG GET. fr
+            // previously returned the raw relative parent (often "."),
+            // which broke tooling that parses CONFIG GET dir as an
+            // absolute path. Resolve via std::env::current_dir() and
+            // join the relative parent if applicable.
+            let raw = self
                 .server
                 .rdb_path
                 .as_ref()
@@ -7766,6 +7773,17 @@ impl Runtime {
                 .map(|path| path.to_string_lossy().into_owned())
                 .filter(|path| !path.is_empty())
                 .unwrap_or_else(|| ".".to_string());
+            let dirname = match std::env::current_dir() {
+                Ok(cwd) => {
+                    let joined = cwd.join(&raw);
+                    joined
+                        .canonicalize()
+                        .unwrap_or(joined)
+                        .to_string_lossy()
+                        .into_owned()
+                }
+                Err(_) => raw,
+            };
             entries.push(RespFrame::BulkString(Some(dirname.into_bytes())));
         }
         if Self::config_pattern_matches(pattern, "aclfile") {
@@ -16970,8 +16988,17 @@ mod tests {
 
     #[test]
     fn config_set_appendfsync_no_leaves_local_waitaof_unsatisfied() {
+        // (frankenredis-86666) Use an absolute temp path to avoid
+        // test-ordering flakiness — earlier tests in the suite may
+        // leave cwd in a since-deleted tempdir, breaking relative
+        // AOF path resolution under BGREWRITEAOF.
+        let dir = std::env::temp_dir().join(format!(
+            "fr_runtime_appendfsync_no_waitaof_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
         let mut rt = Runtime::default_strict();
-        rt.set_aof_path(std::path::PathBuf::from("appendonly.aof"));
+        rt.set_aof_path(dir.join("appendonly.aof"));
 
         assert_eq!(
             rt.execute_frame(command(&[b"CONFIG", b"SET", b"appendfsync", b"no"]), 0),
@@ -20706,20 +20733,38 @@ mod tests {
         );
     }
 
+    /// (frankenredis-vlh11) Upstream Redis resolves CONFIG GET dir to
+    /// the absolute canonical path of the working directory (via
+    /// chdir+getcwd at startup). Pre-fix fr returned the literal "."
+    /// when rdb_path had no parent component; post-fix it joins
+    /// `current_dir()` with the parent and canonicalizes. This test
+    /// verifies the returned dir is absolute and resolves to a real
+    /// directory containing the cargo test binary's cwd.
     #[test]
-    fn config_get_dir_uses_dot_for_filename_only_rdb_path() {
+    fn config_get_dir_resolves_to_absolute_for_filename_only_rdb_path() {
         let mut rt = Runtime::default_strict();
         rt.set_rdb_path(std::path::PathBuf::from("custom.rdb"));
 
-        assert_eq!(
-            rt.execute_frame(command(&[b"CONFIG", b"GET", b"dir", b"dbfilename"]), 0),
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"dir".to_vec())),
-                RespFrame::BulkString(Some(b".".to_vec())),
-                RespFrame::BulkString(Some(b"dbfilename".to_vec())),
-                RespFrame::BulkString(Some(b"custom.rdb".to_vec())),
-            ]))
+        let reply = rt.execute_frame(command(&[b"CONFIG", b"GET", b"dir", b"dbfilename"]), 0);
+        let RespFrame::Array(Some(entries)) = reply else {
+            panic!("expected array reply, got {reply:?}");
+        };
+        assert_eq!(entries.len(), 4);
+        let RespFrame::BulkString(Some(dir_bytes)) = &entries[1] else {
+            panic!("expected dir value to be a BulkString, got {:?}", entries[1]);
+        };
+        let dir = std::str::from_utf8(dir_bytes).expect("dir is utf8");
+        let dir_path = std::path::Path::new(dir);
+        assert!(
+            dir_path.is_absolute(),
+            "CONFIG GET dir must be absolute, got {dir}"
         );
+        assert!(
+            dir_path.exists(),
+            "CONFIG GET dir must point at an existing directory, got {dir}"
+        );
+        assert_eq!(entries[2], RespFrame::BulkString(Some(b"dbfilename".to_vec())));
+        assert_eq!(entries[3], RespFrame::BulkString(Some(b"custom.rdb".to_vec())));
     }
 
     #[test]
@@ -21211,15 +21256,21 @@ mod tests {
                     .to_string()
             )
         );
-        assert_eq!(
-            rt.execute_frame(command(&[b"CONFIG", b"GET", b"dir", b"dbfilename"]), 0),
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"dir".to_vec())),
-                RespFrame::BulkString(Some(b".".to_vec())),
-                RespFrame::BulkString(Some(b"dbfilename".to_vec())),
-                RespFrame::BulkString(Some(b"original.rdb".to_vec())),
-            ]))
-        );
+        // (frankenredis-vlh11) dir now resolves to absolute cwd
+        // path rather than the literal ".". Validate structure +
+        // absoluteness, leave the exact path as runtime-derived.
+        let reply = rt.execute_frame(command(&[b"CONFIG", b"GET", b"dir", b"dbfilename"]), 0);
+        let RespFrame::Array(Some(entries)) = reply else {
+            panic!("expected array reply, got {reply:?}");
+        };
+        assert_eq!(entries.len(), 4);
+        assert_eq!(entries[0], RespFrame::BulkString(Some(b"dir".to_vec())));
+        let RespFrame::BulkString(Some(dir_bytes)) = &entries[1] else {
+            panic!("dir must be BulkString");
+        };
+        assert!(std::path::Path::new(std::str::from_utf8(dir_bytes).unwrap()).is_absolute());
+        assert_eq!(entries[2], RespFrame::BulkString(Some(b"dbfilename".to_vec())));
+        assert_eq!(entries[3], RespFrame::BulkString(Some(b"original.rdb".to_vec())));
     }
 
     #[test]
@@ -21241,15 +21292,19 @@ mod tests {
                     .to_string()
             )
         );
-        assert_eq!(
-            rt.execute_frame(command(&[b"CONFIG", b"GET", b"dir", b"dbfilename"]), 0),
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"dir".to_vec())),
-                RespFrame::BulkString(Some(b".".to_vec())),
-                RespFrame::BulkString(Some(b"dbfilename".to_vec())),
-                RespFrame::BulkString(Some(b"dump.rdb".to_vec())),
-            ]))
-        );
+        // (frankenredis-vlh11) dir is now absolute cwd, not ".".
+        let reply2 = rt.execute_frame(command(&[b"CONFIG", b"GET", b"dir", b"dbfilename"]), 0);
+        let RespFrame::Array(Some(entries2)) = reply2 else {
+            panic!("expected array, got {reply2:?}");
+        };
+        assert_eq!(entries2.len(), 4);
+        assert_eq!(entries2[0], RespFrame::BulkString(Some(b"dir".to_vec())));
+        let RespFrame::BulkString(Some(dir_bytes)) = &entries2[1] else {
+            panic!("dir must be BulkString");
+        };
+        assert!(std::path::Path::new(std::str::from_utf8(dir_bytes).unwrap()).is_absolute());
+        assert_eq!(entries2[2], RespFrame::BulkString(Some(b"dbfilename".to_vec())));
+        assert_eq!(entries2[3], RespFrame::BulkString(Some(b"dump.rdb".to_vec())));
     }
 
     #[test]
