@@ -15193,6 +15193,26 @@ fn command_info_multi_keyspec(name: &str) -> Option<Vec<RespFrame>> {
                 &["RO", "access"],
             ),
         ]),
+        // (frankenredis-ntybu) MIGRATE has 2 keyspecs per upstream
+        // commands.def: (1) the single positional key at @3 with
+        // RW|ACCESS|DELETE (the key is read, transmitted, then
+        // dropped from the local instance on success); (2) the
+        // keyword KEYS startfrom=-2 with RW|ACCESS|DELETE|INCOMPLETE
+        // covering the multi-key form `MIGRATE host port "" db
+        // timeout KEYS k1 k2 ...`. The INCOMPLETE flag mirrors
+        // upstream's CMD_KEY_INCOMPLETE bit and is emitted as a
+        // SimpleString through the existing flag-array path.
+        "migrate" => Some(vec![
+            make_keyspec_index_range(&["RW", "access", "delete"], 3, 0, 1),
+            make_keyspec_keyword_range(
+                &["RW", "access", "delete", "incomplete"],
+                "KEYS",
+                -2,
+                -1,
+                1,
+                0,
+            ),
+        ]),
         // (frankenredis-dtvnc) GEORADIUS / GEORADIUSBYMEMBER: 3
         // keyspecs per upstream commands.def. Source geo key @1 is
         // RO|ACCESS even though the command itself is CMD_WRITE (the
