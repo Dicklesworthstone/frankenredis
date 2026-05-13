@@ -11571,7 +11571,7 @@ impl Store {
                     let mut pairs = Vec::with_capacity(zs.len() * 2);
                     for (member, score) in zs.iter_asc() {
                         pairs.push(member.clone());
-                        pairs.push(score.to_string().into_bytes());
+                        pairs.push(redis_score_to_string(*score).into_bytes());
                     }
                     let pair_refs: Vec<&[u8]> = pairs.iter().map(Vec::as_slice).collect();
                     encode_dump_bulk(&mut buf, &encode_listpack_strings(&pair_refs)?);
@@ -12002,7 +12002,7 @@ impl Store {
                                 .then_with(|| a.0.cmp(b.0))
                         });
                         for (member, score) in pairs {
-                            argv.push(score.to_string().into_bytes());
+                            argv.push(redis_score_to_string(*score).into_bytes());
                             argv.push(member.clone());
                         }
                         commands.push(argv);
@@ -12670,6 +12670,87 @@ pub fn sha1_hex_public(data: &[u8]) -> String {
     sha1_hex(data)
 }
 
+/// (frankenredis-nhy73) Convert a sorted-set / GEO score to the
+/// RESP bulk-string form vendored Redis 7.2.4 emits.
+///
+/// Upstream util.c::d2string fast-paths exact-integer doubles
+/// (double2ll → ll2string) and otherwise delegates to
+/// fpconv_dtoa (Grisu3 shortest roundtrip).
+///
+/// Rust's f64::to_string() also produces a shortest-roundtrip
+/// decimal but always in FIXED form, so values like 1e308 expand to
+/// 309 chars instead of vendored's "1e+308". This helper mirrors
+/// upstream by:
+///   - emitting "nan" / "inf" / "-inf" / "0" / "-0" for the special
+///     cases (matches d2string verbatim);
+///   - returning the i64 decimal when the score is an exact integer
+///     in [i64::MIN, i64::MAX];
+///   - otherwise using Rust's shortest-roundtrip fixed-point for
+///     reasonably-scaled values, and switching to scientific (with
+///     '+' on positive exponents to match vendored) when the
+///     base-10 exponent is <= -7 or >= 19. Those thresholds were
+///     calibrated empirically against vendored Redis 7.2.4 ZSCORE
+///     output (1e-6 stays as "0.000001"; 1e-7 becomes "1e-7";
+///     1e18 stays as "1000000000000000000"; 1e19 becomes "1e+19").
+pub fn redis_score_to_string(value: f64) -> String {
+    if value.is_nan() {
+        return "nan".to_string();
+    }
+    if value.is_infinite() {
+        return if value > 0.0 {
+            "inf".to_string()
+        } else {
+            "-inf".to_string()
+        };
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() {
+            "-0".to_string()
+        } else {
+            "0".to_string()
+        };
+    }
+
+    // Exact-integer fast path mirrors double2ll. The bounds match
+    // i64's representable range; the equality re-check guards
+    // against f64s like 1e19 that fall outside i64 even though the
+    // bounds check would pass for marginal values.
+    if value >= i64::MIN as f64 && value <= i64::MAX as f64 {
+        let truncated = value as i64;
+        if truncated as f64 == value {
+            return truncated.to_string();
+        }
+    }
+
+    let abs = value.abs();
+    let log10_floor = abs.log10().floor() as i32;
+    let use_scientific = log10_floor <= -7 || log10_floor >= 19;
+
+    if use_scientific {
+        let raw = format!("{:e}", value);
+        // Rust's {:e} omits the '+' sign on positive exponents;
+        // vendored fpconv_dtoa always emits one (so "1e+308" not
+        // "1e308"). Insert it after the 'e' when the next char is
+        // a digit.
+        let bytes = raw.as_bytes();
+        if let Some(epos) = bytes.iter().position(|&b| b == b'e') {
+            if epos + 1 < bytes.len()
+                && bytes[epos + 1] != b'-'
+                && bytes[epos + 1] != b'+'
+            {
+                let mut out = String::with_capacity(raw.len() + 1);
+                out.push_str(&raw[..=epos]);
+                out.push('+');
+                out.push_str(&raw[epos + 1..]);
+                return out;
+            }
+        }
+        raw
+    } else {
+        value.to_string()
+    }
+}
+
 /// Generate a 40-character hex run ID (like Redis's run_id).
 /// Uses process ID and a timestamp-based seed for uniqueness.
 /// Generate a 40-char hex run-id / replid, mirroring upstream
@@ -13064,7 +13145,7 @@ fn estimate_listpack_score_bytes(score: f64) -> usize {
     if score.is_finite() && score.fract() == 0.0 {
         format!("{score:.0}").len().max(1)
     } else {
-        score.to_string().len().max(1)
+        redis_score_to_string(score).len().max(1)
     }
 }
 

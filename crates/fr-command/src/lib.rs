@@ -10,7 +10,7 @@ use fr_store::{
     PendingAclLogEvent, PttlValue, PubSubMessage, ScoreBound, Store, StoreError,
     StreamAutoClaimOptions, StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply,
     StreamGroupReadCursor, StreamGroupReadOptions, StreamId, StreamPendingRecord, Value, ValueType,
-    glob_match, read_rss_bytes, sha1_hex_public,
+    glob_match, read_rss_bytes, redis_score_to_string, sha1_hex_public,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -3826,7 +3826,7 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             })?;
         match result {
             Some(new_score) => Ok(RespFrame::BulkString(Some(
-                new_score.to_string().into_bytes(),
+                redis_score_to_string(new_score).into_bytes(),
             ))),
             None => Ok(RespFrame::BulkString(None)),
         }
@@ -3859,7 +3859,7 @@ fn zscore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         return Err(CommandError::WrongArity("ZSCORE"));
     }
     match store.zscore(&argv[1], &argv[2], now_ms)? {
-        Some(score) => Ok(RespFrame::BulkString(Some(score.to_string().into_bytes()))),
+        Some(score) => Ok(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes()))),
         None => Ok(RespFrame::BulkString(None)),
     }
 }
@@ -3919,7 +3919,7 @@ fn zrank_generic(
                 let score = store.zscore(&argv[1], &argv[2], now_ms)?.unwrap_or(0.0);
                 Ok(RespFrame::Array(Some(vec![
                     RespFrame::Integer(rank_i),
-                    RespFrame::BulkString(Some(score.to_string().into_bytes())),
+                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
                 ])))
             } else {
                 Ok(RespFrame::Integer(rank_i))
@@ -4129,7 +4129,7 @@ fn zrange_emit_with_resp(
             .map(|(member, score)| {
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(member)),
-                    RespFrame::BulkString(Some(score.to_string().into_bytes())),
+                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
                 ]))
             })
             .collect();
@@ -4138,7 +4138,7 @@ fn zrange_emit_with_resp(
         let mut frames = Vec::with_capacity(pairs.len() * 2);
         for (member, score) in pairs {
             frames.push(RespFrame::BulkString(Some(member)));
-            frames.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+            frames.push(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())));
         }
         Ok(RespFrame::Array(Some(frames)))
     }
@@ -4257,7 +4257,7 @@ fn zincrby(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
             }
         })?;
     Ok(RespFrame::BulkString(Some(
-        new_score.to_string().into_bytes(),
+        redis_score_to_string(new_score).into_bytes(),
     )))
 }
 
@@ -4284,7 +4284,7 @@ fn zpop_count_emit(
             .map(|(member, score)| {
                 RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(member)),
-                    RespFrame::BulkString(Some(score.to_string().into_bytes())),
+                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
                 ]))
             })
             .collect();
@@ -4293,7 +4293,7 @@ fn zpop_count_emit(
         let mut frames = Vec::with_capacity(pairs.len() * 2);
         for (member, score) in pairs {
             frames.push(RespFrame::BulkString(Some(member)));
-            frames.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+            frames.push(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())));
         }
         RespFrame::Array(Some(frames))
     }
@@ -4326,7 +4326,7 @@ fn zpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     match store.zpopmin(&argv[1], now_ms)? {
         Some((member, score)) => Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(member)),
-            RespFrame::BulkString(Some(score.to_string().into_bytes())),
+            RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
         ]))),
         None => Ok(RespFrame::Array(Some(vec![]))),
     }
@@ -4347,7 +4347,7 @@ fn zpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     match store.zpopmax(&argv[1], now_ms)? {
         Some((member, score)) => Ok(RespFrame::Array(Some(vec![
             RespFrame::BulkString(Some(member)),
-            RespFrame::BulkString(Some(score.to_string().into_bytes())),
+            RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
         ]))),
         None => Ok(RespFrame::Array(Some(vec![]))),
     }
@@ -10329,7 +10329,7 @@ fn zmscore(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     let frames = scores
         .into_iter()
         .map(|s| match s {
-            Some(score) => RespFrame::BulkString(Some(score.to_string().into_bytes())),
+            Some(score) => RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
             None => RespFrame::BulkString(None),
         })
         .collect();
@@ -12364,7 +12364,7 @@ fn zmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                         Some((member, score)) => {
                             popped.push(RespFrame::Array(Some(vec![
                                 RespFrame::BulkString(Some(member)),
-                                RespFrame::BulkString(Some(score.to_string().into_bytes())),
+                                RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
                             ])));
                         }
                         None => break,
@@ -17991,7 +17991,7 @@ fn zscan(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         let mut result = Vec::with_capacity(pairs.len() * 2);
         for (member, score) in pairs {
             result.push(RespFrame::BulkString(Some(member)));
-            result.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+            result.push(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())));
         }
         result
     };
@@ -19164,7 +19164,7 @@ fn zdiff(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     for (member, score) in result {
         frames.push(RespFrame::BulkString(Some(member)));
         if withscores {
-            frames.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+            frames.push(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())));
         }
     }
     Ok(RespFrame::Array(Some(frames)))
@@ -19262,7 +19262,7 @@ fn zinter(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     for (member, score) in result {
         frames.push(RespFrame::BulkString(Some(member)));
         if withscores {
-            frames.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+            frames.push(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())));
         }
     }
     Ok(RespFrame::Array(Some(frames)))
@@ -19313,7 +19313,7 @@ fn zunion_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     for (member, score) in entries {
         frames.push(RespFrame::BulkString(Some(member)));
         if withscores {
-            frames.push(RespFrame::BulkString(Some(score.to_string().into_bytes())));
+            frames.push(RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())));
         }
     }
     Ok(RespFrame::Array(Some(frames)))
@@ -21864,7 +21864,7 @@ fn bzpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
                 return Ok(RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(key.clone())),
                     RespFrame::BulkString(Some(member)),
-                    RespFrame::BulkString(Some(score.to_string().into_bytes())),
+                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
                 ])));
             }
             Ok(None) => continue,
@@ -21886,7 +21886,7 @@ fn bzpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
                 return Ok(RespFrame::Array(Some(vec![
                     RespFrame::BulkString(Some(key.clone())),
                     RespFrame::BulkString(Some(member)),
-                    RespFrame::BulkString(Some(score.to_string().into_bytes())),
+                    RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
                 ])));
             }
             Ok(None) => continue,
@@ -21962,7 +21962,7 @@ fn bzmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                     .map(|(member, score)| {
                         RespFrame::Array(Some(vec![
                             RespFrame::BulkString(Some(member)),
-                            RespFrame::BulkString(Some(score.to_string().into_bytes())),
+                            RespFrame::BulkString(Some(redis_score_to_string(score).into_bytes())),
                         ]))
                     })
                     .collect();
