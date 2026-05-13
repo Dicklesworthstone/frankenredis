@@ -1740,6 +1740,12 @@ impl Scope {
 #[derive(Clone, Debug)]
 struct Env {
     scopes: Vec<Scope>,
+    /// Index of the first scope that holds a "local" (vs upvalue) for the
+    /// purposes of error messages. Scopes at indices < local_floor are
+    /// captured upvalues (Lua 5.1 reports them as "upvalue 'NAME'"); scopes
+    /// at indices >= local_floor are locals declared in or below the
+    /// current function body. (frankenredis-md71j)
+    local_floor: usize,
 }
 
 fn is_lua_yield_signal(err: &str) -> bool {
@@ -1750,6 +1756,7 @@ impl Env {
     fn new() -> Self {
         Self {
             scopes: vec![Scope::new()],
+            local_floor: 0,
         }
     }
 
@@ -1797,6 +1804,10 @@ impl Env {
 
     /// Create an Env pre-loaded with captured upvalue scopes.
     fn from_captured(captured: &[HashMap<String, Rc<RefCell<LuaValue>>>]) -> Self {
+        // (frankenredis-md71j) The captured scopes are upvalues from the
+        // outer function; any scopes pushed AFTER this point belong to the
+        // freshly-entered function body and are reported as "local".
+        let local_floor = captured.len();
         Self {
             scopes: captured
                 .iter()
@@ -1804,7 +1815,21 @@ impl Env {
                     locals: locals.clone(),
                 })
                 .collect(),
+            local_floor,
         }
+    }
+
+    /// Classify where `name` lives for error-message purposes:
+    /// `Some(true)` if it's a true local of the current function, `Some(false)`
+    /// if it's a captured upvalue, `None` if not in any scope.
+    /// (frankenredis-md71j)
+    fn classify_name(&self, name: &str) -> Option<bool> {
+        for (idx, scope) in self.scopes.iter().enumerate().rev() {
+            if scope.locals.contains_key(name) {
+                return Some(idx >= self.local_floor);
+            }
+        }
+        None
     }
 }
 
@@ -2621,7 +2646,17 @@ impl<'a> LuaState<'a> {
             Expr::Call(func_expr, args) => {
                 let func = self.eval_expr(func_expr, env, varargs)?;
                 let mut arg_vals = self.eval_call_args(args, env, varargs)?;
-                let results = self.call_function(&func, &mut arg_vals, env, varargs)?;
+                // (frankenredis-md71j) Plumb the callee AST node so a
+                // non-callable target reports "local 'x'" / "field 'f'" /
+                // "upvalue 'y'" / "global 'g'" context.
+                let results = self.call_function_with_callee(
+                    func_expr,
+                    &func,
+                    &mut arg_vals,
+                    env,
+                    varargs,
+                    None,
+                )?;
                 // Write back table mutations (table.sort/insert/remove mutate args[0] in-place).
                 // The inner `if` has a side-effect (set_existing_local) so must not be collapsed.
                 #[allow(clippy::collapsible_if)]
@@ -2644,16 +2679,35 @@ impl<'a> LuaState<'a> {
                     LuaValue::Table(t) => {
                         t.get_with_index(&LuaValue::Str(method.as_bytes().to_vec()))
                     }
+                    LuaValue::Str(_) => {
+                        // Strings have no per-instance metatable in fr's
+                        // sandbox; calling :method on a string yields a nil
+                        // method lookup, which then reports the standard
+                        // "attempt to call method 'NAME' (a nil value)".
+                        LuaValue::Nil
+                    }
                     _ => {
+                        // (frankenredis-md71j) Mirror Lua 5.1's "attempt to
+                        // index a TYPE value" wording for the receiver-side
+                        // index failure of `obj:m()` against nil/bool/etc.
                         return Err(format!(
-                            "attempt to call method on a {} value",
+                            "user_script:1: attempt to index a {} value",
                             obj.type_name()
                         ));
                     }
                 };
                 let mut arg_vals = vec![obj.clone()];
                 arg_vals.extend(self.eval_call_args(args, env, varargs)?);
-                let results = self.call_function(&func, &mut arg_vals, env, varargs)?;
+                // (frankenredis-md71j) method-call errors carry "method
+                // 'NAME'" context regardless of the receiver expression.
+                let results = self.call_function_with_callee(
+                    obj_expr,
+                    &func,
+                    &mut arg_vals,
+                    env,
+                    varargs,
+                    Some(method.as_str()),
+                )?;
                 Ok(results.into_iter().next().unwrap_or(LuaValue::Nil))
             }
             Expr::TableConstructor(fields) => {
@@ -2710,7 +2764,16 @@ impl<'a> LuaState<'a> {
                     Expr::Call(func_expr, call_args) => {
                         let func = self.eval_expr(func_expr, env, varargs)?;
                         let mut arg_vals = self.eval_call_args(call_args, env, varargs)?;
-                        let results = self.call_function(&func, &mut arg_vals, env, varargs)?;
+                        // (frankenredis-md71j) Same accessor-context plumbing
+                        // as Expr::Call when expanded as a trailing arg.
+                        let results = self.call_function_with_callee(
+                            func_expr,
+                            &func,
+                            &mut arg_vals,
+                            env,
+                            varargs,
+                            None,
+                        )?;
                         vals.extend(results);
                     }
                     Expr::MethodCall(obj_expr, method, call_args) => {
@@ -2721,7 +2784,14 @@ impl<'a> LuaState<'a> {
                         };
                         let mut arg_vals = vec![obj];
                         arg_vals.extend(self.eval_call_args(call_args, env, varargs)?);
-                        let results = self.call_function(&func, &mut arg_vals, env, varargs)?;
+                        let results = self.call_function_with_callee(
+                            obj_expr,
+                            &func,
+                            &mut arg_vals,
+                            env,
+                            varargs,
+                            Some(method.as_str()),
+                        )?;
                         vals.extend(results);
                     }
                     _ => {
@@ -2979,6 +3049,72 @@ impl<'a> LuaState<'a> {
                 Err("unexpected logical operator in binary evaluation".to_string())
             }
         }
+    }
+
+    /// Compute the Lua 5.1-style accessor label for a call site, e.g.
+    /// `"local 'x'"`, `"upvalue 'y'"`, `"global 'g'"`, `"field 'f'"`,
+    /// `"method 'm'"`, or `"field '?'"` for non-literal index keys.
+    /// Returns `None` for call sites without a syntactic name (parenthesized
+    /// expressions, call results, etc.), which match vendored Lua's
+    /// "attempt to call a TYPE value" wording sans accessor.
+    /// (frankenredis-md71j)
+    fn callee_label(&self, expr: &Expr, env: &Env) -> Option<String> {
+        match expr {
+            Expr::Name(name) => match env.classify_name(name) {
+                Some(true) => Some(format!("local '{name}'")),
+                Some(false) => Some(format!("upvalue '{name}'")),
+                None => {
+                    if self.globals.contains_key(name) {
+                        Some(format!("global '{name}'"))
+                    } else {
+                        None
+                    }
+                }
+            },
+            Expr::Field(_, name) => Some(format!("field '{name}'")),
+            Expr::Index(_, key) => match key.as_ref() {
+                Expr::Str(s) if !s.is_empty() => match std::str::from_utf8(s) {
+                    Ok(name) => Some(format!("field '{name}'")),
+                    Err(_) => Some("field '?'".to_string()),
+                },
+                _ => Some("field '?'".to_string()),
+            },
+            _ => None,
+        }
+    }
+
+    /// Variant of `call_function` for call sites that have a syntactic
+    /// callee expression. When `func` is non-callable, rewrites the error
+    /// to include the accessor context Lua 5.1 emits (e.g. "attempt to
+    /// call local 'x' (a nil value)" or "attempt to call field 'm'
+    /// (a nil value)"). (frankenredis-md71j)
+    fn call_function_with_callee(
+        &mut self,
+        callee_expr: &Expr,
+        func: &LuaValue,
+        args: &mut [LuaValue],
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+        method_override: Option<&str>,
+    ) -> Result<Vec<LuaValue>, String> {
+        if matches!(
+            func,
+            LuaValue::RustFunction(_) | LuaValue::Function(_) | LuaValue::WrappedCoroutine(_)
+        ) {
+            return self.call_function(func, args, env, varargs);
+        }
+        let label = match method_override {
+            Some(m) => Some(format!("method '{m}'")),
+            None => self.callee_label(callee_expr, env),
+        };
+        let ty = match func {
+            LuaValue::Coroutine(_) => "thread",
+            other => other.type_name(),
+        };
+        Err(match label {
+            Some(l) => format!("user_script:1: attempt to call {l} (a {ty} value)"),
+            None => format!("user_script:1: attempt to call a {ty} value"),
+        })
     }
 
     fn call_function(
@@ -6445,6 +6581,96 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_attempt_to_call_errors_carry_accessor_context() {
+        // Pins frankenredis-md71j. Lua 5.1 (vendored Redis 7.2.4) emits
+        // accessor-aware wording for non-callable call sites:
+        //   'local x; x()'                  → "attempt to call local 'x' (a nil value)"
+        //   'local x=1; local f=function() x() end; f()' → "attempt to call upvalue 'x' (a nil value)"
+        //   'local t={}; t.f()'             → "attempt to call field 'f' (a nil value)"
+        //   "local t={}; t['foo']()"        → "attempt to call field 'foo' (a nil value)"
+        //   'local t={}; t[1]()'            → "attempt to call field '?' (a nil value)"
+        //   'local t={}; t:m()'             → "attempt to call method 'm' (a nil value)"
+        //   '(nil)()'                       → "attempt to call a nil value"
+        //   "(function() return nil end)()()" → "attempt to call a nil value"
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local x; x()",
+                "attempt to call local 'x' (a nil value)",
+            ),
+            (
+                b"local x = 42; x()",
+                "attempt to call local 'x' (a number value)",
+            ),
+            (
+                b"local x; local f = function() x() end; f()",
+                "attempt to call upvalue 'x' (a nil value)",
+            ),
+            (
+                b"local t = {}; t.f()",
+                "attempt to call field 'f' (a nil value)",
+            ),
+            (
+                b"local t = {f = true}; t.f()",
+                "attempt to call field 'f' (a boolean value)",
+            ),
+            (
+                b"local t = {}; t['foo']()",
+                "attempt to call field 'foo' (a nil value)",
+            ),
+            (
+                b"local t = {}; t[1]()",
+                "attempt to call field '?' (a nil value)",
+            ),
+            (
+                b"local t = {}; t[true]()",
+                "attempt to call field '?' (a nil value)",
+            ),
+            (
+                b"local t = {}; t:m()",
+                "attempt to call method 'm' (a nil value)",
+            ),
+            (
+                b"local t = {m = 42}; t:m()",
+                "attempt to call method 'm' (a number value)",
+            ),
+            (b"(nil)()", "attempt to call a nil value"),
+            (
+                b"local function g() return nil end; g()()",
+                "attempt to call a nil value",
+            ),
+        ];
+        for (src, expected) in cases {
+            let err = eval_script(src, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected error for {:?}",
+                String::from_utf8_lossy(src)
+            ));
+            assert!(
+                err.contains(expected),
+                "wrong wording for {:?}: got {err:?}, expected to contain {expected:?}",
+                String::from_utf8_lossy(src)
+            );
+            // Every runtime call error carries the source-location prefix.
+            assert!(
+                err.contains("user_script:"),
+                "missing user_script: prefix for {:?}: {err:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+
+        // Callable values still execute normally (regression check).
+        let frame = eval_script(
+            b"local function f(x) return x + 1 end; return f(41)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::Integer(42));
     }
 
     #[test]
