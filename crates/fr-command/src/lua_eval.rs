@@ -4041,10 +4041,7 @@ impl<'a> LuaState<'a> {
                     .get(1)
                     .map(|a| a.to_display_string())
                     .unwrap_or_default();
-                let repl = args
-                    .get(2)
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                let repl = args.get(2).cloned().unwrap_or(LuaValue::Nil);
                 let max_n = args.get(3).and_then(|v| v.to_number()).map(|n| n as usize);
                 let mut result = Vec::new();
                 let mut pos = 0;
@@ -4056,10 +4053,46 @@ impl<'a> LuaState<'a> {
                         break;
                     }
                     if let Some(m) = lua_pattern_find(&s, &pattern, pos) {
-                        // Append text before match
                         result.extend_from_slice(&s[pos..m.start]);
-                        // Append replacement
-                        result.extend_from_slice(&lua_gsub_replace(&s, &m, &repl));
+                        // (frankenredis-76y97) Dispatch on the repl
+                        // value type per Lua 5.1 spec: string uses %0/%N
+                        // capture refs (legacy path), table is indexed
+                        // by the 1st capture or whole match, function
+                        // is called with captures.
+                        let replacement: Vec<u8> = match &repl {
+                            LuaValue::Str(repl_bytes) => {
+                                lua_gsub_replace(&s, &m, repl_bytes)
+                            }
+                            LuaValue::Table(t) => {
+                                let key_bytes = lua_gsub_capture_key(&s, &m);
+                                let key = LuaValue::Str(key_bytes);
+                                let val = t.get(&key);
+                                lua_gsub_normalise_repl(&s, &m, &val)?
+                            }
+                            LuaValue::Function(_) | LuaValue::RustFunction(_) | LuaValue::WrappedCoroutine(_) => {
+                                let mut call_args = lua_gsub_capture_args(&s, &m);
+                                let mut varargs = Vec::new();
+                                let ret = self.call_function(
+                                    &repl,
+                                    &mut call_args,
+                                    env,
+                                    &mut varargs,
+                                )?;
+                                let first = ret.into_iter().next().unwrap_or(LuaValue::Nil);
+                                lua_gsub_normalise_repl(&s, &m, &first)?
+                            }
+                            LuaValue::Number(_) => {
+                                // Legacy: numeric repl coerces to string.
+                                lua_gsub_replace(&s, &m, &repl.to_display_string())
+                            }
+                            _ => {
+                                return Err(format!(
+                                    "user_script:1: bad argument #3 to 'gsub' (string/function/table expected, got {})",
+                                    repl.type_name()
+                                ));
+                            }
+                        };
+                        result.extend_from_slice(&replacement);
                         count += 1;
                         if m.end == m.start {
                             if m.end < s.len() {
@@ -4073,7 +4106,6 @@ impl<'a> LuaState<'a> {
                         break;
                     }
                 }
-                // Append remaining text
                 if pos <= s.len() {
                     result.extend_from_slice(&s[pos..]);
                 }
@@ -5130,6 +5162,69 @@ fn lua_match_captures(s: &[u8], m: &LuaPatMatch) -> Vec<LuaValue> {
 }
 
 /// Apply gsub replacement for one match. Handles string replacements with %0-%9.
+/// (frankenredis-76y97) Build the lookup key for table-style
+/// gsub replacement. Uses the 1st capture if present, otherwise the
+/// whole match. Mirrors Lua 5.1's lstrlib.c::str_gsub when typ == LUA_TTABLE.
+fn lua_gsub_capture_key(s: &[u8], m: &LuaPatMatch) -> Vec<u8> {
+    if m.captures.is_empty() {
+        s[m.start..m.end].to_vec()
+    } else {
+        match &m.captures[0] {
+            LuaCapture::Substring(cs, Some(ce)) => s[*cs..*ce].to_vec(),
+            LuaCapture::Substring(cs, None) => s[*cs..].to_vec(),
+            LuaCapture::Position(pos) => format!("{}", pos + 1).into_bytes(),
+        }
+    }
+}
+
+/// (frankenredis-76y97) Build the positional args passed to a
+/// function-style gsub replacement: every capture as a Lua value, or
+/// the whole match when there are no captures. Position captures
+/// become numbers; substring captures become strings.
+fn lua_gsub_capture_args(s: &[u8], m: &LuaPatMatch) -> Vec<LuaValue> {
+    if m.captures.is_empty() {
+        vec![LuaValue::Str(s[m.start..m.end].to_vec())]
+    } else {
+        m.captures
+            .iter()
+            .map(|c| match c {
+                LuaCapture::Substring(cs, Some(ce)) => LuaValue::Str(s[*cs..*ce].to_vec()),
+                LuaCapture::Substring(cs, None) => LuaValue::Str(s[*cs..].to_vec()),
+                LuaCapture::Position(pos) => LuaValue::Number((*pos + 1) as f64),
+            })
+            .collect()
+    }
+}
+
+/// (frankenredis-76y97) Normalise a table-lookup or function-return
+/// value to its replacement bytes per Lua 5.1 spec: nil/false leaves
+/// the match unchanged, strings/numbers are coerced as expected,
+/// other types raise the standard "invalid replacement value" error.
+fn lua_gsub_normalise_repl(
+    s: &[u8],
+    m: &LuaPatMatch,
+    val: &LuaValue,
+) -> Result<Vec<u8>, String> {
+    match val {
+        LuaValue::Nil | LuaValue::Bool(false) => Ok(s[m.start..m.end].to_vec()),
+        LuaValue::Bool(true) => Err(
+            "user_script:1: invalid replacement value (a boolean)".to_string(),
+        ),
+        LuaValue::Str(b) => Ok(b.clone()),
+        LuaValue::Number(n) => {
+            if *n == (*n as i64) as f64 && n.is_finite() {
+                Ok(format!("{}", *n as i64).into_bytes())
+            } else {
+                Ok(lua_number_to_string(*n).into_bytes())
+            }
+        }
+        _ => Err(format!(
+            "user_script:1: invalid replacement value (a {})",
+            val.type_name()
+        )),
+    }
+}
+
 fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Vec<u8> {
     let mut result = Vec::new();
     let mut i = 0;
