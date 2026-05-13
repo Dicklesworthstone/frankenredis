@@ -5513,8 +5513,11 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                                     // arg_idx is already +1 (incremented before the match);
                                     // add another +1 to account for the format-string itself
                                     // being arg #1 in the Lua-call position scheme.
+                                    // (frankenredis-5rnrx) Prepend the standard Lua error
+                                    // location prefix; matches luaL_argerror in upstream
+                                    // which wraps with "<source>:<line>: " automatically.
                                     return Err(format!(
-                                        "bad argument #{} to 'format' (string expected, got {})",
+                                        "user_script:1: bad argument #{} to 'format' (string expected, got {})",
                                         arg_idx + 1,
                                         arg.type_name()
                                     ));
