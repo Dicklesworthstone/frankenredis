@@ -1211,6 +1211,14 @@ fn handle_readable(
         return;
     }
 
+    // (frankenredis-tepuj) Refresh the per-client read/write buffer
+    // metrics on the session before swapping it into the runtime so
+    // CLIENT INFO / CLIENT LIST emit live qbuf/qbuf-free/obl/tot-mem
+    // values that diff cleanly against vendored 7.2.
+    conn.session.qbuf_bytes = conn.read_buf.len();
+    conn.session.qbuf_free_bytes = conn.read_buf.capacity().saturating_sub(conn.read_buf.len());
+    conn.session.output_buffer_bytes = conn.write_buf.len();
+
     // Swap in this client's session, process frames, swap back.
     let session = std::mem::take(&mut conn.session);
     let prev = runtime.swap_session(session);
@@ -1235,6 +1243,12 @@ fn handle_readable(
     // Swap session back.
     let updated_session = runtime.swap_session(prev);
     conn.session = updated_session;
+    // (frankenredis-tepuj) Re-sample buffer metrics post-dispatch so
+    // record_client_session snapshots a coherent view: the dispatch may
+    // have consumed bytes off read_buf and appended replies to write_buf.
+    conn.session.qbuf_bytes = conn.read_buf.len();
+    conn.session.qbuf_free_bytes = conn.read_buf.capacity().saturating_sub(conn.read_buf.len());
+    conn.session.output_buffer_bytes = conn.write_buf.len();
     runtime.record_client_session(&conn.session);
 
     // If there's data to write, ensure we're registered for WRITABLE so the
@@ -3106,6 +3120,10 @@ fn handle_writable(
             closing_tokens.insert(token);
         }
     }
+    // (frankenredis-tepuj) Refresh output buffer accounting on the
+    // session so a CLIENT LIST issued between writable events reflects
+    // the post-flush state rather than the pre-dispatch snapshot.
+    conn.session.output_buffer_bytes = conn.write_buf.len();
 }
 
 #[cfg(test)]

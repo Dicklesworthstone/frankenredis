@@ -1235,6 +1235,16 @@ pub struct DispatchClientContext {
     /// ClientSession::socket_fd by the runtime when constructing the
     /// dispatch context.
     pub socket_fd: Option<i32>,
+    /// (frankenredis-tepuj) Per-client read-buffer accounting fields
+    /// mirrored from ClientSession by the runtime when constructing the
+    /// dispatch context. `qbuf_bytes` is the live read-buffer length;
+    /// `qbuf_free_bytes` is the trailing free capacity; `output_buffer_bytes`
+    /// is the live write-buffer length. These power CLIENT INFO's
+    /// `qbuf=`, `qbuf-free=`, `obl=`, and `tot-mem=` fields so dashboards
+    /// diffing against vendored 7.2 see non-zero buffer metrics.
+    pub qbuf_bytes: usize,
+    pub qbuf_free_bytes: usize,
+    pub output_buffer_bytes: usize,
     pub authenticated_user: Vec<u8>,
     pub resp_protocol_version: i64,
     pub channel_subscriptions: usize,
@@ -1267,6 +1277,9 @@ impl Default for DispatchClientContext {
             flags: "N".to_string(),
             peer_addr: "127.0.0.1:0".to_string(),
             socket_fd: None,
+            qbuf_bytes: 0,
+            qbuf_free_bytes: 0,
+            output_buffer_bytes: 0,
             authenticated_user: b"default".to_vec(),
             resp_protocol_version: 2,
             channel_subscriptions: 0,

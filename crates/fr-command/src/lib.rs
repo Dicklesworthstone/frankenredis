@@ -16809,7 +16809,7 @@ fn client_info_line(store: &Store, sub: &str) -> Vec<u8> {
         // (frankenredis-cudmd) Upstream networking.c::catClientInfoString
         // terminates each per-client info string with a single '\n', not
         // CRLF — see the matching change in fr-runtime.
-        "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd=client|{} user={} redir={} resp={} lib-name={} lib-ver={}\n",
+        "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl={} oll=0 omem=0 tot-mem={} events=r cmd=client|{} user={} redir={} resp={} lib-name={} lib-ver={}\n",
         ctx.client_id,
         ctx.peer_addr,
         store.server_port,
@@ -16825,6 +16825,17 @@ fn client_info_line(store: &Store, sub: &str) -> Vec<u8> {
         ctx.pattern_subscriptions,
         ctx.shard_subscriptions,
         ctx.multi_count,
+        ctx.qbuf_bytes,
+        ctx.qbuf_free_bytes,
+        ctx.output_buffer_bytes,
+        // (frankenredis-tepuj) Lower-bound tot-mem estimate: per-client
+        // struct overhead + live read/write buffers + the 16384B reply
+        // chunk baseline (see fr-runtime client_info_line_for_session).
+        432_usize
+            .saturating_add(ctx.qbuf_bytes)
+            .saturating_add(ctx.qbuf_free_bytes)
+            .saturating_add(16384)
+            .saturating_add(ctx.output_buffer_bytes),
         sub.to_ascii_lowercase(),
         user,
         redir,

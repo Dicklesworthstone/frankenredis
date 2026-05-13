@@ -2635,6 +2635,16 @@ pub struct ClientSession {
     /// vendored Redis 7.2.4. None when the session was constructed in
     /// a non-TCP context (e.g. unit tests, replica handshake).
     pub socket_fd: Option<i32>,
+    /// (frankenredis-tepuj) Bytes currently buffered in the TCP
+    /// read_buf awaiting parse — used for CLIENT INFO `qbuf=` field.
+    pub qbuf_bytes: usize,
+    /// (frankenredis-tepuj) Free capacity left in the read_buf used
+    /// for CLIENT INFO `qbuf-free=` field. fr's read_buf is a Vec<u8>
+    /// so capacity - len is the natural mapping.
+    pub qbuf_free_bytes: usize,
+    /// (frankenredis-tepuj) Pending write bytes in write_buf — used
+    /// for CLIENT INFO `obl=` (output buffer length).
+    pub output_buffer_bytes: usize,
     /// Connection acceptance timestamp in ms since epoch.
     pub connected_at_ms: u64,
     /// Last command interaction timestamp in ms since epoch.
@@ -2661,6 +2671,9 @@ impl Default for ClientSession {
             client_reply: ClientReplyState::default(),
             peer_addr: None,
             socket_fd: None,
+            qbuf_bytes: 0,
+            qbuf_free_bytes: 0,
+            output_buffer_bytes: 0,
             connected_at_ms: 0,
             last_interaction_ms: 0,
             last_command_name: "NULL".to_string(),
@@ -5865,6 +5878,12 @@ impl Runtime {
             // dispatch context so CLIENT INFO / CLIENT LIST emit it
             // through fr-command's client_info_line wrapper too.
             socket_fd: session.socket_fd,
+            // (frankenredis-tepuj) Mirror per-client read/write buffer
+            // metrics into the dispatch context so fr-command's
+            // client_info_line emits real qbuf/qbuf-free/obl/tot-mem.
+            qbuf_bytes: session.qbuf_bytes,
+            qbuf_free_bytes: session.qbuf_free_bytes,
+            output_buffer_bytes: session.output_buffer_bytes,
             authenticated_user: session.current_user_name().to_vec(),
             resp_protocol_version: session.resp_protocol_version,
             channel_subscriptions: self
@@ -6010,7 +6029,7 @@ impl Runtime {
             // single LF). Earlier versions emitted CRLF here, leaving
             // a stray 0x0d byte in the bulk-string payload that broke
             // raw-byte parsers diffing against vendored.
-            "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf=0 qbuf-free=0 argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl=0 oll=0 omem=0 tot-mem=0 events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
+            "id={} addr={} laddr=127.0.0.1:{} fd={} name={} age={} idle={} flags={} db={} sub={} psub={} ssub={} multi={} qbuf={} qbuf-free={} argv-mem=0 multi-mem=0 rbs=16384 rbp=16384 obl={} oll=0 omem=0 tot-mem={} events=r cmd={} user={} redir={} resp={} lib-name={} lib-ver={}\n",
             session.client_id,
             peer,
             self.server.store.server_port,
@@ -6027,6 +6046,23 @@ impl Runtime {
             pattern_subs,
             shard_subs,
             multi_count,
+            session.qbuf_bytes,
+            session.qbuf_free_bytes,
+            session.output_buffer_bytes,
+            // (frankenredis-tepuj) Approximate upstream's c->tot_mem
+            // accounting: per-client struct overhead (~432B baseline) +
+            // the live read/write buffers + the 16384B reply-chunk
+            // baseline that rbs is pinned to. This is intentionally a
+            // lower-bound estimate — fr does not track every replica
+            // accumulation buffer or pubsub message-queue allocation,
+            // but the value moves in lockstep with the dominant
+            // contributors (qbuf + output_buffer) so MEMORY USAGE
+            // dashboards stay informative.
+            432_usize
+                .saturating_add(session.qbuf_bytes)
+                .saturating_add(session.qbuf_free_bytes)
+                .saturating_add(16384)
+                .saturating_add(session.output_buffer_bytes),
             session.last_command_name,
             String::from_utf8_lossy(session.current_user_name()),
             redir,
