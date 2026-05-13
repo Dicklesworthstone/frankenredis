@@ -5612,7 +5612,7 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             // luaO_pushvfstring rejects non-string/non-
                             // number args to %s with "bad argument #N
                             // to 'format' (string expected, got <type>)".
-                            // fr was permissively accepting nil/tables.
+                            // fr was permissively accepting nil/tables/bool.
                             let s = match &arg {
                                 LuaValue::Str(b) => b.clone(),
                                 LuaValue::Number(n) => {
@@ -5621,9 +5621,6 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                                     } else {
                                         lua_number_to_string(*n).into_bytes()
                                     }
-                                }
-                                LuaValue::Bool(b) => {
-                                    if *b { b"true".to_vec() } else { b"false".to_vec() }
                                 }
                                 _ => {
                                     // arg_idx is already +1 (incremented before the match);
