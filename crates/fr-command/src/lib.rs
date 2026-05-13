@@ -14837,10 +14837,13 @@ fn command_info_keyspec_override(name: &str) -> Option<(&'static str, &'static [
         "expire" | "expireat" | "pexpire" | "pexpireat" | "persist" | "lset"
         | "xack" | "xclaim" | "xsetid" => &["RW", "update"],
 
-        // HSET / HMSET / GEOADD: upstream uses UPDATE here even though
-        // they create the key when absent (the heuristic's INSERT is a
-        // fr-side wart).
-        "hset" | "hmset" | "geoadd" => &["RW", "update"],
+        // HSET / HMSET / GEOADD / ZADD: upstream uses UPDATE here even
+        // though they create the key when absent (the heuristic's
+        // INSERT is a fr-side wart). (frankenredis-r1s79) ZADD's
+        // commands.def declares CMD_KEY_RW|CMD_KEY_UPDATE -- the score
+        // mutation is the modeled effect, not the optional new-member
+        // insertion. Vendored COMMAND INFO ZADD emits 'RW update'.
+        "hset" | "hmset" | "geoadd" | "zadd" => &["RW", "update"],
 
         // CMD_KEY_RW | CMD_KEY_INSERT — value mutated, new entries added
         // but the key itself is not created from nothing (HSETNX, LINSERT,
@@ -15283,7 +15286,6 @@ fn command_info_key_specs(
             | "rpushx"
             | "sadd"
             | "setnx"
-            | "zadd"
     ) {
         vec!["RW", "insert"]
     } else {
