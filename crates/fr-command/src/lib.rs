@@ -18528,8 +18528,15 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
             .saturating_add(aof_buffer)
             .saturating_add(lua_caches)
             .saturating_add(functions_caches);
+        // (frankenredis-cucvq) peak.allocated is the historical max
+        // observed by Store::observe_memory_sample (driven by RSS each
+        // INFO memory call). Fall back to `used` if no peak has been
+        // sampled yet -- upstream's c->stat_peak_memory is initialised
+        // to 0 but server.c::serverCron updates it before the first
+        // INFO call, so peak >= used in practice.
+        let peak_allocated: i64 = (store.stat_used_memory_peak as i64).max(used);
         for kv in [
-            pair("peak.allocated", used),
+            pair("peak.allocated", peak_allocated),
             pair("total.allocated", used),
             pair("startup.allocated", startup_allocated),
             pair("replication.backlog", replication_backlog),
@@ -18628,9 +18635,29 @@ fn memory_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         ] {
             items.extend(kv);
         }
+        // (frankenredis-cucvq) Mirror upstream object.c::getMemoryOverheadData:
+        //   mh->dataset_perc = 100 * (1 - (mh->overhead_total - mh->startup_allocated)
+        //                                  / (mh->total_allocated - mh->startup_allocated))
+        //   mh->peak_perc    = 100 * mh->total_allocated / mh->peak_allocated
+        // Guard against divide-by-zero by falling back to 0.0 — matches
+        // upstream's behavior on a freshly-started server before the
+        // first cron sample.
+        let total_minus_startup = (used - startup_allocated).max(0);
+        let dataset_percentage = if total_minus_startup > 0 {
+            100.0
+                * (total_minus_startup - (overhead_total - startup_allocated).max(0)) as f64
+                / total_minus_startup as f64
+        } else {
+            0.0
+        };
+        let peak_percentage = if peak_allocated > 0 {
+            100.0 * used as f64 / peak_allocated as f64
+        } else {
+            0.0
+        };
         for kv in [
-            pair_double("dataset.percentage", 100.0),
-            pair_double("peak.percentage", 100.0),
+            pair_double("dataset.percentage", dataset_percentage),
+            pair_double("peak.percentage", peak_percentage),
         ] {
             items.extend(kv);
         }
