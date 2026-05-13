@@ -12861,6 +12861,29 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             100.0
         };
 
+        // (frankenredis-d9mxz) Compute used_memory_overhead from the
+        // same component summation MEMORY STATS uses (wkglo). This is
+        // upstream object.c::getMemoryOverheadData's mh->overhead_total
+        // = startup + repl_backlog + clients_slaves + clients_normal +
+        // cluster_links + aof_buffer + lua_caches + functions_caches
+        // + per-db hashtable overheads. fr's startup/repl_backlog/
+        // cluster_links/aof_buffer are all 0 currently — separate gaps.
+        const DICT_ENTRY_BYTES_FOR_OVERHEAD: usize = 64;
+        let mut used_memory_overhead: usize = store
+            .stat_clients_replica_mem_bytes
+            .saturating_add(store.stat_clients_normal_mem_bytes)
+            .saturating_add(store.scripts_memory_bytes())
+            .saturating_add(store.functions_memory_bytes());
+        for db in 0..store.database_count {
+            let keys = store.dbsize_in_db(db);
+            if keys == 0 {
+                continue;
+            }
+            let expires = store.expires_in_db(db);
+            used_memory_overhead = used_memory_overhead
+                .saturating_add(keys.saturating_mul(DICT_ENTRY_BYTES_FOR_OVERHEAD))
+                .saturating_add(expires.saturating_mul(DICT_ENTRY_BYTES_FOR_OVERHEAD));
+        }
         info.push_str("# Memory\r\n");
         let _ = write!(info, "used_memory:{used_memory}\r\n");
         let _ = write!(info, "used_memory_human:{used_memory_human}\r\n");
@@ -12869,8 +12892,18 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         let _ = write!(info, "used_memory_peak:{peak}\r\n");
         let _ = write!(info, "used_memory_peak_human:{peak_human}\r\n");
         let _ = write!(info, "used_memory_peak_perc:{peak_perc:.2}%\r\n");
-        info.push_str("used_memory_overhead:0\r\n");
+        let _ = write!(info, "used_memory_overhead:{used_memory_overhead}\r\n");
         info.push_str("used_memory_startup:0\r\n");
+        // (frankenredis-d9mxz) fr's `used_memory` = estimate_memory_usage_bytes
+        // is the *dataset-only* accounting (hand-counted bytes for keys
+        // + value structures). Upstream's used_memory is total heap
+        // allocation including overhead, so upstream computes
+        // dataset = used_memory - overhead. fr's used_memory IS
+        // dataset, so used_memory_dataset == used_memory and the perc
+        // is 100% by definition. This intentional divergence keeps
+        // fr's other accounting (MEMORY USAGE etc.) coherent — exact
+        // total-heap accounting would require a jemalloc/mimalloc
+        // sampler that #![forbid(unsafe_code)] blocks.
         let _ = write!(info, "used_memory_dataset:{used_memory}\r\n");
         info.push_str("used_memory_dataset_perc:100.00%\r\n");
         // (frankenredis-fqwyf) maxmemory/maxmemory_human/maxmemory_policy
@@ -12965,8 +12998,19 @@ fn info(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         info.push_str("mem_not_counted_for_evict:0\r\n");
         info.push_str("mem_replication_backlog:0\r\n");
         info.push_str("mem_total_replication_buffers:0\r\n");
-        info.push_str("mem_clients_slaves:0\r\n");
-        info.push_str("mem_clients_normal:0\r\n");
+        // (frankenredis-d9mxz) Mirror the same per-client buffer
+        // summation MEMORY STATS uses (zfu61). Vendored emits 0 for
+        // mem_clients_slaves when no replicas are attached.
+        let _ = write!(
+            info,
+            "mem_clients_slaves:{}\r\n",
+            store.stat_clients_replica_mem_bytes
+        );
+        let _ = write!(
+            info,
+            "mem_clients_normal:{}\r\n",
+            store.stat_clients_normal_mem_bytes
+        );
         info.push_str("mem_cluster_links:0\r\n");
         info.push_str("mem_aof_buffer:0\r\n");
         info.push_str("mem_allocator:rust-alloc\r\n");
