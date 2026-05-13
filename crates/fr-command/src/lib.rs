@@ -15095,8 +15095,11 @@ fn command_info_multi_keyspec(name: &str) -> Option<Vec<RespFrame>> {
             make_keyspec_index_range(&["RW", "access", "delete"], 1, 0, 1),
             make_keyspec_index_range(&["OW", "insert"], 2, 0, 1),
         ]),
-        // lmove / rpoplpush: src@1 [RW, access, delete], dst@2 [RW, insert]
-        "lmove" | "rpoplpush" => Some(vec![
+        // (frankenredis-qdknd) lmove / rpoplpush / blmove / brpoplpush /
+        // smove: src@1 [RW, access, delete], dst@2 [RW, insert].
+        // Upstream commands.def declares all 5 with identical keyspecs --
+        // the blocking variants and SMOVE share the LMOVE pattern.
+        "lmove" | "rpoplpush" | "blmove" | "brpoplpush" | "smove" => Some(vec![
             make_keyspec_index_range(&["RW", "access", "delete"], 1, 0, 1),
             make_keyspec_index_range(&["RW", "insert"], 2, 0, 1),
         ]),
