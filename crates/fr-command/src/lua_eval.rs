@@ -5022,6 +5022,15 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Number(n.sqrt())])
             }
             "math.random" => {
+                // (frankenredis-nwmly) Upstream lmathlib.c::math_random
+                // dispatches on lua_gettop(L). 0 args -> float [0,1);
+                // 1 arg -> int [1,u] with luaL_argcheck(_, 1<=u, 1, ...);
+                // 2 args -> int [l,u] with luaL_argcheck(_, l<=u, 2, ...)
+                // — note arg #2 is reported as the bad arg when l>u;
+                // 3+ args -> luaL_error(_, "wrong number of arguments").
+                // fr previously reported arg #1 for the 2-arg case,
+                // omitted the user_script:1: prefix, and silently
+                // accepted 3+ args.
                 let r = self.next_rand();
                 match args.len() {
                     0 => {
@@ -5031,34 +5040,37 @@ impl<'a> LuaState<'a> {
                     1 => {
                         let m = args[0]
                             .to_number()
-                            .ok_or("bad argument #1 to 'random' (number expected)")?
+                            .ok_or("user_script:1: bad argument #1 to 'random' (number expected)")?
                             as i64;
                         if m < 1 {
                             return Err(
-                                "bad argument #1 to 'random' (interval is empty)".to_string()
+                                "user_script:1: bad argument #1 to 'random' (interval is empty)"
+                                    .to_string()
                             );
                         }
                         let val = (r % (m as u64)) + 1;
                         Ok(vec![LuaValue::Number(val as f64)])
                     }
-                    _ => {
+                    2 => {
                         let m = args[0]
                             .to_number()
-                            .ok_or("bad argument #1 to 'random' (number expected)")?
+                            .ok_or("user_script:1: bad argument #1 to 'random' (number expected)")?
                             as i64;
                         let n = args[1]
                             .to_number()
-                            .ok_or("bad argument #2 to 'random' (number expected)")?
+                            .ok_or("user_script:1: bad argument #2 to 'random' (number expected)")?
                             as i64;
                         if m > n {
                             return Err(
-                                "bad argument #1 to 'random' (interval is empty)".to_string()
+                                "user_script:1: bad argument #2 to 'random' (interval is empty)"
+                                    .to_string()
                             );
                         }
                         let range = n as i128 - m as i128 + 1;
                         let val = m as i128 + (r as i128 % range);
                         Ok(vec![LuaValue::Number(val as f64)])
                     }
+                    _ => Err("user_script:1: wrong number of arguments".to_string()),
                 }
             }
             "math.fmod" => {
@@ -5379,11 +5391,28 @@ impl<'a> LuaState<'a> {
                 Ok(results)
             }
             "string.char" => {
+                // (frankenredis-uni2j) Upstream's luaL_argerror prepends
+                // the source-location prefix "user_script:1: " to the
+                // argument-error template. fr previously emitted just
+                // the bare "bad argument #N to 'char' (...)" wording
+                // which the regression suite caught when the error
+                // crossed back to the client envelope.
                 let mut result = Vec::new();
                 for (i, a) in args.iter().enumerate() {
-                    let n = a.to_number().ok_or("bad argument to 'string.char'")? as i64;
+                    let n = a
+                        .to_number()
+                        .ok_or_else(|| {
+                            format!(
+                                "user_script:1: bad argument #{} to 'char' (number expected, got {})",
+                                i + 1,
+                                a.type_name()
+                            )
+                        })? as i64;
                     if !(0..=255).contains(&n) {
-                        return Err(format!("bad argument #{} to 'char' (invalid value)", i + 1));
+                        return Err(format!(
+                            "user_script:1: bad argument #{} to 'char' (invalid value)",
+                            i + 1
+                        ));
                     }
                     result.push(n as u8);
                 }
@@ -11569,6 +11598,106 @@ mod tests {
             let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
             assert_eq!(result, RespFrame::Integer(1));
         }
+    }
+
+    #[test]
+    fn math_random_arity_and_error_reporting_nwmly() {
+        // (frankenredis-nwmly) Upstream lmathlib.c::math_random:
+        //   0 args  -> float in [0,1)
+        //   1 arg   -> int [1,u]; luaL_argcheck(_, 1<=u, 1, ...)
+        //   2 args  -> int [l,u]; luaL_argcheck(_, l<=u, 2, ...)
+        //   3+ args -> luaL_error "wrong number of arguments"
+        // fr previously reported arg #1 for the 2-arg case, omitted
+        // the user_script:1: prefix, and silently ignored extras.
+        let mut store = Store::new();
+
+        // 1-arg, m<1 -> arg #1 with prefix.
+        let err = eval_script(
+            b"math.randomseed(1); return math.random(0)",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected interval-empty error");
+        assert_eq!(
+            err,
+            "user_script:1: bad argument #1 to 'random' (interval is empty)",
+        );
+
+        // 2-arg, m>n -> arg #2 with prefix.
+        let err = eval_script(
+            b"math.randomseed(1); return math.random(5, 1)",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected interval-empty error");
+        assert_eq!(
+            err,
+            "user_script:1: bad argument #2 to 'random' (interval is empty)",
+        );
+
+        // 3+ args -> wrong number of arguments.
+        let err = eval_script(
+            b"return math.random(1, 2, 3)",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected wrong-number-of-args error");
+        assert_eq!(err, "user_script:1: wrong number of arguments");
+
+        let err = eval_script(
+            b"return math.random(1, 2, 3, 4)",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected wrong-number-of-args error");
+        assert_eq!(err, "user_script:1: wrong number of arguments");
+
+        // Valid calls still produce values in the expected range.
+        let r = eval_script(
+            b"math.randomseed(42); local v = math.random(1, 10); return v",
+            &[], &[], &mut store, 0,
+        ).expect("valid call");
+        let RespFrame::Integer(n) = r else {
+            panic!("expected integer, got {r:?}");
+        };
+        assert!((1..=10).contains(&n), "math.random(1,10) returned {n}");
+
+        // 1-arg valid call.
+        let r = eval_script(
+            b"math.randomseed(42); local v = math.random(5); return v",
+            &[], &[], &mut store, 0,
+        ).expect("valid 1-arg call");
+        let RespFrame::Integer(n) = r else {
+            panic!("expected integer, got {r:?}");
+        };
+        assert!((1..=5).contains(&n), "math.random(5) returned {n}");
+    }
+
+    #[test]
+    fn string_char_invalid_value_includes_user_script_prefix_uni2j() {
+        // (frankenredis-uni2j) Upstream luaL_argerror prepends the
+        // source location "user_script:1: " before "bad argument #N to
+        // 'char' (invalid value)". fr previously emitted the bare
+        // wording for both the out-of-range path (256, -1) and the
+        // type-error path.
+        let mut store = Store::new();
+        for body in &[
+            b"return string.char(256)".as_slice(),
+            b"return string.char(-1)".as_slice(),
+            b"return string.char(99999)".as_slice(),
+        ] {
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
+                &format!("expected error for {:?}", String::from_utf8_lossy(body)),
+            );
+            assert!(
+                err.starts_with("user_script:1: bad argument #1 to 'char' (invalid value)"),
+                "missing prefix for {:?}: {err}",
+                String::from_utf8_lossy(body),
+            );
+        }
+        // Wrong-type also prefixed.
+        let err = eval_script(b"return string.char({})", &[], &[], &mut store, 0)
+            .expect_err("expected error");
+        assert!(
+            err.starts_with("user_script:1: bad argument #1 to 'char' (number expected"),
+            "missing prefix for type-error: {err}",
+        );
+        // Valid call still works.
+        let ok = eval_script(b"return string.char(72, 73)", &[], &[], &mut store, 0)
+            .expect("valid string.char");
+        assert_eq!(ok, RespFrame::BulkString(Some(b"HI".to_vec())));
     }
 
     #[test]
