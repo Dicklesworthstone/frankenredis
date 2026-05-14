@@ -2766,6 +2766,34 @@ impl<'a> LuaState<'a> {
                                 }
                             }
                         }
+                        // (frankenredis-mdxsk) Arithmetic operators dispatch
+                        // to __add / __sub / __mul / __div / __mod / __pow
+                        // when at least one operand fails to coerce to a
+                        // number (matches Lua 5.1's `arith` C function:
+                        // tonumber both; if either fails, try metamethod).
+                        if let Some(name) = match op {
+                            BinOp::Add => Some("__add"),
+                            BinOp::Sub => Some("__sub"),
+                            BinOp::Mul => Some("__mul"),
+                            BinOp::Div => Some("__div"),
+                            BinOp::Mod => Some("__mod"),
+                            BinOp::Pow => Some("__pow"),
+                            _ => None,
+                        } {
+                            if lv.to_number().is_none() || rv.to_number().is_none() {
+                                if let Some(handler) =
+                                    self.lookup_binop_metamethod(&lv, &rv, name)
+                                {
+                                    let mut args = vec![lv, rv];
+                                    let results = self.call_function(
+                                        &handler, &mut args, env, varargs,
+                                    )?;
+                                    return Ok(
+                                        results.into_iter().next().unwrap_or(LuaValue::Nil),
+                                    );
+                                }
+                            }
+                        }
                         self.eval_binop(&lv, op, &rv)
                     }
                 }
@@ -2774,6 +2802,33 @@ impl<'a> LuaState<'a> {
                 let val = self.eval_expr(inner, env, varargs)?;
                 match op {
                     UnaryOp::Neg => {
+                        // (frankenredis-mdxsk) Try __unm before bailing
+                        // when the operand isn't a coercible number.
+                        // Lua 5.1 invokes __unm(value) and uses the first
+                        // return value; non-callable handlers naturally
+                        // produce "attempt to call a TYPE value" via
+                        // call_function.
+                        if val.to_number().is_none() {
+                            if let LuaValue::Table(t) = &val {
+                                let handler = {
+                                    let inner = t.inner.borrow();
+                                    inner
+                                        .metatable
+                                        .as_ref()
+                                        .map(|mt| mt.get(&LuaValue::Str(b"__unm".to_vec())))
+                                        .unwrap_or(LuaValue::Nil)
+                                };
+                                if !matches!(handler, LuaValue::Nil) {
+                                    let mut args = vec![val.clone()];
+                                    let results = self.call_function(
+                                        &handler, &mut args, env, varargs,
+                                    )?;
+                                    return Ok(
+                                        results.into_iter().next().unwrap_or(LuaValue::Nil),
+                                    );
+                                }
+                            }
+                        }
                         // (frankenredis-7w22v) Use the operand's actual
                         // type name to match Lua 5.1's "a string value" /
                         // "a boolean value" wording.
@@ -7109,6 +7164,88 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_arithmetic_metamethods_dispatch_on_non_numeric_operands() {
+        // Pins frankenredis-mdxsk (sub-bead of frankenredis-00gjf).
+        // Lua 5.1 dispatches arithmetic operators (+, -, *, /, %, ^,
+        // unary -) to __add/__sub/__mul/__div/__mod/__pow/__unm when
+        // at least one operand fails the implicit number coercion.
+        let mut store = Store::new();
+
+        // __add fires; args are (table, number).
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__add=function(a, b) return type(a) .. '+' .. type(b) end}); return t + 1",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"table+number".to_vec()))
+        );
+
+        // RHS-only metatable still fires.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__add=function(a, b) return type(a) .. '+' .. type(b) end}); return 1 + t",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"number+table".to_vec()))
+        );
+
+        // Other binary arithmetic ops.
+        for (src, want) in [
+            (b"local t = setmetatable({}, {__sub=function() return 's' end}); return t - 1" as &[u8], b"s" as &[u8]),
+            (b"local t = setmetatable({}, {__mul=function() return 'm' end}); return t * 2", b"m"),
+            (b"local t = setmetatable({}, {__div=function() return 'd' end}); return t / 2", b"d"),
+            (b"local t = setmetatable({}, {__mod=function() return 'o' end}); return t % 2", b"o"),
+            (b"local t = setmetatable({}, {__pow=function() return 'p' end}); return t ^ 2", b"p"),
+        ] {
+            let frame = eval_script(src, &[], &[], &mut store, 0).unwrap();
+            assert_eq!(
+                frame,
+                RespFrame::BulkString(Some(want.to_vec())),
+                "wrong dispatch for {:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+
+        // __unm (unary minus) receives the operand as its sole arg.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__unm=function(a) return type(a) end}); return -t",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"table".to_vec())));
+
+        // LHS metatable wins when both have __add.
+        let frame = eval_script(
+            b"local L = setmetatable({}, {__add=function() return 'L' end}); local R = setmetatable({}, {__add=function() return 'R' end}); return L + R",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"L".to_vec())));
+
+        // Numeric strings still trigger metamethod dispatch when the
+        // OTHER operand fails to_number (the str is numeric, table is not).
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__add=function() return 'META' end}); return '1' + t",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"META".to_vec())));
+
+        // Pure-number arithmetic doesn't pay the metamethod-lookup cost.
+        let frame = eval_script(b"return 2 + 3", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(5));
+
+        // Non-callable __add raises the standard "attempt to call" error.
+        let err = eval_script(
+            b"local t = setmetatable({}, {__add='nope'}); return t + 1",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected error for string-__add");
+        assert!(
+            err.contains("attempt to call") && err.contains("string"),
+            "non-callable __add should raise call-error: {err:?}"
+        );
     }
 
     #[test]
