@@ -7895,15 +7895,47 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                     };
                     let formatted = match conv {
                         'd' | 'i' => {
+                            // (frankenredis-3pug0) C printf treats
+                            // precision for integer conversions as the
+                            // minimum digit count (zero-padded). When
+                            // precision is set, zero-padding from width
+                            // is suppressed and spaces fill the
+                            // remaining width. When precision is 0 and
+                            // value is 0, NO digits are produced.
                             let n = require_number(&arg)? as i64;
-                            let s = if show_sign && n >= 0 {
-                                format!("+{n}")
-                            } else if space_sign && n >= 0 {
-                                format!(" {n}")
+                            let abs_str = if n == i64::MIN {
+                                "9223372036854775808".to_string()
                             } else {
-                                format!("{n}")
+                                format!("{}", n.unsigned_abs())
                             };
-                            lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
+                            let padded_digits = match precision {
+                                Some(0) if n == 0 => String::new(),
+                                Some(p) if p > abs_str.len() => {
+                                    let pad = p - abs_str.len();
+                                    format!("{}{}", "0".repeat(pad), abs_str)
+                                }
+                                _ => abs_str,
+                            };
+                            let s = if n < 0 {
+                                format!("-{padded_digits}")
+                            } else if show_sign {
+                                format!("+{padded_digits}")
+                            } else if space_sign {
+                                format!(" {padded_digits}")
+                            } else {
+                                padded_digits
+                            };
+                            // Per C printf: an explicit precision
+                            // suppresses the 0-flag for integer
+                            // conversions.
+                            let effective_pad = if precision.is_some() {
+                                ' '
+                            } else if zero_pad {
+                                '0'
+                            } else {
+                                ' '
+                            };
+                            lua_fmt_pad(&s, width, left_align, effective_pad)
                         }
                         'u' => {
                             // (frankenredis-t1ah8) Upstream %u prints the unsigned
@@ -7913,8 +7945,22 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             // fr was rendering negatives as signed (-1) by sharing the
                             // %d arm.
                             let n = require_number(&arg)? as i64 as u64;
-                            let s = format!("{n}");
-                            lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
+                            let digits = format!("{n}");
+                            let padded_digits = match precision {
+                                Some(0) if n == 0 => String::new(),
+                                Some(p) if p > digits.len() => {
+                                    format!("{}{}", "0".repeat(p - digits.len()), digits)
+                                }
+                                _ => digits,
+                            };
+                            let effective_pad = if precision.is_some() {
+                                ' '
+                            } else if zero_pad {
+                                '0'
+                            } else {
+                                ' '
+                            };
+                            lua_fmt_pad(&padded_digits, width, left_align, effective_pad)
                         }
                         'f' => {
                             let n = require_number(&arg)?;
@@ -8071,30 +8117,69 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             // from f64 saturates negatives to 0; going through
                             // i64 first recovers the two's complement bits, so
                             // -1 -> ffffffffffffffff matching vendored.
+                            // (frankenredis-3pug0) Precision: minimum digit
+                            // count, zero-padded; the # alt-form prefix sits
+                            // outside the precision pad; precision suppresses
+                            // the width's 0-flag.
                             let n = require_number(&arg)? as i64 as u64;
-                            let s = if conv == 'x' {
-                                if alt_form {
-                                    format!("0x{n:x}")
-                                } else {
-                                    format!("{n:x}")
-                                }
-                            } else if alt_form {
-                                format!("0X{n:X}")
+                            let digits = if conv == 'x' {
+                                format!("{n:x}")
                             } else {
                                 format!("{n:X}")
                             };
-                            lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
+                            let padded_digits = match precision {
+                                Some(0) if n == 0 => String::new(),
+                                Some(p) if p > digits.len() => {
+                                    format!("{}{}", "0".repeat(p - digits.len()), digits)
+                                }
+                                _ => digits,
+                            };
+                            let s = if alt_form && n != 0 {
+                                if conv == 'x' {
+                                    format!("0x{padded_digits}")
+                                } else {
+                                    format!("0X{padded_digits}")
+                                }
+                            } else {
+                                padded_digits
+                            };
+                            let effective_pad = if precision.is_some() {
+                                ' '
+                            } else if zero_pad {
+                                '0'
+                            } else {
+                                ' '
+                            };
+                            lua_fmt_pad(&s, width, left_align, effective_pad)
                         }
                         'o' => {
                             // (frankenredis-t1ah8) Same fix as %x/%X — recover
                             // the unsigned bit pattern for negative inputs.
+                            // (frankenredis-3pug0) Precision applies to digit
+                            // count; alt-form '#' ensures a leading 0 (just
+                            // a precision bump by 1 when needed).
                             let n = require_number(&arg)? as i64 as u64;
-                            let s = if alt_form {
-                                format!("0{n:o}")
-                            } else {
-                                format!("{n:o}")
+                            let digits = format!("{n:o}");
+                            let padded_digits = match precision {
+                                Some(0) if n == 0 => String::new(),
+                                Some(p) if p > digits.len() => {
+                                    format!("{}{}", "0".repeat(p - digits.len()), digits)
+                                }
+                                _ => digits,
                             };
-                            lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
+                            let s = if alt_form && !padded_digits.starts_with('0') {
+                                format!("0{padded_digits}")
+                            } else {
+                                padded_digits
+                            };
+                            let effective_pad = if precision.is_some() {
+                                ' '
+                            } else if zero_pad {
+                                '0'
+                            } else {
+                                ' '
+                            };
+                            lua_fmt_pad(&s, width, left_align, effective_pad)
                         }
                         'c' => {
                             // (frankenredis-be7o1) Upstream printf %c casts to
@@ -12932,6 +13017,44 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_string_format_integer_precision_3pug0() {
+        // (frankenredis-3pug0) C printf treats precision on integer
+        // conversions as a minimum digit count (zero-padded); an
+        // explicit precision suppresses the 0-flag for width padding.
+        // Probed against vendored Redis 7.2.4 on :16380.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (b"return string.format('%10.5d', 42)",   "     00042"),
+            (b"return string.format('%5.3d', 42)",    "  042"),
+            (b"return string.format('%.5d', 42)",     "00042"),
+            (b"return string.format('%.0d', 0)",      ""),
+            (b"return string.format('%.0d', 5)",      "5"),
+            (b"return string.format('%05.3d', 42)",   "  042"),  // precision suppresses 0-flag
+            (b"return string.format('%5d', 42)",      "   42"),
+            (b"return string.format('%d', 42)",       "42"),
+            (b"return string.format('%.4x', 255)",    "00ff"),
+            (b"return string.format('%.4X', 255)",    "00FF"),
+            (b"return string.format('%#.4x', 255)",   "0x00ff"),
+            (b"return string.format('%.6o', 8)",      "000010"),
+            (b"return string.format('%5.4d', -42)",   "-0042"),
+            (b"return string.format('%.5u', 42)",     "00042"),
+            (b"return string.format('%.0x', 0)",      ""),
+            (b"return string.format('%.0o', 0)",      ""),
+            (b"return string.format('%.0u', 0)",      ""),
+        ];
+        for (body, expected) in cases {
+            let r = eval_script(body, &[], &[], &mut store, 0)
+                .unwrap_or_else(|e| panic!("eval {:?} failed: {e}", String::from_utf8_lossy(body)));
+            assert_eq!(
+                r,
+                RespFrame::BulkString(Some(expected.as_bytes().to_vec())),
+                "wrong output for {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
     }
 
     #[test]
