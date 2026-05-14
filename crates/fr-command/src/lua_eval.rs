@@ -84,6 +84,12 @@ pub struct LuaFunc {
     /// For `local function f(x) ... end`, stores the name so the function
     /// can be injected into its own call scope for self-recursion.
     pub self_name: Option<String>,
+    /// Source-location label this function uses for runtime error
+    /// prefixes. Set by `loadstring`/`load` so chunk errors carry the
+    /// chunk's name (e.g. `[string "src"]:1:`) instead of the outer
+    /// script's `user_script:1:`. None means the function inherits the
+    /// outer script's prefix. (frankenredis-ycaog)
+    pub source_label: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1759,6 +1765,12 @@ pub struct LuaState<'a> {
     /// every `eval_script` call since each script creates a fresh
     /// LuaState. (frankenredis-cxmsu)
     pending_error_value: Option<LuaValue>,
+    /// Source-location prefix to use for new Lua functions defined while
+    /// this state is active. Defaults to `None` (which renders as
+    /// "user_script"). loadstring/load functions push their chunk label
+    /// onto this slot for the duration of their execution so functions
+    /// defined inside the chunk inherit that label. (frankenredis-ycaog)
+    current_source_label: Option<String>,
     /// Depth of nested exec_stmts calls. The coroutine resume path
     /// (exec_coroutine_stmts → exec_stmt) keeps this at 0 for top-
     /// level body statements; any nested control-flow block (for,
@@ -2067,6 +2079,7 @@ impl<'a> LuaState<'a> {
             current_coroutine: None,
             pending_yield: None,
             pending_error_value: None,
+            current_source_label: None,
             nested_exec_stmts_depth: 0,
             inside_bare_expression_stmt: false,
         }
@@ -2461,6 +2474,7 @@ impl<'a> LuaState<'a> {
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
                     self_name: None,
+                    source_label: self.current_source_label.clone(),
                 });
                 if names.len() == 1 {
                     // (frankenredis-j02x9) `function f() end` is
@@ -2483,6 +2497,7 @@ impl<'a> LuaState<'a> {
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
                     self_name: Some(name.clone()),
+                    source_label: self.current_source_label.clone(),
                 });
                 env.set_local(name, func);
                 Ok(ControlFlow::None)
@@ -3201,6 +3216,7 @@ impl<'a> LuaState<'a> {
                 is_variadic: *is_variadic,
                 captured_env: Some(env.snapshot()),
                 self_name: None,
+                source_label: self.current_source_label.clone(),
             })),
         }
     }
@@ -3775,10 +3791,38 @@ impl<'a> LuaState<'a> {
             LuaValue::Function(lua_func) => {
                 let (mut new_env, mut func_varargs) =
                     Self::prepare_lua_function_env(func.clone(), lua_func, args);
-                match self.exec_stmts(&lua_func.body, &mut new_env, &mut func_varargs) {
+                // (frankenredis-ycaog) Functions carrying a source_label
+                // (loaded via loadstring/load) push their chunk label so
+                // any inner function definitions inherit it and runtime
+                // errors get rewritten to that prefix on the way out.
+                let prev_label = if lua_func.source_label.is_some() {
+                    std::mem::replace(
+                        &mut self.current_source_label,
+                        lua_func.source_label.clone(),
+                    )
+                } else {
+                    self.current_source_label.clone()
+                };
+                let result = self.exec_stmts(&lua_func.body, &mut new_env, &mut func_varargs);
+                if lua_func.source_label.is_some() {
+                    self.current_source_label = prev_label;
+                }
+                match result {
                     Ok(ControlFlow::Return(vals)) => Ok(vals),
                     Ok(_) => Ok(vec![LuaValue::Nil]),
-                    Err(e) => Err(e),
+                    Err(e) => {
+                        if let Some(label) = lua_func.source_label.as_deref() {
+                            // Rewrite the standard "user_script:" prefix
+                            // (the only error prefix fr emits) to the
+                            // chunk label. Errors that already carry a
+                            // chunk label or that don't have any prefix
+                            // pass through unchanged.
+                            if let Some(rest) = e.strip_prefix("user_script:") {
+                                return Err(format!("{label}:{rest}"));
+                            }
+                        }
+                        Err(e)
+                    }
                 }
             }
             // (frankenredis-8w2ag) Prepend the standard
@@ -4133,6 +4177,11 @@ impl<'a> LuaState<'a> {
                         is_variadic: true,
                         captured_env: Some(env.snapshot()),
                         self_name: None,
+                        // (frankenredis-ycaog) Tag the chunk so runtime
+                        // errors raised from inside it are reported with
+                        // the loadstring chunk-label prefix instead of
+                        // the outer script's `user_script:1:` prefix.
+                        source_label: Some(chunk_label),
                     })]),
                     Err(msg) => Ok(vec![
                         LuaValue::Nil,
@@ -7502,6 +7551,90 @@ mod tests {
         assert!(
             err.contains("attempt to concatenate a nil value"),
             "wrong wording for nil: {err:?}"
+        );
+    }
+
+    #[test]
+    fn lua_loadstring_runtime_errors_carry_chunk_label_prefix() {
+        // Pins frankenredis-ycaog. Lua 5.1 / vendored Redis 7.2.4 use
+        // the loadstring chunk's label (`[string "SOURCE"]` or the
+        // `=NAME` / `@NAME` form) for ALL runtime errors raised from
+        // inside that chunk, including from nested function definitions.
+        let mut store = Store::new();
+
+        // Direct error: nonexistent global access in the chunk.
+        let frame = eval_script(
+            b"local f = loadstring('return undef'); local ok, err = pcall(f); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        let s = String::from_utf8_lossy(&body);
+        assert!(
+            s.starts_with("[string \"return undef\"]:1: ") && s.contains("undef"),
+            "default chunk label missing: {s:?}"
+        );
+
+        // Custom chunk name.
+        let frame = eval_script(
+            b"local f = loadstring('return undef', 'mychunk'); local ok, err = pcall(f); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        let s = String::from_utf8_lossy(&body);
+        assert!(
+            s.starts_with("[string \"mychunk\"]:1: "),
+            "named chunk label missing: {s:?}"
+        );
+
+        // `=NAME` prefix strips the brackets.
+        let frame = eval_script(
+            b"local f = loadstring('return undef', '=mn'); local ok, err = pcall(f); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        let s = String::from_utf8_lossy(&body);
+        assert!(
+            s.starts_with("mn:1: "),
+            "= prefix should strip brackets: {s:?}"
+        );
+
+        // Nested function defined inside the chunk inherits the label.
+        let frame = eval_script(
+            b"local f = loadstring('local function inner() return undef end; return inner()', 'mn'); local ok, err = pcall(f); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        let s = String::from_utf8_lossy(&body);
+        assert!(
+            s.starts_with("[string \"mn\"]:1: "),
+            "nested function should inherit chunk label: {s:?}"
+        );
+
+        // Errors raised OUTSIDE any loaded chunk still use user_script:.
+        let frame = eval_script(
+            b"local ok, err = pcall(function() return undef end); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        let s = String::from_utf8_lossy(&body);
+        assert!(
+            s.starts_with("user_script:1: "),
+            "outer error should keep user_script: prefix: {s:?}"
         );
     }
 
