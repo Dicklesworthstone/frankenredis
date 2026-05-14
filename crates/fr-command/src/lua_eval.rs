@@ -4121,7 +4121,20 @@ impl<'a> LuaState<'a> {
                 // with __tostring=function() return 99 end yields the
                 // number 99. Non-callable handlers raise the standard
                 // "attempt to call a TYPE value" error via call_function.
-                let val = args.first().cloned().unwrap_or(LuaValue::Nil);
+                // (frankenredis-6iqkt) luaB_tostring calls luaL_checkany
+                // before any other logic, so a missing arg raises
+                // "bad argument #1 to '?' (value expected)" (or the
+                // call-site name when available).
+                let val = match args.first().cloned() {
+                    Some(v) => v,
+                    None => {
+                        return Err(self.format_builtin_argerror(
+                            "tostring",
+                            1,
+                            "value expected",
+                        ));
+                    }
+                };
                 if let LuaValue::Table(t) = &val {
                     let handler = {
                         let inner = t.inner.borrow();
@@ -4145,7 +4158,19 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(val.to_display_string())])
             }
             "type" => {
-                let val = args.first().cloned().unwrap_or(LuaValue::Nil);
+                // (frankenredis-6iqkt) luaB_type calls luaL_checkany so
+                // a missing arg errors with the standard "value
+                // expected" wording. fr previously returned 'nil'.
+                let val = match args.first().cloned() {
+                    Some(v) => v,
+                    None => {
+                        return Err(self.format_builtin_argerror(
+                            "type",
+                            1,
+                            "value expected",
+                        ));
+                    }
+                };
                 Ok(vec![LuaValue::Str(val.type_name().as_bytes().to_vec())])
             }
             "error" => {
@@ -7623,6 +7648,56 @@ mod tests {
             err.contains("attempt to concatenate a nil value"),
             "wrong wording for nil: {err:?}"
         );
+    }
+
+    #[test]
+    fn lua_tostring_type_with_no_args_error_value_expected() {
+        // Pins frankenredis-6iqkt. Lua 5.1 lbaselib.c::luaB_tostring
+        // and luaB_type both call luaL_checkany before any other
+        // logic, so a missing arg raises
+        // "bad argument #1 to '?' (value expected)" via pcall callback
+        // or "user_script:1: bad argument #1 to '<name>' (value expected)"
+        // when called directly.
+        let mut store = Store::new();
+
+        // Direct call: name resolves to 'tostring' / 'type'.
+        let err = eval_script(
+            b"return tostring()",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected error");
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'tostring' (value expected)"),
+            "tostring direct: {err:?}"
+        );
+
+        let err = eval_script(b"return type()", &[], &[], &mut store, 0)
+            .expect_err("expected error");
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'type' (value expected)"),
+            "type direct: {err:?}"
+        );
+
+        // pcall callback: name is '?' with no prefix.
+        let frame = eval_script(
+            b"local ok, err = pcall(tostring); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        assert_eq!(body, b"bad argument #1 to '?' (value expected)");
+
+        // Explicit nil arg is NOT missing — tostring(nil) returns "nil".
+        let frame = eval_script(b"return tostring(nil)", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"nil".to_vec())));
+
+        // Happy paths.
+        let frame = eval_script(b"return tostring(42)", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"42".to_vec())));
+
+        let frame = eval_script(b"return type({})", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"table".to_vec())));
     }
 
     #[test]
