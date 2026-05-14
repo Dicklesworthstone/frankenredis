@@ -779,6 +779,34 @@ fn lua_lvalue_first_token(expr: &Expr) -> String {
     }
 }
 
+/// (frankenredis-i0h24) Build the "expected"-slot label that Lua 5.1's
+/// parser uses in 'X expected near Y' diagnostics. Keywords and
+/// punctuation are quoted with their literal spelling; identifiers
+/// (when the parser needs any name) render as '<name>'.
+fn expected_token_label(t: &Token) -> String {
+    match t {
+        Token::Name(_) => "<name>".to_string(),
+        other => token_display(other),
+    }
+}
+
+/// Build an upstream-shaped 'EXPECTED expected near GOT' message
+/// using single-quoted token-display forms on both sides.
+fn parser_expected_near(expected: &Token, got: &Token) -> String {
+    format!(
+        "'{}' expected near '{}'",
+        expected_token_label(expected),
+        token_display(got),
+    )
+}
+
+/// Same shape with a literal "<name>" expected slot, used when the
+/// parser requires an identifier in a specific position (function
+/// name, parameter, field, local, etc).
+fn parser_name_expected_near(got: &Token) -> String {
+    format!("'<name>' expected near '{}'", token_display(got))
+}
+
 fn token_display(tok: &Token) -> String {
     match tok {
         Token::Name(n) => n.clone(),
@@ -1314,11 +1342,20 @@ pub enum Stmt {
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// (frankenredis-i0h24) Lexical loop nesting depth — used so the
+    /// parser can reject `break` outside any loop with vendored's
+    /// "no loop to break near '<eof>'" message. Incremented on
+    /// while/repeat/for entry, decremented on exit.
+    loop_depth: usize,
 }
 
 impl Parser {
     fn new(tokens: Vec<Token>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            loop_depth: 0,
+        }
     }
 
     fn peek(&self) -> &Token {
@@ -1336,7 +1373,8 @@ impl Parser {
         if std::mem::discriminant(&tok) == std::mem::discriminant(expected) {
             Ok(())
         } else {
-            Err(format!("expected {expected:?}, got {tok:?}"))
+            // (frankenredis-i0h24) Use upstream's "X expected near Y" wording.
+            Err(parser_expected_near(expected, &tok))
         }
     }
 
@@ -1377,6 +1415,16 @@ impl Parser {
             Token::Local => self.parse_local(),
             Token::Return => self.parse_return(),
             Token::Break => {
+                // (frankenredis-i0h24) Upstream lparser.c::breakstat
+                // raises "no loop to break" when the current function's
+                // breaklist is empty.
+                if self.loop_depth == 0 {
+                    self.advance();
+                    return Err(format!(
+                        "no loop to break near '{}'",
+                        token_display(self.peek()),
+                    ));
+                }
                 self.advance();
                 Ok(Stmt::Break)
             }
@@ -1417,14 +1465,20 @@ impl Parser {
         self.advance(); // 'while'
         let cond = self.parse_expr()?;
         self.expect(&Token::Do)?;
-        let body = self.parse_block()?;
+        self.loop_depth += 1;
+        let body_result = self.parse_block();
+        self.loop_depth -= 1;
+        let body = body_result?;
         self.expect(&Token::End)?;
         Ok(Stmt::While(cond, body))
     }
 
     fn parse_repeat(&mut self) -> Result<Stmt, String> {
         self.advance(); // 'repeat'
-        let body = self.parse_block()?;
+        self.loop_depth += 1;
+        let body_result = self.parse_block();
+        self.loop_depth -= 1;
+        let body = body_result?;
         self.expect(&Token::Until)?;
         let cond = self.parse_expr()?;
         Ok(Stmt::Repeat(body, cond))
@@ -1434,7 +1488,7 @@ impl Parser {
         self.advance(); // 'for'
         let name = match self.advance() {
             Token::Name(n) => n,
-            t => return Err(format!("expected name in for, got {t:?}")),
+            t => return Err(parser_name_expected_near(&t)),
         };
 
         if self.check(&Token::Eq) {
@@ -1450,7 +1504,10 @@ impl Parser {
                 None
             };
             self.expect(&Token::Do)?;
-            let body = self.parse_block()?;
+            self.loop_depth += 1;
+            let body_result = self.parse_block();
+            self.loop_depth -= 1;
+            let body = body_result?;
             self.expect(&Token::End)?;
             Ok(Stmt::NumericFor(name, start, stop, step, body))
         } else {
@@ -1460,13 +1517,16 @@ impl Parser {
                 self.advance();
                 match self.advance() {
                     Token::Name(n) => names.push(n),
-                    t => return Err(format!("expected name in for, got {t:?}")),
+                    t => return Err(parser_name_expected_near(&t)),
                 }
             }
             self.expect(&Token::In)?;
             let exprs = self.parse_expr_list()?;
             self.expect(&Token::Do)?;
-            let body = self.parse_block()?;
+            self.loop_depth += 1;
+            let body_result = self.parse_block();
+            self.loop_depth -= 1;
+            let body = body_result?;
             self.expect(&Token::End)?;
             Ok(Stmt::GenericFor(names, exprs, body))
         }
@@ -1478,7 +1538,7 @@ impl Parser {
             self.advance(); // 'function'
             let name = match self.advance() {
                 Token::Name(n) => n,
-                t => return Err(format!("expected function name, got {t:?}")),
+                t => return Err(parser_name_expected_near(&t)),
             };
             let (params, is_variadic, body) = self.parse_func_body()?;
             return Ok(Stmt::LocalFunctionDecl(name, params, is_variadic, body));
@@ -1487,13 +1547,13 @@ impl Parser {
         let mut names = Vec::new();
         match self.advance() {
             Token::Name(n) => names.push(n),
-            t => return Err(format!("expected name after local, got {t:?}")),
+            t => return Err(parser_name_expected_near(&t)),
         }
         while self.check(&Token::Comma) {
             self.advance();
             match self.advance() {
                 Token::Name(n) => names.push(n),
-                t => return Err(format!("expected name, got {t:?}")),
+                t => return Err(parser_name_expected_near(&t)),
             }
         }
         let exprs = if self.check(&Token::Eq) {
@@ -1525,13 +1585,13 @@ impl Parser {
         let mut names = Vec::new();
         match self.advance() {
             Token::Name(n) => names.push(n),
-            t => return Err(format!("expected function name, got {t:?}")),
+            t => return Err(parser_name_expected_near(&t)),
         }
         while self.check(&Token::Dot) {
             self.advance();
             match self.advance() {
                 Token::Name(n) => names.push(n),
-                t => return Err(format!("expected name after '.', got {t:?}")),
+                t => return Err(parser_name_expected_near(&t)),
             }
         }
         let (params, is_variadic, body) = self.parse_func_body()?;
@@ -1551,7 +1611,7 @@ impl Parser {
                 }
                 match self.advance() {
                     Token::Name(n) => params.push(n),
-                    t => return Err(format!("expected parameter name, got {t:?}")),
+                    t => return Err(parser_name_expected_near(&t)),
                 }
                 if !self.check(&Token::Comma) {
                     break;
@@ -1757,7 +1817,7 @@ impl Parser {
                     self.advance();
                     match self.advance() {
                         Token::Name(n) => expr = Expr::Field(Box::new(expr), n),
-                        t => return Err(format!("expected field name, got {t:?}")),
+                        t => return Err(parser_name_expected_near(&t)),
                     }
                 }
                 Token::LBracket => {
@@ -1770,7 +1830,7 @@ impl Parser {
                     self.advance();
                     let method = match self.advance() {
                         Token::Name(n) => n,
-                        t => return Err(format!("expected method name, got {t:?}")),
+                        t => return Err(parser_name_expected_near(&t)),
                     };
                     let args = self.parse_call_args()?;
                     expr = Expr::MethodCall(Box::new(expr), method, args);
@@ -1851,7 +1911,7 @@ impl Parser {
                 self.advance();
                 Ok(Expr::VarArgs)
             }
-            t => Err(format!("unexpected token in expression: {t:?}")),
+            t => Err(format!("unexpected symbol near '{}'", token_display(&t))),
         }
     }
 
@@ -2416,7 +2476,7 @@ impl<'a> LuaState<'a> {
         let mut parser = Parser::new(tokens);
         let stmts = parser.parse_block()?;
         if !parser.check(&Token::Eof) {
-            return Err(format!("unexpected token: {:?}", parser.peek()));
+            return Err(format!("'<eof>' expected near '{}'", token_display(parser.peek())));
         }
         // (frankenredis-j02x9) Lock the globals table — from this point
         // forward any user-script write to globals raises a readonly-
@@ -4708,7 +4768,7 @@ impl<'a> LuaState<'a> {
                     let mut parser = Parser::new(tokens);
                     let stmts = parser.parse_block()?;
                     if !parser.check(&Token::Eof) {
-                        return Err(format!("unexpected token: {:?}", parser.peek()));
+                        return Err(format!("'<eof>' expected near '{}'", token_display(parser.peek())));
                     }
                     Ok(stmts)
                 }) {
@@ -8481,7 +8541,7 @@ pub fn compile_check(script: &[u8]) -> Result<(), String> {
     let mut parser = Parser::new(tokens);
     let _ = parser.parse_block()?;
     if !parser.check(&Token::Eof) {
-        return Err(format!("unexpected token: {:?}", parser.peek()));
+        return Err(format!("'<eof>' expected near '{}'", token_display(parser.peek())));
     }
     Ok(())
 }
@@ -12570,6 +12630,57 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_parser_errors_use_upstream_wording_i0h24() {
+        // (frankenredis-i0h24) Lua 5.1's parser emits diagnostics shaped
+        // as "X expected near Y" / "unexpected symbol near 'X'" / etc.
+        // fr previously emitted Rust-debug-style wording. Probed against
+        // vendored Redis 7.2.4 on :16380.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            // self.expect() now produces upstream wording for all
+            // keyword-expected and punctuation-expected paths.
+            (b"function f end",         "'(' expected near 'end'"),
+            (b"if true do end",         "'then' expected near 'do'"),
+            (b"if true print('x') end", "'then' expected near 'print'"),
+            (b"repeat end",             "'until' expected near 'end'"),
+            (b"do",                     "'end' expected near '<eof>'"),
+            // name-expected paths use the '<name>' literal slot.
+            (b"local nil = 1",          "'<name>' expected near 'nil'"),
+            (b"function 1() end",       "'<name>' expected near '1'"),
+            // unexpected symbol in expression-start.
+            (b"if then end",            "unexpected symbol near 'then'"),
+            (b"while do end",           "unexpected symbol near 'do'"),
+            (b"for x= do",              "unexpected symbol near 'do'"),
+            (b"return 1+",              "unexpected symbol near '<eof>'"),
+            (b"(((",                    "unexpected symbol near '<eof>'"),
+            (b"::label::",              "unexpected symbol near ':'"),
+            (b"[",                      "unexpected symbol near '['"),
+            // Top-of-chunk "extra tokens" → '<eof>' expected near 'X'.
+            (b"elseif x then return end", "'<eof>' expected near 'elseif'"),
+            (b"else return end",          "'<eof>' expected near 'else'"),
+            (b"end",                      "'<eof>' expected near 'end'"),
+            // `break` outside a loop now raises.
+            (b"break",                  "no loop to break near '<eof>'"),
+        ];
+        for (body, expected) in cases {
+            let err = eval_script(body, &[], &[], &mut store, 0)
+                .expect_err("parser error expected");
+            assert!(
+                err.contains(expected),
+                "wrong error for {:?}: got {err:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
+
+        // Regression: break inside a loop still parses.
+        let r = eval_script(
+            b"for i=1,3 do if i==2 then break end end; return 'ok'",
+            &[], &[], &mut store, 0,
+        ).expect("break-in-loop");
+        assert_eq!(r, RespFrame::BulkString(Some(b"ok".to_vec())));
     }
 
     #[test]
