@@ -411,6 +411,24 @@ fn lua_optional_integer_arg(
     }
 }
 
+/// (frankenredis-tb9vb) Lua 5.1's table-set primitive (ltable.c::luaH_set
+/// invoked from lvm.c::luaV_settable) rejects nil and NaN keys with a
+/// runtime error before the slot is allocated. Both `t[k]=v` syntax and
+/// `{[k]=v}` constructors funnel through luaV_settable, so the check
+/// must fire at both sites in fr. Positive/negative infinity are
+/// allowed — only NaN is rejected. Returns the user_script:1-prefixed
+/// error string matching the VM-runtime wording (rawset emits the same
+/// message without the prefix; see the rawset arm).
+fn lua_check_table_key(key: &LuaValue) -> Result<(), String> {
+    match key {
+        LuaValue::Nil => Err("user_script:1: table index is nil".to_string()),
+        LuaValue::Number(n) if n.is_nan() => {
+            Err("user_script:1: table index is NaN".to_string())
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Render the upstream "got" suffix for a bad-argument error.
 /// `None` means the arg position was never set, producing "no value";
 /// `Some(LuaValue::Nil)` produces "nil"; any other value produces the
@@ -2711,6 +2729,11 @@ impl<'a> LuaState<'a> {
             Expr::Index(table_expr, key_expr) => {
                 let table = self.eval_expr(table_expr, env, varargs)?;
                 let key = self.eval_expr(key_expr, env, varargs)?;
+                // (frankenredis-tb9vb) Reject nil/NaN keys before the
+                // assignment dispatches into __newindex or hits the
+                // table's internal storage — upstream luaV_settable
+                // raises here, never silently dropping the value.
+                lua_check_table_key(&key)?;
                 self.table_set_by_expr(table_expr, table, key, value, env, varargs)?;
             }
             Expr::Field(table_expr, field) => {
@@ -3333,6 +3356,11 @@ impl<'a> LuaState<'a> {
                         TableField::Index(key_expr, val_expr) => {
                             let key = self.eval_expr(key_expr, env, varargs)?;
                             let val = self.eval_expr(val_expr, env, varargs)?;
+                            // (frankenredis-tb9vb) {[k]=v} constructors
+                            // funnel through the same luaV_settable as
+                            // assignment, so nil/NaN keys raise here
+                            // too — not at first lookup.
+                            lua_check_table_key(&key)?;
                             table.set(key, val);
                         }
                     }
@@ -12280,6 +12308,65 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_table_rejects_nil_and_nan_keys_tb9vb() {
+        // (frankenredis-tb9vb) Lua 5.1's luaV_settable raises at runtime
+        // when an assignment uses a nil or NaN key. Positive/negative
+        // infinity are valid keys (NaN is rejected because NaN != NaN
+        // breaks the table's internal equality). fr previously dropped
+        // these silently. Probed against vendored Redis 7.2.4 on :16380.
+        let mut store = Store::new();
+
+        // Direct t[nil]=1 syntax raises before storing.
+        let err = eval_script(
+            b"local t={} t[nil]=1",
+            &[], &[], &mut store, 0,
+        ).expect_err("nil key");
+        assert_eq!(err, "user_script:1: table index is nil");
+
+        // Direct t[0/0]=1 syntax raises with NaN message.
+        let err = eval_script(
+            b"local t={} t[0/0]=1",
+            &[], &[], &mut store, 0,
+        ).expect_err("NaN key");
+        assert_eq!(err, "user_script:1: table index is NaN");
+
+        // -NaN must also be rejected (sign bit doesn't help).
+        let err = eval_script(
+            b"local t={} t[-(0/0)]=1",
+            &[], &[], &mut store, 0,
+        ).expect_err("-NaN key");
+        assert_eq!(err, "user_script:1: table index is NaN");
+
+        // Table constructor {[nil]=1} raises at construction time.
+        let err = eval_script(
+            b"return {[nil]=1}",
+            &[], &[], &mut store, 0,
+        ).expect_err("ctor nil key");
+        assert_eq!(err, "user_script:1: table index is nil");
+
+        // Table constructor {[0/0]=1} raises at construction time.
+        let err = eval_script(
+            b"return {[0/0]=1}",
+            &[], &[], &mut store, 0,
+        ).expect_err("ctor NaN key");
+        assert_eq!(err, "user_script:1: table index is NaN");
+
+        // Positive infinity is a valid key — must NOT raise.
+        let r = eval_script(
+            b"local t={} t[1/0]=42 return t[1/0]",
+            &[], &[], &mut store, 0,
+        ).expect("inf key ok");
+        assert_eq!(r, RespFrame::Integer(42));
+
+        // Negative infinity is a valid key — must NOT raise.
+        let r = eval_script(
+            b"local t={} t[-1/0]=42 return t[-1/0]",
+            &[], &[], &mut store, 0,
+        ).expect("-inf key ok");
+        assert_eq!(r, RespFrame::Integer(42));
     }
 
     #[test]
