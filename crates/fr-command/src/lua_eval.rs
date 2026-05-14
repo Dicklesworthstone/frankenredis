@@ -2968,7 +2968,10 @@ impl<'a> LuaState<'a> {
             self.write_back_table_expr(table_expr, table, env, varargs)?;
             Ok(())
         } else {
-            Err(format!("user_script:1: attempt to index a {} value", table.type_name()))
+            // (frankenredis-ct3ir) Route through type_error_with_label
+            // so newindex on a non-table picks up the accessor context
+            // (local 'x' / field 'f' / global 'g') just like reads do.
+            Err(self.type_error_with_label("index", table_expr, &table, env))
         }
     }
 
@@ -15115,6 +15118,50 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn newindex_attempt_to_index_carries_accessor_label_ct3ir() {
+        // (frankenredis-ct3ir) Newindex on a non-table value must pick
+        // up the accessor context (local 'x' / field 'f' / global 'g')
+        // just like reads do. Previously fr emitted the bare wording.
+        let mut store = Store::new();
+
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local ok,e=pcall(function() local x = nil; x.a = 1 end); return tostring(e)",
+                "user_script:1: attempt to index local 'x' (a nil value)",
+            ),
+            (
+                b"local ok,e=pcall(function() local x = 1; x.a = 1 end); return tostring(e)",
+                "user_script:1: attempt to index local 'x' (a number value)",
+            ),
+            (
+                b"local ok,e=pcall(function() local x = 'abc'; x.a = 1 end); return tostring(e)",
+                "user_script:1: attempt to index local 'x' (a string value)",
+            ),
+            (
+                b"local ok,e=pcall(function() local x = true; x.a = 1 end); return tostring(e)",
+                "user_script:1: attempt to index local 'x' (a boolean value)",
+            ),
+            // Field-style accessor on a nested non-table.
+            (
+                b"local ok,e=pcall(function() local t={a=nil}; t.a.b = 1 end); return tostring(e)",
+                "user_script:1: attempt to index field 'a' (a nil value)",
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[test]
