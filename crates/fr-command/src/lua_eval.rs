@@ -7043,6 +7043,12 @@ fn lua_single_match(pat: &[u8], pi: usize, ch: u8) -> bool {
 /// (frankenredis-vfv8s)
 fn lua_pattern_validate(pat: &[u8]) -> Result<(), String> {
     let mut i = 0;
+    // (frankenredis-skwin) Capture-balance: each '(' opens a capture
+    // slot; ')' closes the innermost; the engine errors at match time
+    // on either an unclosed group ("unfinished capture") or an extra
+    // ')' ("invalid pattern capture"). Track depth here so malformed
+    // captures are rejected eagerly with the upstream wording.
+    let mut open_captures: i32 = 0;
     while i < pat.len() {
         match pat[i] {
             b'%' => {
@@ -7063,6 +7069,23 @@ fn lua_pattern_validate(pat: &[u8]) -> Result<(), String> {
                         );
                     }
                     i += 2;
+                    continue;
+                }
+                // (frankenredis-skwin) %bxy consumes 4 pattern bytes
+                // (%, b, open, close). Without this case the next loop
+                // iteration would see the open char as the start of a
+                // new pattern element — e.g. %b() would treat '(' as a
+                // capture open, '%b[' as a set, etc.
+                if pat[i + 1] == b'b' {
+                    // (frankenredis-skwin) Redis-vendored Lua emits
+                    // "unbalanced pattern" when %b lacks the 2-char
+                    // open/close argument suffix.
+                    if i + 3 >= pat.len() {
+                        return Err(
+                            "user_script:1: unbalanced pattern".to_string(),
+                        );
+                    }
+                    i += 4;
                     continue;
                 }
                 i += 2;
@@ -7098,8 +7121,24 @@ fn lua_pattern_validate(pat: &[u8]) -> Result<(), String> {
                 }
                 i = j;
             }
+            b'(' => {
+                open_captures += 1;
+                i += 1;
+            }
+            b')' => {
+                open_captures -= 1;
+                if open_captures < 0 {
+                    return Err(
+                        "user_script:1: invalid pattern capture".to_string(),
+                    );
+                }
+                i += 1;
+            }
             _ => i += 1,
         }
+    }
+    if open_captures > 0 {
+        return Err("user_script:1: unfinished capture".to_string());
     }
     Ok(())
 }
@@ -7109,6 +7148,8 @@ fn lua_pattern_element_len(pat: &[u8], pi: usize) -> usize {
         return 0;
     }
     match pat[pi] {
+        // (frankenredis-skwin) %bxy is a 4-byte pattern element.
+        b'%' if pi + 1 < pat.len() && pat[pi + 1] == b'b' && pi + 3 < pat.len() => 4,
         b'%' if pi + 1 < pat.len() => 2,
         b'%' => 1,
         b'[' => {
@@ -7246,6 +7287,35 @@ fn lua_pat_match(
         let cur = if si < s.len() { s[si] } else { 0u8 };
         if !lua_set_match(pat, pi + 2, prev) && lua_set_match(pat, pi + 2, cur) {
             return lua_pat_match(s, si, pat, pi + 2 + set_len, captures, depth + 1);
+        }
+        return None;
+    }
+
+    // (frankenredis-skwin) Handle %bxy balanced match. Starting at the
+    // current string position, advance through paired open/close chars
+    // tracking nesting depth; on success continue matching with the
+    // string position past the close char and the pattern past the
+    // 4-byte %bxy element. Mirrors lstrlib.c::matchbalance.
+    if pi + 3 < pat.len() && pat[pi] == b'%' && pat[pi + 1] == b'b' {
+        let open_ch = pat[pi + 2];
+        let close_ch = pat[pi + 3];
+        if si >= s.len() || s[si] != open_ch {
+            return None;
+        }
+        let mut depth_b: i32 = 1;
+        let mut j = si + 1;
+        while j < s.len() {
+            // For the degenerate case where open == close (e.g. %bxx),
+            // every match closes the outermost bracket.
+            if s[j] == close_ch {
+                depth_b -= 1;
+                if depth_b == 0 {
+                    return lua_pat_match(s, j + 1, pat, pi + 4, captures, depth + 1);
+                }
+            } else if s[j] == open_ch {
+                depth_b += 1;
+            }
+            j += 1;
         }
         return None;
     }
@@ -12862,6 +12932,60 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_pattern_balanced_match_and_capture_validation_skwin() {
+        // (frankenredis-skwin) %bxy balanced-match pattern + capture
+        // balance validation. Probed against vendored Redis 7.2.4.
+        let mut store = Store::new();
+
+        // %b() matches a balanced parenthesized substring.
+        let r = eval_script(
+            b"return string.match('(a)(b)(c)', '%b()')",
+            &[], &[], &mut store, 0,
+        ).expect("balanced ()");
+        assert_eq!(r, RespFrame::BulkString(Some(b"(a)".to_vec())));
+
+        // %b[] matches a balanced bracketed substring — and the inner
+        // bracket-class parser must NOT consume the trailing ']' as part
+        // of a set.
+        let r = eval_script(
+            b"return string.match('foo[bar]baz', '%b[]')",
+            &[], &[], &mut store, 0,
+        ).expect("balanced []");
+        assert_eq!(r, RespFrame::BulkString(Some(b"[bar]".to_vec())));
+
+        // Degenerate: %bxy where open == close just matches a 2-char run.
+        let r = eval_script(
+            b"return string.match('xx', '%bxx')",
+            &[], &[], &mut store, 0,
+        ).expect("degenerate balanced");
+        assert_eq!(r, RespFrame::BulkString(Some(b"xx".to_vec())));
+
+        // No balanced match → nil.
+        let r = eval_script(
+            b"return string.match('(unbal', '%b()')",
+            &[], &[], &mut store, 0,
+        ).expect("unbalanced");
+        assert_eq!(r, RespFrame::BulkString(None));
+
+        // Nested balanced.
+        let r = eval_script(
+            b"return string.match('(a(b)c)d', '%b()')",
+            &[], &[], &mut store, 0,
+        ).expect("nested balanced");
+        assert_eq!(r, RespFrame::BulkString(Some(b"(a(b)c)".to_vec())));
+
+        // Capture validation: unclosed '(' raises "unfinished capture".
+        let err = eval_script(b"return string.match('abc', '(.*')", &[], &[], &mut store, 0)
+            .expect_err("unfinished");
+        assert_eq!(err, "user_script:1: unfinished capture");
+
+        // Extra ')' raises "invalid pattern capture".
+        let err = eval_script(b"return string.match('abc', '.*)')", &[], &[], &mut store, 0)
+            .expect_err("invalid capture");
+        assert_eq!(err, "user_script:1: invalid pattern capture");
     }
 
     #[test]
