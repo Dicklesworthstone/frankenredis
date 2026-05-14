@@ -5461,6 +5461,14 @@ impl<'a> LuaState<'a> {
                 };
                 let init = init.min(s.len());
                 let plain = args.get(3).map(|v| v.is_truthy()).unwrap_or(false);
+                // (frankenredis-vfv8s) Validate the pattern eagerly so
+                // malformed inputs raise upstream-shaped errors instead
+                // of silently returning nil. The plain-search path is
+                // exempt because Lua's plain mode treats the pattern
+                // bytes literally.
+                if !plain {
+                    lua_pattern_validate(&pattern)?;
+                }
                 if plain {
                     // Plain substring search
                     if let Some(pos) = s[init..]
@@ -5515,6 +5523,8 @@ impl<'a> LuaState<'a> {
                 } else {
                     (init_raw as usize).saturating_sub(1)
                 };
+                // (frankenredis-vfv8s) Validate pattern eagerly.
+                lua_pattern_validate(&pattern)?;
                 if let Some(m) = lua_pattern_find(&s, &pattern, init) {
                     Ok(lua_match_captures(&s, &m))
                 } else {
@@ -5526,6 +5536,10 @@ impl<'a> LuaState<'a> {
                 // We collect all matches and return a closure-like iterator via a table.
                 let s = lua_check_string(args, 0, "gmatch")?;
                 let pattern = lua_check_string(args, 1, "gmatch")?;
+                // (frankenredis-vfv8s) Validate pattern eagerly so the
+                // iterator constructor surfaces malformed patterns the
+                // same way upstream's gmatch does.
+                lua_pattern_validate(&pattern)?;
                 // Collect all matches
                 let mut matches: Vec<Vec<LuaValue>> = Vec::new();
                 let mut pos = 0;
@@ -5576,6 +5590,8 @@ impl<'a> LuaState<'a> {
                 let pattern = lua_check_string(args, 1, "gsub")?;
                 let repl = args.get(2).cloned().unwrap_or(LuaValue::Nil);
                 let max_n = args.get(3).and_then(|v| v.to_number()).map(|n| n as usize);
+                // (frankenredis-vfv8s) Validate pattern eagerly.
+                lua_pattern_validate(&pattern)?;
                 let mut result = Vec::new();
                 let mut pos = 0;
                 let mut count = 0usize;
@@ -6563,6 +6579,63 @@ fn lua_single_match(pat: &[u8], pi: usize, ch: u8) -> bool {
 }
 
 /// How many pattern bytes does a single element consume?
+/// Validate a Lua pattern eagerly, returning the upstream wording when
+/// the pattern is malformed. Mirrors lstrlib.c's two-class of errors:
+///   - "malformed pattern (ends with '%')" — trailing `%` without a
+///     following class char.
+///   - "malformed pattern (missing ']')" — `[...]` set whose closing
+///     `]` is absent (respecting `]` immediately after `[` or `[^` as
+///     literal, just like upstream singlematchclass).
+/// (frankenredis-vfv8s)
+fn lua_pattern_validate(pat: &[u8]) -> Result<(), String> {
+    let mut i = 0;
+    while i < pat.len() {
+        match pat[i] {
+            b'%' => {
+                if i + 1 >= pat.len() {
+                    return Err(
+                        "user_script:1: malformed pattern (ends with '%')".to_string(),
+                    );
+                }
+                i += 2;
+            }
+            b'[' => {
+                let mut j = i + 1;
+                if j < pat.len() && pat[j] == b'^' {
+                    j += 1;
+                }
+                // Upstream: a `]` immediately after `[` or `[^` is treated as
+                // literal, so we must advance past it before searching for the
+                // real closing bracket.
+                if j < pat.len() && pat[j] == b']' {
+                    j += 1;
+                }
+                let mut closed = false;
+                while j < pat.len() {
+                    if pat[j] == b'%' && j + 1 < pat.len() {
+                        j += 2;
+                        continue;
+                    }
+                    if pat[j] == b']' {
+                        closed = true;
+                        j += 1;
+                        break;
+                    }
+                    j += 1;
+                }
+                if !closed {
+                    return Err(
+                        "user_script:1: malformed pattern (missing ']')".to_string(),
+                    );
+                }
+                i = j;
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
+
 fn lua_pattern_element_len(pat: &[u8], pi: usize) -> usize {
     if pi >= pat.len() {
         return 0;
@@ -11616,6 +11689,67 @@ mod tests {
             let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
             assert_eq!(result, RespFrame::Integer(1));
         }
+    }
+
+    #[test]
+    fn lua_pattern_validate_catches_malformed_patterns_vfv8s() {
+        // (frankenredis-vfv8s) Upstream lstrlib.c raises two classes of
+        // pattern-malformed errors at match time. fr previously silently
+        // returned no-match (or, for gsub, the unchanged source string)
+        // for both. Pin the upstream wording for find/match/gmatch/gsub.
+        let mut store = Store::new();
+        let trailing_pct: &[&[u8]] = &[
+            b"return string.find('hello', '%')",
+            b"return string.match('hello', '%')",
+            b"for w in string.gmatch('hello', '%') do end return 1",
+            b"return string.gsub('hello', '%', 'X')",
+        ];
+        for body in trailing_pct {
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
+                &format!("expected malformed-pattern error for {:?}", String::from_utf8_lossy(body)),
+            );
+            assert_eq!(
+                err,
+                "user_script:1: malformed pattern (ends with '%')",
+                "wrong error for {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
+        let missing_bracket: &[&[u8]] = &[
+            b"return string.find('hello', '[abc')",
+            b"return string.match('hello', '[abc')",
+            b"for w in string.gmatch('hello', '[abc') do end return 1",
+            b"return string.gsub('hello', '[abc', 'X')",
+        ];
+        for body in missing_bracket {
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
+                &format!("expected missing-] error for {:?}", String::from_utf8_lossy(body)),
+            );
+            assert_eq!(
+                err,
+                "user_script:1: malformed pattern (missing ']')",
+                "wrong error for {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
+        // Plain mode of string.find is exempt — pattern bytes are literal.
+        // The exact reply shape after Lua's multi-return collapses through
+        // the RESP wrapper is non-trivial; only assert that the call
+        // doesn't raise the pattern-malformed error.
+        let _ = eval_script(
+            b"return string.find('a%b', '%', 1, true)",
+            &[], &[], &mut store, 0,
+        ).expect("plain find must not validate pattern");
+
+        // Valid patterns continue to match without error.
+        let _ = eval_script(
+            b"return string.find('hello123', '%d+')",
+            &[], &[], &mut store, 0,
+        ).expect("valid pattern must match");
+        let _ = eval_script(
+            b"return string.gsub('hello', '(l)', '<%1>')",
+            &[], &[], &mut store, 0,
+        ).expect("valid gsub must match");
     }
 
     #[test]
