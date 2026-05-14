@@ -5861,14 +5861,20 @@ impl<'a> LuaState<'a> {
             // Lua function bodies. More exotic "yield as expression"
             // continuations intentionally still fall back to ordinary Lua
             // errors instead of panicking.
+            // (frankenredis-96j2u) Route all 4 coroutine.* argerror
+            // sites through lua_format_argerror so pcall(coroutine.X,…)
+            // emits the anonymous shape (`'?'`, no prefix) while
+            // direct calls keep the named/prefixed shape.
             "coroutine.create" => {
                 if let Some(LuaValue::Function(func)) = args.first() {
                     Ok(vec![LuaValue::Coroutine(LuaCoroutine::new(func.clone()))])
                 } else {
-                    Err(
-                        "user_script:1: bad argument #1 to 'create' (Lua function expected)"
-                            .to_string(),
-                    )
+                    Err(lua_format_argerror(
+                        self.current_invocation_name.as_deref(),
+                        "create",
+                        1,
+                        "Lua function expected",
+                    ))
                 }
             }
             "coroutine.wrap" => {
@@ -5877,27 +5883,35 @@ impl<'a> LuaState<'a> {
                         func.clone(),
                     ))])
                 } else {
-                    Err(
-                        "user_script:1: bad argument #1 to 'wrap' (Lua function expected)"
-                            .to_string(),
-                    )
+                    Err(lua_format_argerror(
+                        self.current_invocation_name.as_deref(),
+                        "wrap",
+                        1,
+                        "Lua function expected",
+                    ))
                 }
             }
             "coroutine.resume" => match args.first() {
                 Some(LuaValue::Coroutine(coroutine)) => {
                     self.resume_coroutine(coroutine, args.get(1..).unwrap_or(&[]))
                 }
-                _ => Err(
-                    "user_script:1: bad argument #1 to 'resume' (coroutine expected)".to_string(),
-                ),
+                _ => Err(lua_format_argerror(
+                    self.current_invocation_name.as_deref(),
+                    "resume",
+                    1,
+                    "coroutine expected",
+                )),
             },
             "coroutine.status" => match args.first() {
                 Some(LuaValue::Coroutine(coroutine)) => {
                     Ok(vec![LuaValue::Str(coroutine.status_name().to_vec())])
                 }
-                _ => Err(
-                    "user_script:1: bad argument #1 to 'status' (coroutine expected)".to_string(),
-                ),
+                _ => Err(lua_format_argerror(
+                    self.current_invocation_name.as_deref(),
+                    "status",
+                    1,
+                    "coroutine expected",
+                )),
             },
             "coroutine.yield" => {
                 // (frankenredis-ztawj) Yield is only resumable when
@@ -15148,6 +15162,96 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn coroutine_argerror_pcall_shape_96j2u() {
+        // (frankenredis-96j2u) coroutine.create/wrap/resume/status now
+        // route their bad-argument errors through lua_format_argerror
+        // so pcall(coroutine.X,…) emits `bad argument #1 to '?' (…)`
+        // without the user_script:1: prefix.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local ok,e=pcall(coroutine.create); return tostring(e)",
+                "bad argument #1 to '?' (Lua function expected)",
+            ),
+            (
+                b"local ok,e=pcall(coroutine.create,'x'); return tostring(e)",
+                "bad argument #1 to '?' (Lua function expected)",
+            ),
+            (
+                b"local ok,e=pcall(coroutine.create,1); return tostring(e)",
+                "bad argument #1 to '?' (Lua function expected)",
+            ),
+            (
+                b"local ok,e=pcall(coroutine.wrap); return tostring(e)",
+                "bad argument #1 to '?' (Lua function expected)",
+            ),
+            (
+                b"local ok,e=pcall(coroutine.wrap,nil); return tostring(e)",
+                "bad argument #1 to '?' (Lua function expected)",
+            ),
+            (
+                b"local ok,e=pcall(coroutine.resume); return tostring(e)",
+                "bad argument #1 to '?' (coroutine expected)",
+            ),
+            (
+                b"local ok,e=pcall(coroutine.resume,1); return tostring(e)",
+                "bad argument #1 to '?' (coroutine expected)",
+            ),
+            (
+                b"local ok,e=pcall(coroutine.status); return tostring(e)",
+                "bad argument #1 to '?' (coroutine expected)",
+            ),
+            (
+                b"local ok,e=pcall(coroutine.status,1); return tostring(e)",
+                "bad argument #1 to '?' (coroutine expected)",
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Direct-call regressions: named/prefixed shape preserved.
+        for (body, fname, msg) in &[
+            (
+                b"return coroutine.create(nil)".as_slice(),
+                "create",
+                "Lua function expected",
+            ),
+            (
+                b"return coroutine.wrap(nil)",
+                "wrap",
+                "Lua function expected",
+            ),
+            (
+                b"return coroutine.resume(nil)",
+                "resume",
+                "coroutine expected",
+            ),
+            (
+                b"return coroutine.status(nil)",
+                "status",
+                "coroutine expected",
+            ),
+        ] {
+            let err = eval_script(body, &[], &[], &mut store, 0).unwrap_err();
+            let expected = format!("user_script:1: bad argument #1 to '{fname}' ({msg})");
+            assert!(
+                err.contains(&expected),
+                "got {err:?} expected {expected:?}"
+            );
+        }
     }
 
     #[test]
