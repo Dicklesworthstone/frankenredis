@@ -4395,21 +4395,49 @@ impl<'a> LuaState<'a> {
                 Ok(results)
             }
             "select" => {
+                // (frankenredis-w3wkp) Tighten select's bad-argument
+                // handling to match vendored Lua 5.1. Non-numeric args
+                // now report "number expected, got TYPE" with the #1
+                // index prefix; NaN/±inf coerce via C-style cast so NaN
+                // and -inf trip the "index out of range" check while
+                // +inf saturates to the past-the-end empty case; the
+                // old "bad argument to 'select'" wording (no #N, no
+                // type detail) is gone. Note: Lua 5.1 emits the C
+                // closure's debug name ('select' here), or '?' when
+                // invoked via pcall — fr always emits 'select' since
+                // call-site name plumbing is filed separately (see
+                // frankenredis-md71j-style follow-up).
                 let idx = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let rest = args.get(1..).unwrap_or(&[]);
                 match &idx {
                     LuaValue::Str(s) if s == b"#" => Ok(vec![LuaValue::Number(rest.len() as f64)]),
                     _ => {
-                        let raw_index = idx.to_number().ok_or("bad argument to 'select'")?;
-                        if !raw_index.is_finite() || raw_index.fract() != 0.0 {
-                            return Err("bad argument to 'select'".to_string());
-                        }
-
+                        let raw_index = idx.to_number().ok_or_else(|| {
+                            format!(
+                                "user_script:1: bad argument #1 to 'select' (number expected, got {})",
+                                idx.type_name()
+                            )
+                        })?;
                         let arg_count = rest.len() as i64;
-                        let index = raw_index as i64;
+                        // NaN → 0 via C-style cast; trips "index out of
+                        // range" alongside zero and negative-out-of-range.
+                        let index = if raw_index.is_nan() {
+                            0i64
+                        } else if raw_index.is_infinite() {
+                            // ±inf: positive saturates to arg_count+1 so
+                            // start > arg_count yields empty; negative
+                            // trips "index out of range".
+                            if raw_index > 0.0 {
+                                arg_count + 1
+                            } else {
+                                i64::MIN
+                            }
+                        } else {
+                            raw_index as i64
+                        };
                         if index == 0 || index < -arg_count {
                             return Err(
-                                "bad argument #1 to 'select' (index out of range)".to_string()
+                                "user_script:1: bad argument #1 to 'select' (index out of range)".to_string()
                             );
                         }
 
@@ -7375,6 +7403,69 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_select_bad_argument_errors_match_upstream_wording() {
+        // Pins frankenredis-w3wkp. Lua 5.1's lbaselib.c::luaB_select
+        // uses luaL_argerror, which produces:
+        //   "user_script:1: bad argument #1 to 'select' (REASON)"
+        // where REASON is one of:
+        //   - "number expected, got TYPE" for non-coercible-to-number args
+        //   - "index out of range" for 0, < -arg_count, or NaN/-inf
+        // Fractional indices truncate toward zero (1.5 → 1).
+        let mut store = Store::new();
+
+        // Direct call: NaN, zero, large negative all trip "index out of range".
+        for (src, _why) in [
+            (b"return select(0, 'a')" as &[u8], "zero"),
+            (b"return select(-5, 'a', 'b')", "neg-out-of-range"),
+            (b"return select(0/0, 'a')", "nan"),
+        ] {
+            let err = eval_script(src, &[], &[], &mut store, 0).expect_err(_why);
+            assert!(
+                err.contains("user_script:1: bad argument #1 to 'select' (index out of range)"),
+                "wrong wording for {_why}: {err:?}"
+            );
+        }
+
+        // Non-numeric arg types produce "number expected, got TYPE".
+        for (src, want_ty) in [
+            (b"return select('xyz', 'a')" as &[u8], "string"),
+            (b"return select({}, 'a')", "table"),
+            (b"return select(true, 'a')", "boolean"),
+        ] {
+            let err = eval_script(src, &[], &[], &mut store, 0).expect_err("bad arg");
+            let want = format!(
+                "user_script:1: bad argument #1 to 'select' (number expected, got {want_ty})"
+            );
+            assert!(
+                err.contains(&want),
+                "wrong wording for non-numeric {want_ty}: {err:?}"
+            );
+        }
+
+        // Fractional truncation: select(1.5, 'a', 'b') is select(1, ...).
+        let frame =
+            eval_script(b"return select(1.5, 'a', 'b')", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"a".to_vec())));
+
+        // Happy paths still work.
+        let frame = eval_script(
+            b"return select(2, 'a', 'b', 'c')",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"b".to_vec())));
+
+        let frame =
+            eval_script(b"return select('#', 'a', 'b', 'c')", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(3));
+
+        let frame = eval_script(
+            b"return select(-1, 'a', 'b', 'c')",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"c".to_vec())));
     }
 
     #[test]
