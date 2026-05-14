@@ -2553,19 +2553,23 @@ impl<'a> LuaState<'a> {
                 Ok(ControlFlow::None)
             }
             Stmt::NumericFor(name, start, stop, step, body) => {
+                // (frankenredis-7vqyo) Upstream luaV_execute raises these
+                // via luaG_runerror which prepends the script source
+                // location. The initial-value variant reads "initial
+                // value" (not "start") in Lua 5.1's lvm.c.
                 let s = self
                     .eval_expr(start, env, varargs)?
                     .to_number()
-                    .ok_or("'for' start must be a number")?;
+                    .ok_or("user_script:1: 'for' initial value must be a number")?;
                 let e = self
                     .eval_expr(stop, env, varargs)?
                     .to_number()
-                    .ok_or("'for' limit must be a number")?;
+                    .ok_or("user_script:1: 'for' limit must be a number")?;
                 let st = match step {
                     Some(expr) => self
                         .eval_expr(expr, env, varargs)?
                         .to_number()
-                        .ok_or("'for' step must be a number")?,
+                        .ok_or("user_script:1: 'for' step must be a number")?,
                     None => 1.0,
                 };
                 // (frankenredis-4hhz5) Lua 5.1 allows step=0; the body
@@ -12451,6 +12455,38 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_numeric_for_loop_error_wording_7vqyo() {
+        // (frankenredis-7vqyo) Lua 5.1's luaV_execute raises numeric-for
+        // type errors via luaG_runerror which prepends 'user_script:1: '
+        // and names the initial slot "initial value", not "start".
+        // Probed against vendored Redis 7.2.4 on :16380.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"for i='a','b' do end",
+                "user_script:1: 'for' initial value must be a number",
+            ),
+            (
+                b"for i=1,'b' do end",
+                "user_script:1: 'for' limit must be a number",
+            ),
+            (
+                b"for i=1,3,'abc' do end",
+                "user_script:1: 'for' step must be a number",
+            ),
+        ];
+        for (body, expected) in cases {
+            let err = eval_script(body, &[], &[], &mut store, 0)
+                .expect_err("for-loop type error");
+            assert_eq!(
+                err, *expected,
+                "wrong error for {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
     }
 
     #[test]
