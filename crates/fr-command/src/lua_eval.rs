@@ -968,7 +968,11 @@ impl<'a> Lexer<'a> {
         let mut buf = Vec::new();
         loop {
             let Some(b) = self.advance() else {
-                return Err("unterminated string".to_string());
+                // (frankenredis-yunl8) Upstream llex.c emits the
+                // "near '<eof>'" suffix when the lexer hits end-of-
+                // input mid-token. fr previously emitted just the
+                // bare "unterminated string".
+                return Err("unfinished string near '<eof>'".to_string());
             };
             if b == delim {
                 return Ok(buf);
@@ -1025,7 +1029,9 @@ impl<'a> Lexer<'a> {
                 return Ok(buf);
             }
             let Some(b) = self.advance() else {
-                return Err("unterminated long string".to_string());
+                // (frankenredis-yunl8) Mirror upstream's "near '<eof>'"
+                // suffix on unterminated long-string tokens.
+                return Err("unfinished long string near '<eof>'".to_string());
             };
             buf.push(b);
         }
@@ -1463,8 +1469,21 @@ impl Parser {
             match self.peek() {
                 Token::End | Token::Else | Token::ElseIf | Token::Until | Token::Eof => break,
                 _ => {
+                    // (frankenredis-yunl8) Upstream Lua 5.1 lparser.c
+                    // treats `return` as the terminal statement of a
+                    // block — once parsed, the block loop exits. Any
+                    // extra tokens then surface at the chunk-level
+                    // check_match(<eos>) and report
+                    // `'<eof>' expected near '<token>'`. fr previously
+                    // kept looping past the return and tried to parse
+                    // the trailing token as a new statement, surfacing
+                    // a generic "unexpected symbol near 'X'" instead.
+                    let is_return = matches!(self.peek(), Token::Return);
                     let stmt = self.parse_statement()?;
                     stmts.push(stmt);
+                    if is_return {
+                        break;
+                    }
                 }
             }
         }
@@ -1936,7 +1955,14 @@ impl Parser {
                 self.advance();
                 Ok(vec![Expr::Str(s)])
             }
-            _ => Err("expected function arguments".to_string()),
+            // (frankenredis-yunl8) Mirror upstream llex.c wording:
+            // "function arguments expected near '<token>'". The
+            // current peek token names the place where the missing
+            // args were expected.
+            _ => Err(format!(
+                "function arguments expected near '{}'",
+                token_display(self.peek())
+            )),
         }
     }
 
@@ -15198,6 +15224,45 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn lua_parser_lexer_error_wording_matches_upstream_yunl8() {
+        // (frankenredis-yunl8) Four upstream-parity fixes:
+        //   1. read_string EOF → "unfinished string near '<eof>'"
+        //   2. read_long_string EOF → "unfinished long string near '<eof>'"
+        //   3. parse_call_args bad token → "function arguments expected near '<token>'"
+        //   4. parse_block exits after `return` so trailing tokens
+        //      surface via the chunk-level '<eof>' expected check.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (b"return 'unterminated", "unfinished string near '<eof>'"),
+            (b"return \"unterminated", "unfinished string near '<eof>'"),
+            (b"return [[unterminated", "unfinished long string near '<eof>'"),
+            (b"return (1+1))", "'<eof>' expected near ')'"),
+            (b"return foo:bar", "function arguments expected near '<eof>'"),
+        ];
+        for (body, expected_msg) in cases {
+            let err = eval_script(body, &[], &[], &mut store, 0).unwrap_err();
+            assert!(
+                err.contains(expected_msg),
+                "body={:?} got {err:?} expected to contain {expected_msg:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Sanity: valid programs still execute.
+        let frame = eval_script(b"return (1+1)", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(2));
+        let frame = eval_script(
+            b"local function f() return 1 end; return f()",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::Integer(1));
     }
 
     #[test]
