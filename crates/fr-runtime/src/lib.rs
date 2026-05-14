@@ -7690,35 +7690,36 @@ impl Runtime {
                 self.server.repl_timeout_sec.to_string().into_bytes(),
             )));
         }
-        if Self::config_pattern_matches(pattern, "replica-serve-stale-data")
-            || Self::config_pattern_matches(pattern, "slave-serve-stale-data")
-        {
-            let key = if Self::config_pattern_matches(pattern, "slave-serve-stale-data") {
-                b"slave-serve-stale-data".as_slice()
-            } else {
-                b"replica-serve-stale-data".as_slice()
-            };
-            entries.push(RespFrame::BulkString(Some(key.to_vec())));
+        // (frankenredis-ts4r4) Upstream redis config registers the
+        // slave-* and replica-* names as DISTINCT entries pointing at
+        // the same underlying value; a wildcard like '*' emits both.
+        // Previously fr emitted only one alias because the if/else
+        // collapsed a pattern that matched both back into one entry.
+        let stale_value = if self.server.replica_serve_stale_data {
+            b"yes".to_vec()
+        } else {
+            b"no".to_vec()
+        };
+        if Self::config_pattern_matches(pattern, "slave-serve-stale-data") {
             entries.push(RespFrame::BulkString(Some(
-                if self.server.replica_serve_stale_data {
-                    b"yes".to_vec()
-                } else {
-                    b"no".to_vec()
-                },
+                b"slave-serve-stale-data".to_vec(),
             )));
+            entries.push(RespFrame::BulkString(Some(stale_value.clone())));
         }
-        if Self::config_pattern_matches(pattern, "replica-priority")
-            || Self::config_pattern_matches(pattern, "slave-priority")
-        {
-            let key = if Self::config_pattern_matches(pattern, "slave-priority") {
-                b"slave-priority".as_slice()
-            } else {
-                b"replica-priority".as_slice()
-            };
-            entries.push(RespFrame::BulkString(Some(key.to_vec())));
+        if Self::config_pattern_matches(pattern, "replica-serve-stale-data") {
             entries.push(RespFrame::BulkString(Some(
-                self.server.replica_priority.to_string().into_bytes(),
+                b"replica-serve-stale-data".to_vec(),
             )));
+            entries.push(RespFrame::BulkString(Some(stale_value)));
+        }
+        let priority_value = self.server.replica_priority.to_string().into_bytes();
+        if Self::config_pattern_matches(pattern, "slave-priority") {
+            entries.push(RespFrame::BulkString(Some(b"slave-priority".to_vec())));
+            entries.push(RespFrame::BulkString(Some(priority_value.clone())));
+        }
+        if Self::config_pattern_matches(pattern, "replica-priority") {
+            entries.push(RespFrame::BulkString(Some(b"replica-priority".to_vec())));
+            entries.push(RespFrame::BulkString(Some(priority_value)));
         }
         if Self::config_pattern_matches(pattern, "repl-diskless-sync") {
             entries.push(RespFrame::BulkString(Some(b"repl-diskless-sync".to_vec())));
@@ -22828,6 +22829,68 @@ mod tests {
             maxmemory_count, 1,
             "literal+glob overlap must yield `maxmemory` once, items={items:?}"
         );
+    }
+
+    /// (frankenredis-ts4r4) Wildcard CONFIG GET must emit BOTH the
+    /// slave-* and replica-* aliases for serve-stale-data and priority,
+    /// matching upstream config.c where each is registered as a distinct
+    /// (aliased) config entry. fr previously collapsed both into a single
+    /// emission when the pattern matched both names.
+    #[test]
+    fn config_get_wildcard_emits_both_slave_and_replica_aliases_ts4r4() {
+        let mut rt = Runtime::default_strict();
+        let collect_names = |frame: RespFrame| -> Vec<String> {
+            let RespFrame::Array(Some(items)) = frame else {
+                panic!("expected array reply");
+            };
+            items
+                .chunks(2)
+                .filter_map(|chunk| match chunk.first() {
+                    Some(RespFrame::BulkString(Some(name))) => {
+                        Some(String::from_utf8_lossy(name).to_string())
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        // Wildcard '*' must yield both aliases.
+        let names = collect_names(rt.execute_frame(command(&[b"CONFIG", b"GET", b"*"]), 0));
+        for required in &[
+            "slave-priority",
+            "replica-priority",
+            "slave-serve-stale-data",
+            "replica-serve-stale-data",
+        ] {
+            assert!(
+                names.iter().any(|n| n == required),
+                "wildcard CONFIG GET '*' must include {required}, got {names:?}"
+            );
+        }
+        // *priority* pattern must yield both priority aliases.
+        let priority_names = collect_names(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"*priority*"]), 0),
+        );
+        assert!(
+            priority_names.iter().any(|n| n == "slave-priority")
+                && priority_names.iter().any(|n| n == "replica-priority"),
+            "*priority* must yield both aliases, got {priority_names:?}"
+        );
+        // *serve-stale* pattern must yield both serve-stale aliases.
+        let stale_names = collect_names(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"*serve-stale*"]), 0),
+        );
+        assert!(
+            stale_names.iter().any(|n| n == "slave-serve-stale-data")
+                && stale_names.iter().any(|n| n == "replica-serve-stale-data"),
+            "*serve-stale* must yield both aliases, got {stale_names:?}"
+        );
+        // Exact-name still returns one (key, value) pair.
+        let RespFrame::Array(Some(items)) =
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"replica-priority"]), 0)
+        else {
+            panic!("expected array");
+        };
+        assert_eq!(items.len(), 2);
     }
 
     #[test]
