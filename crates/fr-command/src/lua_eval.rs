@@ -6195,9 +6195,34 @@ impl<'a> LuaState<'a> {
                 ])
             }
             "string.gsub" => {
-                let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "gsub")?;
-                let pattern = lua_check_string(self.current_invocation_name.as_deref(), args, 1, "gsub")?;
+                let inv_owned: Option<String> = self.current_invocation_name.clone();
+                let inv = inv_owned.as_deref();
+                let s = lua_check_string(inv, args, 0, "gsub")?;
+                let pattern = lua_check_string(inv, args, 1, "gsub")?;
                 let repl = args.get(2).cloned().unwrap_or(LuaValue::Nil);
+                // (frankenredis-tfob7) Upstream lstrlib.c:str_gsub
+                // validates the repl type at function entry via
+                // luaL_argcheck(... "string/function/table expected").
+                // fr previously only checked the type inside the per-
+                // match dispatch, so calling `string.gsub('a','b')`
+                // (nil repl, pattern doesn't match) or with a boolean
+                // repl returned the input unchanged instead of erroring.
+                match &repl {
+                    LuaValue::Str(_)
+                    | LuaValue::Number(_)
+                    | LuaValue::Table(_)
+                    | LuaValue::Function(_)
+                    | LuaValue::RustFunction(_)
+                    | LuaValue::WrappedCoroutine(_) => {}
+                    _ => {
+                        return Err(lua_format_argerror(
+                            inv,
+                            "gsub",
+                            3,
+                            "string/function/table expected",
+                        ));
+                    }
+                }
                 let max_n = args.get(3).and_then(|v| v.to_number()).map(|n| n as usize);
                 // (frankenredis-vfv8s) Validate pattern eagerly.
                 lua_pattern_validate(&pattern)?;
@@ -6244,9 +6269,15 @@ impl<'a> LuaState<'a> {
                                 lua_gsub_replace(&s, &m, &repl.to_display_string())?
                             }
                             _ => {
-                                return Err(format!(
-                                    "user_script:1: bad argument #3 to 'gsub' (string/function/table expected, got {})",
-                                    repl.type_name()
+                                // Unreachable: the upfront repl-type
+                                // check (frankenredis-tfob7) rejects
+                                // anything outside string/number/table/
+                                // function before the loop runs.
+                                return Err(lua_format_argerror(
+                                    inv_owned.as_deref(),
+                                    "gsub",
+                                    3,
+                                    "string/function/table expected",
                                 ));
                             }
                         };
@@ -14997,6 +15028,92 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn string_gsub_validates_repl_type_upfront_tfob7() {
+        // (frankenredis-tfob7) Upstream lstrlib.c:str_gsub runs
+        // luaL_argcheck on the repl type at function entry, so passing
+        // nil or boolean errors regardless of whether the pattern
+        // matches. fr previously deferred the check to the per-match
+        // dispatch — `string.gsub('a','b')` with no repl returned 'a'
+        // because the pattern never matched and the type check never
+        // fired.
+        let mut store = Store::new();
+
+        // pcall(C-builtin) shape: '?' name, no user_script:1: prefix.
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local ok,e=pcall(string.gsub,'a','b'); return tostring(e)",
+                "bad argument #3 to '?' (string/function/table expected)",
+            ),
+            (
+                b"local ok,e=pcall(string.gsub,'a','b',true); return tostring(e)",
+                "bad argument #3 to '?' (string/function/table expected)",
+            ),
+            (
+                b"local ok,e=pcall(string.gsub,'a','b',false); return tostring(e)",
+                "bad argument #3 to '?' (string/function/table expected)",
+            ),
+            (
+                b"local ok,e=pcall(string.gsub,'a','b',nil); return tostring(e)",
+                "bad argument #3 to '?' (string/function/table expected)",
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Direct-call (named/prefixed shape).
+        let err = eval_script(b"return string.gsub('a','b')", &[], &[], &mut store, 0)
+            .unwrap_err();
+        assert!(
+            err.contains("user_script:1: bad argument #3 to 'gsub' (string/function/table expected)"),
+            "got {err:?}"
+        );
+
+        // Regression: valid repls still work — at script top-level
+        // Lua returns only the first value (the result string).
+        let frame = eval_script(
+            b"return string.gsub('aaa','a','x')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"xxx".to_vec())));
+
+        // Number repl is accepted (coerced to string).
+        let frame = eval_script(
+            b"return string.gsub('aaa','a',1)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"111".to_vec())));
+
+        // Multi-return reaches inner Lua code.
+        let frame = eval_script(
+            b"local s,n=string.gsub('aaa','a','x'); return s..'-'..n",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"xxx-3".to_vec())));
     }
 
     #[test]
