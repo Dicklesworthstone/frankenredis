@@ -363,27 +363,31 @@ fn lua_raw_equal(a: &LuaValue, b: &LuaValue) -> bool {
     }
 }
 
-fn lua_bad_table_arg(function: &str, index: usize, value: &LuaValue) -> String {
+/// (frankenredis-kqd16) Upstream luaL_argerror prepends "user_script:1: "
+/// (the source-location prefix) before the argument template. Use the
+/// got-label helper so missing args report "got no value" while explicit
+/// LuaValue::Nil reports "got nil" — distinct upstream wordings.
+fn lua_bad_table_arg(function: &str, index: usize, value: Option<&LuaValue>) -> String {
     format!(
-        "bad argument #{index} to '{function}' (table expected, got {})",
-        value.type_name()
+        "user_script:1: bad argument #{index} to '{function}' (table expected, got {})",
+        lua_arg_got_label(value)
     )
 }
 
-fn lua_bad_number_arg(function: &str, index: usize, value: &LuaValue) -> String {
+fn lua_bad_number_arg(function: &str, index: usize, value: Option<&LuaValue>) -> String {
     format!(
-        "bad argument #{index} to '{function}' (number expected, got {})",
-        value.type_name()
+        "user_script:1: bad argument #{index} to '{function}' (number expected, got {})",
+        lua_arg_got_label(value)
     )
 }
 
 fn lua_table_arg<'a>(
     function: &str,
     index: usize,
-    value: &'a LuaValue,
+    value: Option<&'a LuaValue>,
 ) -> Result<&'a LuaTable, String> {
     match value {
-        LuaValue::Table(table) => Ok(table),
+        Some(LuaValue::Table(table)) => Ok(table),
         _ => Err(lua_bad_table_arg(function, index, value)),
     }
 }
@@ -391,7 +395,7 @@ fn lua_table_arg<'a>(
 fn lua_required_integer_arg(function: &str, index: usize, value: &LuaValue) -> Result<i64, String> {
     match value.to_number() {
         Some(number) if number.is_finite() => Ok(number as i64),
-        _ => Err(lua_bad_number_arg(function, index, value)),
+        _ => Err(lua_bad_number_arg(function, index, Some(value))),
     }
 }
 
@@ -4649,7 +4653,7 @@ impl<'a> LuaState<'a> {
             "pairs" => {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
                 if !matches!(table, LuaValue::Table(_)) {
-                    return Err(lua_bad_table_arg("pairs", 1, &table));
+                    return Err(lua_bad_table_arg("pairs", 1, args.first()));
                 }
                 // Return next, table, nil
                 Ok(vec![
@@ -4661,7 +4665,7 @@ impl<'a> LuaState<'a> {
             "ipairs" => {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
                 if !matches!(table, LuaValue::Table(_)) {
-                    return Err(lua_bad_table_arg("ipairs", 1, &table));
+                    return Err(lua_bad_table_arg("ipairs", 1, args.first()));
                 }
                 Ok(vec![
                     LuaValue::RustFunction("__ipairs_iter".to_string()),
@@ -4726,7 +4730,7 @@ impl<'a> LuaState<'a> {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let key = args.get(1).cloned().unwrap_or(LuaValue::Nil);
                 let LuaValue::Table(t) = &table else {
-                    return Err(lua_bad_table_arg("next", 1, &table));
+                    return Err(lua_bad_table_arg("next", 1, args.first()));
                 };
 
                 // Find next key after the given key.
@@ -4779,8 +4783,7 @@ impl<'a> LuaState<'a> {
                 }
             }
             "unpack" => {
-                let table = args.first().cloned().unwrap_or(LuaValue::Nil);
-                let t = lua_table_arg("unpack", 1, &table)?;
+                let t = lua_table_arg("unpack", 1, args.first())?;
                 let start = lua_optional_integer_arg("unpack", 2, args.get(1), 1)? as usize;
                 let end = lua_optional_integer_arg(
                     "unpack",
@@ -5692,7 +5695,7 @@ impl<'a> LuaState<'a> {
             "table.insert" => {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let LuaValue::Table(_) = &table else {
-                    return Err(lua_bad_table_arg("insert", 1, &table));
+                    return Err(lua_bad_table_arg("insert", 1, args.first()));
                 };
                 // (frankenredis-jwkhc) Upstream Redis-vendored ltablib.c
                 // raises 'wrong number of arguments to insert' for any
@@ -5744,7 +5747,7 @@ impl<'a> LuaState<'a> {
             "table.remove" => {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
                 if !matches!(table, LuaValue::Table(_)) {
-                    return Err(lua_bad_table_arg("remove", 1, &table));
+                    return Err(lua_bad_table_arg("remove", 1, args.first()));
                 }
                 let pos_arg = args.get(1).cloned();
                 if let LuaValue::Table(ref mut t) = args[0] {
@@ -5764,8 +5767,7 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Nil])
             }
             "table.concat" => {
-                let table = args.first().cloned().unwrap_or(LuaValue::Nil);
-                let t = lua_table_arg("concat", 1, &table)?;
+                let t = lua_table_arg("concat", 1, args.first())?;
                 // (frankenredis-jwkhc) Upstream luaL_optstring(L, 2, '') maps
                 // nil/missing sep to the empty string. fr previously routed
                 // through to_display_string() which renders nil as the literal
@@ -11757,6 +11759,61 @@ mod tests {
             let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
             assert_eq!(result, RespFrame::Integer(1));
         }
+    }
+
+    #[test]
+    fn lua_stdlib_distinguishes_no_value_from_nil_with_prefix_kqd16() {
+        // (frankenredis-kqd16) Upstream luaL_argerror prepends
+        // "user_script:1: " and distinguishes "got no value" (absent)
+        // from "got nil" (explicit). fr previously dropped the prefix
+        // on table-related builtins and collapsed both cases to nil.
+        let mut store = Store::new();
+
+        // No-arg cases — every builtin reports "got no value" with prefix.
+        let no_arg: &[(&[u8], &str)] = &[
+            (b"return ipairs()", "ipairs"),
+            (b"return pairs()", "pairs"),
+            (b"return next()", "next"),
+            (b"return table.concat()", "concat"),
+            (b"return table.insert()", "insert"),
+            (b"return table.remove()", "remove"),
+        ];
+        for (body, fname) in no_arg {
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
+                &format!("expected no-value error for {:?}", String::from_utf8_lossy(body)),
+            );
+            let expected = format!(
+                "user_script:1: bad argument #1 to '{fname}' (table expected, got no value)"
+            );
+            assert_eq!(err, expected, "wrong error for {:?}", String::from_utf8_lossy(body));
+        }
+
+        // Explicit-nil cases — same builtins report "got nil" with prefix.
+        let nil_arg: &[(&[u8], &str)] = &[
+            (b"return ipairs(nil)", "ipairs"),
+            (b"return pairs(nil)", "pairs"),
+            (b"return next(nil)", "next"),
+            (b"return table.concat(nil)", "concat"),
+            (b"return table.insert(nil)", "insert"),
+            (b"return table.remove(nil)", "remove"),
+        ];
+        for (body, fname) in nil_arg {
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
+                &format!("expected nil error for {:?}", String::from_utf8_lossy(body)),
+            );
+            let expected = format!(
+                "user_script:1: bad argument #1 to '{fname}' (table expected, got nil)"
+            );
+            assert_eq!(err, expected, "wrong error for {:?}", String::from_utf8_lossy(body));
+        }
+
+        // Wrong-type still reports the actual type with prefix.
+        let err = eval_script(b"return ipairs(42)", &[], &[], &mut store, 0)
+            .expect_err("expected type error");
+        assert_eq!(
+            err,
+            "user_script:1: bad argument #1 to 'ipairs' (table expected, got number)",
+        );
     }
 
     #[test]
