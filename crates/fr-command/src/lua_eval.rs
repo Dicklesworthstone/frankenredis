@@ -4232,27 +4232,38 @@ impl<'a> LuaState<'a> {
                     );
                 }
                 let val = args.first().cloned().unwrap_or(LuaValue::Nil);
+                // (frankenredis-5qv1n) Upstream: explicit nil base behaves
+                // like no base (default 10/string parse); float base is
+                // truncated via luaL_checkint; missing-arg-or-absent base
+                // also defaults. Only non-nil/non-coercible values raise
+                // "base out of range" — and that error must carry the
+                // user_script:1: prefix from luaL_argerror.
                 let base = match args.get(1) {
+                    Some(LuaValue::Nil) | None => None,
                     Some(base_value) => {
-                        let Some(base) = base_value.to_number() else {
+                        let Some(base_f) = base_value.to_number() else {
                             return Err(
-                                "bad argument #2 to 'tonumber' (base out of range)".to_string()
+                                "user_script:1: bad argument #2 to 'tonumber' (base out of range)"
+                                    .to_string()
                             );
                         };
-                        if !base.is_finite() || base.fract() != 0.0 {
+                        if !base_f.is_finite() {
                             return Err(
-                                "bad argument #2 to 'tonumber' (base out of range)".to_string()
+                                "user_script:1: bad argument #2 to 'tonumber' (base out of range)"
+                                    .to_string()
                             );
                         }
-                        let base = base as u32;
+                        // luaL_checkint truncates floats — 10.5 -> 10,
+                        // -1.9 -> -1. Match that here before bounds-checking.
+                        let base = base_f as i64;
                         if !(2..=36).contains(&base) {
                             return Err(
-                                "bad argument #2 to 'tonumber' (base out of range)".to_string()
+                                "user_script:1: bad argument #2 to 'tonumber' (base out of range)"
+                                    .to_string()
                             );
                         }
-                        Some(base)
+                        Some(base as u32)
                     }
-                    None => None,
                 };
                 match &val {
                     LuaValue::Number(n) => Ok(vec![LuaValue::Number(*n)]),
@@ -4260,8 +4271,25 @@ impl<'a> LuaState<'a> {
                         let s_str = std::str::from_utf8(s).unwrap_or("");
                         let trimmed = s_str.trim();
                         if let Some(base) = base {
-                            match i64::from_str_radix(trimmed, base) {
-                                Ok(n) => Ok(vec![LuaValue::Number(n as f64)]),
+                            // (frankenredis-5qv1n) Upstream strtoul(s, _,
+                            // base) accepts a leading "0x"/"0X" prefix
+                            // when base is 16 (or 0). Rust's from_str_radix
+                            // does not, so strip the prefix here for the
+                            // base-16 path, including the optional sign.
+                            let (sign, body) = match trimmed.as_bytes().first() {
+                                Some(b'-') => (-1i64, &trimmed[1..]),
+                                Some(b'+') => (1i64, &trimmed[1..]),
+                                _ => (1i64, trimmed),
+                            };
+                            let stripped: &str = if base == 16 {
+                                body.strip_prefix("0x")
+                                    .or_else(|| body.strip_prefix("0X"))
+                                    .unwrap_or(body)
+                            } else {
+                                body
+                            };
+                            match i64::from_str_radix(stripped, base) {
+                                Ok(n) => Ok(vec![LuaValue::Number((sign * n) as f64)]),
                                 Err(_) => Ok(vec![LuaValue::Nil]),
                             }
                         } else {
@@ -10455,11 +10483,16 @@ mod tests {
     }
 
     #[test]
-    fn tonumber_rejects_non_integer_base() {
+    fn tonumber_truncates_float_base_5qv1n() {
+        // (frankenredis-5qv1n) Upstream luaL_checkint truncates the
+        // base via (int)d, so tonumber('10', 2.5) is equivalent to
+        // tonumber('10', 2) and returns 2 (binary "10" -> 2). Pre-fix
+        // fr rejected with "base out of range" for any non-integer
+        // base.
         let mut store = Store::new();
-        let result = eval_script(b"return tonumber('10', 2.5)", &[], &[], &mut store, 0);
-
-        assert!(matches!(result, Err(ref err) if err.contains("base out of range")));
+        let result = eval_script(b"return tonumber('10', 2.5)", &[], &[], &mut store, 0)
+            .expect("base truncates to int");
+        assert_eq!(result, RespFrame::Integer(2));
     }
 
     #[test]
@@ -11723,6 +11756,67 @@ mod tests {
         ] {
             let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
             assert_eq!(result, RespFrame::Integer(1));
+        }
+    }
+
+    #[test]
+    fn tonumber_base_edge_cases_5qv1n() {
+        // (frankenredis-5qv1n) Upstream lbaselib.c::luaB_tonumber:
+        //   - strtoul accepts "0x"/"0X" prefix when base is 16.
+        //   - luaL_checkint truncates float base (10.5 -> 10).
+        //   - Explicit nil base behaves like no base (default 10).
+        //   - Out-of-range base errors carry user_script:1: prefix.
+        let mut store = Store::new();
+
+        // 0x prefix accepted in base 16.
+        for body in &[
+            b"return tonumber('0xff', 16)".as_slice(),
+            b"return tonumber('0Xff', 16)".as_slice(),
+            b"return tonumber('0xFF', 16)".as_slice(),
+            b"return tonumber('ff', 16)".as_slice(),
+            b"return tonumber('FF', 16)".as_slice(),
+        ] {
+            let r = eval_script(body, &[], &[], &mut store, 0).expect(
+                &format!("expected number for {:?}", String::from_utf8_lossy(body)),
+            );
+            assert_eq!(
+                r, RespFrame::Integer(255),
+                "wrong result for {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
+
+        // Negative hex string with explicit base.
+        let r = eval_script(b"return tonumber('-ff', 16)", &[], &[], &mut store, 0)
+            .expect("neg hex");
+        assert_eq!(r, RespFrame::Integer(-255));
+
+        // Float base truncates to integer.
+        let r = eval_script(b"return tonumber('10', 10.5)", &[], &[], &mut store, 0)
+            .expect("float base");
+        assert_eq!(r, RespFrame::Integer(10));
+
+        // Explicit nil base defaults to no base (string-as-decimal).
+        let r = eval_script(b"return tonumber('10', nil)", &[], &[], &mut store, 0)
+            .expect("nil base");
+        assert_eq!(r, RespFrame::Integer(10));
+
+        // Base out of range: 1, 37, -1, 0 all error with the prefix.
+        for body in &[
+            b"return tonumber('0', 1)".as_slice(),
+            b"return tonumber('0', 37)".as_slice(),
+            b"return tonumber('0', -1)".as_slice(),
+            b"return tonumber('0', 0)".as_slice(),
+        ] {
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
+                &format!("expected base-out-of-range for {:?}", String::from_utf8_lossy(body)),
+            );
+            assert_eq!(
+                err,
+                "user_script:1: bad argument #2 to 'tonumber' (base out of range)",
+                "wrong error for {:?}",
+                String::from_utf8_lossy(body),
+            );
         }
     }
 
