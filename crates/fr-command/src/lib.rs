@@ -5140,6 +5140,16 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     let (withcoord, withdist, withhash, count, any, sort, _) =
         parse_geo_search_flags(argv, 6, unit_mult, GeoFlagContext::GeoRadius)?;
     let (store_key, storedist) = extract_geo_store(argv, 6);
+    // (frankenredis-kdmf3) Upstream geo.c::georadiusGeneric guards
+    // against STORE/STOREDIST combined with any WITH* metadata flag:
+    // the reply payload shape changes between [member, withcoord,
+    // withdist, withhash] arrays and the integer count returned by
+    // STORE, so the two modes are mutually exclusive.
+    if store_key.is_some() && (withcoord || withdist || withhash) {
+        return Ok(RespFrame::Error(
+            "ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options".to_string(),
+        ));
+    }
     let results = geo_search_core(
         store, &argv[1], center_lon, center_lat, radius_m, count, sort, any, now_ms,
     )?;
@@ -5203,6 +5213,12 @@ fn georadiusbymember(
     let (withcoord, withdist, withhash, count, any, sort, _) =
         parse_geo_search_flags(argv, 5, unit_mult, GeoFlagContext::GeoRadius)?;
     let (store_key, storedist) = extract_geo_store(argv, 5);
+    // (frankenredis-kdmf3) See georadius() above for rationale.
+    if store_key.is_some() && (withcoord || withdist || withhash) {
+        return Ok(RespFrame::Error(
+            "ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options".to_string(),
+        ));
+    }
     let results = geo_search_core(
         store, &argv[1], center_lon, center_lat, radius_m, count, sort, any, now_ms,
     )?;
@@ -46905,6 +46921,105 @@ mod tests {
         )
         .expect("STORE-with-key");
         assert!(matches!(stored, RespFrame::Integer(_)));
+    }
+
+    /// (frankenredis-kdmf3) Upstream geo.c::georadiusGeneric rejects
+    /// STORE/STOREDIST when paired with any WITHCOORD/WITHDIST/WITHHASH
+    /// flag. The two reply shapes are mutually exclusive — STORE returns
+    /// just the count, WITH* returns metadata arrays — so the combination
+    /// is forbidden with a dedicated error wording.
+    #[test]
+    fn georadius_rejects_store_with_with_flag_combinations_kdmf3() {
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+        let expected = RespFrame::Error(
+            "ERR STORE option in GEORADIUS is not compatible with WITHDIST, WITHHASH and WITHCOORD options".to_string(),
+        );
+
+        // 3 WITH flags × 2 STORE-flavors × 2 commands = 12 cases.
+        let with_flags = [&b"WITHCOORD"[..], &b"WITHDIST"[..], &b"WITHHASH"[..]];
+        let store_kinds = [&b"STORE"[..], &b"STOREDIST"[..]];
+
+        for &with_flag in &with_flags {
+            for &store_kind in &store_kinds {
+                // GEORADIUS
+                let argv_gr = vec![
+                    b"GEORADIUS".to_vec(),
+                    b"mygeo".to_vec(),
+                    b"15".to_vec(),
+                    b"37".to_vec(),
+                    b"200".to_vec(),
+                    b"km".to_vec(),
+                    with_flag.to_vec(),
+                    store_kind.to_vec(),
+                    b"dst".to_vec(),
+                ];
+                let reply = dispatch_argv(&argv_gr, &mut store, 0).expect("GEORADIUS dispatch");
+                assert_eq!(
+                    reply,
+                    expected,
+                    "GEORADIUS with {} {}",
+                    String::from_utf8_lossy(with_flag),
+                    String::from_utf8_lossy(store_kind)
+                );
+
+                // GEORADIUSBYMEMBER
+                let argv_grbm = vec![
+                    b"GEORADIUSBYMEMBER".to_vec(),
+                    b"mygeo".to_vec(),
+                    b"Catania".to_vec(),
+                    b"200".to_vec(),
+                    b"km".to_vec(),
+                    with_flag.to_vec(),
+                    store_kind.to_vec(),
+                    b"dst".to_vec(),
+                ];
+                let reply2 =
+                    dispatch_argv(&argv_grbm, &mut store, 0).expect("GEORADIUSBYMEMBER dispatch");
+                assert_eq!(
+                    reply2,
+                    expected,
+                    "GEORADIUSBYMEMBER with {} {}",
+                    String::from_utf8_lossy(with_flag),
+                    String::from_utf8_lossy(store_kind)
+                );
+            }
+        }
+
+        // Regression: STORE alone (no WITH*) still returns a count.
+        let stored = dispatch_argv(
+            &[
+                b"GEORADIUS".to_vec(),
+                b"mygeo".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"STORE".to_vec(),
+                b"dst".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("STORE-alone");
+        assert!(matches!(stored, RespFrame::Integer(_)));
+
+        // Regression: WITH* alone (no STORE) still returns the metadata array.
+        let with_alone = dispatch_argv(
+            &[
+                b"GEORADIUS".to_vec(),
+                b"mygeo".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"WITHCOORD".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("WITHCOORD-alone");
+        assert!(matches!(with_alone, RespFrame::Array(_)));
     }
 
     #[test]
