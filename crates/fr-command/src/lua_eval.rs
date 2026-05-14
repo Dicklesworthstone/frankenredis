@@ -2803,12 +2803,67 @@ impl<'a> LuaState<'a> {
             Expr::TableConstructor(fields) => {
                 let table = LuaTable::new();
                 let mut auto_idx = 1usize;
-                for field in fields {
+                let last_idx = fields.len().checked_sub(1);
+                for (i, field) in fields.iter().enumerate() {
                     match field {
                         TableField::Positional(expr) => {
-                            let val = self.eval_expr(expr, env, varargs)?;
-                            table.set(LuaValue::Number(auto_idx as f64), val);
-                            auto_idx += 1;
+                            // (frankenredis-d4vlx) Lua 5.1 expands the
+                            // LAST field of a table constructor to its
+                            // full multi-value if it's `...` or a function
+                            // call. Other positions take only the first
+                            // value. Mirrors the call-args expansion rule
+                            // in eval_call_args.
+                            let is_last_field = Some(i) == last_idx;
+                            if is_last_field {
+                                let values: Vec<LuaValue> = match expr {
+                                    Expr::VarArgs => varargs.clone(),
+                                    Expr::Call(func_expr, call_args) => {
+                                        let func = self.eval_expr(func_expr, env, varargs)?;
+                                        let mut arg_vals =
+                                            self.eval_call_args(call_args, env, varargs)?;
+                                        self.call_function_with_callee(
+                                            func_expr,
+                                            &func,
+                                            &mut arg_vals,
+                                            env,
+                                            varargs,
+                                            None,
+                                        )?
+                                    }
+                                    Expr::MethodCall(obj_expr, method, call_args) => {
+                                        let obj = self.eval_expr(obj_expr, env, varargs)?;
+                                        let func = match &obj {
+                                            LuaValue::Table(t) => t.get(&LuaValue::Str(
+                                                method.as_bytes().to_vec(),
+                                            )),
+                                            LuaValue::Str(_) => self.lookup_string_field(
+                                                &LuaValue::Str(method.as_bytes().to_vec()),
+                                            ),
+                                            _ => LuaValue::Nil,
+                                        };
+                                        let mut arg_vals = vec![obj];
+                                        arg_vals
+                                            .extend(self.eval_call_args(call_args, env, varargs)?);
+                                        self.call_function_with_callee(
+                                            obj_expr,
+                                            &func,
+                                            &mut arg_vals,
+                                            env,
+                                            varargs,
+                                            Some(method.as_str()),
+                                        )?
+                                    }
+                                    _ => vec![self.eval_expr(expr, env, varargs)?],
+                                };
+                                for val in values {
+                                    table.set(LuaValue::Number(auto_idx as f64), val);
+                                    auto_idx += 1;
+                                }
+                            } else {
+                                let val = self.eval_expr(expr, env, varargs)?;
+                                table.set(LuaValue::Number(auto_idx as f64), val);
+                                auto_idx += 1;
+                            }
                         }
                         TableField::Named(name, expr) => {
                             let val = self.eval_expr(expr, env, varargs)?;
@@ -6818,6 +6873,91 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_table_constructor_expands_trailing_multi_values() {
+        // Pins frankenredis-d4vlx. Lua 5.1 table constructors expand
+        // the LAST FIELD's multi-value (varargs or call result) into
+        // multiple positional entries; non-last positions take only
+        // the first value.
+        let mut store = Store::new();
+
+        // Last-positional `...` expands to all varargs.
+        let frame = eval_script(
+            b"local function f(...) local t = {...}; return #t end; return f('a','b','c')",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(3));
+
+        // Last-positional `...` after explicit fields: existing entries
+        // plus the expanded varargs.
+        let frame = eval_script(
+            b"local function f(...) local t = {1, 2, ...}; return #t end; return f('a','b','c')",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(5));
+
+        // Non-last `...` takes only the first value.
+        let frame = eval_script(
+            b"local function f(...) local t = {..., 99}; return #t end; return f('a','b','c')",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(2));
+
+        // Last-positional function call expands all return values.
+        let frame = eval_script(
+            b"local function g() return 1, 2, 3 end; local t = {g()}; return #t",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(3));
+
+        // Non-last function call takes only the first return value.
+        let frame = eval_script(
+            b"local function g() return 1, 2, 3 end; local t = {g(), 99}; return #t",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(2));
+
+        // Method call as last positional also expands (single value
+        // for string:upper, which only returns one value).
+        let frame = eval_script(
+            b"local s = 'abc'; local t = {'x', s:upper()}; return tostring(t[1])..','..tostring(t[2])",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"x,ABC".to_vec()))
+        );
+
+        // Named fields don't count toward # but coexist with positional
+        // varargs expansion.
+        let frame = eval_script(
+            b"local function f(...) local t = {x=1, ...}; return #t..':'..tostring(t.x) end; return f('a','b','c')",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"3:1".to_vec()))
+        );
+
+        // Empty varargs yields an empty table.
+        let frame = eval_script(
+            b"local function f(...) local t = {...}; return #t end; return f()",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(0));
+
+        // When `...` is NOT the last field (a named field follows it),
+        // only the first vararg is taken.
+        let frame = eval_script(
+            b"local function f(...) local t = {..., x=1}; return #t..':'..tostring(t.x) end; return f('a','b','c')",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"1:1".to_vec()))
+        );
     }
 
     #[test]
