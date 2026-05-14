@@ -3352,9 +3352,10 @@ impl Store {
             }
             None => return if bit { Ok(-1) } else { Ok(0) },
         };
-        if bytes.is_empty() {
-            return if bit { Ok(-1) } else { Ok(0) };
-        }
+        // Empty existing strings must NOT short-circuit on bit==0 like
+        // missing keys do (frankenredis-ol3zy). Upstream bitposCommand
+        // falls through to range normalization where start=0, end=-1
+        // satisfies start>end and returns -1 for both bit=0 and bit=1.
 
         // Normalize start/end into the chosen unit's index space
         // (bit-or-byte). After this block, both indices are
@@ -19305,6 +19306,65 @@ mod tests {
                 .bitpos(b"all1", false, None, None, BitRangeUnit::Byte, 0)
                 .unwrap(),
             24
+        );
+    }
+
+    /// (frankenredis-ol3zy) Empty existing strings must produce -1 for
+    /// both bit=0 and bit=1, regardless of start/end/unit. Upstream's
+    /// bitposCommand does NOT short-circuit empty existing keys the
+    /// same way it short-circuits missing keys (which return 0 for
+    /// bit=0). The previous implementation copied the missing-key
+    /// return shape and reported 0 for empty-string + bit=0.
+    #[test]
+    fn bitpos_empty_existing_string_returns_minus_one_for_both_bits_ol3zy() {
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), Vec::new(), None, 0);
+        // No range modifiers.
+        assert_eq!(
+            store
+                .bitpos(b"k", false, None, None, BitRangeUnit::Byte, 0)
+                .unwrap(),
+            -1
+        );
+        assert_eq!(
+            store
+                .bitpos(b"k", true, None, None, BitRangeUnit::Byte, 0)
+                .unwrap(),
+            -1
+        );
+        // Explicit start with no end.
+        assert_eq!(
+            store
+                .bitpos(b"k", false, Some(0), None, BitRangeUnit::Byte, 0)
+                .unwrap(),
+            -1
+        );
+        // Explicit start + end (BYTE).
+        assert_eq!(
+            store
+                .bitpos(b"k", false, Some(0), Some(-1), BitRangeUnit::Byte, 0)
+                .unwrap(),
+            -1
+        );
+        // Explicit start + end (BIT).
+        assert_eq!(
+            store
+                .bitpos(b"k", false, Some(0), Some(-1), BitRangeUnit::Bit, 0)
+                .unwrap(),
+            -1
+        );
+        // Missing key must still return 0 for bit=0 (sanity).
+        assert_eq!(
+            store
+                .bitpos(b"nokey", false, None, None, BitRangeUnit::Byte, 0)
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            store
+                .bitpos(b"nokey", true, None, None, BitRangeUnit::Byte, 0)
+                .unwrap(),
+            -1
         );
     }
 
