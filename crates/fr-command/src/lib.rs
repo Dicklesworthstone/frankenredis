@@ -31486,6 +31486,141 @@ mod tests {
     }
 
     #[test]
+    fn xclaim_and_xautoclaim_create_destination_consumer_v9p5j() {
+        // Pins frankenredis-v9p5j. Upstream
+        // t_stream.c::xclaimCommand and xautoclaimCommand both call
+        // streamLookupConsumer(group, consumer, SLC_DEFAULT) before
+        // the per-ID claim loop. SLC_DEFAULT auto-creates the
+        // consumer if it doesn't exist, even if no entries end up
+        // being claimed. fr was gating the consumer insertion on a
+        // non-empty claimed_ids, leaving XINFO CONSUMERS empty after
+        // an XCLAIM/XAUTOCLAIM call that found nothing to transfer.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"*".to_vec(),
+                b"f".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            1000,
+        )
+        .expect("xadd");
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            1000,
+        )
+        .expect("xgroup create");
+
+        // XCLAIM with no matching pending entries — still creates
+        // the destination consumer.
+        let xclaim_reply = dispatch_argv(
+            &[
+                b"XCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"newcon".to_vec(),
+                b"0".to_vec(),
+                b"0-0".to_vec(),
+            ],
+            &mut store,
+            2000,
+        )
+        .expect("xclaim");
+        assert_eq!(xclaim_reply, RespFrame::Array(Some(vec![])));
+
+        let consumers = dispatch_argv(
+            &[
+                b"XINFO".to_vec(),
+                b"CONSUMERS".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+            ],
+            &mut store,
+            2000,
+        )
+        .expect("xinfo consumers");
+        let RespFrame::Array(Some(rows)) = consumers else {
+            panic!("expected array, got {consumers:?}");
+        };
+        assert_eq!(rows.len(), 1, "XCLAIM should create newcon");
+        let RespFrame::Array(Some(fields)) = &rows[0] else {
+            panic!("expected consumer row array");
+        };
+        // Layout: [name, "newcon", pending, 0, idle, _, inactive, -1]
+        assert_eq!(fields[0], RespFrame::BulkString(Some(b"name".to_vec())));
+        assert_eq!(fields[1], RespFrame::BulkString(Some(b"newcon".to_vec())));
+        assert_eq!(fields[2], RespFrame::BulkString(Some(b"pending".to_vec())));
+        assert_eq!(fields[3], RespFrame::Integer(0));
+        // Per upstream SLC_DEFAULT semantics, an XCLAIM that didn't
+        // transfer entries should leave active_time at -1 ("never").
+        assert_eq!(fields[6], RespFrame::BulkString(Some(b"inactive".to_vec())));
+        assert_eq!(fields[7], RespFrame::Integer(-1));
+
+        // XAUTOCLAIM on a fresh consumer with no pending entries —
+        // still creates that consumer.
+        let xautoclaim_reply = dispatch_argv(
+            &[
+                b"XAUTOCLAIM".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"newcon2".to_vec(),
+                b"0".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            3000,
+        )
+        .expect("xautoclaim");
+        // Empty claim returns next_start=0-0 with empty arrays.
+        if let RespFrame::Array(Some(items)) = &xautoclaim_reply {
+            assert_eq!(items[0], RespFrame::BulkString(Some(b"0-0".to_vec())));
+        } else {
+            panic!("expected array, got {xautoclaim_reply:?}");
+        }
+
+        let consumers2 = dispatch_argv(
+            &[
+                b"XINFO".to_vec(),
+                b"CONSUMERS".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+            ],
+            &mut store,
+            3000,
+        )
+        .expect("xinfo consumers post-autoclaim");
+        let RespFrame::Array(Some(rows2)) = consumers2 else {
+            panic!("expected array");
+        };
+        assert_eq!(rows2.len(), 2, "XAUTOCLAIM should add newcon2");
+        let names: Vec<Vec<u8>> = rows2
+            .iter()
+            .filter_map(|row| {
+                let RespFrame::Array(Some(fields)) = row else {
+                    return None;
+                };
+                if let RespFrame::BulkString(Some(name)) = &fields[1] {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert!(names.contains(&b"newcon".to_vec()));
+        assert!(names.contains(&b"newcon2".to_vec()));
+    }
+
+    #[test]
     fn xautoclaim_claims_by_cursor_and_returns_next_start() {
         let mut store = Store::new();
         for (id, value) in [("1000-0", "v0"), ("1000-1", "v1"), ("1000-2", "v2")] {

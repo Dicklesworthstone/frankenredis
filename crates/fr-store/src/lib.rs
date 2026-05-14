@@ -8488,6 +8488,22 @@ impl Store {
         let mut claimed_entries = Vec::new();
         let consumer_vec = consumer.to_vec();
 
+        // (frankenredis-v9p5j) Upstream t_stream.c::xclaimCommand calls
+        // streamLookupConsumer(group, consumer, SLC_DEFAULT) once
+        // before the per-ID claim loop. SLC_DEFAULT auto-creates the
+        // consumer when it does not exist and refreshes seen_time even
+        // when no entries are transferred. So a XCLAIM that finds zero
+        // claimable IDs still leaves XINFO CONSUMERS with the named
+        // destination consumer. fr was deferring this insertion to the
+        // bottom of the function and gating it on a non-empty
+        // claimed_ids — empty claims left the consumer absent.
+        group_state.consumers.insert(consumer_vec.clone());
+        let meta = group_state
+            .consumer_metadata
+            .entry(consumer_vec.clone())
+            .or_insert(StreamConsumerMetadata::default());
+        meta.seen_time_ms = now_ms;
+
         for id in ids {
             let Some(fields) = stream_records.get(id) else {
                 group_state.pending.remove(id);
@@ -8542,13 +8558,14 @@ impl Store {
         }
 
         if !claimed_ids.is_empty() {
-            group_state.consumers.insert(consumer_vec.clone());
             // (frankenredis-p4dpj) XCLAIM is also an "active" event.
+            // The consumer/seen_time were already upserted up-front
+            // (frankenredis-v9p5j); here we only bump active_time and
+            // the dirty counter when entries actually moved.
             let meta = group_state
                 .consumer_metadata
                 .entry(consumer_vec)
                 .or_insert(StreamConsumerMetadata::default());
-            meta.seen_time_ms = now_ms;
             meta.active_time_ms = Some(now_ms);
             self.dirty = self.dirty.saturating_add(claimed_ids.len() as u64);
         }
@@ -8645,6 +8662,22 @@ impl Store {
         }
 
         let consumer_vec = consumer.to_vec();
+
+        // (frankenredis-v9p5j) Upstream
+        // t_stream.c::xautoclaimCommand calls
+        // streamLookupConsumer(group, consumer, SLC_DEFAULT) before
+        // the per-ID claim loop, so even an XAUTOCLAIM that finds zero
+        // entries to claim still creates the destination consumer and
+        // bumps its seen_time. fr was gating the insertion on a
+        // non-empty claimed_ids, so XINFO CONSUMERS showed nothing for
+        // the cursor-driven first call.
+        group_state.consumers.insert(consumer_vec.clone());
+        let meta = group_state
+            .consumer_metadata
+            .entry(consumer_vec.clone())
+            .or_insert(StreamConsumerMetadata::default());
+        meta.seen_time_ms = now_ms;
+
         for id in &claimed_ids {
             if let Some(pending_entry) = group_state.pending.get_mut(id) {
                 pending_entry.consumer = consumer_vec.clone();
@@ -8655,13 +8688,14 @@ impl Store {
             }
         }
         if !claimed_ids.is_empty() {
-            group_state.consumers.insert(consumer_vec.clone());
-            // (frankenredis-p4dpj) XAUTOCLAIM is also an "active" event.
+            // (frankenredis-p4dpj) XAUTOCLAIM is also an "active"
+            // event. Seen/insertion already happened up-front
+            // (frankenredis-v9p5j); only bump active_time + dirty
+            // when entries actually moved.
             let meta = group_state
                 .consumer_metadata
                 .entry(consumer_vec)
                 .or_insert(StreamConsumerMetadata::default());
-            meta.seen_time_ms = now_ms;
             meta.active_time_ms = Some(now_ms);
             self.dirty = self.dirty.saturating_add(claimed_ids.len() as u64);
         }
