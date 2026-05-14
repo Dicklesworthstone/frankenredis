@@ -5021,7 +5021,50 @@ impl<'a> LuaState<'a> {
                     }
                 };
                 let LuaValue::Table(t) = &table else { unreachable!() };
-                let mt_arg = args.get(1).cloned().unwrap_or(LuaValue::Nil);
+                // (frankenredis-fnh42) Upstream luaL_argcheck rejects a
+                // missing #2 arg (LUA_TNONE) as "nil or table expected"
+                // — only an explicit nil or a table passes. fr was
+                // converting missing → nil and silently clearing the
+                // metatable.
+                let Some(mt_arg) = args.get(1).cloned() else {
+                    return Err(self.format_builtin_argerror(
+                        "setmetatable",
+                        2,
+                        "nil or table expected",
+                    ));
+                };
+                if !matches!(mt_arg, LuaValue::Nil | LuaValue::Table(_)) {
+                    return Err(self.format_builtin_argerror(
+                        "setmetatable",
+                        2,
+                        "nil or table expected",
+                    ));
+                }
+                // (frankenredis-fnh42) Upstream luaL_getmetafield checks
+                // the existing metatable for __metatable; if present,
+                // raise — the protection blocks reassignment regardless
+                // of what __metatable resolves to. luaL_error pre-pends
+                // the where(1) source-location, which is empty for C
+                // callers (pcall(setmetatable, t, mt)) and
+                // 'user_script:1: ' when called from a Lua function;
+                // current_invocation_name encodes that distinction the
+                // same way format_builtin_argerror does.
+                {
+                    let inner = t.inner.borrow();
+                    if let Some(existing_mt) = &inner.metatable {
+                        let protected = existing_mt
+                            .inner
+                            .borrow()
+                            .get(&LuaValue::Str(b"__metatable".to_vec()));
+                        if !matches!(protected, LuaValue::Nil) {
+                            let msg = "cannot change a protected metatable";
+                            return Err(match &self.current_invocation_name {
+                                Some(_) => format!("user_script:1: {msg}"),
+                                None => msg.to_string(),
+                            });
+                        }
+                    }
+                }
                 match mt_arg {
                     LuaValue::Table(mt) => {
                         t.inner.borrow_mut().metatable = Some(mt);
@@ -5029,13 +5072,7 @@ impl<'a> LuaState<'a> {
                     LuaValue::Nil => {
                         t.inner.borrow_mut().metatable = None;
                     }
-                    _ => {
-                        return Err(self.format_builtin_argerror(
-                            "setmetatable",
-                            2,
-                            "nil or table expected",
-                        ));
-                    }
+                    _ => unreachable!(),
                 }
                 Ok(vec![table])
             }
@@ -5054,7 +5091,22 @@ impl<'a> LuaState<'a> {
                     LuaValue::Table(t) => {
                         let inner = t.inner.borrow();
                         match &inner.metatable {
-                            Some(mt) => Ok(vec![LuaValue::Table(mt.clone())]),
+                            // (frankenredis-fnh42) luaL_getmetafield
+                            // returns the __metatable field if present
+                            // — shielding the real metatable from the
+                            // caller. Only fall back to the metatable
+                            // itself when __metatable is absent.
+                            Some(mt) => {
+                                let masked = mt
+                                    .inner
+                                    .borrow()
+                                    .get(&LuaValue::Str(b"__metatable".to_vec()));
+                                if matches!(masked, LuaValue::Nil) {
+                                    Ok(vec![LuaValue::Table(mt.clone())])
+                                } else {
+                                    Ok(vec![masked])
+                                }
+                            }
                             None => Ok(vec![LuaValue::Nil]),
                         }
                     }
@@ -12336,6 +12388,72 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_metatable_protection_and_setmetatable_arg_check_fnh42() {
+        // (frankenredis-fnh42) Lua 5.1's luaB_setmetatable and
+        // luaB_getmetatable honor the __metatable field of an existing
+        // metatable. Probed against vendored Redis 7.2.4 on :16380.
+        let mut store = Store::new();
+
+        // getmetatable returns __metatable when present.
+        let r = eval_script(
+            b"return getmetatable(setmetatable({}, {__metatable='locked'}))",
+            &[], &[], &mut store, 0,
+        ).expect("getmetatable masked");
+        assert_eq!(r, RespFrame::BulkString(Some(b"locked".to_vec())));
+
+        // getmetatable still returns the real metatable when
+        // __metatable is absent (existing behavior must not regress).
+        let r = eval_script(
+            b"local mt={}; setmetatable({}, mt); return type(getmetatable(setmetatable({},mt)))",
+            &[], &[], &mut store, 0,
+        ).expect("getmetatable plain");
+        assert_eq!(r, RespFrame::BulkString(Some(b"table".to_vec())));
+
+        // setmetatable on a protected table errors. Called directly
+        // via pcall, the where(1) prefix is empty (C frame).
+        let r = eval_script(
+            b"local t=setmetatable({},{__metatable='x'}); local ok,e=pcall(setmetatable, t, {}); return tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("setmetatable protected direct");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(b"cannot change a protected metatable".to_vec()))
+        );
+
+        // Same error from inside a Lua function — prefix added.
+        let r = eval_script(
+            b"local t=setmetatable({},{__metatable='x'}); local ok,e=pcall(function() setmetatable(t, {}) end); return tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("setmetatable protected wrapped");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"user_script:1: cannot change a protected metatable".to_vec()
+            ))
+        );
+
+        // setmetatable({}) with only one arg raises "nil or table
+        // expected" rather than silently treating arg #2 as nil.
+        let r = eval_script(
+            b"local ok,e=pcall(setmetatable, {}); return tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("setmetatable arity");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"bad argument #2 to '?' (nil or table expected)".to_vec()
+            ))
+        );
+
+        // Explicit nil still clears the metatable (regression guard).
+        let r = eval_script(
+            b"local t=setmetatable({},{__index=function() return 1 end}); setmetatable(t, nil); return tostring(getmetatable(t))",
+            &[], &[], &mut store, 0,
+        ).expect("setmetatable nil clears");
+        assert_eq!(r, RespFrame::BulkString(Some(b"nil".to_vec())));
     }
 
     #[test]
