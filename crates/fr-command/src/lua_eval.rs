@@ -2005,6 +2005,27 @@ const LUA_YIELD_SENTINEL: &str = "__frankenredis_lua_coroutine_yield__";
 /// (frankenredis-cxmsu)
 const LUA_TYPED_ERROR_SENTINEL: &str = "__frankenredis_lua_typed_error__";
 
+/// Prefix tag that marks an `error(...)` string as already carrying the
+/// complete RESP error body (so the dispatch wrapper must NOT auto-add
+/// the "ERR " code). Used when error() unwraps a `{err = STRING}` table:
+/// upstream's protocol path emits the verbatim err field, never adding
+/// a code prefix. The tag is stripped by `lua_strip_raw_error_marker`
+/// inside `eval_script_error_reply` (fr-command/src/lib.rs).
+/// (frankenredis-vkqn0)
+pub const LUA_RAW_ERROR_BODY_MARKER: &str = "\u{0001}fr-raw-err\u{0001}";
+
+/// Strip the LUA_RAW_ERROR_BODY_MARKER prefix from an error string if
+/// present, returning (stripped_body, was_marker_present). The dispatch
+/// wrapper uses `was_marker_present == true` to skip the "ERR "
+/// auto-prefix step.
+pub fn lua_strip_raw_error_marker(error: &str) -> (String, bool) {
+    if let Some(rest) = error.strip_prefix(LUA_RAW_ERROR_BODY_MARKER) {
+        (rest.to_string(), true)
+    } else {
+        (error.to_string(), false)
+    }
+}
+
 enum ControlFlow {
     None,
     Return(Vec<LuaValue>),
@@ -2055,6 +2076,14 @@ pub struct LuaState<'a> {
     /// every `eval_script` call since each script creates a fresh
     /// LuaState. (frankenredis-cxmsu)
     pending_error_value: Option<LuaValue>,
+    /// True iff the pending_error_value came from an `error({err=STR})`
+    /// unwrap (frankenredis-vkqn0). When the typed-error sentinel
+    /// escapes uncaught at the top level, the rendering site prepends
+    /// LUA_RAW_ERROR_BODY_MARKER so eval_script_error_reply skips its
+    /// "ERR " auto-prefix — matching vendored, which emits the verbatim
+    /// err string with no code prefix. Cleared by every consumer that
+    /// also clears pending_error_value.
+    pending_error_is_raw_body: bool,
     /// Source-location prefix to use for new Lua functions defined while
     /// this state is active. Defaults to `None` (which renders as
     /// "user_script"). loadstring/load functions push their chunk label
@@ -2381,6 +2410,7 @@ impl<'a> LuaState<'a> {
             current_coroutine: None,
             pending_yield: None,
             pending_error_value: None,
+            pending_error_is_raw_body: false,
             current_source_label: None,
             current_invocation_name: None,
             nested_exec_stmts_depth: 0,
@@ -2549,8 +2579,18 @@ impl<'a> LuaState<'a> {
             // table case; fr emits a tostring()-style representation).
             Err(msg) if msg == LUA_TYPED_ERROR_SENTINEL => {
                 let val = self.pending_error_value.take().unwrap_or(LuaValue::Nil);
+                let was_raw_body = self.pending_error_is_raw_body;
+                self.pending_error_is_raw_body = false;
                 let rendered = String::from_utf8_lossy(&val.to_display_string()).to_string();
-                Err(rendered)
+                // (frankenredis-vkqn0) error({err=STRING}) tagged this
+                // path. Prepend LUA_RAW_ERROR_BODY_MARKER so the
+                // eval_script_error_reply wrapper recognises the
+                // pre-formed RESP body and skips its "ERR " auto-prefix.
+                Err(if was_raw_body {
+                    format!("{LUA_RAW_ERROR_BODY_MARKER}{rendered}")
+                } else {
+                    rendered
+                })
             }
             Err(msg) => Err(msg),
         }
@@ -4730,13 +4770,39 @@ impl<'a> LuaState<'a> {
                 // here. For non-string/non-number args the value is
                 // re-raised via the typed-error sentinel so pcall/xpcall
                 // can return the original type to the script.
-                let raw = args.first().cloned().unwrap_or(LuaValue::Nil);
+                let mut raw = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let level = lua_optional_integer_arg(
                     self.current_invocation_name.as_deref(),
                     2,
                     args.get(1),
                     1,
                 )?;
+                // (frankenredis-vkqn0) Upstream Redis hooks lua_error so
+                // that an error value of the form `{err = STRING, …}`
+                // gets unwrapped to the bare `err` string at the
+                // lua_error boundary — both pcall and the top-level
+                // reply path see the string, not the table. Tables
+                // without a string `err` field pass through unchanged.
+                // The unwrap also skips the level-based where-prefix
+                // because the table form already encodes the final
+                // error message verbatim (live probe confirmed:
+                // `error({err='x'})` produces just `x`, never
+                // `user_script:1: x`). Implement this by replacing
+                // `raw` with the inner string and forcing the
+                // no-prefix branch via `level = 0`.
+                let mut tagged_err_unwrap = false;
+                let level = if let LuaValue::Table(ref t) = raw {
+                    let err_field = t.get(&LuaValue::Str(b"err".to_vec()));
+                    if let LuaValue::Str(s) = err_field {
+                        raw = LuaValue::Str(s);
+                        tagged_err_unwrap = true;
+                        0_i64
+                    } else {
+                        level
+                    }
+                } else {
+                    level
+                };
                 // luaB_error:
                 //   if (lua_isstring(L, 1) && level > 0) {
                 //       luaL_where(L, level); lua_pushvalue(L, 1);
@@ -4768,6 +4834,7 @@ impl<'a> LuaState<'a> {
                     return Err(msg);
                 }
                 self.pending_error_value = Some(raw);
+                self.pending_error_is_raw_body = tagged_err_unwrap;
                 Err(LUA_TYPED_ERROR_SENTINEL.to_string())
             }
             "assert" => {
@@ -4919,6 +4986,7 @@ impl<'a> LuaState<'a> {
                         // Drop any stale typed-error stash; the protected
                         // call completed normally.
                         self.pending_error_value = None;
+                        self.pending_error_is_raw_body = false;
                         let mut new_vals = Vec::with_capacity(vals.len() + 1);
                         new_vals.push(LuaValue::Bool(true));
                         new_vals.extend(vals);
@@ -4947,6 +5015,10 @@ impl<'a> LuaState<'a> {
                             self.pending_error_value = None;
                             LuaValue::Str(msg.into_bytes())
                         };
+                        // The raw-body marker only matters for uncaught
+                        // top-level errors — pcall has already converted
+                        // the sentinel back to a typed value.
+                        self.pending_error_is_raw_body = false;
                         Ok(vec![LuaValue::Bool(false), err_val])
                     }
                 }
@@ -4975,6 +5047,7 @@ impl<'a> LuaState<'a> {
                 match result {
                     Ok(vals) => {
                         self.pending_error_value = None;
+                        self.pending_error_is_raw_body = false;
                         let mut new_vals = Vec::with_capacity(vals.len() + 1);
                         new_vals.push(LuaValue::Bool(true));
                         new_vals.extend(vals);
@@ -4998,6 +5071,7 @@ impl<'a> LuaState<'a> {
                             self.pending_error_value = None;
                             LuaValue::Str(msg.into_bytes())
                         };
+                        self.pending_error_is_raw_body = false;
                         let mut handler_args = vec![err_val.clone()];
                         match self.call_function(
                             &err_handler,
@@ -14771,6 +14845,80 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn lua_error_unwraps_table_with_err_string_field_vkqn0() {
+        // (frankenredis-vkqn0) Upstream Redis hooks Lua's error() so
+        // that a `{err = STRING}` table is unwrapped to the bare err
+        // field — both pcall and the top-level reply path see the
+        // string, not the table. The top-level reply also skips the
+        // "ERR " auto-prefix (the err field IS the complete body).
+        let mut store = Store::new();
+
+        // pcall: the second return value should be the string, not the table.
+        let frame = eval_script(
+            b"local ok,e = pcall(error, {err='x'}); return type(e)..'-'..tostring(e)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"string-x".to_vec())));
+
+        // pcall with extra fields: still unwraps via the err field.
+        let frame = eval_script(
+            b"local ok,e = pcall(error, {err='x', foo='y'}); return type(e)..'-'..tostring(e)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"string-x".to_vec())));
+
+        // pcall without an err field: NO unwrap, the table stays.
+        let frame = eval_script(
+            b"local ok,e = pcall(error, {foo='bar'}); return type(e)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"table".to_vec())));
+
+        // pcall with a non-string err field: NO unwrap.
+        let frame = eval_script(
+            b"local ok,e = pcall(error, {err=42}); return type(e)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"table".to_vec())));
+
+        // Existing typed-error regressions still pass.
+        for body in &[
+            (b"local ok,e = pcall(error, 42); return type(e)..'-'..tostring(e)".as_slice(), "string-42"),
+            (b"local ok,e = pcall(error, true); return type(e)..'-'..tostring(e)", "boolean-true"),
+            (b"local ok,e = pcall(error, nil); return type(e)..'-'..tostring(e)", "nil-nil"),
+        ] {
+            let frame = eval_script(body.0, &[], &[], &mut store, 0).unwrap();
+            assert_eq!(
+                frame,
+                RespFrame::BulkString(Some(body.1.as_bytes().to_vec())),
+                "src = {:?}",
+                String::from_utf8_lossy(body.0)
+            );
+        }
+
+        // Direct uncaught error({err=string}) emits Err(marker + body).
+        // The fr-command::lib eval_script_error_reply wrapper strips
+        // the marker and uses the body verbatim — covered in the
+        // dispatch_argv integration tests below.
     }
 
     #[test]

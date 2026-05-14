@@ -17576,6 +17576,12 @@ fn eval_script_error_reply(script: &[u8], error: String) -> RespFrame {
             "ERR Error compiling script (new function): user_script:1: {error}"
         ))
     } else {
+        // (frankenredis-vkqn0) error({err = STRING}) tags its error
+        // string with LUA_RAW_ERROR_BODY_MARKER to signal that the
+        // body is already the complete RESP error payload — upstream
+        // emits the err field verbatim without auto-prepending "ERR ".
+        // Strip the marker; if it was present, skip the prefix path.
+        let (error, raw_body) = lua_eval::lua_strip_raw_error_marker(&error);
         // Upstream script_lua.c::luaCallFunction wraps every runtime
         // error in the form `<msg> script: <sha1>, on <source>:<line>.`
         // where <msg> already carries an error code (luaPushErrorBuff
@@ -17583,7 +17589,7 @@ fn eval_script_error_reply(script: &[u8], error: String) -> RespFrame {
         // error strings come without a code, so prepend "ERR " unless
         // the caller already emitted a known upper-case code (e.g.
         // WRONGTYPE, NOAUTH, NOPERM). (br-frankenredis-fdys)
-        let body = if error_has_resp_code_prefix(&error) {
+        let body = if raw_body || error_has_resp_code_prefix(&error) {
             error
         } else {
             format!("ERR {error}")
@@ -43944,6 +43950,69 @@ mod tests {
         )
         .expect("evalsha_ro pcall publish rejection");
         assert_eq!(pcall_out, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn eval_error_with_err_field_skips_err_prefix_vkqn0() {
+        // (frankenredis-vkqn0) Upstream Redis: error({err = STRING})
+        // emits the err field verbatim as the RESP error body — no
+        // "ERR " auto-prefix, no user_script:1: where-prefix.
+        let mut store = Store::new();
+
+        // error({err='x'}) at top level: body is just "x" + script suffix.
+        let out = dispatch_argv(
+            &[b"EVAL".to_vec(), b"error({err='x'})".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("eval");
+        let RespFrame::Error(msg) = out else {
+            panic!("expected error frame, got {out:?}");
+        };
+        assert!(
+            msg.starts_with("x script:") && msg.ends_with(", on @user_script:1."),
+            "expected 'x script:..., on @user_script:1.' got {msg}"
+        );
+        assert!(
+            !msg.starts_with("ERR "),
+            "must NOT carry the ERR auto-prefix: {msg}"
+        );
+
+        // error({err='WRONGTYPE foo'}) preserves the upstream code
+        // prefix verbatim.
+        let out = dispatch_argv(
+            &[
+                b"EVAL".to_vec(),
+                b"error({err='WRONGTYPE foo'})".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("eval");
+        let RespFrame::Error(msg) = out else {
+            panic!("expected error, got {out:?}");
+        };
+        assert!(
+            msg.starts_with("WRONGTYPE foo script:"),
+            "expected verbatim WRONGTYPE body, got {msg}"
+        );
+
+        // Regression: error('x') at top level still has the ERR prefix
+        // AND the user_script:1: where-prefix.
+        let out = dispatch_argv(
+            &[b"EVAL".to_vec(), b"error('x')".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("eval");
+        let RespFrame::Error(msg) = out else {
+            panic!("expected error, got {out:?}");
+        };
+        assert!(
+            msg.starts_with("ERR user_script:1: x"),
+            "regression: bare string error still gets ERR + where prefix, got {msg}"
+        );
     }
 
     #[test]
