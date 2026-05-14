@@ -15560,8 +15560,27 @@ fn command_info_subcommand_entry(
 /// `<parent>|*` rows from SUBCOMMAND_TABLE. Per-subcommand keyspec
 /// flags come through command_info_key_specs's override path so e.g.
 /// xgroup|create emits [RW, insert] and object|encoding emits bare [RO].
-const SUBCOMMAND_PARENTS_WITH_INFO: &[&str] =
-    &["command", "object", "xgroup", "xinfo"];
+///
+/// (frankenredis-94zpo) Expanded to match upstream's full container set
+/// minus `debug` — vendored's COMMAND INFO DEBUG intentionally suppresses
+/// its admin-flagged subcommands, returning the bare parent entry.
+const SUBCOMMAND_PARENTS_WITH_INFO: &[&str] = &[
+    "acl",
+    "client",
+    "cluster",
+    "command",
+    "config",
+    "function",
+    "latency",
+    "memory",
+    "module",
+    "object",
+    "pubsub",
+    "script",
+    "slowlog",
+    "xgroup",
+    "xinfo",
+];
 
 fn command_info_subcommands(name: &str) -> Vec<RespFrame> {
     if !SUBCOMMAND_PARENTS_WITH_INFO.contains(&name) {
@@ -23480,6 +23499,94 @@ mod tests {
         assert!(matches!(r, RespFrame::SimpleString(ref s) if s == "OK"));
         let r = dispatch_argv(&[b"PING".to_vec()], &mut store, 0).expect("default PING ok");
         assert_eq!(r, RespFrame::SimpleString("PONG".to_string()));
+    }
+
+    #[test]
+    fn command_info_emits_subcommands_for_all_container_parents_94zpo() {
+        // (frankenredis-94zpo) Pre-fix: COMMAND INFO for container
+        // commands like CLUSTER/CLIENT/CONFIG/etc. emitted an empty
+        // subcommands array (slot 10), missing the per-subcommand
+        // metadata that vendored emits. Verify that every container
+        // parent now fans out at least one row from SUBCOMMAND_TABLE
+        // (debug excluded — vendored intentionally suppresses its
+        // admin-flagged subcommand fan-out).
+        let mut store = Store::new();
+        let containers: &[(&[u8], &[u8])] = &[
+            (b"ACL", b"acl|cat"),
+            (b"CLIENT", b"client|kill"),
+            (b"CLUSTER", b"cluster|count-failure-reports"),
+            (b"CONFIG", b"config|get"),
+            (b"FUNCTION", b"function|flush"),
+            (b"LATENCY", b"latency|history"),
+            (b"MEMORY", b"memory|usage"),
+            (b"MODULE", b"module|list"),
+            (b"OBJECT", b"object|encoding"),
+            (b"PUBSUB", b"pubsub|channels"),
+            (b"SCRIPT", b"script|flush"),
+            (b"SLOWLOG", b"slowlog|reset"),
+            (b"XGROUP", b"xgroup|create"),
+            (b"XINFO", b"xinfo|stream"),
+            (b"COMMAND", b"command|count"),
+        ];
+        for (parent, expected_sub) in containers {
+            let out = dispatch_argv(
+                &[b"COMMAND".to_vec(), b"INFO".to_vec(), parent.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("dispatch");
+            let RespFrame::Array(Some(rows)) = out else {
+                panic!("COMMAND INFO {:?}: expected array", parent);
+            };
+            assert_eq!(rows.len(), 1, "COMMAND INFO {parent:?}: one entry per name");
+            let RespFrame::Array(Some(ref entry)) = rows[0] else {
+                panic!("COMMAND INFO {parent:?}: entry not array");
+            };
+            // Slot 9 (zero-indexed) is the subcommands array.
+            let RespFrame::Array(Some(ref subs)) = entry[9] else {
+                panic!("COMMAND INFO {parent:?}: subcommand slot not array");
+            };
+            assert!(
+                !subs.is_empty(),
+                "COMMAND INFO {parent:?}: subcommand slot must not be empty"
+            );
+            let sub_names: Vec<&[u8]> = subs
+                .iter()
+                .filter_map(|s| match s {
+                    RespFrame::Array(Some(e)) => match e.first() {
+                        Some(RespFrame::BulkString(Some(n))) => Some(n.as_slice()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                sub_names.iter().any(|n| n == expected_sub),
+                "COMMAND INFO {parent:?}: expected subcommand {expected_sub:?} in {sub_names:?}",
+            );
+        }
+
+        // DEBUG must continue to emit an empty subcommands slot
+        // (matches upstream — admin-flagged subcommands suppressed).
+        let out = dispatch_argv(
+            &[b"COMMAND".to_vec(), b"INFO".to_vec(), b"DEBUG".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("dispatch debug");
+        let RespFrame::Array(Some(rows)) = out else {
+            panic!("COMMAND INFO DEBUG: expected array");
+        };
+        let RespFrame::Array(Some(ref entry)) = rows[0] else {
+            panic!("COMMAND INFO DEBUG: entry not array");
+        };
+        let RespFrame::Array(Some(ref subs)) = entry[9] else {
+            panic!("COMMAND INFO DEBUG: subcommand slot not array");
+        };
+        assert!(
+            subs.is_empty(),
+            "COMMAND INFO DEBUG: subcommand slot must be empty (vendored parity)"
+        );
     }
 
     #[test]
