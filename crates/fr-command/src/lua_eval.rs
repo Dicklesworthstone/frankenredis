@@ -5194,12 +5194,35 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(result)])
             }
             "string.format" => {
-                let fmt = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
-                let fmt_str = String::from_utf8_lossy(&fmt).to_string();
-                let result = lua_string_format(&fmt_str, &args[1..])?;
+                // (frankenredis-be7o1) DOS fix: previously, calling
+                // string.format() with no args panicked on the args[1..]
+                // slice and killed the server. Validate arg #1 explicitly,
+                // matching upstream luaL_checkstring wording.
+                let fmt_bytes = match args.first() {
+                    Some(LuaValue::Str(b)) => b.clone(),
+                    Some(LuaValue::Number(n)) => {
+                        if *n == (*n as i64) as f64 && n.is_finite() {
+                            format!("{}", *n as i64).into_bytes()
+                        } else {
+                            lua_number_to_string(*n).into_bytes()
+                        }
+                    }
+                    Some(other) => {
+                        return Err(format!(
+                            "user_script:1: bad argument #1 to 'format' (string expected, got {})",
+                            other.type_name()
+                        ));
+                    }
+                    None => {
+                        return Err(
+                            "user_script:1: bad argument #1 to 'format' (string expected, got no value)"
+                                .to_string(),
+                        );
+                    }
+                };
+                let fmt_str = String::from_utf8_lossy(&fmt_bytes).to_string();
+                let rest: &[LuaValue] = if args.is_empty() { &[] } else { &args[1..] };
+                let result = lua_string_format(&fmt_str, rest)?;
                 Ok(vec![LuaValue::Str(result.into_bytes())])
             }
             "string.find" => {
@@ -6874,16 +6897,35 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                     let arg = match args.get(arg_idx) {
                         Some(v) => v.clone(),
                         None => {
+                            // (frankenredis-be7o1) Upstream luaL_checknumber/
+                            // luaL_checkstring number the arguments from the
+                            // caller's perspective, where the format string
+                            // is arg #1. arg_idx is 0-based into args[1..],
+                            // so the missing value is Lua arg #(arg_idx + 2).
                             return Err(format!(
-                                "bad argument #{} to 'format' (no value)",
-                                arg_idx + 1
+                                "user_script:1: bad argument #{} to 'format' (no value)",
+                                arg_idx + 2
                             ));
                         }
                     };
                     arg_idx += 1;
+                    // (frankenredis-be7o1) Vendored luaL_checknumber errors with
+                    // "number expected, got <type>" when the arg is not a
+                    // number or numeric string. fr was silently 0-defaulting.
+                    let require_number = |v: &LuaValue| -> Result<f64, String> {
+                        if let Some(n) = v.to_number() {
+                            Ok(n)
+                        } else {
+                            Err(format!(
+                                "user_script:1: bad argument #{} to 'format' (number expected, got {})",
+                                arg_idx + 1,
+                                v.type_name()
+                            ))
+                        }
+                    };
                     let formatted = match conv {
                         'd' | 'i' | 'u' => {
-                            let n = arg.to_number().unwrap_or(0.0) as i64;
+                            let n = require_number(&arg)? as i64;
                             let s = if show_sign && n >= 0 {
                                 format!("+{n}")
                             } else if space_sign && n >= 0 {
@@ -6894,7 +6936,7 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
                         }
                         'f' => {
-                            let n = arg.to_number().unwrap_or(0.0);
+                            let n = require_number(&arg)?;
                             let prec = precision.unwrap_or(6);
                             let s = if show_sign && n >= 0.0 {
                                 format!("+{n:.prec$}")
@@ -6906,7 +6948,7 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
                         }
                         'e' | 'E' => {
-                            let n = arg.to_number().unwrap_or(0.0);
+                            let n = require_number(&arg)?;
                             let prec = precision.unwrap_or(6);
                             let s = lua_fmt_scientific(n, prec, conv == 'E');
                             let s = if show_sign && n >= 0.0 {
@@ -6917,7 +6959,7 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             lua_fmt_pad(&s, width, left_align, ' ')
                         }
                         'g' | 'G' => {
-                            let n = arg.to_number().unwrap_or(0.0);
+                            let n = require_number(&arg)?;
                             let prec = precision.unwrap_or(6).max(1);
                             let s = lua_fmt_g(n, prec, conv == 'G');
                             let s = if show_sign && n >= 0.0 {
@@ -6986,7 +7028,7 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             q
                         }
                         'x' | 'X' => {
-                            let n = arg.to_number().unwrap_or(0.0) as u64;
+                            let n = require_number(&arg)? as u64;
                             let s = if conv == 'x' {
                                 if alt_form {
                                     format!("0x{n:x}")
@@ -7001,7 +7043,7 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
                         }
                         'o' => {
-                            let n = arg.to_number().unwrap_or(0.0) as u64;
+                            let n = require_number(&arg)? as u64;
                             let s = if alt_form {
                                 format!("0{n:o}")
                             } else {
@@ -7010,11 +7052,20 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
                         }
                         'c' => {
-                            let n = arg.to_number().unwrap_or(0.0) as u8;
+                            // (frankenredis-be7o1) Upstream printf %c casts to
+                            // unsigned char with modulo-256 wrap; e.g. -1 -> 0xFF,
+                            // 256 -> 0. Rust's 'as u8' saturates floats, so go via
+                            // i64 first to recover the C wrap-around semantics.
+                            let n = require_number(&arg)? as i64 as u8;
                             String::from(n as char)
                         }
                         _ => {
-                            format!("%{conv}")
+                            // (frankenredis-be7o1) Upstream lstrlib.c:str_format
+                            // rejects unknown conversion specifiers via luaL_error
+                            // with the verbatim wording below.
+                            return Err(format!(
+                                "user_script:1: invalid option '%{conv}' to 'format'"
+                            ));
                         }
                     };
                     result.push_str(&formatted);
@@ -10297,6 +10348,104 @@ mod tests {
             "true"
         );
         assert_eq!(lua_value_to_json(&LuaValue::Nil).expect("nil"), "null");
+    }
+
+    #[test]
+    fn string_format_no_args_does_not_panic_and_matches_upstream() {
+        // (frankenredis-be7o1) Regression: string.format() with no args
+        // panicked on `args[1..]` slice, crashing the server. Must error
+        // cleanly with the standard luaL_checkstring wording.
+        let mut store = Store::new();
+        let err = eval_script(b"return string.format()", &[], &[], &mut store, 0).unwrap_err();
+        assert_eq!(
+            err,
+            "user_script:1: bad argument #1 to 'format' (string expected, got no value)"
+        );
+        // Server is still alive — issue a second command on the same Store.
+        let r2 = eval_script(b"return 1", &[], &[], &mut store, 0).expect("eval after");
+        assert!(matches!(r2, RespFrame::Integer(1)));
+    }
+
+    #[test]
+    fn string_format_validates_specs_and_args_match_upstream() {
+        // (frankenredis-be7o1) Pin error wording for the four newly-tightened
+        // string.format paths vs vendored Redis 7.2.4 (:16380).
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"return string.format('%d')",
+                "user_script:1: bad argument #2 to 'format' (no value)",
+            ),
+            (
+                b"return string.format('%d', 'abc')",
+                "user_script:1: bad argument #2 to 'format' (number expected, got string)",
+            ),
+            (
+                b"return string.format('%d', true)",
+                "user_script:1: bad argument #2 to 'format' (number expected, got boolean)",
+            ),
+            (
+                b"return string.format('%d', nil)",
+                "user_script:1: bad argument #2 to 'format' (number expected, got nil)",
+            ),
+            (
+                b"return string.format('%d', {})",
+                "user_script:1: bad argument #2 to 'format' (number expected, got table)",
+            ),
+            (
+                b"return string.format('%K', 5)",
+                "user_script:1: invalid option '%K' to 'format'",
+            ),
+        ];
+        for (script, expected) in cases {
+            let err = eval_script(script, &[], &[], &mut store, 0).unwrap_err();
+            assert_eq!(
+                err,
+                *expected,
+                "script {:?}",
+                std::str::from_utf8(script).unwrap()
+            );
+        }
+        // Happy paths still work.
+        for (script, expected) in &[
+            (b"return string.format('%d', 42)".as_slice(), "42"),
+            (b"return string.format('%d', '42')", "42"),
+            (b"return string.format('%d', 0x10)", "16"),
+            (b"return string.format('%d', 1.7)", "1"),
+            (b"return string.format('%x', 255)", "ff"),
+            (b"return string.format('%-5d|', 42)", "42   |"),
+            (b"return string.format('%%')", "%"),
+        ] {
+            let r = eval_script(script, &[], &[], &mut store, 0).expect("happy");
+            match r {
+                RespFrame::BulkString(Some(bytes)) => {
+                    assert_eq!(
+                        std::str::from_utf8(&bytes).unwrap(),
+                        *expected,
+                        "script {:?}",
+                        std::str::from_utf8(script).unwrap()
+                    );
+                }
+                other => panic!(
+                    "script {:?}: expected bulk string, got {other:?}",
+                    std::str::from_utf8(script).unwrap()
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn string_format_c_specifier_ascii_path() {
+        // (frankenredis-be7o1) Pin the common ASCII case for %c. The
+        // high-byte modulo-256 wrap path (and vendored's quirk of emitting
+        // 0 bytes for %c 256) requires fr's lua_string_format to return
+        // Vec<u8> instead of String — out of scope for this DOS-focused fix.
+        let mut store = Store::new();
+        let r = eval_script(b"return string.format('%c', 65)", &[], &[], &mut store, 0).expect("c 65");
+        let RespFrame::BulkString(Some(bytes)) = r else {
+            panic!("expected bulk")
+        };
+        assert_eq!(bytes, b"A".to_vec());
     }
 
     #[test]
