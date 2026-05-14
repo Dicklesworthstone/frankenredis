@@ -6083,8 +6083,14 @@ impl<'a> LuaState<'a> {
                 // of silently returning nil. The plain-search path is
                 // exempt because Lua's plain mode treats the pattern
                 // bytes literally.
+                // (frankenredis-uqnq6) Route through inv_name so
+                // pcall(string.find,…,bad) drops the user_script:1:
+                // prefix to match the anonymous C-builtin shape.
                 if !plain {
-                    lua_pattern_validate(&pattern)?;
+                    lua_pattern_validate_named(
+                        self.current_invocation_name.as_deref(),
+                        &pattern,
+                    )?;
                 }
                 if plain {
                     // Plain substring search
@@ -6141,7 +6147,11 @@ impl<'a> LuaState<'a> {
                     (init_raw as usize).saturating_sub(1)
                 };
                 // (frankenredis-vfv8s) Validate pattern eagerly.
-                lua_pattern_validate(&pattern)?;
+                // (frankenredis-uqnq6) inv_name routes the prefix.
+                lua_pattern_validate_named(
+                    self.current_invocation_name.as_deref(),
+                    &pattern,
+                )?;
                 if let Some(m) = lua_pattern_find(&s, &pattern, init) {
                     Ok(lua_match_captures(&s, &m))
                 } else {
@@ -6156,7 +6166,11 @@ impl<'a> LuaState<'a> {
                 // (frankenredis-vfv8s) Validate pattern eagerly so the
                 // iterator constructor surfaces malformed patterns the
                 // same way upstream's gmatch does.
-                lua_pattern_validate(&pattern)?;
+                // (frankenredis-uqnq6) inv_name routes the prefix.
+                lua_pattern_validate_named(
+                    self.current_invocation_name.as_deref(),
+                    &pattern,
+                )?;
                 // Collect all matches
                 let mut matches: Vec<Vec<LuaValue>> = Vec::new();
                 let mut pos = 0;
@@ -6233,7 +6247,8 @@ impl<'a> LuaState<'a> {
                 }
                 let max_n = args.get(3).and_then(|v| v.to_number()).map(|n| n as usize);
                 // (frankenredis-vfv8s) Validate pattern eagerly.
-                lua_pattern_validate(&pattern)?;
+                // (frankenredis-uqnq6) inv_name routes the prefix.
+                lua_pattern_validate_named(inv, &pattern)?;
                 let mut result = Vec::new();
                 let mut pos = 0;
                 let mut count = 0usize;
@@ -7367,7 +7382,19 @@ fn lua_single_match(pat: &[u8], pi: usize, ch: u8) -> bool {
 ///     `]` is absent (respecting `]` immediately after `[` or `[^` as
 ///     literal, just like upstream singlematchclass).
 /// (frankenredis-vfv8s)
-fn lua_pattern_validate(pat: &[u8]) -> Result<(), String> {
+/// Validates a Lua match pattern eagerly and routes the upstream
+/// `<source>:<line>: ` prefix through `inv_name`:
+///   - `Some("...")` → prepend "user_script:1: " (named/direct-call shape)
+///   - `None`        → no prefix (anonymous pcall(C-builtin) shape)
+/// (frankenredis-uqnq6) Matches luaL_error's behavior: luaL_where(L,1) is
+/// "" when the caller of the C-builtin is itself a C frame (pcall).
+fn lua_pattern_validate_named(inv_name: Option<&str>, pat: &[u8]) -> Result<(), String> {
+    let prefix = if inv_name.is_some() {
+        "user_script:1: "
+    } else {
+        ""
+    };
+    let err = |msg: &str| -> String { format!("{prefix}{msg}") };
     let mut i = 0;
     // (frankenredis-skwin) Capture-balance: each '(' opens a capture
     // slot; ')' closes the innermost; the engine errors at match time
@@ -7379,9 +7406,7 @@ fn lua_pattern_validate(pat: &[u8]) -> Result<(), String> {
         match pat[i] {
             b'%' => {
                 if i + 1 >= pat.len() {
-                    return Err(
-                        "user_script:1: malformed pattern (ends with '%')".to_string(),
-                    );
+                    return Err(err("malformed pattern (ends with '%')"));
                 }
                 // (frankenredis-3zxc1) Upstream lstrlib.c::do_match raises
                 // luaL_error("missing '[' after '%%f' in pattern") when %f
@@ -7390,9 +7415,7 @@ fn lua_pattern_validate(pat: &[u8]) -> Result<(), String> {
                 // [set] body just like any other bracket expression.
                 if pat[i + 1] == b'f' {
                     if i + 2 >= pat.len() || pat[i + 2] != b'[' {
-                        return Err(
-                            "user_script:1: missing '[' after '%f' in pattern".to_string(),
-                        );
+                        return Err(err("missing '[' after '%f' in pattern"));
                     }
                     i += 2;
                     continue;
@@ -7407,9 +7430,7 @@ fn lua_pattern_validate(pat: &[u8]) -> Result<(), String> {
                     // "unbalanced pattern" when %b lacks the 2-char
                     // open/close argument suffix.
                     if i + 3 >= pat.len() {
-                        return Err(
-                            "user_script:1: unbalanced pattern".to_string(),
-                        );
+                        return Err(err("unbalanced pattern"));
                     }
                     i += 4;
                     continue;
@@ -7441,9 +7462,7 @@ fn lua_pattern_validate(pat: &[u8]) -> Result<(), String> {
                     j += 1;
                 }
                 if !closed {
-                    return Err(
-                        "user_script:1: malformed pattern (missing ']')".to_string(),
-                    );
+                    return Err(err("malformed pattern (missing ']')"));
                 }
                 i = j;
             }
@@ -7454,9 +7473,7 @@ fn lua_pattern_validate(pat: &[u8]) -> Result<(), String> {
             b')' => {
                 open_captures -= 1;
                 if open_captures < 0 {
-                    return Err(
-                        "user_script:1: invalid pattern capture".to_string(),
-                    );
+                    return Err(err("invalid pattern capture"));
                 }
                 i += 1;
             }
@@ -7464,7 +7481,7 @@ fn lua_pattern_validate(pat: &[u8]) -> Result<(), String> {
         }
     }
     if open_captures > 0 {
-        return Err("user_script:1: unfinished capture".to_string());
+        return Err(err("unfinished capture"));
     }
     Ok(())
 }
@@ -15035,6 +15052,76 @@ mod tests {
         assert!(
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
+        );
+    }
+
+    #[test]
+    fn lua_pattern_errors_pcall_shape_drops_prefix_uqnq6() {
+        // (frankenredis-uqnq6) Pattern-validation errors raised by
+        // string.find/match (and the eager validation in gmatch/gsub)
+        // must drop the user_script:1: prefix when the host C-builtin
+        // is invoked directly by pcall, matching luaL_error's
+        // luaL_where(L,1) behavior over a C pcall frame.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local ok,e=pcall(string.find,'abc','('); return tostring(e)",
+                "unfinished capture",
+            ),
+            (
+                b"local ok,e=pcall(string.find,'abc','['); return tostring(e)",
+                "malformed pattern (missing ']')",
+            ),
+            (
+                b"local ok,e=pcall(string.find,'abc','%'); return tostring(e)",
+                "malformed pattern (ends with '%')",
+            ),
+            (
+                b"local ok,e=pcall(string.match,'abc','('); return tostring(e)",
+                "unfinished capture",
+            ),
+            (
+                b"local ok,e=pcall(string.match,'abc','%'); return tostring(e)",
+                "malformed pattern (ends with '%')",
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Direct-call regression: prefix preserved.
+        let err = eval_script(b"return string.find('abc','(')", &[], &[], &mut store, 0)
+            .unwrap_err();
+        assert!(
+            err.contains("user_script:1: unfinished capture"),
+            "got {err:?}"
+        );
+
+        // Lua-wrapped pcall: prefix reappears (Lua frame above C frame).
+        let frame = eval_script(
+            b"local f=function() return string.find('abc','(') end; local ok,e=pcall(f); return tostring(e)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::BulkString(Some(bytes)) = frame else {
+            panic!("expected bulk")
+        };
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(
+            s.contains("user_script:1: unfinished capture"),
+            "lua-wrapped pcall got {s:?}"
         );
     }
 
