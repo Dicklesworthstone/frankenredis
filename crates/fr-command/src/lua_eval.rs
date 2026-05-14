@@ -3956,7 +3956,35 @@ impl<'a> LuaState<'a> {
                 }
             }
             "tostring" => {
+                // (frankenredis-2ddgn) Lua 5.1 lbaselib.c::luaB_tostring
+                // checks for a __tostring metamethod first (via
+                // luaL_callmeta) and returns its result if found —
+                // without coercing to string. Vendored does not enforce
+                // that the metamethod returns a string; tostring({})
+                // with __tostring=function() return 99 end yields the
+                // number 99. Non-callable handlers raise the standard
+                // "attempt to call a TYPE value" error via call_function.
                 let val = args.first().cloned().unwrap_or(LuaValue::Nil);
+                if let LuaValue::Table(t) = &val {
+                    let handler = {
+                        let inner = t.inner.borrow();
+                        inner
+                            .metatable
+                            .as_ref()
+                            .map(|mt| mt.get(&LuaValue::Str(b"__tostring".to_vec())))
+                            .unwrap_or(LuaValue::Nil)
+                    };
+                    if !matches!(handler, LuaValue::Nil) {
+                        let mut meta_args = vec![val.clone()];
+                        let results = self.call_function(
+                            &handler,
+                            &mut meta_args,
+                            env,
+                            &mut Vec::new(),
+                        )?;
+                        return Ok(vec![results.into_iter().next().unwrap_or(LuaValue::Nil)]);
+                    }
+                }
                 Ok(vec![LuaValue::Str(val.to_display_string())])
             }
             "type" => {
@@ -7285,6 +7313,52 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_tostring_dispatches_to_metamethod_for_tables() {
+        // Pins frankenredis-2ddgn (sub-bead of frankenredis-00gjf).
+        // Lua 5.1 lbaselib.c::luaB_tostring consults __tostring via
+        // luaL_callmeta BEFORE doing the default "table: 0x..." form.
+        // Non-string return values are passed through as-is — vendored
+        // does not coerce __tostring output to string. Lua 5.1's `#`
+        // operator does NOT call __len on tables (only userdata), so
+        // fr's existing length behaviour is left untouched.
+        let mut store = Store::new();
+
+        // Custom __tostring is used.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__tostring=function() return 'custom' end}); return tostring(t)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"custom".to_vec())));
+
+        // The table itself is passed as the single arg.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__tostring=function(self) return type(self) end}); return tostring(t)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"table".to_vec())));
+
+        // No __tostring → standard "table: 0x..." form (just check the
+        // prefix; the hash suffix is non-deterministic).
+        let frame = eval_script(
+            b"local t = {}; return tostring(t):sub(1, 7)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"table: ".to_vec())));
+
+        // Numbers / strings keep their existing tostring path.
+        let frame = eval_script(b"return tostring(42)", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"42".to_vec())));
+
+        // # on tables ignores __len (matches Lua 5.1; __len fires for
+        // userdata, which Redis 7.2 scripts can't create).
+        let frame = eval_script(
+            b"local t = setmetatable({1,2,3,4,5,6,7,8,9,10}, {__len=function() return 42 end}); return #t",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(10));
     }
 
     #[test]
