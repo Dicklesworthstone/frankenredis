@@ -6855,13 +6855,32 @@ impl<'a> LuaState<'a> {
             }
             // ── cjson library ───────────────────────────────────────────
             "cjson.encode" => {
+                // (frankenredis-u4mn6) Upstream lua_cjson.c::json_encode
+                // requires exactly 1 arg; fr was treating missing arg
+                // as nil and returning "null".
+                let inv = self.current_invocation_name.as_deref();
+                if args.is_empty() {
+                    return Err(lua_format_argerror(
+                        inv,
+                        "encode",
+                        1,
+                        "expected 1 argument",
+                    ));
+                }
                 let val = args.first().cloned().unwrap_or(LuaValue::Nil);
                 // (frankenredis-bum6y) Upstream cjson raises via luaL_error,
                 // which auto-prepends 'user_script:N: '. fr's wrap does not
                 // add it for non-runtime errors, so do it explicitly here
                 // to match vendored verbatim.
-                let json = lua_value_to_json(&val)
-                    .map_err(|e| format!("user_script:1: {e}"))?;
+                // (frankenredis-u4mn6) luaL_error wording: drop the
+                // user_script:1: prefix when invoked via pcall(C-builtin).
+                let json = lua_value_to_json(&val).map_err(|e| {
+                    if inv.is_some() {
+                        format!("user_script:1: {e}")
+                    } else {
+                        e
+                    }
+                })?;
                 Ok(vec![LuaValue::Str(json.into_bytes())])
             }
             "cjson.decode" => {
@@ -6869,9 +6888,15 @@ impl<'a> LuaState<'a> {
                 // calls luaL_argcheck(L, lua_gettop(L) == 1, 1, ...) and
                 // requires arg #1 to be a string. fr was permissively
                 // coercing nil to "" and returning nil silently.
+                // (frankenredis-u4mn6) Route bad-argument errors through
+                // lua_format_argerror for dual direct/pcall shape.
+                let inv = self.current_invocation_name.as_deref();
                 if args.is_empty() {
-                    return Err(format!(
-                        "user_script:1: bad argument #1 to 'decode' (expected 1 argument)"
+                    return Err(lua_format_argerror(
+                        inv,
+                        "decode",
+                        1,
+                        "expected 1 argument",
                     ));
                 }
                 let data = match args.first() {
@@ -6884,9 +6909,14 @@ impl<'a> LuaState<'a> {
                         }
                     }
                     other => {
-                        return Err(format!(
-                            "user_script:1: bad argument #1 to 'decode' (string expected, got {})",
-                            other.map(|v| v.type_name()).unwrap_or("no value"),
+                        return Err(lua_format_argerror(
+                            inv,
+                            "decode",
+                            1,
+                            &format!(
+                                "string expected, got {}",
+                                other.map(|v| v.type_name()).unwrap_or("no value")
+                            ),
                         ));
                     }
                 };
@@ -15118,6 +15148,85 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn cjson_encode_decode_arg_validation_and_pcall_shape_u4mn6() {
+        // (frankenredis-u4mn6) cjson.encode now requires exactly one
+        // argument (previously fr silently encoded nil → "null"). All
+        // four argerror sites (encode missing-arg + serialise fail,
+        // decode missing-arg + bad-type) honor the dual direct/pcall
+        // shape via lua_format_argerror.
+        let mut store = Store::new();
+
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local ok,e=pcall(cjson.encode); return tostring(e)",
+                "bad argument #1 to '?' (expected 1 argument)",
+            ),
+            (
+                b"local ok,e=pcall(cjson.encode,function() end); return tostring(e)",
+                "Cannot serialise function: type not supported",
+            ),
+            (
+                b"local ok,e=pcall(cjson.decode); return tostring(e)",
+                "bad argument #1 to '?' (expected 1 argument)",
+            ),
+            (
+                b"local ok,e=pcall(cjson.decode,nil); return tostring(e)",
+                "bad argument #1 to '?' (string expected, got nil)",
+            ),
+            (
+                b"local ok,e=pcall(cjson.decode,true); return tostring(e)",
+                "bad argument #1 to '?' (string expected, got boolean)",
+            ),
+            (
+                b"local ok,e=pcall(cjson.decode,{}); return tostring(e)",
+                "bad argument #1 to '?' (string expected, got table)",
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Direct-call regressions: named/prefixed shape preserved.
+        let err = eval_script(b"return cjson.encode()", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'encode' (expected 1 argument)"),
+            "got {err:?}"
+        );
+        let err = eval_script(
+            b"return cjson.encode(function() end)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("user_script:1: Cannot serialise function: type not supported"),
+            "got {err:?}"
+        );
+        let err = eval_script(b"return cjson.decode()", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'decode' (expected 1 argument)"),
+            "got {err:?}"
+        );
+
+        // Sanity: valid usage still works.
+        let frame = eval_script(b"return cjson.encode(1)", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"1".to_vec())));
+        let frame = eval_script(b"return cjson.decode('1')", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(1));
     }
 
     #[test]
