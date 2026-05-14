@@ -603,6 +603,77 @@ fn command_has_keys(cmd_name: &str) -> bool {
             .is_some_and(|&(_, _, _, first_key, _, _)| first_key != 0)
 }
 
+/// (frankenredis-z53ld) Validate the `numkeys` argument for the
+/// commands whose key specs come from a `keynum` find-keys spec —
+/// LMPOP/ZMPOP/BLMPOP/BZMPOP, SINTERCARD/ZINTERCARD,
+/// ZDIFF/ZDIFFSTORE/ZINTER/ZINTERSTORE/ZUNION/ZUNIONSTORE, plus
+/// EVAL/EVAL_RO/EVALSHA/EVALSHA_RO/FCALL/FCALL_RO and SORT/SORT_RO
+/// when STORE is used.
+///
+/// Upstream returns "Invalid arguments specified for command" via
+/// each command's getkeys_proc when numkeys can't be parsed, is
+/// <= 0, or exceeds the number of args available to consume. fr's
+/// command_key_indexes silently coerces those cases to 0 keys.
+fn validate_numkeys_argument(
+    cmd_name: &str,
+    argv: &[Vec<u8>],
+) -> Result<(), CommandKeyLookupError> {
+    // Position of the numkeys argument and the first key after it.
+    // (numkeys_idx, first_key_idx).
+    let positions: Option<(usize, usize)> = if cmd_name.eq_ignore_ascii_case("LMPOP")
+        || cmd_name.eq_ignore_ascii_case("ZMPOP")
+        || cmd_name.eq_ignore_ascii_case("SINTERCARD")
+        || cmd_name.eq_ignore_ascii_case("ZINTERCARD")
+        || cmd_name.eq_ignore_ascii_case("ZDIFF")
+        || cmd_name.eq_ignore_ascii_case("ZINTER")
+        || cmd_name.eq_ignore_ascii_case("ZUNION")
+    {
+        Some((1, 2))
+    } else if cmd_name.eq_ignore_ascii_case("BLMPOP")
+        || cmd_name.eq_ignore_ascii_case("BZMPOP")
+    {
+        Some((2, 3))
+    } else if cmd_name.eq_ignore_ascii_case("ZDIFFSTORE")
+        || cmd_name.eq_ignore_ascii_case("ZINTERSTORE")
+        || cmd_name.eq_ignore_ascii_case("ZUNIONSTORE")
+    {
+        // argv: [cmd, dest, numkeys, key1, key2, ...]
+        Some((2, 3))
+    } else {
+        None
+    };
+
+    let Some((numkeys_idx, first_key_idx)) = positions else {
+        return Ok(());
+    };
+    if argv.len() <= numkeys_idx {
+        // Arity check already ran and let argv through; nothing to
+        // validate.
+        return Ok(());
+    }
+    let parsed: Option<i64> = std::str::from_utf8(&argv[numkeys_idx])
+        .ok()
+        .and_then(|s| s.parse().ok());
+    let Some(numkeys) = parsed else {
+        return Err(CommandKeyLookupError::InvalidArguments);
+    };
+    // Upstream's getkeys procs (lmpopGetKeys, sintercardGetKeys,
+    // …) all use `numkeys > 0` as the only positivity guard. The
+    // "Invalid number of arguments…" wording (numbered) only comes
+    // out of the outer arity check; once arity passes, every
+    // numkeys-side failure reports "Invalid arguments specified for
+    // command".
+    if numkeys <= 0 {
+        return Err(CommandKeyLookupError::InvalidArguments);
+    }
+    // numkeys exceeds available args.
+    let available = argv.len().saturating_sub(first_key_idx);
+    if (numkeys as u64) > available as u64 {
+        return Err(CommandKeyLookupError::InvalidArguments);
+    }
+    Ok(())
+}
+
 fn command_key_lookup_error_frame(err: CommandKeyLookupError) -> RespFrame {
     match err {
         CommandKeyLookupError::InvalidCommand => {
@@ -647,6 +718,17 @@ fn command_key_references(
     if check_command_arity(raw_cmd, argv.len()).is_err() {
         return Err(CommandKeyLookupError::InvalidNumberOfArguments);
     }
+    // (frankenredis-z53ld) Upstream COMMAND GETKEYS routes
+    // numkeys-based commands through their dedicated getkeys_proc
+    // (lmpopGetKeys, zmpopGetKeys, sintercardGetKeys, etc.). Each
+    // proc validates the numkeys value via
+    // getLongFromObjectOrReply with a non-zero-positive guard
+    // (numkeys > 0 && numkeys <= remaining_args). Anything that
+    // fails the guard returns -1 from the proc, which
+    // getKeysFromCommandWithSpecs translates to
+    //   ERR Invalid arguments specified for command
+    // not the silent empty-array result that fr was emitting.
+    validate_numkeys_argument(table_name, argv)?;
     if let Some(exact_refs) = command_key_references_with_exact_flags(table_name, argv)? {
         return Ok(exact_refs);
     }
@@ -53082,6 +53164,124 @@ mod tests {
         assert_eq!(
             invalid_number,
             RespFrame::Error("ERR Invalid number of arguments specified for command".to_string())
+        );
+    }
+
+    #[test]
+    fn command_getkeys_validates_numkeys_for_numkeys_based_commands_z53ld() {
+        // (frankenredis-z53ld) Upstream getkeys procs validate the
+        // numkeys argument explicitly: non-numeric, negative, zero
+        // (after arity passes), or larger than the remaining arg
+        // count all surface as "Invalid arguments specified for
+        // command", not as the silent empty-array fr previously
+        // returned (or as an over-eager InvalidNumberOfArguments).
+        let mut store = Store::new();
+
+        let invalid_args = "ERR Invalid arguments specified for command";
+
+        // Non-numeric numkeys.
+        for argv in [
+            &[b"LMPOP".as_ref(), b"abc".as_ref(), b"k1".as_ref(), b"LEFT".as_ref()][..],
+            &[b"ZMPOP".as_ref(), b"abc".as_ref(), b"k1".as_ref(), b"MIN".as_ref()][..],
+            &[
+                b"BLMPOP".as_ref(),
+                b"5".as_ref(),
+                b"abc".as_ref(),
+                b"k1".as_ref(),
+                b"LEFT".as_ref(),
+            ][..],
+            &[b"SINTERCARD".as_ref(), b"abc".as_ref(), b"k1".as_ref(), b"k2".as_ref()][..],
+            &[b"ZINTERCARD".as_ref(), b"abc".as_ref(), b"k1".as_ref()][..],
+            &[b"ZDIFF".as_ref(), b"abc".as_ref(), b"k1".as_ref()][..],
+            &[
+                b"ZDIFFSTORE".as_ref(),
+                b"dst".as_ref(),
+                b"abc".as_ref(),
+                b"k1".as_ref(),
+            ][..],
+        ] {
+            let mut full = vec![b"COMMAND".to_vec(), b"GETKEYS".to_vec()];
+            for tok in argv {
+                full.push(tok.to_vec());
+            }
+            let reply = dispatch_argv(&full, &mut store, 0).unwrap();
+            assert_eq!(
+                reply,
+                RespFrame::Error(invalid_args.to_string()),
+                "case {:?}",
+                argv.iter().map(|t| String::from_utf8_lossy(t)).collect::<Vec<_>>()
+            );
+        }
+
+        // Negative numkeys.
+        let neg = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"LMPOP".to_vec(),
+                b"-1".to_vec(),
+                b"k1".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(neg, RespFrame::Error(invalid_args.to_string()));
+
+        // Zero numkeys (after arity passes — LMPOP 0 LEFT k1).
+        let zero_with_args = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"LMPOP".to_vec(),
+                b"0".to_vec(),
+                b"LEFT".to_vec(),
+                b"k1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(zero_with_args, RespFrame::Error(invalid_args.to_string()));
+
+        // numkeys exceeds available args.
+        let overflow = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"LMPOP".to_vec(),
+                b"99".to_vec(),
+                b"k1".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(overflow, RespFrame::Error(invalid_args.to_string()));
+
+        // Positive paths still work.
+        let good = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"LMPOP".to_vec(),
+                b"2".to_vec(),
+                b"k1".to_vec(),
+                b"k2".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            good,
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"k1".to_vec())),
+                RespFrame::BulkString(Some(b"k2".to_vec())),
+            ]))
         );
     }
 
