@@ -7817,20 +7817,34 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
                 return RespFrame::Map(Some(pairs));
             }
 
-            // {set = t}: emit the inner table's array part as an Array.
-            // RESP2 wire is the same as for any array; RESP3's `~` Set
-            // prefix isn't represented in fr's frame enum, so this is
-            // a RESP2-correct approximation under RESP3 too.
+            // {set = t}: emit the inner table's KEYS (not values) as
+            // an Array. Upstream src/script_lua.c::luaReplyToRedisReply
+            // iterates with lua_next, pops the value, and recurses on
+            // the key — so `{set={a=true, b=true}}` yields {"a","b"}
+            // and `{set={1,2,3}}` yields {1,2,3} (the integer indices
+            // of the positional table, not its values).
+            // (frankenredis-jp7gs continuation: set-keys, not values)
             let set_field = t.get(&LuaValue::Str(b"set".to_vec()));
             if let LuaValue::Table(inner) = set_field {
-                let items: Vec<RespFrame> = inner
-                    .inner
-                    .borrow()
-                    .array
-                    .iter()
-                    .filter(|v| !matches!(v, LuaValue::Nil))
-                    .map(lua_to_resp)
-                    .collect();
+                let mut items: Vec<RespFrame> = Vec::new();
+                let inner_borrow = inner.inner.borrow();
+                // Array part: positional keys 1..N, skipping holes
+                // (where the value is Nil — `lua_next` would skip
+                // them too because the slot is unset).
+                for (idx, value) in inner_borrow.array.iter().enumerate() {
+                    if matches!(value, LuaValue::Nil) {
+                        continue;
+                    }
+                    items.push(RespFrame::Integer(i64::try_from(idx + 1).unwrap_or(i64::MAX)));
+                }
+                // String hash keys.
+                for k in inner_borrow.string_hash.keys() {
+                    items.push(RespFrame::BulkString(Some(k.clone())));
+                }
+                // Other-hash keys (numeric non-array, boolean, …).
+                for (k, _) in &inner_borrow.other_hash {
+                    items.push(lua_to_resp(k));
+                }
                 return RespFrame::Array(Some(items));
             }
 
@@ -9074,6 +9088,80 @@ mod tests {
         Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
         json_to_lua_value, lua_raw_equal, lua_value_to_json,
     };
+
+    #[test]
+    fn eval_set_hint_emits_keys_not_values_e6ffo() {
+        // (frankenredis-e6ffo) Upstream src/script_lua.c::
+        // luaReplyToRedisReply iterates {set=t}'s inner table with
+        // lua_next, discards the value, and emits the key as the set
+        // member. fr previously iterated the array-part VALUES.
+        //
+        // Hash table → keys are strings.
+        let mut store = Store::new();
+        let frame =
+            eval_script(b"return {set={a=true, b=true}}", &[], &[], &mut store, 0).unwrap();
+        match frame {
+            RespFrame::Array(Some(items)) => {
+                assert_eq!(items.len(), 2);
+                let mut got: Vec<String> = items
+                    .iter()
+                    .filter_map(|f| match f {
+                        RespFrame::BulkString(Some(b)) => {
+                            Some(String::from_utf8_lossy(b).into_owned())
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                got.sort();
+                assert_eq!(got, vec!["a".to_string(), "b".to_string()]);
+            }
+            other => panic!("expected Array of 2 string keys, got {other:?}"),
+        }
+
+        // Positional table → keys are integer indices (1,2,3 — NOT
+        // the string values "a","b","c").
+        let mut store = Store::new();
+        let frame =
+            eval_script(b"return {set={\"a\",\"b\",\"c\"}}", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+                RespFrame::Integer(3),
+            ]))
+        );
+
+        // Mixed integer + string keys.
+        let mut store = Store::new();
+        let frame = eval_script(
+            b"return {set={[\"x\"]=true, [10]=true, [\"y\"]=true}}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match frame {
+            RespFrame::Array(Some(items)) => {
+                assert_eq!(items.len(), 3);
+                let has_x = items
+                    .iter()
+                    .any(|f| matches!(f, RespFrame::BulkString(Some(s)) if s == b"x"));
+                let has_y = items
+                    .iter()
+                    .any(|f| matches!(f, RespFrame::BulkString(Some(s)) if s == b"y"));
+                let has_10 = items.iter().any(|f| matches!(f, RespFrame::Integer(10)));
+                assert!(has_x && has_y && has_10, "items={items:?}");
+            }
+            other => panic!("expected Array of 3 keys, got {other:?}"),
+        }
+
+        // Empty set → empty array.
+        let mut store = Store::new();
+        let frame = eval_script(b"return {set={}}", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Array(Some(vec![])));
+    }
 
     #[test]
     fn eval_map_hint_flattens_to_array_for_resp2_jp7gs() {
