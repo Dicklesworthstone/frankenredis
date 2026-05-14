@@ -6677,13 +6677,23 @@ fn xread(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     if idx >= argv.len() || !eq_ascii_command(&argv[idx], b"STREAMS") {
         return Err(CommandError::SyntaxError);
     }
+    // (frankenredis-pnkd6) Upstream t_stream.c::xreadCommand only
+    // accepts the STREAMS keyword via `!strcasecmp(o,"STREAMS") &&
+    // moreargs` — when STREAMS is the last arg the keyword does not
+    // match and the parse loop's terminal `else` branch emits
+    // shared.syntaxerr. The 'Unbalanced ... list of streams' wording
+    // is reserved for odd-count tails (e.g. STREAMS k id1 id2 id3);
+    // an empty tail must surface as the generic syntax error.
+    if idx + 1 >= argv.len() {
+        return Err(CommandError::SyntaxError);
+    }
     idx += 1;
 
     let tail = argv.len().saturating_sub(idx);
     // Upstream t_stream.c::xreadCommand emits the dedicated
     // 'Unbalanced ... list of streams' error when the trailing
-    // STREAMS arg count is not even or is empty. (br-frankenredis-xreadbal)
-    if tail < 2 || !tail.is_multiple_of(2) {
+    // STREAMS arg count is odd. (br-frankenredis-xreadbal)
+    if !tail.is_multiple_of(2) {
         return Err(CommandError::Custom(
             "ERR Unbalanced 'xread' list of streams: for each stream key an ID or '$' must be specified.".to_string(),
         ));
@@ -6783,11 +6793,17 @@ fn xreadgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
     if idx >= argv.len() || !eq_ascii_command(&argv[idx], b"STREAMS") {
         return Err(CommandError::SyntaxError);
     }
+    // (frankenredis-pnkd6) Same `STREAMS && moreargs` short-circuit as
+    // upstream — empty tail must surface as generic syntax error, not
+    // the Unbalanced wording.
+    if idx + 1 >= argv.len() {
+        return Err(CommandError::SyntaxError);
+    }
     idx += 1;
 
     let tail = argv.len().saturating_sub(idx);
     // (br-frankenredis-xreadbal)
-    if tail < 2 || !tail.is_multiple_of(2) {
+    if !tail.is_multiple_of(2) {
         return Err(CommandError::Custom(
             // Upstream t_stream.c::xreadCommand uses '>' for the XREADGROUP
             // sentinel (vs '$' for plain XREAD); pin the matching wording.
@@ -30889,6 +30905,115 @@ mod tests {
             wrongtype,
             CommandError::Store(fr_store::StoreError::WrongType)
         ));
+    }
+
+    #[test]
+    fn xread_xreadgroup_streams_with_empty_tail_returns_syntax_error_pnkd6() {
+        // (frankenredis-pnkd6) Upstream t_stream.c::xreadCommand only
+        // matches the STREAMS keyword when at least one arg follows it
+        // (`!strcasecmp(o,"STREAMS") && moreargs`). When STREAMS is the
+        // last argument the keyword does not match and the parse loop
+        // emits shared.syntaxerr. The 'Unbalanced ...' wording is
+        // reserved for odd-count tails (e.g. STREAMS k id1 id2 id3).
+        let mut store = Store::new();
+        let cases: &[&[&[u8]]] = &[
+            &[b"XREAD", b"COUNT", b"5", b"STREAMS"],
+            &[b"XREAD", b"BLOCK", b"10", b"STREAMS"],
+            &[b"XREAD", b"BLOCK", b"10", b"COUNT", b"5", b"STREAMS"],
+        ];
+        for argv in cases {
+            let owned: Vec<Vec<u8>> = argv.iter().map(|a| a.to_vec()).collect();
+            let err = dispatch_argv(&owned, &mut store, 0).expect_err("expected syntax error");
+            assert!(
+                matches!(err, CommandError::SyntaxError),
+                "expected SyntaxError for {:?}, got {:?}",
+                argv,
+                err
+            );
+        }
+
+        let xreadgroup_cases: &[&[&[u8]]] = &[
+            &[
+                b"XREADGROUP",
+                b"GROUP",
+                b"g",
+                b"c",
+                b"COUNT",
+                b"5",
+                b"STREAMS",
+            ],
+            &[
+                b"XREADGROUP",
+                b"GROUP",
+                b"g",
+                b"c",
+                b"COUNT",
+                b"5",
+                b"NOACK",
+                b"STREAMS",
+            ],
+            &[
+                b"XREADGROUP",
+                b"GROUP",
+                b"g",
+                b"c",
+                b"BLOCK",
+                b"10",
+                b"STREAMS",
+            ],
+        ];
+        for argv in xreadgroup_cases {
+            let owned: Vec<Vec<u8>> = argv.iter().map(|a| a.to_vec()).collect();
+            let err = dispatch_argv(&owned, &mut store, 0).expect_err("expected syntax error");
+            assert!(
+                matches!(err, CommandError::SyntaxError),
+                "expected SyntaxError for {:?}, got {:?}",
+                argv,
+                err
+            );
+        }
+
+        // Odd-count tails still produce the 'Unbalanced' error, not syntax.
+        let unbalanced_xread = dispatch_argv(
+            &[
+                b"XREAD".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s1".to_vec(),
+                b"s2".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("expected unbalanced");
+        assert_eq!(
+            unbalanced_xread,
+            CommandError::Custom(
+                "ERR Unbalanced 'xread' list of streams: for each stream key an ID or '$' must be specified.".to_string()
+            )
+        );
+
+        let unbalanced_xreadgroup = dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g".to_vec(),
+                b"c".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s1".to_vec(),
+                b"s2".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("expected unbalanced");
+        assert_eq!(
+            unbalanced_xreadgroup,
+            CommandError::Custom(
+                "ERR Unbalanced 'xreadgroup' list of streams: for each stream key an ID or '>' must be specified.".to_string()
+            )
+        );
     }
 
     #[test]
