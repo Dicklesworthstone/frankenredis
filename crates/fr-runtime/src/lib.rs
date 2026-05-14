@@ -5222,17 +5222,27 @@ impl Runtime {
         };
         let elapsed_us = start.elapsed().as_micros() as u64;
         let dirty_after = self.server.store.dirty;
-        self.record_slowlog(&argv, elapsed_us, now_ms);
-        self.server.record_latency_sample(&argv, elapsed_us, now_ms);
-        // (frankenredis-infosections) Classify the eventual reply so the
-        // commandstats counters distinguish Success vs Failed without
-        // cloning the (potentially large) reply frame.
-        let failed = match &result {
-            Ok(RespFrame::Error(_)) | Err(_) => true,
-            Ok(_) => false,
-        };
-        self.server
-            .record_command_histogram_outcome(&argv, elapsed_us, failed);
+        // (frankenredis-rot3d) Upstream server.c::processCommand rejects
+        // unknown commands via commandCheckExistence BEFORE call() runs,
+        // so SLOWLOG / INFO commandstats / latency histograms never see
+        // them. fr was dispatching unknown commands through the normal
+        // pipeline, which polluted all three with synthetic
+        // cmdstat_<unknown> rows and SLOWLOG entries. Errorstats and
+        // total_error_replies are still updated via the rejection path.
+        let unknown_command = matches!(&result, Err(CommandError::UnknownCommand { .. }));
+        if !unknown_command {
+            self.record_slowlog(&argv, elapsed_us, now_ms);
+            self.server.record_latency_sample(&argv, elapsed_us, now_ms);
+            // (frankenredis-infosections) Classify the eventual reply so the
+            // commandstats counters distinguish Success vs Failed without
+            // cloning the (potentially large) reply frame.
+            let failed = match &result {
+                Ok(RespFrame::Error(_)) | Err(_) => true,
+                Ok(_) => false,
+            };
+            self.server
+                .record_command_histogram_outcome(&argv, elapsed_us, failed);
+        }
 
         if elapsed_us > (self.server.command_time_budget_ms * 1000) {
             self.record_threat_event(ThreatEventInput {
@@ -14382,6 +14392,81 @@ mod tests {
         };
         let all_body = String::from_utf8(bytes).expect("utf8 info");
         assert!(all_body.contains("# Commandstats"), "{all_body}");
+    }
+
+    /// (frankenredis-rot3d) Mirror upstream server.c::processCommand —
+    /// unknown commands are rejected via commandCheckExistence before
+    /// call() runs, so they never bump SLOWLOG, INFO commandstats, or
+    /// the latency histogram. Only errorstats / total_error_replies are
+    /// incremented via the rejection path.
+    #[test]
+    fn unknown_commands_do_not_populate_slowlog_or_commandstats_rot3d() {
+        let mut rt = Runtime::default_strict();
+
+        // Enable latency tracking and SLOWLOG with a low threshold so any
+        // command duration would normally land in slowlog.
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"latency-tracking", b"yes"]),
+            0,
+        );
+        rt.execute_frame(
+            command(&[b"CONFIG", b"SET", b"slowlog-log-slower-than", b"0"]),
+            0,
+        );
+        rt.execute_frame(command(&[b"SLOWLOG", b"RESET"]), 1);
+
+        // Dispatch a genuinely unknown command.
+        let reply = rt.execute_frame(
+            command(&[b"DEFINITELY_NOT_A_COMMAND", b"arg1", b"arg2"]),
+            2,
+        );
+        assert!(
+            matches!(reply, RespFrame::Error(ref s) if s.starts_with("ERR unknown command")),
+            "expected unknown-command error, got {reply:?}",
+        );
+
+        // INFO commandstats must NOT contain a row for the bogus name.
+        let info = rt.execute_frame(command(&[b"INFO", b"commandstats"]), 3);
+        let RespFrame::BulkString(Some(bytes)) = info else {
+            panic!("expected bulk info");
+        };
+        let body = String::from_utf8(bytes).unwrap();
+        assert!(
+            !body.contains("cmdstat_definitely_not_a_command"),
+            "unknown command leaked into commandstats:\n{body}",
+        );
+
+        // SLOWLOG must NOT list the bogus command. The most recent entry
+        // should still be the prior SLOWLOG RESET (or empty if RESET
+        // doesn't self-record).
+        let slowlog = rt.execute_frame(command(&[b"SLOWLOG", b"GET", b"10"]), 4);
+        let RespFrame::Array(Some(rows)) = slowlog else {
+            panic!("expected slowlog array");
+        };
+        for row in &rows {
+            let RespFrame::Array(Some(fields)) = row else { continue };
+            let argv_slot = &fields[3];
+            let RespFrame::Array(Some(argv_fields)) = argv_slot else { continue };
+            for arg in argv_fields {
+                let RespFrame::BulkString(Some(bytes)) = arg else { continue };
+                let s = String::from_utf8_lossy(bytes);
+                assert!(
+                    !s.eq_ignore_ascii_case("definitely_not_a_command"),
+                    "unknown command leaked into SLOWLOG: {s}",
+                );
+            }
+        }
+
+        // INFO errorstats must still bump errorstat_ERR for the rejection.
+        let errs = rt.execute_frame(command(&[b"INFO", b"errorstats"]), 5);
+        let RespFrame::BulkString(Some(bytes)) = errs else {
+            panic!("expected bulk errorstats");
+        };
+        let body = String::from_utf8(bytes).unwrap();
+        assert!(
+            body.lines().any(|l| l.starts_with("errorstat_ERR:")),
+            "errorstat_ERR should still be tracked for unknown commands:\n{body}"
+        );
     }
 
     /// (frankenredis-infosections) Mirror upstream server.c::call —
