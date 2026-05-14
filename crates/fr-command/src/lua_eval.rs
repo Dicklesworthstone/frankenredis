@@ -1991,7 +1991,9 @@ impl<'a> LuaState<'a> {
             "select",
             "rawget",
             "rawset",
-            "rawlen",
+            // (frankenredis-uyj7c) rawlen was added in Lua 5.2; vendored Redis
+            // ships Lua 5.1, so the global must not be exposed. The dispatch
+            // handler is kept for any internal callers but is not bound.
             "setmetatable",
             "getmetatable",
             "assert",
@@ -4258,22 +4260,34 @@ impl<'a> LuaState<'a> {
                 // back to the script.
                 let raw = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let level = lua_optional_integer_arg("error", 2, args.get(1), 1)?;
+                // (frankenredis-uyj7c) Upstream luaL_where(L, level) only
+                // prepends a source-location when the requested level is
+                // within the call stack. fr's EVAL runs at a single Lua
+                // level (the top-level script), so:
+                //   level == 1  → 'user_script:1: '
+                //   level == 0  → no prefix (caller wants raw error)
+                //   level >= 2  → no prefix (out of stack)
+                //   level < 0   → no prefix (invalid; matches vendored)
+                let prefix_with_location = level == 1;
                 match &raw {
                     LuaValue::Str(_) => {
                         let msg = String::from_utf8_lossy(&raw.to_display_string()).to_string();
-                        if level == 0 {
-                            Err(msg)
-                        } else {
+                        if prefix_with_location {
                             Err(format!("user_script:1: {msg}"))
+                        } else {
+                            Err(msg)
                         }
                     }
                     LuaValue::Number(_) if level > 0 => {
                         // Upstream's `lua_isstring`-on-number check causes
                         // Lua to concatenate the where-prefix with the
-                        // number, producing a plain string error. level=0
-                        // skips the prefix and preserves the number type.
+                        // number, producing a plain string error.
                         let msg = String::from_utf8_lossy(&raw.to_display_string()).to_string();
-                        Err(format!("user_script:1: {msg}"))
+                        if prefix_with_location {
+                            Err(format!("user_script:1: {msg}"))
+                        } else {
+                            Err(msg)
+                        }
                     }
                     _ => {
                         self.pending_error_value = Some(raw);
@@ -4312,19 +4326,29 @@ impl<'a> LuaState<'a> {
                 // inherits globals_locked, so the loaded function still
                 // hits the same nonexistent-global / readonly-table
                 // errors a top-level script would.
-                let source = args.first().cloned().unwrap_or(LuaValue::Nil);
+                let arg = args.first();
                 let chunkname = args.get(1).and_then(|v| match v {
                     LuaValue::Str(s) => Some(s.clone()),
                     _ => None,
                 });
-                let src_bytes: Vec<u8> = match &source {
-                    LuaValue::Str(s) => s.clone(),
-                    LuaValue::Number(n) => n.to_string().into_bytes(),
-                    _ => {
+                // (frankenredis-uyj7c) Upstream luaB_loadstring uses
+                // luaL_checklstring(L,1,&l) which raises with the user_script:1
+                // prefix and the standard "string expected, got <type|no value>"
+                // wording for missing/wrong-type arg #1.
+                let src_bytes: Vec<u8> = match arg {
+                    Some(LuaValue::Str(s)) => s.clone(),
+                    Some(LuaValue::Number(n)) => n.to_string().into_bytes(),
+                    Some(other) => {
                         return Err(format!(
-                            "bad argument #1 to 'loadstring' (string expected, got {})",
-                            source.type_name()
+                            "user_script:1: bad argument #1 to 'loadstring' (string expected, got {})",
+                            other.type_name()
                         ));
+                    }
+                    None => {
+                        return Err(
+                            "user_script:1: bad argument #1 to 'loadstring' (string expected, got no value)"
+                                .to_string(),
+                        );
                     }
                 };
                 let chunk_label = format_lua_chunk_label(chunkname.as_deref(), &src_bytes);
@@ -4743,20 +4767,41 @@ impl<'a> LuaState<'a> {
                 Ok(vec![table.get(&key)])
             }
             "rawset" => {
-                // rawset(table, key, value) — set and return table
+                // (frankenredis-uyj7c) Upstream luaB_rawset uses
+                // luaL_checktype(L,1,LUA_TTABLE) then luaL_checkany(L,2)
+                // then luaL_checkany(L,3) — all three are required, with
+                // 'value expected' wording for the trailing args.
                 if !matches!(args.first(), Some(LuaValue::Table(_))) {
-                    let v = args.first().cloned().unwrap_or(LuaValue::Nil);
-                    return Err(lua_bad_table_arg("rawset", 1, &v));
+                    return Err(format!(
+                        "user_script:1: bad argument #1 to 'rawset' (table expected, got {})",
+                        lua_arg_got_label(args.first())
+                    ));
                 }
-                if args.len() >= 3 {
-                    let key = args[1].clone();
-                    let val = args[2].clone();
-                    if let LuaValue::Table(ref mut t) = args[0] {
-                        t.set(key, val);
-                    }
+                if args.get(1).is_none() {
+                    return Err(
+                        "user_script:1: bad argument #2 to 'rawset' (value expected)".to_string(),
+                    );
                 }
-                // Return the mutated table — clone from args[0] which has the mutation.
-                // (args[0] must remain intact for the write-back at the call site.)
+                if args.get(2).is_none() {
+                    return Err(
+                        "user_script:1: bad argument #3 to 'rawset' (value expected)".to_string(),
+                    );
+                }
+                // (frankenredis-uyj7c) Upstream lua_rawset routes a nil key
+                // through luaH_set which raises 'table index is nil' (no
+                // user_script:1 prefix — this comes from the VM core rather
+                // than the library wrapper).
+                if matches!(&args[1], LuaValue::Nil) {
+                    return Err("table index is nil".to_string());
+                }
+                if matches!(&args[1], LuaValue::Number(n) if n.is_nan()) {
+                    return Err("table index is NaN".to_string());
+                }
+                let key = args[1].clone();
+                let val = args[2].clone();
+                if let LuaValue::Table(ref mut t) = args[0] {
+                    t.set(key, val);
+                }
                 Ok(vec![args[0].clone()])
             }
             "setmetatable" => {
@@ -5692,8 +5737,21 @@ impl<'a> LuaState<'a> {
             }
             // ── plain top-level globals (frankenredis-vgnsc) ──────────
             "rawequal" => {
-                let a = args.first().unwrap_or(&LuaValue::Nil);
-                let b = args.get(1).unwrap_or(&LuaValue::Nil);
+                // (frankenredis-uyj7c) Upstream luaB_rawequal uses
+                // luaL_checkany on both args — missing/explicit-nil call
+                // raises 'bad argument #N to rawequal (value expected)'.
+                if args.first().is_none() {
+                    return Err(
+                        "user_script:1: bad argument #1 to 'rawequal' (value expected)".to_string(),
+                    );
+                }
+                if args.get(1).is_none() {
+                    return Err(
+                        "user_script:1: bad argument #2 to 'rawequal' (value expected)".to_string(),
+                    );
+                }
+                let a = &args[0];
+                let b = &args[1];
                 // rawequal: identity / value equality with no metamethod
                 // dispatch. fr's LuaValue Eq derives the right semantics
                 // for primitive kinds; tables compare by Rc pointer
@@ -5716,14 +5774,30 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Number(32.0)])
             }
             "collectgarbage" => {
-                // Accept the standard option strings. fr has no real GC
-                // so control variants ('collect', 'stop', 'restart',
-                // 'step', 'setpause', 'setstepmul') are no-ops returning
-                // 0; 'count' returns a stable placeholder of kbytes used.
+                // (frankenredis-uyj7c) Upstream luaB_collectgarbage accepts
+                // a documented option set; anything else triggers
+                // luaL_argerror with 'invalid option <name>'. fr previously
+                // returned 0 for any unknown option.
                 let opt = match args.first() {
                     Some(LuaValue::Str(s)) => String::from_utf8_lossy(s).to_string(),
-                    _ => "collect".to_string(),
+                    Some(LuaValue::Number(n)) => format!("{n}"),
+                    Some(LuaValue::Nil) | None => "collect".to_string(),
+                    Some(other) => {
+                        return Err(format!(
+                            "user_script:1: bad argument #1 to 'collectgarbage' (string expected, got {})",
+                            other.type_name()
+                        ));
+                    }
                 };
+                let known = matches!(
+                    opt.as_str(),
+                    "collect" | "stop" | "restart" | "step" | "setpause" | "setstepmul" | "count"
+                );
+                if !known {
+                    return Err(format!(
+                        "user_script:1: bad argument #1 to 'collectgarbage' (invalid option '{opt}')"
+                    ));
+                }
                 let n = if opt == "count" { 32.0 } else { 0.0 };
                 Ok(vec![LuaValue::Number(n)])
             }
@@ -10816,6 +10890,106 @@ mod tests {
         )
         .expect("pos 0");
         assert_eq!(r, RespFrame::BulkString(Some(b"x".to_vec())));
+    }
+
+    #[test]
+    fn lua_base_lib_parity_uyj7c() {
+        // (frankenredis-uyj7c) Pin error wording / arg validation for the
+        // base-library divergences uncovered after the lua_stdlib audit.
+        let mut store = Store::new();
+
+        // 1. rawlen must NOT be a global (Lua 5.1, no rawlen).
+        let err = eval_script(b"return rawlen('abc')", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err.contains("nonexistent global variable 'rawlen'"),
+            "rawlen err: {err}"
+        );
+
+        // 2-4. rawset arg checks.
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"return rawset()",
+                "user_script:1: bad argument #1 to 'rawset' (table expected, got no value)",
+            ),
+            (
+                b"return rawset({}, 1)",
+                "user_script:1: bad argument #3 to 'rawset' (value expected)",
+            ),
+            (b"return rawset({}, nil, 1)", "table index is nil"),
+            // 5. rawequal arg checks.
+            (
+                b"return rawequal()",
+                "user_script:1: bad argument #1 to 'rawequal' (value expected)",
+            ),
+            (
+                b"return rawequal(1)",
+                "user_script:1: bad argument #2 to 'rawequal' (value expected)",
+            ),
+            // 6. loadstring no-arg and nil-arg wording.
+            (
+                b"return loadstring()",
+                "user_script:1: bad argument #1 to 'loadstring' (string expected, got no value)",
+            ),
+            (
+                b"return loadstring(nil)",
+                "user_script:1: bad argument #1 to 'loadstring' (string expected, got nil)",
+            ),
+            // 7. collectgarbage invalid option.
+            (
+                b"return collectgarbage('unknown')",
+                "user_script:1: bad argument #1 to 'collectgarbage' (invalid option 'unknown')",
+            ),
+        ];
+        for (script, expected) in cases {
+            let err = eval_script(script, &[], &[], &mut store, 0).unwrap_err();
+            assert_eq!(
+                err,
+                *expected,
+                "script {:?}",
+                std::str::from_utf8(script).unwrap()
+            );
+        }
+
+        // 8. error() level semantics. Only level==1 prepends the source
+        // location; level==0 and level>=2 and level<0 don't.
+        for (script, expected) in &[
+            (b"error('x', 0)".as_slice(), "x"),
+            (b"error('x', 1)", "user_script:1: x"),
+            (b"error('x', 2)", "x"),
+            (b"error('x', 5)", "x"),
+            (b"error('x', -1)", "x"),
+            (b"error('x')", "user_script:1: x"), // default level=1
+        ] {
+            let err = eval_script(script, &[], &[], &mut store, 0).unwrap_err();
+            assert_eq!(
+                err,
+                *expected,
+                "script {:?}",
+                std::str::from_utf8(script).unwrap()
+            );
+        }
+
+        // 9. Happy paths still work.
+        let r = eval_script(b"return rawequal(1, 1)", &[], &[], &mut store, 0).expect("rawequal ok");
+        assert_eq!(r, RespFrame::Integer(1));
+        let r = eval_script(
+            b"local t={}; rawset(t, 'k', 42); return t.k",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("rawset ok");
+        assert_eq!(r, RespFrame::Integer(42));
+        let r = eval_script(
+            b"return collectgarbage('count')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("count");
+        assert_eq!(r, RespFrame::Integer(32));
     }
 
     #[test]
