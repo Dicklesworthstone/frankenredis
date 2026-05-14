@@ -6014,6 +6014,13 @@ impl<'a> LuaState<'a> {
                 // string.format() with no args panicked on the args[1..]
                 // slice and killed the server. Validate arg #1 explicitly,
                 // matching upstream luaL_checkstring wording.
+                //
+                // (frankenredis-fllxr) Route through current_invocation_name
+                // so `pcall(string.format, …)` emits the anonymous-C-function
+                // shape (`bad argument #N to '?' (…)`, no `user_script:1:`
+                // prefix) while direct/lua-wrapped calls keep the named
+                // `user_script:1: bad argument #N to 'format' (…)` shape.
+                let inv = self.current_invocation_name.as_deref();
                 let fmt_bytes = match args.first() {
                     Some(LuaValue::Str(b)) => b.clone(),
                     Some(LuaValue::Number(n)) => {
@@ -6024,21 +6031,25 @@ impl<'a> LuaState<'a> {
                         }
                     }
                     Some(other) => {
-                        return Err(format!(
-                            "user_script:1: bad argument #1 to 'format' (string expected, got {})",
-                            other.type_name()
+                        return Err(lua_format_argerror(
+                            inv,
+                            "format",
+                            1,
+                            &format!("string expected, got {}", other.type_name()),
                         ));
                     }
                     None => {
-                        return Err(
-                            "user_script:1: bad argument #1 to 'format' (string expected, got no value)"
-                                .to_string(),
-                        );
+                        return Err(lua_format_argerror(
+                            inv,
+                            "format",
+                            1,
+                            "string expected, got no value",
+                        ));
                     }
                 };
                 let fmt_str = String::from_utf8_lossy(&fmt_bytes).to_string();
                 let rest: &[LuaValue] = if args.is_empty() { &[] } else { &args[1..] };
-                let result = lua_string_format(&fmt_str, rest)?;
+                let result = lua_string_format(inv, &fmt_str, rest)?;
                 Ok(vec![LuaValue::Str(result.into_bytes())])
             }
             "string.find" => {
@@ -8086,7 +8097,24 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
 
 // ── string.format implementation ────────────────────────────────────────
 
-fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
+fn lua_string_format(
+    inv_name: Option<&str>,
+    fmt: &str,
+    args: &[LuaValue],
+) -> Result<String, String> {
+    // (frankenredis-fllxr) When inv_name is Some, render the named/
+    // prefixed shape (direct or Lua-wrapped call). When None, render
+    // the anonymous/unprefixed shape (pcall directly invoking the
+    // C-builtin). luaL_argerror calls go through lua_format_argerror
+    // which already handles the dual shape; luaL_error calls (the
+    // "invalid option" branch) preserve the 'format' name in both
+    // shapes but drop the source:line prefix when invoked via pcall.
+    let invalid_option = |conv: char| -> String {
+        match inv_name {
+            Some(_) => format!("user_script:1: invalid option '%{conv}' to 'format'"),
+            None => format!("invalid option '%{conv}' to 'format'"),
+        }
+    };
     let mut result = String::new();
     let mut arg_idx = 0;
     let mut chars = fmt.chars().peekable();
@@ -8100,9 +8128,11 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
             // "bad argument #N to 'format' (no value)". fr previously
             // emitted the literal `%` silently.
             if chars.peek().is_none() {
-                return Err(format!(
-                    "user_script:1: bad argument #{} to 'format' (no value)",
-                    arg_idx + 2
+                return Err(lua_format_argerror(
+                    inv_name,
+                    "format",
+                    arg_idx + 2,
+                    "no value",
                 ));
             }
             if let Some(&next) = chars.peek() {
@@ -8167,9 +8197,11 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             // caller's perspective, where the format string
                             // is arg #1. arg_idx is 0-based into args[1..],
                             // so the missing value is Lua arg #(arg_idx + 2).
-                            return Err(format!(
-                                "user_script:1: bad argument #{} to 'format' (no value)",
-                                arg_idx + 2
+                            return Err(lua_format_argerror(
+                                inv_name,
+                                "format",
+                                arg_idx + 2,
+                                "no value",
                             ));
                         }
                     };
@@ -8181,10 +8213,11 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                         if let Some(n) = v.to_number() {
                             Ok(n)
                         } else {
-                            Err(format!(
-                                "user_script:1: bad argument #{} to 'format' (number expected, got {})",
+                            Err(lua_format_argerror(
+                                inv_name,
+                                "format",
                                 arg_idx + 1,
-                                v.type_name()
+                                &format!("number expected, got {}", v.type_name()),
                             ))
                         }
                     };
@@ -8346,10 +8379,13 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                                     // (frankenredis-5rnrx) Prepend the standard Lua error
                                     // location prefix; matches luaL_argerror in upstream
                                     // which wraps with "<source>:<line>: " automatically.
-                                    return Err(format!(
-                                        "user_script:1: bad argument #{} to 'format' (string expected, got {})",
+                                    // (frankenredis-fllxr) Route through lua_format_argerror
+                                    // for the dual direct/pcall shape.
+                                    return Err(lua_format_argerror(
+                                        inv_name,
+                                        "format",
                                         arg_idx + 1,
-                                        arg.type_name()
+                                        &format!("string expected, got {}", arg.type_name()),
                                     ));
                                 }
                             };
@@ -8383,10 +8419,11 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                                     }
                                 }
                                 _ => {
-                                    return Err(format!(
-                                        "user_script:1: bad argument #{} to 'format' (string expected, got {})",
+                                    return Err(lua_format_argerror(
+                                        inv_name,
+                                        "format",
                                         arg_idx + 1,
-                                        arg.type_name()
+                                        &format!("string expected, got {}", arg.type_name()),
                                     ));
                                 }
                             };
@@ -8488,9 +8525,10 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             // (frankenredis-be7o1) Upstream lstrlib.c:str_format
                             // rejects unknown conversion specifiers via luaL_error
                             // with the verbatim wording below.
-                            return Err(format!(
-                                "user_script:1: invalid option '%{conv}' to 'format'"
-                            ));
+                            // (frankenredis-fllxr) luaL_error preserves the
+                            // 'format' name in both shapes but drops the
+                            // user_script:1: prefix when invoked via pcall.
+                            return Err(invalid_option(conv));
                         }
                     };
                     result.push_str(&formatted);
@@ -14951,6 +14989,114 @@ mod tests {
         assert!(
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
+        );
+    }
+
+    #[test]
+    fn string_format_pcall_shape_drops_prefix_and_uses_anonymous_name_fllxr() {
+        // (frankenredis-fllxr) Upstream's luaL_argerror uses lua_getinfo
+        // "n.name" which returns NULL for C-functions invoked directly
+        // by pcall (no Lua-side caller frame above), yielding `'?'` as
+        // the function name and dropping the source:line prefix. The
+        // luaL_error path (invalid option) keeps the 'format' name but
+        // still drops the prefix because luaL_where(L,1) over a C
+        // pcall frame returns an empty string.
+        let mut store = Store::new();
+
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local ok,e=pcall(string.format,'%d','hi'); return tostring(e)",
+                "bad argument #2 to '?' (number expected, got string)",
+            ),
+            (
+                b"local ok,e=pcall(string.format,'%q',nil); return tostring(e)",
+                "bad argument #2 to '?' (string expected, got nil)",
+            ),
+            (
+                b"local ok,e=pcall(string.format,'%s'); return tostring(e)",
+                "bad argument #2 to '?' (no value)",
+            ),
+            (
+                b"local ok,e=pcall(string.format,'%d'); return tostring(e)",
+                "bad argument #2 to '?' (no value)",
+            ),
+            (
+                b"local ok,e=pcall(string.format,nil); return tostring(e)",
+                "bad argument #1 to '?' (string expected, got nil)",
+            ),
+            (
+                b"local ok,e=pcall(string.format,true); return tostring(e)",
+                "bad argument #1 to '?' (string expected, got boolean)",
+            ),
+            (
+                b"local ok,e=pcall(string.format,{}); return tostring(e)",
+                "bad argument #1 to '?' (string expected, got table)",
+            ),
+            (
+                b"local ok,e=pcall(string.format); return tostring(e)",
+                "bad argument #1 to '?' (string expected, got no value)",
+            ),
+            (
+                b"local ok,e=pcall(string.format,'%'); return tostring(e)",
+                "bad argument #2 to '?' (no value)",
+            ),
+            (
+                b"local ok,e=pcall(string.format,'%K',5); return tostring(e)",
+                "invalid option '%K' to 'format'",
+            ),
+        ];
+
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Regression: direct calls (named-shape) still match the
+        // user_script:1: bad argument #N to 'format' (...) wording.
+        let err = eval_script(
+            b"return string.format('%d','hi')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("user_script:1: bad argument #2 to 'format' (number expected, got string)"),
+            "direct call got {err:?}"
+        );
+        let err = eval_script(b"return string.format('%K',5)", &[], &[], &mut store, 0)
+            .unwrap_err();
+        assert!(
+            err.contains("user_script:1: invalid option '%K' to 'format'"),
+            "direct call got {err:?}"
+        );
+
+        // Lua-wrapped pcall: function wraps the call, so the C-builtin
+        // is one frame deep — the prefix should reappear.
+        let frame = eval_script(
+            b"local f=function() return string.format('%d','hi') end; local ok,e=pcall(f); return tostring(e)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::BulkString(Some(bytes)) = frame else {
+            panic!("expected bulk")
+        };
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(
+            s.contains("user_script:1: bad argument #2 to 'format' (number expected, got string)"),
+            "lua-wrapped pcall got {s:?}"
         );
     }
 
