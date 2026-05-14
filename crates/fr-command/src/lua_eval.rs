@@ -4402,11 +4402,10 @@ impl<'a> LuaState<'a> {
             "tonumber" => {
                 // (frankenredis-3osi6) Upstream lbaselib.c:luaB_tonumber treats
                 // the value as a luaL_checkany — explicit absence raises.
+                // (frankenredis-i18ug) Funnel through format_builtin_argerror
+                // so the prefix/name match indirect-pcall semantics.
                 if args.is_empty() {
-                    return Err(
-                        "user_script:1: bad argument #1 to 'tonumber' (value expected)"
-                            .to_string(),
-                    );
+                    return Err(self.format_builtin_argerror("tonumber", 1, "value expected"));
                 }
                 let val = args.first().cloned().unwrap_or(LuaValue::Nil);
                 // (frankenredis-5qv1n) Upstream: explicit nil base behaves
@@ -4419,25 +4418,28 @@ impl<'a> LuaState<'a> {
                     Some(LuaValue::Nil) | None => None,
                     Some(base_value) => {
                         let Some(base_f) = base_value.to_number() else {
-                            return Err(
-                                "user_script:1: bad argument #2 to 'tonumber' (base out of range)"
-                                    .to_string()
-                            );
+                            return Err(self.format_builtin_argerror(
+                                "tonumber",
+                                2,
+                                "base out of range",
+                            ));
                         };
                         if !base_f.is_finite() {
-                            return Err(
-                                "user_script:1: bad argument #2 to 'tonumber' (base out of range)"
-                                    .to_string()
-                            );
+                            return Err(self.format_builtin_argerror(
+                                "tonumber",
+                                2,
+                                "base out of range",
+                            ));
                         }
                         // luaL_checkint truncates floats — 10.5 -> 10,
                         // -1.9 -> -1. Match that here before bounds-checking.
                         let base = base_f as i64;
                         if !(2..=36).contains(&base) {
-                            return Err(
-                                "user_script:1: bad argument #2 to 'tonumber' (base out of range)"
-                                    .to_string()
-                            );
+                            return Err(self.format_builtin_argerror(
+                                "tonumber",
+                                2,
+                                "base out of range",
+                            ));
                         }
                         Some(base as u32)
                     }
@@ -4619,15 +4621,20 @@ impl<'a> LuaState<'a> {
                     Ok(args.to_vec())
                 } else {
                     // (frankenredis-l4k9y) Upstream luaL_error prepends
-                    // "user_script:1: " (the source-location prefix) to
-                    // the assert message. fr previously emitted the bare
-                    // message, so a downstream pcall(...) on the failed
-                    // assert lacked the prefix vendored callers rely on.
+                    // the where(1) source-location, which is empty when
+                    // assert was invoked indirectly via pcall (C frame)
+                    // and "user_script:1: " when invoked from a Lua
+                    // function or directly from the chunk top.
+                    // (frankenredis-i18ug) current_invocation_name carries
+                    // that distinction.
                     let msg = args
                         .get(1)
                         .map(|a| String::from_utf8_lossy(&a.to_display_string()).to_string())
                         .unwrap_or_else(|| "assertion failed!".to_string());
-                    Err(format!("user_script:1: {msg}"))
+                    Err(match &self.current_invocation_name {
+                        Some(_) => format!("user_script:1: {msg}"),
+                        None => msg,
+                    })
                 }
             }
             "loadstring" => {
@@ -5026,16 +5033,23 @@ impl<'a> LuaState<'a> {
                 // invoked via pcall — fr always emits 'select' since
                 // call-site name plumbing is filed separately (see
                 // frankenredis-md71j-style follow-up).
-                let idx = args.first().cloned().unwrap_or(LuaValue::Nil);
+                let idx_opt = args.first();
                 let rest = args.get(1..).unwrap_or(&[]);
+                let idx = idx_opt.cloned().unwrap_or(LuaValue::Nil);
                 match &idx {
                     LuaValue::Str(s) if s == b"#" => Ok(vec![LuaValue::Number(rest.len() as f64)]),
                     _ => {
                         let raw_index = idx.to_number().ok_or_else(|| {
+                            // (frankenredis-i18ug follow-up) Use the
+                            // got-label helper so missing args report
+                            // "got no value" rather than "got nil".
                             self.format_builtin_argerror(
                                 "select",
                                 1,
-                                &format!("number expected, got {}", idx.type_name()),
+                                &format!(
+                                    "number expected, got {}",
+                                    lua_arg_got_label(idx_opt),
+                                ),
                             )
                         })?;
                         let arg_count = rest.len() as i64;
@@ -12523,6 +12537,50 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_assert_tonumber_select_indirect_pcall_j438k() {
+        // (frankenredis-j438k) Three builtins were missed by the broader
+        // i18ug refactor — assert raised via hand-rolled luaL_error
+        // string with unconditional prefix, tonumber hand-rolled its
+        // luaL_argerror messages, and select used type_name() instead of
+        // lua_arg_got_label() for its missing-arg case. Probed against
+        // vendored Redis 7.2.4 on :16380.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            // assert via pcall: no prefix.
+            (b"local ok,e=pcall(assert, false); return tostring(e)",
+             "assertion failed!"),
+            (b"local ok,e=pcall(assert, false, 'msg'); return tostring(e)",
+             "msg"),
+            (b"local ok,e=pcall(assert, nil); return tostring(e)",
+             "assertion failed!"),
+            (b"local ok,e=pcall(assert, nil, 'x'); return tostring(e)",
+             "x"),
+            // assert called from inside a Lua function: prefix added.
+            (b"local ok,e=pcall(function() assert(false) end); return tostring(e)",
+             "user_script:1: assertion failed!"),
+            // tonumber via pcall: '?' name, no prefix.
+            (b"local ok,e=pcall(tonumber); return tostring(e)",
+             "bad argument #1 to '?' (value expected)"),
+            // tonumber direct: 'tonumber' name with prefix.
+            (b"local ok,e=pcall(function() return tonumber() end); return tostring(e)",
+             "user_script:1: bad argument #1 to 'tonumber' (value expected)"),
+            // select with no args reports 'got no value' not 'got nil'.
+            (b"local ok,e=pcall(function() return select() end); return tostring(e)",
+             "user_script:1: bad argument #1 to 'select' (number expected, got no value)"),
+        ];
+        for (body, expected) in cases {
+            let r = eval_script(body, &[], &[], &mut store, 0)
+                .unwrap_or_else(|e| panic!("eval {:?} failed: {e}", String::from_utf8_lossy(body)));
+            assert_eq!(
+                r,
+                RespFrame::BulkString(Some(expected.as_bytes().to_vec())),
+                "wrong output for {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
     }
 
     #[test]
