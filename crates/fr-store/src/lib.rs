@@ -2448,14 +2448,26 @@ impl Store {
         if entry.force_set_hashtable_encoding {
             return;
         }
-        if !Self::set_fits_listpack(set, max_listpack_entries) {
-            entry.force_set_hashtable_encoding = true;
-            entry.force_set_listpack_encoding = false;
-        } else if entry.force_set_listpack_encoding
-            || !Self::set_fits_intset(set, max_intset_entries)
-        {
-            entry.force_set_listpack_encoding = true;
+        // (frankenredis-7vogx) Upstream t_set.c keeps intset until
+        // either a non-integer member arrives or the cardinality
+        // crosses set-max-intset-entries (default 512), regardless
+        // of set-max-listpack-entries (default 128). Only when
+        // intset stops fitting do we consider listpack vs
+        // hashtable. fr previously short-circuited to hashtable as
+        // soon as listpack didn't fit, ignoring the still-valid
+        // intset path.
+        if Self::set_fits_intset(set, max_intset_entries) {
+            // intset still fits — no promotion flag needed (and a
+            // prior listpack flag stays in place to remember the
+            // listpack promotion if any).
+            return;
         }
+        if Self::set_fits_listpack(set, max_listpack_entries) {
+            entry.force_set_listpack_encoding = true;
+            return;
+        }
+        entry.force_set_hashtable_encoding = true;
+        entry.force_set_listpack_encoding = false;
     }
 
     fn set_entry(&self, set: BTreeSet<Vec<u8>>, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
@@ -15707,6 +15719,54 @@ mod tests {
         let mut store = Store::new();
         store.sadd(b"t", &[b"1".to_vec()], 0).expect("sadd");
         assert_eq!(store.object_encoding(b"t", 0), Some("intset"));
+    }
+
+    #[test]
+    fn set_intset_stays_intset_past_listpack_cap_7vogx() {
+        // (frankenredis-7vogx) Upstream t_set.c keeps the intset
+        // encoding until either a non-integer member arrives or the
+        // cardinality crosses set-max-intset-entries (default 512).
+        // The listpack cap (default 128) only matters once intset
+        // is no longer applicable. fr was promoting to hashtable as
+        // soon as set.len() > set-max-listpack-entries, even when
+        // every member was still an integer.
+        let mut store = Store::new();
+
+        // 127 integers — well within intset.
+        let members: Vec<Vec<u8>> = (0..127).map(|i| i.to_string().into_bytes()).collect();
+        store.sadd(b"s", &members, 0).expect("sadd 127");
+        assert_eq!(store.object_encoding(b"s", 0), Some("intset"));
+
+        // 129 integers — past the listpack cap (128) but well
+        // under set-max-intset-entries (512). Should stay intset.
+        store
+            .sadd(
+                b"s",
+                &[b"127".to_vec(), b"128".to_vec(), b"129".to_vec()],
+                0,
+            )
+            .expect("sadd 129");
+        assert_eq!(store.object_encoding(b"s", 0), Some("intset"));
+
+        // Crossing 512 integers triggers the intset→listpack/
+        // hashtable transition. With 513 integers and the default
+        // 128-entry listpack cap, the next stop is hashtable.
+        let bulk: Vec<Vec<u8>> = (130..=513).map(|i| i.to_string().into_bytes()).collect();
+        store.sadd(b"s", &bulk, 0).expect("sadd 513");
+        assert_eq!(store.object_encoding(b"s", 0), Some("hashtable"));
+
+        // A small, all-integer set with one short non-integer
+        // member still promotes to listpack (not hashtable) — both
+        // values are short.
+        let mut store2 = Store::new();
+        store2
+            .sadd(
+                b"t",
+                &[b"1".to_vec(), b"2".to_vec(), b"3".to_vec(), b"alpha".to_vec()],
+                0,
+            )
+            .expect("sadd mixed");
+        assert_eq!(store2.object_encoding(b"t", 0), Some("listpack"));
     }
 
     #[test]
