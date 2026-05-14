@@ -6374,73 +6374,94 @@ impl<'a> LuaState<'a> {
             // negative numbers (matching upstream's "all returns are
             // signed 32-bit Lua numbers" rule).
             "bit.band" => {
-                let r = args.iter().try_fold(0xFFFF_FFFFu32, |acc, a| {
-                    lua_value_to_u32(a).map(|v| acc & v)
-                })?;
-                Ok(vec![LuaValue::Number(r as i32 as f64)])
+                // (frankenredis-d3ovh) Upstream LuaJIT bit.band requires
+                // at least one numeric arg; calling with zero args raises
+                // "bad argument #1 to 'band' (number expected, got no
+                // value)". fr previously silently returned 0xFFFFFFFF.
+                let inv = self.current_invocation_name.as_deref();
+                if args.is_empty() {
+                    return Err(lua_value_to_u32_for_bitop(inv, 1, "band", None).unwrap_err());
+                }
+                let mut acc = 0xFFFF_FFFFu32;
+                for (i, a) in args.iter().enumerate() {
+                    acc &= lua_value_to_u32_for_bitop(inv, i + 1, "band", Some(a))?;
+                }
+                Ok(vec![LuaValue::Number(acc as i32 as f64)])
             }
             "bit.bor" => {
-                let r = args
-                    .iter()
-                    .try_fold(0u32, |acc, a| lua_value_to_u32(a).map(|v| acc | v))?;
-                Ok(vec![LuaValue::Number(r as i32 as f64)])
+                let inv = self.current_invocation_name.as_deref();
+                if args.is_empty() {
+                    return Err(lua_value_to_u32_for_bitop(inv, 1, "bor", None).unwrap_err());
+                }
+                let mut acc = 0u32;
+                for (i, a) in args.iter().enumerate() {
+                    acc |= lua_value_to_u32_for_bitop(inv, i + 1, "bor", Some(a))?;
+                }
+                Ok(vec![LuaValue::Number(acc as i32 as f64)])
             }
             "bit.bxor" => {
-                let r = args
-                    .iter()
-                    .try_fold(0u32, |acc, a| lua_value_to_u32(a).map(|v| acc ^ v))?;
-                Ok(vec![LuaValue::Number(r as i32 as f64)])
+                let inv = self.current_invocation_name.as_deref();
+                if args.is_empty() {
+                    return Err(lua_value_to_u32_for_bitop(inv, 1, "bxor", None).unwrap_err());
+                }
+                let mut acc = 0u32;
+                for (i, a) in args.iter().enumerate() {
+                    acc ^= lua_value_to_u32_for_bitop(inv, i + 1, "bxor", Some(a))?;
+                }
+                Ok(vec![LuaValue::Number(acc as i32 as f64)])
             }
             "bit.bnot" => {
-                let r = !lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
-                Ok(vec![LuaValue::Number(r as i32 as f64)])
+                let inv = self.current_invocation_name.as_deref();
+                let x = lua_value_to_u32_for_bitop(inv, 1, "bnot", args.first())?;
+                Ok(vec![LuaValue::Number(!x as i32 as f64)])
             }
             "bit.lshift" => {
-                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
-                let n =
-                    lua_value_to_u32(args.get(1).unwrap_or(&LuaValue::Number(0.0)))? & 31;
+                let inv = self.current_invocation_name.as_deref();
+                let x = lua_value_to_u32_for_bitop(inv, 1, "lshift", args.first())?;
+                let n = lua_value_to_u32_for_bitop(inv, 2, "lshift", args.get(1))? & 31;
                 Ok(vec![LuaValue::Number((x << n) as i32 as f64)])
             }
             "bit.rshift" => {
-                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
-                let n =
-                    lua_value_to_u32(args.get(1).unwrap_or(&LuaValue::Number(0.0)))? & 31;
+                let inv = self.current_invocation_name.as_deref();
+                let x = lua_value_to_u32_for_bitop(inv, 1, "rshift", args.first())?;
+                let n = lua_value_to_u32_for_bitop(inv, 2, "rshift", args.get(1))? & 31;
                 Ok(vec![LuaValue::Number((x >> n) as i32 as f64)])
             }
             "bit.arshift" => {
-                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))? as i32;
-                let n =
-                    lua_value_to_u32(args.get(1).unwrap_or(&LuaValue::Number(0.0)))? & 31;
+                let inv = self.current_invocation_name.as_deref();
+                let x = lua_value_to_u32_for_bitop(inv, 1, "arshift", args.first())? as i32;
+                let n = lua_value_to_u32_for_bitop(inv, 2, "arshift", args.get(1))? & 31;
                 Ok(vec![LuaValue::Number((x >> n) as f64)])
             }
             "bit.rol" => {
-                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
-                let n =
-                    lua_value_to_u32(args.get(1).unwrap_or(&LuaValue::Number(0.0)))? & 31;
+                let inv = self.current_invocation_name.as_deref();
+                let x = lua_value_to_u32_for_bitop(inv, 1, "rol", args.first())?;
+                let n = lua_value_to_u32_for_bitop(inv, 2, "rol", args.get(1))? & 31;
                 Ok(vec![LuaValue::Number(x.rotate_left(n) as i32 as f64)])
             }
             "bit.ror" => {
-                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
-                let n =
-                    lua_value_to_u32(args.get(1).unwrap_or(&LuaValue::Number(0.0)))? & 31;
+                let inv = self.current_invocation_name.as_deref();
+                let x = lua_value_to_u32_for_bitop(inv, 1, "ror", args.first())?;
+                let n = lua_value_to_u32_for_bitop(inv, 2, "ror", args.get(1))? & 31;
                 Ok(vec![LuaValue::Number(x.rotate_right(n) as i32 as f64)])
             }
             "bit.bswap" => {
-                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
+                let inv = self.current_invocation_name.as_deref();
+                let x = lua_value_to_u32_for_bitop(inv, 1, "bswap", args.first())?;
                 Ok(vec![LuaValue::Number(x.swap_bytes() as i32 as f64)])
             }
             "bit.tobit" => {
-                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
-                // LuaJIT bit.tobit returns a signed 32-bit value as
-                // Lua number: the upper half of u32 maps to negative.
+                let inv = self.current_invocation_name.as_deref();
+                let x = lua_value_to_u32_for_bitop(inv, 1, "tobit", args.first())?;
                 Ok(vec![LuaValue::Number(x as i32 as f64)])
             }
             "bit.tohex" => {
-                let x = lua_value_to_u32(args.first().unwrap_or(&LuaValue::Number(0.0)))?;
+                let inv = self.current_invocation_name.as_deref();
+                let x = lua_value_to_u32_for_bitop(inv, 1, "tohex", args.first())?;
                 // Second arg (optional): digit count; negative = upper case.
                 let n = match args.get(1) {
-                    Some(LuaValue::Number(f)) => *f as i32,
-                    _ => 8,
+                    Some(v) => lua_value_to_u32_for_bitop(inv, 2, "tohex", Some(v))? as i32,
+                    None => 8,
                 };
                 let abs_n = n.unsigned_abs().min(8) as usize;
                 let s = if n < 0 {
@@ -8229,27 +8250,70 @@ fn strip_trailing_zeros(s: &str) -> String {
 /// truncate-toward-zero (matching f64 -> i32 semantics for finite
 /// values), then reinterpreted as u32. Strings are parsed if they look
 /// numeric, otherwise an error is raised.
-fn lua_value_to_u32(val: &LuaValue) -> Result<u32, String> {
+/// (frankenredis-d3ovh) Convert a Lua value to a u32 the way LuaJIT's
+/// bit.* family does. Numbers go through banker's rounding (round-half-
+/// to-even, matching lj_num2int's lrint-based path) then narrow to
+/// i32→u32. Numeric strings coerce via the same path. Anything else
+/// raises a standard "bad argument #N to 'FUNC' (number expected, got
+/// TYPE)" error, with the prefix/name controlled by inv_name.
+fn lua_value_to_u32_for_bitop(
+    inv_name: Option<&str>,
+    arg_idx: usize,
+    fname: &str,
+    val_opt: Option<&LuaValue>,
+) -> Result<u32, String> {
+    let val = match val_opt {
+        Some(v) => v,
+        None => {
+            return Err(lua_format_argerror(
+                inv_name,
+                fname,
+                arg_idx,
+                "number expected, got no value",
+            ));
+        }
+    };
+    let bad = |got: &str| {
+        lua_format_argerror(
+            inv_name,
+            fname,
+            arg_idx,
+            &format!("number expected, got {got}"),
+        )
+    };
     match val {
         LuaValue::Number(f) => {
             if !f.is_finite() {
-                return Err("bad argument to bit op (number expected, got NaN/inf)".to_string());
+                // LuaJIT permits NaN/inf — lj_num2int rounds NaN/±inf
+                // to 0x80000000 (INT32_MIN). Match that here.
+                return Ok(if f.is_nan() {
+                    0x8000_0000u32
+                } else if *f > 0.0 {
+                    0x8000_0000u32
+                } else {
+                    0x8000_0000u32
+                });
             }
-            Ok((*f as i64 as i32) as u32)
+            // Banker's rounding (round-half-to-even). Rust's `f64::
+            // round_ties_even` does exactly this.
+            let rounded = f.round_ties_even();
+            Ok((rounded as i64 as i32) as u32)
         }
         LuaValue::Str(s) => {
             let text = String::from_utf8_lossy(s);
-            text.trim()
-                .parse::<i64>()
-                .map(|n| n as i32 as u32)
-                .or_else(|_| text.trim().parse::<f64>().map(|f| f as i64 as i32 as u32))
-                .map_err(|_| format!("bad argument to bit op (number expected, got string '{text}')"))
+            let trimmed = text.trim();
+            if let Ok(n) = trimmed.parse::<i64>() {
+                return Ok(n as i32 as u32);
+            }
+            if let Ok(f) = trimmed.parse::<f64>() {
+                if f.is_finite() {
+                    return Ok((f.round_ties_even() as i64 as i32) as u32);
+                }
+            }
+            Err(bad("string"))
         }
-        LuaValue::Bool(b) => Ok(if *b { 1 } else { 0 }),
-        LuaValue::Nil => {
-            Err("bad argument to bit op (number expected, got nil)".to_string())
-        }
-        _ => Err("bad argument to bit op (number expected, got non-number)".to_string()),
+        LuaValue::Nil => Err(bad("nil")),
+        other => Err(bad(other.type_name())),
     }
 }
 
@@ -12630,6 +12694,88 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_bit_library_parity_d3ovh() {
+        // (frankenredis-d3ovh) LuaJIT bit.* error wording, arity checks,
+        // and float→int rounding. Probed against vendored Redis 7.2.4.
+        let mut store = Store::new();
+
+        // Positive controls.
+        for (body, expected) in &[
+            (b"return bit.band(0xFF, 0x0F)".as_slice(), 15i64),
+            (b"return bit.bor(0xF0, 0x0F)", 255),
+            (b"return bit.bxor(0xFF, 0x55)", 170),
+            (b"return bit.lshift(1, 4)", 16),
+            (b"return bit.rshift(0x10, 4)", 1),
+            (b"return bit.bnot(0)", -1),
+            // Banker's rounding: tobit(1.5) → 2 (round to even),
+            // band(2, 1) = 0. fr previously returned 1.
+            (b"return bit.band(1.5, 1)", 0),
+            (b"return bit.tobit(1.5)", 2),
+            (b"return bit.tobit(2.5)", 2),
+            (b"return bit.tobit(-1.5)", -2),
+        ] {
+            let r = eval_script(body, &[], &[], &mut store, 0)
+                .unwrap_or_else(|e| panic!("eval {:?} failed: {e}", String::from_utf8_lossy(body)));
+            assert_eq!(
+                r,
+                RespFrame::Integer(*expected),
+                "wrong value for {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
+
+        // Missing-arg / type errors with upstream wording.
+        let err = eval_script(b"return bit.band()", &[], &[], &mut store, 0)
+            .expect_err("band() no args");
+        assert!(
+            err.contains("bad argument #1 to 'band' (number expected, got no value)"),
+            "wrong: {err}"
+        );
+        let err = eval_script(b"return bit.lshift()", &[], &[], &mut store, 0)
+            .expect_err("lshift() no args");
+        assert!(
+            err.contains("bad argument #1 to 'lshift' (number expected, got no value)"),
+            "wrong: {err}"
+        );
+        let err = eval_script(b"return bit.lshift(1)", &[], &[], &mut store, 0)
+            .expect_err("lshift(1) missing #2");
+        assert!(
+            err.contains("bad argument #2 to 'lshift' (number expected, got no value)"),
+            "wrong: {err}"
+        );
+        let err = eval_script(b"return bit.band(nil, 1)", &[], &[], &mut store, 0)
+            .expect_err("band(nil, 1)");
+        assert!(
+            err.contains("bad argument #1 to 'band' (number expected, got nil)"),
+            "wrong: {err}"
+        );
+        let err = eval_script(b"return bit.band({}, 1)", &[], &[], &mut store, 0)
+            .expect_err("band({}, 1)");
+        assert!(
+            err.contains("bad argument #1 to 'band' (number expected, got table)"),
+            "wrong: {err}"
+        );
+        let err = eval_script(b"return bit.tohex('abc')", &[], &[], &mut store, 0)
+            .expect_err("tohex('abc')");
+        assert!(
+            err.contains("bad argument #1 to 'tohex' (number expected, got string)"),
+            "wrong: {err}"
+        );
+
+        // Indirect pcall drops prefix and uses '?' name.
+        let r = eval_script(
+            b"local ok,e=pcall(bit.band); return tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall(bit.band)");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"bad argument #1 to '?' (number expected, got no value)".to_vec()
+            ))
+        );
     }
 
     #[test]
