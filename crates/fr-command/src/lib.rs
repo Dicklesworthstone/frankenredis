@@ -11512,7 +11512,7 @@ fn failover_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErr
     // [TO host port] [FORCE] [TIMEOUT ms], with each option accepted at most once.
     let mut abort = false;
     let mut _to_host: Option<&[u8]> = None;
-    let mut _to_port: Option<u16> = None;
+    let mut _to_port: Option<i64> = None;
     let mut _force = false;
     let mut _timeout_ms: Option<u64> = None;
 
@@ -11540,10 +11540,14 @@ fn failover_cmd(argv: &[Vec<u8>], store: &Store) -> Result<RespFrame, CommandErr
             i += 2;
         } else if arg.eq_ignore_ascii_case("TO") && i + 2 < argv.len() && _to_host.is_none() {
             _to_host = Some(&argv[i + 1]);
+            // (frankenredis-ovp5b) Upstream failoverCommand parses
+            // the port as a plain long long via
+            // getLongFromObjectOrReply with no 0..65535 range check.
+            // 99999, -1, 0 all parse fine; only an actual i64 overflow
+            // (or non-numeric input) trips the integer error. The
+            // port value is never consulted again unless the failover
+            // path proceeds, so wider acceptance is harmless.
             let port = parse_i64_arg(&argv[i + 2])?;
-            let Ok(port) = u16::try_from(port) else {
-                return Err(CommandError::InvalidInteger);
-            };
             _to_port = Some(port);
             i += 3;
         } else if arg.eq_ignore_ascii_case("FORCE") && !_force {
@@ -37678,6 +37682,70 @@ mod tests {
             0,
         )
         .expect_err("invalid FAILOVER port should fail");
+        assert_eq!(err, CommandError::InvalidInteger);
+    }
+
+    #[test]
+    fn failover_to_port_accepts_any_signed_long_ovp5b() {
+        // (frankenredis-ovp5b) Upstream failoverCommand parses the
+        // port via getLongFromObjectOrReply with no 0..65535 range
+        // check. fr was clamping via u16::try_from, which surfaced
+        // the int wording for valid-looking ports outside that range
+        // (and made `FAILOVER TO host 99999 abc` report the wrong
+        // error class — int instead of syntax for the trailing abc).
+        let mut store = Store::new();
+
+        // Ports outside u16 (and negative ones) should parse fine;
+        // the failover path then trips on "requires connected
+        // replicas" since this fr is standalone.
+        for port in [b"99999".as_slice(), b"-1".as_slice(), b"0".as_slice()] {
+            let err = dispatch_argv(
+                &[
+                    b"FAILOVER".to_vec(),
+                    b"TO".to_vec(),
+                    b"host".to_vec(),
+                    port.to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect_err("FAILOVER no-replica path");
+            assert_eq!(
+                err,
+                CommandError::Custom("ERR FAILOVER requires connected replicas.".to_string()),
+                "port {}",
+                String::from_utf8_lossy(port)
+            );
+        }
+
+        // Trailing unknown option (after a valid port) should surface
+        // as a syntax error, not as the port int error.
+        let err = dispatch_argv(
+            &[
+                b"FAILOVER".to_vec(),
+                b"TO".to_vec(),
+                b"host".to_vec(),
+                b"99999".to_vec(),
+                b"abc".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("trailing abc should be syntax error");
+        assert_eq!(err, CommandError::SyntaxError);
+
+        // i64 overflow still trips the int error.
+        let err = dispatch_argv(
+            &[
+                b"FAILOVER".to_vec(),
+                b"TO".to_vec(),
+                b"host".to_vec(),
+                b"9223372036854775808".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("i64 overflow port");
         assert_eq!(err, CommandError::InvalidInteger);
     }
 

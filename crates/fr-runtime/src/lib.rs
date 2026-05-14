@@ -12286,7 +12286,14 @@ replica_announced:1\r\n",
         }
 
         let mut target_host: Option<String> = None;
-        let mut target_port: Option<u16> = None;
+        // (frankenredis-ovp5b) Upstream failoverCommand parses the
+        // port with getLongFromObjectOrReply — no 0..65535 range
+        // check at parse time. Out-of-u16 values like 99999 or -1
+        // are accepted by the parser and only fail later when the
+        // failover path consults them. Store as i64 here; the
+        // selection logic below filters by replica match and never
+        // reaches the connect attempt unless the value fits u16.
+        let mut target_port: Option<i64> = None;
         let mut force = false;
         let mut timeout_ms: Option<u64> = None;
         let mut i = 1;
@@ -12314,9 +12321,6 @@ replica_announced:1\r\n",
                     Ok(value) => value,
                     Err(err) => return err.to_resp(),
                 };
-                let Ok(parsed_port) = u16::try_from(parsed_port) else {
-                    return CommandError::InvalidInteger.to_resp();
-                };
                 target_port = Some(parsed_port);
                 i += 3;
             } else if arg.eq_ignore_ascii_case("FORCE") && !force {
@@ -12332,6 +12336,16 @@ replica_announced:1\r\n",
         }
 
         let selected_target = if let (Some(host), Some(port)) = (target_host, target_port) {
+            // The port was already parsed permissively per upstream;
+            // narrow it to u16 here for the replica-selection match.
+            // A port outside u16 simply cannot equal a real replica's
+            // listening_port, so the "not a replica" branch handles
+            // it naturally without rewording.
+            let Ok(port) = u16::try_from(port) else {
+                return RespFrame::Error(
+                    "ERR FAILOVER target HOST and PORT is not a replica.".to_string(),
+                );
+            };
             let is_known_replica =
                 self.server
                     .replication_runtime_state
