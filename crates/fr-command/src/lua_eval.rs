@@ -5173,11 +5173,18 @@ impl<'a> LuaState<'a> {
                 if n_val < 0.0 {
                     return Ok(vec![LuaValue::Str(Vec::new())]);
                 }
-                if n_val > 512.0 * 1024.0 * 1024.0 {
-                    return Err("string length overflow".to_string());
+                // (frankenredis-jwkhc) The previous unconditional cap on
+                // n_val tripped 'string length overflow' for the no-op case
+                // string.rep('', N), which vendored just returns as ''. Guard
+                // on the *product* instead; an empty source short-circuits.
+                if s.is_empty() {
+                    return Ok(vec![LuaValue::Str(Vec::new())]);
                 }
-                let n = n_val as usize;
-
+                let n = if n_val > usize::MAX as f64 {
+                    return Err("string length overflow".to_string());
+                } else {
+                    n_val as usize
+                };
                 let target_len = s.len().checked_mul(n).ok_or("string length overflow")?;
                 if target_len > 512 * 1024 * 1024 {
                     return Err("string length overflow".to_string());
@@ -5472,24 +5479,49 @@ impl<'a> LuaState<'a> {
                 let LuaValue::Table(_) = &table else {
                     return Err(lua_bad_table_arg("insert", 1, &table));
                 };
+                // (frankenredis-jwkhc) Upstream Redis-vendored ltablib.c
+                // raises 'wrong number of arguments to insert' for any
+                // shape other than (t, v) or (t, pos, v).
+                if args.len() != 2 && args.len() != 3 {
+                    return Err(
+                        "user_script:1: wrong number of arguments to 'insert'".to_string(),
+                    );
+                }
                 if args.len() == 2 {
-                    // table.insert(t, value) — append
                     let val = args[1].clone();
                     if let LuaValue::Table(ref mut t) = args[0] {
                         t.inner.borrow_mut().array.push(val);
                     }
-                } else if args.len() >= 3 {
-                    // table.insert(t, pos, value)
-                    let pos = lua_required_integer_arg("insert", 2, &args[1])? as usize;
+                } else {
+                    // (frankenredis-jwkhc) Redis's vendored Lua has the bounds
+                    // check stripped from ltablib.c::tinsert:
+                    //   if (pos > e) e = pos;  /* `grow' array if necessary */
+                    // So pos may be 0, negative, or > #t+1 — vendored grows the
+                    // array (or stores in the hash part for non-positive keys)
+                    // rather than erroring.
+                    let pos_i = lua_required_integer_arg("insert", 2, &args[1])?;
                     let val = args[2].clone();
                     if let LuaValue::Table(ref mut t) = args[0] {
-                        if pos < 1 || pos > t.inner.borrow().array.len() + 1 {
-                            return Err(
-                                "bad argument #2 to 'insert' (position out of bounds)".to_string()
-                            );
+                        if pos_i >= 1 {
+                            let pos = pos_i as usize;
+                            let len = t.inner.borrow().array.len();
+                            if pos <= len + 1 {
+                                t.inner.borrow_mut().array.insert(pos - 1, val);
+                            } else {
+                                // Grow array with nils up to pos, then place val.
+                                {
+                                    let mut inner = t.inner.borrow_mut();
+                                    inner.array.resize(pos - 1, LuaValue::Nil);
+                                    inner.array.push(val);
+                                }
+                            }
+                        } else {
+                            // pos <= 0 — store with integer key in the hash
+                            // part. Upstream's lua_rawseti writes to the slot
+                            // directly; fr's table mirrors that via .set on a
+                            // numeric key.
+                            t.set(LuaValue::Number(pos_i as f64), val);
                         }
-                        let idx = pos.saturating_sub(1);
-                        t.inner.borrow_mut().array.insert(idx, val);
                     }
                 }
                 Ok(vec![LuaValue::Nil])
@@ -5519,29 +5551,60 @@ impl<'a> LuaState<'a> {
             "table.concat" => {
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let t = lua_table_arg("concat", 1, &table)?;
-                let sep = args
-                    .get(1)
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
-                let start = lua_optional_integer_arg("concat", 3, args.get(2), 1)? as usize;
-                let end = lua_optional_integer_arg(
-                    "concat",
-                    4,
-                    args.get(3),
-                    t.inner.borrow().array.len() as i64,
-                )? as usize;
-                let mut parts: Vec<Vec<u8>> = Vec::new();
-                for i in start..=end {
-                    if i >= 1 && i <= t.inner.borrow().array.len() {
-                        parts.push(t.inner.borrow().array[i - 1].to_display_string());
+                // (frankenredis-jwkhc) Upstream luaL_optstring(L, 2, '') maps
+                // nil/missing sep to the empty string. fr previously routed
+                // through to_display_string() which renders nil as the literal
+                // 'nil', producing 'a nil b' instead of 'ab'.
+                let sep: Vec<u8> = match args.get(1) {
+                    None | Some(LuaValue::Nil) => Vec::new(),
+                    Some(v) => v.to_display_string(),
+                };
+                let array_len = t.inner.borrow().array.len() as i64;
+                let start = lua_optional_integer_arg("concat", 3, args.get(2), 1)?;
+                let end =
+                    lua_optional_integer_arg("concat", 4, args.get(3), array_len)?;
+                // (frankenredis-jwkhc) Upstream ltablib.c::tconcat validates
+                // each element in [start, end] and raises 'invalid value (nil
+                // | <type>) at index N in table for concat' for any non-
+                // string/non-number entry. fr previously silently dropped
+                // out-of-range indices and nil holes.
+                let mut result: Vec<u8> = Vec::new();
+                if start <= end {
+                    let mut first = true;
+                    let array = &t.inner.borrow().array;
+                    for i in start..=end {
+                        let val: Option<&LuaValue> = if i >= 1 && (i as usize) <= array.len() {
+                            Some(&array[(i - 1) as usize])
+                        } else {
+                            None
+                        };
+                        let bytes = match val {
+                            Some(LuaValue::Str(b)) => b.clone(),
+                            Some(LuaValue::Number(n)) => {
+                                if *n == (*n as i64) as f64 && n.is_finite() {
+                                    format!("{}", *n as i64).into_bytes()
+                                } else {
+                                    lua_number_to_string(*n).into_bytes()
+                                }
+                            }
+                            Some(other) => {
+                                return Err(format!(
+                                    "user_script:1: invalid value ({}) at index {i} in table for 'concat'",
+                                    other.type_name()
+                                ));
+                            }
+                            None => {
+                                return Err(format!(
+                                    "user_script:1: invalid value (nil) at index {i} in table for 'concat'"
+                                ));
+                            }
+                        };
+                        if !first {
+                            result.extend_from_slice(&sep);
+                        }
+                        result.extend_from_slice(&bytes);
+                        first = false;
                     }
-                }
-                let mut result = Vec::new();
-                for (i, part) in parts.iter().enumerate() {
-                    if i > 0 {
-                        result.extend_from_slice(&sep);
-                    }
-                    result.extend_from_slice(part);
                 }
                 Ok(vec![LuaValue::Str(result)])
             }
@@ -10213,17 +10276,21 @@ mod tests {
     }
 
     #[test]
-    fn table_insert_rejects_out_of_bounds_position() {
+    fn table_insert_accepts_out_of_bounds_position_sparse_growth() {
+        // (frankenredis-jwkhc) Redis's vendored Lua has the
+        // `luaL_argcheck(... position out of bounds)` stripped from
+        // ltablib.c::tinsert — sparse / non-contiguous positions are
+        // accepted and the array grows to fit. fr previously errored.
         let mut store = Store::new();
-        let result = eval_script(
-            b"local t = {1, 2}\ntable.insert(t, 4, 3)",
+        let r = eval_script(
+            b"local t = {1, 2}; table.insert(t, 4, 3); return t[4]",
             &[],
             &[],
             &mut store,
             0,
-        );
-
-        assert!(matches!(result, Err(ref err) if err.contains("position out of bounds")));
+        )
+        .expect("insert pos > #t+1");
+        assert!(matches!(r, RespFrame::Integer(3)));
     }
 
     #[test]
@@ -10565,6 +10632,190 @@ mod tests {
         // Server still alive after all the error cases: a follow-up eval works.
         let r = eval_script(b"return 1 + 1", &[], &[], &mut store, 0).expect("after");
         assert!(matches!(r, RespFrame::Integer(2)));
+    }
+
+    #[test]
+    fn table_concat_matches_upstream_lua_5_1() {
+        // (frankenredis-jwkhc) table.concat semantics audit vs vendored 7.2.4.
+        let mut store = Store::new();
+
+        // nil separator coerces to empty string, not the literal "nil".
+        let r = eval_script(
+            b"return table.concat({1,2,3}, nil)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("nil sep");
+        assert_eq!(r, RespFrame::BulkString(Some(b"123".to_vec())));
+
+        // missing separator equally OK.
+        let r = eval_script(
+            b"return table.concat({1,2,3})",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("default sep");
+        assert_eq!(r, RespFrame::BulkString(Some(b"123".to_vec())));
+
+        // nil hole inside an explicit iteration range raises with the
+        // upstream wording. (We use an explicit range here because fr's
+        // # operator returns a shorter length for sparse tables than
+        // vendored's binary-search boundary, which would otherwise mask
+        // the nil hole when relying on the default end argument.)
+        let err = eval_script(
+            b"return table.concat({1,nil,3}, '', 1, 3)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "user_script:1: invalid value (nil) at index 2 in table for 'concat'"
+        );
+
+        // Out-of-range explicit end raises.
+        let err = eval_script(
+            b"return table.concat({1,2,3}, '', 1, 5)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "user_script:1: invalid value (nil) at index 4 in table for 'concat'"
+        );
+
+        // Out-of-range explicit start raises.
+        let err = eval_script(
+            b"return table.concat({1,2,3}, '', 0, 3)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "user_script:1: invalid value (nil) at index 0 in table for 'concat'"
+        );
+
+        // Mid-range nil hole inside an explicit range raises at that index.
+        let err = eval_script(
+            b"return table.concat({1,2,3,nil,5}, '', 1, 5)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "user_script:1: invalid value (nil) at index 4 in table for 'concat'"
+        );
+
+        // Empty range is empty (Lua: when start > end, no iteration).
+        let r = eval_script(
+            b"return table.concat({1,2,3}, '-', 2, 1)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("empty range");
+        assert_eq!(r, RespFrame::BulkString(Some(Vec::new())));
+
+        // Empty table is empty.
+        let r = eval_script(
+            b"return table.concat({})",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("empty table");
+        assert_eq!(r, RespFrame::BulkString(Some(Vec::new())));
+
+        // Non-string non-number entry raises with the type name.
+        let err = eval_script(
+            b"return table.concat({1, true, 3})",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "user_script:1: invalid value (boolean) at index 2 in table for 'concat'"
+        );
+    }
+
+    #[test]
+    fn table_insert_wrong_arity_and_sparse_grow_match_upstream() {
+        // (frankenredis-jwkhc) Upstream: 1-arg call errors; 2-arg appends;
+        // 3-arg with out-of-bounds pos grows the array sparsely.
+        let mut store = Store::new();
+
+        // 1-arg call → upstream raises explicit "wrong number of arguments".
+        let err = eval_script(b"table.insert({})", &[], &[], &mut store, 0).unwrap_err();
+        assert_eq!(err, "user_script:1: wrong number of arguments to 'insert'");
+
+        // 4+ args also rejected with same wording.
+        let err = eval_script(b"table.insert({}, 1, 'x', 'extra')", &[], &[], &mut store, 0)
+            .unwrap_err();
+        assert_eq!(err, "user_script:1: wrong number of arguments to 'insert'");
+
+        // 2-arg append still works.
+        let r = eval_script(
+            b"local t = {1, 2}; table.insert(t, 3); return t[3]",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("append");
+        assert!(matches!(r, RespFrame::Integer(3)));
+
+        // 3-arg insert at #t+1 = append boundary.
+        let r = eval_script(
+            b"local t = {1, 2}; table.insert(t, 3, 'x'); return t[3]",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("boundary insert");
+        assert_eq!(r, RespFrame::BulkString(Some(b"x".to_vec())));
+
+        // 3-arg insert at sparse pos grows.
+        let r = eval_script(
+            b"local t = {1, 2}; table.insert(t, 10, 'x'); return t[10]",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("sparse");
+        assert_eq!(r, RespFrame::BulkString(Some(b"x".to_vec())));
+
+        // 3-arg insert at pos 0 stores in hash part.
+        let r = eval_script(
+            b"local t = {1, 2}; table.insert(t, 0, 'x'); return t[0]",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pos 0");
+        assert_eq!(r, RespFrame::BulkString(Some(b"x".to_vec())));
     }
 
     #[test]
@@ -10963,12 +11214,16 @@ mod tests {
     }
 
     #[test]
-    fn string_rep_huge_does_not_loop_forever() {
+    fn string_rep_huge_returns_empty_for_empty_source() {
+        // (frankenredis-jwkhc) Upstream Lua: string.rep('', N) is always
+        // empty regardless of N, including math.huge / 2^31-1. The
+        // overflow guard must short-circuit on s.len() == 0; previously
+        // fr returned 'string length overflow' for huge n_val even when
+        // the multiplication trivially yields 0.
         let mut store = Store::new();
-        // This should error out quickly rather than looping forever.
         let script = b"return string.rep('', math.huge)";
-        let result = eval_script(script, &[], &[], &mut store, 0);
-        assert!(result.is_err());
+        let r = eval_script(script, &[], &[], &mut store, 0).expect("empty rep huge");
+        assert_eq!(r, RespFrame::BulkString(Some(Vec::new())));
     }
 
     #[test]
