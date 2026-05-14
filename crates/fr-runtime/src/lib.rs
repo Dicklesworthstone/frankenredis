@@ -1298,8 +1298,38 @@ impl AuthState {
                 // acl.c::ACLSetUser rejects unknown command names
                 // with 'Unknown command or category name in ACL'.
                 // (br-frankenredis-aclcmd)
+                //
+                // (frankenredis-6lgmx) Upstream splits `cmd|sub` on
+                // the first '|' and walks the parent's subcommand
+                // table:
+                //   - Parent must exist (else reject).
+                //   - If parent has subcommands and `sub` isn't one
+                //     of them, reject.
+                //   - If parent has no subcommands at all, the
+                //     `sub` portion is accepted blindly (matched
+                //     at dispatch time against argv[1]).
+                // fr was passing the whole `cmd|sub` token to
+                // is_known_acl_command_selector, which only returns
+                // true for known fr metadata pairs (CLIENT|SETNAME,
+                // …). That over-rejected `+get|invalid` (GET has no
+                // subcommands so upstream accepts) and matched
+                // upstream's `+acl|nosuch` (ACL has subcommands so
+                // upstream rejects).
                 let cmd_lower = cmd.to_ascii_lowercase();
-                if !fr_command::is_known_acl_command_selector(&cmd_lower) {
+                if let Some((parent, _sub)) = cmd_lower.split_once('|') {
+                    if !fr_command::is_known_acl_command_selector(parent) {
+                        return Err(format!(
+                            "ERR Error in ACL SETUSER modifier '{rule_str}': Unknown command or category name in ACL"
+                        ));
+                    }
+                    if fr_command::command_has_acl_subcommands(parent)
+                        && !fr_command::is_known_acl_command_selector(&cmd_lower)
+                    {
+                        return Err(format!(
+                            "ERR Error in ACL SETUSER modifier '{rule_str}': Unknown command or category name in ACL"
+                        ));
+                    }
+                } else if !fr_command::is_known_acl_command_selector(&cmd_lower) {
                     return Err(format!(
                         "ERR Error in ACL SETUSER modifier '{rule_str}': Unknown command or category name in ACL"
                     ));
@@ -1308,6 +1338,16 @@ impl AuthState {
                 user.denied_commands.remove(&cmd_lower);
             } else if let Some(cmd) = rule_str.strip_prefix('-') {
                 // -command — deny this specific command. (br-frankenredis-aclcmd)
+                // (frankenredis-6lgmx) Upstream asymmetry: while
+                // `+cmd|sub` accepts unknown subs blindly when the
+                // parent owns no subcommand table, `-cmd|sub`
+                // requires the full `cmd|sub` to be a known
+                // selector. Probe showed:
+                //   `-get|invalid` → vendored: rejected
+                //   `+get|invalid` → vendored: accepted
+                // The deny path strips the sub from any existing
+                // per-parent allow list, so vendored insists the
+                // sub actually exists.
                 let cmd_lower = cmd.to_ascii_lowercase();
                 if !fr_command::is_known_acl_command_selector(&cmd_lower) {
                     return Err(format!(
@@ -25111,8 +25151,14 @@ mod tests {
 
     #[test]
     fn acl_per_subcommand_rejects_unknown_selector() {
+        // (frankenredis-6lgmx) Upstream's `+parent|sub` rule
+        // validates the sub against the parent's known subcommands
+        // ONLY when the parent owns subcommands. ACL has
+        // subcommands, so `+acl|nosuch` is rejected. GET has no
+        // subcommands, so `+get|invalid` is accepted blindly.
         let mut rt = Runtime::default_strict();
 
+        // Parent with subcommands + unknown sub → reject.
         let reply = rt.execute_frame(
             command(&[
                 b"ACL",
@@ -25126,10 +25172,68 @@ mod tests {
             ]),
             0,
         );
-
         assert!(
             matches!(&reply, RespFrame::Error(err) if err.contains("Unknown command or category name in ACL")),
             "unknown ACL subcommand selector should be rejected, got {reply:?}"
+        );
+
+        // Parent without subcommands + any sub → accept blindly.
+        let reply = rt.execute_frame(
+            command(&[
+                b"ACL",
+                b"SETUSER",
+                b"sub2",
+                b"on",
+                b">pass",
+                b"-@all",
+                b"+get|invalid",
+                b"allkeys",
+            ]),
+            0,
+        );
+        assert_eq!(
+            reply,
+            RespFrame::SimpleString("OK".to_string()),
+            "+get|invalid should be accepted because GET has no subcommands"
+        );
+
+        // Parent with subcommands + known sub → accept.
+        let reply = rt.execute_frame(
+            command(&[
+                b"ACL",
+                b"SETUSER",
+                b"sub3",
+                b"on",
+                b">pass",
+                b"-@all",
+                b"+client|setname",
+                b"allkeys",
+            ]),
+            0,
+        );
+        assert_eq!(
+            reply,
+            RespFrame::SimpleString("OK".to_string()),
+            "+client|setname is a real subcommand"
+        );
+
+        // Unknown parent → reject.
+        let reply = rt.execute_frame(
+            command(&[
+                b"ACL",
+                b"SETUSER",
+                b"sub4",
+                b"on",
+                b">pass",
+                b"-@all",
+                b"+nosuchcmd|whatever",
+                b"allkeys",
+            ]),
+            0,
+        );
+        assert!(
+            matches!(&reply, RespFrame::Error(err) if err.contains("Unknown command or category name in ACL")),
+            "unknown parent should be rejected, got {reply:?}"
         );
     }
 

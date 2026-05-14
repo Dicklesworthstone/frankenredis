@@ -14357,6 +14357,20 @@ pub fn is_known_acl_command_selector(command: &str) -> bool {
     get_command_flags(command.as_bytes()).is_some() || !command_acl_categories(command).is_empty()
 }
 
+/// (frankenredis-6lgmx) Return whether a parent command name owns any
+/// known subcommands per the SUBCOMMAND_TABLE registry. Upstream
+/// acl.c::ACLSetUser uses this to decide whether to validate the
+/// `sub` portion of a `+cmd|sub` rule: parents with subcommands
+/// (CLIENT, CONFIG, ACL, CLUSTER, …) reject unknown subs, while
+/// parents without subcommands accept any sub blindly.
+#[must_use]
+pub fn command_has_acl_subcommands(parent: &str) -> bool {
+    let prefix_lower = format!("{}|", parent.to_ascii_lowercase());
+    SUBCOMMAND_TABLE
+        .iter()
+        .any(|(name, ..)| name.to_ascii_lowercase().starts_with(&prefix_lower))
+}
+
 /// Return ACL selectors for a command invocation, most-specific first.
 #[must_use]
 pub fn acl_command_selectors_for_argv(argv: &[Vec<u8>]) -> Vec<String> {
