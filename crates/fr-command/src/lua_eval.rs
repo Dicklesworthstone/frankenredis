@@ -6373,10 +6373,15 @@ impl<'a> LuaState<'a> {
                 // (frankenredis-jwkhc) Upstream Redis-vendored ltablib.c
                 // raises 'wrong number of arguments to insert' for any
                 // shape other than (t, v) or (t, pos, v).
+                // (frankenredis-toecv) luaL_error wording: drop the
+                // user_script:1: prefix when invoked via pcall(C-builtin).
                 if args.len() != 2 && args.len() != 3 {
-                    return Err(
-                        "user_script:1: wrong number of arguments to 'insert'".to_string(),
-                    );
+                    let body = "wrong number of arguments to 'insert'";
+                    return Err(if inv.is_some() {
+                        format!("user_script:1: {body}")
+                    } else {
+                        body.to_string()
+                    });
                 }
                 if args.len() == 2 {
                     let val = args[1].clone();
@@ -6478,6 +6483,16 @@ impl<'a> LuaState<'a> {
                 // | <type>) at index N in table for concat' for any non-
                 // string/non-number entry. fr previously silently dropped
                 // out-of-range indices and nil holes.
+                // (frankenredis-toecv) luaL_error wording: prefix only
+                // when invoked via a named call site.
+                let invalid_value = |idx: i64, ty: &str| -> String {
+                    let body = format!("invalid value ({ty}) at index {idx} in table for 'concat'");
+                    if inv.is_some() {
+                        format!("user_script:1: {body}")
+                    } else {
+                        body
+                    }
+                };
                 let mut result: Vec<u8> = Vec::new();
                 if start <= end {
                     let mut first = true;
@@ -6498,15 +6513,10 @@ impl<'a> LuaState<'a> {
                                 }
                             }
                             Some(other) => {
-                                return Err(format!(
-                                    "user_script:1: invalid value ({}) at index {i} in table for 'concat'",
-                                    other.type_name()
-                                ));
+                                return Err(invalid_value(i, other.type_name()));
                             }
                             None => {
-                                return Err(format!(
-                                    "user_script:1: invalid value (nil) at index {i} in table for 'concat'"
-                                ));
+                                return Err(invalid_value(i, "nil"));
                             }
                         };
                         if !first {
@@ -15104,6 +15114,68 @@ mod tests {
         assert!(
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
+        );
+    }
+
+    #[test]
+    fn table_insert_concat_luaerror_pcall_shape_toecv() {
+        // (frankenredis-toecv) luaL_error wording in table.insert
+        // (wrong-arity) and table.concat (invalid-value) now drops the
+        // user_script:1: prefix when invoked via pcall(C-builtin).
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local ok,e=pcall(table.insert,{1,2,3}); return tostring(e)",
+                "wrong number of arguments to 'insert'",
+            ),
+            (
+                b"local ok,e=pcall(table.insert,{1,2,3},1,2,3); return tostring(e)",
+                "wrong number of arguments to 'insert'",
+            ),
+            (
+                b"local ok,e=pcall(table.concat,{},'a',1,2,3,4); return tostring(e)",
+                "invalid value (nil) at index 1 in table for 'concat'",
+            ),
+            (
+                b"local ok,e=pcall(table.concat,{1,true,3}); return tostring(e)",
+                "invalid value (boolean) at index 2 in table for 'concat'",
+            ),
+            (
+                b"local ok,e=pcall(table.concat,{1,nil,3},'',1,3); return tostring(e)",
+                "invalid value (nil) at index 2 in table for 'concat'",
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Direct-call regressions: named/prefixed shape preserved.
+        let err = eval_script(b"return table.insert({1,2,3})", &[], &[], &mut store, 0)
+            .unwrap_err();
+        assert!(
+            err.contains("user_script:1: wrong number of arguments to 'insert'"),
+            "got {err:?}"
+        );
+        let err = eval_script(
+            b"return table.concat({1,nil,3},'',1,3)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("user_script:1: invalid value (nil) at index 2 in table for 'concat'"),
+            "got {err:?}"
         );
     }
 
