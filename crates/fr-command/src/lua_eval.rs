@@ -4440,11 +4440,16 @@ impl<'a> LuaState<'a> {
                 if val.is_truthy() {
                     Ok(args.to_vec())
                 } else {
+                    // (frankenredis-l4k9y) Upstream luaL_error prepends
+                    // "user_script:1: " (the source-location prefix) to
+                    // the assert message. fr previously emitted the bare
+                    // message, so a downstream pcall(...) on the failed
+                    // assert lacked the prefix vendored callers rely on.
                     let msg = args
                         .get(1)
                         .map(|a| String::from_utf8_lossy(&a.to_display_string()).to_string())
                         .unwrap_or_else(|| "assertion failed!".to_string());
-                    Err(msg)
+                    Err(format!("user_script:1: {msg}"))
                 }
             }
             "loadstring" => {
@@ -4645,7 +4650,20 @@ impl<'a> LuaState<'a> {
                                     handler_results.into_iter().next().unwrap_or(err_val);
                                 Ok(vec![LuaValue::Bool(false), transformed])
                             }
-                            Err(_) => Ok(vec![LuaValue::Bool(false), err_val]),
+                            Err(_) => {
+                                // (frankenredis-l4k9y) Upstream's
+                                // lua_pcall returns LUA_ERRERR when the
+                                // message handler itself errors, and
+                                // pushes the canonical "error in error
+                                // handling" string onto the stack. fr
+                                // previously returned the original error
+                                // value, swallowing the handler failure.
+                                self.pending_error_value = None;
+                                Ok(vec![
+                                    LuaValue::Bool(false),
+                                    LuaValue::Str(b"error in error handling".to_vec()),
+                                ])
+                            }
                         }
                     }
                 }
@@ -11759,6 +11777,81 @@ mod tests {
             let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
             assert_eq!(result, RespFrame::Integer(1));
         }
+    }
+
+    #[test]
+    fn assert_and_xpcall_handler_error_parity_l4k9y() {
+        // (frankenredis-l4k9y) Two distinct gaps from the rolling probe sweep:
+        //   - assert prepends "user_script:1: " (via luaL_error in upstream).
+        //   - xpcall returns "error in error handling" when the message
+        //     handler itself raises, matching LUA_ERRERR from lua_pcall.
+        let mut store = Store::new();
+
+        // assert with custom message — wrapped via pcall.
+        let r = eval_script(
+            b"local ok,err=pcall(function() assert(false, 'failed') end) return tostring(ok)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).expect("assert pcall");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(b"false:user_script:1: failed".to_vec())),
+        );
+
+        // assert with no message defaults to "assertion failed!".
+        let r = eval_script(
+            b"local ok,err=pcall(function() assert(false) end) return tostring(ok)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).expect("assert pcall no msg");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(b"false:user_script:1: assertion failed!".to_vec())),
+        );
+
+        // assert with nil — same default message.
+        let r = eval_script(
+            b"local ok,err=pcall(function() assert(nil) end) return tostring(ok)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).expect("assert pcall nil");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(b"false:user_script:1: assertion failed!".to_vec())),
+        );
+
+        // assert(truthy) returns its args unchanged.
+        let r = eval_script(
+            b"return assert(42, 'msg')",
+            &[], &[], &mut store, 0,
+        ).expect("assert truthy");
+        // 42 is returned; multi-return collapses through eval_script.
+        match r {
+            RespFrame::Integer(n) => assert_eq!(n, 42),
+            other => panic!("expected Integer(42), got {other:?}"),
+        }
+
+        // xpcall: when the message handler errors, vendored returns
+        // "error in error handling" (LUA_ERRERR canonical message).
+        let r = eval_script(
+            b"local ok, err = xpcall(function() error('a') end, function() error('b') end) return tostring(ok)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).expect("xpcall");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(b"false:error in error handling".to_vec())),
+        );
+
+        // xpcall: when the handler succeeds, its return value is used.
+        let r = eval_script(
+            b"local ok, err = xpcall(function() error('boom') end, function(e) return 'handled:'..e end) return tostring(ok)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).expect("xpcall handler ok");
+        let RespFrame::BulkString(Some(bytes)) = r else {
+            panic!("expected bulk string");
+        };
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(
+            s.starts_with("false:handled:"),
+            "expected handler result prefix, got {s}",
+        );
     }
 
     #[test]
