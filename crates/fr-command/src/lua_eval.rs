@@ -314,6 +314,12 @@ fn lua_raw_equal(a: &LuaValue, b: &LuaValue) -> bool {
         // name. Matching by name preserves `string.upper == s.upper`
         // and `string.upper == ('x').upper` equalities.
         (LuaValue::RustFunction(x), LuaValue::RustFunction(y)) => x == y,
+        // (frankenredis-cxmsu) LuaTable values share an Rc handle; Lua
+        // 5.1 raw-compares tables by reference identity. Required so
+        // `error(t); ... err == t` (round-tripping a table through
+        // pcall) holds and so `t == t` for a single-table variable is
+        // true regardless of contents.
+        (LuaValue::Table(x), LuaValue::Table(y)) => Rc::ptr_eq(&x.inner, &y.inner),
         (LuaValue::Coroutine(x), LuaValue::Coroutine(y))
         | (LuaValue::WrappedCoroutine(x), LuaValue::WrappedCoroutine(y)) => {
             Rc::ptr_eq(&x.inner, &y.inner)
@@ -1677,6 +1683,12 @@ impl Parser {
 const MAX_CALL_DEPTH: usize = 128;
 const MAX_ITERATIONS: u64 = 1_000_000;
 const LUA_YIELD_SENTINEL: &str = "__frankenredis_lua_coroutine_yield__";
+/// Sentinel error string emitted by `error()` when the argument is a
+/// non-string, non-number value (bool/nil/table/function/thread). The
+/// real LuaValue is stashed on `LuaState::pending_error_value` and
+/// pcall/xpcall splice it back so callers see the original type.
+/// (frankenredis-cxmsu)
+const LUA_TYPED_ERROR_SENTINEL: &str = "__frankenredis_lua_typed_error__";
 
 enum ControlFlow {
     None,
@@ -1710,6 +1722,14 @@ pub struct LuaState<'a> {
     script_started_at: Instant,
     current_coroutine: Option<LuaCoroutine>,
     pending_yield: Option<Vec<LuaValue>>,
+    /// Original LuaValue passed to `error()` when its type is not
+    /// representable as a plain string (bool/nil/table/function/thread).
+    /// Set in tandem with returning `Err(LUA_TYPED_ERROR_SENTINEL)`;
+    /// consumed atomically via `Option::take` in pcall/xpcall so the
+    /// original type round-trips back to the calling script. Cleared on
+    /// every `eval_script` call since each script creates a fresh
+    /// LuaState. (frankenredis-cxmsu)
+    pending_error_value: Option<LuaValue>,
     /// Depth of nested exec_stmts calls. The coroutine resume path
     /// (exec_coroutine_stmts → exec_stmt) keeps this at 0 for top-
     /// level body statements; any nested control-flow block (for,
@@ -2011,6 +2031,7 @@ impl<'a> LuaState<'a> {
             script_started_at: Instant::now(),
             current_coroutine: None,
             pending_yield: None,
+            pending_error_value: None,
             nested_exec_stmts_depth: 0,
             inside_bare_expression_stmt: false,
         }
@@ -2149,9 +2170,24 @@ impl<'a> LuaState<'a> {
         self.globals_locked = true;
         let mut env = Env::new();
         let mut varargs = Vec::new();
-        match self.exec_block(&stmts, &mut env, &mut varargs)? {
-            ControlFlow::Return(vals) => Ok(vals.into_iter().next().unwrap_or(LuaValue::Nil)),
-            _ => Ok(LuaValue::Nil),
+        let outcome = self.exec_block(&stmts, &mut env, &mut varargs);
+        match outcome {
+            Ok(ControlFlow::Return(vals)) => {
+                Ok(vals.into_iter().next().unwrap_or(LuaValue::Nil))
+            }
+            Ok(_) => Ok(LuaValue::Nil),
+            // (frankenredis-cxmsu) An uncaught `error({...})` /
+            // `error(true)` / `error(nil)` escapes through the
+            // sentinel string. Convert to a sensible reply string at
+            // the boundary — Redis cannot return a non-string error
+            // to the wire (vendored Redis 7.2 actually crashes on the
+            // table case; fr emits a tostring()-style representation).
+            Err(msg) if msg == LUA_TYPED_ERROR_SENTINEL => {
+                let val = self.pending_error_value.take().unwrap_or(LuaValue::Nil);
+                let rendered = String::from_utf8_lossy(&val.to_display_string()).to_string();
+                Err(rendered)
+            }
+            Err(msg) => Err(msg),
         }
     }
 
@@ -3426,16 +3462,39 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(val.type_name().as_bytes().to_vec())])
             }
             "error" => {
-                let msg = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                // (frankenredis-cxmsu) Lua 5.1's lbaselib.c::luaB_error
+                // tests `lua_isstring(L, 1)` (which is true for both
+                // strings and numbers) before prepending the
+                // luaL_where source-location. For string/number args
+                // with level > 0 we emit a plain prefixed string error
+                // exactly as before; for any other type (nil/bool/
+                // table/function/thread) we stash the original LuaValue
+                // on `pending_error_value` and raise the typed-error
+                // sentinel so pcall/xpcall can return the original type
+                // back to the script.
+                let raw = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let level = lua_optional_integer_arg("error", 2, args.get(1), 1)?;
-                let msg = String::from_utf8_lossy(&msg);
-                if level == 0 {
-                    Err(msg.to_string())
-                } else {
-                    Err(format!("user_script:1: {msg}"))
+                match &raw {
+                    LuaValue::Str(_) => {
+                        let msg = String::from_utf8_lossy(&raw.to_display_string()).to_string();
+                        if level == 0 {
+                            Err(msg)
+                        } else {
+                            Err(format!("user_script:1: {msg}"))
+                        }
+                    }
+                    LuaValue::Number(_) if level > 0 => {
+                        // Upstream's `lua_isstring`-on-number check causes
+                        // Lua to concatenate the where-prefix with the
+                        // number, producing a plain string error. level=0
+                        // skips the prefix and preserves the number type.
+                        let msg = String::from_utf8_lossy(&raw.to_display_string()).to_string();
+                        Err(format!("user_script:1: {msg}"))
+                    }
+                    _ => {
+                        self.pending_error_value = Some(raw);
+                        Err(LUA_TYPED_ERROR_SENTINEL.to_string())
+                    }
                 }
             }
             "assert" => {
@@ -3455,6 +3514,9 @@ impl<'a> LuaState<'a> {
                 let mut call_args_vec = args.get(1..).unwrap_or(&[]).to_vec();
                 match self.call_function(&func, &mut call_args_vec, env, &mut Vec::new()) {
                     Ok(vals) => {
+                        // Drop any stale typed-error stash; the protected
+                        // call completed normally.
+                        self.pending_error_value = None;
                         let mut new_vals = Vec::with_capacity(vals.len() + 1);
                         new_vals.push(LuaValue::Bool(true));
                         new_vals.extend(vals);
@@ -3468,7 +3530,23 @@ impl<'a> LuaState<'a> {
                     Err(msg) if is_lua_yield_signal(&msg) && self.pending_yield.is_some() => {
                         Err(msg)
                     }
-                    Err(msg) => Ok(vec![LuaValue::Bool(false), LuaValue::Str(msg.into_bytes())]),
+                    Err(msg) => {
+                        // (frankenredis-cxmsu) If the protected call
+                        // raised a typed error via `error({...})` /
+                        // `error(true)` / `error(nil)`, the sentinel
+                        // string carries no value — splice the original
+                        // LuaValue back from `pending_error_value` so
+                        // `pcall` returns (false, table|bool|nil|...).
+                        let err_val = if msg == LUA_TYPED_ERROR_SENTINEL
+                            && self.pending_error_value.is_some()
+                        {
+                            self.pending_error_value.take().unwrap()
+                        } else {
+                            self.pending_error_value = None;
+                            LuaValue::Str(msg.into_bytes())
+                        };
+                        Ok(vec![LuaValue::Bool(false), err_val])
+                    }
                 }
             }
             "xpcall" => {
@@ -3478,6 +3556,7 @@ impl<'a> LuaState<'a> {
                 let mut call_args_vec = args.get(2..).unwrap_or(&[]).to_vec();
                 match self.call_function(&func, &mut call_args_vec, env, &mut Vec::new()) {
                     Ok(vals) => {
+                        self.pending_error_value = None;
                         let mut new_vals = Vec::with_capacity(vals.len() + 1);
                         new_vals.push(LuaValue::Bool(true));
                         new_vals.extend(vals);
@@ -3489,8 +3568,18 @@ impl<'a> LuaState<'a> {
                         Err(msg)
                     }
                     Err(msg) => {
-                        // Call error handler with the error message
-                        let err_val = LuaValue::Str(msg.into_bytes());
+                        // (frankenredis-cxmsu) Reconstruct the typed
+                        // error value the same way pcall does, then hand
+                        // the original LuaValue to the user-supplied
+                        // message handler.
+                        let err_val = if msg == LUA_TYPED_ERROR_SENTINEL
+                            && self.pending_error_value.is_some()
+                        {
+                            self.pending_error_value.take().unwrap()
+                        } else {
+                            self.pending_error_value = None;
+                            LuaValue::Str(msg.into_bytes())
+                        };
                         let mut handler_args = vec![err_val.clone()];
                         match self.call_function(
                             &err_handler,
@@ -6617,6 +6706,107 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_pcall_preserves_typed_error_values() {
+        // Pins frankenredis-cxmsu. Lua 5.1 (vendored Redis 7.2.4) keeps
+        // the original LuaValue passed to `error()` when its type is
+        // not coercible to a string via lua_concat — i.e. bool, nil,
+        // table, function, thread. Number errors with default level=1
+        // are concatenated with the where-prefix and become a string;
+        // level=0 preserves the number's type.
+        let mut store = Store::new();
+
+        // table is preserved with its fields and identity.
+        let frame = eval_script(
+            b"local t={code=42}; local ok,err=pcall(function() error(t) end); return type(err)..':'..tostring(err.code)..':'..tostring(err==t)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"table:42:true".to_vec()))
+        );
+
+        // boolean preserves type.
+        let frame = eval_script(
+            b"local ok,err=pcall(function() error(true) end); return type(err)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"boolean:true".to_vec()))
+        );
+
+        // nil preserves type.
+        let frame = eval_script(
+            b"local ok,err=pcall(function() error(nil) end); return type(err)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"nil".to_vec())));
+
+        // Default-level number is coerced to a prefixed string (Lua
+        // 5.1's lua_isstring-on-number quirk).
+        let frame = eval_script(
+            b"local ok,err=pcall(function() error(42) end); return type(err)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"string:user_script:1: 42".to_vec()))
+        );
+
+        // level=0 with a number preserves the number type.
+        let frame = eval_script(
+            b"local ok,err=pcall(function() error(42,0) end); return type(err)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"number:42".to_vec()))
+        );
+
+        // Nested pcall: inner consumes its own typed error; outer's
+        // typed error round-trips independently.
+        let frame = eval_script(
+            b"local ok,err=pcall(function() pcall(function() error({}) end); error({deep=true}) end); return type(err)..':'..tostring(err.deep)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"table:true".to_vec()))
+        );
+
+        // pending_error_value cleared by a successful pcall, so a later
+        // pcall around a string error doesn't accidentally surface
+        // stale typed-error state.
+        let frame = eval_script(
+            b"local ok = pcall(function() return 1 end); local ok2, err = pcall(function() error('x') end); return type(err)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"string:user_script:1: x".to_vec()))
+        );
+
+        // xpcall hands the typed value to the message handler.
+        let frame = eval_script(
+            b"local ok,err=xpcall(function() error({m='hi'}) end, function(e) return e end); return type(err)..':'..tostring(err.m)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"table:hi".to_vec()))
+        );
+
+        // Top-level escape (uncaught typed error) renders to a string
+        // for the Redis error reply.
+        let err = eval_script(b"error(true)", &[], &[], &mut store, 0)
+            .expect_err("error(true) should escape script as an error");
+        assert!(
+            err.contains("true"),
+            "top-level error(true) should render as 'true': {err:?}"
+        );
     }
 
     #[test]
