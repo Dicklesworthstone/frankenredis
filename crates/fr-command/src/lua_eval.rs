@@ -6652,6 +6652,20 @@ fn lua_pattern_validate(pat: &[u8]) -> Result<(), String> {
                         "user_script:1: malformed pattern (ends with '%')".to_string(),
                     );
                 }
+                // (frankenredis-3zxc1) Upstream lstrlib.c::do_match raises
+                // luaL_error("missing '[' after '%%f' in pattern") when %f
+                // is not immediately followed by a character class. Advance
+                // only to the '[' so the next loop iteration validates the
+                // [set] body just like any other bracket expression.
+                if pat[i + 1] == b'f' {
+                    if i + 2 >= pat.len() || pat[i + 2] != b'[' {
+                        return Err(
+                            "user_script:1: missing '[' after '%f' in pattern".to_string(),
+                        );
+                    }
+                    i += 2;
+                    continue;
+                }
                 i += 2;
             }
             b'[' => {
@@ -6818,6 +6832,23 @@ fn lua_pat_match(
     // Handle $ anchor at end of pattern
     if pat[pi] == b'$' && pi + 1 == pat.len() {
         return if si == s.len() { Some(si) } else { None };
+    }
+
+    // (frankenredis-3zxc1) Handle %f[set] frontier matcher — a zero-width
+    // assertion that matches the empty string at a position where the
+    // previous byte does NOT match [set] but the current byte DOES.
+    // Mirrors lstrlib.c::do_match's L_ESC + 'f' branch. The pre-loop
+    // validator (lua_pattern_validate) guarantees pat[pi+2] == '['.
+    if pi + 2 < pat.len() && pat[pi] == b'%' && pat[pi + 1] == b'f' && pat[pi + 2] == b'[' {
+        let set_len = lua_pattern_element_len(pat, pi + 2);
+        // Upstream treats s[-1] as '\0' at the start of the string, and
+        // s[len] as '\0' off the end (matching the C convention).
+        let prev = if si == 0 { 0u8 } else { s[si - 1] };
+        let cur = if si < s.len() { s[si] } else { 0u8 };
+        if !lua_set_match(pat, pi + 2, prev) && lua_set_match(pat, pi + 2, cur) {
+            return lua_pat_match(s, si, pat, pi + 2 + set_len, captures, depth + 1);
+        }
+        return None;
     }
 
     let elem_len = lua_pattern_element_len(pat, pi);
@@ -12249,6 +12280,78 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_pattern_frontier_matcher_3zxc1() {
+        // (frankenredis-3zxc1) Lua 5.1's pattern engine supports %f[set]
+        // as a zero-width assertion: the previous byte does NOT match
+        // [set] but the current byte DOES (with '\0' as the sentinel
+        // before position 0 and past end-of-string). fr previously
+        // returned no-match for any pattern containing %f.
+        //
+        // Cases below were probed live against vendored Redis 7.2.4
+        // on :16380 and pin both the matching behavior and the
+        // upstream malformed-pattern wording.
+        let mut store = Store::new();
+
+        // Zero-width match at start: 'T' is %a, "before pos 0" is \0.
+        let r = eval_script(
+            b"return string.find('THE (QUICK)', '%f[%a]')",
+            &[], &[], &mut store, 0,
+        ).expect("frontier find");
+        assert_eq!(r, RespFrame::Integer(1));
+
+        // Multiple matches via gsub at every word boundary.
+        let r = eval_script(
+            b"return string.gsub('THE QUICK BROWN', '%f[%a]', '|')",
+            &[], &[], &mut store, 0,
+        ).expect("frontier gsub many");
+        // Returns (result, count) — the script returns the string only,
+        // which is the first multi-return value.
+        if let RespFrame::BulkString(Some(bytes)) = r {
+            assert_eq!(bytes, b"|THE |QUICK |BROWN");
+        } else {
+            panic!("expected bulk string, got {r:?}");
+        }
+
+        let r = eval_script(
+            b"return string.gsub('a b c', '%f[%a]', '!')",
+            &[], &[], &mut store, 0,
+        ).expect("frontier gsub a b c");
+        assert_eq!(r, RespFrame::BulkString(Some(b"!a !b !c".to_vec())));
+
+        // match returns the captured word at the first word boundary.
+        let r = eval_script(
+            b"return string.match('Hello World', '%f[%w]%w+')",
+            &[], &[], &mut store, 0,
+        ).expect("frontier match");
+        assert_eq!(r, RespFrame::BulkString(Some(b"Hello".to_vec())));
+
+        // Anchored frontier still works.
+        let r = eval_script(
+            b"return string.find('abc', '^%f[%a]')",
+            &[], &[], &mut store, 0,
+        ).expect("anchored frontier");
+        assert_eq!(r, RespFrame::Integer(1));
+
+        // Malformed: %f without trailing [set] must raise the upstream
+        // message verbatim.
+        for body in [
+            b"return string.find('hello', '%f')".as_slice(),
+            b"return string.find('hello', '%fx')".as_slice(),
+            b"return string.gsub('hello', '%f', 'X')".as_slice(),
+            b"return string.match('hello', '%f')".as_slice(),
+        ] {
+            let err = eval_script(body, &[], &[], &mut store, 0)
+                .expect_err("expected missing-bracket error");
+            assert_eq!(
+                err,
+                "user_script:1: missing '[' after '%f' in pattern",
+                "wrong error for {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
     }
 
     #[test]
