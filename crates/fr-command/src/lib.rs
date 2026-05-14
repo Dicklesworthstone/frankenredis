@@ -12872,6 +12872,15 @@ fn select(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError
         return Err(CommandError::WrongArity("SELECT"));
     }
     let db = parse_i64_arg(&argv[1])?;
+    // (frankenredis-wal9t) Upstream uses getIntFromObjectOrReply
+    // (i32-narrowed) for the DB index; values outside i32 surface
+    // the generic i32-range message, not the per-command
+    // "DB index is out of range" wording.
+    if i32::try_from(db).is_err() {
+        return Ok(RespFrame::Error(
+            "ERR value is out of range, value must between -2147483648 and 2147483647".to_string(),
+        ));
+    }
     let Ok(db_index) = usize::try_from(db) else {
         return Ok(RespFrame::Error("ERR DB index is out of range".to_string()));
     };
@@ -21454,6 +21463,13 @@ fn move_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
         ));
     }
     let target_db = parse_i64_arg(&argv[2])?;
+    // (frankenredis-wal9t) Upstream narrows to i32 and emits the
+    // generic i32-range message for values that don't fit.
+    if i32::try_from(target_db).is_err() {
+        return Err(CommandError::Custom(
+            "ERR value is out of range, value must between -2147483648 and 2147483647".to_string(),
+        ));
+    }
     let dbc = store.database_count;
     if !(0..dbc as i64).contains(&target_db) {
         return Err(CommandError::Custom(
@@ -23050,6 +23066,13 @@ fn copy_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFram
                 return Err(CommandError::SyntaxError);
             }
             let parsed = parse_i64_arg(&argv[i + 1])?;
+            // (frankenredis-wal9t) Upstream narrows DB to i32 first.
+            if i32::try_from(parsed).is_err() {
+                return Err(CommandError::Custom(
+                    "ERR value is out of range, value must between -2147483648 and 2147483647"
+                        .to_string(),
+                ));
+            }
             let dbc = store.database_count;
             if !(0..dbc as i64).contains(&parsed) {
                 return Err(CommandError::Custom(
@@ -25375,6 +25398,127 @@ mod tests {
     // SELECT N (N != 0) when cluster_enabled is true. Lua / AOF replay
     // / MULTI EXEC route SELECT through dispatch_argv → fr-command's
     // select(); pin the same guard there.
+    #[test]
+    fn db_index_commands_report_i32_overflow_per_upstream_wal9t() {
+        // (frankenredis-wal9t) Upstream parses DB index args via
+        // getIntFromObjectOrReply / getLongFromObjectOrReply, both
+        // of which narrow to a 32-bit integer. Values that don't
+        // fit i32 surface the generic
+        //   "ERR value is out of range, value must between
+        //    -2147483648 and 2147483647"
+        // for COPY/MOVE/SELECT, while SWAPDB uses its bespoke
+        // "invalid first/second DB index" wording for both the
+        // parse-failure AND i32-overflow paths. Values inside i32
+        // but outside [0, dbnum) keep the existing per-command
+        // wording.
+        let mut store = Store::new();
+
+        let i32_overflow = RespFrame::Error(
+            "ERR value is out of range, value must between -2147483648 and 2147483647".to_string(),
+        );
+        let dbi_out_of_range = RespFrame::Error("ERR DB index is out of range".to_string());
+
+        // SELECT
+        assert_eq!(
+            dispatch_argv(
+                &[b"SELECT".to_vec(), b"99999999999".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            i32_overflow
+        );
+        assert_eq!(
+            dispatch_argv(
+                &[b"SELECT".to_vec(), b"2147483648".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap(),
+            i32_overflow
+        );
+        assert_eq!(
+            dispatch_argv(&[b"SELECT".to_vec(), b"99".to_vec()], &mut store, 0).unwrap(),
+            dbi_out_of_range
+        );
+
+        // MOVE
+        store.set(
+            fr_store::encode_db_key(0, b"k"),
+            b"v".to_vec(),
+            None,
+            0,
+        );
+        let err = dispatch_argv(
+            &[b"MOVE".to_vec(), b"k".to_vec(), b"99999999999".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR value is out of range, value must between -2147483648 and 2147483647"
+                    .to_string()
+            )
+        );
+        let err = dispatch_argv(
+            &[b"MOVE".to_vec(), b"k".to_vec(), b"99".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR DB index is out of range".to_string())
+        );
+
+        // COPY (DB option)
+        store.set(
+            fr_store::encode_db_key(0, b"src".as_ref()),
+            b"hello".to_vec(),
+            None,
+            0,
+        );
+        let err = dispatch_argv(
+            &[
+                b"COPY".to_vec(),
+                b"src".to_vec(),
+                b"dst".to_vec(),
+                b"DB".to_vec(),
+                b"99999999999".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom(
+                "ERR value is out of range, value must between -2147483648 and 2147483647"
+                    .to_string()
+            )
+        );
+        let err = dispatch_argv(
+            &[
+                b"COPY".to_vec(),
+                b"src".to_vec(),
+                b"dst".to_vec(),
+                b"DB".to_vec(),
+                b"99".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            CommandError::Custom("ERR DB index is out of range".to_string())
+        );
+        let _ = i32_overflow;
+        let _ = dbi_out_of_range;
+    }
+
     #[test]
     fn select_via_dispatch_rejects_nonzero_db_in_cluster_mode() {
         let mut store = Store::new();

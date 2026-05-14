@@ -1883,13 +1883,40 @@ fn replicaof_command_name(argv: &[Vec<u8>]) -> &'static str {
 }
 
 #[inline]
+/// (frankenredis-wal9t) Upstream parses DB index args via
+/// getIntFromObjectOrReply, narrowing to `int` (i32) before the
+/// dbnum range check. Values outside i32 surface a generic
+/// "value is out of range, value must between -2147483648 and
+/// 2147483647" message; values inside i32 but outside [0, dbnum)
+/// get the per-command DB-index-out-of-range message. SWAPDB
+/// uses a custom "invalid first/second DB index" wording that
+/// covers BOTH non-numeric and i32-overflow inputs — pass that
+/// same message for both `i32_overflow_message` and via the
+/// caller's parse-failure branch.
 fn parse_db_index_arg(
     arg: &[u8],
     out_of_range_message: &'static str,
     database_count: usize,
 ) -> Result<usize, RespFrame> {
+    parse_db_index_arg_with_overflow(
+        arg,
+        "ERR value is out of range, value must between -2147483648 and 2147483647",
+        out_of_range_message,
+        database_count,
+    )
+}
+
+fn parse_db_index_arg_with_overflow(
+    arg: &[u8],
+    i32_overflow_message: &str,
+    out_of_range_message: &str,
+    database_count: usize,
+) -> Result<usize, RespFrame> {
     let parsed = parse_i64_arg(arg)
         .map_err(|_| RespFrame::Error("ERR value is not an integer or out of range".to_string()))?;
+    if i32::try_from(parsed).is_err() {
+        return Err(RespFrame::Error(i32_overflow_message.to_string()));
+    }
     if (0..database_count as i64).contains(&parsed) {
         Ok(parsed as usize)
     } else {
@@ -11402,11 +11429,19 @@ impl Runtime {
         //   - 'DB index is out of range' for either index >= dbnum
         // (br-frankenredis-swapdberrs)
         let dbc = self.server.store.database_count;
+        // (frankenredis-wal9t) Upstream's SWAPDB uses the bespoke
+        // "invalid first/second DB index" wording for BOTH the
+        // parse-failure (non-numeric input) AND the i32-overflow
+        // path. Values inside i32 but >= dbnum continue to use the
+        // generic "DB index is out of range".
         let parse_index = |arg: &[u8], invalid: &'static str| -> Result<usize, RespFrame> {
             let parsed = match parse_i64_arg(arg) {
                 Ok(v) => v,
                 Err(_) => return Err(RespFrame::Error(invalid.to_string())),
             };
+            if i32::try_from(parsed).is_err() {
+                return Err(RespFrame::Error(invalid.to_string()));
+            }
             if !(0..dbc as i64).contains(&parsed) {
                 return Err(RespFrame::Error("ERR DB index is out of range".to_string()));
             }
