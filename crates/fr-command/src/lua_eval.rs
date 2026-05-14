@@ -2740,6 +2740,32 @@ impl<'a> LuaState<'a> {
                     _ => {
                         let lv = self.eval_expr(left, env, varargs)?;
                         let rv = self.eval_expr(right, env, varargs)?;
+                        // (frankenredis-hqevr) When `..` is applied to a
+                        // table (or any non-string-non-number) and either
+                        // operand has a `__concat` metamethod, dispatch
+                        // to it as Lua 5.1 does. Non-callable handlers
+                        // produce the standard "attempt to call a TYPE
+                        // value" error via call_function — that's the
+                        // wording vendored emits for e.g. __concat=42.
+                        if matches!(op, BinOp::Concat) {
+                            let lhs_simple =
+                                matches!(lv, LuaValue::Str(_) | LuaValue::Number(_));
+                            let rhs_simple =
+                                matches!(rv, LuaValue::Str(_) | LuaValue::Number(_));
+                            if !(lhs_simple && rhs_simple) {
+                                if let Some(handler) =
+                                    self.lookup_binop_metamethod(&lv, &rv, "__concat")
+                                {
+                                    let mut args = vec![lv, rv];
+                                    let results = self.call_function(
+                                        &handler, &mut args, env, varargs,
+                                    )?;
+                                    return Ok(
+                                        results.into_iter().next().unwrap_or(LuaValue::Nil),
+                                    );
+                                }
+                            }
+                        }
                         self.eval_binop(&lv, op, &rv)
                     }
                 }
@@ -3423,6 +3449,34 @@ impl<'a> LuaState<'a> {
             Some(l) => format!("user_script:1: attempt to call {l} (a {ty} value)"),
             None => format!("user_script:1: attempt to call a {ty} value"),
         })
+    }
+
+    /// Look up the first non-nil binop metamethod (`__concat`, `__add`,
+    /// `__sub`, `__eq`, etc.) by checking the LHS metatable first then
+    /// the RHS metatable. Unlike `__index`/`__call`/`__newindex` we do
+    /// NOT filter for callability — Lua 5.1 invokes the handler
+    /// unconditionally and a non-callable handler produces the standard
+    /// "attempt to call a TYPE value" error through call_function.
+    /// (frankenredis-hqevr)
+    fn lookup_binop_metamethod(
+        &self,
+        lv: &LuaValue,
+        rv: &LuaValue,
+        name: &str,
+    ) -> Option<LuaValue> {
+        let key = LuaValue::Str(name.as_bytes().to_vec());
+        for operand in [lv, rv] {
+            if let LuaValue::Table(t) = operand {
+                let inner = t.inner.borrow();
+                if let Some(mt) = &inner.metatable {
+                    let handler = mt.get(&key);
+                    if !matches!(handler, LuaValue::Nil) {
+                        return Some(handler);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Resolve a value's `__call` metamethod. Returns the bound
@@ -7055,6 +7109,72 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_concat_metamethod_dispatches_on_table_operands() {
+        // Pins frankenredis-hqevr (sub-bead of frankenredis-00gjf).
+        // Lua 5.1's `..` operator invokes __concat(left, right) when
+        // at least one operand is not a string/number and either has
+        // a __concat metamethod. LHS metatable is checked first.
+        let mut store = Store::new();
+
+        // LHS table provides __concat.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__concat=function(a, b) return 'lhs_' .. tostring(b) end}); return t .. 'x'",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"lhs_x".to_vec())));
+
+        // RHS table provides __concat — args still in (left, right) order.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__concat=function(a, b) return 'rhs_' .. tostring(a) end}); return 'x' .. t",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"rhs_x".to_vec())));
+
+        // Both have __concat → LHS wins.
+        let frame = eval_script(
+            b"local L = setmetatable({}, {__concat=function() return 'L' end}); local R = setmetatable({}, {__concat=function() return 'R' end}); return L .. R",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"L".to_vec())));
+
+        // Types reported in handler args match the actual operand types.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__concat=function(a, b) return type(a) .. '+' .. type(b) end}); return t .. 42",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"table+number".to_vec()))
+        );
+
+        // Multi-return: only the first value is used (matches Lua 5.1).
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__concat=function() return 'A', 'B', 'C' end}); return t .. 'x' .. 'y'",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"A".to_vec())));
+
+        // No metamethod present → standard concat error.
+        let err = eval_script(b"local t = {}; return t .. 'x'", &[], &[], &mut store, 0)
+            .expect_err("expected error for plain-table concat");
+        assert!(
+            err.contains("attempt to concatenate") && err.contains("table value"),
+            "wrong wording for plain-table concat: {err:?}"
+        );
+
+        // Non-callable __concat → call_function emits "attempt to call
+        // a TYPE value" (matches vendored).
+        let err = eval_script(
+            b"local t = setmetatable({}, {__concat='nope'}); return t .. 'x'",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected error for string-__concat");
+        assert!(
+            err.contains("attempt to call") && err.contains("string"),
+            "non-callable __concat should raise call-error: {err:?}"
+        );
     }
 
     #[test]
