@@ -5558,7 +5558,82 @@ fn next_auto_stream_id(last_id: Option<StreamId>, now_ms: u64) -> StreamId {
     id
 }
 
+// Upstream t_stream.c::streamIncrID — successor in lexicographic (ms, seq)
+// order. Returns None when 'id' is already the maximum representable id.
+#[inline]
+fn stream_incr_id(id: StreamId) -> Option<StreamId> {
+    let (ms, seq) = id;
+    if seq == u64::MAX {
+        if ms == u64::MAX {
+            None
+        } else {
+            Some((ms + 1, 0))
+        }
+    } else {
+        Some((ms, seq + 1))
+    }
+}
+
+// Upstream t_stream.c::streamDecrID — predecessor of 'id'. Returns None
+// when 'id' is the minimum (0-0).
+#[inline]
+fn stream_decr_id(id: StreamId) -> Option<StreamId> {
+    let (ms, seq) = id;
+    if seq == 0 {
+        if ms == 0 {
+            None
+        } else {
+            Some((ms - 1, u64::MAX))
+        }
+    } else {
+        Some((ms, seq - 1))
+    }
+}
+
+// Parse a strict numeric id form ('ms' or 'ms-seq') with partial-id
+// completion: when seq is omitted, 0 is used for start bounds, u64::MAX
+// for end bounds (mirrors upstream's missing_seq plumbing).
+fn parse_partial_stream_id(arg: &[u8], is_start: bool) -> Result<StreamId, RespFrame> {
+    let invalid_id = || {
+        RespFrame::Error("ERR Invalid stream ID specified as stream command argument".to_string())
+    };
+    if let Some((ms_str, seq_str)) = std::str::from_utf8(arg)
+        .ok()
+        .and_then(|text| text.split_once('-'))
+    {
+        let ms = ms_str.parse::<u64>().map_err(|_| invalid_id())?;
+        let seq = seq_str.parse::<u64>().map_err(|_| invalid_id())?;
+        return Ok((ms, seq));
+    }
+    let ms = parse_u64_arg(arg).map_err(|_| invalid_id())?;
+    Ok((ms, if is_start { 0 } else { u64::MAX }))
+}
+
+// XRANGE/XREVRANGE/XPENDING/XAUTOCLAIM bound parser. Matches upstream's
+// streamParseIntervalIDOrReply: accepts the `-`/`+` sentinels and the
+// `(N` exclusive prefix (Redis 6.2+). XREAD/XTRIM/XADD MINID/XGROUP do
+// NOT accept `(N` and must reject it upstream of this call.
 fn parse_stream_range_bound(arg: &[u8], is_start: bool) -> Result<StreamId, RespFrame> {
+    let invalid_id = || {
+        RespFrame::Error("ERR Invalid stream ID specified as stream command argument".to_string())
+    };
+
+    if let Some(rest) = arg.strip_prefix(b"(") {
+        if rest.is_empty() || rest == b"-" || rest == b"+" {
+            return Err(invalid_id());
+        }
+        let inner = parse_partial_stream_id(rest, is_start)?;
+        return if is_start {
+            stream_incr_id(inner).ok_or_else(|| {
+                RespFrame::Error("ERR invalid start ID for the interval".to_string())
+            })
+        } else {
+            stream_decr_id(inner).ok_or_else(|| {
+                RespFrame::Error("ERR invalid end ID for the interval".to_string())
+            })
+        };
+    }
+
     if arg == b"-" {
         return Ok((0, 0));
     }
@@ -5566,31 +5641,11 @@ fn parse_stream_range_bound(arg: &[u8], is_start: bool) -> Result<StreamId, Resp
         return Ok((u64::MAX, u64::MAX));
     }
 
-    if let Some((ms, seq)) = std::str::from_utf8(arg)
-        .ok()
-        .and_then(|text| text.split_once('-'))
-    {
-        let ms = ms.parse::<u64>().map_err(|_| {
-            RespFrame::Error(
-                "ERR Invalid stream ID specified as stream command argument".to_string(),
-            )
-        })?;
-        let seq = seq.parse::<u64>().map_err(|_| {
-            RespFrame::Error(
-                "ERR Invalid stream ID specified as stream command argument".to_string(),
-            )
-        })?;
-        return Ok((ms, seq));
-    }
-
-    let ms = parse_u64_arg(arg).map_err(|_| {
-        RespFrame::Error("ERR Invalid stream ID specified as stream command argument".to_string())
-    })?;
-    Ok((ms, if is_start { 0 } else { u64::MAX }))
+    parse_partial_stream_id(arg, is_start)
 }
 
 fn parse_xread_id(arg: &[u8]) -> Result<StreamId, RespFrame> {
-    if arg == b"-" || arg == b"+" || arg == b"$" {
+    if arg == b"-" || arg == b"+" || arg == b"$" || arg.starts_with(b"(") {
         return Err(RespFrame::Error(
             "ERR Invalid stream ID specified as stream command argument".to_string(),
         ));
@@ -6727,7 +6782,11 @@ fn xautoclaim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFr
         u64::try_from(min_idle_raw).unwrap_or(u64::MAX)
     };
 
-    let start = match parse_stream_id(&argv[5]) {
+    // Upstream xautoclaimCommand parses the start ID via
+    // streamParseIntervalIDOrReply, which accepts `-`/`+`/`(N`. fr was
+    // routing this through parse_stream_id which only allows the strict
+    // 'ms-seq' form. (frankenredis-j3j26)
+    let start = match parse_stream_range_bound(&argv[5], true) {
         Ok(id) => id,
         Err(reply) => return Ok(reply),
     };
@@ -6980,7 +7039,12 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         let start_id = if eq_ascii_command(&argv[4], b"$") {
             store.xlast_id(&argv[2], now_ms)?.unwrap_or((0, 0))
         } else {
-            if eq_ascii_command(&argv[4], b"-") || eq_ascii_command(&argv[4], b"+") {
+            // Upstream xgroupCommand CREATE uses streamParseStrictIDOrReply
+            // (rejects `-`/`+`/`(N`); only `$` and a strict id are valid.
+            if eq_ascii_command(&argv[4], b"-")
+                || eq_ascii_command(&argv[4], b"+")
+                || argv[4].starts_with(b"(")
+            {
                 return Ok(RespFrame::Error(
                     "ERR Invalid stream ID specified as stream command argument".to_string(),
                 ));
@@ -7076,7 +7140,12 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
         let last_delivered_id = if eq_ascii_command(&argv[4], b"$") {
             store.xlast_id(&argv[2], now_ms)?.unwrap_or((0, 0))
         } else {
-            if eq_ascii_command(&argv[4], b"-") || eq_ascii_command(&argv[4], b"+") {
+            // Upstream xgroupCommand SETID uses streamParseStrictIDOrReply
+            // (rejects `-`/`+`/`(N`); only `$` and a strict id are valid.
+            if eq_ascii_command(&argv[4], b"-")
+                || eq_ascii_command(&argv[4], b"+")
+                || argv[4].starts_with(b"(")
+            {
                 return Ok(RespFrame::Error(
                     "ERR Invalid stream ID specified as stream command argument".to_string(),
                 ));
@@ -28504,6 +28573,312 @@ mod tests {
         // (br-frankenredis-xrangenegcount) — upstream emits a RESP
         // null array for COUNT <= 0.
         assert_eq!(count_zero, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn xrange_exclusive_open_paren_bounds_match_upstream() {
+        // (frankenredis-j3j26) Redis 6.2+ accepts the '(N' exclusive prefix
+        // on XRANGE/XREVRANGE start/end bounds. Cross-checked against
+        // vendored Redis 7.2.4 on :16380.
+        let mut store = Store::new();
+        for (id, _i) in [(b"1-0", 0), (b"1-5", 1), (b"2-0", 2), (b"2-1", 3), (b"3-0", 4)] {
+            dispatch_argv(
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    id.to_vec(),
+                    b"f".to_vec(),
+                    b"v".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("xadd");
+        }
+
+        let entry_ids = |frame: &RespFrame| -> Vec<Vec<u8>> {
+            let RespFrame::Array(Some(entries)) = frame else {
+                panic!("expected array, got {:?}", frame);
+            };
+            entries
+                .iter()
+                .map(|e| {
+                    let RespFrame::Array(Some(parts)) = e else {
+                        panic!("entry shape");
+                    };
+                    let RespFrame::BulkString(Some(id)) = &parts[0] else {
+                        panic!("entry id");
+                    };
+                    id.clone()
+                })
+                .collect()
+        };
+
+        // Start exclusive: '(1' (partial-id) → strictly > 1-0 → 1-5, 2-0, 2-1, 3-0
+        let r = dispatch_argv(
+            &[
+                b"XRANGE".to_vec(),
+                b"s".to_vec(),
+                b"(1".to_vec(),
+                b"+".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xrange (1 +");
+        assert_eq!(
+            entry_ids(&r),
+            vec![
+                b"1-5".to_vec(),
+                b"2-0".to_vec(),
+                b"2-1".to_vec(),
+                b"3-0".to_vec(),
+            ]
+        );
+
+        // Start exclusive with explicit seq: '(2-0' → 2-1, 3-0
+        let r = dispatch_argv(
+            &[
+                b"XRANGE".to_vec(),
+                b"s".to_vec(),
+                b"(2-0".to_vec(),
+                b"+".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xrange (2-0 +");
+        assert_eq!(entry_ids(&r), vec![b"2-1".to_vec(), b"3-0".to_vec()]);
+
+        // End exclusive partial-id: '(2' → strictly < 2-MAX → 1-0, 1-5, 2-0, 2-1
+        let r = dispatch_argv(
+            &[
+                b"XRANGE".to_vec(),
+                b"s".to_vec(),
+                b"-".to_vec(),
+                b"(2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xrange - (2");
+        assert_eq!(
+            entry_ids(&r),
+            vec![
+                b"1-0".to_vec(),
+                b"1-5".to_vec(),
+                b"2-0".to_vec(),
+                b"2-1".to_vec()
+            ]
+        );
+
+        // End exclusive explicit: '(2-1' → 1-0, 1-5, 2-0
+        let r = dispatch_argv(
+            &[
+                b"XRANGE".to_vec(),
+                b"s".to_vec(),
+                b"-".to_vec(),
+                b"(2-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xrange - (2-1");
+        assert_eq!(
+            entry_ids(&r),
+            vec![b"1-0".to_vec(), b"1-5".to_vec(), b"2-0".to_vec()]
+        );
+
+        // XREVRANGE start/end swap.
+        let r = dispatch_argv(
+            &[
+                b"XREVRANGE".to_vec(),
+                b"s".to_vec(),
+                b"+".to_vec(),
+                b"(1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xrevrange + (1");
+        assert_eq!(
+            entry_ids(&r),
+            vec![
+                b"3-0".to_vec(),
+                b"2-1".to_vec(),
+                b"2-0".to_vec(),
+                b"1-5".to_vec()
+            ]
+        );
+
+        // Decrement underflow: '(0-0' as end → "invalid end ID for the interval"
+        let r = dispatch_argv(
+            &[
+                b"XRANGE".to_vec(),
+                b"s".to_vec(),
+                b"-".to_vec(),
+                b"(0-0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xrange - (0-0");
+        assert_eq!(
+            r,
+            RespFrame::Error("ERR invalid end ID for the interval".to_string())
+        );
+
+        // Malformed exclusive forms: '(', '(+', '(-', '((1' → standard Invalid stream ID.
+        for bad in [b"(".as_slice(), b"(+", b"(-", b"((1", b"(abc"] {
+            let r = dispatch_argv(
+                &[
+                    b"XRANGE".to_vec(),
+                    b"s".to_vec(),
+                    bad.to_vec(),
+                    b"+".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("xrange malformed");
+            assert_eq!(
+                r,
+                RespFrame::Error(
+                    "ERR Invalid stream ID specified as stream command argument".to_string()
+                ),
+                "input: {:?}",
+                bad
+            );
+        }
+
+        // XREAD/XGROUP/XTRIM/XADD MINID must continue to reject '('.
+        for argv in [
+            vec![
+                b"XREAD".to_vec(),
+                b"COUNT".to_vec(),
+                b"5".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b"(1".to_vec(),
+            ],
+            vec![
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"(1".to_vec(),
+            ],
+            vec![
+                b"XTRIM".to_vec(),
+                b"s".to_vec(),
+                b"MINID".to_vec(),
+                b"(1".to_vec(),
+            ],
+        ] {
+            let r = dispatch_argv(&argv, &mut store, 0).expect("rejects (");
+            assert_eq!(
+                r,
+                RespFrame::Error(
+                    "ERR Invalid stream ID specified as stream command argument".to_string()
+                ),
+                "argv: {:?}",
+                argv
+            );
+        }
+    }
+
+    #[test]
+    fn xautoclaim_start_accepts_sentinels_and_open_paren() {
+        // (frankenredis-j3j26) XAUTOCLAIM start ID uses streamParseIntervalIDOrReply
+        // upstream: '-', '+', '(N' are all accepted.
+        let mut store = Store::new();
+        for id in [b"1-0", b"2-0", b"3-0"] {
+            dispatch_argv(
+                &[
+                    b"XADD".to_vec(),
+                    b"s".to_vec(),
+                    id.to_vec(),
+                    b"f".to_vec(),
+                    b"v".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("xadd");
+        }
+        dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"s".to_vec(),
+                b"g".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create");
+        dispatch_argv(
+            &[
+                b"XREADGROUP".to_vec(),
+                b"GROUP".to_vec(),
+                b"g".to_vec(),
+                b"c1".to_vec(),
+                b"COUNT".to_vec(),
+                b"10".to_vec(),
+                b"STREAMS".to_vec(),
+                b"s".to_vec(),
+                b">".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xreadgroup");
+
+        for start in [b"-".as_slice(), b"+", b"0-0", b"(1"] {
+            let r = dispatch_argv(
+                &[
+                    b"XAUTOCLAIM".to_vec(),
+                    b"s".to_vec(),
+                    b"g".to_vec(),
+                    b"c2".to_vec(),
+                    b"0".to_vec(),
+                    start.to_vec(),
+                ],
+                &mut store,
+                100,
+            )
+            .expect("xautoclaim accepts");
+            let RespFrame::Array(Some(parts)) = r else {
+                panic!("xautoclaim shape for {:?}", start);
+            };
+            assert_eq!(parts.len(), 3, "xautoclaim 3-tuple for {:?}", start);
+        }
+
+        // '(-', '(+' must still be rejected.
+        for bad in [b"(-".as_slice(), b"(+", b"("] {
+            let r = dispatch_argv(
+                &[
+                    b"XAUTOCLAIM".to_vec(),
+                    b"s".to_vec(),
+                    b"g".to_vec(),
+                    b"c3".to_vec(),
+                    b"0".to_vec(),
+                    bad.to_vec(),
+                ],
+                &mut store,
+                100,
+            )
+            .expect("xautoclaim rejects");
+            assert_eq!(
+                r,
+                RespFrame::Error(
+                    "ERR Invalid stream ID specified as stream command argument".to_string()
+                ),
+                "input: {:?}",
+                bad
+            );
+        }
     }
 
     #[test]
