@@ -4387,6 +4387,19 @@ impl<'a> LuaState<'a> {
             self.call_depth -= 1;
             return Err("script exceeded maximum call depth".to_string());
         }
+        // (frankenredis-4ovjf) Snapshot the caller's frame kind BEFORE
+        // pushing so the bad-callable arms below can decide whether to
+        // prepend the user_script:1: source-location prefix. Upstream's
+        // luaG_addinfo derives source:line from the immediate Lua
+        // caller's frame; the chunk itself counts as a Lua frame, so
+        // an empty kind stack also yields "caller is Lua". A C caller
+        // (RustFunction frame, e.g. pcall invoking a non-callable)
+        // hides the source.
+        let caller_is_lua_frame = match self.lua_frame_kinds.last() {
+            None => true,
+            Some(true) => true,
+            Some(false) => false,
+        };
         // (frankenredis-0k259) Push a frame for this call so error()/assert()
         // can walk `level` entries back through the kind stack to decide
         // whether to prepend the user_script:1 source-location prefix.
@@ -4457,19 +4470,18 @@ impl<'a> LuaState<'a> {
             }
             // (frankenredis-8w2ag) Prepend the standard
             // 'user_script:N: ' source-location prefix that upstream
-            // Lua 5.1 wraps around every runtime error. (Vendored
-            // also adds 'field NAME ' context when the call site is
-            // a method-style access -- requires plumbing the field
-            // name through; deferred as a separate follow-up.)
+            // Lua 5.1 wraps around every runtime error.
             //
-            // (frankenredis-o3epl) When the call originates from inside
-            // a C-builtin's pcall (current_invocation_name is None —
-            // pcall clears it before invoking the target), luaG_typeerror
-            // in upstream sees a "[C]" frame and emits the bare wording
-            // without the user_script:1: prefix.
+            // (frankenredis-4ovjf) The prefix tracks the caller's
+            // frame kind, NOT current_invocation_name. Lua-frame
+            // callers (a Lua function body or the chunk itself)
+            // supply source:line; C-frame callers (RustFunction, e.g.
+            // pcall directly invoking a non-callable) leave it empty.
+            // Snapshotted into caller_is_lua_frame above before the
+            // kind-stack push.
             LuaValue::Nil => {
                 let body = "attempt to call a nil value";
-                if self.current_invocation_name.is_some() {
+                if caller_is_lua_frame {
                     Err(format!("user_script:1: {body}"))
                 } else {
                     Err(body.to_string())
@@ -4477,7 +4489,7 @@ impl<'a> LuaState<'a> {
             }
             LuaValue::Coroutine(_) => {
                 let body = "attempt to call a thread value";
-                if self.current_invocation_name.is_some() {
+                if caller_is_lua_frame {
                     Err(format!("user_script:1: {body}"))
                 } else {
                     Err(body.to_string())
@@ -4485,7 +4497,7 @@ impl<'a> LuaState<'a> {
             }
             other => {
                 let body = format!("attempt to call a {} value", other.type_name());
-                if self.current_invocation_name.is_some() {
+                if caller_is_lua_frame {
                     Err(format!("user_script:1: {body}"))
                 } else {
                     Err(body)
@@ -15306,6 +15318,58 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn call_function_bad_callable_uses_caller_frame_kind_4ovjf() {
+        // (frankenredis-4ovjf) Upstream luaG_addinfo derives the
+        // source:line prefix from the immediate Lua caller's frame:
+        //   - Caller is a Lua function or top-level chunk → prefix.
+        //   - Caller is a C frame (pcall, internal RustFunction)    → no prefix.
+        //
+        // fr previously checked self.current_invocation_name.is_some(),
+        // which is wrong: pcall clears the name, so even when the
+        // inner Lua function body subsequently triggers an iterator
+        // call to nil, fr dropped the prefix. The new check inspects
+        // the kind-stack BEFORE pushing.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            // Inside a Lua function called via pcall — Lua caller → prefix.
+            (
+                b"local ok,e=pcall(function() for k,v in nil do end end); return tostring(e)",
+                "user_script:1: attempt to call a nil value",
+            ),
+            (
+                b"local ok,e=pcall(function() for k,v in 1 do end end); return tostring(e)",
+                "user_script:1: attempt to call a number value",
+            ),
+            (
+                b"local ok,e=pcall(function() for k,v in 'abc' do end end); return tostring(e)",
+                "user_script:1: attempt to call a string value",
+            ),
+            // pcall directly invoking a non-callable — C caller → no prefix.
+            // (Already pinned by frankenredis-o3epl; preserved here for clarity.)
+            (
+                b"local ok,e=pcall(nil); return tostring(e)",
+                "attempt to call a nil value",
+            ),
+            (
+                b"local ok,e=pcall(1); return tostring(e)",
+                "attempt to call a number value",
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[test]
