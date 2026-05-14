@@ -8993,7 +8993,47 @@ pub fn eval_script(
     };
 
     let result = state.execute(executed_script)?;
-    Ok(lua_to_resp(&result))
+    let frame = lua_to_resp(&result);
+    // (frankenredis-luaresp2map) Upstream src/script_lua.c::
+    // luaReplyToRedisReply emits Map/Set/Push/Double/etc only when the
+    // caller connection is RESP3; for RESP2 it auto-downconverts
+    // (Map → flat 2N Array, Set → Array). fr-protocol's encoder
+    // unconditionally writes `%N\r\n` for RespFrame::Map, so a Lua
+    // `{map={…}}` reply leaked a RESP3 map frame to RESP2 clients.
+    // Walk the result tree and flatten Map → flat Array when the
+    // caller is on RESP2. Read the version off the store's dispatch
+    // context since EVAL always flows through dispatch.
+    let frame = if store.dispatch_client_ctx.resp_protocol_version == 3 {
+        frame
+    } else {
+        downconvert_lua_reply_to_resp2(frame)
+    };
+    Ok(frame)
+}
+
+/// Walk a RESP frame tree and rewrite RESP3-only shapes into their
+/// RESP2 equivalents (Map → flat 2N Array). Applied to Lua reply
+/// frames before they leave eval_script when the calling client is on
+/// RESP2. (frankenredis-luaresp2map)
+fn downconvert_lua_reply_to_resp2(frame: RespFrame) -> RespFrame {
+    match frame {
+        RespFrame::Map(Some(entries)) => {
+            let mut flat = Vec::with_capacity(entries.len() * 2);
+            for (k, v) in entries {
+                flat.push(downconvert_lua_reply_to_resp2(k));
+                flat.push(downconvert_lua_reply_to_resp2(v));
+            }
+            RespFrame::Array(Some(flat))
+        }
+        RespFrame::Map(None) => RespFrame::Array(None),
+        RespFrame::Array(Some(items)) => RespFrame::Array(Some(
+            items.into_iter().map(downconvert_lua_reply_to_resp2).collect(),
+        )),
+        RespFrame::Push(items) => RespFrame::Array(Some(
+            items.into_iter().map(downconvert_lua_reply_to_resp2).collect(),
+        )),
+        other => other,
+    }
 }
 
 /// Lex+parse a script body without executing it. Returns the parser's
@@ -9034,6 +9074,71 @@ mod tests {
         Env, LuaState, LuaTable, LuaValue, SCRIPT_NOSCRIPT_ERROR, compile_check, eval_script,
         json_to_lua_value, lua_raw_equal, lua_value_to_json,
     };
+
+    #[test]
+    fn eval_map_hint_flattens_to_array_for_resp2_jp7gs() {
+        // (frankenredis-jp7gs) Upstream src/script_lua.c::luaReplyToRedisReply
+        // only emits RESP3 Map frames when the calling connection is on
+        // RESP3; RESP2 clients receive the equivalent flat 2N Array via
+        // the auto-downconvert step in addReplyMapLen.
+        //
+        // RESP2 (default): {map={a=1,b=2}} -> flat 4-element Array.
+        let mut store = Store::new();
+        let frame =
+            eval_script(b"return {map={a=1, b=2}}", &[], &[], &mut store, 0).unwrap();
+        match frame {
+            RespFrame::Array(Some(items)) => {
+                assert_eq!(items.len(), 4, "expected flat 4-element array, got {items:?}");
+                // Key ordering depends on Lua's hash iteration but for two
+                // string keys the entries must still be paired k/v.
+                assert!(matches!(&items[0], RespFrame::BulkString(Some(s)) if s == b"a" || s == b"b"));
+                assert!(matches!(&items[2], RespFrame::BulkString(Some(s)) if s == b"a" || s == b"b"));
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+
+        // RESP3: same script returns a Map(2) frame, no downconvert.
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let frame =
+            eval_script(b"return {map={a=1, b=2}}", &[], &[], &mut store, 0).unwrap();
+        match frame {
+            RespFrame::Map(Some(entries)) => {
+                assert_eq!(entries.len(), 2, "expected 2-entry map, got {entries:?}");
+            }
+            other => panic!("expected Map, got {other:?}"),
+        }
+
+        // Nested map inside an array element also downconverts in RESP2.
+        let mut store = Store::new();
+        let frame = eval_script(
+            b"return {map={a={map={x=1}}, b=2}}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match frame {
+            RespFrame::Array(Some(items)) => {
+                assert_eq!(items.len(), 4);
+                // One of the values is itself a flat 2-element array
+                // ({map={x=1}} downconverted).
+                let any_nested = items.iter().any(|v| matches!(v, RespFrame::Array(Some(inner)) if inner.len() == 2));
+                assert!(any_nested, "expected one nested 2-element array, got {items:?}");
+            }
+            other => panic!("expected Array, got {other:?}"),
+        }
+
+        // Plain arrays without map/set hints unchanged in both modes.
+        let mut store = Store::new();
+        let frame = eval_script(b"return {1, 2, 3}", &[], &[], &mut store, 0).unwrap();
+        assert!(matches!(frame, RespFrame::Array(Some(ref v)) if v.len() == 3));
+        let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
+        let frame = eval_script(b"return {1, 2, 3}", &[], &[], &mut store, 0).unwrap();
+        assert!(matches!(frame, RespFrame::Array(Some(ref v)) if v.len() == 3));
+    }
 
     #[test]
     fn lua_to_resp_non_finite_numbers_match_upstream_llong_min_cast() {
@@ -10817,10 +10922,15 @@ mod tests {
         // {double=...}, {big_number=...}, {verbatim_string=...} hint
         // tables AFTER ok/err but before the array-iteration fallback.
         // fr was returning empty arrays for ALL of them.
-
+        //
+        // (frankenredis-jp7gs) The Map frame is RESP3-only; RESP2
+        // clients see it as a flat 2N array. Pin both shapes here so
+        // any future refactor that drops the RESP3 hint detection or
+        // the RESP2 downconvert is caught.
         let mut store = Store::new();
+        store.dispatch_client_ctx.resp_protocol_version = 3;
 
-        // {map = {a=1, b=2}} → Map frame with 2 pairs.
+        // {map = {a=1, b=2}} → Map frame with 2 pairs (RESP3).
         let frame = eval_script(b"return {map = {a=1, b=2}}", &[], &[], &mut store, 0)
             .expect("map hint should not error");
         match frame {
@@ -10838,6 +10948,18 @@ mod tests {
                 assert_eq!(keys, vec!["a".to_string(), "b".to_string()]);
             }
             other => panic!("expected Map for map hint, got {other:?}"),
+        }
+
+        // Same script over a RESP2 client downconverts to a 4-element
+        // flat array (frankenredis-jp7gs).
+        let mut store2 = Store::new();
+        let frame = eval_script(b"return {map = {a=1, b=2}}", &[], &[], &mut store2, 0)
+            .expect("map hint resp2 should not error");
+        match frame {
+            RespFrame::Array(Some(items)) => {
+                assert_eq!(items.len(), 4, "expected flat 4-element array, got {items:?}");
+            }
+            other => panic!("expected Array for resp2 map hint, got {other:?}"),
         }
 
         // {set = {1, 2, 3}} → Array of the inner array's values.
