@@ -95,6 +95,14 @@ fn normalize_acl_hash(hash: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// Mirrors upstream acl.c::ACLStringHasSpaces — returns true if the byte
+/// sequence contains any C-isspace character (space, tab, newline, VT,
+/// FF, CR) or a NUL byte. Used to reject malformed `ACL SETUSER` names
+/// that would otherwise break ACL-file serialization. (frankenredis-mdg4o)
+fn acl_username_has_invalid_byte(name: &[u8]) -> bool {
+    name.iter().any(|&b| matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r' | 0x00))
+}
+
 fn acl_setuser_missing_password_error(rule_str: &str) -> String {
     format!(
         "ERR Error in ACL SETUSER modifier '{}': The password you are trying to remove from the user does not exist",
@@ -6769,6 +6777,18 @@ impl Runtime {
                 subcommand: "SETUSER".to_string(),
             }
             .to_resp();
+        }
+        // Upstream acl.c::aclCommand SETUSER calls ACLStringHasSpaces on
+        // the username before any rule processing and rejects when any
+        // byte is C-isspace (space, tab, newline, VT, FF, CR) or NUL.
+        // fr previously accepted any byte sequence, so users like
+        // "with space" could be created and subsequently break the ACL
+        // file serializer (`user with space ...` would split into three
+        // tokens on reload). (frankenredis-mdg4o)
+        if acl_username_has_invalid_byte(&argv[2]) {
+            return RespFrame::Error(
+                "ERR Usernames can't contain spaces or null characters".to_string(),
+            );
         }
         let username = argv[2].clone();
         let rules: Vec<&[u8]> = argv[3..].iter().map(Vec::as_slice).collect();
@@ -24833,6 +24853,67 @@ mod tests {
                 "NOPERM this user has no permissions to run the 'ACL' command".to_string()
             )
         );
+    }
+
+    #[test]
+    fn acl_setuser_rejects_usernames_containing_whitespace_or_nul_mdg4o() {
+        // (frankenredis-mdg4o) Pin upstream acl.c::aclCommand SETUSER
+        // ACLStringHasSpaces check — reject names containing any
+        // C-isspace byte (space, tab, newline, VT, FF, CR) or NUL. fr
+        // previously accepted any byte sequence, so `ACL SETUSER "bad
+        // name" ...` would silently create a user whose name breaks the
+        // ACL-file serializer (which splits on whitespace on reload).
+        let mut rt = Runtime::default_strict();
+        let bad_names: &[&[u8]] = &[
+            b"with space",
+            b"tab\tname",
+            b"newline\nname",
+            b"vtab\x0bname",
+            b"formfeed\x0cname",
+            b"cr\rname",
+            b"nul\x00name",
+        ];
+        for bad in bad_names {
+            let reply = rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", bad, b"on", b">pw"]),
+                0,
+            );
+            assert_eq!(
+                reply,
+                RespFrame::Error(
+                    "ERR Usernames can't contain spaces or null characters".to_string()
+                ),
+                "expected SETUSER to reject {bad:?}",
+            );
+            // Bad-named user must not be created.
+            assert!(
+                rt.server.auth_state.acl_users.get(&bad.to_vec()).is_none(),
+                "user {bad:?} must not be inserted",
+            );
+        }
+
+        // Sanity check: names with $ : @ - _ and other non-whitespace
+        // symbols are still accepted, and empty name is also accepted
+        // (matches upstream — ACLStringHasSpaces returns false for len 0).
+        let ok_names: &[&[u8]] = &[
+            b"alice",
+            b"alice$bob",
+            b"alice:bob",
+            b"user-with-dashes",
+            b"user_with_underscores",
+            b"",
+        ];
+        for ok in ok_names {
+            let reply = rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", ok, b"on", b">pw"]),
+                1,
+            );
+            assert_eq!(
+                reply,
+                RespFrame::SimpleString("OK".to_string()),
+                "expected SETUSER to accept {ok:?}",
+            );
+        }
     }
 
     #[test]
