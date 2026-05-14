@@ -1060,9 +1060,21 @@ impl<'a> Lexer<'a> {
                             break;
                         }
                     }
+                    // (frankenredis-5ife7) Greedy-consume alphanumeric
+                    // continuation so trailing junk lands inside the
+                    // malformed lexeme — vendored emits "malformed
+                    // number near '0xG'" not "...'0x'".
+                    let hex_end = self.pos;
+                    while let Some(d) = self.peek_byte() {
+                        if d.is_ascii_alphanumeric() || d == b'.' {
+                            self.pos += 1;
+                        } else {
+                            break;
+                        }
+                    }
                     let s = std::str::from_utf8(&self.src[start..self.pos])
                         .map_err(|_| "invalid number")?;
-                    if s.len() <= 2 {
+                    if self.pos != hex_end || s.len() <= 2 {
                         return Err(format!("malformed number near '{s}'"));
                     }
                     let n = u64::from_str_radix(&s[2..], 16)
@@ -1095,9 +1107,33 @@ impl<'a> Lexer<'a> {
                         }
                     }
                 }
+                // (frankenredis-5ife7) Greedy-consume alphanumeric
+                // continuation so trailing junk (e.g. `1ea`, `1.2.3`)
+                // ends up inside the lexeme and the upstream
+                // "malformed number near '<lexeme>'" wording matches
+                // verbatim. Without this, `1ea` would stop at `1e`
+                // (the scientific-notation block already advanced
+                // past 'e' once, but only digits follow it normally,
+                // so `a` would be lexed as a Name and the parser
+                // would emit a different error).
+                while let Some(d) = self.peek_byte() {
+                    if d.is_ascii_alphanumeric() || d == b'.' {
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
                 let s = std::str::from_utf8(&self.src[start..self.pos])
                     .map_err(|_| "invalid number")?;
-                let n = s.parse::<f64>().map_err(|e| e.to_string())?;
+                let n = s.parse::<f64>().map_err(|_| {
+                    // (frankenredis-5ife7) Upstream Lua's llex.c::lex_number
+                    // raises "malformed number near '<lexeme>'" for any
+                    // sequence that scans like a number but doesn't parse
+                    // (multiple dots, trailing letters, incomplete
+                    // scientific notation, etc.). fr previously bubbled
+                    // Rust's stdlib "invalid float literal" verbatim.
+                    format!("malformed number near '{s}'")
+                })?;
                 Ok(Token::Number(n))
             }
             b'"' | b'\'' => {
@@ -15162,6 +15198,55 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn lua_lexer_malformed_number_wording_matches_upstream_5ife7() {
+        // (frankenredis-5ife7) Lua 5.1's llex.c::lex_number scans a
+        // number token greedily (including trailing alphanumeric junk)
+        // and emits "malformed number near '<lexeme>'" when the lexeme
+        // fails to parse. fr previously surfaced Rust's stdlib
+        // "invalid float literal" verbatim for any non-numeric trail
+        // (multiple dots, incomplete scientific notation, alpha
+        // trailers) — and also stopped its hex lexer at the first
+        // non-hex byte, so `0xG` emitted "...near '0x'" instead of
+        // "...near '0xG'".
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (b"return 1..1", "malformed number near '1..1'"),
+            (b"return 1.2.3", "malformed number near '1.2.3'"),
+            (b"return 1..", "malformed number near '1..'"),
+            (b"return 1e", "malformed number near '1e'"),
+            (b"return 1e+", "malformed number near '1e+'"),
+            (b"return 1ea", "malformed number near '1ea'"),
+            (b"return 1abc", "malformed number near '1abc'"),
+            (b"return 0xG", "malformed number near '0xG'"),
+            (b"return 0x", "malformed number near '0x'"),
+        ];
+        for (body, expected_msg) in cases {
+            let err = eval_script(body, &[], &[], &mut store, 0).unwrap_err();
+            assert!(
+                err.contains(expected_msg),
+                "body={:?} got {err:?} expected to contain {expected_msg:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Sanity: valid number literals still work.
+        for (body, expected) in &[
+            (b"return 1+1".as_slice(), RespFrame::Integer(2)),
+            (b"return 1e3", RespFrame::Integer(1000)),
+            (b"return 0xFF", RespFrame::Integer(255)),
+            (b"return 1.5+0.5", RespFrame::Integer(2)),
+        ] {
+            let got = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            assert_eq!(
+                &got,
+                expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[test]
