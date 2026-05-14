@@ -301,6 +301,35 @@ impl LuaTableInner {
     }
 }
 
+/// Format the chunk-name prefix Lua 5.1 wraps around loadstring/load
+/// parse errors. Mirrors luaO_chunkid in lobject.c:
+///   - chunkname starts with '=' → strip the '=' and use as a literal label
+///   - chunkname starts with '@' → strip the '@' and use as a literal label
+///     (upstream uses this for filenames)
+///   - any other chunkname → wrap in `[string "NAME"]`
+///   - no chunkname → use the first line of the source, truncated with
+///     `"..."` if the source spans multiple lines, wrapped in `[string "..."]`
+/// (frankenredis-cfflo)
+fn format_lua_chunk_label(chunkname: Option<&[u8]>, source: &[u8]) -> String {
+    if let Some(name) = chunkname {
+        if let Some(rest) = name.strip_prefix(b"=").or_else(|| name.strip_prefix(b"@")) {
+            return String::from_utf8_lossy(rest).into_owned();
+        }
+        return format!("[string \"{}\"]", String::from_utf8_lossy(name));
+    }
+    let first_newline = source.iter().position(|&b| b == b'\n');
+    let snippet: &[u8] = match first_newline {
+        Some(pos) => &source[..pos],
+        None => source,
+    };
+    let suffix = if first_newline.is_some() { "..." } else { "" };
+    format!(
+        "[string \"{}{}\"]",
+        String::from_utf8_lossy(snippet),
+        suffix
+    )
+}
+
 fn lua_raw_equal(a: &LuaValue, b: &LuaValue) -> bool {
     match (a, b) {
         (LuaValue::Nil, LuaValue::Nil) => true,
@@ -1882,6 +1911,12 @@ impl<'a> LuaState<'a> {
             "getmetatable",
             "assert",
             "xpcall",
+            // (frankenredis-cfflo) loadstring/load parse a chunk of
+            // source code and return a callable function. Both are part
+            // of vendored Redis 7.2.4's Lua 5.1 sandbox surface; Redis
+            // only blocks loadfile/dofile/io/os/require/print etc.
+            "loadstring",
+            "load",
             // (frankenredis-1khox) 'print' is *not* exposed in the
             // Redis 7.2 Lua sandbox (script_lua.c blocks it alongside
             // loadfile/dofile/io/os/require). The print RustFunction
@@ -3507,6 +3542,83 @@ impl<'a> LuaState<'a> {
                         .map(|a| String::from_utf8_lossy(&a.to_display_string()).to_string())
                         .unwrap_or_else(|| "assertion failed!".to_string());
                     Err(msg)
+                }
+            }
+            "loadstring" => {
+                // (frankenredis-cfflo) Lua 5.1 loadstring(s [, chunkname])
+                // parses `s` as a chunk and returns the resulting function,
+                // or (nil, errmsg) on parse failure. The chunk runs in the
+                // same sandboxed environment as the calling script — it
+                // inherits globals_locked, so the loaded function still
+                // hits the same nonexistent-global / readonly-table
+                // errors a top-level script would.
+                let source = args.first().cloned().unwrap_or(LuaValue::Nil);
+                let chunkname = args.get(1).and_then(|v| match v {
+                    LuaValue::Str(s) => Some(s.clone()),
+                    _ => None,
+                });
+                let src_bytes: Vec<u8> = match &source {
+                    LuaValue::Str(s) => s.clone(),
+                    LuaValue::Number(n) => n.to_string().into_bytes(),
+                    _ => {
+                        return Err(format!(
+                            "bad argument #1 to 'loadstring' (string expected, got {})",
+                            source.type_name()
+                        ));
+                    }
+                };
+                let chunk_label = format_lua_chunk_label(chunkname.as_deref(), &src_bytes);
+                match Lexer::new(&src_bytes).tokenize_all().and_then(|tokens| {
+                    let mut parser = Parser::new(tokens);
+                    let stmts = parser.parse_block()?;
+                    if !parser.check(&Token::Eof) {
+                        return Err(format!("unexpected token: {:?}", parser.peek()));
+                    }
+                    Ok(stmts)
+                }) {
+                    Ok(body) => Ok(vec![LuaValue::Function(LuaFunc {
+                        params: Vec::new(),
+                        body,
+                        is_variadic: true,
+                        captured_env: Some(env.snapshot()),
+                        self_name: None,
+                    })]),
+                    Err(msg) => Ok(vec![
+                        LuaValue::Nil,
+                        LuaValue::Str(
+                            format!("{chunk_label}:1: {msg}").into_bytes(),
+                        ),
+                    ]),
+                }
+            }
+            "load" => {
+                // (frankenredis-cfflo) Lua 5.1 load(func [, chunkname])
+                // accepts a function that returns chunks. fr's tree-
+                // walking interpreter cannot stream source from a Lua
+                // callback in a useful way (the script-tree-of-Stmt form
+                // is already fully materialised), so we only implement
+                // the type-checked rejection upstream emits for non-
+                // function arguments — which matches what real Redis 7.2
+                // scripts do when they call `load('some src')` by
+                // accident (vendored: "bad argument #1 to 'load'
+                // (function expected, got string)").
+                let raw = args.first().cloned().unwrap_or(LuaValue::Nil);
+                match &raw {
+                    LuaValue::Function(_)
+                    | LuaValue::RustFunction(_)
+                    | LuaValue::WrappedCoroutine(_) => Err(
+                        "load with a chunk-generator function is not yet implemented in fr; \
+                         use loadstring(source) instead"
+                            .to_string(),
+                    ),
+                    _ => Err(format!(
+                        // (frankenredis-cfflo) Lua 5.1 marks C closures
+                        // without a registered debug name with '?'. The
+                        // base library's `load` is one of these. Match
+                        // vendored's exact wording.
+                        "bad argument #1 to '?' (function expected, got {})",
+                        raw.type_name()
+                    )),
                 }
             }
             "pcall" => {
@@ -6706,6 +6818,123 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_loadstring_parses_chunks_into_callable_functions() {
+        // Pins frankenredis-cfflo. Lua 5.1's loadstring(s [, chunkname])
+        // parses `s` as a chunk and returns the resulting function (or
+        // nil + errmsg on parse failure). `load(non_function)` errors
+        // with vendored's "bad argument #1 to '?' ..." wording.
+        let mut store = Store::new();
+
+        // Success path: simple chunk returning a constant.
+        let frame = eval_script(
+            b"local f = loadstring('return 42'); return f()",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(42));
+
+        // Success path: chunk that uses varargs.
+        let frame = eval_script(
+            b"local f = loadstring('local a,b=...; return a+b'); return f(2, 3)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(5));
+
+        // Parse failure: returns nil + a chunk-labelled error string.
+        let frame = eval_script(
+            b"local f, err = loadstring('!!!'); return tostring(f) .. ';' .. tostring(err)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        let s = String::from_utf8_lossy(&body);
+        assert!(s.starts_with("nil;"), "expected nil prefix, got {s:?}");
+        assert!(
+            s.contains("[string \"!!!\"]:1:"),
+            "expected default chunk label, got {s:?}"
+        );
+
+        // Custom chunk name produces `[string "NAME"]:1:` brackets.
+        let frame = eval_script(
+            b"local f, err = loadstring('!!!', 'myname'); return tostring(err)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        let s = String::from_utf8_lossy(&body);
+        assert!(
+            s.contains("[string \"myname\"]:1:"),
+            "expected bracketed chunk label, got {s:?}"
+        );
+
+        // `=NAME` and `@NAME` prefixes strip the brackets.
+        for prefix in ["=", "@"] {
+            let src = format!(
+                "local f, err = loadstring('!!!', '{prefix}myname'); return tostring(err)"
+            );
+            let frame =
+                eval_script(src.as_bytes(), &[], &[], &mut store, 0).unwrap();
+            let body = match frame {
+                RespFrame::BulkString(Some(b)) => b,
+                other => panic!("expected bulk string, got {other:?}"),
+            };
+            let s = String::from_utf8_lossy(&body);
+            assert!(
+                s.contains("myname:1:") && !s.contains("[string"),
+                "expected unbracketed label for prefix {prefix:?}, got {s:?}"
+            );
+        }
+
+        // Multi-line source: default chunk label truncates after the
+        // first line with `...`.
+        let frame = eval_script(
+            b"local f, err = loadstring('return 1\nreturn 2\n!!!'); return tostring(err)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        let s = String::from_utf8_lossy(&body);
+        assert!(
+            s.contains("[string \"return 1...\"]"),
+            "expected truncated default label, got {s:?}"
+        );
+
+        // type(loadstring) / type(load) are both 'function'.
+        let frame = eval_script(b"return type(loadstring)", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"function".to_vec())));
+        let frame = eval_script(b"return type(load)", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"function".to_vec())));
+
+        // load(non_function) reports vendored's "bad argument #1 to '?'"
+        // wording — Lua 5.1 marks C closures lacking debug names with '?'.
+        let frame = eval_script(
+            b"local ok, err = pcall(load, 'src'); return tostring(err)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        let s = String::from_utf8_lossy(&body);
+        assert!(
+            s.contains("bad argument #1 to '?'") && s.contains("got string"),
+            "expected vendored bad-argument wording, got {s:?}"
+        );
+
+        // load != loadstring (separate function values).
+        let frame = eval_script(
+            b"return tostring(load == loadstring)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"false".to_vec())));
     }
 
     #[test]
