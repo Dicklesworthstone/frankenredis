@@ -5571,15 +5571,17 @@ impl<'a> LuaState<'a> {
                 // so calling with zero args raises 'bad argument #1 to
                 // max (number expected, got no value)'.
                 // (frankenredis-a6r5p) Wrong-type args at index > 0
-                // route through the same luaL_argerror, so they need
-                // the source-location prefix and the correct arg
-                // index. Pre-fix fr emitted a generic "bad argument
-                // to 'math.max'" for any non-numeric arg past #1.
+                // route through the same luaL_argerror.
+                // (frankenredis-ymb2q) Route the empty-args case through
+                // lua_format_argerror so `pcall(math.max)` emits the
+                // anonymous-C-function shape (`'?'` name, no prefix).
                 if args.is_empty() {
-                    return Err(
-                        "user_script:1: bad argument #1 to 'max' (number expected, got no value)"
-                            .to_string(),
-                    );
+                    return Err(lua_format_argerror(
+                        self.current_invocation_name.as_deref(),
+                        "max",
+                        1,
+                        "number expected, got no value",
+                    ));
                 }
                 let mut max = f64::NEG_INFINITY;
                 for (i, _) in args.iter().enumerate() {
@@ -5593,11 +5595,15 @@ impl<'a> LuaState<'a> {
             "math.min" => {
                 // (frankenredis-a6r5p) Same template as math.max — see
                 // comment above for the upstream wording rationale.
+                // (frankenredis-ymb2q) Empty-args branch via
+                // lua_format_argerror for the dual direct/pcall shape.
                 if args.is_empty() {
-                    return Err(
-                        "user_script:1: bad argument #1 to 'min' (number expected, got no value)"
-                            .to_string(),
-                    );
+                    return Err(lua_format_argerror(
+                        self.current_invocation_name.as_deref(),
+                        "min",
+                        1,
+                        "number expected, got no value",
+                    ));
                 }
                 let mut min = f64::INFINITY;
                 for (i, _) in args.iter().enumerate() {
@@ -5984,26 +5990,27 @@ impl<'a> LuaState<'a> {
             "string.char" => {
                 // (frankenredis-uni2j) Upstream's luaL_argerror prepends
                 // the source-location prefix "user_script:1: " to the
-                // argument-error template. fr previously emitted just
-                // the bare "bad argument #N to 'char' (...)" wording
-                // which the regression suite caught when the error
-                // crossed back to the client envelope.
+                // argument-error template.
+                // (frankenredis-ymb2q) Route through lua_format_argerror
+                // so `pcall(string.char, …)` emits the anonymous-C-
+                // function shape (`'?'` name, no `user_script:1:`
+                // prefix) while direct/Lua-wrapped calls keep the named
+                // shape.
+                let inv = self.current_invocation_name.as_deref();
                 let mut result = Vec::new();
                 for (i, a) in args.iter().enumerate() {
                     let n = a
                         .to_number()
                         .ok_or_else(|| {
-                            format!(
-                                "user_script:1: bad argument #{} to 'char' (number expected, got {})",
+                            lua_format_argerror(
+                                inv,
+                                "char",
                                 i + 1,
-                                a.type_name()
+                                &format!("number expected, got {}", a.type_name()),
                             )
                         })? as i64;
                     if !(0..=255).contains(&n) {
-                        return Err(format!(
-                            "user_script:1: bad argument #{} to 'char' (invalid value)",
-                            i + 1
-                        ));
+                        return Err(lua_format_argerror(inv, "char", i + 1, "invalid value"));
                     }
                     result.push(n as u8);
                 }
@@ -14989,6 +14996,69 @@ mod tests {
         assert!(
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
+        );
+    }
+
+    #[test]
+    fn string_char_and_math_min_max_pcall_shape_drops_prefix_ymb2q() {
+        // (frankenredis-ymb2q) Same dual-shape pattern as frankenredis-fllxr
+        // — pcall directly invoking a C-builtin yields '?' as the function
+        // name and drops the user_script:1: prefix. The three handlers
+        // string.char, math.max, math.min previously hardcoded the named
+        // shape and now route through lua_format_argerror.
+        let mut store = Store::new();
+
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local ok,e=pcall(string.char,'x'); return tostring(e)",
+                "bad argument #1 to '?' (number expected, got string)",
+            ),
+            (
+                b"local ok,e=pcall(string.char,300); return tostring(e)",
+                "bad argument #1 to '?' (invalid value)",
+            ),
+            (
+                b"local ok,e=pcall(string.char,-1); return tostring(e)",
+                "bad argument #1 to '?' (invalid value)",
+            ),
+            (
+                b"local ok,e=pcall(math.max); return tostring(e)",
+                "bad argument #1 to '?' (number expected, got no value)",
+            ),
+            (
+                b"local ok,e=pcall(math.min); return tostring(e)",
+                "bad argument #1 to '?' (number expected, got no value)",
+            ),
+        ];
+
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Direct-call regressions — named/prefixed shape preserved.
+        let err = eval_script(b"return string.char(300)", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'char' (invalid value)"),
+            "got {err:?}"
+        );
+        let err = eval_script(b"return math.max()", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'max' (number expected, got no value)"),
+            "got {err:?}"
+        );
+        let err = eval_script(b"return math.min()", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'min' (number expected, got no value)"),
+            "got {err:?}"
         );
     }
 
