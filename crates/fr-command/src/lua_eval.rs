@@ -4314,14 +4314,36 @@ impl<'a> LuaState<'a> {
             // also adds 'field NAME ' context when the call site is
             // a method-style access -- requires plumbing the field
             // name through; deferred as a separate follow-up.)
-            LuaValue::Nil => Err("user_script:1: attempt to call a nil value".to_string()),
-            LuaValue::Coroutine(_) => {
-                Err("user_script:1: attempt to call a thread value".to_string())
+            //
+            // (frankenredis-o3epl) When the call originates from inside
+            // a C-builtin's pcall (current_invocation_name is None —
+            // pcall clears it before invoking the target), luaG_typeerror
+            // in upstream sees a "[C]" frame and emits the bare wording
+            // without the user_script:1: prefix.
+            LuaValue::Nil => {
+                let body = "attempt to call a nil value";
+                if self.current_invocation_name.is_some() {
+                    Err(format!("user_script:1: {body}"))
+                } else {
+                    Err(body.to_string())
+                }
             }
-            other => Err(format!(
-                "user_script:1: attempt to call a {} value",
-                other.type_name()
-            )),
+            LuaValue::Coroutine(_) => {
+                let body = "attempt to call a thread value";
+                if self.current_invocation_name.is_some() {
+                    Err(format!("user_script:1: {body}"))
+                } else {
+                    Err(body.to_string())
+                }
+            }
+            other => {
+                let body = format!("attempt to call a {} value", other.type_name());
+                if self.current_invocation_name.is_some() {
+                    Err(format!("user_script:1: {body}"))
+                } else {
+                    Err(body)
+                }
+            }
         };
         self.call_depth -= 1;
         self.lua_frame_kinds.pop();
@@ -5633,9 +5655,33 @@ impl<'a> LuaState<'a> {
                 // 2 args -> int [l,u] with luaL_argcheck(_, l<=u, 2, ...)
                 // — note arg #2 is reported as the bad arg when l>u;
                 // 3+ args -> luaL_error(_, "wrong number of arguments").
-                // fr previously reported arg #1 for the 2-arg case,
-                // omitted the user_script:1: prefix, and silently
-                // accepted 3+ args.
+                //
+                // (frankenredis-o3epl) All 5 errors must honor the
+                // dual direct/pcall shape. The 4 luaL_argerror calls
+                // (interval-empty + number-expected) route through
+                // lua_format_argerror; the luaL_error wrong-arity uses
+                // a conditional-prefix helper because it has no name
+                // in the message.
+                let inv_owned: Option<String> = self.current_invocation_name.clone();
+                let inv = inv_owned.as_deref();
+                let number_expected = |arg_idx: usize, got: &LuaValue| -> String {
+                    lua_format_argerror(
+                        inv,
+                        "random",
+                        arg_idx,
+                        &format!("number expected, got {}", got.type_name()),
+                    )
+                };
+                let interval_empty = |arg_idx: usize| -> String {
+                    lua_format_argerror(inv, "random", arg_idx, "interval is empty")
+                };
+                let wrong_arity = || -> String {
+                    if inv.is_some() {
+                        "user_script:1: wrong number of arguments".to_string()
+                    } else {
+                        "wrong number of arguments".to_string()
+                    }
+                };
                 let r = self.next_rand();
                 match args.len() {
                     0 => {
@@ -5645,13 +5691,10 @@ impl<'a> LuaState<'a> {
                     1 => {
                         let m = args[0]
                             .to_number()
-                            .ok_or("user_script:1: bad argument #1 to 'random' (number expected)")?
+                            .ok_or_else(|| number_expected(1, &args[0]))?
                             as i64;
                         if m < 1 {
-                            return Err(
-                                "user_script:1: bad argument #1 to 'random' (interval is empty)"
-                                    .to_string()
-                            );
+                            return Err(interval_empty(1));
                         }
                         let val = (r % (m as u64)) + 1;
                         Ok(vec![LuaValue::Number(val as f64)])
@@ -5659,23 +5702,20 @@ impl<'a> LuaState<'a> {
                     2 => {
                         let m = args[0]
                             .to_number()
-                            .ok_or("user_script:1: bad argument #1 to 'random' (number expected)")?
+                            .ok_or_else(|| number_expected(1, &args[0]))?
                             as i64;
                         let n = args[1]
                             .to_number()
-                            .ok_or("user_script:1: bad argument #2 to 'random' (number expected)")?
+                            .ok_or_else(|| number_expected(2, &args[1]))?
                             as i64;
                         if m > n {
-                            return Err(
-                                "user_script:1: bad argument #2 to 'random' (interval is empty)"
-                                    .to_string()
-                            );
+                            return Err(interval_empty(2));
                         }
                         let range = n as i128 - m as i128 + 1;
                         let val = m as i128 + (r as i128 % range);
                         Ok(vec![LuaValue::Number(val as f64)])
                     }
-                    _ => Err("user_script:1: wrong number of arguments".to_string()),
+                    _ => Err(wrong_arity()),
                 }
             }
             "math.fmod" => {
@@ -15052,6 +15092,94 @@ mod tests {
         assert!(
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
+        );
+    }
+
+    #[test]
+    fn math_random_and_attempt_to_call_errors_pcall_shape_o3epl() {
+        // (frankenredis-o3epl) Three error sites now honor the dual
+        // direct/pcall shape:
+        //   1. math.random's 4 luaL_argerror calls (interval-empty
+        //      and number-expected) via lua_format_argerror.
+        //   2. math.random's wrong-arity luaL_error (no name, only
+        //      prefix toggles).
+        //   3. call_function fallback "attempt to call a TYPE value"
+        //      for Nil/Thread/other when current_invocation_name is
+        //      None (target invoked directly by pcall).
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local ok,e=pcall(math.random,0); return tostring(e)",
+                "bad argument #1 to '?' (interval is empty)",
+            ),
+            (
+                b"local ok,e=pcall(math.random,5,1); return tostring(e)",
+                "bad argument #2 to '?' (interval is empty)",
+            ),
+            (
+                b"local ok,e=pcall(math.random,'x'); return tostring(e)",
+                "bad argument #1 to '?' (number expected, got string)",
+            ),
+            (
+                b"local ok,e=pcall(math.random,1,'y'); return tostring(e)",
+                "bad argument #2 to '?' (number expected, got string)",
+            ),
+            (
+                b"local ok,e=pcall(math.random,1,2,3); return tostring(e)",
+                "wrong number of arguments",
+            ),
+            (
+                b"local ok,e=pcall(math.pi); return tostring(e)",
+                "attempt to call a number value",
+            ),
+            (
+                b"local ok,e=pcall(nil); return tostring(e)",
+                "attempt to call a nil value",
+            ),
+            (
+                b"local ok,e=pcall(true); return tostring(e)",
+                "attempt to call a boolean value",
+            ),
+            (
+                b"local ok,e=pcall('abc'); return tostring(e)",
+                "attempt to call a string value",
+            ),
+            (
+                b"local ok,e=pcall({}); return tostring(e)",
+                "attempt to call a table value",
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Direct-call regressions — named/prefixed shape preserved.
+        let err = eval_script(b"return math.random(0)", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'random' (interval is empty)"),
+            "got {err:?}"
+        );
+        let err = eval_script(b"return math.random(1,2,3)", &[], &[], &mut store, 0)
+            .unwrap_err();
+        assert!(
+            err.contains("user_script:1: wrong number of arguments"),
+            "got {err:?}"
+        );
+        // Direct attempt-to-call: gets the field-aware wording (a
+        // separate, longer-standing fr feature), not the bare wording.
+        let err = eval_script(b"return math.pi()", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err.contains("attempt to call") && err.contains("number"),
+            "got {err:?}"
         );
     }
 
