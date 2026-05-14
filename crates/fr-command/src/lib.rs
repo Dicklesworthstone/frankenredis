@@ -9343,9 +9343,15 @@ fn zrangestore_cmd(
         return Err(CommandError::SyntaxError);
     }
 
-    // Mirror upstream t_zset.c::zrangeGenericCommand which rejects LIMIT
-    // unless paired with BYSCORE or BYLEX.
-    if limit_offset.is_some() && !byscore && !bylex {
+    // (frankenredis-qsd9p) Upstream's zrangeGenericCommand checks
+    // `opt_limit != -1` after the parse loop — the sentinel for
+    // "LIMIT was specified with a real count" is limit_count being
+    // set, not limit_offset. fr's ZRANGE check uses the same rule
+    // (line ~4261). The previous `limit_offset.is_some()` guard
+    // rejected `LIMIT 0 -1` (no-op) even in plain-rank mode, while
+    // ZRANGE accepts it. Switching to `limit_count.is_some()` makes
+    // ZRANGESTORE match both ZRANGE and vendored.
+    if limit_count.is_some() && !byscore && !bylex {
         return Ok(RespFrame::Error(
             "ERR syntax error, LIMIT is only supported in combination with either BYSCORE or BYLEX"
                 .to_string(),
@@ -9393,8 +9399,15 @@ fn zrangestore_cmd(
         }
     };
 
-    // Apply LIMIT
-    let pairs = if let Some(offset) = limit_offset {
+    // (frankenredis-qsd9p) Apply LIMIT only in BYSCORE/BYLEX mode.
+    // In rank mode, the BYSCORE/BYLEX guard above already rejected
+    // any LIMIT with a real count, so the only way to reach here in
+    // rank mode is `LIMIT N -1` — and upstream's zrangeGenericCommand
+    // skips the LIMIT clause entirely for rank-mode ranges (the
+    // offset/count fields are only consumed in the BYSCORE/BYLEX
+    // paths). Mirroring that here means `LIMIT 1 -1` doesn't drop
+    // the first element from a rank-mode ZRANGESTORE.
+    let pairs = if (byscore || bylex) && let Some(offset) = limit_offset {
         if let Some(count) = limit_count {
             pairs.into_iter().skip(offset).take(count).collect()
         } else {
@@ -56984,6 +56997,117 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, RespFrame::Array(Some(vec![])));
+    }
+
+    /// (frankenredis-qsd9p) Upstream's zrangeGenericCommand only emits
+    /// the "LIMIT requires BYSCORE/BYLEX" syntax error when the LIMIT
+    /// count is a real (non-sentinel) value. `LIMIT N -1` with rank-
+    /// mode ZRANGE/ZRANGESTORE has count=-1 (sentinel meaning "no
+    /// limit"), so the guard is skipped — and the offset is silently
+    /// ignored, returning the full range. fr previously rejected
+    /// `LIMIT 0 -1` for ZRANGESTORE (offset check) and silently
+    /// applied the offset for nonzero `LIMIT N -1`.
+    #[test]
+    fn zrangestore_rank_mode_ignores_limit_sentinel_qsd9p() {
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"src".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+                b"4".to_vec(),
+                b"d".to_vec(),
+                b"5".to_vec(),
+                b"e".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        // `LIMIT 0 -1`, `LIMIT 1 -1`, `LIMIT 100 -1` all return the
+        // full 5 elements in rank mode (LIMIT is a no-op).
+        for &offset in &[b"0".as_slice(), b"1", b"5", b"100"] {
+            let reply = dispatch_argv(
+                &[
+                    b"ZRANGESTORE".to_vec(),
+                    b"dst".to_vec(),
+                    b"src".to_vec(),
+                    b"0".to_vec(),
+                    b"-1".to_vec(),
+                    b"LIMIT".to_vec(),
+                    offset.to_vec(),
+                    b"-1".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(
+                reply,
+                RespFrame::Integer(5),
+                "ZRANGESTORE rank LIMIT {} -1 should be no-op (full range)",
+                String::from_utf8_lossy(offset)
+            );
+        }
+        // Real count without BYSCORE/BYLEX still rejected.
+        for &(off, cnt) in &[
+            (b"0".as_slice(), b"0".as_slice()),
+            (b"1", b"2"),
+            (b"0", b"100"),
+        ] {
+            let reply = dispatch_argv(
+                &[
+                    b"ZRANGESTORE".to_vec(),
+                    b"dst".to_vec(),
+                    b"src".to_vec(),
+                    b"0".to_vec(),
+                    b"-1".to_vec(),
+                    b"LIMIT".to_vec(),
+                    off.to_vec(),
+                    cnt.to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert!(
+                matches!(
+                    reply,
+                    RespFrame::Error(ref e) if e.contains("LIMIT is only supported")
+                ),
+                "ZRANGESTORE rank LIMIT {} {} should error, got {:?}",
+                String::from_utf8_lossy(off),
+                String::from_utf8_lossy(cnt),
+                reply
+            );
+        }
+        // BYSCORE preserves both offset and count semantics.
+        let reply = dispatch_argv(
+            &[
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"src".to_vec(),
+                b"1".to_vec(),
+                b"5".to_vec(),
+                b"BYSCORE".to_vec(),
+                b"LIMIT".to_vec(),
+                b"2".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            reply,
+            RespFrame::Integer(3),
+            "BYSCORE LIMIT 2 -1 should drop first two elements (returns 3)"
+        );
     }
 
     #[test]
