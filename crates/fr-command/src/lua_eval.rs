@@ -2773,6 +2773,27 @@ impl<'a> LuaState<'a> {
                                         results.into_iter().next().unwrap_or(LuaValue::Nil),
                                     );
                                 }
+                                // (frankenredis-22c3u) No __concat handler:
+                                // emit Lua 5.1's accessor-aware wording.
+                                // The first non-string/non-number operand
+                                // (LHS preferred) supplies the
+                                // local/upvalue/field/method label.
+                                let (bad_val, bad_expr) = if !lhs_simple {
+                                    (&lv, &**left)
+                                } else {
+                                    (&rv, &**right)
+                                };
+                                let label = self.callee_label(bad_expr, env);
+                                return Err(match label {
+                                    Some(l) => format!(
+                                        "user_script:1: attempt to concatenate {l} (a {} value)",
+                                        bad_val.type_name()
+                                    ),
+                                    None => format!(
+                                        "user_script:1: attempt to concatenate a {} value",
+                                        bad_val.type_name()
+                                    ),
+                                });
                             }
                         }
                         // (frankenredis-mdxsk) Arithmetic operators dispatch
@@ -7403,6 +7424,85 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_concat_error_carries_accessor_context() {
+        // Pins frankenredis-22c3u. Lua 5.1 emits accessor-aware wording
+        // for concat-of-non-string-non-number when no __concat handler
+        // is found: `attempt to concatenate <accessor> (a TYPE value)`
+        // where accessor is local/upvalue/global/field 'NAME' / field
+        // '?'. Anonymous call sites (paren expr, call result) fall back
+        // to `attempt to concatenate a TYPE value`.
+        let mut store = Store::new();
+
+        // local on LHS: tracked as 'local' inside the current function.
+        let err = eval_script(
+            b"local t = {}; return t .. 'x'",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected concat error");
+        assert!(
+            err.contains("attempt to concatenate local 't' (a table value)"),
+            "wrong wording for local LHS: {err:?}"
+        );
+
+        // local on RHS still produces the accessor label.
+        let err = eval_script(
+            b"local t = {}; return 'x' .. t",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected concat error");
+        assert!(
+            err.contains("attempt to concatenate local 't' (a table value)"),
+            "wrong wording for local RHS: {err:?}"
+        );
+
+        // Field-access prefix.
+        let err = eval_script(
+            b"local obj = {fld = {}}; return obj.fld .. 'x'",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected concat error");
+        assert!(
+            err.contains("attempt to concatenate field 'fld' (a table value)"),
+            "wrong wording for field: {err:?}"
+        );
+
+        // Numeric-index access → field '?'.
+        let err = eval_script(
+            b"local arr = {{}}; return arr[1] .. 'x'",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected concat error");
+        assert!(
+            err.contains("attempt to concatenate field '?' (a table value)"),
+            "wrong wording for numeric index: {err:?}"
+        );
+
+        // String-literal index resolves to the field name.
+        let err = eval_script(
+            b"local obj = {fld = {}}; return obj['fld'] .. 'x'",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected concat error");
+        assert!(
+            err.contains("attempt to concatenate field 'fld' (a table value)"),
+            "wrong wording for string-index: {err:?}"
+        );
+
+        // Call result has no accessor — falls back to anonymous form.
+        let err = eval_script(
+            b"local function g() return {} end; return g() .. 'x'",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected concat error");
+        assert!(
+            err.contains("attempt to concatenate a table value"),
+            "wrong wording for call result: {err:?}"
+        );
+
+        // Paren expression (nil): anonymous form with the actual type.
+        let err = eval_script(b"return (nil) .. 'x'", &[], &[], &mut store, 0)
+            .expect_err("expected concat error for nil");
+        assert!(
+            err.contains("attempt to concatenate a nil value"),
+            "wrong wording for nil: {err:?}"
+        );
     }
 
     #[test]
