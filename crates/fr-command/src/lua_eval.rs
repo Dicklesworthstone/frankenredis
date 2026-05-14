@@ -7394,7 +7394,7 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                         }
                     };
                     let formatted = match conv {
-                        'd' | 'i' | 'u' => {
+                        'd' | 'i' => {
                             let n = require_number(&arg)? as i64;
                             let s = if show_sign && n >= 0 {
                                 format!("+{n}")
@@ -7405,39 +7405,83 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             };
                             lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
                         }
+                        'u' => {
+                            // (frankenredis-t1ah8) Upstream %u prints the unsigned
+                            // bit pattern of the C `long`/`int` result of luaL_checkinteger.
+                            // Going via `as i64 as u64` recovers the two's complement
+                            // bit pattern for negatives (e.g. -1 -> 18446744073709551615).
+                            // fr was rendering negatives as signed (-1) by sharing the
+                            // %d arm.
+                            let n = require_number(&arg)? as i64 as u64;
+                            let s = format!("{n}");
+                            lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
+                        }
                         'f' => {
                             let n = require_number(&arg)?;
-                            let prec = precision.unwrap_or(6);
-                            let s = if show_sign && n >= 0.0 {
-                                format!("+{n:.prec$}")
-                            } else if space_sign && n >= 0.0 {
-                                format!(" {n:.prec$}")
+                            if let Some(s) = lua_fmt_nonfinite(n, conv == 'F') {
+                                let s = if show_sign && !n.is_sign_negative() {
+                                    format!("+{s}")
+                                } else if space_sign && !n.is_sign_negative() {
+                                    format!(" {s}")
+                                } else {
+                                    s
+                                };
+                                lua_fmt_pad(&s, width, left_align, ' ')
                             } else {
-                                format!("{n:.prec$}")
-                            };
-                            lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
+                                let prec = precision.unwrap_or(6);
+                                let s = if show_sign && n >= 0.0 {
+                                    format!("+{n:.prec$}")
+                                } else if space_sign && n >= 0.0 {
+                                    format!(" {n:.prec$}")
+                                } else {
+                                    format!("{n:.prec$}")
+                                };
+                                lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
+                            }
                         }
                         'e' | 'E' => {
                             let n = require_number(&arg)?;
-                            let prec = precision.unwrap_or(6);
-                            let s = lua_fmt_scientific(n, prec, conv == 'E');
-                            let s = if show_sign && n >= 0.0 {
-                                format!("+{s}")
+                            if let Some(s) = lua_fmt_nonfinite(n, conv == 'E') {
+                                let s = if show_sign && !n.is_sign_negative() {
+                                    format!("+{s}")
+                                } else if space_sign && !n.is_sign_negative() {
+                                    format!(" {s}")
+                                } else {
+                                    s
+                                };
+                                lua_fmt_pad(&s, width, left_align, ' ')
                             } else {
-                                s
-                            };
-                            lua_fmt_pad(&s, width, left_align, ' ')
+                                let prec = precision.unwrap_or(6);
+                                let s = lua_fmt_scientific(n, prec, conv == 'E');
+                                let s = if show_sign && n >= 0.0 {
+                                    format!("+{s}")
+                                } else {
+                                    s
+                                };
+                                lua_fmt_pad(&s, width, left_align, ' ')
+                            }
                         }
                         'g' | 'G' => {
                             let n = require_number(&arg)?;
-                            let prec = precision.unwrap_or(6).max(1);
-                            let s = lua_fmt_g(n, prec, conv == 'G');
-                            let s = if show_sign && n >= 0.0 {
-                                format!("+{s}")
+                            if let Some(s) = lua_fmt_nonfinite(n, conv == 'G') {
+                                let s = if show_sign && !n.is_sign_negative() {
+                                    format!("+{s}")
+                                } else if space_sign && !n.is_sign_negative() {
+                                    format!(" {s}")
+                                } else {
+                                    s
+                                };
+                                lua_fmt_pad(&s, width, left_align, ' ')
                             } else {
-                                s
-                            };
-                            lua_fmt_pad(&s, width, left_align, ' ')
+                                let prec = precision.unwrap_or(6).max(1);
+                                let s = lua_fmt_g(n, prec, conv == 'G');
+                                let s = if show_sign && n >= 0.0 {
+                                    format!("+{s}")
+                                } else {
+                                    s
+                                };
+                                lua_fmt_pad(&s, width, left_align, ' ')
+                            }
                         }
                         's' => {
                             // (frankenredis-u5qgq follow-up) Lua 5.1's
@@ -7521,7 +7565,13 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             q
                         }
                         'x' | 'X' => {
-                            let n = require_number(&arg)? as u64;
+                            // (frankenredis-t1ah8) Upstream luaL_checkinteger
+                            // returns lua_Integer (C `ptrdiff_t`/long); %x/%X
+                            // prints the unsigned bit pattern. `as u64` directly
+                            // from f64 saturates negatives to 0; going through
+                            // i64 first recovers the two's complement bits, so
+                            // -1 -> ffffffffffffffff matching vendored.
+                            let n = require_number(&arg)? as i64 as u64;
                             let s = if conv == 'x' {
                                 if alt_form {
                                     format!("0x{n:x}")
@@ -7536,7 +7586,9 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
                         }
                         'o' => {
-                            let n = require_number(&arg)? as u64;
+                            // (frankenredis-t1ah8) Same fix as %x/%X — recover
+                            // the unsigned bit pattern for negative inputs.
+                            let n = require_number(&arg)? as i64 as u64;
                             let s = if alt_form {
                                 format!("0{n:o}")
                             } else {
@@ -7594,6 +7646,34 @@ fn lua_fmt_pad(s: &str, width: Option<usize>, left_align: bool, pad: char) -> St
             "{}{s}",
             std::iter::repeat_n(pad, padding).collect::<String>()
         )
+    }
+}
+
+/// (frankenredis-t1ah8) Render non-finite floats the way C's printf does for
+/// %e/%E/%f/%F/%g/%G: "inf"/"-inf" or "nan"/"-nan", upper-cased for the
+/// upper-case conversion variants. The sign-bit of NaN drives the leading
+/// '-' to match x86-64 glibc (0/0 produces a sign-negative NaN, which Lua
+/// prints as "-nan"). Returns None for finite values so the caller can fall
+/// through to the regular formatter.
+fn lua_fmt_nonfinite(n: f64, upper: bool) -> Option<String> {
+    if n.is_infinite() {
+        Some(if n.is_sign_negative() {
+            if upper { "-INF".to_string() } else { "-inf".to_string() }
+        } else if upper {
+            "INF".to_string()
+        } else {
+            "inf".to_string()
+        })
+    } else if n.is_nan() {
+        Some(if n.is_sign_negative() {
+            if upper { "-NAN".to_string() } else { "-nan".to_string() }
+        } else if upper {
+            "NAN".to_string()
+        } else {
+            "nan".to_string()
+        })
+    } else {
+        None
     }
 }
 
@@ -12169,6 +12249,61 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn string_format_inf_nan_and_neg_unsigned_t1ah8() {
+        // (frankenredis-t1ah8) Upstream string.format relies on C printf
+        // which has well-defined output for non-finite floats and for
+        // negative inputs to unsigned conversions. fr previously emitted
+        // garbage like "NaNe+2147483647" for inf, "NaN" instead of "-nan",
+        // and 0 / -1 for %x/%u on negative inputs. Pin the upstream
+        // wording (probed against vendored Redis 7.2.4 on :16380).
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            // Positive infinity → lowercase "inf" for lowercase specs,
+            // "INF" for uppercase. %f already worked; cover all four.
+            (b"return string.format('%e', 1/0)", "inf"),
+            (b"return string.format('%E', 1/0)", "INF"),
+            (b"return string.format('%g', 1/0)", "inf"),
+            (b"return string.format('%G', 1/0)", "INF"),
+            (b"return string.format('%f', 1/0)", "inf"),
+            // Negative infinity.
+            (b"return string.format('%e', -1/0)", "-inf"),
+            (b"return string.format('%g', -1/0)", "-inf"),
+            (b"return string.format('%f', -1/0)", "-inf"),
+            // NaN: 0/0 produces a sign-negative NaN on x86-64, matching
+            // glibc's "-nan" / "-NAN" output.
+            (b"return string.format('%e', 0/0)", "-nan"),
+            (b"return string.format('%g', 0/0)", "-nan"),
+            (b"return string.format('%f', 0/0)", "-nan"),
+            (b"return string.format('%E', 0/0)", "-NAN"),
+            (b"return string.format('%G', 0/0)", "-NAN"),
+            // Negative integer to %x/%X/%o/%u: must recover the unsigned
+            // two's complement bit pattern.
+            (b"return string.format('%x', -1)", "ffffffffffffffff"),
+            (b"return string.format('%x', -255)", "ffffffffffffff01"),
+            (b"return string.format('%X', -1)", "FFFFFFFFFFFFFFFF"),
+            (b"return string.format('%o', -1)", "1777777777777777777777"),
+            (b"return string.format('%u', -1)", "18446744073709551615"),
+            (b"return string.format('%u', -42)", "18446744073709551574"),
+            // Finite values must still round-trip correctly.
+            (b"return string.format('%e', 1.5)", "1.500000e+00"),
+            (b"return string.format('%g', 1.5)", "1.5"),
+            (b"return string.format('%x', 255)", "ff"),
+            (b"return string.format('%u', 42)", "42"),
+            (b"return string.format('%d', 42)", "42"),
+        ];
+        for (body, expected) in cases {
+            let r = eval_script(body, &[], &[], &mut store, 0)
+                .unwrap_or_else(|e| panic!("eval {:?} failed: {e}", String::from_utf8_lossy(body)));
+            assert_eq!(
+                r,
+                RespFrame::BulkString(Some(expected.as_bytes().to_vec())),
+                "wrong output for {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
     }
 
     #[test]
