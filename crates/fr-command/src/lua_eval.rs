@@ -4495,24 +4495,47 @@ impl<'a> LuaState<'a> {
             }
             "redis.acl_check_cmd" => {
                 // Upstream script_lua.c::luaRedisAclCheckCmdCommand
-                // requires at least one string argument (the command
-                // name); rejects unknown commands. (br-frankenredis-redislua)
+                // requires at least one argument (the command name);
+                // rejects unknown commands. (br-frankenredis-redislua)
+                //
+                // (frankenredis-vqjp9) Upstream's per-arg loop calls
+                // lua_tolstring, which coerces both strings and numbers
+                // to byte strings — so `redis.acl_check_cmd(123)` looks
+                // up "123" as a command name (yielding the unknown-cmd
+                // error), and `redis.acl_check_cmd(3.14)` looks up
+                // "3.14". Only bool/nil/table arguments hit the
+                // type-rejection branch. All three error strings carry
+                // the "ERR " prefix because upstream's luaPushError
+                // stores it as part of the error table's `err` field —
+                // pcall sees "ERR ..." and the direct-call wrapper
+                // recognises the prefix via error_has_resp_code_prefix
+                // and does not double-add.
                 if args.is_empty() {
                     return Err(
-                        "Please specify at least one argument for this redis lib call".to_string(),
+                        "ERR Please specify at least one argument for this redis lib call"
+                            .to_string(),
                     );
                 }
-                let cmd_bytes = match &args[0] {
+                let cmd_bytes: Vec<u8> = match &args[0] {
                     LuaValue::Str(b) => b.clone(),
+                    LuaValue::Number(n) => {
+                        if *n == (*n as i64) as f64 && n.is_finite() {
+                            format!("{}", *n as i64).into_bytes()
+                        } else {
+                            lua_number_to_string(*n).into_bytes()
+                        }
+                    }
                     _ => {
                         return Err(
-                            "Lua redis lib command arguments must be strings or integers"
+                            "ERR Lua redis lib command arguments must be strings or integers"
                                 .to_string(),
                         );
                     }
                 };
                 if !crate::is_known_command(&cmd_bytes) {
-                    return Err("Invalid command passed to redis.acl_check_cmd()".to_string());
+                    return Err(
+                        "ERR Invalid command passed to redis.acl_check_cmd()".to_string(),
+                    );
                 }
                 // Standalone mode without per-call ACL gating: assume
                 // the command is allowed.
@@ -14900,6 +14923,131 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn redis_acl_check_cmd_coerces_numbers_and_prefixes_err_vqjp9() {
+        // (frankenredis-vqjp9) Upstream script_lua.c::luaRedisAclCheckCmdCommand
+        // accepts numeric args (lua_tolstring coerces "123" → "123" and
+        // "3.14" → "3.14") and looks them up as command names; only
+        // bool/nil/table arguments hit the type-rejection branch. All
+        // three error strings carry the "ERR " prefix (luaPushError on
+        // upstream stores the prefix in the err table's err field).
+        let mut store = Store::new();
+
+        // Numeric coercion path: 123 should be coerced to "123" and
+        // rejected as unknown command — NOT as a type error.
+        let caught = eval_script(
+            b"local ok,err=pcall(redis.acl_check_cmd,123); return tostring(err)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::BulkString(Some(bytes)) = caught else {
+            panic!("expected bulk")
+        };
+        let s = String::from_utf8(bytes).unwrap();
+        assert_eq!(s, "ERR Invalid command passed to redis.acl_check_cmd()");
+
+        // Negative integer coerces to "-5" → unknown.
+        let caught = eval_script(
+            b"local ok,err=pcall(redis.acl_check_cmd,-5); return tostring(err)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::BulkString(Some(bytes)) = caught else {
+            panic!("expected bulk")
+        };
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "ERR Invalid command passed to redis.acl_check_cmd()"
+        );
+
+        // Float with fraction coerces to "3.14" → unknown.
+        let caught = eval_script(
+            b"local ok,err=pcall(redis.acl_check_cmd,3.14); return tostring(err)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::BulkString(Some(bytes)) = caught else {
+            panic!("expected bulk")
+        };
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "ERR Invalid command passed to redis.acl_check_cmd()"
+        );
+
+        // String unknown command — same error.
+        let caught = eval_script(
+            b"local ok,err=pcall(redis.acl_check_cmd,'NOTACMD'); return tostring(err)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::BulkString(Some(bytes)) = caught else {
+            panic!("expected bulk")
+        };
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "ERR Invalid command passed to redis.acl_check_cmd()"
+        );
+
+        // bool/nil/table: type rejection with ERR prefix.
+        for body in &[
+            b"local ok,err=pcall(redis.acl_check_cmd,true); return tostring(err)".as_slice(),
+            b"local ok,err=pcall(redis.acl_check_cmd,false); return tostring(err)",
+            b"local ok,err=pcall(redis.acl_check_cmd,nil); return tostring(err)",
+            b"local ok,err=pcall(redis.acl_check_cmd,{}); return tostring(err)",
+        ] {
+            let caught = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = caught else {
+                panic!("expected bulk for body={:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                "ERR Lua redis lib command arguments must be strings or integers",
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Empty args: ERR prefix.
+        let caught = eval_script(
+            b"local ok,err=pcall(redis.acl_check_cmd); return tostring(err)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::BulkString(Some(bytes)) = caught else {
+            panic!("expected bulk")
+        };
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "ERR Please specify at least one argument for this redis lib call"
+        );
+
+        // Sanity: known command returns true.
+        let ok = eval_script(
+            b"return redis.acl_check_cmd('GET')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(ok, RespFrame::Integer(1));
     }
 
     #[test]
