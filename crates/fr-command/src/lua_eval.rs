@@ -680,6 +680,33 @@ fn hex_str_to_lua_number(trimmed: &str) -> LuaValue {
 /// e.g. 'lua', '<eof>', 'b', '+'. Used by the parser to reproduce
 /// upstream's "'=' expected near '<token>'" wording for invalid
 /// expression statements. (frankenredis-luabarestmt)
+/// Best-effort rendering of the leading token of an Expr, used to
+/// produce a vendored-style "unexpected symbol near '<X>'"-flavoured
+/// message when a non-lvalue is supplied on the LHS of an assignment.
+/// (frankenredis-s9mxn)
+fn lua_lvalue_first_token(expr: &Expr) -> String {
+    match expr {
+        Expr::Nil => "nil".to_string(),
+        Expr::Bool(true) => "true".to_string(),
+        Expr::Bool(false) => "false".to_string(),
+        Expr::Number(n) => {
+            if n.fract() == 0.0 && n.is_finite() && n.abs() < 1e15 {
+                format!("{}", *n as i64)
+            } else {
+                format!("{n}")
+            }
+        }
+        Expr::Str(s) => format!("'{}'", String::from_utf8_lossy(s)),
+        Expr::Name(n) => n.clone(),
+        Expr::VarArgs => "...".to_string(),
+        Expr::Call(_, _) | Expr::MethodCall(_, _, _) => "()".to_string(),
+        Expr::TableConstructor(_) => "{".to_string(),
+        Expr::FunctionDef(_, _, _) => "function".to_string(),
+        Expr::BinOp(left, _, _) | Expr::UnaryOp(_, left) => lua_lvalue_first_token(left),
+        Expr::Index(left, _) | Expr::Field(left, _) => lua_lvalue_first_token(left),
+    }
+}
+
 fn token_display(tok: &Token) -> String {
     match tok {
         Token::Name(n) => n.clone(),
@@ -1477,6 +1504,28 @@ impl Parser {
                 lhs.push(self.parse_suffixed_expr()?);
             }
             self.expect(&Token::Eq)?;
+            // (frankenredis-s9mxn) Upstream Lua's grammar restricts
+            // varlist to Name | prefixexp '[' exp ']' | prefixexp '.'
+            // Name. Literals, operators, and function-call results are
+            // NOT valid assignment targets, and vendored's parser
+            // rejects them at compile time (`SCRIPT LOAD "1 = 2"` ->
+            // "unexpected symbol near '1'"). fr's parser accepted any
+            // suffixed expression on the LHS, deferring rejection to
+            // runtime where `invalid assignment target` fires only on
+            // EVAL/EVALSHA — meaning SCRIPT LOAD would happily cache a
+            // sha for malformed source. Validate each LHS entry here so
+            // the parse fails before the sha is returned.
+            for lvalue in &lhs {
+                if !matches!(
+                    lvalue,
+                    Expr::Name(_) | Expr::Index(_, _) | Expr::Field(_, _)
+                ) {
+                    return Err(format!(
+                        "syntax error near '=': '{}' is not a valid assignment target",
+                        lua_lvalue_first_token(lvalue)
+                    ));
+                }
+            }
             let rhs = self.parse_expr_list()?;
             Ok(Stmt::Assign(lhs, rhs))
         } else {

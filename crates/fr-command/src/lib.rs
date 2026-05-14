@@ -42966,6 +42966,62 @@ mod tests {
     }
 
     #[test]
+    fn script_load_rejects_invalid_assignment_targets_at_compile_time_s9mxn() {
+        // (frankenredis-s9mxn) Upstream Lua's grammar restricts varlist
+        // to Name | prefixexp '[' exp ']' | prefixexp '.' Name. Literals
+        // and function-call results are NOT valid assignment targets,
+        // and vendored's Lua parser rejects them at compile time so
+        // SCRIPT LOAD never returns a SHA for source like `1 = 2`.
+        // Pre-fix fr's parser accepted any suffixed expression on the
+        // LHS, returning a SHA from SCRIPT LOAD and only failing later
+        // at EVAL/EVALSHA with `invalid assignment target` — meaning a
+        // sha was cached for malformed source.
+        let mut store = Store::new();
+        let invalid_lvalues: &[&[u8]] = &[
+            b"1 = 2",
+            b"'a' = 'b'",
+            b"true = false",
+            b"nil = 1",
+            b"redis.call('GET','k') = 1",
+        ];
+        for script in invalid_lvalues {
+            let err = dispatch_argv(
+                &[b"SCRIPT".to_vec(), b"LOAD".to_vec(), script.to_vec()],
+                &mut store,
+                0,
+            )
+            .expect_err("expected compile-error envelope");
+            let CommandError::Custom(msg) = err else {
+                panic!(
+                    "expected Custom error for {:?}, got {err:?}",
+                    String::from_utf8_lossy(script)
+                );
+            };
+            assert!(
+                msg.starts_with("ERR Error compiling script (new function): user_script:1: "),
+                "missing upstream envelope prefix for {:?}: {msg}",
+                String::from_utf8_lossy(script)
+            );
+        }
+
+        // Sanity: syntactically valid (even if semantically meaningless)
+        // scripts must still load and cache.
+        let ok = dispatch_argv(
+            &[
+                b"SCRIPT".to_vec(),
+                b"LOAD".to_vec(),
+                b"return 1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("valid script should load");
+        let RespFrame::BulkString(Some(_sha)) = ok else {
+            panic!("expected sha back from valid SCRIPT LOAD");
+        };
+    }
+
+    #[test]
     fn script_load_rejects_unparseable_lua_with_compile_error_envelope() {
         // (frankenredis-scrldch) Upstream scripting.c::scriptingLoadCommand
         // routes through luaCreateFunction, which calls luaL_loadbuffer
