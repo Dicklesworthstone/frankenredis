@@ -5651,8 +5651,20 @@ fn geosearchstore(
     // (br-frankenredis-geofromnonexistent) — parse trailing flags
     // before the missing-center check so syntax errors surface even
     // when the source key is absent.
-    let (_, _, _, count, any, sort, _) =
+    let (withcoord, withdist, withhash, count, any, sort, _) =
         parse_geo_search_flags(&synth, i, unit_mult, GeoFlagContext::GeoSearchStore)?;
+
+    // (frankenredis-w2whf) Upstream src/geo.c::georadiusGeneric on
+    // the GEOSEARCHSTORE path rejects any WITH* metadata flag with
+    // the dedicated wording (distinct from GEORADIUS STORE's
+    // "STORE option in GEORADIUS is not compatible..." form). The
+    // store-output of GEOSEARCHSTORE is always a {member→score} set,
+    // so the WITH* output-shaping flags have no defined meaning here.
+    if withcoord || withdist || withhash {
+        return Ok(RespFrame::Error(
+            "ERR GEOSEARCHSTORE is not compatible with WITHDIST, WITHHASH and WITHCOORD options".to_string(),
+        ));
+    }
 
     let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
         if !has_center {
@@ -47465,6 +47477,104 @@ mod tests {
         )
         .expect("WITHCOORD-alone");
         assert!(matches!(with_alone, RespFrame::Array(_)));
+    }
+
+    #[test]
+    fn geosearchstore_rejects_with_options_w2whf() {
+        // (frankenredis-w2whf) Upstream src/geo.c::georadiusGeneric on
+        // the GEOSEARCHSTORE path rejects WITHCOORD/WITHDIST/WITHHASH
+        // with the dedicated error wording. Plain GEOSEARCHSTORE and
+        // GEOSEARCHSTORE with STOREDIST alone must still succeed.
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+        let expected_err = RespFrame::Error(
+            "ERR GEOSEARCHSTORE is not compatible with WITHDIST, WITHHASH and WITHCOORD options"
+                .to_string(),
+        );
+        for flag in [b"WITHCOORD".as_slice(), b"WITHDIST", b"WITHHASH"] {
+            let out = dispatch_argv(
+                &[
+                    b"GEOSEARCHSTORE".to_vec(),
+                    b"dest".to_vec(),
+                    b"mygeo".to_vec(),
+                    b"FROMLONLAT".to_vec(),
+                    b"15".to_vec(),
+                    b"37".to_vec(),
+                    b"BYRADIUS".to_vec(),
+                    b"200".to_vec(),
+                    b"km".to_vec(),
+                    flag.to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("geosearchstore with-flag should not arity-error");
+            assert_eq!(
+                out,
+                expected_err,
+                "flag={:?}",
+                String::from_utf8_lossy(flag)
+            );
+        }
+        // STOREDIST + WITHCOORD also rejected.
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCHSTORE".to_vec(),
+                b"dest".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"STOREDIST".to_vec(),
+                b"WITHCOORD".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, expected_err);
+
+        // Plain GEOSEARCHSTORE still works.
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCHSTORE".to_vec(),
+                b"dest".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(2));
+
+        // STOREDIST alone still works.
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCHSTORE".to_vec(),
+                b"dest2".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"200".to_vec(),
+                b"km".to_vec(),
+                b"STOREDIST".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(out, RespFrame::Integer(2));
     }
 
     #[test]
