@@ -4827,8 +4827,19 @@ impl<'a> LuaState<'a> {
                 // the type-checked rejection upstream emits for non-
                 // function arguments — which matches what real Redis 7.2
                 // scripts do when they call `load('some src')` by
-                // accident (vendored: "bad argument #1 to 'load'
-                // (function expected, got string)").
+                // accident.
+                //
+                // (frankenredis-4zmde) Upstream lbaselib.c registers
+                // `load` via luaL_register on the base_funcs table, so
+                // lua_getinfo reports its debug name as `load` when
+                // called directly. When called via pcall/xpcall the
+                // call site is lost and the name reports as `'?'`. The
+                // direct-call form also carries the `user_script:1: `
+                // source-location prefix; the pcall form does not.
+                // Live probe vs vendored 7.2.4 confirmed both shapes —
+                // fr's prior wording was the pcall form even on direct
+                // calls. lua_format_argerror handles the two cases via
+                // current_invocation_name.
                 let raw = args.first().cloned().unwrap_or(LuaValue::Nil);
                 match &raw {
                     LuaValue::Function(_)
@@ -4838,13 +4849,11 @@ impl<'a> LuaState<'a> {
                          use loadstring(source) instead"
                             .to_string(),
                     ),
-                    _ => Err(format!(
-                        // (frankenredis-cfflo) Lua 5.1 marks C closures
-                        // without a registered debug name with '?'. The
-                        // base library's `load` is one of these. Match
-                        // vendored's exact wording.
-                        "bad argument #1 to '?' (function expected, got {})",
-                        raw.type_name()
+                    _ => Err(lua_format_argerror(
+                        self.current_invocation_name.as_deref(),
+                        "load",
+                        1,
+                        &format!("function expected, got {}", raw.type_name()),
                     )),
                 }
             }
@@ -10582,8 +10591,13 @@ mod tests {
         let frame = eval_script(b"return type(load)", &[], &[], &mut store, 0).unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"function".to_vec())));
 
-        // load(non_function) reports vendored's "bad argument #1 to '?'"
-        // wording — Lua 5.1 marks C closures lacking debug names with '?'.
+        // load(non_function) — direct call carries the user_script:1:
+        // prefix and reports the function name as 'load'; calls via
+        // pcall lose the call site so the name reports as '?' with no
+        // prefix. (frankenredis-4zmde — live probe vs vendored 7.2.4
+        // confirmed both shapes.)
+        //
+        // pcall-invoked: '?' name, no prefix.
         let frame = eval_script(
             b"local ok, err = pcall(load, 'src'); return tostring(err)",
             &[], &[], &mut store, 0,
@@ -10595,7 +10609,19 @@ mod tests {
         let s = String::from_utf8_lossy(&body);
         assert!(
             s.contains("bad argument #1 to '?'") && s.contains("got string"),
-            "expected vendored bad-argument wording, got {s:?}"
+            "expected pcall bad-argument wording, got {s:?}"
+        );
+
+        // Direct call: 'load' name with user_script:1: prefix.
+        let frame = eval_script(
+            b"return type(load(nil))",
+            &[], &[], &mut store, 0,
+        );
+        let err = frame.expect_err("direct load(nil) should error");
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'load'")
+                && err.contains("got nil"),
+            "expected direct-call wording, got {err:?}"
         );
 
         // load != loadstring (separate function values).
