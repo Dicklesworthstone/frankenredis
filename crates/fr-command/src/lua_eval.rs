@@ -418,6 +418,59 @@ fn lua_arg_got_label(value: Option<&LuaValue>) -> &'static str {
     }
 }
 
+// (frankenredis-3osi6) Mirror upstream lauxlib.c:luaL_checknumber. Both the
+// missing-arg and the wrong-type cases go through the same "bad argument #N
+// to '<fname>' (number expected, got <got>)" template, with the user_script:N
+// source-location prefix that Lua's luaL_argerror auto-prepends.
+fn lua_check_number(args: &[LuaValue], idx: usize, fname: &str) -> Result<f64, String> {
+    let arg = args.get(idx);
+    if let Some(v) = arg
+        && let Some(n) = v.to_number()
+    {
+        return Ok(n);
+    }
+    Err(format!(
+        "user_script:1: bad argument #{} to '{fname}' (number expected, got {})",
+        idx + 1,
+        lua_arg_got_label(arg)
+    ))
+}
+
+// Mirror upstream luaL_checklstring. Numbers are coerced to their
+// luaO_str2d-formatted string; everything else (nil, bool, table, function,
+// thread) raises with the standard 'string expected, got <type>' wording.
+fn lua_check_string(args: &[LuaValue], idx: usize, fname: &str) -> Result<Vec<u8>, String> {
+    match args.get(idx) {
+        Some(LuaValue::Str(b)) => Ok(b.clone()),
+        Some(LuaValue::Number(n)) => {
+            if *n == (*n as i64) as f64 && n.is_finite() {
+                Ok(format!("{}", *n as i64).into_bytes())
+            } else {
+                Ok(lua_number_to_string(*n).into_bytes())
+            }
+        }
+        other => Err(format!(
+            "user_script:1: bad argument #{} to '{fname}' (string expected, got {})",
+            idx + 1,
+            lua_arg_got_label(other)
+        )),
+    }
+}
+
+// Mirror upstream luaL_checktype(L, idx, LUA_TTABLE). Returns a cloned
+// LuaTable handle (refcounted) so the caller can borrow without lifetime
+// shenanigans.
+fn lua_check_table(args: &[LuaValue], idx: usize, fname: &str) -> Result<LuaTable, String> {
+    match args.get(idx) {
+        Some(LuaValue::Table(t)) => Ok(t.clone()),
+        other => Err(format!(
+            "user_script:1: bad argument #{} to '{fname}' (table expected, got {})",
+            idx + 1,
+            lua_arg_got_label(other)
+        )),
+    }
+}
+
 impl LuaValue {
     fn is_truthy(&self) -> bool {
         !matches!(self, LuaValue::Nil | LuaValue::Bool(false))
@@ -4071,6 +4124,14 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(hex.into_bytes())])
             }
             "tonumber" => {
+                // (frankenredis-3osi6) Upstream lbaselib.c:luaB_tonumber treats
+                // the value as a luaL_checkany — explicit absence raises.
+                if args.is_empty() {
+                    return Err(
+                        "user_script:1: bad argument #1 to 'tonumber' (value expected)"
+                            .to_string(),
+                    );
+                }
                 let val = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let base = match args.get(1) {
                     Some(base_value) => {
@@ -4767,15 +4828,15 @@ impl<'a> LuaState<'a> {
             }
             // ── Math library ────────────────────────────────────────────
             "math.floor" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "floor")?;
                 Ok(vec![LuaValue::Number(n.floor())])
             }
             "math.ceil" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "ceil")?;
                 Ok(vec![LuaValue::Number(n.ceil())])
             }
             "math.abs" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "abs")?;
                 Ok(vec![LuaValue::Number(n.abs())])
             }
             "math.max" => {
@@ -4815,7 +4876,7 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Number(min)])
             }
             "math.sqrt" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "sqrt")?;
                 Ok(vec![LuaValue::Number(n.sqrt())])
             }
             "math.random" => {
@@ -4859,87 +4920,94 @@ impl<'a> LuaState<'a> {
                 }
             }
             "math.fmod" => {
-                let a = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
-                let b = args.get(1).and_then(|v| v.to_number()).unwrap_or(1.0);
+                // (frankenredis-3osi6) Vendored math_fmod is implemented as
+                //   lua_pushnumber(L, fmod(luaL_checknumber(L,1),
+                //                          luaL_checknumber(L,2)));
+                // and the compiler (gcc default ABI on x86_64) evaluates
+                // the inner arguments right-to-left, so arg #2 is checked
+                // first. The same quirk applies to math.pow / math.atan2 /
+                // math.ldexp below.
+                let b = lua_check_number(args, 1, "fmod")?;
+                let a = lua_check_number(args, 0, "fmod")?;
                 Ok(vec![LuaValue::Number(a % b)])
             }
             "math.log" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(1.0);
+                let n = lua_check_number(args, 0, "log")?;
                 Ok(vec![LuaValue::Number(n.ln())])
             }
             "math.exp" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "exp")?;
                 Ok(vec![LuaValue::Number(n.exp())])
             }
             "math.pow" => {
-                let a = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
-                let b = args.get(1).and_then(|v| v.to_number()).unwrap_or(0.0);
+                let b = lua_check_number(args, 1, "pow")?;
+                let a = lua_check_number(args, 0, "pow")?;
                 Ok(vec![LuaValue::Number(a.powf(b))])
             }
             "math.sin" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "sin")?;
                 Ok(vec![LuaValue::Number(n.sin())])
             }
             "math.cos" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "cos")?;
                 Ok(vec![LuaValue::Number(n.cos())])
             }
             "math.tan" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "tan")?;
                 Ok(vec![LuaValue::Number(n.tan())])
             }
             "math.asin" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "asin")?;
                 Ok(vec![LuaValue::Number(n.asin())])
             }
             "math.acos" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "acos")?;
                 Ok(vec![LuaValue::Number(n.acos())])
             }
             "math.atan" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "atan")?;
                 Ok(vec![LuaValue::Number(n.atan())])
             }
             "math.atan2" => {
-                let y = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
-                let x = args.get(1).and_then(|v| v.to_number()).unwrap_or(1.0);
+                let x = lua_check_number(args, 1, "atan2")?;
+                let y = lua_check_number(args, 0, "atan2")?;
                 Ok(vec![LuaValue::Number(y.atan2(x))])
             }
             // (frankenredis-9dmqr) Five additional math helpers Lua 5.1
             // exposes that fr's interpreter was missing dispatch arms
             // for. Rust's f64 stdlib supplies each operation directly.
             "math.deg" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "deg")?;
                 Ok(vec![LuaValue::Number(n.to_degrees())])
             }
             "math.rad" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "rad")?;
                 Ok(vec![LuaValue::Number(n.to_radians())])
             }
             "math.sinh" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "sinh")?;
                 Ok(vec![LuaValue::Number(n.sinh())])
             }
             "math.cosh" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "cosh")?;
                 Ok(vec![LuaValue::Number(n.cosh())])
             }
             "math.tanh" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "tanh")?;
                 Ok(vec![LuaValue::Number(n.tanh())])
             }
             "math.log10" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "log10")?;
                 Ok(vec![LuaValue::Number(n.log10())])
             }
             "math.modf" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "modf")?;
                 let trunc = n.trunc();
                 let frac = n - trunc;
                 Ok(vec![LuaValue::Number(trunc), LuaValue::Number(frac)])
             }
             "math.frexp" => {
-                let n = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
+                let n = lua_check_number(args, 0, "frexp")?;
                 if n == 0.0 {
                     Ok(vec![LuaValue::Number(0.0), LuaValue::Number(0.0)])
                 } else {
@@ -4964,8 +5032,8 @@ impl<'a> LuaState<'a> {
                 }
             }
             "math.ldexp" => {
-                let m = args.first().and_then(|v| v.to_number()).unwrap_or(0.0);
-                let e = args.get(1).and_then(|v| v.to_number()).unwrap_or(0.0) as i32;
+                let e = lua_check_number(args, 1, "ldexp")? as i32;
+                let m = lua_check_number(args, 0, "ldexp")?;
                 Ok(vec![LuaValue::Number(m * 2f64.powi(e))])
             }
             "math.randomseed" => {
@@ -5070,19 +5138,13 @@ impl<'a> LuaState<'a> {
             }
             // ── String library ──────────────────────────────────────────
             "string.len" => {
-                let s = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                let s = lua_check_string(args, 0, "len")?;
                 Ok(vec![LuaValue::Number(s.len() as f64)])
             }
             "string.sub" => {
-                let s = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                let s = lua_check_string(args, 0, "sub")?;
                 let len = s.len() as i64;
-                let mut i = args.get(1).and_then(|v| v.to_number()).unwrap_or(1.0) as i64;
+                let mut i = lua_check_number(args, 1, "sub")? as i64;
                 let mut j = args.get(2).and_then(|v| v.to_number()).unwrap_or(-1.0) as i64;
                 // Lua string indices: negative means from end
                 if i < 0 {
@@ -5106,11 +5168,8 @@ impl<'a> LuaState<'a> {
                 }
             }
             "string.rep" => {
-                let s = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
-                let n_val = args.get(1).and_then(|v| v.to_number()).unwrap_or(0.0);
+                let s = lua_check_string(args, 0, "rep")?;
+                let n_val = lua_check_number(args, 1, "rep")?;
                 if n_val < 0.0 {
                     return Ok(vec![LuaValue::Str(Vec::new())]);
                 }
@@ -5131,24 +5190,15 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(result)])
             }
             "string.lower" => {
-                let s = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                let s = lua_check_string(args, 0, "lower")?;
                 Ok(vec![LuaValue::Str(s.to_ascii_lowercase())])
             }
             "string.upper" => {
-                let s = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                let s = lua_check_string(args, 0, "upper")?;
                 Ok(vec![LuaValue::Str(s.to_ascii_uppercase())])
             }
             "string.reverse" => {
-                let mut s = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                let mut s = lua_check_string(args, 0, "reverse")?;
                 s.reverse();
                 Ok(vec![LuaValue::Str(s)])
             }
@@ -5161,10 +5211,7 @@ impl<'a> LuaState<'a> {
                 "user_script:1: unable to dump given function".to_string(),
             ),
             "string.byte" => {
-                let s = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                let s = lua_check_string(args, 0, "byte")?;
                 let len = s.len() as i64;
                 let mut i = args.get(1).and_then(|v| v.to_number()).unwrap_or(1.0) as i64;
                 let mut j = args.get(2).and_then(|v| v.to_number()).unwrap_or(i as f64) as i64;
@@ -5226,14 +5273,8 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(result.into_bytes())])
             }
             "string.find" => {
-                let s = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
-                let pattern = args
-                    .get(1)
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                let s = lua_check_string(args, 0, "find")?;
+                let pattern = lua_check_string(args, 1, "find")?;
                 let init_raw = args.get(2).and_then(|v| v.to_number()).unwrap_or(1.0) as i64;
                 let init = if init_raw < 0 {
                     (s.len() as i64 + init_raw).max(0) as usize
@@ -5288,14 +5329,8 @@ impl<'a> LuaState<'a> {
                 }
             }
             "string.match" => {
-                let s = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
-                let pattern = args
-                    .get(1)
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                let s = lua_check_string(args, 0, "match")?;
+                let pattern = lua_check_string(args, 1, "match")?;
                 let init_raw = args.get(2).and_then(|v| v.to_number()).unwrap_or(1.0) as i64;
                 let init = if init_raw < 0 {
                     (s.len() as i64 + init_raw).max(0) as usize
@@ -5311,14 +5346,8 @@ impl<'a> LuaState<'a> {
             "string.gmatch" => {
                 // Returns an iterator function. Each call returns next match.
                 // We collect all matches and return a closure-like iterator via a table.
-                let s = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
-                let pattern = args
-                    .get(1)
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                let s = lua_check_string(args, 0, "gmatch")?;
+                let pattern = lua_check_string(args, 1, "gmatch")?;
                 // Collect all matches
                 let mut matches: Vec<Vec<LuaValue>> = Vec::new();
                 let mut pos = 0;
@@ -5365,14 +5394,8 @@ impl<'a> LuaState<'a> {
                 ])
             }
             "string.gsub" => {
-                let s = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
-                let pattern = args
-                    .get(1)
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                let s = lua_check_string(args, 0, "gsub")?;
+                let pattern = lua_check_string(args, 1, "gsub")?;
                 let repl = args.get(2).cloned().unwrap_or(LuaValue::Nil);
                 let max_n = args.get(3).and_then(|v| v.to_number()).map(|n| n as usize);
                 let mut result = Vec::new();
@@ -5523,7 +5546,11 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(result)])
             }
             "table.sort" => {
-                if !args.is_empty() {
+                // (frankenredis-3osi6) Upstream ltablib.c:sort uses
+                // luaL_checktype(L, 1, LUA_TTABLE) which raises on missing
+                // or non-table arg #1.
+                let _ = lua_check_table(args, 0, "sort")?;
+                {
                     let comp_fn = args.get(1).cloned();
                     // Extract array so we can call comparator without borrow conflicts
                     let mut arr = if let LuaValue::Table(ref mut t) = args[0] {
@@ -5577,7 +5604,9 @@ impl<'a> LuaState<'a> {
                 }
             }
             "table.maxn" => {
-                // Returns the largest positive numeric key in the table
+                // (frankenredis-3osi6) Upstream ltablib.c:maxn uses
+                // luaL_checktype(L, 1, LUA_TTABLE).
+                let _ = lua_check_table(args, 0, "maxn")?;
                 let table = args.first().cloned().unwrap_or(LuaValue::Nil);
                 if let LuaValue::Table(t) = &table {
                     let mut max_n: f64 = 0.0;
@@ -10446,6 +10475,96 @@ mod tests {
             panic!("expected bulk")
         };
         assert_eq!(bytes, b"A".to_vec());
+    }
+
+    #[test]
+    fn lua_stdlib_builtins_reject_missing_args_match_upstream() {
+        // (frankenredis-3osi6) Verifies that ~27 Lua stdlib builtins which
+        // were silently accepting no-arg/nil-arg calls now raise with the
+        // exact upstream luaL_checkX wording.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            // math.* — unary number
+            (b"return math.abs()",   "user_script:1: bad argument #1 to 'abs' (number expected, got no value)"),
+            (b"return math.ceil()",  "user_script:1: bad argument #1 to 'ceil' (number expected, got no value)"),
+            (b"return math.floor()", "user_script:1: bad argument #1 to 'floor' (number expected, got no value)"),
+            (b"return math.sqrt()",  "user_script:1: bad argument #1 to 'sqrt' (number expected, got no value)"),
+            (b"return math.exp()",   "user_script:1: bad argument #1 to 'exp' (number expected, got no value)"),
+            (b"return math.log()",   "user_script:1: bad argument #1 to 'log' (number expected, got no value)"),
+            (b"return math.log10()", "user_script:1: bad argument #1 to 'log10' (number expected, got no value)"),
+            (b"return math.sin()",   "user_script:1: bad argument #1 to 'sin' (number expected, got no value)"),
+            (b"return math.cos()",   "user_script:1: bad argument #1 to 'cos' (number expected, got no value)"),
+            (b"return math.tan()",   "user_script:1: bad argument #1 to 'tan' (number expected, got no value)"),
+            (b"return math.deg()",   "user_script:1: bad argument #1 to 'deg' (number expected, got no value)"),
+            (b"return math.rad()",   "user_script:1: bad argument #1 to 'rad' (number expected, got no value)"),
+            (b"return math.modf()",  "user_script:1: bad argument #1 to 'modf' (number expected, got no value)"),
+            (b"return math.frexp()", "user_script:1: bad argument #1 to 'frexp' (number expected, got no value)"),
+            // math.* — arg-#2 missing
+            (b"return math.fmod()",  "user_script:1: bad argument #2 to 'fmod' (number expected, got no value)"),
+            (b"return math.fmod(1)", "user_script:1: bad argument #2 to 'fmod' (number expected, got no value)"),
+            (b"return math.pow(1)",  "user_script:1: bad argument #2 to 'pow' (number expected, got no value)"),
+            (b"return math.atan2(1)","user_script:1: bad argument #2 to 'atan2' (number expected, got no value)"),
+            (b"return math.ldexp(1)","user_script:1: bad argument #2 to 'ldexp' (number expected, got no value)"),
+            // string.* — arg #1 string missing
+            (b"return string.len()",     "user_script:1: bad argument #1 to 'len' (string expected, got no value)"),
+            (b"return string.lower()",   "user_script:1: bad argument #1 to 'lower' (string expected, got no value)"),
+            (b"return string.upper()",   "user_script:1: bad argument #1 to 'upper' (string expected, got no value)"),
+            (b"return string.reverse()", "user_script:1: bad argument #1 to 'reverse' (string expected, got no value)"),
+            (b"return string.rep()",     "user_script:1: bad argument #1 to 'rep' (string expected, got no value)"),
+            (b"return string.byte()",    "user_script:1: bad argument #1 to 'byte' (string expected, got no value)"),
+            (b"return string.find()",    "user_script:1: bad argument #1 to 'find' (string expected, got no value)"),
+            (b"return string.match()",   "user_script:1: bad argument #1 to 'match' (string expected, got no value)"),
+            (b"return string.gmatch()",  "user_script:1: bad argument #1 to 'gmatch' (string expected, got no value)"),
+            (b"return string.gsub()",    "user_script:1: bad argument #1 to 'gsub' (string expected, got no value)"),
+            // string.* — arg-#2 missing
+            (b"return string.sub('abc')",   "user_script:1: bad argument #2 to 'sub' (number expected, got no value)"),
+            (b"return string.rep('a')",     "user_script:1: bad argument #2 to 'rep' (number expected, got no value)"),
+            (b"return string.find('abc')",  "user_script:1: bad argument #2 to 'find' (string expected, got no value)"),
+            (b"return string.match('abc')", "user_script:1: bad argument #2 to 'match' (string expected, got no value)"),
+            (b"return string.gmatch('abc')","user_script:1: bad argument #2 to 'gmatch' (string expected, got no value)"),
+            (b"return string.gsub('abc')",  "user_script:1: bad argument #2 to 'gsub' (string expected, got no value)"),
+            // table.*
+            (b"return table.sort()",  "user_script:1: bad argument #1 to 'sort' (table expected, got no value)"),
+            (b"return table.maxn()",  "user_script:1: bad argument #1 to 'maxn' (table expected, got no value)"),
+            // base
+            (b"return tonumber()",    "user_script:1: bad argument #1 to 'tonumber' (value expected)"),
+        ];
+        for (script, expected) in cases {
+            let err = eval_script(script, &[], &[], &mut store, 0).unwrap_err();
+            assert_eq!(
+                err,
+                *expected,
+                "script {:?}",
+                std::str::from_utf8(script).unwrap()
+            );
+        }
+        // Type-mismatch sample: math.floor(true) reports 'got boolean'.
+        let err = eval_script(b"return math.floor(true)", &[], &[], &mut store, 0).unwrap_err();
+        assert_eq!(
+            err,
+            "user_script:1: bad argument #1 to 'floor' (number expected, got boolean)"
+        );
+        // Happy-path regressions: each function still works correctly.
+        let happy_pairs: &[(&[u8], RespFrame)] = &[
+            (b"return math.floor(3.7)", RespFrame::Integer(3)),
+            (b"return math.abs(-5)",    RespFrame::Integer(5)),
+            (b"return math.fmod(7,3)",  RespFrame::Integer(1)),
+            (b"return math.pow(2,3)",   RespFrame::Integer(8)),
+            (b"return string.len('abc')", RespFrame::Integer(3)),
+            (b"return string.upper('abc')", RespFrame::BulkString(Some(b"ABC".to_vec()))),
+        ];
+        for (script, expected) in happy_pairs {
+            let r = eval_script(script, &[], &[], &mut store, 0).expect("happy");
+            assert_eq!(
+                r,
+                *expected,
+                "script {:?}",
+                std::str::from_utf8(script).unwrap()
+            );
+        }
+        // Server still alive after all the error cases: a follow-up eval works.
+        let r = eval_script(b"return 1 + 1", &[], &[], &mut store, 0).expect("after");
+        assert!(matches!(r, RespFrame::Integer(2)));
     }
 
     #[test]
