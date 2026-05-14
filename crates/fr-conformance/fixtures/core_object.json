@@ -721,7 +721,7 @@
     {
       "name": "object_encoding_hash_config_restore",
       "now_ms": 70003,
-      "argv": ["CONFIG", "SET", "hash-max-listpack-entries", "512"],
+      "argv": ["CONFIG", "SET", "hash-max-listpack-entries", "128"],
       "expect": { "kind": "simple", "value": "OK" }
     },
     {

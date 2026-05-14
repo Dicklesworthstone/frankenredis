@@ -1750,7 +1750,10 @@ impl Default for Store {
             maxmemory_policy: MaxmemoryPolicy::default(),
             lfu_decay_time: 1,
             lfu_log_factor: 10,
-            hash_max_listpack_entries: 512,
+            // (frankenredis-k20ut) Upstream config.c default is 128;
+            // higher values silently prevent the listpack→hashtable
+            // transition that observability tools depend on.
+            hash_max_listpack_entries: 128,
             hash_max_listpack_value: 64,
             list_max_listpack_size: -2,
             list_max_listpack_entries: 128,

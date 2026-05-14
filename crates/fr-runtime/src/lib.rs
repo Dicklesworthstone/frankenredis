@@ -492,7 +492,7 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("list-compress-depth", "0"),
     ("set-max-intset-entries", "512"),
     ("set-max-listpack-entries", "128"),
-    ("hash-max-listpack-entries", "512"),
+    ("hash-max-listpack-entries", "128"),
     ("hash-max-listpack-value", "64"),
     ("hash-max-ziplist-entries", "128"),
     ("hash-max-ziplist-value", "64"),
