@@ -920,7 +920,7 @@ impl<'a> Lexer<'a> {
         Some(b)
     }
 
-    fn skip_whitespace_and_comments(&mut self) {
+    fn skip_whitespace_and_comments(&mut self) -> Result<(), String> {
         loop {
             // Skip whitespace
             while let Some(b) = self.peek_byte() {
@@ -936,18 +936,34 @@ impl<'a> Lexer<'a> {
                 && self.src[self.pos + 1] == b'-'
             {
                 self.pos += 2;
-                // Check for long comment --[[ ... ]]
-                if self.pos + 1 < self.src.len()
-                    && self.src[self.pos] == b'['
-                    && self.src[self.pos + 1] == b'['
-                {
-                    self.pos += 2;
-                    while self.pos + 1 < self.src.len() {
-                        if self.src[self.pos] == b']' && self.src[self.pos + 1] == b']' {
-                            self.pos += 2;
+                // (frankenredis-h1vbd) Long comment with optional
+                // level markers: `--[=*[ ... ]=*]`. fr previously only
+                // recognised level-0 (`--[[ ... ]]`) and emitted
+                // `'=' expected near '<eof>'` for level >= 1 because
+                // the trailing `[=[` made the lexer attempt to parse
+                // `[=` as something else.
+                if let Some(level) = self.try_long_bracket_open() {
+                    self.pos += level + 2; // consume `[<level eq>[`
+                    let mut closed = false;
+                    while self.pos + level + 1 < self.src.len() {
+                        if self.src[self.pos] == b']'
+                            && self.src[self.pos + level + 1] == b']'
+                            && (1..=level).all(|i| self.src[self.pos + i] == b'=')
+                        {
+                            self.pos += level + 2;
+                            closed = true;
                             break;
                         }
                         self.pos += 1;
+                    }
+                    if !closed {
+                        // Match upstream wording on unterminated body.
+                        // Drain to EOF before erroring so the caller
+                        // sees the end-of-input position.
+                        self.pos = self.src.len();
+                        return Err(
+                            "unfinished long comment near '<eof>'".to_string()
+                        );
                     }
                 } else {
                     // Line comment
@@ -962,6 +978,7 @@ impl<'a> Lexer<'a> {
             }
             break;
         }
+        Ok(())
     }
 
     fn read_string(&mut self, delim: u8) -> Result<Vec<u8>, String> {
@@ -1013,19 +1030,46 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn read_long_string(&mut self) -> Result<Vec<u8>, String> {
-        // Already consumed [[
+    /// (frankenredis-h1vbd) Try to read a long-bracket opener
+    /// (`[=*[`) at the current position. Returns the level count
+    /// (number of `=` between brackets, including zero) and advances
+    /// past the entire opener on success; leaves position unchanged
+    /// on failure. Mirrors upstream llex.c::skip_sep + check_next.
+    fn try_long_bracket_open(&self) -> Option<usize> {
+        if self.peek_byte() != Some(b'[') {
+            return None;
+        }
+        let mut probe = self.pos + 1;
+        let mut level = 0;
+        while probe < self.src.len() && self.src[probe] == b'=' {
+            level += 1;
+            probe += 1;
+        }
+        if probe < self.src.len() && self.src[probe] == b'[' {
+            Some(level)
+        } else {
+            None
+        }
+    }
+
+    fn read_long_string(&mut self, level: usize) -> Result<Vec<u8>, String> {
+        // Already consumed the opener `[<level eq>[`
         let mut buf = Vec::new();
         // Skip first newline if present
         if self.peek_byte() == Some(b'\n') {
             self.pos += 1;
         }
         loop {
-            if self.pos + 1 < self.src.len()
+            // (frankenredis-h1vbd) Closing pattern matches the level:
+            // `]` + `level` × `=` + `]`. The 0-level case folds back to
+            // the original `]]` matcher; higher levels need to count
+            // the equal signs between the closing brackets.
+            if self.pos + level + 1 < self.src.len()
                 && self.src[self.pos] == b']'
-                && self.src[self.pos + 1] == b']'
+                && self.src[self.pos + level + 1] == b']'
+                && (1..=level).all(|i| self.src[self.pos + i] == b'=')
             {
-                self.pos += 2;
+                self.pos += level + 2;
                 return Ok(buf);
             }
             let Some(b) = self.advance() else {
@@ -1038,7 +1082,7 @@ impl<'a> Lexer<'a> {
     }
 
     fn next_token(&mut self) -> Result<Token, String> {
-        self.skip_whitespace_and_comments();
+        self.skip_whitespace_and_comments()?;
         let Some(b) = self.peek_byte() else {
             return Ok(Token::Eof);
         };
@@ -1147,9 +1191,13 @@ impl<'a> Lexer<'a> {
                 let s = self.read_string(b)?;
                 Ok(Token::Str(s))
             }
-            b'[' if self.pos + 1 < self.src.len() && self.src[self.pos + 1] == b'[' => {
-                self.pos += 2;
-                let s = self.read_long_string()?;
+            // (frankenredis-h1vbd) Long-string with optional level
+            // markers: `[=*[` ... `]=*]`. Falls through to LBracket
+            // when the `[` isn't followed by `=*[`.
+            b'[' if self.try_long_bracket_open().is_some() => {
+                let level = self.try_long_bracket_open().unwrap();
+                self.pos += level + 2; // consume `[<level eq>[`
+                let s = self.read_long_string(level)?;
                 Ok(Token::Str(s))
             }
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => {
@@ -15223,6 +15271,68 @@ mod tests {
         assert!(
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
+        );
+    }
+
+    #[test]
+    fn lua_long_string_and_comment_level_brackets_h1vbd() {
+        // (frankenredis-h1vbd) Upstream Lua 5.1 lexer supports level
+        // markers in long strings (`[=[…]=]`, `[==[…]==]`, etc.) and
+        // long comments (`--[=[…]=]`). The level counts `=` signs
+        // between brackets, allowing nested content with matching
+        // closing brackets.
+        let mut store = Store::new();
+
+        let cases: &[(&[u8], &[u8])] = &[
+            (b"return [=[abc]=]", b"abc"),
+            (b"return [==[ab]=cd]==]", b"ab]=cd"),
+            (b"return [===[deep]===]", b"deep"),
+            // Level 0 still works.
+            (b"return [[basic]]", b"basic"),
+            // Embedded brackets at lower levels survive.
+            (b"return [=[contains [[brackets]]]=]", b"contains [[brackets]]"),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            assert_eq!(
+                frame,
+                RespFrame::BulkString(Some(expected.to_vec())),
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Long comments with level markers should be skipped.
+        let frame = eval_script(
+            b"--[=[ level 1 ]=] return 2",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::Integer(2));
+        let frame = eval_script(
+            b"--[==[ level 2 ]==] return 3",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::Integer(3));
+
+        // Unterminated long comment surfaces the upstream wording.
+        let err = eval_script(b"--[[ unterminated", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err.contains("unfinished long comment near '<eof>'"),
+            "got {err:?}"
+        );
+        let err =
+            eval_script(b"--[=[ unterminated", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err.contains("unfinished long comment near '<eof>'"),
+            "got {err:?}"
         );
     }
 
