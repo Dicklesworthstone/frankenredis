@@ -2708,7 +2708,12 @@ impl<'a> LuaState<'a> {
                 let table = self.eval_expr(table_expr, env, varargs)?;
                 let key = self.eval_expr(key_expr, env, varargs)?;
                 match &table {
-                    LuaValue::Table(t) => Ok(t.get_with_index(&key)),
+                    // (frankenredis-vhbp3) Route through the full __index
+                    // metamethod chain so function-valued __index is
+                    // invoked rather than silently returning nil.
+                    LuaValue::Table(t) => {
+                        self.table_lookup_with_index_meta(t, &key, env, varargs)
+                    }
                     // (frankenredis-tbu4k) Lua 5.1 sets the string library
                     // as the metatable __index for strings, so indexing a
                     // string with a string key looks up that field in the
@@ -2722,7 +2727,8 @@ impl<'a> LuaState<'a> {
                 let table = self.eval_expr(table_expr, env, varargs)?;
                 match &table {
                     LuaValue::Table(t) => {
-                        Ok(t.get_with_index(&LuaValue::Str(field.as_bytes().to_vec())))
+                        let key = LuaValue::Str(field.as_bytes().to_vec());
+                        self.table_lookup_with_index_meta(t, &key, env, varargs)
                     }
                     // (frankenredis-tbu4k) Same string-as-metatable behavior
                     // as Expr::Index — `s.upper` returns string.upper,
@@ -2766,7 +2772,12 @@ impl<'a> LuaState<'a> {
                 let obj = self.eval_expr(obj_expr, env, varargs)?;
                 let func = match &obj {
                     LuaValue::Table(t) => {
-                        t.get_with_index(&LuaValue::Str(method.as_bytes().to_vec()))
+                        // (frankenredis-vhbp3) Method dispatch uses the
+                        // same __index metamethod chain as field reads;
+                        // function-valued __index can return the method
+                        // dynamically.
+                        let key = LuaValue::Str(method.as_bytes().to_vec());
+                        self.table_lookup_with_index_meta(t, &key, env, varargs)?
                     }
                     LuaValue::Str(_) => {
                         // (frankenredis-tbu4k) Look up the method in the
@@ -2833,9 +2844,15 @@ impl<'a> LuaState<'a> {
                                     Expr::MethodCall(obj_expr, method, call_args) => {
                                         let obj = self.eval_expr(obj_expr, env, varargs)?;
                                         let func = match &obj {
-                                            LuaValue::Table(t) => t.get(&LuaValue::Str(
-                                                method.as_bytes().to_vec(),
-                                            )),
+                                            // (frankenredis-vhbp3) Same __index
+                                            // metamethod chain handling as the
+                                            // single MethodCall arm.
+                                            LuaValue::Table(t) => {
+                                                let key = LuaValue::Str(method.as_bytes().to_vec());
+                                                self.table_lookup_with_index_meta(
+                                                    t, &key, env, varargs,
+                                                )?
+                                            }
                                             LuaValue::Str(_) => self.lookup_string_field(
                                                 &LuaValue::Str(method.as_bytes().to_vec()),
                                             ),
@@ -2924,7 +2941,12 @@ impl<'a> LuaState<'a> {
                     Expr::MethodCall(obj_expr, method, call_args) => {
                         let obj = self.eval_expr(obj_expr, env, varargs)?;
                         let func = match &obj {
-                            LuaValue::Table(t) => t.get(&LuaValue::Str(method.as_bytes().to_vec())),
+                            // (frankenredis-vhbp3) Route table receivers
+                            // through the full __index metamethod chain.
+                            LuaValue::Table(t) => {
+                                let key = LuaValue::Str(method.as_bytes().to_vec());
+                                self.table_lookup_with_index_meta(t, &key, env, varargs)?
+                            }
                             // (frankenredis-tbu4k) String receivers route
                             // through the string library, same as the
                             // single-call MethodCall arm above.
@@ -3211,6 +3233,54 @@ impl<'a> LuaState<'a> {
         } else {
             LuaValue::Nil
         }
+    }
+
+    /// Read `key` from `table` honoring the full Lua 5.1 __index
+    /// metamethod chain: if a raw lookup yields nil, walk the metatable
+    /// __index value. When __index is a TABLE, recurse into it (already
+    /// handled inside LuaTable::get_with_index_depth). When __index is
+    /// a FUNCTION (RustFunction / Lua Function / WrappedCoroutine),
+    /// invoke it as `__index(table, key)` and return the first result.
+    /// Cap recursion at 16 hops, matching get_with_index_depth.
+    /// (frankenredis-vhbp3)
+    fn table_lookup_with_index_meta(
+        &mut self,
+        table: &LuaTable,
+        key: &LuaValue,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<LuaValue, String> {
+        let mut current = table.clone();
+        for _ in 0..16 {
+            let raw = current.inner.borrow().get(key);
+            if !matches!(raw, LuaValue::Nil) {
+                return Ok(raw);
+            }
+            let handler = {
+                let inner = current.inner.borrow();
+                match &inner.metatable {
+                    Some(mt) => mt.get(&LuaValue::Str(b"__index".to_vec())),
+                    None => return Ok(LuaValue::Nil),
+                }
+            };
+            match handler {
+                LuaValue::Nil => return Ok(LuaValue::Nil),
+                LuaValue::Table(next) => {
+                    current = next;
+                    continue;
+                }
+                callable
+                    @ (LuaValue::RustFunction(_)
+                    | LuaValue::Function(_)
+                    | LuaValue::WrappedCoroutine(_)) => {
+                    let mut args = vec![LuaValue::Table(current.clone()), key.clone()];
+                    let results = self.call_function(&callable, &mut args, env, varargs)?;
+                    return Ok(results.into_iter().next().unwrap_or(LuaValue::Nil));
+                }
+                _ => return Ok(LuaValue::Nil),
+            }
+        }
+        Ok(LuaValue::Nil)
     }
 
     /// Compute the Lua 5.1-style accessor label for a call site, e.g.
@@ -6873,6 +6943,72 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_index_metamethod_as_function_is_invoked() {
+        // Pins frankenredis-vhbp3 (sub-bead of frankenredis-00gjf
+        // metamethods epic). Lua 5.1 invokes __index(table, key) when a
+        // raw lookup misses and the metatable's __index slot is callable.
+        let mut store = Store::new();
+
+        // Basic invocation: missing key → __index function called with
+        // (table, key) and result returned.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__index=function(_, k) return 'meta_' .. k end}); return t.foo",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"meta_foo".to_vec())));
+
+        // Existing keys bypass __index.
+        let frame = eval_script(
+            b"local t = setmetatable({x=10}, {__index=function(_, k) return 99 end}); return t.x",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(10));
+
+        // Bracket-style indexing also triggers __index.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__index=function(_, k) return 'b_' .. k end}); return t['hi']",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"b_hi".to_vec())));
+
+        // Method dispatch: __index returns a function that is then
+        // called as `t:method()` — the self arg is the original table.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__index=function(_, k) return function(self) return 'm_' .. k end end}); return t:greet()",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"m_greet".to_vec())));
+
+        // rawget bypasses __index entirely.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__index=function(_, k) return 'meta' end}); return tostring(rawget(t, 'foo'))",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"nil".to_vec())));
+
+        // Chained metatables: table-__index then function-__index.
+        let frame = eval_script(
+            b"local a = setmetatable({}, {__index=function(_, k) return 'fn_' .. k end}); local b = {x=1}; setmetatable(b, {__index=a}); return b.foo",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"fn_foo".to_vec())));
+
+        // Multi-return: only the first value is used (matches Lua 5.1).
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__index=function(_, k) return 1, 2, 3 end}); return t.foo",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(1));
+
+        // __index function returns nil → script sees nil.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__index=function() return nil end}); return tostring(t.foo)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"nil".to_vec())));
     }
 
     #[test]
