@@ -6242,6 +6242,7 @@ impl Runtime {
             DispatchAclPermissionReason::Channel => "channel",
         };
         let context = match event.context {
+            DispatchAclLogContext::Toplevel => "toplevel",
             DispatchAclLogContext::Lua => "lua",
         };
         self.server.record_acl_log_event(

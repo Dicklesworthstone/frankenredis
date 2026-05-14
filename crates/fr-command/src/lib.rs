@@ -1292,8 +1292,15 @@ pub fn dispatch_argv(
     {
         return Err(read_only_script_write_command_error());
     }
-    if store.script_nesting_level >= 1
-        && let Some(permissions) = &store.dispatch_client_ctx.acl_permissions
+    // (frankenredis-7ymk5) P0 security fix: ACL permissions must be
+    // enforced for every dispatched command, not only for those running
+    // inside a Lua script. The previous gate scoped this check to
+    // script_nesting_level >= 1, so any authenticated non-default user
+    // could bypass their command/key/channel restrictions by issuing
+    // commands directly. Default user has all_commands=true so the
+    // helper short-circuits to None and the cost on the hot path is
+    // negligible.
+    if let Some(permissions) = &store.dispatch_client_ctx.acl_permissions
         && let Some(permission_error) = dispatch_acl_permission_error_for_argv(argv, permissions)
     {
         let command_name = String::from_utf8_lossy(raw_cmd).into_owned();
@@ -1323,9 +1330,14 @@ pub fn dispatch_argv(
                 )
             }
         };
+        let context = if store.script_nesting_level >= 1 {
+            DispatchAclLogContext::Lua
+        } else {
+            DispatchAclLogContext::Toplevel
+        };
         store.request_acl_log_event(PendingAclLogEvent {
             reason,
-            context: DispatchAclLogContext::Lua,
+            context,
             object,
             username: store.dispatch_client_ctx.authenticated_user.clone(),
         });
@@ -23382,6 +23394,92 @@ mod tests {
         let mut store = Store::new();
         let out = dispatch_argv(&argv, &mut store, 0).expect("dispatch");
         assert_eq!(out, RespFrame::SimpleString("PONG".to_string()));
+    }
+
+    #[test]
+    fn acl_enforces_command_and_key_restrictions_on_direct_dispatch_7ymk5() {
+        // (frankenredis-7ymk5) Direct (non-Lua) commands must honour the
+        // authenticated user's ACL command/key permissions. The previous
+        // gate scoped the check to script_nesting_level >= 1, so an alice-
+        // like user with limited perms could run arbitrary commands.
+        use fr_store::{DispatchAclPermissions, DispatchClientContext};
+        let mut store = Store::new();
+
+        // Build a permissions snapshot for an alice-like user: only GET
+        // on keys matching k*.
+        let mut allowed = std::collections::HashSet::new();
+        allowed.insert("get".to_string());
+        store.dispatch_client_ctx = DispatchClientContext {
+            authenticated_user: b"alice".to_vec(),
+            acl_permissions: Some(DispatchAclPermissions {
+                all_commands: false,
+                allowed_commands: allowed,
+                denied_commands: Default::default(),
+                allowed_categories: Default::default(),
+                denied_categories: Default::default(),
+                key_patterns: vec![b"k*".to_vec()],
+                all_keys: false,
+                channel_patterns: vec![],
+                all_channels: false,
+            }),
+            ..Default::default()
+        };
+
+        // SET (not in allowed_commands) — denied with NOPERM command.
+        let err = dispatch_argv(
+            &[b"SET".to_vec(), b"k1".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("SET denied");
+        match err {
+            CommandError::Custom(msg) => assert!(
+                msg.contains("NOPERM this user has no permissions to run the 'SET' command"),
+                "{msg}"
+            ),
+            other => panic!("expected NOPERM command, got {other:?}"),
+        }
+
+        // GET on an allowed-key-pattern key — succeeds (returns nil).
+        let r =
+            dispatch_argv(&[b"GET".to_vec(), b"k1".to_vec()], &mut store, 0).expect("GET allowed");
+        assert!(matches!(r, RespFrame::BulkString(None)));
+
+        // GET on a key outside the allowed pattern — NOPERM key.
+        let err = dispatch_argv(
+            &[b"GET".to_vec(), b"notallowed".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect_err("GET denied key");
+        match err {
+            CommandError::Custom(msg) => {
+                assert!(msg.contains("NOPERM No permissions to access a key"), "{msg}")
+            }
+            other => panic!("expected NOPERM key, got {other:?}"),
+        }
+
+        // Switch to the default user (all_commands=true, all_keys=true);
+        // every command must pass.
+        store.dispatch_client_ctx = DispatchClientContext {
+            authenticated_user: b"default".to_vec(),
+            acl_permissions: Some(DispatchAclPermissions {
+                all_commands: true,
+                all_keys: true,
+                all_channels: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let r = dispatch_argv(
+            &[b"SET".to_vec(), b"defaultkey".to_vec(), b"v".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("default SET ok");
+        assert!(matches!(r, RespFrame::SimpleString(ref s) if s == "OK"));
+        let r = dispatch_argv(&[b"PING".to_vec()], &mut store, 0).expect("default PING ok");
+        assert_eq!(r, RespFrame::SimpleString("PONG".to_string()));
     }
 
     #[test]

@@ -1306,6 +1306,11 @@ pub enum DispatchAclPermissionReason {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DispatchAclLogContext {
+    /// Command dispatched directly from a client connection (toplevel).
+    /// Upstream Redis logs these as "toplevel" in ACL LOG entries.
+    /// (frankenredis-7ymk5)
+    Toplevel,
+    /// Command dispatched from within a Lua script via redis.call.
     Lua,
 }
 
