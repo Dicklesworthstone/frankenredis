@@ -3920,6 +3920,22 @@ fn geo_invalid_pair_error(longitude: f64, latitude: f64) -> RespFrame {
     ))
 }
 
+/// Validate lon/lat against the geohash polar bounds. Mirrors upstream
+/// src/geo.c::extractLongLatOrReply (which calls geohashEncodeRangeFromCoords
+/// and rejects if the coords fall outside the encodable rectangle).
+/// Used by GEORADIUS / GEORADIUS_RO / GEOSEARCH FROMLONLAT /
+/// GEOSEARCHSTORE FROMLONLAT — GEOADD has its own existing check.
+/// (frankenredis-nugoc)
+#[inline]
+fn validate_geo_center(longitude: f64, latitude: f64) -> Result<(), RespFrame> {
+    if !(GEO_LONG_MIN..=GEO_LONG_MAX).contains(&longitude)
+        || !(GEO_LAT_MIN..=GEO_LAT_MAX).contains(&latitude)
+    {
+        return Err(geo_invalid_pair_error(longitude, latitude));
+    }
+    Ok(())
+}
+
 /// Formats an f64 the way upstream's GEOPOS / GEOSEARCH WITHCOORD do:
 /// snprintf("%.17Lf", ...) followed by trailing-zero trimming
 /// (LD_STR_HUMAN — see legacy_redis_code/redis/src/util.c::ld2string).
@@ -5148,6 +5164,13 @@ fn georadius(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         Ok(v) => v,
         Err(e) => return Ok(e),
     };
+    // (frankenredis-nugoc) Upstream geo.c::georadiusGeneric routes
+    // both positional coordinates through extractLongLatOrReply, which
+    // rejects |lon|>180 or |lat|>85.05112878 with the dedicated
+    // "ERR invalid longitude,latitude pair %.6f,%.6f" error.
+    if let Err(e) = validate_geo_center(center_lon, center_lat) {
+        return Ok(e);
+    }
     // (frankenredis-geostorearg) Upstream geo.c::georadiusGeneric
     // routes the radius parse through extractDistanceOrReply, whose
     // error message is "need numeric radius" — not the generic
@@ -5335,14 +5358,21 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
-            center_lon = Some(match parse_geo_f64(&argv[i + 1]) {
+            let lon = match parse_geo_f64(&argv[i + 1]) {
                 Ok(v) => v,
                 Err(e) => return Ok(e),
-            });
-            center_lat = Some(match parse_geo_f64(&argv[i + 2]) {
+            };
+            let lat = match parse_geo_f64(&argv[i + 2]) {
                 Ok(v) => v,
                 Err(e) => return Ok(e),
-            });
+            };
+            // (frankenredis-nugoc) Reject out-of-range coords with
+            // upstream's extractLongLatOrReply wording.
+            if let Err(e) = validate_geo_center(lon, lat) {
+                return Ok(e);
+            }
+            center_lon = Some(lon);
+            center_lat = Some(lat);
             i += 2;
         } else if eq_ascii_command(&argv[i], b"BYRADIUS") {
             if has_shape {
@@ -5566,14 +5596,21 @@ fn geosearchstore(
             if i + 2 >= synth.len() {
                 return Err(CommandError::SyntaxError);
             }
-            center_lon = Some(match parse_geo_f64(&synth[i + 1]) {
+            let lon = match parse_geo_f64(&synth[i + 1]) {
                 Ok(v) => v,
                 Err(e) => return Ok(e),
-            });
-            center_lat = Some(match parse_geo_f64(&synth[i + 2]) {
+            };
+            let lat = match parse_geo_f64(&synth[i + 2]) {
                 Ok(v) => v,
                 Err(e) => return Ok(e),
-            });
+            };
+            // (frankenredis-nugoc) Reject out-of-range coords with
+            // upstream's extractLongLatOrReply wording.
+            if let Err(e) = validate_geo_center(lon, lat) {
+                return Ok(e);
+            }
+            center_lon = Some(lon);
+            center_lat = Some(lat);
             i += 2;
         } else if eq_ascii_command(&synth[i], b"BYRADIUS") {
             if has_shape {
@@ -47477,6 +47514,132 @@ mod tests {
         )
         .expect("WITHCOORD-alone");
         assert!(matches!(with_alone, RespFrame::Array(_)));
+    }
+
+    #[test]
+    fn georadius_geosearch_reject_out_of_range_lonlat_nugoc() {
+        // (frankenredis-nugoc) Upstream src/geo.c::extractLongLatOrReply
+        // rejects |lon| > 180 or |lat| > 85.05112878 with the dedicated
+        // "ERR invalid longitude,latitude pair %.6f,%.6f" wording.
+        // GEORADIUS / GEORADIUS_RO / GEOSEARCH FROMLONLAT /
+        // GEOSEARCHSTORE FROMLONLAT all share the validator upstream.
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+
+        let bad_pairs = [
+            (-200.0, 38.0),
+            (200.0, 0.0),
+            (181.0, 0.0),
+            (-181.0, 0.0),
+            (0.0, 86.0),
+            (0.0, -86.0),
+            (0.0, 100.0),
+            (0.0, -100.0),
+        ];
+        for &(lon, lat) in &bad_pairs {
+            let expected = RespFrame::Error(format!(
+                "ERR invalid longitude,latitude pair {lon:.6},{lat:.6}"
+            ));
+
+            // GEORADIUS
+            let out = dispatch_argv(
+                &[
+                    b"GEORADIUS".to_vec(),
+                    b"mygeo".to_vec(),
+                    lon.to_string().into_bytes(),
+                    lat.to_string().into_bytes(),
+                    b"100".to_vec(),
+                    b"km".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(out, expected, "GEORADIUS {lon},{lat}");
+
+            // GEORADIUS_RO
+            let out = dispatch_argv(
+                &[
+                    b"GEORADIUS_RO".to_vec(),
+                    b"mygeo".to_vec(),
+                    lon.to_string().into_bytes(),
+                    lat.to_string().into_bytes(),
+                    b"100".to_vec(),
+                    b"km".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(out, expected, "GEORADIUS_RO {lon},{lat}");
+
+            // GEOSEARCH FROMLONLAT
+            let out = dispatch_argv(
+                &[
+                    b"GEOSEARCH".to_vec(),
+                    b"mygeo".to_vec(),
+                    b"FROMLONLAT".to_vec(),
+                    lon.to_string().into_bytes(),
+                    lat.to_string().into_bytes(),
+                    b"BYRADIUS".to_vec(),
+                    b"100".to_vec(),
+                    b"km".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(out, expected, "GEOSEARCH FROMLONLAT {lon},{lat}");
+
+            // GEOSEARCHSTORE FROMLONLAT
+            let out = dispatch_argv(
+                &[
+                    b"GEOSEARCHSTORE".to_vec(),
+                    b"dest".to_vec(),
+                    b"mygeo".to_vec(),
+                    b"FROMLONLAT".to_vec(),
+                    lon.to_string().into_bytes(),
+                    lat.to_string().into_bytes(),
+                    b"BYRADIUS".to_vec(),
+                    b"100".to_vec(),
+                    b"km".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(out, expected, "GEOSEARCHSTORE FROMLONLAT {lon},{lat}");
+        }
+
+        // In-range edge values still accepted (boundary inclusive).
+        let good_pairs = [
+            (180.0, 0.0),
+            (-180.0, 0.0),
+            (0.0, 85.05112878),
+            (0.0, -85.05112878),
+            (0.0, 0.0),
+        ];
+        for &(lon, lat) in &good_pairs {
+            let out = dispatch_argv(
+                &[
+                    b"GEORADIUS".to_vec(),
+                    b"mygeo".to_vec(),
+                    lon.to_string().into_bytes(),
+                    lat.to_string().into_bytes(),
+                    b"100".to_vec(),
+                    b"km".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            // Either a successful (possibly empty) Array response is fine,
+            // never the validation error.
+            assert!(
+                matches!(out, RespFrame::Array(_)),
+                "GEORADIUS {lon},{lat} should be accepted, got {out:?}"
+            );
+        }
     }
 
     #[test]
