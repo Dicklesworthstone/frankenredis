@@ -1948,7 +1948,19 @@ impl Parser {
     }
 
     fn parse_suffixed_expr(&mut self) -> Result<Expr, String> {
-        let mut expr = self.parse_primary()?;
+        // (frankenredis-oee7k) Upstream Lua 5.1's grammar distinguishes
+        // primaryexp (Name | `(`exp`)`) — which is suffixable via
+        // var/functioncall productions — from simpleexp (numeric/string/
+        // nil/true/false/table/function literals + varargs) which is
+        // never suffixed. fr previously routed every literal through
+        // suffix parsing, so `1[2]`, `nil.foo`, `'abc':upper()` all
+        // parsed (the last one even RAN). Track whether the primary
+        // came from the suffixable subset and exit the loop early
+        // otherwise.
+        let (mut expr, suffixable) = self.parse_primary_with_kind()?;
+        if !suffixable {
+            return Ok(expr);
+        }
         loop {
             match self.peek().clone() {
                 Token::Dot => {
@@ -1981,6 +1993,28 @@ impl Parser {
             }
         }
         Ok(expr)
+    }
+
+    /// (frankenredis-oee7k) Parses a primary expression and returns
+    /// it along with a flag indicating whether the value can be
+    /// suffixed by `.`/`[`/`:`/call args. Only Name and parenthesized
+    /// expressions match upstream's `primaryexp` production; literals
+    /// (number/string/bool/nil/table/function/varargs) match
+    /// `simpleexp` and bypass the suffix loop.
+    fn parse_primary_with_kind(&mut self) -> Result<(Expr, bool), String> {
+        match self.peek().clone() {
+            Token::Name(n) => {
+                self.advance();
+                Ok((Expr::Name(n), true))
+            }
+            Token::LParen => {
+                self.advance();
+                let expr = self.parse_expr()?;
+                self.expect(&Token::RParen)?;
+                Ok((expr, true))
+            }
+            _ => Ok((self.parse_primary()?, false)),
+        }
     }
 
     fn parse_call_args(&mut self) -> Result<Vec<Expr>, String> {
@@ -15272,6 +15306,76 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn lua_parser_rejects_suffix_on_literal_primaries_oee7k() {
+        // (frankenredis-oee7k) Upstream Lua 5.1 grammar splits
+        // primaryexp (Name | `(`exp`)`) from simpleexp (literals);
+        // only primaryexp can carry `.`, `[`, `:`, or call args. fr
+        // previously routed every literal through suffix parsing, so
+        // `1[2]`, `'abc':upper()`, etc. parsed (and ran).
+        let mut store = Store::new();
+
+        // All these used to silently parse and either runtime-error
+        // or even succeed (`'abc':upper()` returned 'ABC'). They now
+        // surface at compile time via the chunk-level <eof>-expected
+        // check (frankenredis-yunl8 follow-up).
+        let cases: &[&[u8]] = &[
+            b"return 1[2]",
+            b"return 1.0[2]",
+            b"return true[1]",
+            b"return nil[1]",
+            b"return 'a'[1]",
+            b"return true.foo",
+            b"return nil.foo",
+            b"return 1()",
+            b"return true()",
+            b"return nil()",
+            b"return 'a'()",
+            b"return 'abc':upper()",
+        ];
+        for body in cases {
+            let err = eval_script(body, &[], &[], &mut store, 0).unwrap_err();
+            assert!(
+                err.contains("'<eof>' expected near"),
+                "body={:?} expected compile-time error, got {err:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Sanity: suffix is fine on Name and parenthesized expression.
+        let frame = eval_script(b"return (1)", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(1));
+        let frame = eval_script(b"return ('abc'):upper()", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"ABC".to_vec())));
+        let frame = eval_script(
+            b"local t={a=1}; return t.a",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::Integer(1));
+        let frame = eval_script(
+            b"local function f() return 'x' end; return f()",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"x".to_vec())));
+        let frame = eval_script(
+            b"local function f() return {1,2,3} end; return f()[2]",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::Integer(2));
     }
 
     #[test]
