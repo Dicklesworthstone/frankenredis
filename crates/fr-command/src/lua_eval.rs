@@ -728,6 +728,28 @@ enum Token {
 /// LuaValue::Nil on any malformed input (no digits, junk, etc.) so
 /// callers can route directly into tonumber's nil-on-failure path.
 /// (frankenredis-luatonumhex)
+/// (frankenredis-8reid) Reproduce upstream luaB_tonumber's
+/// strtoul-based wrap. With an explicit non-10 base, Lua 5.1 calls
+/// `strtoul(s, _, base)` which parses the digits as unsigned and then
+/// applies unsigned negation when a leading '-' was consumed. So
+/// `tonumber("-5", 16)` returns ((unsigned long)-5) cast to a Lua
+/// number — ~1.8446744073709552e19. For base=10 explicit, vendored
+/// takes a different code path (lua_isnumber/lua_tonumber → strtod),
+/// which is signed; preserve that here.
+fn lua_tonumber_strtoul_result(sign: i64, digits: u64, base: u32) -> f64 {
+    if sign >= 0 {
+        return digits as f64;
+    }
+    if base == 10 {
+        // strtod-style signed negation.
+        return -(digits as f64);
+    }
+    // strtoul wrap: parse magnitude as unsigned, apply unsigned
+    // negation, then cast to f64. The lua_to_resp boundary then
+    // mimics the C `(long long)` cast which yields INT64_MIN.
+    digits.wrapping_neg() as f64
+}
+
 fn hex_str_to_lua_number(trimmed: &str) -> LuaValue {
     let (neg, rest) = match trimmed.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -4531,8 +4553,10 @@ impl<'a> LuaState<'a> {
                         } else {
                             body
                         };
-                        return match i64::from_str_radix(stripped, base) {
-                            Ok(n) => Ok(vec![LuaValue::Number((sign * n) as f64)]),
+                        return match u64::from_str_radix(stripped, base) {
+                            Ok(n) => Ok(vec![LuaValue::Number(
+                                lua_tonumber_strtoul_result(sign, n, base),
+                            )]),
                             Err(_) => Ok(vec![LuaValue::Nil]),
                         };
                     }
@@ -4560,8 +4584,10 @@ impl<'a> LuaState<'a> {
                             } else {
                                 body
                             };
-                            match i64::from_str_radix(stripped, base) {
-                                Ok(n) => Ok(vec![LuaValue::Number((sign * n) as f64)]),
+                            match u64::from_str_radix(stripped, base) {
+                                Ok(n) => Ok(vec![LuaValue::Number(
+                                    lua_tonumber_strtoul_result(sign, n, base),
+                                )]),
                                 Err(_) => Ok(vec![LuaValue::Nil]),
                             }
                         } else {
@@ -7741,7 +7767,19 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
             // math.huge / 1/0 / 0/0 surfaces the same Integer reply
             // (Integer(-9223372036854775808)) as vendored 7.2.4.
             // (frankenredis-luanonfinite)
-            let i = if n.is_finite() {
+            //
+            // (frankenredis-8reid) cvttsd2si also returns LLONG_MIN
+            // for any finite double outside [INT64_MIN, INT64_MAX +
+            // 1). That bites the strtoul-wrap case from
+            // luaB_tonumber('-5', 16) where the Lua value is
+            // ~1.844674407371e+19. Rust's `as i64` saturates to
+            // i64::MAX (9223372036854775807) instead. Match the C
+            // result by treating any out-of-range finite double the
+            // same as non-finite.
+            let i = if n.is_finite()
+                && *n >= -9223372036854775808.0_f64
+                && *n < 9223372036854775808.0_f64
+            {
                 *n as i64
             } else {
                 i64::MIN
@@ -9045,6 +9083,105 @@ mod tests {
                 String::from_utf8_lossy(src)
             );
         }
+    }
+
+    #[test]
+    fn lua_tonumber_strtoul_wrap_and_resp_saturation_8reid() {
+        // Pins frankenredis-8reid. Two reinforcing divergences:
+        //
+        // 1. luaB_tonumber('-N', base) with base != 10 dispatches to
+        //    strtoul, which parses the digits as unsigned and applies
+        //    unsigned negation: tonumber('-5', 16) is
+        //    ((unsigned long)-5) cast to a Lua number — about
+        //    1.8446744073709552e19, NOT -5.
+        //
+        // 2. addReplyLongLong(c, (long long)lua_tonumber(L, -1))
+        //    further casts that out-of-range double back to long
+        //    long. The C cast is UB, but x86-64 cvttsd2si returns
+        //    LLONG_MIN for any finite double outside [INT64_MIN,
+        //    INT64_MAX + 1). Rust's `as i64` saturates to i64::MAX
+        //    instead, so EVAL replies diverge unless lua_to_resp
+        //    mimics the C cast.
+        //
+        // For base 10 (explicit or implicit) the upstream code path
+        // is strtod / luaO_str2d, which preserves signed values:
+        // tonumber('-1', 10) is -1, not a wrap.
+        let mut store = Store::new();
+
+        // strtoul-wrap branch: tonumber('-5', 16) round-trips
+        // through lua_to_resp as INT64_MIN.
+        for src in [
+            b"return tonumber('-5', 16)".as_slice(),
+            b"return tonumber('-1', 16)".as_slice(),
+            b"return tonumber('-FF', 16)".as_slice(),
+            b"return tonumber('-10', 2)".as_slice(),
+            b"return tonumber('-1', 8)".as_slice(),
+        ] {
+            let frame = eval_script(src, &[], &[], &mut store, 0).unwrap();
+            assert_eq!(
+                frame,
+                RespFrame::Integer(i64::MIN),
+                "src = {:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+
+        // tostring of the wrapped value emits the f64 in upstream's
+        // %.14g format: "1.844674407371e+19".
+        let frame = eval_script(
+            b"return tostring(tonumber('-5', 16))",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"1.844674407371e+19".to_vec()))
+        );
+
+        // Base 10 (explicit or implicit) preserves signed values.
+        for (src, expected) in [
+            (b"return tonumber('-1', 10)".as_slice(), -1),
+            (b"return tonumber('-255')".as_slice(), -255),
+            (b"return tonumber('-0xff')".as_slice(), -255),
+        ] {
+            let frame = eval_script(src, &[], &[], &mut store, 0).unwrap();
+            assert_eq!(
+                frame,
+                RespFrame::Integer(expected),
+                "src = {:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+
+        // Non-negative inputs still parse normally.
+        for (src, expected) in [
+            (b"return tonumber('5', 16)".as_slice(), 5),
+            (b"return tonumber('FF', 16)".as_slice(), 255),
+            (b"return tonumber('10', 2)".as_slice(), 2),
+        ] {
+            let frame = eval_script(src, &[], &[], &mut store, 0).unwrap();
+            assert_eq!(
+                frame,
+                RespFrame::Integer(expected),
+                "src = {:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
+
+        // Direct out-of-range double also hits lua_to_resp's
+        // cvttsd2si mimic.
+        let frame = eval_script(
+            b"return 1.8446744073709552e19",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::Integer(i64::MIN));
     }
 
     #[test]
@@ -12981,10 +13118,12 @@ mod tests {
             );
         }
 
-        // Negative hex string with explicit base.
+        // Negative hex string with explicit base wraps via strtoul.
+        // Pinned in detail by frankenredis-8reid — round-trips to
+        // INT64_MIN through lua_to_resp's cvttsd2si mimic.
         let r = eval_script(b"return tonumber('-ff', 16)", &[], &[], &mut store, 0)
             .expect("neg hex");
-        assert_eq!(r, RespFrame::Integer(-255));
+        assert_eq!(r, RespFrame::Integer(i64::MIN));
 
         // Float base truncates to integer.
         let r = eval_script(b"return tonumber('10', 10.5)", &[], &[], &mut store, 0)
