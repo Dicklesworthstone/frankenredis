@@ -307,6 +307,13 @@ fn lua_raw_equal(a: &LuaValue, b: &LuaValue) -> bool {
         (LuaValue::Bool(x), LuaValue::Bool(y)) => x == y,
         (LuaValue::Number(x), LuaValue::Number(y)) => x == y,
         (LuaValue::Str(x), LuaValue::Str(y)) => x == y,
+        // (frankenredis-tbu4k) RustFunctions are identified by their
+        // dispatch name; two LuaValues referring to e.g. "string.upper"
+        // share the same identity in vendored Lua 5.1 because the
+        // string library table holds one shared function pointer per
+        // name. Matching by name preserves `string.upper == s.upper`
+        // and `string.upper == ('x').upper` equalities.
+        (LuaValue::RustFunction(x), LuaValue::RustFunction(y)) => x == y,
         (LuaValue::Coroutine(x), LuaValue::Coroutine(y))
         | (LuaValue::WrappedCoroutine(x), LuaValue::WrappedCoroutine(y)) => {
             Rc::ptr_eq(&x.inner, &y.inner)
@@ -2631,6 +2638,12 @@ impl<'a> LuaState<'a> {
                 let key = self.eval_expr(key_expr, env, varargs)?;
                 match &table {
                     LuaValue::Table(t) => Ok(t.get_with_index(&key)),
+                    // (frankenredis-tbu4k) Lua 5.1 sets the string library
+                    // as the metatable __index for strings, so indexing a
+                    // string with a string key looks up that field in the
+                    // 'string' table (unknown keys yield nil). Non-string
+                    // keys (numeric, boolean, etc.) just return nil.
+                    LuaValue::Str(_) => Ok(self.lookup_string_field(&key)),
                     _ => Err(format!("user_script:1: attempt to index a {} value", table.type_name())),
                 }
             }
@@ -2640,6 +2653,11 @@ impl<'a> LuaState<'a> {
                     LuaValue::Table(t) => {
                         Ok(t.get_with_index(&LuaValue::Str(field.as_bytes().to_vec())))
                     }
+                    // (frankenredis-tbu4k) Same string-as-metatable behavior
+                    // as Expr::Index — `s.upper` returns string.upper,
+                    // `s.fld` for unknown field returns nil.
+                    LuaValue::Str(_) => Ok(self
+                        .lookup_string_field(&LuaValue::Str(field.as_bytes().to_vec()))),
                     _ => Err(format!("user_script:1: attempt to index a {} value", table.type_name())),
                 }
             }
@@ -2680,11 +2698,12 @@ impl<'a> LuaState<'a> {
                         t.get_with_index(&LuaValue::Str(method.as_bytes().to_vec()))
                     }
                     LuaValue::Str(_) => {
-                        // Strings have no per-instance metatable in fr's
-                        // sandbox; calling :method on a string yields a nil
-                        // method lookup, which then reports the standard
-                        // "attempt to call method 'NAME' (a nil value)".
-                        LuaValue::Nil
+                        // (frankenredis-tbu4k) Look up the method in the
+                        // 'string' library so `s:upper()` / `s:len()` etc.
+                        // resolve to the corresponding RustFunction;
+                        // unknown methods still yield nil, which then
+                        // reports "attempt to call method 'NAME'".
+                        self.lookup_string_field(&LuaValue::Str(method.as_bytes().to_vec()))
                     }
                     _ => {
                         // (frankenredis-md71j) Mirror Lua 5.1's "attempt to
@@ -2780,6 +2799,11 @@ impl<'a> LuaState<'a> {
                         let obj = self.eval_expr(obj_expr, env, varargs)?;
                         let func = match &obj {
                             LuaValue::Table(t) => t.get(&LuaValue::Str(method.as_bytes().to_vec())),
+                            // (frankenredis-tbu4k) String receivers route
+                            // through the string library, same as the
+                            // single-call MethodCall arm above.
+                            LuaValue::Str(_) => self
+                                .lookup_string_field(&LuaValue::Str(method.as_bytes().to_vec())),
                             _ => LuaValue::Nil,
                         };
                         let mut arg_vals = vec![obj];
@@ -3048,6 +3072,18 @@ impl<'a> LuaState<'a> {
             BinOp::And | BinOp::Or => {
                 Err("unexpected logical operator in binary evaluation".to_string())
             }
+        }
+    }
+
+    /// Look up `key` in the global `string` table. Used to implement
+    /// Lua 5.1's string-as-metatable __index behavior: `s.foo` and
+    /// `s:foo()` resolve `foo` via the string library. Unknown keys
+    /// (including non-string keys) return nil. (frankenredis-tbu4k)
+    fn lookup_string_field(&self, key: &LuaValue) -> LuaValue {
+        if let Some(LuaValue::Table(t)) = self.globals.get("string") {
+            t.get_with_index(key)
+        } else {
+            LuaValue::Nil
         }
     }
 
@@ -6581,6 +6617,112 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_string_indexing_routes_through_string_library() {
+        // Pins frankenredis-tbu4k. Lua 5.1 (vendored Redis 7.2.4) attaches
+        // the 'string' library as the metatable __index for strings:
+        //   `('abc').upper` returns string.upper (a function),
+        //   `('abc').fld`   returns nil (no error),
+        //   `('abc'):upper()` calls string.upper('abc') → "ABC".
+        // The string-library function values share identity with the
+        // ones registered in the `string` table: `string.upper == ('x').upper`.
+        let mut store = Store::new();
+
+        // s.upper resolves to a function; calling it via : returns "ABC".
+        let frame = eval_script(
+            b"local s = 'abc'; return s:upper()",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"ABC".to_vec())));
+
+        // s.len via colon returns 3.
+        let frame = eval_script(b"local s = 'abc'; return s:len()", &[], &[], &mut store, 0)
+            .unwrap();
+        assert_eq!(frame, RespFrame::Integer(3));
+
+        // Unknown field returns nil instead of erroring.
+        let frame = eval_script(
+            b"local s = 'abc'; return tostring(s.fld)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"nil".to_vec())));
+
+        // Bracket-indexing with a string key also routes through the
+        // string library.
+        let frame = eval_script(
+            b"local s = 'abc'; return type(s['upper'])",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"function".to_vec())));
+
+        // Numeric indexing returns nil (string library is keyed by string).
+        let frame = eval_script(
+            b"local s = 'abc'; return tostring(s[1])",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"nil".to_vec())));
+
+        // Identity: string.upper is the same value as ('x').upper.
+        let frame = eval_script(
+            b"return tostring(string.upper == ('x').upper)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"true".to_vec())));
+
+        // Calling an unknown field still produces the "attempt to call
+        // field 'fld' (a nil value)" wording (matches frankenredis-md71j).
+        let err = eval_script(
+            b"local s = 'abc'; s.fld()",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected error for s.fld()");
+        assert!(
+            err.contains("attempt to call field 'fld' (a nil value)"),
+            "wrong wording for s.fld(): {err:?}"
+        );
+
+        // Receivers that are still non-indexable types (nil/bool/number)
+        // remain errors — only Str routes through the string library.
+        for src in [
+            b"local x; return x.foo" as &[u8],
+            b"return (true).foo",
+            b"return (42).foo",
+        ] {
+            let err = eval_script(src, &[], &[], &mut store, 0).expect_err(&format!(
+                "expected index error for {:?}",
+                String::from_utf8_lossy(src)
+            ));
+            assert!(
+                err.contains("attempt to index"),
+                "wrong index error for {:?}: {err:?}",
+                String::from_utf8_lossy(src)
+            );
+        }
     }
 
     #[test]
