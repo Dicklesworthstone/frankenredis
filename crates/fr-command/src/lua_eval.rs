@@ -5704,7 +5704,12 @@ impl<'a> LuaState<'a> {
             // ── cjson library ───────────────────────────────────────────
             "cjson.encode" => {
                 let val = args.first().cloned().unwrap_or(LuaValue::Nil);
-                let json = lua_value_to_json(&val);
+                // (frankenredis-bum6y) Upstream cjson raises via luaL_error,
+                // which auto-prepends 'user_script:N: '. fr's wrap does not
+                // add it for non-runtime errors, so do it explicitly here
+                // to match vendored verbatim.
+                let json = lua_value_to_json(&val)
+                    .map_err(|e| format!("user_script:1: {e}"))?;
                 Ok(vec![LuaValue::Str(json.into_bytes())])
             }
             "cjson.decode" => {
@@ -7243,59 +7248,65 @@ fn lua_value_to_u32(val: &LuaValue) -> Result<u32, String> {
     }
 }
 
-fn lua_value_to_json(val: &LuaValue) -> String {
+// (frankenredis-bum6y) Mirror Redis-bundled lua_cjson.c::json_create_encoder
+// — return the exact error wording vendored emits for unserialisable values.
+// The script error wrap adds 'user_script:N: ' prefix and the trailing
+// 'script: <sha>, on @user_script:N.' tail.
+fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
     match val {
-        LuaValue::Nil => "null".to_string(),
-        LuaValue::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        LuaValue::Nil => Ok("null".to_string()),
+        LuaValue::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
         LuaValue::Number(n) => {
-            if *n == (*n as i64) as f64 && n.is_finite() {
-                format!("{}", *n as i64)
+            if !n.is_finite() {
+                return Err("Cannot serialise number: must not be NaN or Inf".to_string());
+            }
+            if *n == (*n as i64) as f64 {
+                Ok(format!("{}", *n as i64))
             } else {
-                format!("{n}")
+                Ok(format!("{n}"))
             }
         }
-        LuaValue::Str(s) => json_escape_bytes(s),
+        LuaValue::Str(s) => Ok(json_escape_bytes(s)),
         LuaValue::Table(t) => {
             if !t.inner.borrow().array.is_empty() && t.hash_is_empty() {
-                // JSON array
-                let items: Vec<String> = t
+                let items = t
                     .inner
                     .borrow()
                     .array
                     .iter()
                     .map(lua_value_to_json)
-                    .collect();
-                format!("[{}]", items.join(","))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(format!("[{}]", items.join(",")))
             } else if t.inner.borrow().array.is_empty() && !t.hash_is_empty() {
-                // JSON object
                 let hash_pairs = t.hash_pairs();
-                let pairs: Vec<String> = hash_pairs
+                let pairs = hash_pairs
                     .iter()
                     .map(|(k, v)| {
                         let key_json = json_escape_bytes(&k.to_display_string());
-                        format!("{key_json}:{}", lua_value_to_json(v))
+                        lua_value_to_json(v).map(|v_json| format!("{key_json}:{v_json}"))
                     })
-                    .collect();
-                format!("{{{}}}", pairs.join(","))
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(format!("{{{}}}", pairs.join(",")))
             } else if t.inner.borrow().array.is_empty() && t.hash_is_empty() {
-                "{}".to_string()
+                Ok("{}".to_string())
             } else {
-                // Mixed — encode as object with numeric string keys for array part
                 let mut pairs: Vec<String> = Vec::new();
                 for (i, v) in t.inner.borrow().array.iter().enumerate() {
-                    pairs.push(format!("\"{}\":{}", i + 1, lua_value_to_json(v)));
+                    pairs.push(format!("\"{}\":{}", i + 1, lua_value_to_json(v)?));
                 }
                 for (k, v) in &t.hash_pairs() {
                     let key_json = json_escape_bytes(&k.to_display_string());
-                    pairs.push(format!("{key_json}:{}", lua_value_to_json(v)));
+                    pairs.push(format!("{key_json}:{}", lua_value_to_json(v)?));
                 }
-                format!("{{{}}}", pairs.join(","))
+                Ok(format!("{{{}}}", pairs.join(",")))
             }
         }
-        LuaValue::Function(_)
-        | LuaValue::RustFunction(_)
-        | LuaValue::Coroutine(_)
-        | LuaValue::WrappedCoroutine(_) => "null".to_string(),
+        LuaValue::Function(_) | LuaValue::RustFunction(_) => {
+            Err("Cannot serialise function: type not supported".to_string())
+        }
+        LuaValue::Coroutine(_) | LuaValue::WrappedCoroutine(_) => {
+            Err("Cannot serialise thread: type not supported".to_string())
+        }
     }
 }
 
@@ -9933,7 +9944,7 @@ mod tests {
         );
 
         assert_eq!(
-            lua_value_to_json(&LuaValue::Table(table)),
+            lua_value_to_json(&LuaValue::Table(table)).expect("encode"),
             "{\"say\\\"hi\\\\there\\n\":1}"
         );
     }
@@ -10238,7 +10249,7 @@ mod tests {
         table.set(LuaValue::Str(b"a".to_vec()), LuaValue::Number(2.0));
 
         assert_eq!(
-            lua_value_to_json(&LuaValue::Table(table)),
+            lua_value_to_json(&LuaValue::Table(table)).expect("encode"),
             "{\"a\":2,\"z\":1}"
         );
     }
@@ -10246,9 +10257,46 @@ mod tests {
     #[test]
     fn cjson_encode_escapes_all_json_control_characters() {
         assert_eq!(
-            lua_value_to_json(&LuaValue::Str(b"\x08\x0c\x01".to_vec())),
+            lua_value_to_json(&LuaValue::Str(b"\x08\x0c\x01".to_vec())).expect("encode"),
             "\"\\b\\f\\u0001\""
         );
+    }
+
+    #[test]
+    fn cjson_encode_rejects_nan_inf_function_thread_match_upstream() {
+        // (frankenredis-bum6y) Redis-bundled cjson rejects NaN/+-Inf and
+        // unsupported types with specific wordings. Verified against
+        // vendored Redis 7.2.4 on :16380.
+        for n in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                lua_value_to_json(&LuaValue::Number(n)).unwrap_err(),
+                "Cannot serialise number: must not be NaN or Inf",
+                "n = {n}"
+            );
+        }
+        assert_eq!(
+            lua_value_to_json(&LuaValue::RustFunction("noop".to_string())).unwrap_err(),
+            "Cannot serialise function: type not supported"
+        );
+        // Wrap an unsupported value inside a table; encoder must propagate
+        // the same error string rather than fall through to 'null'.
+        let t = LuaTable::new();
+        t.inner.borrow_mut().array.push(LuaValue::Number(1.0));
+        t.inner.borrow_mut().array.push(LuaValue::Number(f64::NAN));
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Table(t)).unwrap_err(),
+            "Cannot serialise number: must not be NaN or Inf"
+        );
+        // Finite numbers, strings, booleans, nil must still encode.
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Number(1.5)).expect("finite"),
+            "1.5"
+        );
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Bool(true)).expect("bool"),
+            "true"
+        );
+        assert_eq!(lua_value_to_json(&LuaValue::Nil).expect("nil"), "null");
     }
 
     #[test]
