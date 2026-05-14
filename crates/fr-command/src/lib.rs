@@ -3056,10 +3056,18 @@ fn ttl(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, Co
     if argv.len() != 2 {
         return Err(CommandError::WrongArity("TTL"));
     }
+    // (frankenredis-cnsmt) Upstream src/expire.c::ttlGenericCommand
+    // converts the remaining ms→s with `(ttl + 500) / 1000` (round
+    // half-up), so an EXPIRE that was just issued reads back with
+    // the original whole-second value even when the wall-clock has
+    // already drifted into the millisecond fraction. fr was using
+    // plain integer division (floor), which made `TTL k` return
+    // `N - 1` immediately after `EXPIRE k N` for any non-zero ms
+    // offset.
     let value = match store.pttl(&argv[1], now_ms) {
         PttlValue::KeyMissing => -2,
         PttlValue::NoExpiry => -1,
-        PttlValue::Remaining(ms) => ms / 1000,
+        PttlValue::Remaining(ms) => ms.saturating_add(500) / 1000,
     };
     Ok(RespFrame::Integer(value))
 }
@@ -24696,6 +24704,50 @@ mod tests {
         let argv_missing = vec![b"TTL".to_vec(), b"missing".to_vec()];
         let out2 = dispatch_argv(&argv_missing, &mut store, 1000).expect("ttl missing");
         assert_eq!(out2, RespFrame::Integer(-2));
+    }
+
+    #[test]
+    fn ttl_rounds_half_up_per_upstream_cnsmt() {
+        // (frankenredis-cnsmt) Upstream
+        // src/expire.c::ttlGenericCommand converts ms→s with
+        // (ttl + 500) / 1000 (round half-up). After `EXPIRE k N` at
+        // wall-clock T_now, the deadline lands at T_now + N*1000
+        // (ms-precision), and `TTL k` at any later T_now'<deadline
+        // should still report N until we cross the half-second
+        // boundary. fr was using plain integer division (floor),
+        // so the value dropped to N-1 immediately after the first
+        // millisecond of wall-clock drift.
+        let mut store = Store::new();
+
+        // Set expiry at T_now + 100s and query at T_now + 6ms — the
+        // remaining ms is 99994, which rounds half-up to 100.
+        store.set(b"k".to_vec(), b"v".to_vec(), Some(100_000), 0);
+        let argv = vec![b"TTL".to_vec(), b"k".to_vec()];
+        let out = dispatch_argv(&argv, &mut store, 6).expect("ttl 99994ms");
+        assert_eq!(out, RespFrame::Integer(100));
+
+        // PTTL stays floor (matches upstream's separate
+        // ttlGenericCommand path when output_ms=1).
+        let out_ms = dispatch_argv(&[b"PTTL".to_vec(), b"k".to_vec()], &mut store, 6)
+            .expect("pttl 99994ms");
+        assert_eq!(out_ms, RespFrame::Integer(99_994));
+
+        // 993 ms remaining → rounds half-up to 1s.
+        store.set(b"k2".to_vec(), b"v".to_vec(), Some(1_000), 0);
+        let out = dispatch_argv(&[b"TTL".to_vec(), b"k2".to_vec()], &mut store, 7)
+            .expect("ttl 993ms");
+        assert_eq!(out, RespFrame::Integer(1));
+
+        // 499 ms remaining → still rounds down to 0 (under the
+        // half-second boundary).
+        let out = dispatch_argv(&[b"TTL".to_vec(), b"k2".to_vec()], &mut store, 501)
+            .expect("ttl 499ms");
+        assert_eq!(out, RespFrame::Integer(0));
+
+        // 500 ms exactly → rounds up to 1.
+        let out = dispatch_argv(&[b"TTL".to_vec(), b"k2".to_vec()], &mut store, 500)
+            .expect("ttl 500ms");
+        assert_eq!(out, RespFrame::Integer(1));
     }
 
     #[test]
