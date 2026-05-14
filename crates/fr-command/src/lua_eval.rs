@@ -4462,8 +4462,22 @@ impl<'a> LuaState<'a> {
                 // which renders bool/nil/table as "true"/"false"/"nil"/
                 // table:0x...". (br-frankenredis-replyargtype,
                 // frankenredis-20ggg)
+                //
+                // (frankenredis-f5rgn) Upstream also rejects argc != 1
+                // with "wrong number of arguments" — both the
+                // zero-args case (which fr already handled) and the
+                // multi-args case must error. fr previously silently
+                // ignored extras. The raw error string carries the
+                // "ERR " prefix because upstream's luaPushError stores
+                // it as part of the error table's `err` field — pcall
+                // sees "ERR wrong number of arguments" and the direct-
+                // call wrapper recognises the prefix via
+                // error_has_resp_code_prefix and does not double-add.
+                if args.len() != 1 {
+                    return Err("ERR wrong number of arguments".to_string());
+                }
                 let Some(arg) = args.first() else {
-                    return Err("wrong number of arguments".to_string());
+                    return Err("ERR wrong number of arguments".to_string());
                 };
                 let data: Vec<u8> = match arg {
                     LuaValue::Str(s) => s.clone(),
@@ -14680,6 +14694,47 @@ mod tests {
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
             "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d", // sha1("hello")
+        );
+    }
+
+    #[test]
+    fn redis_sha1hex_rejects_wrong_arity_f5rgn() {
+        // (frankenredis-f5rgn) Upstream luaRedisSha1hexCommand has
+        // `if (argc != 1) luaPushError(... "wrong number of arguments")
+        // lua_error()`. Both argc=0 and argc>1 raise the same error.
+        // fr previously rejected argc=0 but silently sha1'd args[0]
+        // for argc>1.
+        let mut store = Store::new();
+        for body in &[
+            b"return redis.sha1hex()".as_slice(),
+            b"return redis.sha1hex('a','b')",
+            b"return redis.sha1hex('a','b','c')",
+        ] {
+            let err = eval_script(body, &[], &[], &mut store, 0)
+                .expect_err("expected wrong-arity error");
+            assert!(
+                err.contains("wrong number of arguments"),
+                "body={:?} got {err:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // pcall-caught propagation.
+        let caught = eval_script(
+            b"local ok,err = pcall(redis.sha1hex,'a','b'); return tostring(err)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let RespFrame::BulkString(Some(bytes)) = caught else {
+            panic!("expected bulk")
+        };
+        let s = String::from_utf8(bytes).unwrap();
+        assert!(
+            s.contains("wrong number of arguments"),
+            "pcall caught: {s:?}"
         );
     }
 }
