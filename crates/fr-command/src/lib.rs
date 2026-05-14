@@ -691,6 +691,49 @@ fn command_key_lookup_error_frame(err: CommandKeyLookupError) -> RespFrame {
     }
 }
 
+/// Resolve key references for subcommand-style parent commands whose
+/// keys live in subcommand-specific keyspecs (e.g. OBJECT). Upstream's
+/// `getKeysSubcommandImpl` calls `lookupCommand` BEFORE arity/keyspec
+/// checks, so:
+///   - bare parent (`OBJECT`)         → "no key arguments"
+///   - unknown subcommand (`OBJECT BOGUS k`) → "Invalid command specified"
+///   - HELP subcommand (`OBJECT HELP`) → "no key arguments"
+///   - key-bearing subcommand (`OBJECT ENCODING k`) → key at argv[2], RO
+///
+/// Returns `Ok(None)` if `cmd_name` isn't one of the handled parents,
+/// so the regular arity/keyspec pipeline takes over. (frankenredis-t8z4e)
+fn subcommand_parent_key_references(
+    cmd_name: &str,
+    argv: &[Vec<u8>],
+) -> Result<Option<Vec<CommandKeyReference>>, CommandKeyLookupError> {
+    if cmd_name.eq_ignore_ascii_case("OBJECT") {
+        if argv.len() < 2 {
+            // Bare OBJECT: parent has no keyspec → no-key-arguments.
+            return Err(CommandKeyLookupError::NoKeyArguments);
+        }
+        let sub = std::str::from_utf8(&argv[1]).unwrap_or("");
+        if sub.eq_ignore_ascii_case("ENCODING")
+            || sub.eq_ignore_ascii_case("REFCOUNT")
+            || sub.eq_ignore_ascii_case("IDLETIME")
+            || sub.eq_ignore_ascii_case("FREQ")
+        {
+            if argv.len() < 3 {
+                return Err(CommandKeyLookupError::InvalidNumberOfArguments);
+            }
+            return Ok(Some(vec![CommandKeyReference {
+                index: 2,
+                flags: KEY_FLAGS_RO,
+            }]));
+        }
+        if sub.eq_ignore_ascii_case("HELP") {
+            return Err(CommandKeyLookupError::NoKeyArguments);
+        }
+        // Unknown subcommand — upstream's lookupCommand returns NULL.
+        return Err(CommandKeyLookupError::InvalidCommand);
+    }
+    Ok(None)
+}
+
 fn command_key_references(
     argv: &[Vec<u8>],
 ) -> Result<Vec<CommandKeyReference>, CommandKeyLookupError> {
@@ -714,6 +757,13 @@ fn command_key_references(
     // args followed. (br-frankenredis-getkeysorder)
     if !command_has_keys(table_name) {
         return Err(CommandKeyLookupError::NoKeyArguments);
+    }
+    // Subcommand-style parents (OBJECT) need their lookupCommand match
+    // run before the parent's arity check so unknown subcommands hit
+    // "Invalid command specified" and bare-parent hits "no key arguments"
+    // — matching server.c::getKeysSubcommandImpl. (frankenredis-t8z4e)
+    if let Some(refs) = subcommand_parent_key_references(table_name, argv)? {
+        return Ok(refs);
     }
     if check_command_arity(raw_cmd, argv.len()).is_err() {
         return Err(CommandKeyLookupError::InvalidNumberOfArguments);
@@ -1025,7 +1075,7 @@ fn command_key_references_with_exact_flags(
     }
 
     // Metadata-only readonly ops: XLEN, LLEN, HLEN, SCARD, ZCARD,
-    // STRLEN, TYPE, OBJECT — and also EXISTS/TOUCH/HEXISTS/HSTRLEN/
+    // STRLEN, TYPE — and also EXISTS/TOUCH/HEXISTS/HSTRLEN/
     // SISMEMBER which upstream commands.def declares with CMD_KEY_RO
     // (no access) because the value content is not exposed back to
     // the caller. WATCH likewise uses pure RO.
@@ -1037,7 +1087,6 @@ fn command_key_references_with_exact_flags(
         || cmd_name.eq_ignore_ascii_case("ZCARD")
         || cmd_name.eq_ignore_ascii_case("STRLEN")
         || cmd_name.eq_ignore_ascii_case("TYPE")
-        || cmd_name.eq_ignore_ascii_case("OBJECT")
         || cmd_name.eq_ignore_ascii_case("EXISTS")
         || cmd_name.eq_ignore_ascii_case("TOUCH")
         || cmd_name.eq_ignore_ascii_case("HEXISTS")
@@ -53573,6 +53622,142 @@ mod tests {
                     ])),
                 ])),
             ]))
+        );
+    }
+
+    /// (frankenredis-t8z4e) OBJECT is a subcommand-style parent: the key
+    /// sits at argv[2] (after the subcommand name) for ENCODING/REFCOUNT/
+    /// IDLETIME/FREQ, and OBJECT HELP has no key at all. The previous
+    /// implementation lumped OBJECT with LLEN/HLEN and returned argv[1]
+    /// (the subcommand name) as the "key".
+    #[test]
+    fn command_getkeys_object_extracts_key_after_subcommand_t8z4e() {
+        let mut store = Store::new();
+        // Key-bearing OBJECT subcommands → key at argv[2].
+        for sub in [b"ENCODING".as_slice(), b"REFCOUNT", b"IDLETIME", b"FREQ"] {
+            let reply = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"GETKEYS".to_vec(),
+                    b"OBJECT".to_vec(),
+                    sub.to_vec(),
+                    b"mykey".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(
+                reply,
+                RespFrame::Array(Some(vec![RespFrame::BulkString(Some(b"mykey".to_vec()))])),
+                "OBJECT {} mykey",
+                String::from_utf8_lossy(sub)
+            );
+            // GETKEYSANDFLAGS pairs the key with RO.
+            let with_flags = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"GETKEYSANDFLAGS".to_vec(),
+                    b"OBJECT".to_vec(),
+                    sub.to_vec(),
+                    b"mykey".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap();
+            assert_eq!(
+                with_flags,
+                RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"mykey".to_vec())),
+                    RespFrame::Array(Some(vec![RespFrame::SimpleString("RO".to_string())])),
+                ]))])),
+                "GETKEYSANDFLAGS OBJECT {} mykey",
+                String::from_utf8_lossy(sub)
+            );
+        }
+        // OBJECT HELP → no key arguments error.
+        let help = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"OBJECT".to_vec(),
+                b"HELP".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            help,
+            RespFrame::Error("ERR The command has no key arguments".to_string())
+        );
+        // Same for GETKEYSANDFLAGS.
+        let help_flags = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"OBJECT".to_vec(),
+                b"HELP".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            help_flags,
+            RespFrame::Error("ERR The command has no key arguments".to_string())
+        );
+        // Missing key for ENCODING → arity error.
+        let missing_key = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"OBJECT".to_vec(),
+                b"ENCODING".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert!(
+            matches!(missing_key, RespFrame::Error(ref e) if e.contains("Invalid number of arguments")),
+            "expected arity error for OBJECT ENCODING with no key, got {:?}",
+            missing_key
+        );
+        // Bare OBJECT (no subcommand) → no-key-arguments per upstream
+        // doesCommandHaveKeys path.
+        let bare_object = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"OBJECT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            bare_object,
+            RespFrame::Error("ERR The command has no key arguments".to_string())
+        );
+        // OBJECT BOGUS k → unknown subcommand: upstream's lookupCommand
+        // returns NULL → "Invalid command specified".
+        let unknown_sub = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"OBJECT".to_vec(),
+                b"BOGUS".to_vec(),
+                b"k".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            unknown_sub,
+            RespFrame::Error("ERR Invalid command specified".to_string())
         );
     }
 
