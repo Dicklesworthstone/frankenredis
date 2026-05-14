@@ -407,6 +407,17 @@ fn lua_optional_integer_arg(
     }
 }
 
+/// Render the upstream "got" suffix for a bad-argument error.
+/// `None` means the arg position was never set, producing "no value";
+/// `Some(LuaValue::Nil)` produces "nil"; any other value produces the
+/// type name. (frankenredis-nf29w)
+fn lua_arg_got_label(value: Option<&LuaValue>) -> &'static str {
+    match value {
+        None => "no value",
+        Some(v) => v.type_name(),
+    }
+}
+
 impl LuaValue {
     fn is_truthy(&self) -> bool {
         !matches!(self, LuaValue::Nil | LuaValue::Bool(false))
@@ -4210,7 +4221,18 @@ impl<'a> LuaState<'a> {
                 }
             }
             "assert" => {
-                let val = args.first().cloned().unwrap_or(LuaValue::Nil);
+                // (frankenredis-nf29w) Lua 5.1 lbaselib.c::luaB_assert
+                // calls luaL_checkany first, so a zero-arg invocation
+                // raises "bad argument #1 to ? (value expected)" rather
+                // than "assertion failed!".
+                if args.is_empty() {
+                    return Err(self.format_builtin_argerror(
+                        "assert",
+                        1,
+                        "value expected",
+                    ));
+                }
+                let val = &args[0];
                 if val.is_truthy() {
                     Ok(args.to_vec())
                 } else {
@@ -4352,6 +4374,18 @@ impl<'a> LuaState<'a> {
             }
             "xpcall" => {
                 // xpcall(f, msgh, ...) — like pcall but with error handler
+                // (frankenredis-nf29w) Lua 5.1 lbaselib.c::luaB_xpcall
+                // calls luaL_checkany on the msgh slot before doing
+                // anything else, so a missing msgh raises
+                // "bad argument #2 to ? (value expected)" — fr
+                // previously silently substituted nil.
+                if args.len() < 2 {
+                    return Err(self.format_builtin_argerror(
+                        "xpcall",
+                        2,
+                        "value expected",
+                    ));
+                }
                 let func = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let err_handler = args.get(1).cloned().unwrap_or(LuaValue::Nil);
                 let mut call_args_vec = args.get(2..).unwrap_or(&[]).to_vec();
@@ -4621,12 +4655,31 @@ impl<'a> LuaState<'a> {
                 }
             }
             "rawget" => {
-                let table = args.first().cloned().unwrap_or(LuaValue::Nil);
-                let key = args.get(1).cloned().unwrap_or(LuaValue::Nil);
-                let LuaValue::Table(t) = &table else {
-                    return Err(lua_bad_table_arg("rawget", 1, &table));
+                // (frankenredis-nf29w) Lua 5.1 luaB_rawget calls
+                // luaL_checktype(L, 1, LUA_TTABLE) (which uses
+                // "got no value" for missing args) and luaL_checkany on
+                // the key slot.
+                let table_opt = args.first();
+                let key_opt = args.get(1);
+                let table = match table_opt {
+                    Some(LuaValue::Table(t)) => t.clone(),
+                    other => {
+                        return Err(self.format_builtin_argerror(
+                            "rawget",
+                            1,
+                            &format!("table expected, got {}", lua_arg_got_label(other)),
+                        ));
+                    }
                 };
-                Ok(vec![t.get(&key)])
+                if key_opt.is_none() {
+                    return Err(self.format_builtin_argerror(
+                        "rawget",
+                        2,
+                        "value expected",
+                    ));
+                }
+                let key = key_opt.cloned().unwrap();
+                Ok(vec![table.get(&key)])
             }
             "rawset" => {
                 // rawset(table, key, value) — set and return table
@@ -4646,10 +4699,20 @@ impl<'a> LuaState<'a> {
                 Ok(vec![args[0].clone()])
             }
             "setmetatable" => {
-                let table = args.first().cloned().unwrap_or(LuaValue::Nil);
-                let LuaValue::Table(t) = &table else {
-                    return Err("bad argument #1 to 'setmetatable' (table expected)".to_string());
+                // (frankenredis-nf29w) Lua 5.1 luaB_setmetatable uses
+                // luaL_checktype which reports "got no value" for a
+                // missing arg.
+                let table = match args.first() {
+                    Some(LuaValue::Table(t)) => LuaValue::Table(t.clone()),
+                    other => {
+                        return Err(self.format_builtin_argerror(
+                            "setmetatable",
+                            1,
+                            &format!("table expected, got {}", lua_arg_got_label(other)),
+                        ));
+                    }
                 };
+                let LuaValue::Table(t) = &table else { unreachable!() };
                 let mt_arg = args.get(1).cloned().unwrap_or(LuaValue::Nil);
                 match mt_arg {
                     LuaValue::Table(mt) => {
@@ -4659,16 +4722,27 @@ impl<'a> LuaState<'a> {
                         t.inner.borrow_mut().metatable = None;
                     }
                     _ => {
-                        return Err(
-                            "bad argument #2 to 'setmetatable' (nil or table expected)".to_string()
-                        );
+                        return Err(self.format_builtin_argerror(
+                            "setmetatable",
+                            2,
+                            "nil or table expected",
+                        ));
                     }
                 }
                 Ok(vec![table])
             }
             "getmetatable" => {
-                let val = args.first().cloned().unwrap_or(LuaValue::Nil);
-                match &val {
+                // (frankenredis-nf29w) Lua 5.1 luaB_getmetatable calls
+                // luaL_checkany so a zero-arg call raises
+                // "bad argument #1 to ? (value expected)".
+                if args.is_empty() {
+                    return Err(self.format_builtin_argerror(
+                        "getmetatable",
+                        1,
+                        "value expected",
+                    ));
+                }
+                match &args[0] {
                     LuaValue::Table(t) => {
                         let inner = t.inner.borrow();
                         match &inner.metatable {
@@ -7648,6 +7722,99 @@ mod tests {
             err.contains("attempt to concatenate a nil value"),
             "wrong wording for nil: {err:?}"
         );
+    }
+
+    #[test]
+    fn lua_builtin_missing_arg_errors_match_upstream_wording() {
+        // Pins frankenredis-nf29w. Lua 5.1's luaL_checktype /
+        // luaL_checkany differentiate a MISSING arg slot ("got no
+        // value") from an explicit nil arg ("got nil"). They also
+        // route the function name through luaL_argerror, which uses
+        // the AST callsite name or '?' depending on invocation context.
+        // Covers the high-traffic builtins: assert, xpcall, rawget,
+        // setmetatable, getmetatable.
+        let mut store = Store::new();
+
+        // assert() with no args.
+        let frame = eval_script(
+            b"local ok, err = pcall(assert); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        assert_eq!(body, b"bad argument #1 to '?' (value expected)");
+
+        // assert() direct call uses 'assert' as the name.
+        let err = eval_script(b"return assert()", &[], &[], &mut store, 0)
+            .expect_err("expected error");
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'assert' (value expected)"),
+            "assert direct: {err:?}"
+        );
+
+        // xpcall(f) with no msgh.
+        let frame = eval_script(
+            b"local ok, err = pcall(xpcall, function() end); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        assert_eq!(body, b"bad argument #2 to '?' (value expected)");
+
+        // rawget() with no args → "table expected, got no value".
+        let frame = eval_script(
+            b"local ok, err = pcall(rawget); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        assert_eq!(body, b"bad argument #1 to '?' (table expected, got no value)");
+
+        // rawget(t) with no key → "value expected" at slot 2.
+        let frame = eval_script(
+            b"local ok, err = pcall(rawget, {}); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        assert_eq!(body, b"bad argument #2 to '?' (value expected)");
+
+        // setmetatable() with no args.
+        let frame = eval_script(
+            b"local ok, err = pcall(setmetatable); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        assert_eq!(body, b"bad argument #1 to '?' (table expected, got no value)");
+
+        // getmetatable() with no args.
+        let frame = eval_script(
+            b"local ok, err = pcall(getmetatable); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        assert_eq!(body, b"bad argument #1 to '?' (value expected)");
+
+        // Regression: good args still work.
+        let frame = eval_script(
+            b"local t = {x = 1}; return rawget(t, 'x')",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(1));
     }
 
     #[test]
