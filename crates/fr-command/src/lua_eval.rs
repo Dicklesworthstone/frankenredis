@@ -4447,8 +4447,13 @@ impl<'a> LuaState<'a> {
                 // The only gate is `flags & ~(PROPAGATE_AOF|REPL)` —
                 // so set_repl('abc'), set_repl(nil), set_repl({}) all
                 // resolve to flags=0 and are silently accepted.
+                //
+                // (frankenredis-lrrr4) Upstream's luaPushError stamps
+                // "ERR " on both error bodies; pcall sees the prefixed
+                // form and the direct-call wrapper recognises it via
+                // error_has_resp_code_prefix.
                 if args.len() != 1 {
-                    return Err("redis.set_repl() requires one argument.".to_string());
+                    return Err("ERR redis.set_repl() requires one argument.".to_string());
                 }
                 // to_number().unwrap_or(0.0) mirrors lua_tonumber's
                 // "0 for non-coercible" semantics. The `as i64` cast
@@ -4462,7 +4467,7 @@ impl<'a> LuaState<'a> {
                     0
                 };
                 if flags_i & !(SCRIPT_PROPAGATE_AOF as i64 | SCRIPT_PROPAGATE_REPLICA as i64) != 0 {
-                    return Err("Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.".to_string());
+                    return Err("ERR Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.".to_string());
                 }
                 self.store.script_propagation_mode = flags_i as u8;
                 Ok(vec![LuaValue::Nil])
@@ -4479,13 +4484,16 @@ impl<'a> LuaState<'a> {
                 //   setresp('abc'), setresp(nil), setresp({}) → 0 → rejected
                 //   setresp(5) → rejected
                 // (br-frankenredis-redislua, frankenredis-op1r0)
+                //
+                // (frankenredis-lrrr4) Upstream's luaPushError stamps
+                // "ERR " on both error bodies.
                 if args.len() != 1 {
-                    return Err("redis.setresp() requires one argument.".to_string());
+                    return Err("ERR redis.setresp() requires one argument.".to_string());
                 }
                 let v_f = args[0].to_number().unwrap_or(0.0);
                 let v = if v_f.is_finite() { v_f as i64 } else { 0 };
                 if v != 2 && v != 3 {
-                    return Err("RESP version must be 2 or 3.".to_string());
+                    return Err("ERR RESP version must be 2 or 3.".to_string());
                 }
                 // fr's per-script RESP propagation isn't tracked on
                 // the LuaState today; the command's effect on reply
@@ -15028,6 +15036,50 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn redis_set_repl_and_setresp_errors_carry_err_prefix_lrrr4() {
+        // (frankenredis-lrrr4) Upstream's luaPushError stamps "ERR "
+        // on the err-table body for both redis.set_repl and redis.setresp
+        // error paths (arity + value-out-of-range). fr previously
+        // emitted bare wording, breaking pcall callers that compare
+        // r.err prefixes.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local ok,e=pcall(redis.set_repl); return tostring(e)",
+                "ERR redis.set_repl() requires one argument.",
+            ),
+            (
+                b"local ok,e=pcall(redis.set_repl,99); return tostring(e)",
+                "ERR Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.",
+            ),
+            (
+                b"local ok,e=pcall(redis.setresp); return tostring(e)",
+                "ERR redis.setresp() requires one argument.",
+            ),
+            (
+                b"local ok,e=pcall(redis.setresp,'x'); return tostring(e)",
+                "ERR RESP version must be 2 or 3.",
+            ),
+            (
+                b"local ok,e=pcall(redis.setresp,5); return tostring(e)",
+                "ERR RESP version must be 2 or 3.",
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[test]
