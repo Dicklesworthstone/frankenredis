@@ -1887,6 +1887,16 @@ pub struct LuaState<'a> {
     /// luaProtectedTableError __index handler.
     globals_locked: bool,
     call_depth: usize,
+    /// (frankenredis-0k259) Per-frame kind stack used to satisfy Lua 5.1's
+    /// `luaL_where(L, level)` semantics from `error()` / `assert()`. Each
+    /// entry is `true` for a Lua function frame (script chunk or
+    /// user-defined `function`) and `false` for a C/Rust-builtin frame
+    /// (pcall, xpcall, error, assert, etc.). The bottom of the stack is
+    /// pushed by `execute()` for the script top-level; `call_function`
+    /// maintains the rest. `error(msg, level)` reads the slot at
+    /// `len - 1 - level` (skipping the error builtin's own top entry) to
+    /// decide whether to prepend the `user_script:1: ` source-location.
+    lua_frame_kinds: Vec<bool>,
     iterations: u64,
     rng_seed: u64,
     script_started_at: Instant,
@@ -2219,6 +2229,7 @@ impl<'a> LuaState<'a> {
             globals,
             globals_locked: false,
             call_depth: 0,
+            lua_frame_kinds: Vec::new(),
             iterations: 0,
             rng_seed,
             script_started_at: Instant::now(),
@@ -2374,7 +2385,12 @@ impl<'a> LuaState<'a> {
         self.globals_locked = true;
         let mut env = Env::new();
         let mut varargs = Vec::new();
+        // (frankenredis-0k259) The script top-level chunk is a Lua function
+        // frame for the purposes of luaL_where; push before exec_block so
+        // error(msg, N) at the bottom of the call stack can find it.
+        self.lua_frame_kinds.push(true);
         let outcome = self.exec_block(&stmts, &mut env, &mut varargs);
+        self.lua_frame_kinds.pop();
         match outcome {
             Ok(ControlFlow::Return(vals)) => {
                 Ok(vals.into_iter().next().unwrap_or(LuaValue::Nil))
@@ -3571,7 +3587,12 @@ impl<'a> LuaState<'a> {
         // be set per-stmt by exec_stmt's Stmt::Expression arm.
         // (frankenredis-gdbca)
         let previous_bare_stmt = std::mem::replace(&mut self.inside_bare_expression_stmt, false);
+        // (frankenredis-0k259) The coroutine body is a Lua function but it
+        // doesn't enter through call_function — push the kind frame here
+        // so error()/assert() inside the body see a Lua frame at level 1.
+        self.lua_frame_kinds.push(true);
         let run_result = self.exec_coroutine_stmts(&func.body, pc, &mut env, &mut func_varargs);
+        self.lua_frame_kinds.pop();
         self.inside_bare_expression_stmt = previous_bare_stmt;
         self.nested_exec_stmts_depth = previous_nested_depth;
         self.current_coroutine = previous_coroutine;
@@ -3967,6 +3988,11 @@ impl<'a> LuaState<'a> {
             self.call_depth -= 1;
             return Err("script exceeded maximum call depth".to_string());
         }
+        // (frankenredis-0k259) Push a frame for this call so error()/assert()
+        // can walk `level` entries back through the kind stack to decide
+        // whether to prepend the user_script:1 source-location prefix.
+        // LuaValue::Function is the only kind that counts as a Lua frame.
+        self.lua_frame_kinds.push(matches!(func, LuaValue::Function(_)));
         // (frankenredis-2c7hj) Tables with a callable `__call` metamethod
         // act like the underlying function with the table prepended as
         // the first arg. Handled here so internal callers (iterators,
@@ -3977,6 +4003,7 @@ impl<'a> LuaState<'a> {
             new_args.push(func.clone());
             new_args.extend_from_slice(args);
             self.call_depth -= 1;
+            self.lua_frame_kinds.pop();
             return self.call_function(&callable, &mut new_args, env, _varargs);
         }
         let result = match func {
@@ -4045,6 +4072,7 @@ impl<'a> LuaState<'a> {
             )),
         };
         self.call_depth -= 1;
+        self.lua_frame_kinds.pop();
         result
     }
 
@@ -4405,52 +4433,52 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(val.type_name().as_bytes().to_vec())])
             }
             "error" => {
-                // (frankenredis-cxmsu) Lua 5.1's lbaselib.c::luaB_error
-                // tests `lua_isstring(L, 1)` (which is true for both
-                // strings and numbers) before prepending the
-                // luaL_where source-location. For string/number args
-                // with level > 0 we emit a plain prefixed string error
-                // exactly as before; for any other type (nil/bool/
-                // table/function/thread) we stash the original LuaValue
-                // on `pending_error_value` and raise the typed-error
-                // sentinel so pcall/xpcall can return the original type
-                // back to the script.
+                // (frankenredis-cxmsu / frankenredis-0k259) Lua 5.1's
+                // lbaselib.c::luaB_error tests `lua_isstring(L, 1)` (true
+                // for both strings and numbers) before prepending the
+                // luaL_where source-location for the requested level.
+                // The location is added iff `lua_getstack(L, level, &ar)`
+                // succeeds AND the frame at that level is a Lua function
+                // with source info — C-builtin frames like pcall/xpcall
+                // produce no location. fr tracks each in-flight call's
+                // kind in `lua_frame_kinds` so we can answer that lookup
+                // here. For non-string/non-number args the value is
+                // re-raised via the typed-error sentinel so pcall/xpcall
+                // can return the original type to the script.
                 let raw = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let level = lua_optional_integer_arg("error", 2, args.get(1), 1)?;
-                // (frankenredis-uyj7c) Upstream luaL_where(L, level) only
-                // prepends a source-location when the requested level is
-                // within the call stack. fr's EVAL runs at a single Lua
-                // level (the top-level script), so:
-                //   level == 1  → 'user_script:1: '
-                //   level == 0  → no prefix (caller wants raw error)
-                //   level >= 2  → no prefix (out of stack)
-                //   level < 0   → no prefix (invalid; matches vendored)
-                let prefix_with_location = level == 1;
-                match &raw {
-                    LuaValue::Str(_) => {
-                        let msg = String::from_utf8_lossy(&raw.to_display_string()).to_string();
-                        if prefix_with_location {
-                            Err(format!("user_script:1: {msg}"))
-                        } else {
-                            Err(msg)
-                        }
+                // luaB_error:
+                //   if (lua_isstring(L, 1) && level > 0) {
+                //       luaL_where(L, level); lua_pushvalue(L, 1);
+                //       lua_concat(L, 2);
+                //   }
+                //   return lua_error(L);
+                // luaL_where prints '<source>:<line>: ' iff lua_getstack
+                // succeeds AND the frame is a Lua function with source
+                // info; for C frames (pcall/xpcall/etc.) it returns the
+                // empty string. So for string/number args with level>0
+                // the result is always coerced to string; the where
+                // prefix is only added when there is a Lua frame at the
+                // requested level. For level<=0 the raw value passes
+                // through with its original type.
+                if level > 0 && matches!(&raw, LuaValue::Str(_) | LuaValue::Number(_)) {
+                    // The top of lua_frame_kinds is error's own
+                    // RustFunction frame; level N refers to N entries
+                    // back from there.
+                    let level_is_lua = self
+                        .lua_frame_kinds
+                        .len()
+                        .checked_sub(1 + level as usize)
+                        .and_then(|i| self.lua_frame_kinds.get(i).copied())
+                        .unwrap_or(false);
+                    let msg = String::from_utf8_lossy(&raw.to_display_string()).to_string();
+                    if level_is_lua {
+                        return Err(format!("user_script:1: {msg}"));
                     }
-                    LuaValue::Number(_) if level > 0 => {
-                        // Upstream's `lua_isstring`-on-number check causes
-                        // Lua to concatenate the where-prefix with the
-                        // number, producing a plain string error.
-                        let msg = String::from_utf8_lossy(&raw.to_display_string()).to_string();
-                        if prefix_with_location {
-                            Err(format!("user_script:1: {msg}"))
-                        } else {
-                            Err(msg)
-                        }
-                    }
-                    _ => {
-                        self.pending_error_value = Some(raw);
-                        Err(LUA_TYPED_ERROR_SENTINEL.to_string())
-                    }
+                    return Err(msg);
                 }
+                self.pending_error_value = Some(raw);
+                Err(LUA_TYPED_ERROR_SENTINEL.to_string())
             }
             "assert" => {
                 // (frankenredis-nf29w) Lua 5.1 lbaselib.c::luaB_assert
@@ -12308,6 +12336,81 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_error_where_prefix_respects_lua_vs_c_frames_0k259() {
+        // (frankenredis-0k259) Lua 5.1's luaB_error only prepends the
+        // luaL_where(L, level) source-location when the requested level
+        // is a Lua-function frame. C frames (pcall/xpcall/error itself)
+        // produce an empty where-prefix. fr previously assumed level==1
+        // always meant 'user_script:1' regardless of which kind of frame
+        // it pointed to; for direct invocations like `pcall(error, X)`
+        // that yields the wrong prefix.
+        let mut store = Store::new();
+
+        // pcall(error, 'msg'): level=1 default → caller is pcall (C) →
+        // no prefix. fr previously incorrectly emitted user_script:1: msg.
+        let r = eval_script(
+            b"local ok,err=pcall(error, 'msg'); return type(err)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall(error,'msg')");
+        assert_eq!(r, RespFrame::BulkString(Some(b"string:msg".to_vec())));
+
+        // pcall(error, 42): same — number coerced to string, no prefix.
+        let r = eval_script(
+            b"local ok,err=pcall(error, 42); return type(err)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall(error,42)");
+        assert_eq!(r, RespFrame::BulkString(Some(b"string:42".to_vec())));
+
+        // pcall(error, 'msg', 2): level 2 walks past pcall (C) to the
+        // script chunk (Lua) → prefix added.
+        let r = eval_script(
+            b"local ok,err=pcall(error, 'msg', 2); return type(err)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall(error,'msg',2)");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(b"string:user_script:1: msg".to_vec()))
+        );
+
+        // error('msg') inside a Lua function: prefix added (Lua frame
+        // at level 1).
+        let r = eval_script(
+            b"local ok,err=pcall(function() error('msg') end); return type(err)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).expect("error('msg') from fn");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(b"string:user_script:1: msg".to_vec()))
+        );
+
+        // error(42, 0) inside a Lua function: level 0 = no prefix,
+        // value retains its number type.
+        let r = eval_script(
+            b"local ok,err=pcall(function() error(42, 0) end); return type(err)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).expect("error(42,0) from fn");
+        assert_eq!(r, RespFrame::BulkString(Some(b"number:42".to_vec())));
+
+        // error('msg', 0): level 0 = no prefix; string passes through
+        // unchanged.
+        let r = eval_script(
+            b"local ok,err=pcall(function() error('msg', 0) end); return type(err)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).expect("error('msg',0)");
+        assert_eq!(r, RespFrame::BulkString(Some(b"string:msg".to_vec())));
+
+        // Coroutine body is a Lua frame at level 1 — prefix added.
+        let r = eval_script(
+            b"local co=coroutine.create(function() error('x') end); local ok,err=coroutine.resume(co); return type(err)..':'..tostring(err)",
+            &[], &[], &mut store, 0,
+        ).expect("coroutine error");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(b"string:user_script:1: x".to_vec()))
+        );
     }
 
     #[test]
