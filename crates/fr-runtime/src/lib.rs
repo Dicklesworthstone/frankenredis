@@ -6018,6 +6018,21 @@ impl Runtime {
         }
     }
 
+    /// Mirror upstream networking.c::getClientTypeByName — accept the
+    /// legacy `slave` alias as a synonym for `replica`. Returns the
+    /// canonical name used by `client_type_for_session`, or None when
+    /// the kind string is not a recognised client type.
+    /// (frankenredis-h4grb)
+    fn canonical_client_type(kind: &str) -> Option<&'static str> {
+        match kind.to_ascii_lowercase().as_str() {
+            "normal" => Some("normal"),
+            "master" => Some("master"),
+            "replica" | "slave" => Some("replica"),
+            "pubsub" => Some("pubsub"),
+            _ => None,
+        }
+    }
+
     fn client_info_line_for_session(&self, session: &ClientSession, now_ms: u64) -> String {
         let name = session
             .client_name
@@ -10035,17 +10050,13 @@ impl Runtime {
                         Ok(kind) => kind,
                         Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
                     };
-                    if !matches!(
-                        kind.to_ascii_lowercase().as_str(),
-                        "normal" | "master" | "replica" | "pubsub"
-                    ) {
+                    let Some(canonical) = Self::canonical_client_type(kind) else {
                         return RespFrame::Error(format!("ERR Unknown client type '{kind}'"));
-                    }
+                    };
                     sessions
                         .values()
                         .filter(|session| {
-                            self.client_type_for_session(session)
-                                .eq_ignore_ascii_case(kind)
+                            self.client_type_for_session(session) == canonical
                         })
                         .map(|session| self.client_info_line_for_session(session, now_ms))
                         .collect::<String>()
@@ -10227,13 +10238,10 @@ impl Runtime {
                             Ok(s) => s.to_string(),
                             Err(_) => return CommandError::InvalidUtf8Argument.to_resp(),
                         };
-                        if !matches!(
-                            kind.to_ascii_lowercase().as_str(),
-                            "normal" | "master" | "replica" | "pubsub"
-                        ) {
+                        let Some(canonical) = Self::canonical_client_type(&kind) else {
                             return RespFrame::Error(format!("ERR Unknown client type '{kind}'"));
-                        }
-                        filter_type = Some(kind);
+                        };
+                        filter_type = Some(canonical.to_string());
                         i += 2;
                     } else if opt.eq_ignore_ascii_case("USER") && i + 1 < argv.len() {
                         // Upstream networking.c::clientCommand calls
@@ -17924,6 +17932,54 @@ mod tests {
         assert_eq!(list_replica, RespFrame::BulkString(Some(Vec::new())));
         assert_eq!(list_id_match, list_all);
         assert_eq!(list_id_miss, RespFrame::BulkString(Some(Vec::new())));
+    }
+
+    #[test]
+    fn client_list_and_kill_type_accept_slave_alias_for_replica_h4grb() {
+        // (frankenredis-h4grb) Upstream networking.c::getClientTypeByName
+        // accepts the legacy `slave` alias as a synonym for `replica`
+        // (CLIENT_TYPE_SLAVE). fr previously hardcoded the match to only
+        // {normal,master,replica,pubsub}, so `CLIENT KILL TYPE slave`
+        // and `CLIENT LIST TYPE slave` returned "Unknown client type".
+        let mut rt = Runtime::default_strict();
+
+        // CLIENT LIST TYPE slave — no replicas connected, empty list.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"LIST", b"TYPE", b"slave"]), 1),
+            RespFrame::BulkString(Some(Vec::new())),
+        );
+        // CLIENT KILL TYPE slave — no replicas, kills 0.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"KILL", b"TYPE", b"slave"]), 2),
+            RespFrame::Integer(0),
+        );
+        // `replica` continues to work identically.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"LIST", b"TYPE", b"replica"]), 3),
+            RespFrame::BulkString(Some(Vec::new())),
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"KILL", b"TYPE", b"replica"]), 4),
+            RespFrame::Integer(0),
+        );
+        // Bogus types still get the unknown-type error.
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"LIST", b"TYPE", b"bogus"]), 5),
+            RespFrame::Error("ERR Unknown client type 'bogus'".to_string()),
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"KILL", b"TYPE", b"bogus"]), 6),
+            RespFrame::Error("ERR Unknown client type 'bogus'".to_string()),
+        );
+        // Case-insensitive: SLAVE, Slave, sLaVe all accepted.
+        for variant in [b"SLAVE".as_slice(), b"Slave", b"sLaVe"] {
+            assert_eq!(
+                rt.execute_frame(command(&[b"CLIENT", b"KILL", b"TYPE", variant]), 7),
+                RespFrame::Integer(0),
+                "expected `{}` to alias replica",
+                String::from_utf8_lossy(variant),
+            );
+        }
     }
 
     #[test]
