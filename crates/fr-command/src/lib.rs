@@ -5927,104 +5927,149 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     // Upstream t_stream.c::xtrimCommand → streamParseAddOrTrimArgsOrReply:
     //   XTRIM key (MAXLEN | MINID) [= | ~] threshold [LIMIT count]
     //
-    // LIMIT requires the approximate (`~`) modifier and a trimming
-    // strategy. The exact (`=`) form rejects LIMIT, and the bare
-    // form (no = / ~) defaults to exact and likewise rejects LIMIT.
-    // argc inclusive of the command name ranges 4..=7:
-    //   4 → key + STRAT + threshold
-    //   5 → key + STRAT + (= | ~) + threshold
-    //   6 → key + STRAT + threshold + LIMIT count           (= → error)
-    //   7 → key + STRAT + (= | ~) + threshold + LIMIT count
-    if argv.len() < 4 || argv.len() > 7 {
+    // Upstream walks argv token-by-token, tracking a trim_strategy
+    // flag and a limit_given flag, and bails on the first guard that
+    // trips. That structure (rather than fr's previous positional
+    // parser) is what surfaces the type-specific parse error on a
+    // missing threshold (MAXLEN → integer, MINID → stream ID) and
+    // the bespoke "MAXLEN and MINID at the same time" wording when
+    // either strategy token reappears. (frankenredis-wglo0)
+    if argv.len() < 4 {
         return Err(CommandError::WrongArity("XTRIM"));
     }
 
-    let is_maxlen = eq_ascii_command(&argv[2], b"MAXLEN");
-    let is_minid = eq_ascii_command(&argv[2], b"MINID");
-    if !is_maxlen && !is_minid {
-        // (frankenredis-d5y9h) Upstream
-        // streamParseAddOrTrimArgsOrReply (t_stream.c lines 968-1000)
-        // recognises LIMIT iteratively and, after the loop, emits a
-        // specific error when LIMIT was set but no trimming strategy
-        // was selected. fr's restrictive 'argv[2] must be MAXLEN or
-        // MINID' check otherwise falls through to a generic
-        // SyntaxError that hides the clearer LIMIT-specific message.
-        if eq_ascii_command(&argv[2], b"LIMIT") {
-            return Ok(RespFrame::Error(
-                "ERR syntax error, LIMIT cannot be used without specifying a trimming strategy"
-                    .to_string(),
-            ));
-        }
-        return Err(CommandError::SyntaxError);
+    #[derive(Copy, Clone, PartialEq)]
+    enum Strat {
+        None,
+        MaxLen,
+        MinId,
     }
 
-    let mut idx = 3usize;
+    let mut strategy = Strat::None;
     let mut approx = false;
-    if idx < argv.len()
-        && (eq_ascii_command(&argv[idx], b"=") || eq_ascii_command(&argv[idx], b"~"))
-    {
-        approx = eq_ascii_command(&argv[idx], b"~");
-        idx += 1;
-    }
-
-    if idx >= argv.len() {
-        return Err(CommandError::SyntaxError);
-    }
-    let threshold_idx = idx;
-    idx += 1;
-
+    let mut maxlen_value: Option<usize> = None;
+    let mut minid_value: Option<StreamId> = None;
     let mut limit: Option<usize> = None;
     let mut limit_given = false;
-    if idx < argv.len() {
-        if !eq_ascii_command(&argv[idx], b"LIMIT") {
-            return Err(CommandError::SyntaxError);
+    let incompat = || {
+        RespFrame::Error(
+            "ERR syntax error, MAXLEN and MINID options at the same time are not compatible"
+                .to_string(),
+        )
+    };
+
+    let mut i = 2usize;
+    while i < argv.len() {
+        let tok = &argv[i];
+        let is_maxlen = eq_ascii_command(tok, b"MAXLEN");
+        let is_minid = eq_ascii_command(tok, b"MINID");
+        if is_maxlen || is_minid {
+            if strategy != Strat::None {
+                return Ok(incompat());
+            }
+            // moreargs check matches upstream: with no argument at
+            // all after the strategy token, fall through to the
+            // generic "syntax error" catch-all.
+            if i + 1 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let mut j = i + 1;
+            if eq_ascii_command(&argv[j], b"~") {
+                approx = true;
+                j += 1;
+            } else if eq_ascii_command(&argv[j], b"=") {
+                approx = false;
+                j += 1;
+            }
+            // Upstream parses the threshold inline (eagerly) via
+            // getLongLongFromObjectOrReply for MAXLEN or
+            // streamParseStrictIDOrReply for MINID. That ordering
+            // matters for cases like `MAXLEN ~ MAXLEN 5` — the
+            // second `MAXLEN` is consumed as the *threshold* of the
+            // first and surfaces "value is not an integer" before
+            // the duplicate-strategy guard ever sees the second
+            // token.
+            if j >= argv.len() {
+                if is_maxlen {
+                    return Ok(RespFrame::Error(
+                        "ERR value is not an integer or out of range".to_string(),
+                    ));
+                } else {
+                    return Ok(RespFrame::Error(
+                        "ERR Invalid stream ID specified as stream command argument".to_string(),
+                    ));
+                }
+            }
+            if is_maxlen {
+                let n = parse_i64_arg(&argv[j])?;
+                if n < 0 {
+                    return Ok(RespFrame::Error(
+                        "ERR The MAXLEN argument must be >= 0.".to_string(),
+                    ));
+                }
+                maxlen_value = Some(usize::try_from(n).unwrap_or(usize::MAX));
+                strategy = Strat::MaxLen;
+            } else {
+                let id = match parse_stream_id(&argv[j]) {
+                    Ok(id) => id,
+                    Err(reply) => return Ok(reply),
+                };
+                minid_value = Some(id);
+                strategy = Strat::MinId;
+            }
+            i = j + 1;
+            continue;
         }
-        idx += 1;
-        if idx >= argv.len() {
-            return Err(CommandError::SyntaxError);
+        if eq_ascii_command(tok, b"LIMIT") {
+            if strategy == Strat::None {
+                return Ok(RespFrame::Error(
+                    "ERR syntax error, LIMIT cannot be used without specifying a trimming strategy"
+                        .to_string(),
+                ));
+            }
+            if i + 1 >= argv.len() {
+                return Err(CommandError::SyntaxError);
+            }
+            let n = parse_i64_arg(&argv[i + 1])?;
+            if n < 0 {
+                return Ok(RespFrame::Error(
+                    "ERR The LIMIT argument must be >= 0.".to_string(),
+                ));
+            }
+            if !approx {
+                return Ok(RespFrame::Error(
+                    "ERR syntax error, LIMIT cannot be used without the special ~ option"
+                        .to_string(),
+                ));
+            }
+            limit_given = true;
+            if n != 0 {
+                limit = Some(usize::try_from(n).unwrap_or(usize::MAX));
+            }
+            i += 2;
+            continue;
         }
-        let n = parse_i64_arg(&argv[idx])?;
-        if n < 0 {
-            return Ok(RespFrame::Error(
-                "ERR The LIMIT argument must be >= 0.".to_string(),
-            ));
-        }
-        if !approx {
-            return Ok(RespFrame::Error(
-                "ERR syntax error, LIMIT cannot be used without the special ~ option".to_string(),
-            ));
-        }
-        limit_given = true;
-        if n != 0 {
-            limit = Some(usize::try_from(n).unwrap_or(usize::MAX));
-        }
-        idx += 1;
-        if idx != argv.len() {
-            return Err(CommandError::SyntaxError);
-        }
+        // Catch-all: any other token (including a stray "FOO" or a
+        // trailing token after a complete MAXLEN/MINID + LIMIT
+        // clause) maps to "syntax error" per upstream.
+        return Err(CommandError::SyntaxError);
     }
+
+    if strategy == Strat::None {
+        return Err(CommandError::SyntaxError);
+    }
+    let is_maxlen = strategy == Strat::MaxLen;
 
     // Approximate (~) without LIMIT mirrors the XADD inline-trim
     // path: upstream lazily skips trimming when the trailing
     // radix-tree node isn't full, which we model as a no-op (return
     // 0 removed). Exact (=, or no qualifier) always trims fully.
     // Approximate WITH LIMIT honors the cap. LIMIT 0 is still an
-    // explicit LIMIT and means no cap, not no work. A precondition
-    // the XTRIM-specific oracle gate codifies vs vendored Redis 7.2.
+    // explicit LIMIT and means no cap, not no work.
     let approx_noop = approx && !limit_given;
 
     if is_maxlen {
-        let max_len_raw = parse_i64_arg(&argv[threshold_idx])?;
-        // Upstream streamParseAddOrTrimArgsOrReply emits the
-        // bespoke 'The MAXLEN argument must be >= 0.' wording for
-        // negative MAXLEN, not the generic integer-out-of-range.
-        // (br-frankenredis-xtrimmaxlenneg)
-        if max_len_raw < 0 {
-            return Ok(RespFrame::Error(
-                "ERR The MAXLEN argument must be >= 0.".to_string(),
-            ));
-        }
-        let max_len = usize::try_from(max_len_raw).unwrap_or(usize::MAX);
+        let max_len = maxlen_value.expect("maxlen_value set when strategy = MaxLen");
         if approx_noop {
             // Touch type validation by calling xlen — this matches
             // upstream's "syntax was valid, the stream key resolves,
@@ -6037,10 +6082,7 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             i64::try_from(removed).unwrap_or(i64::MAX),
         ))
     } else {
-        let min_id = match parse_stream_id(&argv[threshold_idx]) {
-            Ok(id) => id,
-            Err(reply) => return Ok(reply),
-        };
+        let min_id = minid_value.expect("minid_value set when strategy = MinId");
         if approx_noop {
             store.xlen(&argv[1], now_ms)?;
             return Ok(RespFrame::Integer(0));
@@ -29911,6 +29953,102 @@ mod tests {
         )
         .expect_err("xtrim arity");
         assert!(matches!(arity, CommandError::WrongArity("XTRIM")));
+
+        // (frankenredis-wglo0) Token-iteration error wordings.
+        // Upstream streamParseAddOrTrimArgsOrReply walks argv,
+        // tracks a trim_strategy flag, and bails with type-specific
+        // wording for missing-threshold and bespoke wording for
+        // duplicate / mixed strategies.
+        for &(extra, want_err) in &[
+            // MAXLEN with no threshold (after consuming ~ or =) —
+            // upstream's getLongLongFromObjectOrReply on argv[i+1]
+            // reads past the vector and surfaces the int wording.
+            (
+                &[b"MAXLEN".as_ref(), b"~".as_ref()][..],
+                "ERR value is not an integer or out of range",
+            ),
+            (
+                &[b"MAXLEN".as_ref(), b"=".as_ref()][..],
+                "ERR value is not an integer or out of range",
+            ),
+            // MINID parses the threshold as a stream ID, so the
+            // missing-threshold case surfaces the stream-ID wording.
+            (
+                &[b"MINID".as_ref(), b"~".as_ref()][..],
+                "ERR Invalid stream ID specified as stream command argument",
+            ),
+            (
+                &[b"MINID".as_ref(), b"=".as_ref()][..],
+                "ERR Invalid stream ID specified as stream command argument",
+            ),
+            // Two strategy tokens in any combination — upstream's
+            // `if (trim_strategy != TRIM_STRATEGY_NONE)` guard fires
+            // on the second one and emits the bespoke wording.
+            (
+                &[
+                    b"MAXLEN".as_ref(),
+                    b"5".as_ref(),
+                    b"MINID".as_ref(),
+                    b"0".as_ref(),
+                ][..],
+                "ERR syntax error, MAXLEN and MINID options at the same time are not compatible",
+            ),
+            (
+                &[
+                    b"MINID".as_ref(),
+                    b"0".as_ref(),
+                    b"MAXLEN".as_ref(),
+                    b"5".as_ref(),
+                ][..],
+                "ERR syntax error, MAXLEN and MINID options at the same time are not compatible",
+            ),
+            (
+                &[
+                    b"MAXLEN".as_ref(),
+                    b"5".as_ref(),
+                    b"MAXLEN".as_ref(),
+                    b"3".as_ref(),
+                ][..],
+                "ERR syntax error, MAXLEN and MINID options at the same time are not compatible",
+            ),
+            (
+                &[
+                    b"MAXLEN".as_ref(),
+                    b"~".as_ref(),
+                    b"5".as_ref(),
+                    b"MINID".as_ref(),
+                    b"0".as_ref(),
+                ][..],
+                "ERR syntax error, MAXLEN and MINID options at the same time are not compatible",
+            ),
+            (
+                &[
+                    b"MAXLEN".as_ref(),
+                    b"~".as_ref(),
+                    b"5".as_ref(),
+                    b"LIMIT".as_ref(),
+                    b"5".as_ref(),
+                    b"MINID".as_ref(),
+                    b"0".as_ref(),
+                ][..],
+                "ERR syntax error, MAXLEN and MINID options at the same time are not compatible",
+            ),
+        ] {
+            let mut argv = vec![b"XTRIM".to_vec(), b"stream".to_vec()];
+            for tok in extra {
+                argv.push(tok.to_vec());
+            }
+            let reply = dispatch_argv(&argv, &mut store, 0).expect("xtrim parse path");
+            assert_eq!(
+                reply,
+                RespFrame::Error(want_err.to_string()),
+                "case {:?}",
+                extra
+                    .iter()
+                    .map(|t| String::from_utf8_lossy(t).to_string())
+                    .collect::<Vec<_>>()
+            );
+        }
 
         // (frankenredis-d5y9h) XTRIM key LIMIT N — LIMIT alone without
         // MAXLEN/MINID. Upstream streamParseAddOrTrimArgsOrReply
