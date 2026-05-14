@@ -5726,9 +5726,27 @@ impl<'a> LuaState<'a> {
                 // nil/missing sep to the empty string. fr previously routed
                 // through to_display_string() which renders nil as the literal
                 // 'nil', producing 'a nil b' instead of 'ab'.
+                // (frankenredis-a3ksp) luaL_optlstring further requires that
+                // non-nil sep be a string or number — anything else (table,
+                // boolean, function, ...) raises bad-argument. fr previously
+                // accepted any value and silently produced garbage like
+                // "1table:0x...2table:0x...3" when the sep was a table.
                 let sep: Vec<u8> = match args.get(1) {
                     None | Some(LuaValue::Nil) => Vec::new(),
-                    Some(v) => v.to_display_string(),
+                    Some(LuaValue::Str(s)) => s.clone(),
+                    Some(LuaValue::Number(n)) => {
+                        if *n == (*n as i64) as f64 && n.is_finite() {
+                            format!("{}", *n as i64).into_bytes()
+                        } else {
+                            lua_number_to_string(*n).into_bytes()
+                        }
+                    }
+                    Some(other) => {
+                        return Err(format!(
+                            "user_script:1: bad argument #2 to 'concat' (string expected, got {})",
+                            other.type_name()
+                        ));
+                    }
                 };
                 let array_len = t.inner.borrow().array.len() as i64;
                 let start = lua_optional_integer_arg("concat", 3, args.get(2), 1)?;
@@ -11598,6 +11616,52 @@ mod tests {
             let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
             assert_eq!(result, RespFrame::Integer(1));
         }
+    }
+
+    #[test]
+    fn table_concat_rejects_non_string_separator_a3ksp() {
+        // (frankenredis-a3ksp) Upstream ltablib.c::tconcat uses
+        // luaL_optlstring(L, 2, "", &lsep) which requires the
+        // separator to be a string or number (or absent/nil).
+        // Anything else raises "bad argument #2 to 'concat' (string
+        // expected, got <type>)" with the user_script:1: prefix.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (b"return table.concat({1,2,3}, {})", "table"),
+            (b"return table.concat({1,2,3}, function() end)", "function"),
+            (b"return table.concat({1,2,3}, true)", "boolean"),
+            (b"return table.concat({1,2,3}, false)", "boolean"),
+        ];
+        for (body, ty) in cases {
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
+                &format!("expected concat error for {:?}", String::from_utf8_lossy(body)),
+            );
+            let expected = format!(
+                "user_script:1: bad argument #2 to 'concat' (string expected, got {ty})"
+            );
+            assert_eq!(err, expected, "wrong error for {:?}", String::from_utf8_lossy(body));
+        }
+
+        // Number separator coerces to its string representation.
+        let ok = eval_script(
+            b"return table.concat({1,2,3}, 5)",
+            &[], &[], &mut store, 0,
+        ).expect("number sep should work");
+        assert_eq!(ok, RespFrame::BulkString(Some(b"15253".to_vec())));
+
+        // String separator works.
+        let ok = eval_script(
+            b"return table.concat({1,2,3}, ', ')",
+            &[], &[], &mut store, 0,
+        ).expect("string sep should work");
+        assert_eq!(ok, RespFrame::BulkString(Some(b"1, 2, 3".to_vec())));
+
+        // Missing/nil sep -> empty separator (unchanged jwkhc behavior).
+        let ok = eval_script(
+            b"return table.concat({1,2,3})",
+            &[], &[], &mut store, 0,
+        ).expect("nil sep");
+        assert_eq!(ok, RespFrame::BulkString(Some(b"123".to_vec())));
     }
 
     #[test]
