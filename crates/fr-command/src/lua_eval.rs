@@ -5035,6 +5035,11 @@ impl<'a> LuaState<'a> {
                 // uses luaL_checknumber on every arg starting at arg 1,
                 // so calling with zero args raises 'bad argument #1 to
                 // max (number expected, got no value)'.
+                // (frankenredis-a6r5p) Wrong-type args at index > 0
+                // route through the same luaL_argerror, so they need
+                // the source-location prefix and the correct arg
+                // index. Pre-fix fr emitted a generic "bad argument
+                // to 'math.max'" for any non-numeric arg past #1.
                 if args.is_empty() {
                     return Err(
                         "user_script:1: bad argument #1 to 'max' (number expected, got no value)"
@@ -5042,8 +5047,8 @@ impl<'a> LuaState<'a> {
                     );
                 }
                 let mut max = f64::NEG_INFINITY;
-                for a in args {
-                    let n = a.to_number().ok_or("bad argument to 'math.max'")?;
+                for (i, _) in args.iter().enumerate() {
+                    let n = lua_check_number(args, i, "max")?;
                     if n > max {
                         max = n;
                     }
@@ -5051,6 +5056,8 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Number(max)])
             }
             "math.min" => {
+                // (frankenredis-a6r5p) Same template as math.max — see
+                // comment above for the upstream wording rationale.
                 if args.is_empty() {
                     return Err(
                         "user_script:1: bad argument #1 to 'min' (number expected, got no value)"
@@ -5058,8 +5065,8 @@ impl<'a> LuaState<'a> {
                     );
                 }
                 let mut min = f64::INFINITY;
-                for a in args {
-                    let n = a.to_number().ok_or("bad argument to 'math.min'")?;
+                for (i, _) in args.iter().enumerate() {
+                    let n = lua_check_number(args, i, "min")?;
                     if n < min {
                         min = n;
                     }
@@ -11777,6 +11784,51 @@ mod tests {
             let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
             assert_eq!(result, RespFrame::Integer(1));
         }
+    }
+
+    #[test]
+    fn math_min_max_wrong_type_arg_wording_a6r5p() {
+        // (frankenredis-a6r5p) Upstream math_min/math_max iterate args
+        // via luaL_checknumber, surfacing "bad argument #N to '<min|
+        // max>' (number expected, got <type>)" with the user_script:1:
+        // prefix. fr previously emitted a generic "bad argument to
+        // 'math.min'" / "bad argument to 'math.max'" for any non-numeric
+        // arg past index 0.
+        let mut store = Store::new();
+        for (body, fname, idx, ty) in &[
+            (b"return math.min(1, 'a')".as_slice(), "min", 2, "string"),
+            (b"return math.max(1, 'a')".as_slice(), "max", 2, "string"),
+            (b"return math.min({}, 1)".as_slice(), "min", 1, "table"),
+            (b"return math.max(nil, 1)".as_slice(), "max", 1, "nil"),
+            (b"return math.min(1, 2, true)".as_slice(), "min", 3, "boolean"),
+        ] {
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
+                &format!("expected wrong-type error for {:?}", String::from_utf8_lossy(body)),
+            );
+            let expected = format!(
+                "user_script:1: bad argument #{idx} to '{fname}' (number expected, got {ty})"
+            );
+            assert_eq!(err, expected, "wrong error for {:?}", String::from_utf8_lossy(body));
+        }
+
+        // No-arg form continues to report arg #1 with "got no value".
+        for fname in &["min", "max"] {
+            let body = format!("return math.{fname}()");
+            let err = eval_script(body.as_bytes(), &[], &[], &mut store, 0)
+                .expect_err("no-arg error");
+            assert_eq!(
+                err,
+                format!(
+                    "user_script:1: bad argument #1 to '{fname}' (number expected, got no value)"
+                ),
+            );
+        }
+
+        // Valid calls still work.
+        let r = eval_script(b"return math.min(3, 1, 2)", &[], &[], &mut store, 0).expect("valid min");
+        assert_eq!(r, RespFrame::Integer(1));
+        let r = eval_script(b"return math.max(3, 1, 2)", &[], &[], &mut store, 0).expect("valid max");
+        assert_eq!(r, RespFrame::Integer(3));
     }
 
     #[test]
