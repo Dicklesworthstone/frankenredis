@@ -10253,9 +10253,35 @@ impl Store {
     ) -> Result<(u64, Vec<(Vec<u8>, Vec<u8>)>), StoreError> {
         self.drop_if_expired(key, now_ms);
         self.drop_expired_hash_fields(key, now_ms);
+        let max_listpack_entries = self.hash_max_listpack_entries;
+        let max_listpack_value = self.hash_max_listpack_value;
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Hash(h) => {
+                    // (frankenredis-yvxq6) Upstream
+                    // t_hash.c::hscanCommand short-circuits on
+                    // listpack-encoded hashes: the entire
+                    // collection is returned in a single round
+                    // with cursor=0, regardless of COUNT or input
+                    // cursor (so an out-of-range cursor still
+                    // surfaces all entries instead of an empty
+                    // reply). COUNT only matters for the hashtable
+                    // path.
+                    let fits_listpack = h.len() <= max_listpack_entries
+                        && h.iter().all(|(k, v)| {
+                            k.len() <= max_listpack_value
+                                && v.len() <= max_listpack_value
+                        });
+                    if fits_listpack {
+                        let result: Vec<(Vec<u8>, Vec<u8>)> = h
+                            .iter()
+                            .filter(|(field, _)| {
+                                pattern.is_none_or(|pat| glob_match(pat, field))
+                            })
+                            .map(|(f, v)| (f.clone(), v.clone()))
+                            .collect();
+                        return Ok((0, result));
+                    }
                     let start = cursor as usize;
                     let batch_size = count.max(1);
                     let mut result = Vec::new();
@@ -10304,9 +10330,30 @@ impl Store {
         now_ms: u64,
     ) -> Result<(u64, Vec<Vec<u8>>), StoreError> {
         self.drop_if_expired(key, now_ms);
+        let max_intset_entries = self.set_max_intset_entries;
+        let max_listpack_entries = self.set_max_listpack_entries;
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
+                    // (frankenredis-yvxq6) Upstream
+                    // t_set.c::sscanCommand short-circuits on the
+                    // listpack and intset encodings: full
+                    // collection in one shot with cursor=0,
+                    // regardless of cursor/COUNT. Only the
+                    // hashtable-encoded path honors them.
+                    let is_listpack_or_intset = !entry.force_set_hashtable_encoding
+                        && (Self::set_fits_intset(s, max_intset_entries)
+                            || Self::set_fits_listpack(s, max_listpack_entries));
+                    if is_listpack_or_intset {
+                        let result: Vec<Vec<u8>> = s
+                            .iter()
+                            .filter(|member| {
+                                pattern.is_none_or(|pat| glob_match(pat, member))
+                            })
+                            .cloned()
+                            .collect();
+                        return Ok((0, result));
+                    }
                     let start = cursor as usize;
                     if start >= s.len() {
                         return Ok((0, Vec::new()));
@@ -10354,9 +10401,28 @@ impl Store {
         now_ms: u64,
     ) -> Result<(u64, Vec<(Vec<u8>, f64)>), StoreError> {
         self.drop_if_expired(key, now_ms);
+        let zset_max_listpack_entries = self.zset_max_listpack_entries;
+        let zset_max_listpack_value = self.zset_max_listpack_value;
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
+                    // (frankenredis-yvxq6) Upstream
+                    // t_zset.c::zscanCommand short-circuits on the
+                    // listpack encoding: full collection in one
+                    // shot with cursor=0. COUNT and cursor only
+                    // matter for the skiplist path.
+                    let fits_listpack = zs.len() <= zset_max_listpack_entries
+                        && zs.keys().all(|k| k.len() <= zset_max_listpack_value);
+                    if fits_listpack {
+                        let result: Vec<(Vec<u8>, f64)> = zs
+                            .iter_asc()
+                            .filter(|(member, _)| {
+                                pattern.is_none_or(|pat| glob_match(pat, member))
+                            })
+                            .map(|(m, s)| (m.clone(), *s))
+                            .collect();
+                        return Ok((0, result));
+                    }
                     let start = cursor as usize;
                     if start >= zs.len() {
                         return Ok((0, Vec::new()));
@@ -15767,6 +15833,93 @@ mod tests {
             )
             .expect("sadd mixed");
         assert_eq!(store2.object_encoding(b"t", 0), Some("listpack"));
+    }
+
+    #[test]
+    fn hscan_sscan_zscan_short_circuit_on_small_encodings_yvxq6() {
+        // (frankenredis-yvxq6) Upstream's HSCAN/SSCAN/ZSCAN return
+        // the full collection in one round with cursor=0 when the
+        // value is listpack-encoded (or intset for sets) — COUNT
+        // and an out-of-range cursor are ignored. Only the
+        // hashtable / skiplist path honors them.
+        let mut store = Store::new();
+
+        // Listpack hash
+        for (f, v) in [
+            (b"f1".to_vec(), b"v1".to_vec()),
+            (b"f2".to_vec(), b"v2".to_vec()),
+            (b"f3".to_vec(), b"v3".to_vec()),
+        ] {
+            store.hset(b"h", f, v, 0).expect("hset");
+        }
+        assert_eq!(store.object_encoding(b"h", 0), Some("listpack"));
+
+        // COUNT=1 still returns everything, cursor=0.
+        let (cursor, items) = store
+            .hscan(b"h", 0, None, 1, 0)
+            .expect("hscan listpack count 1");
+        assert_eq!(cursor, 0, "listpack cursor must reset to 0");
+        assert_eq!(items.len(), 3, "listpack returns all in one shot");
+
+        // Out-of-range cursor still returns everything.
+        let (cursor, items) = store
+            .hscan(b"h", 99_999, None, 10, 0)
+            .expect("hscan listpack bogus cursor");
+        assert_eq!(cursor, 0);
+        assert_eq!(items.len(), 3);
+
+        // Listpack set
+        store
+            .sadd(
+                b"s",
+                &[b"a".to_vec(), b"b".to_vec(), b"c".to_vec(), b"alpha".to_vec()],
+                0,
+            )
+            .expect("sadd");
+        assert_eq!(store.object_encoding(b"s", 0), Some("listpack"));
+        let (cursor, items) = store
+            .sscan(b"s", 0, None, 1, 0)
+            .expect("sscan listpack");
+        assert_eq!(cursor, 0);
+        assert_eq!(items.len(), 4);
+
+        // Intset
+        store
+            .sadd(
+                b"si",
+                &[b"1".to_vec(), b"2".to_vec(), b"3".to_vec()],
+                0,
+            )
+            .expect("sadd intset");
+        assert_eq!(store.object_encoding(b"si", 0), Some("intset"));
+        let (cursor, items) = store
+            .sscan(b"si", 99_999, None, 1, 0)
+            .expect("sscan intset bogus cursor");
+        assert_eq!(cursor, 0);
+        assert_eq!(items.len(), 3);
+
+        // Listpack zset
+        store
+            .zadd(
+                b"z",
+                &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec()), (3.0, b"c".to_vec())],
+                0,
+            )
+            .expect("zadd");
+        assert_eq!(store.object_encoding(b"z", 0), Some("listpack"));
+        let (cursor, items) = store
+            .zscan(b"z", 0, None, 1, 0)
+            .expect("zscan listpack");
+        assert_eq!(cursor, 0);
+        assert_eq!(items.len(), 3);
+
+        // MATCH still filters per-call.
+        let (cursor, items) = store
+            .hscan(b"h", 0, Some(b"f1"), 100, 0)
+            .expect("hscan filter");
+        assert_eq!(cursor, 0);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].0, b"f1".to_vec());
     }
 
     #[test]
