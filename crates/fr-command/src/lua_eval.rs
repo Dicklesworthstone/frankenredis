@@ -7223,6 +7223,18 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
 
     while let Some(c) = chars.next() {
         if c == '%' {
+            // (frankenredis-xpopu) Upstream lstrlib.c::str_format scans
+            // a conversion item after L_ESC; when the format string ends
+            // with a bare `%` the scanner increments the arg counter and
+            // then bails on the missing arg via luaL_check*, surfacing
+            // "bad argument #N to 'format' (no value)". fr previously
+            // emitted the literal `%` silently.
+            if chars.peek().is_none() {
+                return Err(format!(
+                    "user_script:1: bad argument #{} to 'format' (no value)",
+                    arg_idx + 2
+                ));
+            }
             if let Some(&next) = chars.peek() {
                 if next == '%' {
                     chars.next();
@@ -7394,7 +7406,30 @@ fn lua_string_format(fmt: &str, args: &[LuaValue]) -> Result<String, String> {
                             // newline (so the output is multi-line),
                             // not "\\n". This matches the original
                             // luaO_str2d / addquoted in lstrlib.c.
-                            let s = arg.to_display_string();
+                            // (frankenredis-xpopu) Upstream addquoted
+                            // calls luaL_checklstring which accepts
+                            // strings and numbers (lua_tolstring coerces
+                            // numbers) but errors on nil/bool/table/etc.
+                            // fr previously took any type via
+                            // to_display_string and produced surprising
+                            // output like "\"nil\"" or "\"table: 0x...\"".
+                            let s = match &arg {
+                                LuaValue::Str(b) => b.clone(),
+                                LuaValue::Number(n) => {
+                                    if *n == (*n as i64) as f64 && n.is_finite() {
+                                        format!("{}", *n as i64).into_bytes()
+                                    } else {
+                                        lua_number_to_string(*n).into_bytes()
+                                    }
+                                }
+                                _ => {
+                                    return Err(format!(
+                                        "user_script:1: bad argument #{} to 'format' (string expected, got {})",
+                                        arg_idx + 1,
+                                        arg.type_name()
+                                    ));
+                                }
+                            };
                             let mut q = String::new();
                             q.push('"');
                             for &b in &s {
@@ -11689,6 +11724,64 @@ mod tests {
             let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
             assert_eq!(result, RespFrame::Integer(1));
         }
+    }
+
+    #[test]
+    fn string_format_unmatched_pct_and_q_type_check_xpopu() {
+        // (frankenredis-xpopu) Upstream string.format raises:
+        //   - "bad argument #N to 'format' (no value)" when the format
+        //     string ends with a bare `%`.
+        //   - "bad argument #N to 'format' (string expected, got T)" for
+        //     %q applied to nil/bool/table/function/etc. (numbers and
+        //     strings continue to work — addquoted coerces numbers via
+        //     luaL_checklstring/lua_tolstring).
+        let mut store = Store::new();
+        let pct_at_end = eval_script(b"return string.format('%')", &[], &[], &mut store, 0)
+            .expect_err("expected no-value error");
+        assert_eq!(
+            pct_at_end,
+            "user_script:1: bad argument #2 to 'format' (no value)",
+        );
+
+        // Trailing `%` after some content also catches.
+        let pct_at_end2 = eval_script(b"return string.format('hello %')", &[], &[], &mut store, 0)
+            .expect_err("expected no-value error");
+        assert_eq!(
+            pct_at_end2,
+            "user_script:1: bad argument #2 to 'format' (no value)",
+        );
+
+        // %q with non-string args.
+        for (body, ty) in &[
+            (b"return string.format('%q', nil)".as_slice(), "nil"),
+            (b"return string.format('%q', true)".as_slice(), "boolean"),
+            (b"return string.format('%q', {})".as_slice(), "table"),
+            (
+                b"return string.format('%q', function() end)".as_slice(),
+                "function",
+            ),
+        ] {
+            let err = eval_script(body, &[], &[], &mut store, 0).expect_err(
+                &format!("expected type-error for {:?}", String::from_utf8_lossy(body)),
+            );
+            let expected = format!(
+                "user_script:1: bad argument #2 to 'format' (string expected, got {ty})"
+            );
+            assert_eq!(err, expected, "wrong error for {:?}", String::from_utf8_lossy(body));
+        }
+
+        // %q with strings and numbers still works.
+        let r = eval_script(b"return string.format('%q', 'hi')", &[], &[], &mut store, 0)
+            .expect("string %q ok");
+        assert_eq!(r, RespFrame::BulkString(Some(b"\"hi\"".to_vec())));
+        let r = eval_script(b"return string.format('%q', 42)", &[], &[], &mut store, 0)
+            .expect("number %q ok");
+        assert_eq!(r, RespFrame::BulkString(Some(b"\"42\"".to_vec())));
+
+        // Escaped %% continues to render a literal %.
+        let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
+            .expect("literal %% ok");
+        assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
     }
 
     #[test]
