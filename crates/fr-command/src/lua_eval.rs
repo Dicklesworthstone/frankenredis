@@ -6796,18 +6796,47 @@ impl<'a> LuaState<'a> {
     }
 
     fn redis_call(&mut self, args: &[LuaValue], is_pcall: bool) -> Result<Vec<LuaValue>, String> {
+        // (frankenredis-sj52g) Upstream's luaPushError prepends "ERR "
+        // to the body of the error table that bubbles out of
+        // luaRedisGenericCommand — both for the empty-args branch and
+        // for the per-arg lua_tolstring rejection. For redis.pcall both
+        // failure modes get packaged into `{err = "ERR …"}` rather than
+        // bubbling up as a Lua error; redis.call lets them propagate.
+        // fr previously returned bare error strings AND only packaged
+        // dispatch errors (the `?` short-circuit on to_redis_arg
+        // bypassed the is_pcall table form entirely).
+        let arg_error = |msg: &str, is_pcall: bool| -> Result<Vec<LuaValue>, String> {
+            let body = format!("ERR {msg}");
+            if is_pcall {
+                let t = LuaTable::new();
+                t.set(
+                    LuaValue::Str(b"err".to_vec()),
+                    LuaValue::Str(body.into_bytes()),
+                );
+                Ok(vec![LuaValue::Table(t)])
+            } else {
+                Err(body)
+            }
+        };
+
         if args.is_empty() {
             // Upstream script_lua.c::luaRedisGenericCommand emits
             // 'Please specify at least one argument for this redis
             // lib call' when no command name is provided.
-            // (br-frankenredis-replyargtype)
-            return Err("Please specify at least one argument for this redis lib call".to_string());
+            // (br-frankenredis-replyargtype, frankenredis-sj52g)
+            return arg_error(
+                "Please specify at least one argument for this redis lib call",
+                is_pcall,
+            );
         }
 
         // Build argv for dispatch
         let mut argv: Vec<Vec<u8>> = Vec::new();
         for arg in args {
-            argv.push(arg.to_redis_arg()?);
+            match arg.to_redis_arg() {
+                Ok(b) => argv.push(b),
+                Err(msg) => return arg_error(&msg, is_pcall),
+            }
         }
 
         let dirty_before = self.store.dirty;
@@ -14922,6 +14951,104 @@ mod tests {
         assert!(
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
+        );
+    }
+
+    #[test]
+    fn redis_call_arg_validation_errors_carry_err_prefix_and_pcall_packages_sj52g() {
+        // (frankenredis-sj52g) Upstream luaRedisGenericCommand routes
+        // both the empty-args branch and the per-arg lua_tolstring
+        // rejection through luaPushError, which prepends "ERR " and
+        // also packages the error into a `{err = STR}` table for the
+        // is_pcall path. fr previously returned bare strings and
+        // bypassed the table-form entirely for arg-validation failures.
+        let mut store = Store::new();
+
+        // redis.call → pcall-caught error: should carry ERR prefix.
+        for body in &[
+            b"local ok,e=pcall(redis.call); return tostring(e)".as_slice(),
+            b"local ok,e=pcall(redis.call,'SET','k',true); return tostring(e)",
+            b"local ok,e=pcall(redis.call,'SET','k',nil); return tostring(e)",
+            b"local ok,e=pcall(redis.call,'SET','k',{}); return tostring(e)",
+        ] {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            let s = String::from_utf8(bytes).unwrap();
+            assert!(
+                s.starts_with("ERR "),
+                "body={:?} got {s:?}",
+                String::from_utf8_lossy(body)
+            );
+            assert!(
+                s.contains("Please specify at least one argument for this redis lib call")
+                    || s.contains("Lua redis lib command arguments must be strings or integers"),
+                "body={:?} got {s:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // redis.pcall arg-validation → packaged into r.err table form.
+        let frame = eval_script(
+            b"local r=redis.pcall(); return tostring(r.err)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(
+                b"ERR Please specify at least one argument for this redis lib call".to_vec()
+            ))
+        );
+
+        let frame = eval_script(
+            b"local r=redis.pcall('SET','k',true); return tostring(r.err)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(
+                b"ERR Lua redis lib command arguments must be strings or integers".to_vec()
+            ))
+        );
+
+        let frame = eval_script(
+            b"local r=redis.pcall('SET','k',{}); return tostring(r.err)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(
+                b"ERR Lua redis lib command arguments must be strings or integers".to_vec()
+            ))
+        );
+
+        // redis.call direct (no pcall) should still surface the error
+        // at top-level with the ERR prefix preserved.
+        let err = eval_script(
+            b"return redis.call('SET','k',true)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect_err("expected error");
+        assert!(err.starts_with("ERR "), "got {err:?}");
+        assert!(
+            err.contains("Lua redis lib command arguments must be strings or integers"),
+            "got {err:?}"
         );
     }
 
