@@ -3011,11 +3011,24 @@ impl<'a> LuaState<'a> {
         let Some((last_field, parent_fields)) = tail.split_last() else {
             return Ok(());
         };
-        let mut current = self
-            .globals
-            .get(root_name)
-            .cloned()
-            .unwrap_or(LuaValue::Nil);
+        // (frankenredis-dfly7) Multi-segment function decls
+        // (`function a.b.c() … end`) start by reading the root global
+        // through the sandbox layer. Upstream's _G __index handler
+        // emits "Script attempted to access nonexistent global
+        // variable 'a'" for missing keys when the sandbox is locked.
+        // fr previously fell through to "attempt to index a nil
+        // value" because the read bypassed Expr::Name's sandbox path.
+        let mut current = match self.globals.get(root_name) {
+            Some(val) => val.clone(),
+            None => {
+                if self.globals_locked {
+                    return Err(format!(
+                        "user_script:1: Script attempted to access nonexistent global variable '{root_name}'"
+                    ));
+                }
+                LuaValue::Nil
+            }
+        };
         if !matches!(current, LuaValue::Table(_)) {
             return Err(format!("user_script:1: attempt to index a {} value", current.type_name()));
         }
@@ -11862,11 +11875,19 @@ mod tests {
 
     #[test]
     fn function_decl_errors_on_missing_table_path() {
+        // (frankenredis-dfly7) When `function a.b.c() end` references an
+        // unbound global `a`, vendored's sandbox emits "Script attempted
+        // to access nonexistent global variable 'a'". fr previously
+        // pinned the bypass wording "attempt to index a nil value"; the
+        // sandbox-aware fix routes through the same wording as
+        // Expr::Name evaluation under globals_locked.
         let mut store = Store::new();
         let err = eval_script(b"function a.b.c() return 1 end", &[], &[], &mut store, 0)
             .expect_err("expected error");
         assert!(
-            err.contains("user_script:1: attempt to index a nil value"),
+            err.contains(
+                "user_script:1: Script attempted to access nonexistent global variable 'a'"
+            ),
             "unexpected error: {err}"
         );
     }
