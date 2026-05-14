@@ -3335,6 +3335,14 @@ impl<'a> LuaState<'a> {
         ) {
             return self.call_function(func, args, env, varargs);
         }
+        // (frankenredis-2c7hj) Tables with a callable __call metamethod
+        // delegate to call_function (which prepends the table to args).
+        // Non-callable __call values fall through to the error path so
+        // the accessor-aware "attempt to call <label> (a table value)"
+        // wording is preserved.
+        if matches!(func, LuaValue::Table(_)) && self.metatable_call_handler(func).is_some() {
+            return self.call_function(func, args, env, varargs);
+        }
         let label = match method_override {
             Some(m) => Some(format!("method '{m}'")),
             None => self.callee_label(callee_expr, env),
@@ -3349,6 +3357,30 @@ impl<'a> LuaState<'a> {
         })
     }
 
+    /// Resolve a value's `__call` metamethod. Returns the bound
+    /// callable LuaValue only when the handler is a function/closure;
+    /// non-callable handlers (table/string/etc.) yield `None` and the
+    /// caller emits the normal "attempt to call a TYPE value" error —
+    /// vendored Lua 5.1 does not chain `__call` recursively through
+    /// non-function handlers. (frankenredis-2c7hj)
+    fn metatable_call_handler(&self, value: &LuaValue) -> Option<LuaValue> {
+        let table = match value {
+            LuaValue::Table(t) => t,
+            _ => return None,
+        };
+        let handler = {
+            let inner = table.inner.borrow();
+            let mt = inner.metatable.as_ref()?;
+            mt.get(&LuaValue::Str(b"__call".to_vec()))
+        };
+        match handler {
+            LuaValue::RustFunction(_)
+            | LuaValue::Function(_)
+            | LuaValue::WrappedCoroutine(_) => Some(handler),
+            _ => None,
+        }
+    }
+
     fn call_function(
         &mut self,
         func: &LuaValue,
@@ -3360,6 +3392,18 @@ impl<'a> LuaState<'a> {
         if self.call_depth > MAX_CALL_DEPTH {
             self.call_depth -= 1;
             return Err("script exceeded maximum call depth".to_string());
+        }
+        // (frankenredis-2c7hj) Tables with a callable `__call` metamethod
+        // act like the underlying function with the table prepended as
+        // the first arg. Handled here so internal callers (iterators,
+        // pcall, coroutine resumption, sort comparators) honor the same
+        // semantics as AST call sites.
+        if let Some(callable) = self.metatable_call_handler(func) {
+            let mut new_args = Vec::with_capacity(args.len() + 1);
+            new_args.push(func.clone());
+            new_args.extend_from_slice(args);
+            self.call_depth -= 1;
+            return self.call_function(&callable, &mut new_args, env, _varargs);
         }
         let result = match func {
             LuaValue::RustFunction(name) => self.call_builtin(name, args, env),
@@ -6943,6 +6987,76 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_call_metamethod_makes_tables_callable() {
+        // Pins frankenredis-2c7hj (sub-bead of frankenredis-00gjf).
+        // Lua 5.1 lets `t(args...)` invoke `t`'s metatable __call as
+        // `__call(t, args...)` whenever __call is a function. A
+        // non-function __call (table/string/number/bool/nil) still
+        // produces the standard "attempt to call ... (a table value)"
+        // error — vendored does NOT recursively chain through a
+        // table-valued __call.
+        let mut store = Store::new();
+
+        // Basic call: table with __call function.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__call=function(_, a) return a*2 end}); return t(21)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(42));
+
+        // The table itself is passed as the first arg (self).
+        let frame = eval_script(
+            b"local t = setmetatable({x=99}, {__call=function(self) return self.x end}); return t()",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(99));
+
+        // Multi-arg passed through after the implicit table.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__call=function(_, a, b, c) return a+b+c end}); return t(10, 20, 30)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(60));
+
+        // No metatable at all → unchanged "attempt to call ..." error.
+        let err = eval_script(b"local t = {}; return t()", &[], &[], &mut store, 0)
+            .expect_err("expected error for plain table call");
+        assert!(
+            err.contains("attempt to call") && err.contains("table value"),
+            "wrong error wording for plain-table call: {err:?}"
+        );
+
+        // __call=non_function → same error wording, NOT chained.
+        let err = eval_script(
+            b"local t = setmetatable({}, {__call='nope'}); return t()",
+            &[], &[], &mut store, 0,
+        )
+        .expect_err("expected error for string-__call");
+        assert!(
+            err.contains("attempt to call") && err.contains("table value"),
+            "non-function __call should NOT chain: {err:?}"
+        );
+
+        // __call=table_with_callable_call → still errors (no recursive chain).
+        let err = eval_script(
+            b"local t2 = setmetatable({}, {__call=function() return 'inner' end}); local t1 = setmetatable({}, {__call=t2}); return t1()",
+            &[], &[], &mut store, 0,
+        )
+        .expect_err("expected error for table-valued __call");
+        assert!(
+            err.contains("attempt to call") && err.contains("table value"),
+            "table-valued __call should NOT chain: {err:?}"
+        );
+
+        // pcall sees the callable-table-as-function semantics.
+        let frame = eval_script(
+            b"local t = setmetatable({}, {__call=function() return 'p' end}); local ok, v = pcall(t); return tostring(ok)..':'..tostring(v)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"true:p".to_vec())));
     }
 
     #[test]
