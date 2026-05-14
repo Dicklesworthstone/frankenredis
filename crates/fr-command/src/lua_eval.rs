@@ -6225,8 +6225,31 @@ impl<'a> LuaState<'a> {
                 // luaL_checktype(L, 1, LUA_TTABLE) which raises on missing
                 // or non-table arg #1.
                 let _ = lua_check_table(self.current_invocation_name.as_deref(), args, 0, "sort")?;
+                // (frankenredis-b2cmq) Validate comparator type: it
+                // must be nil/missing OR a callable. Anything else
+                // (string, number, table-without-__call, ...) raises
+                // the luaL_checktype 'function expected, got TYPE'
+                // wording before any comparison is attempted.
+                let comp_fn = match args.get(1) {
+                    None | Some(LuaValue::Nil) => None,
+                    Some(v) => {
+                        let callable = matches!(
+                            v,
+                            LuaValue::Function(_)
+                                | LuaValue::RustFunction(_)
+                        ) || (matches!(v, LuaValue::Table(_))
+                            && self.metatable_call_handler(v).is_some());
+                        if !callable {
+                            return Err(self.format_builtin_argerror(
+                                "sort",
+                                2,
+                                &format!("function expected, got {}", v.type_name()),
+                            ));
+                        }
+                        Some(v.clone())
+                    }
+                };
                 {
-                    let comp_fn = args.get(1).cloned();
                     // Extract array so we can call comparator without borrow conflicts
                     let mut arr = if let LuaValue::Table(ref mut t) = args[0] {
                         std::mem::take(&mut t.inner.borrow_mut().array)
@@ -6254,14 +6277,45 @@ impl<'a> LuaState<'a> {
                             arr[j] = key;
                         }
                     } else {
-                        // Default sort: compare as strings or numbers
-                        arr.sort_by(|a, b| match (a, b) {
-                            (LuaValue::Number(x), LuaValue::Number(y)) => {
-                                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+                        // (frankenredis-b2cmq) Default sort: comparable
+                        // pairs are (Number, Number) or (Str, Str).
+                        // Anything else (nil, table, bool, mixed-type)
+                        // raises the same "attempt to compare X with Y"
+                        // wording the < operator emits at runtime — that
+                        // is exactly what upstream propagates from the
+                        // C-level luaO_str2d-driven default sort.
+                        for i in 1..arr.len() {
+                            let key = arr[i].clone();
+                            let mut j = i;
+                            while j > 0 {
+                                let order = match (&key, &arr[j - 1]) {
+                                    (LuaValue::Number(a), LuaValue::Number(b)) => a
+                                        .partial_cmp(b)
+                                        .ok_or_else(|| {
+                                            // (frankenredis-b2cmq) Errors from the
+                                            // C-level default sort do NOT carry the
+                                            // user_script:1 prefix; vendored emits
+                                            // the bare wording.
+                                            "attempt to compare two number values"
+                                                .to_string()
+                                        })?,
+                                    (LuaValue::Str(a), LuaValue::Str(b)) => a.cmp(b),
+                                    (a, b) => {
+                                        return Err(format!(
+                                            "attempt to compare {} with {}",
+                                            a.type_name(),
+                                            b.type_name()
+                                        ));
+                                    }
+                                };
+                                if order != std::cmp::Ordering::Less {
+                                    break;
+                                }
+                                arr[j] = arr[j - 1].clone();
+                                j -= 1;
                             }
-                            (LuaValue::Str(x), LuaValue::Str(y)) => x.cmp(y),
-                            _ => std::cmp::Ordering::Equal,
-                        });
+                            arr[j] = key;
+                        }
                     }
                     // Put array back
                     if let LuaValue::Table(ref mut t) = args[0] {
@@ -13017,6 +13071,87 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_table_sort_comparator_and_default_compare_b2cmq() {
+        // (frankenredis-b2cmq) Lua 5.1's table.sort validates the
+        // comparator (must be callable) and propagates compare errors
+        // for incomparable element pairs. Probed against vendored
+        // Redis 7.2.4 on :16380.
+        let mut store = Store::new();
+
+        // Non-function comparator rejected with the luaL_argerror
+        // wording (not the generic "attempt to call" message).
+        let err = eval_script(
+            b"local t={1,2,3}; table.sort(t, 'bad'); return t",
+            &[], &[], &mut store, 0,
+        ).expect_err("string comparator");
+        assert_eq!(
+            err,
+            "user_script:1: bad argument #2 to 'sort' (function expected, got string)"
+        );
+
+        // Mixed-type sort propagates the underlying compare error
+        // (no user_script:1 prefix — C-level error origin).
+        let r = eval_script(
+            b"local t={'a',{b=2}}; local ok,e=pcall(table.sort, t); return tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("mixed types");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"attempt to compare table with string".to_vec()
+            ))
+        );
+        // Direct (not via pcall) — same bare wording.
+        let err = eval_script(
+            b"local t={'a',{b=2}}; table.sort(t); return t",
+            &[], &[], &mut store, 0,
+        ).expect_err("direct mixed");
+        assert_eq!(err, "attempt to compare table with string");
+
+        // Numbers + strings together still raise from the default
+        // sort (not silently treated as equal).
+        let r = eval_script(
+            b"local t={1,'a',2}; local ok,e=pcall(table.sort, t); return tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("number+string mix");
+        assert!(
+            matches!(&r, RespFrame::BulkString(Some(b)) if String::from_utf8_lossy(b).contains("attempt to compare")),
+            "expected compare-error, got {r:?}"
+        );
+
+        // Positive controls: pure numeric / pure string still sort.
+        let r = eval_script(
+            b"local t={3,1,2}; table.sort(t); return t[1]..t[2]..t[3]",
+            &[], &[], &mut store, 0,
+        ).expect("numeric sort");
+        assert_eq!(r, RespFrame::BulkString(Some(b"123".to_vec())));
+        let r = eval_script(
+            b"local t={'c','a','b'}; table.sort(t); return t[1]..t[2]..t[3]",
+            &[], &[], &mut store, 0,
+        ).expect("string sort");
+        assert_eq!(r, RespFrame::BulkString(Some(b"abc".to_vec())));
+
+        // Custom callable still works.
+        let r = eval_script(
+            b"local t={3,1,2}; table.sort(t, function(a,b) return a>b end); return t[1]..t[2]..t[3]",
+            &[], &[], &mut store, 0,
+        ).expect("custom comparator");
+        assert_eq!(r, RespFrame::BulkString(Some(b"321".to_vec())));
+
+        // Pcall-indirect variant uses '?' name.
+        let r = eval_script(
+            b"local ok,e=pcall(table.sort, {1,2}, 'bad'); return tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall sort bad cmp");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"bad argument #2 to '?' (function expected, got string)".to_vec()
+            ))
+        );
     }
 
     #[test]
