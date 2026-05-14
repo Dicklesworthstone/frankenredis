@@ -4444,6 +4444,39 @@ impl<'a> LuaState<'a> {
                         Some(base as u32)
                     }
                 };
+                // (frankenredis-s99a4) Upstream luaB_tonumber: when base
+                // is explicit, arg 1 goes through luaL_checkstring which
+                // coerces numbers to their printed form, then strtoul
+                // parses in the given base. So tonumber(5, 3) sees the
+                // string "5" and fails to parse a base-3 digit ('5' >=
+                // '3'), returning nil — not the unchanged number 5.
+                if base.is_some() && matches!(val, LuaValue::Number(_)) {
+                    if let LuaValue::Number(n) = &val {
+                        let s = if *n == (*n as i64) as f64 && n.is_finite() {
+                            format!("{}", *n as i64)
+                        } else {
+                            lua_number_to_string(*n)
+                        };
+                        let trimmed = s.trim();
+                        let base = base.unwrap();
+                        let (sign, body) = match trimmed.as_bytes().first() {
+                            Some(b'-') => (-1i64, &trimmed[1..]),
+                            Some(b'+') => (1i64, &trimmed[1..]),
+                            _ => (1i64, trimmed),
+                        };
+                        let stripped: &str = if base == 16 {
+                            body.strip_prefix("0x")
+                                .or_else(|| body.strip_prefix("0X"))
+                                .unwrap_or(body)
+                        } else {
+                            body
+                        };
+                        return match i64::from_str_radix(stripped, base) {
+                            Ok(n) => Ok(vec![LuaValue::Number((sign * n) as f64)]),
+                            Err(_) => Ok(vec![LuaValue::Nil]),
+                        };
+                    }
+                }
                 match &val {
                     LuaValue::Number(n) => Ok(vec![LuaValue::Number(*n)]),
                     LuaValue::Str(s) => {
@@ -12537,6 +12570,51 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_tonumber_numeric_arg_with_base_s99a4() {
+        // (frankenredis-s99a4) Upstream luaB_tonumber routes arg 1
+        // through luaL_checkstring when an explicit base is given —
+        // numbers get coerced to their printed form and the result is
+        // strtoul-parsed in that base. fr was short-circuiting on
+        // LuaValue::Number and returning the number unchanged.
+        let mut store = Store::new();
+
+        // Base 3: "5" is not a valid base-3 digit, parser fails → nil.
+        let r = eval_script(b"return tonumber(5, 3)", &[], &[], &mut store, 0)
+            .expect("tonumber(5,3)");
+        assert_eq!(r, RespFrame::BulkString(None));
+
+        // Base 2: "7" is not a valid base-2 digit → nil.
+        let r = eval_script(b"return tonumber(7, 2)", &[], &[], &mut store, 0)
+            .expect("tonumber(7,2)");
+        assert_eq!(r, RespFrame::BulkString(None));
+
+        // Base 16: "15" parses as 0x15 = 21.
+        let r = eval_script(b"return tonumber(15, 16)", &[], &[], &mut store, 0)
+            .expect("tonumber(15,16)");
+        assert_eq!(r, RespFrame::Integer(21));
+
+        // No base: number passes through unchanged.
+        let r = eval_script(b"return tonumber(15)", &[], &[], &mut store, 0)
+            .expect("tonumber(15)");
+        assert_eq!(r, RespFrame::Integer(15));
+
+        // Nil base behaves like no base.
+        let r = eval_script(b"return tonumber(15, nil)", &[], &[], &mut store, 0)
+            .expect("tonumber(15, nil)");
+        assert_eq!(r, RespFrame::Integer(15));
+
+        // Float base 3.7 → truncated to 3, then "5" fails base-3 parse.
+        let r = eval_script(b"return tonumber(5, 3.7)", &[], &[], &mut store, 0)
+            .expect("tonumber(5, 3.7)");
+        assert_eq!(r, RespFrame::BulkString(None));
+
+        // String path unchanged.
+        let r = eval_script(b"return tonumber('15', 16)", &[], &[], &mut store, 0)
+            .expect("tonumber('15',16)");
+        assert_eq!(r, RespFrame::Integer(21));
     }
 
     #[test]
