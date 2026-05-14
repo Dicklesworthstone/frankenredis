@@ -43947,6 +43947,97 @@ mod tests {
     }
 
     #[test]
+    fn redis_set_repl_and_setresp_coerce_via_lua_tonumber_op1r0() {
+        // (frankenredis-op1r0) Upstream script_lua.c::luaRedisSetRepl
+        // and luaSetRespCommand both call lua_tonumber, which returns
+        // 0 for non-coercible types (nil, bool, table, string-that-is-
+        // not-a-number) and truncates fractional floats. fr previously
+        // rejected non-integer / non-numeric inputs explicitly; that
+        // diverged from vendored which silently coerces.
+        let mut store = Store::new();
+
+        // set_repl: non-numeric → flags=0 → silently accepted (returns nil).
+        for body in &[
+            b"return type(redis.set_repl('abc'))".as_slice(),
+            b"return type(redis.set_repl(nil))",
+            b"return type(redis.set_repl({}))",
+            b"return type(redis.set_repl(true))",
+            b"return type(redis.set_repl(1.5))",
+            b"return type(redis.set_repl(0))",
+            b"return type(redis.set_repl(0.5))",
+        ] {
+            let out = dispatch_argv(
+                &[b"EVAL".to_vec(), body.to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("eval");
+            assert_eq!(
+                out,
+                RespFrame::BulkString(Some(b"nil".to_vec())),
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // set_repl: out-of-range integer still rejected.
+        let out = dispatch_argv(
+            &[
+                b"EVAL".to_vec(),
+                b"return redis.set_repl(99)".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("eval");
+        let RespFrame::Error(msg) = out else {
+            panic!("expected error, got {out:?}");
+        };
+        assert!(
+            msg.contains("Invalid replication flags"),
+            "expected invalid flags error, got {msg}"
+        );
+
+        // setresp: 2.5 → truncate to 2 → accepted.
+        let out = dispatch_argv(
+            &[
+                b"EVAL".to_vec(),
+                b"return type(redis.setresp(2.5))".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("eval");
+        assert_eq!(out, RespFrame::BulkString(Some(b"nil".to_vec())));
+
+        // setresp: 'abc' → 0 → rejected.
+        // setresp: nil → 0 → rejected.
+        // setresp: 5 → 5 → rejected.
+        for body in &[
+            b"return redis.setresp('abc')".as_slice(),
+            b"return redis.setresp(nil)",
+            b"return redis.setresp(5)",
+        ] {
+            let out = dispatch_argv(
+                &[b"EVAL".to_vec(), body.to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("eval");
+            let RespFrame::Error(msg) = out else {
+                panic!("expected error, got {out:?}");
+            };
+            assert!(
+                msg.contains("RESP version must be 2 or 3"),
+                "body={:?} got {msg}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
     fn eval_redis_set_repl_validates_arity_and_flags_like_redis() {
         let mut store = Store::new();
 

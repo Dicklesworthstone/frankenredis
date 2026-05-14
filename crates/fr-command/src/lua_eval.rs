@@ -4393,20 +4393,31 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Bool(true)])
             }
             "redis.set_repl" => {
+                // (frankenredis-op1r0) Upstream script_lua.c::
+                // luaRedisSetReplCommand calls lua_tonumber + truncates
+                // to int. lua_tonumber returns 0 for nil/bool/table/
+                // non-numeric-string and truncates fractional floats.
+                // The only gate is `flags & ~(PROPAGATE_AOF|REPL)` —
+                // so set_repl('abc'), set_repl(nil), set_repl({}) all
+                // resolve to flags=0 and are silently accepted.
                 if args.len() != 1 {
                     return Err("redis.set_repl() requires one argument.".to_string());
                 }
-                let Some(flags) = args[0].to_number() else {
-                    return Err("Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.".to_string());
+                // to_number().unwrap_or(0.0) mirrors lua_tonumber's
+                // "0 for non-coercible" semantics. The `as i64` cast
+                // truncates fractional doubles toward zero, matching
+                // C's `int flags = lua_tonumber(...)` implicit
+                // conversion.
+                let flags_f = args[0].to_number().unwrap_or(0.0);
+                let flags_i = if flags_f.is_finite() {
+                    flags_f as i64
+                } else {
+                    0
                 };
-                if !flags.is_finite() || flags.fract() != 0.0 {
+                if flags_i & !(SCRIPT_PROPAGATE_AOF as i64 | SCRIPT_PROPAGATE_REPLICA as i64) != 0 {
                     return Err("Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.".to_string());
                 }
-                let flags = flags as i64;
-                if flags & !(SCRIPT_PROPAGATE_AOF as i64 | SCRIPT_PROPAGATE_REPLICA as i64) != 0 {
-                    return Err("Invalid replication flags. Use REPL_AOF, REPL_REPLICA, REPL_ALL or REPL_NONE.".to_string());
-                }
-                self.store.script_propagation_mode = flags as u8;
+                self.store.script_propagation_mode = flags_i as u8;
                 Ok(vec![LuaValue::Nil])
             }
             "redis.breakpoint" => {
@@ -4414,19 +4425,18 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Bool(false)])
             }
             "redis.setresp" => {
-                // Upstream script_lua.c::luaSetRespCommand requires
-                // exactly one numeric argument; the value must be 2 or
-                // 3. (br-frankenredis-redislua)
+                // Upstream script_lua.c::luaSetRespCommand calls
+                // lua_tonumber (0 for non-numeric, truncates floats),
+                // then checks `resp != 2 && resp != 3`. So:
+                //   setresp(2.5) → 2 → accepted
+                //   setresp('abc'), setresp(nil), setresp({}) → 0 → rejected
+                //   setresp(5) → rejected
+                // (br-frankenredis-redislua, frankenredis-op1r0)
                 if args.len() != 1 {
                     return Err("redis.setresp() requires one argument.".to_string());
                 }
-                let Some(version) = args[0].to_number() else {
-                    return Err("RESP version must be 2 or 3.".to_string());
-                };
-                if !version.is_finite() || version.fract() != 0.0 {
-                    return Err("RESP version must be 2 or 3.".to_string());
-                }
-                let v = version as i64;
+                let v_f = args[0].to_number().unwrap_or(0.0);
+                let v = if v_f.is_finite() { v_f as i64 } else { 0 };
                 if v != 2 && v != 3 {
                     return Err("RESP version must be 2 or 3.".to_string());
                 }
