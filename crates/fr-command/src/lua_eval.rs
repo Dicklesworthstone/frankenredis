@@ -4032,12 +4032,21 @@ impl<'a> LuaState<'a> {
                 // luaPushError + `return 1`, NOT `luaError`. So the
                 // wrong-type response is a return value, not a raise,
                 // and carries no 'script: <sha>' suffix.
-                // (br-frankenredis-replyargtype)
+                // (br-frankenredis-replyargtype, frankenredis-20ggg)
+                // 20ggg: upstream luaRedisReturnSingleFieldTable
+                // checks lua_gettop(lua) != 1, so 2+ args must also
+                // produce the wrong-args reply — fr previously took
+                // `args.first()` and silently ignored the extras.
                 let make_err_table = |bytes: Vec<u8>| {
                     let t = LuaTable::new();
                     t.set(LuaValue::Str(b"err".to_vec()), LuaValue::Str(bytes));
                     LuaValue::Table(t)
                 };
+                if args.len() != 1 {
+                    return Ok(vec![make_err_table(
+                        b"ERR wrong number or type of arguments".to_vec(),
+                    )]);
+                }
                 let Some(LuaValue::Str(bytes)) = args.first() else {
                     return Ok(vec![make_err_table(
                         b"ERR wrong number or type of arguments".to_vec(),
@@ -4058,7 +4067,18 @@ impl<'a> LuaState<'a> {
                 Ok(vec![make_err_table(final_msg)])
             }
             "redis.status_reply" => {
-                // (br-frankenredis-replyargtype)
+                // (br-frankenredis-replyargtype, frankenredis-20ggg)
+                // Upstream luaRedisReturnSingleFieldTable requires
+                // exactly one string arg. fr previously accepted any
+                // length and silently used args[0].
+                if args.len() != 1 {
+                    let t = LuaTable::new();
+                    t.set(
+                        LuaValue::Str(b"err".to_vec()),
+                        LuaValue::Str(b"ERR wrong number or type of arguments".to_vec()),
+                    );
+                    return Ok(vec![LuaValue::Table(t)]);
+                }
                 let Some(LuaValue::Str(bytes)) = args.first() else {
                     let t = LuaTable::new();
                     t.set(
@@ -4076,12 +4096,22 @@ impl<'a> LuaState<'a> {
             "redis.log" => {
                 // Upstream script_lua.c::luaLogCommand requires
                 // (level, msg [, msg2 …]) — at least two args, with
-                // the first arg numeric. (br-frankenredis-redislog)
+                // the first arg numeric AND in the LL_DEBUG..LL_WARNING
+                // range (0..=3). (br-frankenredis-redislog,
+                // frankenredis-20ggg)
                 if args.len() < 2 {
                     return Err("redis.log() requires two arguments or more.".to_string());
                 }
-                if !matches!(args[0], LuaValue::Number(_)) {
+                let LuaValue::Number(level_f) = args[0] else {
                     return Err("First argument must be a number (log level).".to_string());
+                };
+                // Match upstream: level cast to int via lua_tonumber,
+                // then bounds-check against LL_DEBUG (0) and LL_WARNING
+                // (3). NaN, negative, or > LL_WARNING all raise the
+                // same "Invalid debug level." error.
+                let level_i = level_f as i64;
+                if !level_f.is_finite() || level_i < 0 || level_i > 3 {
+                    return Err("Invalid debug level.".to_string());
                 }
                 Ok(vec![LuaValue::Nil])
             }
@@ -4166,11 +4196,29 @@ impl<'a> LuaState<'a> {
             }
             "redis.sha1hex" => {
                 // Upstream script_lua.c::luaRedisSha1hexCommand
-                // requires exactly one argument. (br-frankenredis-replyargtype)
+                // requires exactly one argument and calls lua_tolstring,
+                // which only converts strings and numbers — booleans,
+                // nil, tables, functions yield NULL (treated as empty
+                // bytes by sha1hex). fr previously used to_display_string
+                // which renders bool/nil/table as "true"/"false"/"nil"/
+                // table:0x...". (br-frankenredis-replyargtype,
+                // frankenredis-20ggg)
                 let Some(arg) = args.first() else {
                     return Err("wrong number of arguments".to_string());
                 };
-                let data = arg.to_display_string();
+                let data: Vec<u8> = match arg {
+                    LuaValue::Str(s) => s.clone(),
+                    LuaValue::Number(n) => {
+                        if *n == (*n as i64) as f64 && n.is_finite() {
+                            format!("{}", *n as i64).into_bytes()
+                        } else {
+                            lua_number_to_string(*n).into_bytes()
+                        }
+                    }
+                    // lua_tolstring returns NULL for nil/bool/table/...
+                    // → upstream hashes the empty byte string.
+                    _ => Vec::new(),
+                };
                 let hex = fr_store::sha1_hex_public(&data);
                 Ok(vec![LuaValue::Str(hex.into_bytes())])
             }
@@ -11456,5 +11504,104 @@ mod tests {
         let script = b"return math.random(-9223372036854775808, 9223372036854775807)";
         let result = eval_script(script, &[], &[], &mut store, 0);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn redis_error_and_status_reply_reject_extra_arity_20ggg() {
+        // (frankenredis-20ggg) Upstream luaRedisReturnSingleFieldTable
+        // checks lua_gettop(lua) != 1 and emits "wrong number or type
+        // of arguments". fr previously took args.first() and silently
+        // dropped extras.
+        let mut store = Store::new();
+        for body in &[
+            b"return redis.error_reply('a','b')".as_slice(),
+            b"return redis.status_reply('a','b')".as_slice(),
+            b"return redis.error_reply('a','b','c')".as_slice(),
+            b"return redis.error_reply()".as_slice(),
+            b"return redis.status_reply()".as_slice(),
+        ] {
+            let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
+            let RespFrame::Error(msg) = result else {
+                panic!("expected error for {:?}, got {result:?}", String::from_utf8_lossy(body));
+            };
+            assert!(
+                msg.contains("wrong number or type of arguments"),
+                "expected wrong-args wording for {:?}, got {msg}",
+                String::from_utf8_lossy(body),
+            );
+        }
+
+        // Sanity: exactly-one-string args still produce the table.
+        let ok = eval_script(b"return redis.status_reply('OK')", &[], &[], &mut store, 0).expect("status_reply ok");
+        assert_eq!(ok, RespFrame::SimpleString("OK".to_string()));
+    }
+
+    #[test]
+    fn redis_log_rejects_out_of_range_levels_20ggg() {
+        // (frankenredis-20ggg) Upstream luaLogCommand bounds-checks
+        // level against LL_DEBUG..LL_WARNING (0..=3) and emits
+        // "Invalid debug level." via luaError, which propagates from
+        // the RustFunction handler as a Rust Err.
+        let mut store = Store::new();
+        for body in &[
+            b"redis.log(-1, 'msg') return 1".as_slice(),
+            b"redis.log(4, 'msg') return 1".as_slice(),
+            b"redis.log(99, 'msg') return 1".as_slice(),
+            b"redis.log(0/0, 'msg') return 1".as_slice(),  // NaN
+        ] {
+            let result = eval_script(body, &[], &[], &mut store, 0);
+            let err = result.expect_err(&format!(
+                "expected luaError for {:?}",
+                String::from_utf8_lossy(body)
+            ));
+            assert!(
+                err.contains("Invalid debug level."),
+                "expected debug-level error for {:?}, got {err}",
+                String::from_utf8_lossy(body),
+            );
+        }
+        // In-range levels still accepted.
+        for body in &[
+            b"redis.log(0, 'msg') return 1".as_slice(),
+            b"redis.log(3, 'msg') return 1".as_slice(),
+            b"redis.log(redis.LOG_WARNING, 'msg') return 1".as_slice(),
+        ] {
+            let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
+            assert_eq!(result, RespFrame::Integer(1));
+        }
+    }
+
+    #[test]
+    fn redis_sha1hex_uses_lua_tolstring_coercion_20ggg() {
+        // (frankenredis-20ggg) Upstream luaRedisSha1hexCommand calls
+        // lua_tolstring which returns NULL for nil/bool/table/etc., so
+        // those types hash the empty byte string. fr previously used
+        // to_display_string which rendered bool as "true"/"false" etc.
+        let sha1_empty = "da39a3ee5e6b4b0d3255bfef95601890afd80709";
+        let mut store = Store::new();
+        for body in &[
+            b"return redis.sha1hex(true)".as_slice(),
+            b"return redis.sha1hex(false)".as_slice(),
+            b"return redis.sha1hex(nil)".as_slice(),
+            b"return redis.sha1hex({1,2,3})".as_slice(),
+        ] {
+            let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
+            let RespFrame::BulkString(Some(bytes)) = result else {
+                panic!("expected bulk string for {:?}, got {result:?}", String::from_utf8_lossy(body));
+            };
+            let hex = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                hex, sha1_empty,
+                "non-string types must hash to empty for {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
+        // Strings and numbers continue to hash their byte representation.
+        let ok = eval_script(b"return redis.sha1hex('hello')", &[], &[], &mut store, 0).expect("eval");
+        let RespFrame::BulkString(Some(bytes)) = ok else { panic!("expected sha bulk") };
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d", // sha1("hello")
+        );
     }
 }
