@@ -2580,12 +2580,80 @@ impl<'a> LuaState<'a> {
         varargs: &mut Vec<LuaValue>,
     ) -> Result<(), String> {
         if let LuaValue::Table(t) = &mut table {
-            t.set(key, value);
+            // (frankenredis-9f16h) Route table assignments through the
+            // full __newindex metamethod chain: callable handlers fire,
+            // table handlers cascade, existing keys bypass.
+            self.table_assign_with_newindex(t.clone(), key, value, env, varargs)?;
             self.write_back_table_expr(table_expr, table, env, varargs)?;
             Ok(())
         } else {
             Err(format!("user_script:1: attempt to index a {} value", table.type_name()))
         }
+    }
+
+    /// Write `value` to `table[key]` honoring Lua 5.1's full __newindex
+    /// metamethod chain:
+    ///   - If `key` already exists in the table → direct write (no
+    ///     metamethod invocation).
+    ///   - Else if metatable has __newindex == table → cascade the
+    ///     write to that table (recursively).
+    ///   - Else if __newindex is callable → invoke
+    ///     `__newindex(table, key, value)`.
+    ///   - Else if __newindex is non-nil non-callable → emit "attempt
+    ///     to index a TYPE value" (vendored behavior; e.g.
+    ///     __newindex='nope' tries to index the string).
+    ///   - Else → direct write.
+    /// Cap the cascade at 16 hops, matching the __index depth limit.
+    /// (frankenredis-9f16h)
+    fn table_assign_with_newindex(
+        &mut self,
+        table: LuaTable,
+        key: LuaValue,
+        value: LuaValue,
+        env: &mut Env,
+        varargs: &mut Vec<LuaValue>,
+    ) -> Result<(), String> {
+        let mut current = table;
+        for _ in 0..16 {
+            let existing = current.inner.borrow().get(&key);
+            if !matches!(existing, LuaValue::Nil) {
+                current.set(key, value);
+                return Ok(());
+            }
+            let handler = {
+                let inner = current.inner.borrow();
+                match &inner.metatable {
+                    Some(mt) => mt.get(&LuaValue::Str(b"__newindex".to_vec())),
+                    None => LuaValue::Nil,
+                }
+            };
+            match handler {
+                LuaValue::Nil => {
+                    current.set(key, value);
+                    return Ok(());
+                }
+                LuaValue::Table(next) => {
+                    current = next;
+                    continue;
+                }
+                callable
+                    @ (LuaValue::RustFunction(_)
+                    | LuaValue::Function(_)
+                    | LuaValue::WrappedCoroutine(_)) => {
+                    let mut args =
+                        vec![LuaValue::Table(current.clone()), key, value];
+                    self.call_function(&callable, &mut args, env, varargs)?;
+                    return Ok(());
+                }
+                other => {
+                    return Err(format!(
+                        "user_script:1: attempt to index a {} value",
+                        other.type_name()
+                    ));
+                }
+            }
+        }
+        Err("user_script:1: __newindex cascade exceeded depth limit".to_string())
     }
 
     fn write_back_table_expr(
@@ -6987,6 +7055,72 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_newindex_metamethod_intercepts_table_assignment() {
+        // Pins frankenredis-9f16h (sub-bead of frankenredis-00gjf).
+        // Lua 5.1 invokes __newindex(table, key, value) for assignments
+        // to MISSING keys; existing keys bypass the metamethod entirely.
+        // __newindex can be a table (cascade) or a function (callback);
+        // non-nil non-callable handlers raise the standard
+        // "attempt to index a TYPE value" error. rawset always bypasses.
+        let mut store = Store::new();
+
+        // Function handler captures the assignment.
+        let frame = eval_script(
+            b"local stored = {}; local t = setmetatable({}, {__newindex=function(_, k, v) stored[k] = v end}); t.x = 1; return stored.x",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(1));
+
+        // Existing keys bypass __newindex (handler must NOT fire).
+        let frame = eval_script(
+            b"local hit = 0; local t = setmetatable({x=10}, {__newindex=function() hit=hit+1 end}); t.x = 99; return tostring(hit)..','..tostring(t.x)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"0,99".to_vec())));
+
+        // Table handler cascades writes into the delegate.
+        let frame = eval_script(
+            b"local back = {}; local t = setmetatable({}, {__newindex=back}); t.x = 1; return tostring(back.x)..','..tostring(rawget(t, 'x'))",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"1,nil".to_vec())));
+
+        // rawset always bypasses __newindex.
+        let frame = eval_script(
+            b"local hit = 0; local t = setmetatable({}, {__newindex=function() hit=hit+1 end}); rawset(t, 'x', 1); return tostring(hit)..','..tostring(t.x)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"0,1".to_vec())));
+
+        // Non-callable __newindex (e.g. string) errors per vendored.
+        let err = eval_script(
+            b"local t = setmetatable({}, {__newindex='nope'}); t.x = 1",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected error for string-__newindex");
+        assert!(
+            err.contains("attempt to index") && err.contains("string"),
+            "wrong wording for non-callable __newindex: {err:?}"
+        );
+
+        // Chained table __newindex: outer → mid → back; only back gets it.
+        let frame = eval_script(
+            b"local back = {}; local mid = setmetatable({}, {__newindex=back}); local outer = setmetatable({}, {__newindex=mid}); outer.x = 1; return tostring(back.x)..','..tostring(rawget(mid, 'x'))..','..tostring(rawget(outer, 'x'))",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"1,nil,nil".to_vec()))
+        );
+
+        // Bracket-style assignment also triggers __newindex.
+        let frame = eval_script(
+            b"local stored = {}; local t = setmetatable({}, {__newindex=function(_, k, v) stored[k] = v end}); t['k'] = 'v'; return stored.k",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"v".to_vec())));
     }
 
     #[test]
