@@ -6030,15 +6030,43 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     // (= or absent qualifier) always executes and rejects LIMIT
     // upstream of this block. (br-frankenredis-r71v + LIMIT clause
     // follow-up)
+    // (frankenredis-hpz8a) Approximate (~) inline trim follows the
+    // same node-boundary rule as XTRIM: round the would-be exact
+    // trim count down to the nearest multiple of
+    // stream-node-max-entries (default 100), then cap by LIMIT if
+    // given. Exact trim (= or absent qualifier) honors the target
+    // verbatim.
+    const STREAM_NODE_MAX_ENTRIES: usize = 100;
     let should_run_inline_trim = !trim_approx || limit_given;
     if let Some(max_len) = trim_maxlen
         && should_run_inline_trim
     {
-        let _ = store.xtrim(&argv[1], max_len, trim_limit_usize, now_ms);
+        let effective_max_len = if trim_approx {
+            // xlen returns Result<usize, StoreError>; on error, fall
+            // through to a no-op (effective_max_len = max_len means
+            // "trim to target"). With approximate semantics we treat
+            // unknown length as "single node" → no trim.
+            let current_len = store.xlen(&argv[1], now_ms).unwrap_or(0) as usize;
+            let exact_to_trim = current_len.saturating_sub(max_len);
+            let mut node_boundary_trim =
+                (exact_to_trim / STREAM_NODE_MAX_ENTRIES) * STREAM_NODE_MAX_ENTRIES;
+            if let Some(lim) = trim_limit_usize {
+                node_boundary_trim = node_boundary_trim.min(lim);
+            }
+            current_len.saturating_sub(node_boundary_trim)
+        } else {
+            max_len
+        };
+        let pass_limit = if trim_approx { None } else { trim_limit_usize };
+        let _ = store.xtrim(&argv[1], effective_max_len, pass_limit, now_ms);
     }
     if let Some(min_id) = trim_minid
         && should_run_inline_trim
     {
+        // MINID approximate inline trim mirrors XTRIM MINID's
+        // pre-existing behavior; pass through with the LIMIT cap
+        // unchanged. (frankenredis-hpz8a leaves MINID
+        // node-boundary modeling for follow-up.)
         let _ = store.xtrim_minid(&argv[1], min_id, trim_limit_usize, now_ms);
     }
 
@@ -6215,30 +6243,55 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     }
     let is_maxlen = strategy == Strat::MaxLen;
 
-    // Approximate (~) without LIMIT mirrors the XADD inline-trim
-    // path: upstream lazily skips trimming when the trailing
-    // radix-tree node isn't full, which we model as a no-op (return
-    // 0 removed). Exact (=, or no qualifier) always trims fully.
-    // Approximate WITH LIMIT honors the cap. LIMIT 0 is still an
-    // explicit LIMIT and means no cap, not no work.
-    let approx_noop = approx && !limit_given;
+    // (frankenredis-hpz8a) Approximate (~) trim is node-boundary aware
+    // in upstream: streamTrim only deletes whole radix-tree listpack
+    // nodes (default `stream-node-max-entries` = 100). For exact (=
+    // or no qualifier), the requested target is honored verbatim.
+    //
+    // fr's storage doesn't have node boundaries, so simulate the
+    // semantics for MAXLEN by computing how many entries *would* be
+    // removed in exact mode and rounding DOWN to the nearest
+    // multiple of the node size. A LIMIT, when given, caps the
+    // result.
+    //
+    // Examples (node_size = 100):
+    //   len=10,  target=5  → exact=5,  node-boundary=0    (one node, refuse)
+    //   len=128, target=5  → exact=123, node-boundary=100 (one full node evict)
+    //   len=300, target=5  → exact=295, node-boundary=200 (two full nodes)
+    //   len=300, target=5, LIMIT=100 → min(200, 100) = 100
+    //
+    // MINID retains the previous "approx-without-LIMIT → no-op"
+    // shortcut; modeling MINID node-boundary trimming is left to a
+    // follow-up because the entry distribution required to compute
+    // an effective threshold isn't exposed by fr's store today.
+    const STREAM_NODE_MAX_ENTRIES: usize = 100;
+    let approx_noop_minid = approx && !limit_given;
 
     if is_maxlen {
         let max_len = maxlen_value.expect("maxlen_value set when strategy = MaxLen");
-        if approx_noop {
-            // Touch type validation by calling xlen — this matches
-            // upstream's "syntax was valid, the stream key resolves,
-            // but the approximate trim chose to skip" path.
-            store.xlen(&argv[1], now_ms)?;
-            return Ok(RespFrame::Integer(0));
-        }
-        let removed = store.xtrim(&argv[1], max_len, limit, now_ms)?;
+        let effective_max_len = if approx {
+            let current_len = store.xlen(&argv[1], now_ms)? as usize;
+            let exact_to_trim = current_len.saturating_sub(max_len);
+            let mut node_boundary_trim =
+                (exact_to_trim / STREAM_NODE_MAX_ENTRIES) * STREAM_NODE_MAX_ENTRIES;
+            if let Some(lim) = limit {
+                node_boundary_trim = node_boundary_trim.min(lim);
+            }
+            current_len.saturating_sub(node_boundary_trim)
+        } else {
+            max_len
+        };
+        // After computing the effective target, the underlying
+        // store does an exact trim. Pass `None` for limit because we
+        // already incorporated the cap into effective_max_len.
+        let pass_limit = if approx { None } else { limit };
+        let removed = store.xtrim(&argv[1], effective_max_len, pass_limit, now_ms)?;
         Ok(RespFrame::Integer(
             i64::try_from(removed).unwrap_or(i64::MAX),
         ))
     } else {
         let min_id = minid_value.expect("minid_value set when strategy = MinId");
-        if approx_noop {
+        if approx_noop_minid {
             store.xlen(&argv[1], now_ms)?;
             return Ok(RespFrame::Integer(0));
         }
@@ -29963,6 +30016,77 @@ mod tests {
         );
     }
 
+    /// (frankenredis-hpz8a) XTRIM MAXLEN ~ N [LIMIT M] must follow
+    /// upstream's node-boundary approximate semantics: trim count is
+    /// rounded down to the nearest multiple of stream-node-max-entries
+    /// (default 100). When LIMIT is given, the result is also capped
+    /// to that limit. fr previously did exact trimming with LIMIT as
+    /// a max-evictions cap, which over-trimmed small streams.
+    #[test]
+    fn xtrim_maxlen_approximate_respects_node_boundary_hpz8a() {
+        let mut store = Store::new();
+
+        let add_n = |store: &mut Store, n: usize| {
+            // Reset stream by deleting and re-adding.
+            dispatch_argv(&[b"DEL".to_vec(), b"s".to_vec()], store, 0).expect("del");
+            for i in 1..=n {
+                dispatch_argv(
+                    &[
+                        b"XADD".to_vec(),
+                        b"s".to_vec(),
+                        format!("{i}-0").into_bytes(),
+                        b"f".to_vec(),
+                        b"v".to_vec(),
+                    ],
+                    store,
+                    0,
+                )
+                .expect("xadd");
+            }
+        };
+        let xtrim = |store: &mut Store, args: &[&[u8]]| -> i64 {
+            let mut argv = vec![b"XTRIM".to_vec(), b"s".to_vec()];
+            for a in args {
+                argv.push(a.to_vec());
+            }
+            match dispatch_argv(&argv, store, 0).expect("xtrim") {
+                RespFrame::Integer(n) => n,
+                other => panic!("expected integer, got {other:?}"),
+            }
+        };
+
+        // 10 entries, target 5, ~: stream fits in one node — refuse.
+        add_n(&mut store, 10);
+        assert_eq!(xtrim(&mut store, &[b"MAXLEN", b"~", b"5"]), 0);
+        // 10 entries, target 5, ~ + LIMIT 100: still refuse (one node).
+        add_n(&mut store, 10);
+        assert_eq!(
+            xtrim(&mut store, &[b"MAXLEN", b"~", b"5", b"LIMIT", b"100"]),
+            0
+        );
+        // 128 entries, target 5, ~: trim one full node (100).
+        add_n(&mut store, 128);
+        assert_eq!(xtrim(&mut store, &[b"MAXLEN", b"~", b"5"]), 100);
+        // 200 entries, target 5, ~: trim one full node (100), leaving 100.
+        add_n(&mut store, 200);
+        assert_eq!(xtrim(&mut store, &[b"MAXLEN", b"~", b"5"]), 100);
+        // 300 entries, target 5, ~ + LIMIT 100: LIMIT caps to 100.
+        add_n(&mut store, 300);
+        assert_eq!(
+            xtrim(&mut store, &[b"MAXLEN", b"~", b"5", b"LIMIT", b"100"]),
+            100
+        );
+        // 500 entries, target 5, ~: trim 4 full nodes (400).
+        add_n(&mut store, 500);
+        assert_eq!(xtrim(&mut store, &[b"MAXLEN", b"~", b"5"]), 400);
+        // Exact (=) still honors the requested target verbatim.
+        add_n(&mut store, 10);
+        assert_eq!(xtrim(&mut store, &[b"MAXLEN", b"=", b"5"]), 5);
+        // No qualifier behaves like '='.
+        add_n(&mut store, 10);
+        assert_eq!(xtrim(&mut store, &[b"MAXLEN", b"5"]), 5);
+    }
+
     #[test]
     fn xadd_nomkstream_and_approx_maxlen_match_current_redis_behavior() {
         let mut store = Store::new();
@@ -30146,8 +30270,13 @@ mod tests {
         );
     }
 
+    /// (frankenredis-hpz8a) Under upstream's node-boundary semantics,
+    /// `MAXLEN ~ N LIMIT 0` on a single-node stream (≤ 100 entries)
+    /// is a no-op — even with LIMIT 0 meaning "unlimited cap", the
+    /// approximate trim refuses to split a node. This test previously
+    /// pinned fr's over-trimming behavior.
     #[test]
-    fn stream_trim_limit_zero_means_unlimited_cap() {
+    fn stream_trim_limit_zero_respects_node_boundary_hpz8a() {
         let mut store = Store::new();
         for id in [b"1-0", b"2-0", b"3-0", b"4-0", b"5-0"] {
             dispatch_argv(
@@ -30164,6 +30293,7 @@ mod tests {
             .expect("seed xadd");
         }
 
+        // Single-node stream (5 entries) + ~ + LIMIT 0 → upstream refuses to trim.
         let removed = dispatch_argv(
             &[
                 b"XTRIM".to_vec(),
@@ -30178,39 +30308,13 @@ mod tests {
             0,
         )
         .expect("xtrim limit zero");
-        assert_eq!(removed, RespFrame::Integer(3));
+        assert_eq!(removed, RespFrame::Integer(0));
 
-        let remaining = dispatch_argv(
-            &[
-                b"XRANGE".to_vec(),
-                b"s".to_vec(),
-                b"-".to_vec(),
-                b"+".to_vec(),
-            ],
-            &mut store,
-            0,
-        )
-        .expect("xrange remaining");
-        assert_eq!(
-            remaining,
-            RespFrame::Array(Some(vec![
-                RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(b"4-0".to_vec())),
-                    RespFrame::Array(Some(vec![
-                        RespFrame::BulkString(Some(b"f".to_vec())),
-                        RespFrame::BulkString(Some(b"v".to_vec())),
-                    ])),
-                ])),
-                RespFrame::Array(Some(vec![
-                    RespFrame::BulkString(Some(b"5-0".to_vec())),
-                    RespFrame::Array(Some(vec![
-                        RespFrame::BulkString(Some(b"f".to_vec())),
-                        RespFrame::BulkString(Some(b"v".to_vec())),
-                    ])),
-                ])),
-            ]))
-        );
+        let len = dispatch_argv(&[b"XLEN".to_vec(), b"s".to_vec()], &mut store, 0)
+            .expect("xlen after xtrim");
+        assert_eq!(len, RespFrame::Integer(5));
 
+        // Same single-node refusal applies to XADD's inline trim.
         let mut inline_store = Store::new();
         for id in [b"1-0", b"2-0", b"3-0", b"4-0"] {
             dispatch_argv(
@@ -30246,13 +30350,15 @@ mod tests {
         .expect("xadd limit zero");
         assert_eq!(added, RespFrame::BulkString(Some(b"5-0".to_vec())));
 
+        // Stream went from 4 → 5 entries via the XADD itself; the
+        // inline trim refused (single node still).
         let len = dispatch_argv(
             &[b"XLEN".to_vec(), b"inline".to_vec()],
             &mut inline_store,
             0,
         )
         .expect("xlen after inline trim");
-        assert_eq!(len, RespFrame::Integer(2));
+        assert_eq!(len, RespFrame::Integer(5));
     }
 
     #[test]
