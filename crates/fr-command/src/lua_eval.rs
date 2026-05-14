@@ -566,7 +566,20 @@ impl LuaValue {
             LuaValue::Number(n) => Some(*n),
             LuaValue::Str(s) => {
                 let s = std::str::from_utf8(s).ok()?;
-                s.trim().parse::<f64>().ok()
+                let trimmed = s.trim();
+                // (frankenredis-83zqp) Lua 5.1's lua_tonumber funnels
+                // through strtod, which accepts C99 hex floats — both
+                // the `0x10` integer form and the `0x1.8p2` binary-
+                // exponent form. Rust's f64::FromStr only handles
+                // decimal, so try the hex helper first and fall back
+                // to decimal if the input is not a hex literal.
+                if let Some(val) = crate::try_parse_hex_float(trimmed) {
+                    if val.is_nan() {
+                        return None;
+                    }
+                    return Some(val);
+                }
+                trimmed.parse::<f64>().ok()
             }
             _ => None,
         }
@@ -4605,16 +4618,26 @@ impl<'a> LuaState<'a> {
                                 Err(_) => Ok(vec![LuaValue::Nil]),
                             }
                         } else {
+                            // (frankenredis-83zqp) Lua 5.1's lua_tonumber
+                            // calls strtod, which accepts C99 hex floats
+                            // including the `0x1.8p2` binary-exponent
+                            // form. Try the hex helper FIRST so
+                            // `tonumber("0x1.8p2")` returns 6.0; fall
+                            // back to decimal parse, and finally to the
+                            // strtoul(base=16) hex-int path for
+                            // `tonumber("0xFF")` → 255 etc.
+                            if let Some(val) = crate::try_parse_hex_float(trimmed)
+                                && !val.is_nan()
+                            {
+                                return Ok(vec![LuaValue::Number(val)]);
+                            }
                             match trimmed.parse::<f64>() {
                                 Ok(n) => Ok(vec![LuaValue::Number(n)]),
                                 Err(_) => {
-                                    // Lua 5.1 lobject.c::luaO_str2d falls
-                                    // back to a strtoul(s, ..., 16) parse
-                                    // when strtod fails or stops at
-                                    // 'x'/'X', so `tonumber("0xFF")` →
-                                    // 255 and `tonumber("-0xff")` → -255.
-                                    // fr was returning nil for any 0x-
-                                    // prefixed string. (frankenredis-luatonumhex)
+                                    // (frankenredis-luatonumhex) Lua 5.1
+                                    // lobject.c::luaO_str2d falls back to
+                                    // strtoul(s, _, 16) when strtod fails
+                                    // or stops at 'x'/'X'.
                                     Ok(vec![hex_str_to_lua_number(trimmed)])
                                 }
                             }
@@ -11198,10 +11221,12 @@ mod tests {
         }
 
         // Malformed hex still returns nil, matching upstream.
+        // Note: `0xFF.5` is NOT malformed — it's a valid C99 hex float
+        // (FF.5 in hex = 255 + 5/16 = 255.3125), so upstream's strtod
+        // accepts it. (frankenredis-83zqp updated this pin.)
         for src in [
             b"return tonumber('0x') == nil".as_slice(),
             b"return tonumber('0xZ') == nil".as_slice(),
-            b"return tonumber('0xFF.5') == nil".as_slice(),
             b"return tonumber('xyz') == nil".as_slice(),
         ] {
             let frame = eval_script(src, &[], &[], &mut store, 0)
@@ -14736,5 +14761,44 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn lua_arithmetic_coerces_hex_string_literals_83zqp() {
+        // (frankenredis-83zqp) Lua 5.1's lua_tonumber funnels through
+        // strtod, which accepts C99 hex floats. fr previously rejected
+        // arithmetic on hex string literals because to_number used
+        // Rust's f64::FromStr (decimal-only).
+        let mut store = Store::new();
+
+        // Hex int: 0x10 == 16, + 1 = 17.
+        let frame = eval_script(b"return '0x10' + 1", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(17));
+
+        // Hex with binary exponent: 0x1.8p2 == 1.5 * 4 = 6, + 1 = 7.
+        let frame = eval_script(b"return '0x1.8p2' + 1", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(7));
+
+        // Hex int with leading/trailing whitespace.
+        let frame = eval_script(b"return '  0x10  ' + 1", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(17));
+
+        // Decimal still works (regression).
+        let frame = eval_script(b"return '1e5' + 1", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(100001));
+        let frame = eval_script(b"return '5' + 1", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(6));
+
+        // Invalid still errors.
+        let err = eval_script(b"return '5x' + 1", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err.contains("attempt to perform arithmetic on a string value"),
+            "got {err:?}"
+        );
+
+        // tonumber on hex literals also works (it routes through the
+        // same to_number path).
+        let frame = eval_script(b"return tonumber('0x10')", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(16));
     }
 }

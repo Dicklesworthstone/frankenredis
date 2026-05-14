@@ -3598,7 +3598,7 @@ fn sismember(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
 /// through (util.c::string2d → strtod). Returns `None` if the text
 /// isn't a hex literal so the decimal fallback can run.
 /// (frankenredis-hexfloat)
-fn try_parse_hex_float(text: &str) -> Option<f64> {
+pub(crate) fn try_parse_hex_float(text: &str) -> Option<f64> {
     let (sign, rest) = if let Some(t) = text.strip_prefix('-') {
         (-1.0_f64, t)
     } else if let Some(t) = text.strip_prefix('+') {
