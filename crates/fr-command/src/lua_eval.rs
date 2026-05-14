@@ -2202,6 +2202,15 @@ impl<'a> LuaState<'a> {
         // table error and any read of an undefined global raises the
         // upstream sandbox error. Mirrors script_lua.c::
         // luaSetTableProtectionRecursively run after script env init.
+        // (frankenredis-u24vv) Snapshot the globals into a `_G` table
+        // right before locking, mirroring Lua 5.1 / vendored Redis 7.2.4
+        // where the script's environment IS exposed as `_G`. Reads come
+        // from the snapshot (since globals are readonly after locking,
+        // the snapshot stays in sync); the metatable __index handler
+        // emits the nonexistent-global error for missing keys, and the
+        // __newindex handler emits the readonly-table error for writes.
+        // `_G._G` self-references so scripts can detect the table.
+        self.install_g_table();
         self.globals_locked = true;
         let mut env = Env::new();
         let mut varargs = Vec::new();
@@ -3497,6 +3506,32 @@ impl<'a> LuaState<'a> {
     /// Lua 5.1's string-as-metatable __index behavior: `s.foo` and
     /// `s:foo()` resolve `foo` via the string library. Unknown keys
     /// (including non-string keys) return nil. (frankenredis-tbu4k)
+    /// Build the `_G` table that mirrors the post-init globals and
+    /// install it under the "_G" key. Idempotent if called twice
+    /// (replaces any existing _G entry). (frankenredis-u24vv)
+    fn install_g_table(&mut self) {
+        let g_table = LuaTable::new();
+        for (k, v) in &self.globals {
+            g_table.set(LuaValue::Str(k.as_bytes().to_vec()), v.clone());
+        }
+        g_table.set(
+            LuaValue::Str(b"_G".to_vec()),
+            LuaValue::Table(g_table.clone()),
+        );
+        let mt = LuaTable::new();
+        mt.set(
+            LuaValue::Str(b"__index".to_vec()),
+            LuaValue::RustFunction("__fr_g_protected_index".to_string()),
+        );
+        mt.set(
+            LuaValue::Str(b"__newindex".to_vec()),
+            LuaValue::RustFunction("__fr_g_readonly_newindex".to_string()),
+        );
+        g_table.inner.borrow_mut().metatable = Some(mt);
+        self.globals
+            .insert("_G".to_string(), LuaValue::Table(g_table));
+    }
+
     fn lookup_string_field(&self, key: &LuaValue) -> LuaValue {
         if let Some(LuaValue::Table(t)) = self.globals.get("string") {
             t.get_with_index(key)
@@ -5413,6 +5448,33 @@ impl<'a> LuaState<'a> {
                 let val = json_to_lua_value(&s)?;
                 Ok(vec![val])
             }
+            // (frankenredis-u24vv) `_G` metatable handlers. These are
+            // never user-callable directly; they fire when scripts
+            // read/write missing keys on `_G`, mirroring the protected
+            // env behavior vendored installs on the script's `_ENV`.
+            "__fr_g_protected_index" => {
+                let key = args.get(1).cloned().unwrap_or(LuaValue::Nil);
+                let name_bytes = match &key {
+                    LuaValue::Str(s) => s.clone(),
+                    _ => return Ok(vec![LuaValue::Nil]),
+                };
+                let name = match std::str::from_utf8(&name_bytes) {
+                    Ok(s) => s,
+                    Err(_) => return Ok(vec![LuaValue::Nil]),
+                };
+                if let Some(val) = self.globals.get(name) {
+                    Ok(vec![val.clone()])
+                } else if self.globals_locked {
+                    Err(format!(
+                        "user_script:1: Script attempted to access nonexistent global variable '{name}'"
+                    ))
+                } else {
+                    Ok(vec![LuaValue::Nil])
+                }
+            }
+            "__fr_g_readonly_newindex" => {
+                Err("user_script:1: Attempt to modify a readonly table".to_string())
+            }
             _ => Err(format!("attempt to call unknown built-in '{name}'")),
         }
     }
@@ -7313,6 +7375,59 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_g_global_table_exposes_sandboxed_globals() {
+        // Pins frankenredis-u24vv. Lua 5.1 / vendored Redis 7.2.4 expose
+        // the script's globals table as `_G`. The sandbox enforces:
+        //  - `_G` is a table; `type(_G) == 'table'`.
+        //  - `_G._G == _G` self-reference.
+        //  - Known globals like `_G.tostring` resolve to the same
+        //    function as the bare name.
+        //  - Missing globals (`_G.undef`) raise the same
+        //    "Script attempted to access nonexistent global variable"
+        //    error as bare-name reads.
+        //  - Writes raise "Attempt to modify a readonly table".
+        //  - pairs(_G) iterates every registered global.
+        let mut store = Store::new();
+
+        let frame = eval_script(b"return type(_G)", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"table".to_vec())));
+
+        let frame = eval_script(
+            b"return tostring(_G._G == _G)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"true".to_vec())));
+
+        let frame =
+            eval_script(b"return type(_G.tostring)", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"function".to_vec())));
+
+        let err = eval_script(b"return _G.undef_xyz", &[], &[], &mut store, 0)
+            .expect_err("expected nonexistent-global error for _G.undef_xyz");
+        assert!(
+            err.contains("Script attempted to access nonexistent global variable")
+                && err.contains("undef_xyz"),
+            "wrong wording for _G.undef: {err:?}"
+        );
+
+        let err = eval_script(b"_G.x = 1", &[], &[], &mut store, 0)
+            .expect_err("expected readonly error for _G assignment");
+        assert!(
+            err.contains("Attempt to modify a readonly table"),
+            "wrong wording for _G assign: {err:?}"
+        );
+
+        // pairs(_G) iterates the snapshot — must include many globals
+        // (math, string, redis, _G itself, etc.). Lua boolean `true`
+        // returned to Redis becomes Integer(1).
+        let frame = eval_script(
+            b"local count = 0; for k, v in pairs(_G) do count = count + 1 end; return count > 20",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::Integer(1));
     }
 
     #[test]
