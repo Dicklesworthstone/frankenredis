@@ -6488,11 +6488,39 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Str(json.into_bytes())])
             }
             "cjson.decode" => {
-                let data = args
-                    .first()
-                    .map(|a| a.to_display_string())
-                    .unwrap_or_default();
+                // (frankenredis-pt4d4) Upstream lua_cjson.c::json_decode
+                // calls luaL_argcheck(L, lua_gettop(L) == 1, 1, ...) and
+                // requires arg #1 to be a string. fr was permissively
+                // coercing nil to "" and returning nil silently.
+                if args.is_empty() {
+                    return Err(format!(
+                        "user_script:1: bad argument #1 to 'decode' (expected 1 argument)"
+                    ));
+                }
+                let data = match args.first() {
+                    Some(LuaValue::Str(s)) => s.clone(),
+                    Some(LuaValue::Number(n)) => {
+                        if *n == (*n as i64) as f64 && n.is_finite() {
+                            format!("{}", *n as i64).into_bytes()
+                        } else {
+                            lua_number_to_string(*n).into_bytes()
+                        }
+                    }
+                    other => {
+                        return Err(format!(
+                            "user_script:1: bad argument #1 to 'decode' (string expected, got {})",
+                            other.map(|v| v.type_name()).unwrap_or("no value"),
+                        ));
+                    }
+                };
                 let s = String::from_utf8_lossy(&data).to_string();
+                // (frankenredis-pt4d4) Reject an empty buffer the same
+                // way upstream's json_next_token does.
+                if s.trim().is_empty() {
+                    return Err(format!(
+                        "user_script:1: Expected value but found T_END at character 1"
+                    ));
+                }
                 let val = json_to_lua_value(&s)?;
                 Ok(vec![val])
             }
@@ -8337,38 +8365,114 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
         }
         LuaValue::Str(s) => Ok(json_escape_bytes(s)),
         LuaValue::Table(t) => {
-            if !t.inner.borrow().array.is_empty() && t.hash_is_empty() {
-                let items = t
-                    .inner
-                    .borrow()
-                    .array
-                    .iter()
-                    .map(lua_value_to_json)
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(format!("[{}]", items.join(",")))
-            } else if t.inner.borrow().array.is_empty() && !t.hash_is_empty() {
-                let hash_pairs = t.hash_pairs();
-                let pairs = hash_pairs
-                    .iter()
-                    .map(|(k, v)| {
-                        let key_json = json_escape_bytes(&k.to_display_string());
-                        lua_value_to_json(v).map(|v_json| format!("{key_json}:{v_json}"))
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(format!("{{{}}}", pairs.join(",")))
-            } else if t.inner.borrow().array.is_empty() && t.hash_is_empty() {
-                Ok("{}".to_string())
-            } else {
-                let mut pairs: Vec<String> = Vec::new();
-                for (i, v) in t.inner.borrow().array.iter().enumerate() {
-                    pairs.push(format!("\"{}\":{}", i + 1, lua_value_to_json(v)?));
+            // (frankenredis-pt4d4) Mirror Lua-bundled cjson's
+            // lua_array_length: a table encodes as an array iff every
+            // key is a positive integer AND the result isn't "too
+            // sparse" (cjson's defaults: max ≤ encode_sparse_safe=10
+            // OR count ≥ max/encode_sparse_ratio=2). The array form
+            // pads missing indices with null. Boolean/table/function
+            // keys raise "Cannot serialise <type>: table key must be
+            // a number or string".
+            let inner = t.inner.borrow();
+            let array_len = inner.array.len();
+            let hash_pairs = inner.hash_pairs();
+            drop(inner);
+
+            // Validate all keys: numbers/strings allowed; anything
+            // else raises before we even attempt to render.
+            for (k, _) in &hash_pairs {
+                match k {
+                    LuaValue::Str(_) | LuaValue::Number(_) => {}
+                    other => {
+                        return Err(format!(
+                            "Cannot serialise {}: table key must be a number or string",
+                            other.type_name()
+                        ));
+                    }
                 }
-                for (k, v) in &t.hash_pairs() {
-                    let key_json = json_escape_bytes(&k.to_display_string());
-                    pairs.push(format!("{key_json}:{}", lua_value_to_json(v)?));
-                }
-                Ok(format!("{{{}}}", pairs.join(",")))
             }
+
+            // Tally positive-integer keys vs total keys.
+            let mut max_int_key: i64 = array_len as i64;
+            let mut int_key_count: i64 = array_len as i64;
+            let mut has_non_int_key = false;
+            for (k, _) in &hash_pairs {
+                match k {
+                    LuaValue::Number(n)
+                        if n.is_finite()
+                            && *n > 0.0
+                            && *n == (*n as i64) as f64
+                            && (*n as i64) <= i64::MAX / 2 =>
+                    {
+                        let i = *n as i64;
+                        if i > max_int_key {
+                            max_int_key = i;
+                        }
+                        int_key_count += 1;
+                    }
+                    _ => {
+                        has_non_int_key = true;
+                        break;
+                    }
+                }
+            }
+
+            let candidate_array = !has_non_int_key
+                && (array_len > 0 || !hash_pairs.is_empty());
+            let array_ok = candidate_array
+                && (max_int_key <= 10 || int_key_count * 2 >= max_int_key);
+
+            // (frankenredis-pt4d4) Pure-integer-key tables that fail
+            // the sparse threshold are rejected by Lua-bundled cjson
+            // under its default encode_sparse_convert=false setting.
+            // Mixed/string-key tables fall through to object form
+            // unchanged.
+            if candidate_array && !array_ok {
+                return Err(
+                    "Cannot serialise table: excessively sparse array".to_string(),
+                );
+            }
+
+            if array_ok {
+                // Render as array, gathering values by index.
+                let mut by_idx: std::collections::HashMap<i64, LuaValue> =
+                    std::collections::HashMap::new();
+                let inner = t.inner.borrow();
+                for (i, v) in inner.array.iter().enumerate() {
+                    by_idx.insert((i + 1) as i64, v.clone());
+                }
+                drop(inner);
+                for (k, v) in &hash_pairs {
+                    if let LuaValue::Number(n) = k {
+                        by_idx.insert(*n as i64, v.clone());
+                    }
+                }
+                let mut items = Vec::with_capacity(max_int_key as usize);
+                for i in 1..=max_int_key {
+                    match by_idx.get(&i) {
+                        Some(v) => items.push(lua_value_to_json(v)?),
+                        None => items.push("null".to_string()),
+                    }
+                }
+                return Ok(format!("[{}]", items.join(",")));
+            }
+
+            // Object form: every key (array indices + hash) becomes a
+            // string key in the JSON object.
+            if array_len == 0 && hash_pairs.is_empty() {
+                return Ok("{}".to_string());
+            }
+            let mut pairs: Vec<String> = Vec::new();
+            let inner = t.inner.borrow();
+            for (i, v) in inner.array.iter().enumerate() {
+                pairs.push(format!("\"{}\":{}", i + 1, lua_value_to_json(v)?));
+            }
+            drop(inner);
+            for (k, v) in &hash_pairs {
+                let key_json = json_escape_bytes(&k.to_display_string());
+                pairs.push(format!("{key_json}:{}", lua_value_to_json(v)?));
+            }
+            Ok(format!("{{{}}}", pairs.join(",")))
         }
         LuaValue::Function(_) | LuaValue::RustFunction(_) => {
             Err("Cannot serialise function: type not supported".to_string())
@@ -12694,6 +12798,93 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_cjson_sparse_array_and_decode_args_pt4d4() {
+        // (frankenredis-pt4d4) Lua-bundled cjson encodes tables with
+        // positive-integer keys as arrays (with null padding for gaps)
+        // under default sparse-safe=10 / sparse-ratio=2 thresholds;
+        // it raises on bool/table keys; decode arg-validates strictly.
+        let mut store = Store::new();
+
+        // Sparse array encoding (gaps → null).
+        let r = eval_script(
+            b"return cjson.encode({1,nil,3})",
+            &[], &[], &mut store, 0,
+        ).expect("sparse encode 1,nil,3");
+        assert_eq!(r, RespFrame::BulkString(Some(b"[1,null,3]".to_vec())));
+
+        let r = eval_script(
+            b"local x={1}; x[4]='gap'; return cjson.encode(x)",
+            &[], &[], &mut store, 0,
+        ).expect("sparse encode trailing gap");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(b"[1,null,null,\"gap\"]".to_vec()))
+        );
+
+        // Boolean key rejection.
+        let err = eval_script(
+            b"return cjson.encode({[true]=1})",
+            &[], &[], &mut store, 0,
+        ).expect_err("bool key");
+        assert!(
+            err.contains("Cannot serialise boolean: table key must be a number or string"),
+            "wrong: {err}"
+        );
+
+        // decode arg validation.
+        let err = eval_script(b"return cjson.decode()", &[], &[], &mut store, 0)
+            .expect_err("decode no args");
+        assert!(
+            err.contains("bad argument #1 to 'decode' (expected 1 argument)"),
+            "wrong: {err}"
+        );
+        let err = eval_script(b"return cjson.decode(nil)", &[], &[], &mut store, 0)
+            .expect_err("decode nil");
+        assert!(
+            err.contains("bad argument #1 to 'decode' (string expected, got nil)"),
+            "wrong: {err}"
+        );
+        let err = eval_script(b"return cjson.decode('')", &[], &[], &mut store, 0)
+            .expect_err("decode empty");
+        assert!(
+            err.contains("Expected value but found T_END at character 1"),
+            "wrong: {err}"
+        );
+
+        // Regressions: normal cases still round-trip.
+        let r = eval_script(b"return cjson.encode({1,2,3})", &[], &[], &mut store, 0)
+            .expect("plain array");
+        assert_eq!(r, RespFrame::BulkString(Some(b"[1,2,3]".to_vec())));
+        let r = eval_script(b"return cjson.encode({a=1,b=2})", &[], &[], &mut store, 0)
+            .expect("plain object");
+        // Order is not guaranteed by HashMap iteration; just check it's
+        // one of the two valid shapes.
+        let bytes = match r {
+            RespFrame::BulkString(Some(b)) => b,
+            _ => panic!("expected bulk"),
+        };
+        assert!(
+            bytes == b"{\"a\":1,\"b\":2}" || bytes == b"{\"b\":2,\"a\":1}",
+            "got {:?}", String::from_utf8_lossy(&bytes),
+        );
+        // Empty table still encodes as object (cjson default).
+        let r = eval_script(b"return cjson.encode({})", &[], &[], &mut store, 0)
+            .expect("empty table");
+        assert_eq!(r, RespFrame::BulkString(Some(b"{}".to_vec())));
+        // Sparse-ratio guard: max_int_key way larger than count →
+        // upstream raises 'excessively sparse array' under its default
+        // encode_sparse_convert=false setting.
+        let err = eval_script(
+            b"return cjson.encode({[100]='x'})",
+            &[], &[], &mut store, 0,
+        ).expect_err("sparse rejected");
+        assert!(
+            err.contains("Cannot serialise table: excessively sparse array"),
+            "wrong: {err}"
+        );
     }
 
     #[test]
