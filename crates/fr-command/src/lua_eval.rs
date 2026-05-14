@@ -2794,6 +2794,127 @@ impl<'a> LuaState<'a> {
                                 }
                             }
                         }
+                        // (frankenredis-ijlzv) Comparison metamethods.
+                        // For ==/~= on tables: if raw-equal is false and
+                        // both tables share a __eq metamethod by identity,
+                        // dispatch. For </>/<=/>= on tables: try __lt or
+                        // __le; > and >= swap args; <= falls back to
+                        // `not __lt(rhs, lhs)` when __le is missing.
+                        if matches!(op, BinOp::Eq | BinOp::Ne) {
+                            if let (LuaValue::Table(la), LuaValue::Table(rb)) = (&lv, &rv) {
+                                if !Rc::ptr_eq(&la.inner, &rb.inner) {
+                                    // Lua 5.1 calls __eq only when both
+                                    // tables share a __eq metamethod. fr
+                                    // models that as: both tables point at
+                                    // the SAME metatable LuaTable (Rc), or
+                                    // both __eq slots are raw-equal (covers
+                                    // RustFunction-by-name plus the
+                                    // shared-metatable cases via
+                                    // lua_raw_equal). A LuaValue::Function
+                                    // lacks identity in fr, so two
+                                    // syntactically-identical-but-separate
+                                    // function literals are still treated
+                                    // as distinct (matching upstream).
+                                    let mt_a = la.inner.borrow().metatable.clone();
+                                    let mt_b = rb.inner.borrow().metatable.clone();
+                                    let shared_mt = match (&mt_a, &mt_b) {
+                                        (Some(ma), Some(mb)) => Rc::ptr_eq(&ma.inner, &mb.inner),
+                                        _ => false,
+                                    };
+                                    let eq_a = mt_a
+                                        .as_ref()
+                                        .map(|mt| mt.get(&LuaValue::Str(b"__eq".to_vec())))
+                                        .unwrap_or(LuaValue::Nil);
+                                    let eq_b = mt_b
+                                        .as_ref()
+                                        .map(|mt| mt.get(&LuaValue::Str(b"__eq".to_vec())))
+                                        .unwrap_or(LuaValue::Nil);
+                                    let same_eq = shared_mt
+                                        || (!matches!(eq_a, LuaValue::Nil)
+                                            && lua_raw_equal(&eq_a, &eq_b));
+                                    if !matches!(eq_a, LuaValue::Nil) && same_eq {
+                                        let mut args = vec![lv.clone(), rv.clone()];
+                                        let results = self.call_function(
+                                            &eq_a, &mut args, env, varargs,
+                                        )?;
+                                        let raw = results
+                                            .into_iter()
+                                            .next()
+                                            .unwrap_or(LuaValue::Nil);
+                                        let is_eq = raw.is_truthy();
+                                        return Ok(LuaValue::Bool(match op {
+                                            BinOp::Eq => is_eq,
+                                            BinOp::Ne => !is_eq,
+                                            _ => unreachable!(),
+                                        }));
+                                    }
+                                }
+                            }
+                        }
+                        if matches!(op, BinOp::Lt | BinOp::Gt | BinOp::Le | BinOp::Ge) {
+                            let both_numbers = matches!(
+                                (&lv, &rv),
+                                (LuaValue::Number(_), LuaValue::Number(_))
+                            );
+                            let both_strings = matches!(
+                                (&lv, &rv),
+                                (LuaValue::Str(_), LuaValue::Str(_))
+                            );
+                            if !both_numbers && !both_strings {
+                                if let (LuaValue::Table(_), LuaValue::Table(_)) = (&lv, &rv)
+                                {
+                                    // __lt for </>; for <=/>= prefer __le but
+                                    // fall back to `not __lt(swapped)`.
+                                    let (primary, swap, invert) = match op {
+                                        BinOp::Lt => ("__lt", false, false),
+                                        BinOp::Gt => ("__lt", true, false),
+                                        BinOp::Le => ("__le", false, false),
+                                        BinOp::Ge => ("__le", true, false),
+                                        _ => unreachable!(),
+                                    };
+                                    if let Some(handler) =
+                                        self.lookup_binop_metamethod(&lv, &rv, primary)
+                                    {
+                                        let mut args = if swap {
+                                            vec![rv.clone(), lv.clone()]
+                                        } else {
+                                            vec![lv.clone(), rv.clone()]
+                                        };
+                                        let results = self.call_function(
+                                            &handler, &mut args, env, varargs,
+                                        )?;
+                                        let raw = results
+                                            .into_iter()
+                                            .next()
+                                            .unwrap_or(LuaValue::Nil);
+                                        let truthy = raw.is_truthy();
+                                        return Ok(LuaValue::Bool(
+                                            if invert { !truthy } else { truthy },
+                                        ));
+                                    }
+                                    // __le fallback: `a <= b` => `not (b < a)`.
+                                    if matches!(op, BinOp::Le | BinOp::Ge) {
+                                        if let Some(handler) =
+                                            self.lookup_binop_metamethod(&lv, &rv, "__lt")
+                                        {
+                                            let mut args = match op {
+                                                BinOp::Le => vec![rv.clone(), lv.clone()],
+                                                BinOp::Ge => vec![lv.clone(), rv.clone()],
+                                                _ => unreachable!(),
+                                            };
+                                            let results = self.call_function(
+                                                &handler, &mut args, env, varargs,
+                                            )?;
+                                            let raw = results
+                                                .into_iter()
+                                                .next()
+                                                .unwrap_or(LuaValue::Nil);
+                                            return Ok(LuaValue::Bool(!raw.is_truthy()));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         self.eval_binop(&lv, op, &rv)
                     }
                 }
@@ -7164,6 +7285,101 @@ mod tests {
         )
         .unwrap();
         assert_eq!(frame, RespFrame::BulkString(Some(b"hello".to_vec())));
+    }
+
+    #[test]
+    fn lua_comparison_metamethods_dispatch_on_matching_table_types() {
+        // Pins frankenredis-ijlzv (sub-bead of frankenredis-00gjf).
+        // Lua 5.1 dispatches ==/~= to __eq only when both operands are
+        // tables that share a __eq metamethod (vendored detects shared
+        // metatable). </>/<=/>= dispatch to __lt/__le on same-type
+        // operands; > and >= swap args, and <= falls back to
+        // `not __lt(b, a)` when __le is missing.
+        let mut store = Store::new();
+
+        // Shared metatable: __eq fires.
+        let frame = eval_script(
+            b"local mt={__eq=function(a,b) return a.id==b.id end}; local a=setmetatable({id=1},mt); local b=setmetatable({id=1},mt); return tostring(a==b)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"true".to_vec())));
+
+        // Different metatables (even with __eq each) → __eq NOT fired.
+        let frame = eval_script(
+            b"local a=setmetatable({}, {__eq=function() return true end}); local b=setmetatable({}, {__eq=function() return true end}); return tostring(a==b)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"false".to_vec())));
+
+        // Raw equal (same table identity) bypasses __eq entirely.
+        let frame = eval_script(
+            b"local hit=0; local mt={__eq=function() hit=hit+1; return false end}; local a=setmetatable({}, mt); return tostring(a==a)..','..tostring(hit)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"true,0".to_vec())));
+
+        // ~= inverts __eq result.
+        let frame = eval_script(
+            b"local mt={__eq=function() return true end}; local a=setmetatable({}, mt); local b=setmetatable({}, mt); return tostring(a~=b)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"false".to_vec())));
+
+        // < on tables dispatches __lt.
+        let frame = eval_script(
+            b"local mt={__lt=function(x,y) return x.v<y.v end}; local a=setmetatable({v=1},mt); local b=setmetatable({v=2},mt); return tostring(a<b)..','..tostring(b<a)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"true,false".to_vec())));
+
+        // > swaps the args fed to __lt.
+        let frame = eval_script(
+            b"local seen={}; local mt={__lt=function(x,y) table.insert(seen,x.tag..'<'..y.tag); return false end}; local a=setmetatable({tag='A'},mt); local b=setmetatable({tag='B'},mt); local r=a>b; return seen[1]..':'..tostring(r)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"B<A:false".to_vec())));
+
+        // <= dispatches __le when present.
+        let frame = eval_script(
+            b"local mt={__le=function(x,y) return x.v<=y.v end}; local a=setmetatable({v=1},mt); local b=setmetatable({v=1},mt); return tostring(a<=b)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"true".to_vec())));
+
+        // <= falls back to `not __lt(b, a)` when only __lt is defined.
+        let frame = eval_script(
+            b"local mt={__lt=function(x,y) return x.v<y.v end}; local a=setmetatable({v=1},mt); local b=setmetatable({v=2},mt); return tostring(a<=b)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"true".to_vec())));
+
+        // Cross-type comparison (table vs number) still errors even
+        // when the table has __lt.
+        let err = eval_script(
+            b"local t = setmetatable({}, {__lt=function() return true end}); return t < 1",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected error for cross-type compare");
+        assert!(
+            err.contains("attempt to compare") && err.contains("table") && err.contains("number"),
+            "wrong wording for cross-type compare: {err:?}"
+        );
+
+        // Non-callable __lt raises the standard call error.
+        let err = eval_script(
+            b"local mt={__lt=42}; local a=setmetatable({}, mt); local b=setmetatable({}, mt); return a < b",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected error for non-callable __lt");
+        assert!(
+            err.contains("attempt to call") && err.contains("number"),
+            "non-callable __lt should raise call-error: {err:?}"
+        );
+
+        // Plain number compare keeps working with zero overhead.
+        let frame = eval_script(
+            b"return tostring(1 < 2) .. ',' .. tostring(3 >= 3)",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"true,true".to_vec())));
     }
 
     #[test]
