@@ -2984,15 +2984,25 @@ impl<'a> LuaState<'a> {
                         // when at least one operand fails to coerce to a
                         // number (matches Lua 5.1's `arith` C function:
                         // tonumber both; if either fails, try metamethod).
-                        if let Some(name) = match op {
-                            BinOp::Add => Some("__add"),
-                            BinOp::Sub => Some("__sub"),
-                            BinOp::Mul => Some("__mul"),
-                            BinOp::Div => Some("__div"),
-                            BinOp::Mod => Some("__mod"),
-                            BinOp::Pow => Some("__pow"),
-                            _ => None,
-                        } {
+                        let is_arith = matches!(
+                            op,
+                            BinOp::Add
+                                | BinOp::Sub
+                                | BinOp::Mul
+                                | BinOp::Div
+                                | BinOp::Mod
+                                | BinOp::Pow
+                        );
+                        if is_arith {
+                            let name = match op {
+                                BinOp::Add => "__add",
+                                BinOp::Sub => "__sub",
+                                BinOp::Mul => "__mul",
+                                BinOp::Div => "__div",
+                                BinOp::Mod => "__mod",
+                                BinOp::Pow => "__pow",
+                                _ => unreachable!(),
+                            };
                             if lv.to_number().is_none() || rv.to_number().is_none() {
                                 if let Some(handler) =
                                     self.lookup_binop_metamethod(&lv, &rv, name)
@@ -3005,6 +3015,23 @@ impl<'a> LuaState<'a> {
                                         results.into_iter().next().unwrap_or(LuaValue::Nil),
                                     );
                                 }
+                                // (frankenredis-9ckvq) No metamethod; emit
+                                // the accessor-aware "attempt to perform
+                                // arithmetic on local/field/upvalue/global"
+                                // wording, labeling the first non-numeric
+                                // operand (LHS preferred to match Lua's
+                                // left-to-right tonumber probe order).
+                                let (bad_val, bad_expr) = if lv.to_number().is_none() {
+                                    (&lv, &**left)
+                                } else {
+                                    (&rv, &**right)
+                                };
+                                return Err(self.type_error_with_label(
+                                    "perform arithmetic on",
+                                    bad_expr,
+                                    bad_val,
+                                    env,
+                                ));
                             }
                         }
                         // (frankenredis-ijlzv) Comparison metamethods.
@@ -3166,10 +3193,14 @@ impl<'a> LuaState<'a> {
                         // (frankenredis-7w22v) Use the operand's actual
                         // type name to match Lua 5.1's "a string value" /
                         // "a boolean value" wording.
+                        // (frankenredis-9ckvq) Label the operand by its
+                        // syntactic accessor when available.
                         let n = val.to_number().ok_or_else(|| {
-                            format!(
-                                "user_script:1: attempt to perform arithmetic on a {} value",
-                                val.type_name()
+                            self.type_error_with_label(
+                                "perform arithmetic on",
+                                inner,
+                                &val,
+                                env,
                             )
                         })?;
                         Ok(LuaValue::Number(-n))
@@ -3178,11 +3209,13 @@ impl<'a> LuaState<'a> {
                     UnaryOp::Len => match &val {
                         LuaValue::Str(s) => Ok(LuaValue::Number(s.len() as f64)),
                         LuaValue::Table(t) => Ok(LuaValue::Number(t.len() as f64)),
-                        // (frankenredis-7w22v) Prepend user_script:1:
-                        // prefix on the length-of-wrong-type error.
-                        _ => Err(format!(
-                            "user_script:1: attempt to get length of a {} value",
-                            val.type_name()
+                        // (frankenredis-7w22v / frankenredis-9ckvq) Prepend
+                        // user_script:1: prefix and label the bad operand.
+                        _ => Err(self.type_error_with_label(
+                            "get length of",
+                            inner,
+                            &val,
+                            env,
                         )),
                     },
                 }
@@ -3203,7 +3236,9 @@ impl<'a> LuaState<'a> {
                     // 'string' table (unknown keys yield nil). Non-string
                     // keys (numeric, boolean, etc.) just return nil.
                     LuaValue::Str(_) => Ok(self.lookup_string_field(&key)),
-                    _ => Err(format!("user_script:1: attempt to index a {} value", table.type_name())),
+                    // (frankenredis-9ckvq) Label the bad operand by the
+                    // syntactic accessor that produced it.
+                    _ => Err(self.type_error_with_label("index", table_expr, &table, env)),
                 }
             }
             Expr::Field(table_expr, field) => {
@@ -3218,7 +3253,7 @@ impl<'a> LuaState<'a> {
                     // `s.fld` for unknown field returns nil.
                     LuaValue::Str(_) => Ok(self
                         .lookup_string_field(&LuaValue::Str(field.as_bytes().to_vec()))),
-                    _ => Err(format!("user_script:1: attempt to index a {} value", table.type_name())),
+                    _ => Err(self.type_error_with_label("index", table_expr, &table, env)),
                 }
             }
             Expr::Call(func_expr, args) => {
@@ -3808,6 +3843,34 @@ impl<'a> LuaState<'a> {
     /// `"method 'm'"`, or `"field '?'"` for non-literal index keys.
     /// Returns `None` for call sites without a syntactic name (parenthesized
     /// expressions, call results, etc.), which match vendored Lua's
+    /// (frankenredis-9ckvq) Build Lua 5.1's accessor-aware runtime error
+    /// for index/arith/length/concat/call when the offending operand
+    /// resolved from a known syntactic source (a local, upvalue, field,
+    /// or global). Mirrors lvm.c::luaG_typeerror which walks debug info
+    /// to recover the variable name; fr's tree-walker has direct AST
+    /// access so it can label without bytecode metadata. Returns the
+    /// unlabeled form when the operand has no resolvable syntactic
+    /// name (e.g. arithmetic on a function-call result).
+    fn type_error_with_label(
+        &self,
+        op_phrase: &str,
+        expr: &Expr,
+        val: &LuaValue,
+        env: &Env,
+    ) -> String {
+        let label = self.callee_label(expr, env);
+        match label {
+            Some(l) => format!(
+                "user_script:1: attempt to {op_phrase} {l} (a {} value)",
+                val.type_name()
+            ),
+            None => format!(
+                "user_script:1: attempt to {op_phrase} a {} value",
+                val.type_name()
+            ),
+        }
+    }
+
     /// "attempt to call a TYPE value" wording sans accessor.
     /// (frankenredis-md71j)
     fn callee_label(&self, expr: &Expr, env: &Env) -> Option<String> {
@@ -12388,6 +12451,68 @@ mod tests {
         let r = eval_script(b"return string.format('100%%')", &[], &[], &mut store, 0)
             .expect("literal %% ok");
         assert_eq!(r, RespFrame::BulkString(Some(b"100%".to_vec())));
+    }
+
+    #[test]
+    fn lua_attempt_to_X_errors_include_accessor_label_9ckvq() {
+        // (frankenredis-9ckvq) Lua 5.1's lvm.c::luaG_typeerror reports
+        // the variable name of the offending operand alongside the type.
+        // The Concat and Call paths in fr already do this; verify Index
+        // (Field and Index forms), unary -, unary #, and binary
+        // arithmetic now do too. Probed against vendored Redis 7.2.4.
+        let mut store = Store::new();
+
+        let cases: &[(&[u8], &str)] = &[
+            (b"local t=nil; return t.field",
+             "user_script:1: attempt to index local 't' (a nil value)"),
+            (b"local t=nil; return t[1]",
+             "user_script:1: attempt to index local 't' (a nil value)"),
+            (b"local mylocal=nil; return mylocal.f",
+             "user_script:1: attempt to index local 'mylocal' (a nil value)"),
+            (b"local t={a=nil}; return t.a.b",
+             "user_script:1: attempt to index field 'a' (a nil value)"),
+            (b"local t={}; return t.missing.deep",
+             "user_script:1: attempt to index field 'missing' (a nil value)"),
+            (b"local b=true; return b.f",
+             "user_script:1: attempt to index local 'b' (a boolean value)"),
+            (b"local nm=5; return nm.f",
+             "user_script:1: attempt to index local 'nm' (a number value)"),
+            (b"local x=nil; return x+1",
+             "user_script:1: attempt to perform arithmetic on local 'x' (a nil value)"),
+            (b"local y=nil; return 1+y",
+             "user_script:1: attempt to perform arithmetic on local 'y' (a nil value)"),
+            (b"local z=nil; return -z",
+             "user_script:1: attempt to perform arithmetic on local 'z' (a nil value)"),
+            (b"local s=nil; return #s",
+             "user_script:1: attempt to get length of local 's' (a nil value)"),
+            (b"local t={}; return #t.missing",
+             "user_script:1: attempt to get length of field 'missing' (a nil value)"),
+            (b"local t={}; return t+1",
+             "user_script:1: attempt to perform arithmetic on local 't' (a table value)"),
+            (b"local n='abc'; return n+1",
+             "user_script:1: attempt to perform arithmetic on local 'n' (a string value)"),
+        ];
+        for (body, expected) in cases {
+            let err = eval_script(body, &[], &[], &mut store, 0)
+                .expect_err("error expected");
+            assert_eq!(
+                err, *expected,
+                "wrong error for {:?}",
+                String::from_utf8_lossy(body),
+            );
+        }
+
+        // Regression: no syntactic label available → fall back to the
+        // unlabeled wording (vendored does the same when the operand has
+        // no resolvable variable, e.g. a function-call result).
+        let err = eval_script(
+            b"return (function() return nil end)() + 1",
+            &[], &[], &mut store, 0,
+        ).expect_err("no label");
+        assert_eq!(
+            err,
+            "user_script:1: attempt to perform arithmetic on a nil value"
+        );
     }
 
     #[test]
