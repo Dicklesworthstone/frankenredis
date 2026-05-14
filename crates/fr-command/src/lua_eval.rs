@@ -5666,7 +5666,7 @@ impl<'a> LuaState<'a> {
                         // is called with captures.
                         let replacement: Vec<u8> = match &repl {
                             LuaValue::Str(repl_bytes) => {
-                                lua_gsub_replace(&s, &m, repl_bytes)
+                                lua_gsub_replace(&s, &m, repl_bytes)?
                             }
                             LuaValue::Table(t) => {
                                 let key_bytes = lua_gsub_capture_key(&s, &m);
@@ -5688,7 +5688,7 @@ impl<'a> LuaState<'a> {
                             }
                             LuaValue::Number(_) => {
                                 // Legacy: numeric repl coerces to string.
-                                lua_gsub_replace(&s, &m, &repl.to_display_string())
+                                lua_gsub_replace(&s, &m, &repl.to_display_string())?
                             }
                             _ => {
                                 return Err(format!(
@@ -7027,7 +7027,7 @@ fn lua_gsub_normalise_repl(
     }
 }
 
-fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Vec<u8> {
+fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Result<Vec<u8>, String> {
     let mut result = Vec::new();
     let mut i = 0;
     while i < repl.len() {
@@ -7048,6 +7048,26 @@ fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Vec<u8> {
                             result.extend_from_slice(format!("{}", pos + 1).as_bytes());
                         }
                     }
+                } else if idx == 1 && m.captures.is_empty() {
+                    // (frankenredis-127za) Upstream lstrlib.c
+                    // ::push_onecapture has a documented special case:
+                    // when `i == 0` (i.e. %1) AND `ms->level == 0`
+                    // (no captures in the pattern), it pushes the
+                    // whole match instead of erroring. So `%1` is the
+                    // implicit "whole match" reference for a
+                    // capture-less pattern, just like `%0`.
+                    result.extend_from_slice(&s[m.start..m.end]);
+                } else {
+                    // (frankenredis-127za) Upstream lstrlib.c::add_s
+                    // raises luaL_error("invalid capture index") when
+                    // %N references a capture index higher than the
+                    // pattern's capture count. fr previously silently
+                    // skipped the reference, producing surprising
+                    // empty-match output (e.g. gsub('abc','(.)','%5')
+                    // would erase every byte instead of erroring).
+                    return Err(
+                        "user_script:1: invalid capture index".to_string(),
+                    );
                 }
                 i += 2;
             } else if next == b'%' {
@@ -7062,7 +7082,7 @@ fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Vec<u8> {
             i += 1;
         }
     }
-    result
+    Ok(result)
 }
 
 // ── Type conversions ────────────────────────────────────────────────────
@@ -11784,6 +11804,77 @@ mod tests {
             let result = eval_script(body, &[], &[], &mut store, 0).expect("eval");
             assert_eq!(result, RespFrame::Integer(1));
         }
+    }
+
+    #[test]
+    fn string_gsub_invalid_capture_index_127za() {
+        // (frankenredis-127za) Upstream lstrlib.c::add_s raises
+        // "invalid capture index" when the replacement string contains
+        // %N where N exceeds the pattern's capture count. fr previously
+        // silently skipped the reference, so gsub('abc', '(.)', '%5')
+        // erased every byte instead of erroring.
+        let mut store = Store::new();
+        // 1-capture pattern, %5 referenced.
+        let err = eval_script(
+            b"return string.gsub('abc', '(.)', '%5')",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected invalid capture");
+        assert_eq!(err, "user_script:1: invalid capture index");
+
+        // 2-capture pattern, %3 referenced.
+        let err = eval_script(
+            b"return string.gsub('a1', '(%a)(%d)', '%3')",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected invalid capture");
+        assert_eq!(err, "user_script:1: invalid capture index");
+
+        // 0-capture pattern, %1: upstream special-cases this to mean
+        // "whole match" (push_onecapture when i == 0 and level == 0).
+        let r = eval_script(
+            b"return string.gsub('abc', '.', '%1')",
+            &[], &[], &mut store, 0,
+        ).expect("%1 with 0 captures = whole match");
+        let s = match r {
+            RespFrame::Array(Some(rows)) => match rows.first() {
+                Some(RespFrame::BulkString(Some(bytes))) => bytes.clone(),
+                _ => Vec::new(),
+            },
+            RespFrame::BulkString(Some(bytes)) => bytes,
+            _ => Vec::new(),
+        };
+        assert_eq!(s, b"abc");
+
+        // %0 (whole match) always valid even with no captures.
+        let r = eval_script(
+            b"return string.gsub('abc', '.', '<%0>')",
+            &[], &[], &mut store, 0,
+        ).expect("valid %0");
+        // gsub returns two values; first is the substituted string.
+        match r {
+            RespFrame::Array(Some(rows)) => match rows.first() {
+                Some(RespFrame::BulkString(Some(bytes))) => {
+                    assert_eq!(bytes, b"<a><b><c>");
+                }
+                other => panic!("expected bulk string, got {other:?}"),
+            },
+            RespFrame::BulkString(Some(bytes)) => assert_eq!(bytes, b"<a><b><c>"),
+            other => panic!("unexpected reply shape: {other:?}"),
+        }
+
+        // %1 with a valid 1-capture pattern still works.
+        let r = eval_script(
+            b"return string.gsub('hello', '(l)', '<%1>')",
+            &[], &[], &mut store, 0,
+        ).expect("valid %1");
+        let s = match r {
+            RespFrame::Array(Some(rows)) => match rows.first() {
+                Some(RespFrame::BulkString(Some(bytes))) => bytes.clone(),
+                _ => Vec::new(),
+            },
+            RespFrame::BulkString(Some(bytes)) => bytes,
+            _ => Vec::new(),
+        };
+        assert_eq!(s, b"he<l><l>o");
     }
 
     #[test]
