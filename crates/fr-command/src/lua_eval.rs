@@ -4411,11 +4411,18 @@ impl<'a> LuaState<'a> {
                 // the first arg numeric AND in the LL_DEBUG..LL_WARNING
                 // range (0..=3). (br-frankenredis-redislog,
                 // frankenredis-20ggg)
+                //
+                // (frankenredis-r9f5y) Each error string carries the
+                // "ERR " prefix because upstream's luaPushError stores
+                // the prefix as part of the error table's err field —
+                // pcall sees "ERR ..." verbatim, while the direct-call
+                // wrapper recognises the prefix via
+                // error_has_resp_code_prefix and does not double-add.
                 if args.len() < 2 {
-                    return Err("redis.log() requires two arguments or more.".to_string());
+                    return Err("ERR redis.log() requires two arguments or more.".to_string());
                 }
                 let LuaValue::Number(level_f) = args[0] else {
-                    return Err("First argument must be a number (log level).".to_string());
+                    return Err("ERR First argument must be a number (log level).".to_string());
                 };
                 // Match upstream: level cast to int via lua_tonumber,
                 // then bounds-check against LL_DEBUG (0) and LL_WARNING
@@ -4423,7 +4430,7 @@ impl<'a> LuaState<'a> {
                 // same "Invalid debug level." error.
                 let level_i = level_f as i64;
                 if !level_f.is_finite() || level_i < 0 || level_i > 3 {
-                    return Err("Invalid debug level.".to_string());
+                    return Err("ERR Invalid debug level.".to_string());
                 }
                 Ok(vec![LuaValue::Nil])
             }
@@ -14804,6 +14811,54 @@ mod tests {
             String::from_utf8(bytes).unwrap(),
             "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d", // sha1("hello")
         );
+    }
+
+    #[test]
+    fn redis_log_error_carries_err_prefix_r9f5y() {
+        // (frankenredis-r9f5y) Upstream luaPushError stores the
+        // "ERR " prefix as part of the err table's err field, so
+        // pcall sees the prefix verbatim. fr's redis.log handler
+        // previously stored the bare wording; the direct-call wrapper
+        // auto-prepended "ERR " but the pcall path did not.
+        let mut store = Store::new();
+        for (body, want_substr) in &[
+            (
+                b"local ok,e = pcall(redis.log); return tostring(e)".as_slice(),
+                "ERR redis.log() requires two arguments or more.",
+            ),
+            (
+                b"local ok,e = pcall(redis.log, 'bad', 'm'); return tostring(e)".as_slice(),
+                "ERR First argument must be a number (log level).",
+            ),
+            (
+                b"local ok,e = pcall(redis.log, -1, 'm'); return tostring(e)".as_slice(),
+                "ERR Invalid debug level.",
+            ),
+            (
+                b"local ok,e = pcall(redis.log, 99, 'm'); return tostring(e)".as_slice(),
+                "ERR Invalid debug level.",
+            ),
+            (
+                b"local ok,e = pcall(redis.log, {}, 'm'); return tostring(e)".as_slice(),
+                "ERR First argument must be a number (log level).",
+            ),
+            (
+                b"local ok,e = pcall(redis.log, nil, 'm'); return tostring(e)".as_slice(),
+                "ERR First argument must be a number (log level).",
+            ),
+        ] {
+            let frame = eval_script(body, &[], &[], &mut store, 0)
+                .unwrap_or_else(|e| panic!("eval {:?} failed: {e}", String::from_utf8_lossy(body)));
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk string for {:?}, got {frame:?}", String::from_utf8_lossy(body));
+            };
+            let s = String::from_utf8_lossy(&bytes);
+            assert_eq!(
+                s, *want_substr,
+                "body={:?} got {s}",
+                String::from_utf8_lossy(body)
+            );
+        }
     }
 
     #[test]
