@@ -1771,6 +1771,15 @@ pub struct LuaState<'a> {
     /// onto this slot for the duration of their execution so functions
     /// defined inside the chunk inherit that label. (frankenredis-ycaog)
     current_source_label: Option<String>,
+    /// Syntactic call-site name for the currently-dispatching builtin
+    /// (e.g. "select" for a direct `select(...)` call or "f" for
+    /// `local f = select; f(...)`). `None` means there is no AST
+    /// context — Lua 5.1 reports such errors using `'?'` as the name
+    /// and omits the `user_script:1:` source-location prefix.
+    /// Pushed/restored by `call_function_with_callee` and explicitly
+    /// cleared by `pcall`/`xpcall` around their protected callback.
+    /// (frankenredis-557p3)
+    current_invocation_name: Option<String>,
     /// Depth of nested exec_stmts calls. The coroutine resume path
     /// (exec_coroutine_stmts → exec_stmt) keeps this at 0 for top-
     /// level body statements; any nested control-flow block (for,
@@ -2080,6 +2089,7 @@ impl<'a> LuaState<'a> {
             pending_yield: None,
             pending_error_value: None,
             current_source_label: None,
+            current_invocation_name: None,
             nested_exec_stmts_depth: 0,
             inside_bare_expression_stmt: false,
         }
@@ -3662,6 +3672,42 @@ impl<'a> LuaState<'a> {
     /// to include the accessor context Lua 5.1 emits (e.g. "attempt to
     /// call local 'x' (a nil value)" or "attempt to call field 'm'
     /// (a nil value)"). (frankenredis-md71j)
+    /// Format Lua 5.1's `luaL_argerror` wording for a C-builtin
+    /// bad-argument case. When invoked through an AST call site, the
+    /// name comes from the call-site variable and the error carries
+    /// the `user_script:1:` source prefix. When invoked indirectly
+    /// (e.g. `pcall(select, ...)`), the C closure has no debug name —
+    /// vendored emits `'?'` and no source prefix. (frankenredis-557p3)
+    fn format_builtin_argerror(&self, _fallback_name: &str, arg_idx: usize, reason: &str) -> String {
+        match &self.current_invocation_name {
+            Some(name) => format!(
+                "user_script:1: bad argument #{arg_idx} to '{name}' ({reason})"
+            ),
+            None => format!("bad argument #{arg_idx} to '?' ({reason})"),
+        }
+    }
+
+    /// Bare syntactic name for an AST call site, used by C-builtin
+    /// bad-argument errors. Mirrors Lua 5.1's `lua_getinfo` "n.name":
+    /// the variable used to invoke the function, not the function's
+    /// internal name. (frankenredis-557p3)
+    fn ast_call_name(&self, callee_expr: &Expr, method_override: Option<&str>) -> Option<String> {
+        if let Some(m) = method_override {
+            return Some(m.to_string());
+        }
+        match callee_expr {
+            Expr::Name(n) => Some(n.clone()),
+            Expr::Field(_, f) => Some(f.clone()),
+            Expr::Index(_, key) => match key.as_ref() {
+                Expr::Str(s) if !s.is_empty() => {
+                    std::str::from_utf8(s).ok().map(str::to_string)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn call_function_with_callee(
         &mut self,
         callee_expr: &Expr,
@@ -3675,7 +3721,14 @@ impl<'a> LuaState<'a> {
             func,
             LuaValue::RustFunction(_) | LuaValue::Function(_) | LuaValue::WrappedCoroutine(_)
         ) {
-            return self.call_function(func, args, env, varargs);
+            // (frankenredis-557p3) Stash the AST-derived call-site name
+            // so C-builtin errors can use it (matching Lua 5.1's
+            // lua_getinfo("n.name") behavior). Restored on return.
+            let inv_name = self.ast_call_name(callee_expr, method_override);
+            let prev = std::mem::replace(&mut self.current_invocation_name, inv_name);
+            let result = self.call_function(func, args, env, varargs);
+            self.current_invocation_name = prev;
+            return result;
         }
         // (frankenredis-2c7hj) Tables with a callable __call metamethod
         // delegate to call_function (which prepends the table to args).
@@ -3683,7 +3736,11 @@ impl<'a> LuaState<'a> {
         // the accessor-aware "attempt to call <label> (a table value)"
         // wording is preserved.
         if matches!(func, LuaValue::Table(_)) && self.metatable_call_handler(func).is_some() {
-            return self.call_function(func, args, env, varargs);
+            let inv_name = self.ast_call_name(callee_expr, method_override);
+            let prev = std::mem::replace(&mut self.current_invocation_name, inv_name);
+            let result = self.call_function(func, args, env, varargs);
+            self.current_invocation_name = prev;
+            return result;
         }
         let label = match method_override {
             Some(m) => Some(format!("method '{m}'")),
@@ -4224,7 +4281,14 @@ impl<'a> LuaState<'a> {
             "pcall" => {
                 let func = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let mut call_args_vec = args.get(1..).unwrap_or(&[]).to_vec();
-                match self.call_function(&func, &mut call_args_vec, env, &mut Vec::new()) {
+                // (frankenredis-557p3) The protected callback runs WITHOUT
+                // an AST call site — Lua 5.1's lua_getinfo returns no
+                // "n.name" for C closures invoked via lua_pcall, so any
+                // C-builtin errors raised inside use '?' as the name.
+                let prev_inv = self.current_invocation_name.take();
+                let result = self.call_function(&func, &mut call_args_vec, env, &mut Vec::new());
+                self.current_invocation_name = prev_inv;
+                match result {
                     Ok(vals) => {
                         // Drop any stale typed-error stash; the protected
                         // call completed normally.
@@ -4266,7 +4330,11 @@ impl<'a> LuaState<'a> {
                 let func = args.first().cloned().unwrap_or(LuaValue::Nil);
                 let err_handler = args.get(1).cloned().unwrap_or(LuaValue::Nil);
                 let mut call_args_vec = args.get(2..).unwrap_or(&[]).to_vec();
-                match self.call_function(&func, &mut call_args_vec, env, &mut Vec::new()) {
+                // (frankenredis-557p3) Same AST-context clear as pcall.
+                let prev_inv = self.current_invocation_name.take();
+                let result = self.call_function(&func, &mut call_args_vec, env, &mut Vec::new());
+                self.current_invocation_name = prev_inv;
+                match result {
                     Ok(vals) => {
                         self.pending_error_value = None;
                         let mut new_vals = Vec::with_capacity(vals.len() + 1);
@@ -4483,9 +4551,10 @@ impl<'a> LuaState<'a> {
                     LuaValue::Str(s) if s == b"#" => Ok(vec![LuaValue::Number(rest.len() as f64)]),
                     _ => {
                         let raw_index = idx.to_number().ok_or_else(|| {
-                            format!(
-                                "user_script:1: bad argument #1 to 'select' (number expected, got {})",
-                                idx.type_name()
+                            self.format_builtin_argerror(
+                                "select",
+                                1,
+                                &format!("number expected, got {}", idx.type_name()),
                             )
                         })?;
                         let arg_count = rest.len() as i64;
@@ -4506,9 +4575,11 @@ impl<'a> LuaState<'a> {
                             raw_index as i64
                         };
                         if index == 0 || index < -arg_count {
-                            return Err(
-                                "user_script:1: bad argument #1 to 'select' (index out of range)".to_string()
-                            );
+                            return Err(self.format_builtin_argerror(
+                                "select",
+                                1,
+                                "index out of range",
+                            ));
                         }
 
                         let start = if index > 0 {
@@ -7551,6 +7622,65 @@ mod tests {
         assert!(
             err.contains("attempt to concatenate a nil value"),
             "wrong wording for nil: {err:?}"
+        );
+    }
+
+    #[test]
+    fn lua_builtin_argerror_uses_callsite_name_or_questionmark() {
+        // Pins frankenredis-557p3. Lua 5.1's luaL_argerror uses
+        // lua_getinfo("n.name") to derive the function name reported in
+        // bad-argument errors:
+        //   - Direct call `select(...)`  → name 'select', user_script:1: prefix
+        //   - Aliased  `local f=select; f(...)` → name 'f', same prefix
+        //   - Field    `t.s(...)`               → name 's', same prefix
+        //   - Indirect via pcall callback       → name '?', no prefix (no
+        //                                          Lua activation record)
+        let mut store = Store::new();
+
+        // Direct call.
+        let err = eval_script(
+            b"return select(0, 'a')",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected error");
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'select' (index out of range)"),
+            "direct call wording: {err:?}"
+        );
+
+        // Local alias surfaces the local variable's name.
+        let err = eval_script(
+            b"local f = select; return f(0, 'a')",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected error");
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'f' (index out of range)"),
+            "alias wording: {err:?}"
+        );
+
+        // Field call uses the field name.
+        let err = eval_script(
+            b"local t = {s = select}; return t.s(0, 'a')",
+            &[], &[], &mut store, 0,
+        ).expect_err("expected error");
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 's' (index out of range)"),
+            "field-call wording: {err:?}"
+        );
+
+        // pcall(select, ...) loses the AST context: name is '?' and
+        // no user_script:1: prefix.
+        let frame = eval_script(
+            b"local ok, err = pcall(select, 0, 'a'); return err",
+            &[], &[], &mut store, 0,
+        ).unwrap();
+        let body = match frame {
+            RespFrame::BulkString(Some(b)) => b,
+            other => panic!("expected bulk string, got {other:?}"),
+        };
+        let s = String::from_utf8_lossy(&body);
+        assert!(
+            s == "bad argument #1 to '?' (index out of range)",
+            "pcall-callback wording: {s:?}"
         );
     }
 
