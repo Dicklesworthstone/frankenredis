@@ -3643,6 +3643,49 @@ fn try_parse_hex_float(text: &str) -> Option<f64> {
     Some(sign * value)
 }
 
+/// Heuristic for "would strtod set ERANGE because the value underflowed to 0?".
+/// Upstream util.c::string2d rejects `errno == ERANGE && *dp == 0` as ValueNotFloat
+/// — e.g. `1e-1000` rounds to 0 in f64 and sets ERANGE. The companion
+/// `parse_score_f64_arg` applies this to the ZADD/ZINCRBY paths that use
+/// `string2d` upstream; INCRBYFLOAT/HINCRBYFLOAT use `string2ld` (long double)
+/// in upstream and so do NOT reject underflow, so they continue to use plain
+/// `parse_f64_arg`. (frankenredis-mb9tm)
+///
+/// Returns true iff `val` parsed to exactly 0.0 (positive or negative zero)
+/// AND the textual mantissa (everything before 'e'/'E', minus an optional
+/// sign) contains a digit 1-9. A literal zero mantissa with any exponent
+/// (e.g. `0e1000`, `0.0`, `-0`) parses cleanly to 0 without ERANGE and must
+/// remain accepted.
+fn looks_like_decimal_underflow_to_zero(text: &str, val: f64) -> bool {
+    if val != 0.0 {
+        return false;
+    }
+    let (mantissa, _exp) = match text.find(['e', 'E']) {
+        Some(idx) => (&text[..idx], Some(&text[idx + 1..])),
+        None => (text, None),
+    };
+    let mantissa = mantissa
+        .strip_prefix('+')
+        .or_else(|| mantissa.strip_prefix('-'))
+        .unwrap_or(mantissa);
+    mantissa.bytes().any(|b| b.is_ascii_digit() && b != b'0')
+}
+
+fn parse_score_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
+    let val = parse_f64_arg(arg)?;
+    // ZADD/ZINCRBY callsites use upstream's `string2d` path, which
+    // rejects ERANGE underflow (1e-1000 → 0 → "value is not a valid
+    // float"). parse_f64_arg returns the underlying f64 zero without
+    // distinguishing literal-zero from underflow-to-zero, so reapply
+    // the upstream gate here. (frankenredis-mb9tm)
+    let text = std::str::from_utf8(arg)
+        .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
+    if looks_like_decimal_underflow_to_zero(text, val) {
+        return Err(CommandError::Store(fr_store::StoreError::ValueNotFloat));
+    }
+    Ok(val)
+}
+
 fn parse_f64_arg(arg: &[u8]) -> Result<f64, CommandError> {
     let text = std::str::from_utf8(arg)
         .map_err(|_| CommandError::Store(fr_store::StoreError::ValueNotFloat))?;
@@ -4055,7 +4098,7 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     let opts = fr_store::ZaddOptions { nx, xx, gt, lt, ch };
 
     if incr {
-        let score_delta = parse_f64_arg(&argv[i])?;
+        let score_delta = parse_score_f64_arg(&argv[i])?;
         let member = argv[i + 1].clone();
         let result = store
             .zincrby_with_options(&argv[1], member, score_delta, opts, now_ms)
@@ -4075,7 +4118,7 @@ fn zadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
     } else {
         let mut pairs = Vec::with_capacity(remaining / 2);
         while i + 1 < argv.len() {
-            let score = parse_f64_arg(&argv[i])?;
+            let score = parse_score_f64_arg(&argv[i])?;
             pairs.push((score, argv[i + 1].clone()));
             i += 2;
         }
@@ -4483,7 +4526,7 @@ fn zincrby(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
     if argv.len() != 4 {
         return Err(CommandError::WrongArity("ZINCRBY"));
     }
-    let delta = parse_f64_arg(&argv[2])?;
+    let delta = parse_score_f64_arg(&argv[2])?;
     let new_score = store
         .zincrby(&argv[1], argv[3].clone(), delta, now_ms)
         .map_err(|e| {
@@ -34179,6 +34222,164 @@ mod tests {
                 "good={:?}",
                 String::from_utf8_lossy(good)
             );
+        }
+    }
+
+    #[test]
+    fn zadd_zincrby_reject_decimal_underflow_to_zero_mb9tm() {
+        // (frankenredis-mb9tm) Upstream util.c::string2d (used by
+        // ZADD/ZINCRBY's getDoubleFromObjectOrReply) rejects ERANGE
+        // underflow when the result is exactly 0 (e.g. `1e-1000`).
+        // Rust's f64::FromStr silently rounds to 0 with no errno
+        // signal, so parse_score_f64_arg reapplies the gate using a
+        // mantissa-digit heuristic.
+        let mut store = Store::new();
+
+        // ZADD with underflowing scores must error like upstream.
+        for bad in [
+            b"1e-1000".as_slice(),
+            b"-1e-1000",
+            b"+1e-1000",
+            b"1.0e-400",
+            b"0.5e-400",
+            b"5e-500",
+        ] {
+            let err = dispatch_argv(
+                &[b"ZADD".to_vec(), b"z".to_vec(), bad.to_vec(), b"m".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect_err("expected underflow rejection");
+            assert_eq!(
+                err,
+                CommandError::Store(fr_store::StoreError::ValueNotFloat),
+                "bad={:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+
+        // ZINCRBY mirror.
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"m".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        for bad in [b"1e-1000".as_slice(), b"-1e-1000"] {
+            let err = dispatch_argv(
+                &[
+                    b"ZINCRBY".to_vec(),
+                    b"z".to_vec(),
+                    bad.to_vec(),
+                    b"m".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect_err("zincrby underflow");
+            assert_eq!(
+                err,
+                CommandError::Store(fr_store::StoreError::ValueNotFloat),
+                "bad={:?}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+
+        // ZADD INCR mirror.
+        let err = dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"INCR".to_vec(),
+                b"1e-1000".to_vec(),
+                b"m".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("zadd incr underflow");
+        assert_eq!(
+            err,
+            CommandError::Store(fr_store::StoreError::ValueNotFloat),
+        );
+
+        // Literal-zero forms still accepted — these parse to exactly
+        // 0 with no ERANGE upstream.
+        for good in [
+            b"0".as_slice(),
+            b"0.0",
+            b"-0",
+            b"-0.0",
+            b"+0",
+            b"0e1000",
+            b"0e-1000",
+            b"0.0e0",
+        ] {
+            let mut s = Store::new();
+            let out = dispatch_argv(
+                &[
+                    b"ZADD".to_vec(),
+                    b"z".to_vec(),
+                    good.to_vec(),
+                    b"m".to_vec(),
+                ],
+                &mut s,
+                0,
+            )
+            .expect("zadd literal zero ok");
+            assert_eq!(
+                out,
+                RespFrame::Integer(1),
+                "good={:?}",
+                String::from_utf8_lossy(good)
+            );
+        }
+
+        // Denormal-but-nonzero values stay accepted in fr (Rust's
+        // parser yields the denormal as a non-zero f64; upstream's
+        // strtod returns the same denormal so *dp != 0 and the
+        // ERANGE gate doesn't fire).
+        let mut s = Store::new();
+        let out = dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1e-310".to_vec(),
+                b"m".to_vec(),
+            ],
+            &mut s,
+            0,
+        )
+        .expect("denormal accepted");
+        assert_eq!(out, RespFrame::Integer(1));
+
+        // INCRBYFLOAT/HINCRBYFLOAT continue to accept underflowing
+        // deltas — upstream uses long double which can represent
+        // 1e-1000 without underflow, so the ERANGE gate doesn't fire
+        // there. fr loses precision but matches the accept/reject
+        // decision (both yield no observable change for tiny deltas).
+        let mut s = Store::new();
+        s.set(b"k".to_vec(), b"10".to_vec(), None, 0);
+        let out = dispatch_argv(
+            &[
+                b"INCRBYFLOAT".to_vec(),
+                b"k".to_vec(),
+                b"1e-1000".to_vec(),
+            ],
+            &mut s,
+            0,
+        )
+        .expect("incrbyfloat underflow still accepted");
+        if let RespFrame::BulkString(Some(bytes)) = out {
+            let s = String::from_utf8_lossy(&bytes);
+            assert!(s == "10" || s == "10.0", "got {s}");
+        } else {
+            panic!("expected bulk string, got {:?}", out);
         }
     }
 
