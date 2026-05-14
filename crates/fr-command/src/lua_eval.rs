@@ -6695,14 +6695,23 @@ impl<'a> LuaState<'a> {
                 // a documented option set; anything else triggers
                 // luaL_argerror with 'invalid option <name>'. fr previously
                 // returned 0 for any unknown option.
+                //
+                // (frankenredis-kx6jm) Route both error sites through
+                // lua_format_argerror so pcall(collectgarbage,…) emits
+                // the anonymous-C-function shape (`'?'` name, no
+                // user_script:1: prefix) while direct calls keep the
+                // named shape.
+                let inv = self.current_invocation_name.as_deref();
                 let opt = match args.first() {
                     Some(LuaValue::Str(s)) => String::from_utf8_lossy(s).to_string(),
                     Some(LuaValue::Number(n)) => format!("{n}"),
                     Some(LuaValue::Nil) | None => "collect".to_string(),
                     Some(other) => {
-                        return Err(format!(
-                            "user_script:1: bad argument #1 to 'collectgarbage' (string expected, got {})",
-                            other.type_name()
+                        return Err(lua_format_argerror(
+                            inv,
+                            "collectgarbage",
+                            1,
+                            &format!("string expected, got {}", other.type_name()),
                         ));
                     }
                 };
@@ -6711,8 +6720,11 @@ impl<'a> LuaState<'a> {
                     "collect" | "stop" | "restart" | "step" | "setpause" | "setstepmul" | "count"
                 );
                 if !known {
-                    return Err(format!(
-                        "user_script:1: bad argument #1 to 'collectgarbage' (invalid option '{opt}')"
+                    return Err(lua_format_argerror(
+                        inv,
+                        "collectgarbage",
+                        1,
+                        &format!("invalid option '{opt}'"),
                     ));
                 }
                 let n = if opt == "count" { 32.0 } else { 0.0 };
@@ -15093,6 +15105,70 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn collectgarbage_error_pcall_shape_kx6jm() {
+        // (frankenredis-kx6jm) collectgarbage's two error sites
+        // (string-expected and invalid-option) now route through
+        // lua_format_argerror so pcall(collectgarbage,…) emits the
+        // anonymous-C-function shape.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local ok,e=pcall(collectgarbage,'invalid'); return tostring(e)",
+                "bad argument #1 to '?' (invalid option 'invalid')",
+            ),
+            (
+                b"local ok,e=pcall(collectgarbage,'whatever'); return tostring(e)",
+                "bad argument #1 to '?' (invalid option 'whatever')",
+            ),
+            (
+                b"local ok,e=pcall(collectgarbage,true); return tostring(e)",
+                "bad argument #1 to '?' (string expected, got boolean)",
+            ),
+            (
+                b"local ok,e=pcall(collectgarbage,{}); return tostring(e)",
+                "bad argument #1 to '?' (string expected, got table)",
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Direct-call regression: named/prefixed shape preserved.
+        let err = eval_script(
+            b"return collectgarbage('invalid')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("user_script:1: bad argument #1 to 'collectgarbage' (invalid option 'invalid')"),
+            "got {err:?}"
+        );
+
+        // Sanity: known options still work.
+        let frame = eval_script(
+            b"return collectgarbage('count')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert!(matches!(frame, RespFrame::Integer(_)), "got {frame:?}");
     }
 
     #[test]
