@@ -2715,12 +2715,22 @@ impl ClientSession {
         let previous_authenticated_user = preserve_authenticated_user
             .then(|| self.authenticated_user.clone())
             .flatten();
-        if !auth_state.auth_required() {
-            self.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
-        } else if let Some(username) = previous_authenticated_user
+        // Upstream networking.c: a successful `AUTH <user> <pass>` switches
+        // the client's identity for the lifetime of the connection,
+        // regardless of whether `requirepass` is set. fr previously
+        // unconditionally reset to the default user whenever
+        // `!auth_required()`, which meant the session swap performed on
+        // every multi-client roundtrip silently reverted an explicit AUTH
+        // back to default. Now we honour `preserve_authenticated_user`
+        // first: if a prior identity exists and remains valid in the ACL,
+        // keep it; only fall back to default/None when there is no valid
+        // prior user. (frankenredis-fu8ga)
+        if let Some(username) = previous_authenticated_user
             && auth_state.can_authenticate_as(&username)
         {
             self.authenticated_user = Some(username);
+        } else if !auth_state.auth_required() {
+            self.authenticated_user = Some(DEFAULT_AUTH_USER.to_vec());
         } else {
             self.authenticated_user = None;
         }
@@ -14854,6 +14864,52 @@ mod tests {
         assert_eq!(
             rt.session.authenticated_user.as_deref(),
             Some(b"default".as_slice())
+        );
+    }
+
+    #[test]
+    fn auth_user_password_persists_across_session_swap_when_no_requirepass_fu8ga() {
+        // (frankenredis-fu8ga) Upstream: a successful `AUTH alice pw`
+        // sticks for the lifetime of the connection regardless of whether
+        // `requirepass` is set. Prior to fu8ga, the session-swap that
+        // the multi-client TCP server performs on every roundtrip
+        // unconditionally reset `authenticated_user` back to `default`
+        // whenever `auth_required()` was false, so ACL enforcement on
+        // non-default identities was effectively impossible without a
+        // global requirepass.
+        let mut rt = Runtime::default_strict();
+        rt.add_user(b"alice".to_vec(), b"pw".to_vec());
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"alice", b"pw"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.session.authenticated_user.as_deref(),
+            Some(b"alice".as_slice()),
+            "AUTH alice pw should switch the session identity even without requirepass"
+        );
+
+        // Simulate the multi-client roundtrip: swap the current session
+        // out and back in. Before the fu8ga fix, this round-trip reset
+        // `authenticated_user` back to `default`.
+        let alice_session = rt.swap_session(rt.new_session());
+        let _placeholder = rt.swap_session(alice_session);
+        assert_eq!(
+            rt.session.authenticated_user.as_deref(),
+            Some(b"alice".as_slice()),
+            "session swap must preserve a valid explicit AUTH identity"
+        );
+
+        // Deleting alice from the ACL must fall the swapped-in session
+        // back to default (the connection is no longer auth'd as alice).
+        rt.server.auth_state.del_user(b"alice");
+        let alice_session = rt.swap_session(rt.new_session());
+        let _placeholder = rt.swap_session(alice_session);
+        assert_eq!(
+            rt.session.authenticated_user.as_deref(),
+            Some(b"default".as_slice()),
+            "removed users fall back to default when auth_required is false"
         );
     }
 
