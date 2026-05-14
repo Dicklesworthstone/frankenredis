@@ -17776,6 +17776,77 @@ mod tests {
     }
 
     #[test]
+    fn client_tracking_off_redirect_validates_target_id_cals6() {
+        // (frankenredis-cals6) Upstream networking.c::clientCommand
+        // validates the REDIRECT target ID even when the TRACKING
+        // command is turning the feature OFF. fr's parse_client_-
+        // tracking_state previously zeroed the parsed state on the
+        // OFF branch, so the runtime existence-check never ran.
+        let mut rt = Runtime::default_strict();
+
+        // OFF REDIRECT <bogus> → reject (target doesn't exist).
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CLIENT",
+                    b"TRACKING",
+                    b"OFF",
+                    b"REDIRECT",
+                    b"99999",
+                ]),
+                1,
+            ),
+            RespFrame::Error(
+                "ERR The client ID you want redirect to does not exist".to_string()
+            )
+        );
+
+        // OFF REDIRECT 0 → reject (parse-time positivity check).
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CLIENT", b"TRACKING", b"OFF", b"REDIRECT", b"0"]),
+                2,
+            ),
+            RespFrame::Error(
+                "ERR The client ID you want redirect to does not exist".to_string()
+            )
+        );
+
+        // OFF REDIRECT abc → reject (int parse error).
+        assert!(matches!(
+            rt.execute_frame(
+                command(&[b"CLIENT", b"TRACKING", b"OFF", b"REDIRECT", b"abc"]),
+                3,
+            ),
+            RespFrame::Error(err) if err.contains("not an integer")
+        ));
+
+        // OFF with no REDIRECT → OK (regression).
+        assert_eq!(
+            rt.execute_frame(command(&[b"CLIENT", b"TRACKING", b"OFF"]), 4),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // OFF REDIRECT <real-id> → OK.
+        let peer = rt.new_session();
+        rt.record_client_session(&peer);
+        let real_id = peer.client_id.to_string();
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"CLIENT",
+                    b"TRACKING",
+                    b"OFF",
+                    b"REDIRECT",
+                    real_id.as_bytes(),
+                ]),
+                5,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+    }
+
+    #[test]
     fn client_trackinginfo_reports_optout_caching_no() {
         let mut rt = Runtime::default_strict();
         assert_eq!(

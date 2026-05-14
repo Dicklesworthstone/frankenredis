@@ -17530,7 +17530,18 @@ pub fn parse_client_tracking_state(argv: &[Vec<u8>]) -> Result<ClientTrackingSta
     }
 
     if !enabled {
-        return Ok(ClientTrackingState::default());
+        // (frankenredis-cals6) Upstream's networking.c::clientCommand
+        // validates the REDIRECT target client ID even when the
+        // TRACKING command is turning the feature OFF — the existence
+        // check fires regardless of enabled. Preserve the parsed
+        // redirect value here so the runtime's lookup-by-ID can still
+        // reject `TRACKING OFF REDIRECT 99999`. The rest of the state
+        // is zeroed as before since OFF discards every other flag.
+        return Ok(ClientTrackingState {
+            enabled: false,
+            redirect,
+            ..ClientTrackingState::default()
+        });
     }
     if !bcast && !prefixes.is_empty() {
         return Err(CommandError::Custom(
