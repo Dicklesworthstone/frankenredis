@@ -7330,8 +7330,11 @@ impl<'a> LuaState<'a> {
                 // (frankenredis-u4mn6) Upstream lua_cjson.c::json_encode
                 // requires exactly 1 arg; fr was treating missing arg
                 // as nil and returning "null".
+                // (frankenredis-yovmj) The same luaL_argcheck(L,
+                // lua_gettop(L) == 1, ...) also rejects extra args.
+                // fr previously silently ignored the surplus.
                 let inv = self.current_invocation_name.as_deref();
-                if args.is_empty() {
+                if args.len() != 1 {
                     return Err(lua_format_argerror(
                         inv,
                         "encode",
@@ -16794,6 +16797,18 @@ mod tests {
             (
                 b"local ok,e=pcall(cjson.encode,function() end); return tostring(e)",
                 "Cannot serialise function: type not supported",
+            ),
+            // (frankenredis-yovmj) Extra args must also be rejected —
+            // vendored's luaL_argcheck(L, lua_gettop(L) == 1, ...)
+            // raises the same "expected 1 argument" wording when
+            // top != 1, whether top is 0 or 2+.
+            (
+                b"local ok,e=pcall(cjson.encode, 1, 2); return tostring(e)",
+                "bad argument #1 to '?' (expected 1 argument)",
+            ),
+            (
+                b"local ok,e=pcall(cjson.encode, 'a', 'b', 'c'); return tostring(e)",
+                "bad argument #1 to '?' (expected 1 argument)",
             ),
             (
                 b"local ok,e=pcall(cjson.decode); return tostring(e)",
