@@ -10668,6 +10668,16 @@ fn spop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
             return Err(bad());
         }
         let count = usize::try_from(parsed).map_err(|_| bad())?;
+        // (frankenredis-cf9z1) Upstream t_set.c::spopWithCountCommand
+        // validates the key type via checkType() BEFORE the count==0
+        // short-circuit. fr's spop_count loops `for _ in 0..count`
+        // which skips the type check when count==0 and returns an
+        // empty array, masking WRONGTYPE. Fire the type check here
+        // so a wrongtype key with count==0 reports the same error.
+        match store.key_type(&argv[1], now_ms) {
+            Some("set") | None => {}
+            Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
+        }
         let members = store.spop_count(&argv[1], count, now_ms)?;
         let arr = members
             .into_iter()
@@ -58764,6 +58774,52 @@ mod tests {
         // Only 1 member left
         let card = dispatch_argv(&[b"SCARD".to_vec(), b"s".to_vec()], &mut store, 0).unwrap();
         assert_eq!(card, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn spop_count_zero_on_wrongtype_key_reports_wrongtype_cf9z1() {
+        // (frankenredis-cf9z1) Upstream t_set.c::spopWithCountCommand
+        // validates the key's type via checkType BEFORE the count==0
+        // short-circuit. fr's spop_count loops `for _ in 0..count` and
+        // the loop body never runs for count==0, so without an
+        // explicit type check the empty-array reply masks WRONGTYPE.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"strkey".to_vec(), b"foo".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set strkey");
+        let err = dispatch_argv(
+            &[b"SPOP".to_vec(), b"strkey".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CommandError::Store(StoreError::WrongType)),
+            "expected WrongType, got {:?}",
+            err
+        );
+        // Missing key with count==0 still returns empty array (no type
+        // exists to clash) — mirrors vendored's lookupKeyWriteOrReply
+        // empty-set fallthrough.
+        let ok = dispatch_argv(
+            &[b"SPOP".to_vec(), b"nokey".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("spop nokey 0");
+        assert_eq!(ok, RespFrame::Array(Some(Vec::new())));
+        // Count>0 on wrong-type key continues to report WRONGTYPE as
+        // before (regression guard for the original code path).
+        let err = dispatch_argv(
+            &[b"SPOP".to_vec(), b"strkey".to_vec(), b"5".to_vec()],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::Store(StoreError::WrongType)));
     }
 
     #[test]
