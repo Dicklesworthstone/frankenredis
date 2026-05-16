@@ -7230,6 +7230,17 @@ impl Store {
         if !self.record_keyspace_lookup(key, now_ms) {
             return Ok(0);
         }
+        // (frankenredis-xc0ty) Inverted score bounds (min > max) make
+        // the resulting BTreeMap::range start > end, which panics
+        // with 'range start is greater than range end in BTreeMap' —
+        // a trivial DoS triggerable by any client via
+        // `ZCOUNT key +inf -inf`. Upstream zsetzCount returns 0 for
+        // inverted ranges since the result set is empty by definition.
+        // zrangebyscore / zrangebyscore_withscores already have this
+        // guard; mirror it here.
+        if score_bound_value(min) > score_bound_value(max) {
+            return Ok(0);
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
@@ -7596,6 +7607,12 @@ impl Store {
         now_ms: u64,
     ) -> Result<Vec<(Vec<u8>, f64)>, StoreError> {
         self.drop_if_expired(key, now_ms);
+        // (frankenredis-xc0ty) Guard against inverted bounds before
+        // hitting BTreeMap::range — `min > max` after the caller's
+        // intended (max, min) swap would panic the range walker.
+        if min > max {
+            return Ok(Vec::new());
+        }
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::SortedSet(zs) => {
@@ -17329,6 +17346,73 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pairs, vec![(b"a".to_vec(), 0.0)]);
+    }
+
+    /// (frankenredis-xc0ty) Inverted score bounds (min > max) made
+    /// BTreeMap::range panic with "range start is greater than range
+    /// end in BTreeMap", taking the server down. Upstream
+    /// zsetzCount returns 0 for inverted bounds since the range is
+    /// empty by definition. Same guard added to
+    /// zrevrangebyscore_withscores.
+    #[test]
+    fn zcount_zrevrangebyscore_inverted_bounds_short_circuit_xc0ty() {
+        let mut store = Store::new();
+        store
+            .zadd(b"z", &[(1.0, b"a".to_vec()), (2.0, b"b".to_vec())], 0)
+            .unwrap();
+
+        // ZCOUNT +inf -inf → 0 (was: panic + crash)
+        let n = store
+            .zcount(
+                b"z",
+                ScoreBound::Inclusive(f64::INFINITY),
+                ScoreBound::Inclusive(f64::NEG_INFINITY),
+                0,
+            )
+            .expect("inverted bounds must not panic");
+        assert_eq!(n, 0);
+
+        // ZCOUNT 5 1 → 0
+        let n = store
+            .zcount(
+                b"z",
+                ScoreBound::Inclusive(5.0),
+                ScoreBound::Inclusive(1.0),
+                0,
+            )
+            .expect("inverted bounds must not panic");
+        assert_eq!(n, 0);
+
+        // Exclusive inverted → 0
+        let n = store
+            .zcount(
+                b"z",
+                ScoreBound::Exclusive(2.0),
+                ScoreBound::Exclusive(1.0),
+                0,
+            )
+            .expect("inverted exclusive bounds must not panic");
+        assert_eq!(n, 0);
+
+        // ZREVRANGEBYSCORE with min > max → empty (no panic).
+        // Signature is zrevrangebyscore_withscores(max, min) — passing
+        // 1.0 max and 5.0 min is the analogue of ZREVRANGEBYSCORE z 1 5
+        // (i.e. user wrote them in the natural-rev order but inverted).
+        let pairs = store
+            .zrevrangebyscore_withscores(b"z", 1.0, 5.0, 0)
+            .expect("inverted bounds must not panic");
+        assert_eq!(pairs, Vec::<(Vec<u8>, f64)>::new());
+
+        // Normal in-bounds still works after the fix.
+        let n = store
+            .zcount(
+                b"z",
+                ScoreBound::Inclusive(1.0),
+                ScoreBound::Inclusive(2.0),
+                0,
+            )
+            .expect("normal bounds");
+        assert_eq!(n, 2);
     }
 
     #[test]
