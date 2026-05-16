@@ -5101,11 +5101,36 @@ impl<'a> LuaState<'a> {
                     // function or directly from the chunk top.
                     // (frankenredis-i18ug) current_invocation_name carries
                     // that distinction.
-                    let msg = args
-                        .get(1)
-                        .map(|a| String::from_utf8_lossy(&a.to_display_string()).to_string())
-                        .unwrap_or_else(|| "assertion failed!".to_string());
-                    Err(match &self.current_invocation_name {
+                    //
+                    // (frankenredis-wmu03) Upstream uses
+                    // `luaL_optstring(L, 2, "assertion failed!")` which
+                    // treats nil OR absent as default, accepts
+                    // string/number, and rejects other types with
+                    // "bad argument #2 (string expected, got TYPE)".
+                    // fr previously used to_display_string on whatever
+                    // arg 2 happened to be, so explicit nil rendered
+                    // "nil" and booleans/tables silently coerced.
+                    let inv = self.current_invocation_name.as_deref();
+                    let msg = match args.get(1) {
+                        None | Some(LuaValue::Nil) => "assertion failed!".to_string(),
+                        Some(LuaValue::Str(b)) => String::from_utf8_lossy(b).to_string(),
+                        Some(LuaValue::Number(n)) => {
+                            if *n == (*n as i64) as f64 && n.is_finite() {
+                                format!("{}", *n as i64)
+                            } else {
+                                lua_number_to_string(*n)
+                            }
+                        }
+                        Some(other) => {
+                            return Err(lua_format_argerror(
+                                inv,
+                                "assert",
+                                2,
+                                &format!("string expected, got {}", other.type_name()),
+                            ));
+                        }
+                    };
+                    Err(match inv {
                         Some(_) => format!("user_script:1: {msg}"),
                         None => msg,
                     })
@@ -15348,6 +15373,88 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn assert_second_arg_uses_default_for_nil_and_argerror_for_bad_type_wmu03() {
+        // (frankenredis-wmu03) Upstream luaB_assert uses
+        // luaL_optstring(L, 2, "assertion failed!"): nil/absent →
+        // default; string/number → coerce; other types → bad-argument.
+        let mut store = Store::new();
+
+        // Default message for nil/absent.
+        for body in &[
+            b"local ok,e=pcall(assert,false,nil); return tostring(e)".as_slice(),
+            b"local ok,e=pcall(assert,nil,nil); return tostring(e)",
+            b"local ok,e=pcall(assert,false); return tostring(e)",
+            b"local ok,e=pcall(assert,nil); return tostring(e)",
+        ] {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                "assertion failed!",
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // String/number arg 2: passed through verbatim.
+        let frame = eval_script(
+            b"local ok,e=pcall(assert,nil,'custom'); return tostring(e)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"custom".to_vec())));
+
+        let frame = eval_script(
+            b"local ok,e=pcall(assert,nil,42); return tostring(e)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"42".to_vec())));
+
+        // Non-string/number arg 2: bad-argument error with pcall shape.
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local ok,e=pcall(assert,nil,true); return tostring(e)",
+                "bad argument #2 to '?' (string expected, got boolean)",
+            ),
+            (
+                b"local ok,e=pcall(assert,nil,false); return tostring(e)",
+                "bad argument #2 to '?' (string expected, got boolean)",
+            ),
+            (
+                b"local ok,e=pcall(assert,nil,{}); return tostring(e)",
+                "bad argument #2 to '?' (string expected, got table)",
+            ),
+        ];
+        for (body, expected) in cases {
+            let frame = eval_script(body, &[], &[], &mut store, 0).unwrap();
+            let RespFrame::BulkString(Some(bytes)) = frame else {
+                panic!("expected bulk for {:?}", String::from_utf8_lossy(body))
+            };
+            assert_eq!(
+                String::from_utf8(bytes).unwrap(),
+                *expected,
+                "body={:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Truthy first arg: pass through (regression).
+        let frame = eval_script(b"return assert(42)", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::Integer(42));
+        let frame = eval_script(b"return assert('hi')", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"hi".to_vec())));
     }
 
     #[test]
