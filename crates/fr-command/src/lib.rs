@@ -5313,26 +5313,35 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     let mut i = 2;
     let mut center_lon: Option<f64> = None;
     let mut center_lat: Option<f64> = None;
-    let mut has_center = false;
+    let mut has_frommember = false;
+    let mut has_fromlonlat = false;
     let mut radius_m: Option<f64> = None;
     let mut box_width_m: Option<f64> = None;
     let mut box_height_m: Option<f64> = None;
-    let mut has_shape = false;
+    let mut has_byradius = false;
+    let mut has_bybox = false;
     let mut unit_mult = 1.0_f64;
 
     // Parse FROMMEMBER/FROMLONLAT and BYRADIUS/BYBOX.
     //
     // Error-reply wording MUST match upstream geo.c::geosearchCommand
-    // (br-frankenredis-kro2). Upstream uses two distinct signals:
-    //  - Duplicate FROM/BY clauses (e.g. two FROMMEMBERs) → plain
-    //    "ERR syntax error".
-    //  - Missing FROM or BY clause once parsing returns → WrongArity.
+    // (br-frankenredis-kro2 / frankenredis-dnguy). Upstream guards:
+    //   - FROMMEMBER with `!fromloc`  — rejects FROMLONLAT+FROMMEMBER
+    //   - FROMLONLAT with `!frommember` — rejects FROMMEMBER+FROMLONLAT
+    //   - BYRADIUS with `!bybox`      — rejects BYBOX+BYRADIUS
+    //   - BYBOX    with `!byradius`   — rejects BYRADIUS+BYBOX
+    // None of those guards reject the SAME clause twice; the parser
+    // just overwrites center_lon/lat/radius/box. fr previously used
+    // single has_center/has_shape booleans, which also rejected
+    // duplicate-of-same with "ERR syntax error". Split into separate
+    // flags so duplicate-of-same is silently accepted (later wins)
+    // and only mixed pairs are rejected.
     while i < argv.len() {
         if eq_ascii_command(&argv[i], b"FROMMEMBER") {
-            if has_center {
+            if has_fromlonlat {
                 return Err(CommandError::SyntaxError);
             }
-            has_center = true;
+            has_frommember = true;
             i += 1;
             if i >= argv.len() {
                 return Err(CommandError::SyntaxError);
@@ -5355,10 +5364,10 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
                 ));
             }
         } else if eq_ascii_command(&argv[i], b"FROMLONLAT") {
-            if has_center {
+            if has_frommember {
                 return Err(CommandError::SyntaxError);
             }
-            has_center = true;
+            has_fromlonlat = true;
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -5379,10 +5388,10 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             center_lat = Some(lat);
             i += 2;
         } else if eq_ascii_command(&argv[i], b"BYRADIUS") {
-            if has_shape {
+            if has_bybox {
                 return Err(CommandError::SyntaxError);
             }
-            has_shape = true;
+            has_byradius = true;
             if i + 2 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -5410,10 +5419,10 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
             radius_m = Some(r * um);
             i += 2;
         } else if eq_ascii_command(&argv[i], b"BYBOX") {
-            if has_shape {
+            if has_byradius {
                 return Err(CommandError::SyntaxError);
             }
-            has_shape = true;
+            has_bybox = true;
             if i + 3 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -5463,7 +5472,7 @@ fn geosearch(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     // shared.syntaxerr) on the unknown-token branch.
     let (withcoord, withdist, withhash, count, any, sort, _) =
         parse_geo_search_flags(argv, i, unit_mult, GeoFlagContext::GeoSearch)?;
-    if !has_center || !has_shape {
+    if !(has_frommember || has_fromlonlat) || !(has_byradius || has_bybox) {
         return Err(CommandError::WrongArity("GEOSEARCH"));
     }
     let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
@@ -5556,21 +5565,28 @@ fn geosearchstore(
     let mut i = 2;
     let mut center_lon: Option<f64> = None;
     let mut center_lat: Option<f64> = None;
-    let mut has_center = false;
+    // (frankenredis-dnguy) Split flags per FROM/BY kind so duplicate
+    // FROMMEMBER (or FROMLONLAT/BYRADIUS/BYBOX) silently overwrites
+    // and only mixed pairs error. Mirrors upstream geo.c::geoSearchGeneric
+    // which is the single function backing both GEOSEARCH and
+    // GEOSEARCHSTORE.
+    let mut has_frommember = false;
+    let mut has_fromlonlat = false;
     let mut radius_m: Option<f64> = None;
     let mut box_width_m: Option<f64> = None;
     let mut box_height_m: Option<f64> = None;
-    let mut has_shape = false;
+    let mut has_byradius = false;
+    let mut has_bybox = false;
     let mut unit_mult = 1.0_f64;
 
     while i < synth.len() {
         if eq_ascii_command(&synth[i], b"FROMMEMBER") {
-            if has_center {
+            if has_fromlonlat {
                 return Ok(RespFrame::Error(
                     "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
                 ));
             }
-            has_center = true;
+            has_frommember = true;
             i += 1;
             if i >= synth.len() {
                 return Err(CommandError::SyntaxError);
@@ -5591,12 +5607,12 @@ fn geosearchstore(
                 ));
             }
         } else if eq_ascii_command(&synth[i], b"FROMLONLAT") {
-            if has_center {
+            if has_frommember {
                 return Ok(RespFrame::Error(
                     "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
                 ));
             }
-            has_center = true;
+            has_fromlonlat = true;
             if i + 2 >= synth.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -5617,12 +5633,12 @@ fn geosearchstore(
             center_lat = Some(lat);
             i += 2;
         } else if eq_ascii_command(&synth[i], b"BYRADIUS") {
-            if has_shape {
+            if has_bybox {
                 return Ok(RespFrame::Error(
                     "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
                 ));
             }
-            has_shape = true;
+            has_byradius = true;
             if i + 2 >= synth.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -5648,12 +5664,12 @@ fn geosearchstore(
             radius_m = Some(r * um);
             i += 2;
         } else if eq_ascii_command(&synth[i], b"BYBOX") {
-            if has_shape {
+            if has_byradius {
                 return Ok(RespFrame::Error(
                     "ERR exactly one of BYRADIUS or BYBOX must be provided".to_string(),
                 ));
             }
-            has_shape = true;
+            has_bybox = true;
             if i + 3 >= synth.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -5708,7 +5724,7 @@ fn geosearchstore(
     }
 
     let (Some(cx), Some(cy)) = (center_lon, center_lat) else {
-        if !has_center {
+        if !(has_frommember || has_fromlonlat) {
             return Ok(RespFrame::Error(
                 "ERR exactly one of FROMMEMBER or FROMLONLAT must be provided".to_string(),
             ));
@@ -48101,6 +48117,100 @@ mod tests {
                 "GEORADIUS {lon},{lat} should be accepted, got {out:?}"
             );
         }
+    }
+
+    #[test]
+    fn geosearch_duplicate_same_clause_silently_overrides_dnguy() {
+        // (frankenredis-dnguy) Upstream geo.c::geoSearchGeneric guards
+        // FROMMEMBER with !fromloc, FROMLONLAT with !frommember,
+        // BYRADIUS with !bybox, BYBOX with !byradius. The SAME clause
+        // can appear twice — the later value silently overrides.
+        // fr previously used single has_center/has_shape booleans
+        // which also rejected duplicates-of-same as 'ERR syntax error'.
+        let mut store = Store::new();
+        add_geo_points(&mut store);
+        // Duplicate FROMLONLAT: must succeed (second one wins).
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"5000".to_vec(),
+                b"km".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"16".to_vec(),
+                b"38".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("duplicate FROMLONLAT");
+        assert!(matches!(out, RespFrame::Array(_)));
+        // Duplicate BYRADIUS: must succeed (second one wins).
+        let out = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"5000".to_vec(),
+                b"km".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"1000".to_vec(),
+                b"mi".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("duplicate BYRADIUS");
+        assert!(matches!(out, RespFrame::Array(_)));
+        // Mixed FROMMEMBER + FROMLONLAT must still error with the
+        // upstream-shared "syntax error" wording (the !fromloc / !frommember
+        // guards still fire on the mixed-pair case).
+        let err = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"5000".to_vec(),
+                b"km".to_vec(),
+                b"FROMMEMBER".to_vec(),
+                b"Palermo".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::SyntaxError), "expected SyntaxError for FROMLONLAT+FROMMEMBER mix, got {:?}", err);
+        // Mixed BYRADIUS + BYBOX must still error.
+        let err = dispatch_argv(
+            &[
+                b"GEOSEARCH".to_vec(),
+                b"mygeo".to_vec(),
+                b"FROMLONLAT".to_vec(),
+                b"15".to_vec(),
+                b"37".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"5000".to_vec(),
+                b"km".to_vec(),
+                b"BYBOX".to_vec(),
+                b"100".to_vec(),
+                b"100".to_vec(),
+                b"km".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(err, CommandError::SyntaxError), "expected SyntaxError for BYRADIUS+BYBOX mix, got {:?}", err);
     }
 
     #[test]
