@@ -1424,11 +1424,13 @@ pub struct Store {
     pub lfu_log_factor: u64,
 
     // Encoding thresholds — configurable via CONFIG SET, used by OBJECT ENCODING.
+    // (frankenredis-10lqb) Lists deliberately have only the byte-budget
+    // cap `list_max_listpack_size`. Vendored Redis 7.2.4 exposes no
+    // per-entries or per-value cap for lists — the quicklist boundary
+    // is governed by the size budget, not entry count.
     pub hash_max_listpack_entries: usize,
     pub hash_max_listpack_value: usize,
     pub list_max_listpack_size: i64,
-    pub list_max_listpack_entries: usize,
-    pub list_max_listpack_value: usize,
     pub set_max_intset_entries: usize,
     pub set_max_listpack_entries: usize,
     pub zset_max_listpack_entries: usize,
@@ -1771,8 +1773,6 @@ impl Default for Store {
             hash_max_listpack_entries: 512,
             hash_max_listpack_value: 64,
             list_max_listpack_size: -2,
-            list_max_listpack_entries: 128,
-            list_max_listpack_value: 64,
             set_max_intset_entries: 512,
             set_max_listpack_entries: 128,
             zset_max_listpack_entries: 128,
@@ -15857,10 +15857,10 @@ mod tests {
 
         assert_eq!(store.object_encoding(b"list", 0), Some("listpack"));
 
-        // Setting list_max_listpack_entries no longer affects encoding;
-        // the byte budget remains authoritative.
-        store.list_max_listpack_entries = 1;
-        assert_eq!(store.object_encoding(b"list", 0), Some("listpack"));
+        // (frankenredis-10lqb) The fr-only `list_max_listpack_entries`
+        // field has been removed entirely. Vendored Redis 7.2.4 has no
+        // entry-count cap for lists — only the byte budget governs the
+        // listpack/quicklist transition.
 
         // Crossing the byte budget still flips to quicklist.
         store.list_max_listpack_size = -2; // 8 KiB

@@ -17392,11 +17392,12 @@ fn config_collect_store_entries(pattern: &str, store: &Store, entries: &mut Vec<
         entries.push(RespFrame::BulkString(Some(value.as_bytes().to_vec())));
     }
 
+    // (frankenredis-10lqb) list-max-listpack-entries / list-max-listpack-value
+    // are intentionally absent — vendored 7.2.4 has no such parameters.
+    // Lists only use the size-based list-max-listpack-size cap.
     let usize_params: &[(&str, usize)] = &[
         ("hash-max-listpack-entries", store.hash_max_listpack_entries),
         ("hash-max-listpack-value", store.hash_max_listpack_value),
-        ("list-max-listpack-entries", store.list_max_listpack_entries),
-        ("list-max-listpack-value", store.list_max_listpack_value),
         ("set-max-intset-entries", store.set_max_intset_entries),
         ("set-max-listpack-entries", store.set_max_listpack_entries),
         ("zset-max-listpack-entries", store.zset_max_listpack_entries),
@@ -17465,12 +17466,6 @@ fn config_apply_store_sets(pairs: &[Vec<u8>], store: &mut Store) -> Result<(), C
             }
             "hash-max-listpack-value" | "hash-max-ziplist-value" => {
                 store.hash_max_listpack_value = parse_config_usize(lower.as_str(), val)?;
-            }
-            "list-max-listpack-entries" => {
-                store.list_max_listpack_entries = parse_config_usize(lower.as_str(), val)?;
-            }
-            "list-max-listpack-value" => {
-                store.list_max_listpack_value = parse_config_usize(lower.as_str(), val)?;
             }
             "list-max-listpack-size" | "list-max-ziplist-size" => {
                 store.list_max_listpack_size = parse_config_i64(lower.as_str(), val)?;

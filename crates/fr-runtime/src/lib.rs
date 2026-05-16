@@ -486,10 +486,14 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("lazyfree-lazy-user-del", "no"),
     ("lazyfree-lazy-user-flush", "no"),
     // Encoding thresholds
+    // (frankenredis-10lqb) Lists only use the SIZE-based threshold
+    // `list-max-listpack-size` (alias `list-max-ziplist-size`) — there
+    // is no per-entries or per-value cap for lists in vendored Redis
+    // 7.2.4 (see config.c:3154). Hash/set/zset have entries+value caps;
+    // lists do not. Keys are intentionally absent so CONFIG GET parity
+    // holds against vendored 7.2.4.
     ("list-max-listpack-size", "-2"),
     ("list-max-ziplist-size", "-2"),
-    ("list-max-listpack-entries", "128"),
-    ("list-max-listpack-value", "64"),
     ("list-compress-depth", "0"),
     ("set-max-intset-entries", "512"),
     ("set-max-listpack-entries", "128"),
@@ -7866,7 +7870,12 @@ impl Runtime {
                 self.server.hz.to_string().into_bytes(),
             )));
         }
-        // Dynamic encoding thresholds — live values from Store
+        // Dynamic encoding thresholds — live values from Store.
+        // (frankenredis-10lqb) NOTE: lists are NOT in this table because
+        // vendored Redis 7.2.4 only exposes the size-based threshold
+        // `list-max-listpack-size`. There is no `list-max-listpack-entries`
+        // or `list-max-listpack-value` in upstream — only hash/set/zset
+        // have entries+value caps.
         let encoding_params: &[(&str, usize)] = &[
             (
                 "hash-max-listpack-entries",
@@ -7875,14 +7884,6 @@ impl Runtime {
             (
                 "hash-max-listpack-value",
                 self.server.store.hash_max_listpack_value,
-            ),
-            (
-                "list-max-listpack-entries",
-                self.server.store.list_max_listpack_entries,
-            ),
-            (
-                "list-max-listpack-value",
-                self.server.store.list_max_listpack_value,
             ),
             (
                 "set-max-intset-entries",
@@ -8115,8 +8116,6 @@ impl Runtime {
                 || name == "zset-max-ziplist-value"
                 || name == "list-max-listpack-size"
                 || name == "list-max-ziplist-size"
-                || name == "list-max-listpack-entries"
-                || name == "list-max-listpack-value"
                 || name == "appendonly"
                 || name == "stop-writes-on-bgsave-error"
                 || name == "appendfilename"
@@ -9584,10 +9583,13 @@ impl Runtime {
                 || parameter.eq_ignore_ascii_case("hash-max-ziplist-value")
                 || parameter.eq_ignore_ascii_case("zset-max-listpack-value")
                 || parameter.eq_ignore_ascii_case("zset-max-ziplist-value");
+            // (frankenredis-10lqb) NOTE: list-max-listpack-entries /
+            // list-max-listpack-value are deliberately absent — vendored
+            // 7.2.4 has no such parameters (lists use the size-based
+            // list-max-listpack-size only). Adding them caused CONFIG GET
+            // / CONFIG SET to diverge from vendored.
             let is_integer_threshold = parameter.eq_ignore_ascii_case("hash-max-listpack-entries")
                 || parameter.eq_ignore_ascii_case("hash-max-ziplist-entries")
-                || parameter.eq_ignore_ascii_case("list-max-listpack-entries")
-                || parameter.eq_ignore_ascii_case("list-max-listpack-value")
                 || parameter.eq_ignore_ascii_case("set-max-intset-entries")
                 || parameter.eq_ignore_ascii_case("set-max-listpack-entries")
                 || parameter.eq_ignore_ascii_case("set-max-listpack-value")
@@ -9629,10 +9631,6 @@ impl Runtime {
                     || parameter.eq_ignore_ascii_case("hash-max-ziplist-value")
                 {
                     "hash-max-listpack-value"
-                } else if parameter.eq_ignore_ascii_case("list-max-listpack-entries") {
-                    "list-max-listpack-entries"
-                } else if parameter.eq_ignore_ascii_case("list-max-listpack-value") {
-                    "list-max-listpack-value"
                 } else if parameter.eq_ignore_ascii_case("set-max-intset-entries") {
                     "set-max-intset-entries"
                 } else if parameter.eq_ignore_ascii_case("set-max-listpack-entries") {
@@ -10045,12 +10043,12 @@ impl Runtime {
             self.server.store.list_max_listpack_size = list_max_listpack_size;
         }
         // Apply encoding threshold updates to Store and CONFIG GET state.
+        // (frankenredis-10lqb) list-max-listpack-{entries,value} are
+        // intentionally absent — vendored 7.2.4 has no such parameters.
         for (param, value) in encoding_threshold_updates {
             match param {
                 "hash-max-listpack-entries" => self.server.store.hash_max_listpack_entries = value,
                 "hash-max-listpack-value" => self.server.store.hash_max_listpack_value = value,
-                "list-max-listpack-entries" => self.server.store.list_max_listpack_entries = value,
-                "list-max-listpack-value" => self.server.store.list_max_listpack_value = value,
                 "set-max-intset-entries" => self.server.store.set_max_intset_entries = value,
                 "set-max-listpack-entries" => self.server.store.set_max_listpack_entries = value,
                 "zset-max-listpack-entries" => self.server.store.zset_max_listpack_entries = value,
@@ -23136,10 +23134,16 @@ mod tests {
         //   close-on-oom              - fr-specific, no upstream equivalent
         //   repl-diskless-sync-period - not in vendored 7.2.4
         //   rename-command            - config-file-only in vendored (CONFIG GET returns empty)
+        // (frankenredis-10lqb) Two list encoding keys that fr exposed but
+        // vendored 7.2.4 does NOT — lists only have the size-based cap:
+        //   list-max-listpack-entries
+        //   list-max-listpack-value
         for fr_only in [
             "close-on-oom",
             "repl-diskless-sync-period",
             "rename-command",
+            "list-max-listpack-entries",
+            "list-max-listpack-value",
         ] {
             assert!(
                 !names.iter().any(|n| n.eq_ignore_ascii_case(fr_only)),
