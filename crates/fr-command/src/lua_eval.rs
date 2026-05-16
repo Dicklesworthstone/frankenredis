@@ -9172,6 +9172,13 @@ fn json_escape_bytes(bytes: &[u8]) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
+            // (frankenredis-t6bqz) Upstream lua_cjson always escapes
+            // forward slash to "\/" (the table in lua_cjson.c marks
+            // 0x2F as needing escape). The JSON RFC permits but does
+            // not require this, but bundled lua_cjson does it for
+            // HTML/script-safe embedding. fr previously emitted '/'
+            // unescaped.
+            '/' => out.push_str("\\/"),
             '\u{08}' => out.push_str("\\b"),
             '\u{0C}' => out.push_str("\\f"),
             '\n' => out.push_str("\\n"),
@@ -9358,11 +9365,16 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
             if !n.is_finite() {
                 return Err("Cannot serialise number: must not be NaN or Inf".to_string());
             }
-            if *n == (*n as i64) as f64 {
-                Ok(format!("{}", *n as i64))
-            } else {
-                Ok(format!("{n}"))
-            }
+            // (frankenredis-t6bqz) Upstream lua_cjson's
+            // json_append_number routes ALL numbers through
+            // fpconv_g_fmt — essentially printf("%.14g") — so
+            // (a) integers up to 14 significant digits emit as
+            // bare decimals, (b) larger integer-valued doubles get
+            // rounded into scientific notation, and (c) -0.0
+            // preserves its sign. fr's previous integer-cast path
+            // bypassed (b) and (c). lua_number_to_string already
+            // implements %.14g semantics, so reuse it.
+            Ok(lua_number_to_string(*n))
         }
         LuaValue::Str(s) => Ok(json_escape_bytes(s)),
         LuaValue::Table(t) => {
@@ -12865,6 +12877,54 @@ mod tests {
         assert_eq!(
             lua_value_to_json(&LuaValue::Str(b"\x08\x0c\x01".to_vec())).expect("encode"),
             "\"\\b\\f\\u0001\""
+        );
+    }
+
+    #[test]
+    fn cjson_encode_matches_upstream_number_and_slash_t6bqz() {
+        // (frankenredis-t6bqz) cjson.encode must:
+        // 1. Preserve -0 sign (upstream routes through %.14g).
+        // 2. Render large integer-valued doubles via %.14g, losing
+        //    precision past 14 significant digits.
+        // 3. Escape forward slash as \\/.
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Number(-0.0)).expect("neg zero"),
+            "-0"
+        );
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Number(0.0)).expect("pos zero"),
+            "0"
+        );
+        // 2^53 = 9_007_199_254_740_992. %.14g rounds the trailing
+        // digits and switches to scientific notation.
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Number((1u64 << 53) as f64)).expect("2^53"),
+            "9.007199254741e+15"
+        );
+        // 2^53+1 is not exactly representable as f64 — it rounds to
+        // 2^53, so the encoded value is the same.
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Number(((1u64 << 53) + 1) as f64))
+                .expect("2^53+1"),
+            "9.007199254741e+15"
+        );
+        // Small integers still emit as bare decimals (matching %.14g).
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Number(1.0)).expect("one"),
+            "1"
+        );
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Number(123.0)).expect("123"),
+            "123"
+        );
+        // Forward slash escape inside strings.
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Str(b"hello /world".to_vec())).expect("slash"),
+            "\"hello \\/world\""
+        );
+        assert_eq!(
+            lua_value_to_json(&LuaValue::Str(b"//".to_vec())).expect("dbl slash"),
+            "\"\\/\\/\""
         );
     }
 
