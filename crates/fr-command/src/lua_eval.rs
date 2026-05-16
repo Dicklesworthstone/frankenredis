@@ -2277,6 +2277,13 @@ pub struct LuaState<'a> {
     lua_frame_kinds: Vec<bool>,
     iterations: u64,
     rng_seed: u64,
+    /// (frankenredis-lwj8o) Lua math.random must produce values
+    /// bit-compatible with vendored Redis 7.2.4. Vendored Redis overrides
+    /// Lua's C rand()/srand() with its own redisLrand48/redisSrand48 (see
+    /// legacy_redis_code/redis/src/rand.c) — a 48-bit drand48-style LCG.
+    /// We mirror that algorithm exactly so seeded math.random sequences
+    /// match vendored output byte-for-byte.
+    lua_random: RedisLrand48,
     script_started_at: Instant,
     current_coroutine: Option<LuaCoroutine>,
     pending_yield: Option<Vec<LuaValue>>,
@@ -2330,6 +2337,115 @@ pub struct LuaState<'a> {
     /// arg evaluation that would have its bind step skipped).
     /// (frankenredis-gdbca)
     inside_bare_expression_stmt: bool,
+}
+
+/// (frankenredis-lwj8o) Redis 7.2.4 overrides Lua's math.random/randomseed
+/// with `redisLrand48` / `redisSrand48` (rand.c) — a portable 48-bit
+/// linear congruential generator that produces the SAME sequence on every
+/// platform regardless of libc. The algorithm is the BSD/SystemV drand48
+/// variant: state is three 16-bit limbs x[0..3], constants a[0..3] and c
+/// drive `x = (a * x + c) mod 2^48`, and the public output is a 31-bit
+/// integer assembled from the top two limbs.
+#[derive(Clone, Debug)]
+struct RedisLrand48 {
+    x: [u32; 3],
+}
+
+impl RedisLrand48 {
+    const N: u32 = 16;
+    const MASK: u32 = 0xFFFF;
+    /// Mirrors `REDIS_LRAND48_MAX` in script_lua.c (2^31 - 1).
+    const RAND_MAX: i32 = 0x7fff_ffff;
+    /// Seed defaults from upstream rand.c (X0/X1/X2, A0/A1/A2, C).
+    const X0: u32 = 0x330E;
+    const X1: u32 = 0xABCD;
+    const X2: u32 = 0x1234;
+    const A0: u64 = 0xE66D;
+    const A1: u64 = 0xDEEC;
+    const A2: u64 = 0x0005;
+    const C: u32 = 0xB;
+
+    fn new() -> Self {
+        // upstream's static initializer for x = {X0, X1, X2}.
+        Self {
+            x: [Self::X0, Self::X1, Self::X2],
+        }
+    }
+
+    /// Mirror `redisSrand48`: SEED macro keeps x[0] at X0, splits seedval
+    /// into low/high 16-bit halves into x[1]/x[2]. a and c are reset to
+    /// their constants — but since they're const here they're unchanged.
+    fn srand(&mut self, seedval: i32) {
+        let s = seedval as u32;
+        self.x[0] = Self::X0;
+        self.x[1] = s & Self::MASK;
+        self.x[2] = (s >> Self::N) & Self::MASK;
+    }
+
+    /// Mirror `next()` in rand.c: 48-bit LCG step. Each limb is 16 bits;
+    /// the carry chain reproduces the C-level uint16_t arithmetic.
+    fn next(&mut self) {
+        let mask = Self::MASK;
+        let x0 = self.x[0] as u64;
+        let x1 = self.x[1] as u64;
+        let x2 = self.x[2] as u64;
+
+        // MUL(a[0], x[0], p)
+        let l = Self::A0 * x0;
+        let mut p0 = (l & mask as u64) as u32;
+        let mut p1 = ((l >> Self::N) & mask as u64) as u32;
+
+        // ADDEQU(p[0], c, carry0): p[0] += c, carry0 = overflow.
+        let sum = p0 + Self::C;
+        let carry0 = if sum > mask { 1u32 } else { 0 };
+        p0 = sum & mask;
+
+        // ADDEQU(p[1], carry0, carry1)
+        let sum = p1 + carry0;
+        let carry1 = if sum > mask { 1u32 } else { 0 };
+        p1 = sum & mask;
+
+        // MUL(a[0], x[1], q)
+        let l = Self::A0 * x1;
+        let q0 = (l & mask as u64) as u32;
+        let q1 = ((l >> Self::N) & mask as u64) as u32;
+
+        // ADDEQU(p[1], q[0], carry0)
+        let sum = p1 + q0;
+        let carry0 = if sum > mask { 1u32 } else { 0 };
+        p1 = sum & mask;
+
+        // MUL(a[1], x[0], r)
+        let l = Self::A1 * x0;
+        let r0 = (l & mask as u64) as u32;
+        let r1 = ((l >> Self::N) & mask as u64) as u32;
+
+        // CARRY(p[1], r[0])
+        let carry_p1_r0 = if p1 + r0 > mask { 1u32 } else { 0 };
+
+        // x[2] = LOW(carry0 + carry1 + CARRY(p[1], r[0]) + q[1] + r[1] +
+        //            a[0]*x[2] + a[1]*x[1] + a[2]*x[0]);
+        let raw_x2 = carry0 as u64
+            + carry1 as u64
+            + carry_p1_r0 as u64
+            + q1 as u64
+            + r1 as u64
+            + Self::A0 * x2
+            + Self::A1 * x1
+            + Self::A2 * x0;
+        self.x[2] = (raw_x2 & mask as u64) as u32;
+        // x[1] = LOW(p[1] + r[0]);
+        self.x[1] = (p1 + r0) & mask;
+        // x[0] = LOW(p[0]);
+        self.x[0] = p0 & mask;
+    }
+
+    /// Mirror `redisLrand48`: advance state then return the public 31-bit
+    /// integer assembled from the top two limbs.
+    fn rand(&mut self) -> i32 {
+        self.next();
+        ((self.x[2] as i32) << (Self::N - 1)) + ((self.x[1] >> 1) as i32)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2609,6 +2725,15 @@ impl<'a> LuaState<'a> {
         globals.insert("bit".to_string(), LuaValue::Table(bit_table));
 
         let rng_seed = store.rng_seed;
+        // (frankenredis-lwj8o) Initialize math.random's PRNG with the
+        // low 32 bits of the store's rng_seed (or 1 if zero). User
+        // scripts can re-seed via math.randomseed(n). We mirror vendored
+        // Redis's redisLrand48 (NOT glibc rand) — see rand.c.
+        let mut lua_random = RedisLrand48::new();
+        let initial_seed = rng_seed as u32;
+        if initial_seed != 0 {
+            lua_random.srand(initial_seed as i32);
+        }
         Self {
             store,
             now_ms,
@@ -2618,6 +2743,7 @@ impl<'a> LuaState<'a> {
             lua_frame_kinds: Vec::new(),
             iterations: 0,
             rng_seed,
+            lua_random,
             script_started_at: Instant::now(),
             current_coroutine: None,
             pending_yield: None,
@@ -5983,37 +6109,44 @@ impl<'a> LuaState<'a> {
                         "wrong number of arguments".to_string()
                     }
                 };
-                let r = self.next_rand();
+                // (frankenredis-lwj8o) Vendored lmathlib.c::math_random:
+                //   lua_Number r = (lua_Number)(rand()%RAND_MAX) /
+                //                  (lua_Number)RAND_MAX;
+                // Then 0-arg returns r; 1-arg(u) returns floor(r*u)+1;
+                // 2-arg(l,u) returns floor(r*(u-l+1))+l. Vendored Redis
+                // overrides Lua's rand()/srand() with its own
+                // redisLrand48/redisSrand48 (rand.c) — a 48-bit LCG with
+                // RAND_MAX 0x7FFFFFFF. We mirror that here.
+                let rand_raw = self.lua_random.rand();
+                let rand_max = RedisLrand48::RAND_MAX;
+                let r = ((rand_raw % rand_max) as f64) / (rand_max as f64);
                 match args.len() {
-                    0 => {
-                        let f = (r as f64) / (u64::MAX as f64 + 1.0);
-                        Ok(vec![LuaValue::Number(f)])
-                    }
+                    0 => Ok(vec![LuaValue::Number(r)]),
                     1 => {
-                        let m = args[0]
+                        let u = args[0]
                             .to_number()
                             .ok_or_else(|| number_expected(1, &args[0]))?
                             as i64;
-                        if m < 1 {
+                        if u < 1 {
                             return Err(interval_empty(1));
                         }
-                        let val = (r % (m as u64)) + 1;
+                        let val = (r * u as f64).floor() as i64 + 1;
                         Ok(vec![LuaValue::Number(val as f64)])
                     }
                     2 => {
-                        let m = args[0]
+                        let l = args[0]
                             .to_number()
                             .ok_or_else(|| number_expected(1, &args[0]))?
                             as i64;
-                        let n = args[1]
+                        let u = args[1]
                             .to_number()
                             .ok_or_else(|| number_expected(2, &args[1]))?
                             as i64;
-                        if m > n {
+                        if l > u {
                             return Err(interval_empty(2));
                         }
-                        let range = n as i128 - m as i128 + 1;
-                        let val = m as i128 + (r as i128 % range);
+                        let range = (u as i128 - l as i128 + 1) as f64;
+                        let val = l as i128 + (r * range).floor() as i128;
                         Ok(vec![LuaValue::Number(val as f64)])
                     }
                     _ => Err(wrong_arity()),
@@ -6137,9 +6270,16 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Number(m * 2f64.powi(e))])
             }
             "math.randomseed" => {
+                // (frankenredis-lwj8o) Upstream lmathlib.c::math_randomseed:
+                //   srand(luaL_checkint(L, 1));
+                // Vendored Redis routes that srand to redisSrand48, which
+                // initializes the 48-bit LCG state x[0]=0x330E, x[1]=low16,
+                // x[2]=high16 of the seed.
                 if let Some(arg) = args.first()
                     && let Some(n) = arg.to_number()
                 {
+                    let seed_i32 = n as i32; // matches C int cast
+                    self.lua_random.srand(seed_i32);
                     self.rng_seed = n.to_bits();
                 }
                 Ok(vec![LuaValue::Nil])
@@ -15655,6 +15795,70 @@ mod tests {
             panic!("expected integer, got {r:?}");
         };
         assert!((1..=5).contains(&n), "math.random(5) returned {n}");
+    }
+
+    #[test]
+    fn math_random_matches_vendored_redislrand48_lwj8o() {
+        // (frankenredis-lwj8o) Pinned vendored-redis 7.2.4 outputs for the
+        // same seeds. Vendored overrides Lua's rand()/srand() with the
+        // 48-bit redisLrand48/redisSrand48 in rand.c (NOT glibc rand),
+        // which makes math.random platform-independent. These exact values
+        // were captured from redis-server 7.2.4 with the corresponding
+        // EVAL strings — if this test regresses, our RedisLrand48 has
+        // drifted from upstream.
+        let mut store = Store::new();
+        // (seed, body, expected) for math.random(1,100).
+        let cases_2arg: &[(i32, i64)] = &[
+            (1, 5),
+            (42, 75),
+            (100, 26),
+            (12345, 23),
+            (999, 11),
+        ];
+        for (seed, expected) in cases_2arg {
+            let body = format!("math.randomseed({seed}); return math.random(1,100)");
+            let r = eval_script(body.as_bytes(), &[], &[], &mut store, 0)
+                .expect("valid math.random call");
+            let RespFrame::Integer(n) = r else {
+                panic!("expected integer, got {r:?}");
+            };
+            assert_eq!(
+                n, *expected,
+                "seed={seed} math.random(1,100): got {n}, expected {expected}",
+            );
+        }
+        // 1-arg math.random(50).
+        let cases_1arg: &[(i32, i64)] = &[(1, 3), (42, 38), (100, 13), (999, 6)];
+        for (seed, expected) in cases_1arg {
+            let body = format!("math.randomseed({seed}); return math.random(50)");
+            let r = eval_script(body.as_bytes(), &[], &[], &mut store, 0)
+                .expect("valid math.random(50) call");
+            let RespFrame::Integer(n) = r else {
+                panic!("expected integer, got {r:?}");
+            };
+            assert_eq!(
+                n, *expected,
+                "seed={seed} math.random(50): got {n}, expected {expected}",
+            );
+        }
+        // Sequence of 3 draws from seed=42: vendored emits 75, 35, 12.
+        let r = eval_script(
+            b"math.randomseed(42); return {math.random(1,100), math.random(1,100), math.random(1,100)}",
+            &[], &[], &mut store, 0,
+        )
+        .expect("valid sequence call");
+        let RespFrame::Array(Some(items)) = r else {
+            panic!("expected array, got {r:?}");
+        };
+        let mut nums = Vec::new();
+        for item in &items {
+            if let RespFrame::Integer(n) = item {
+                nums.push(*n);
+            } else {
+                panic!("expected integer item, got {item:?}");
+            }
+        }
+        assert_eq!(nums, vec![75i64, 35, 12], "seed=42 3-draw sequence");
     }
 
     #[test]
