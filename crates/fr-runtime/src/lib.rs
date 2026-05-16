@@ -1995,6 +1995,14 @@ struct ReplicationRuntimeState {
     role: ReplicationRoleState,
     backlog: BacklogWindow,
     replicas: BTreeMap<u64, ReplicaState>,
+    // (frankenredis-f82ny) Vendored Redis 7.2.4 keeps repl_backlog == NULL
+    // until the first replica connects; INFO replication then reports
+    // repl_backlog_{first_byte_offset,histlen}:0 even though writes have
+    // advanced master_repl_offset. fr always materializes the backlog
+    // window, so we need a one-way latch to mirror that "ever connected"
+    // signal at the display layer. Once true, stays true even after the
+    // replica disconnects.
+    any_replica_ever_connected: bool,
 }
 
 impl ReplicationRuntimeState {
@@ -2007,10 +2015,14 @@ impl ReplicationRuntimeState {
                 end_offset: ReplOffset(0),
             },
             replicas: BTreeMap::new(),
+            any_replica_ever_connected: false,
         }
     }
 
     fn ensure_replica(&mut self, client_id: u64) -> &mut ReplicaState {
+        // Latch on first replica entry; vendored uses this to decide
+        // whether to materialize the repl backlog. (frankenredis-f82ny)
+        self.any_replica_ever_connected = true;
         self.replicas.entry(client_id).or_default()
     }
 
@@ -12160,12 +12172,26 @@ replica_announced:1\r\n",
             "repl_backlog_size:{}\r\n",
             self.server.repl_backlog_size
         );
+        // (frankenredis-f82ny) Vendored 7.2.4 keeps repl_backlog == NULL
+        // until the first replica connects, so INFO replication reports
+        // first_byte_offset:0 and histlen:0 in that state — even though
+        // writes have advanced master_repl_offset. fr always materializes
+        // the backlog window; mirror vendored's display contract by
+        // emitting 0/0 when no replica has ever connected.
+        let any_ever = self
+            .server
+            .replication_runtime_state
+            .any_replica_ever_connected;
+        let (display_first_byte, display_histlen) = if any_ever {
+            (backlog.start_offset.0, backlog_histlen)
+        } else {
+            (0, 0)
+        };
         let _ = write!(
             info,
-            "repl_backlog_first_byte_offset:{}\r\n",
-            backlog.start_offset.0
+            "repl_backlog_first_byte_offset:{display_first_byte}\r\n"
         );
-        let _ = write!(info, "repl_backlog_histlen:{backlog_histlen}\r\n");
+        let _ = write!(info, "repl_backlog_histlen:{display_histlen}\r\n");
         info.push_str("\r\n");
         RespFrame::BulkString(Some(info.into_bytes()))
     }
@@ -19153,6 +19179,50 @@ mod tests {
         );
     }
 
+    // (frankenredis-f82ny) Vendored Redis 7.2.4 keeps repl_backlog ==
+    // NULL until the first replica connects, so INFO replication reports
+    // repl_backlog_first_byte_offset:0 and repl_backlog_histlen:0 even
+    // after writes have advanced master_repl_offset. Pin that fr now
+    // mirrors the same display contract pre-first-replica, then surfaces
+    // the live counters once any replica has been registered.
+    #[test]
+    fn replication_info_backlog_offsets_zero_until_first_replica_f82ny() {
+        let mut rt = Runtime::default_strict();
+        for i in 0u64..5 {
+            rt.execute_frame(command(&[b"SET", format!("k{i}").as_bytes(), b"v"]), i);
+        }
+        let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 100);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            unreachable!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8");
+        assert!(info.contains("repl_backlog_active:0\r\n"), "{info}");
+        assert!(
+            info.contains("repl_backlog_first_byte_offset:0\r\n"),
+            "expected 0 pre-first-replica, got: {info}"
+        );
+        assert!(
+            info.contains("repl_backlog_histlen:0\r\n"),
+            "expected 0 pre-first-replica, got: {info}"
+        );
+
+        // Latch the any-replica-ever-connected flag.
+        rt.server.replication_runtime_state.ensure_replica(42);
+        let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 101);
+        let RespFrame::BulkString(Some(info_bytes)) = info else {
+            unreachable!("expected bulk INFO response");
+        };
+        let info = String::from_utf8(info_bytes).expect("utf8");
+        assert!(
+            !info.contains("repl_backlog_histlen:0\r\n"),
+            "expected non-zero histlen post-latch, got: {info}"
+        );
+        assert!(
+            info.contains("repl_backlog_first_byte_offset:1\r\n"),
+            "expected first_byte_offset:1 post-latch, got: {info}"
+        );
+    }
+
     #[test]
     fn replication_info_reports_byte_offsets() {
         let mut rt = Runtime::default_strict();
@@ -19162,6 +19232,10 @@ mod tests {
             RespFrame::SimpleString("OK".to_string())
         );
         let expected_offset = rt.replication_primary_offset().0;
+        // (frankenredis-f82ny) Trigger the any-replica-ever-connected
+        // latch so the backlog fields surface their running counters
+        // rather than vendored's pre-first-replica 0/0 sentinel.
+        rt.server.replication_runtime_state.ensure_replica(42);
 
         let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 1);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
@@ -19207,6 +19281,10 @@ mod tests {
             rt.execute_frame(command(&[b"SET", b"key", b"value"]), 1),
             RespFrame::SimpleString("OK".to_string())
         );
+        // (frankenredis-f82ny) Materialize the backlog by latching the
+        // any-replica-ever-connected flag; otherwise the display layer
+        // emits 0/0 per vendored's pre-first-replica behavior.
+        rt.server.replication_runtime_state.ensure_replica(42);
 
         let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 2);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
@@ -19237,6 +19315,8 @@ mod tests {
             RespFrame::SimpleString("OK".to_string())
         );
         let primary_offset = rt.replication_primary_offset().0;
+        // (frankenredis-f82ny) Materialize backlog via the latch.
+        rt.server.replication_runtime_state.ensure_replica(42);
 
         assert_eq!(
             rt.execute_frame(command(&[b"CONFIG", b"SET", b"repl-backlog-size", b"1"]), 2),
