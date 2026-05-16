@@ -13602,9 +13602,20 @@ fn parse_i64(bytes: &[u8]) -> Result<i64, StoreError> {
 }
 
 fn parse_f64(bytes: &[u8]) -> Result<f64, StoreError> {
+    // (frankenredis-6h90t) Mirror upstream util.c::string2ld which rejects
+    // any leading whitespace via `isspace(buf[0])` and any trailing chars
+    // via `eptr[0] != '\0'`. fr previously called `.trim()` here, so
+    // stored values like " 1.5" or "1.5 " or "\t1.5" silently parsed as
+    // 1.5 and INCRBYFLOAT/HINCRBYFLOAT returned a result instead of
+    // 'value is not a valid float'.
     let text = std::str::from_utf8(bytes).map_err(|_| StoreError::ValueNotFloat)?;
+    if text.is_empty()
+        || text.as_bytes()[0].is_ascii_whitespace()
+        || text.as_bytes()[text.len() - 1].is_ascii_whitespace()
+    {
+        return Err(StoreError::ValueNotFloat);
+    }
     let val = text
-        .trim()
         .parse::<f64>()
         .map_err(|_| StoreError::ValueNotFloat)?;
     if val.is_nan() {
@@ -19047,6 +19058,58 @@ mod tests {
         let mut store = Store::new();
         store.sadd(b"k", &[b"m".to_vec()], 0).unwrap();
         assert_eq!(store.incrbyfloat(b"k", 1.0, 0), Err(StoreError::WrongType));
+    }
+
+    #[test]
+    fn incrbyfloat_rejects_stored_value_with_whitespace_6h90t() {
+        // (frankenredis-6h90t) Vendored util.c::string2ld rejects stored
+        // values that have leading or trailing whitespace (or any non-numeric
+        // surround). fr previously called `.trim()` inside `parse_f64` which
+        // silently accepted these.
+        for stored in &[
+            b" 1.5".as_slice(),       // leading space
+            b"1.5 ".as_slice(),       // trailing space
+            b"\t1.5".as_slice(),      // leading tab
+            b"1.5\t".as_slice(),      // trailing tab
+            b" 1.5 ".as_slice(),      // both
+            b"\n1.5".as_slice(),      // leading newline
+            b"1.5\n".as_slice(),      // trailing newline
+        ] {
+            let mut store = Store::new();
+            store.set(b"k".to_vec(), stored.to_vec(), None, 0);
+            let result = store.incrbyfloat_text(b"k", b"1.0", 1.0, 0);
+            assert_eq!(
+                result,
+                Err(StoreError::ValueNotFloat),
+                "stored={:?} expected ValueNotFloat",
+                String::from_utf8_lossy(stored),
+            );
+        }
+        // Sanity: cleanly-formatted values still parse and increment.
+        let mut store = Store::new();
+        store.set(b"k".to_vec(), b"1.5".to_vec(), None, 0);
+        let next = store.incrbyfloat_text(b"k", b"1.0", 1.0, 0).unwrap();
+        assert_eq!(next, b"2.5".to_vec());
+    }
+
+    #[test]
+    fn hincrbyfloat_rejects_stored_value_with_whitespace_6h90t() {
+        // (frankenredis-6h90t) Same rule applies to HINCRBYFLOAT.
+        for stored in &[
+            b" 1.5".as_slice(),
+            b"1.5 ".as_slice(),
+            b"\t1.5".as_slice(),
+        ] {
+            let mut store = Store::new();
+            store.hset(b"h", b"f".to_vec(), stored.to_vec(), 0).unwrap();
+            let result = store.hincrbyfloat_text(b"h", b"f", b"1.0", 1.0, 0);
+            assert_eq!(
+                result,
+                Err(StoreError::ValueNotFloat),
+                "stored={:?} expected ValueNotFloat for HINCRBYFLOAT",
+                String::from_utf8_lossy(stored),
+            );
+        }
     }
 
     fn vendored_long_double_1e308_text() -> Vec<u8> {
