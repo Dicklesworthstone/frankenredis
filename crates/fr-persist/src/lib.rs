@@ -1025,8 +1025,9 @@ pub struct CompactRdbThresholds {
 impl Default for CompactRdbThresholds {
     fn default() -> Self {
         Self {
-            // (frankenredis-k20ut) Mirror upstream redis 7.2.4 default of 128.
-            hash_max_listpack_entries: 128,
+            // (frankenredis-0o5hj) Upstream Redis 7.2.4 default is 512
+            // (config.c:3215). Prior comment claiming 128 was wrong.
+            hash_max_listpack_entries: 512,
             hash_max_listpack_value: 64,
             set_max_intset_entries: 512,
             set_max_listpack_entries: 128,

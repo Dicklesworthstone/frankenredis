@@ -9,7 +9,7 @@
 //! Thresholds exercised are the Store defaults documented at
 //! `crates/fr-store/src/lib.rs:1285-1292`:
 //!
-//!   hash_max_listpack_entries = 128   (frankenredis-k20ut)
+//!   hash_max_listpack_entries = 512   (frankenredis-0o5hj)
 //!   list_max_listpack_entries = 128
 //!   set_max_intset_entries    = 512
 //!   set_max_listpack_entries  = 128
@@ -59,8 +59,9 @@ fn string_encoding_raw_at_45_bytes_past_embstr_boundary() {
 
 #[test]
 fn hash_encoding_listpack_at_threshold_entries() {
+    // (frankenredis-0o5hj) hash-max-listpack-entries default is 512.
     let mut store = Store::new();
-    for i in 0..128_u32 {
+    for i in 0..512_u32 {
         let field = format!("f{i}").into_bytes();
         store.hset(b"h", field, b"v".to_vec(), NOW).expect("hset");
     }
@@ -69,8 +70,9 @@ fn hash_encoding_listpack_at_threshold_entries() {
 
 #[test]
 fn hash_encoding_hashtable_one_entry_past_threshold() {
+    // (frankenredis-0o5hj) 513 entries > default 512 → hashtable.
     let mut store = Store::new();
-    for i in 0..129_u32 {
+    for i in 0..513_u32 {
         let field = format!("f{i}").into_bytes();
         store.hset(b"h", field, b"v".to_vec(), NOW).expect("hset");
     }

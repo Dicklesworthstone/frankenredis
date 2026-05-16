@@ -12053,15 +12053,15 @@ mod tests {
         send_owned(&mut conn, sadd_big, "sadd_big");
 
         // RDB_TYPE_HASH_LISTPACK (16): small hash inside the
-        // hash-max-listpack-entries (128) threshold. (frankenredis-k20ut)
+        // hash-max-listpack-entries (512) threshold. (frankenredis-0o5hj)
         send_owned(
             &mut conn,
             argv(&[b"HSET", b"hash_lp", b"f1", b"v1", b"f2", b"v2"]),
             "hset_small",
         );
-        // RDB_TYPE_HASH (4): >128 fields forces hashtable.
+        // RDB_TYPE_HASH (4): >512 fields forces hashtable.
         let mut hset_big: Vec<Vec<u8>> = vec![b"HSET".to_vec(), b"hash_ht".to_vec()];
-        for i in 0..150_u32 {
+        for i in 0..600_u32 {
             hset_big.push(format!("f{i:04}").into_bytes());
             hset_big.push(b"v".to_vec());
         }

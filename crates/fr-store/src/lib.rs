@@ -1750,10 +1750,15 @@ impl Default for Store {
             maxmemory_policy: MaxmemoryPolicy::default(),
             lfu_decay_time: 1,
             lfu_log_factor: 10,
-            // (frankenredis-k20ut) Upstream config.c default is 128;
-            // higher values silently prevent the listpack→hashtable
-            // transition that observability tools depend on.
-            hash_max_listpack_entries: 128,
+            // (frankenredis-0o5hj) Upstream Redis 7.2.4 default is 512
+            // (config.c:3215 createSizeTConfig("hash-max-listpack-entries",
+            // ..., server.hash_max_listpack_entries, 512, ...)). The
+            // prior comment referencing k20ut claimed 128, but that
+            // does not match what vendored actually advertises via
+            // CONFIG GET. With 128 here, hashes of 129..512 entries
+            // converted to hashtable in fr while vendored kept them
+            // as listpack — observable via OBJECT ENCODING.
+            hash_max_listpack_entries: 512,
             hash_max_listpack_value: 64,
             list_max_listpack_size: -2,
             list_max_listpack_entries: 128,

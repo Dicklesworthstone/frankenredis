@@ -492,9 +492,12 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("list-compress-depth", "0"),
     ("set-max-intset-entries", "512"),
     ("set-max-listpack-entries", "128"),
-    ("hash-max-listpack-entries", "128"),
+    // (frankenredis-0o5hj) Upstream Redis 7.2.4 default is 512 for
+    // hash-max-listpack-entries (config.c:3215). The legacy ziplist
+    // alias shares the same value.
+    ("hash-max-listpack-entries", "512"),
     ("hash-max-listpack-value", "64"),
-    ("hash-max-ziplist-entries", "128"),
+    ("hash-max-ziplist-entries", "512"),
     ("hash-max-ziplist-value", "64"),
     ("zset-max-listpack-entries", "128"),
     ("zset-max-listpack-value", "64"),
