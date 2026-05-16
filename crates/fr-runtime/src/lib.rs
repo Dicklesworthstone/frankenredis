@@ -2680,6 +2680,38 @@ impl ServerState {
         if !Runtime::command_advances_replication_offset(argv) {
             return;
         }
+        // (frankenredis-rl0qz) Vendored Redis 7.2.4
+        // replication.c::replicationFeedSlaves short-circuits the entire
+        // propagation pipeline when:
+        //   server.repl_backlog == NULL
+        //   AND listLength(slaves) == 0
+        //   AND AOF disabled
+        // No record is captured, primary_offset stays put, and the
+        // backlog stream is never materialized. fr previously
+        // unconditionally pushed every replication-eligible write into
+        // aof_records and advanced primary_offset, which meant a
+        // freshly-flushed instance with no replicas reported a
+        // continuously-growing master_repl_offset (rl0qz) and the
+        // backlog stream contained records the offset didn't account
+        // for. Gate both the record push and the offset advance.
+        //
+        // The any_replica_ever_connected latch (added in f82ny) flips
+        // true on the first replica registration; once set, the backlog
+        // is materialized and writes flow through unconditionally
+        // thereafter. Only applies to Master role — a Replica tracks
+        // its own primary_offset from the master's replication stream.
+        let is_master = matches!(
+            self.replication_runtime_state.role,
+            ReplicationRoleState::Master
+        );
+        let any_replica_ever = self
+            .replication_runtime_state
+            .any_replica_ever_connected;
+        let aof_active = self.aof_path.is_some() && self.store.aof_enabled;
+        let should_propagate = !is_master || any_replica_ever || aof_active;
+        if !should_propagate {
+            return;
+        }
         let record = AofRecord {
             argv: argv.to_vec(),
         };
@@ -16455,6 +16487,8 @@ mod tests {
     #[test]
     fn multi_db_persistence_tracks_selected_db_boundaries() {
         let mut rt = Runtime::default_strict();
+        // (frankenredis-rl0qz) Latch propagation so aof records are captured.
+        rt.server.replication_runtime_state.ensure_replica(42);
 
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"zero", b"0"]), 0),
@@ -16828,6 +16862,11 @@ mod tests {
     #[test]
     fn fr_p2c_005_u001_runtime_captures_successful_dispatched_commands_for_aof() {
         let mut rt = Runtime::default_strict();
+        // (frankenredis-rl0qz) Latch the any-replica-ever-connected flag
+        // so writes propagate through the replication/AOF capture
+        // pipeline. Vendored short-circuits the entire propagation when
+        // master+no-replicas+no-backlog+no-aof — fr mirrors that gate.
+        rt.server.replication_runtime_state.ensure_replica(42);
 
         let set = rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
         assert_eq!(set, RespFrame::SimpleString("OK".to_string()));
@@ -16908,6 +16947,8 @@ mod tests {
         });
 
         let mut rt = Runtime::default_strict();
+        // (frankenredis-rl0qz) Latch propagation.
+        rt.server.replication_runtime_state.ensure_replica(42);
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"k", b"db0"]), 0),
             RespFrame::SimpleString("OK".to_string())
@@ -16973,6 +17014,8 @@ mod tests {
     #[test]
     fn fr_p2c_005_u002_runtime_aof_stream_export_round_trips() {
         let mut rt = Runtime::default_strict();
+        // (frankenredis-rl0qz) See note in u001 — latch propagation.
+        rt.server.replication_runtime_state.ensure_replica(42);
         let _ = rt.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
         let _ = rt.execute_frame(command(&[b"DEL", b"k"]), 1);
 
@@ -16989,6 +17032,8 @@ mod tests {
     #[test]
     fn eval_set_repl_runtime_consumes_script_propagation_records() {
         let mut rt = Runtime::default_strict();
+        // (frankenredis-rl0qz) Latch propagation.
+        rt.server.replication_runtime_state.ensure_replica(42);
         let reply = rt.execute_frame(
             command(&[
                 b"EVAL",
@@ -17025,12 +17070,24 @@ mod tests {
     #[test]
     fn fr_p2c_005_u003_runtime_replay_aof_stream_applies_records() {
         let mut source = Runtime::default_strict();
+        // (frankenredis-rl0qz) Latch propagation so source captures aof records.
+        source
+            .server
+            .replication_runtime_state
+            .ensure_replica(42);
         let _ = source.execute_frame(command(&[b"SET", b"k", b"v"]), 0);
         let _ = source.execute_frame(command(&[b"INCR", b"counter"]), 1);
         let encoded = source.encoded_aof_stream();
         let decoded = decode_aof_stream(&encoded).expect("decode source stream");
 
         let mut target = Runtime::default_strict();
+        // (frankenredis-rl0qz) Latch target too — replay_aof_stream
+        // goes through execute_frame → capture_aof_record which is now
+        // gated on master+no-replicas+no-aof.
+        target
+            .server
+            .replication_runtime_state
+            .ensure_replica(43);
         let replies = target
             .replay_aof_stream(&encoded, 10)
             .expect("replay aof stream");
@@ -17052,6 +17109,11 @@ mod tests {
     #[test]
     fn fr_p2c_005_u003_runtime_aof_stream_preserves_select_boundaries() {
         let mut source = Runtime::default_strict();
+        // (frankenredis-rl0qz) Latch propagation.
+        source
+            .server
+            .replication_runtime_state
+            .ensure_replica(42);
         assert_eq!(
             source.execute_frame(command(&[b"SET", b"db0:key", b"zero"]), 0),
             RespFrame::SimpleString("OK".to_string())
@@ -19179,6 +19241,34 @@ mod tests {
         );
     }
 
+    // (frankenredis-rl0qz) Vendored Redis 7.2.4
+    // replication.c::replicationFeedSlaves short-circuits primary_offset
+    // advances when role=master AND no slaves AND no backlog AND no AOF.
+    // Pin that fr now also short-circuits in that state.
+    #[test]
+    fn master_repl_offset_stays_put_with_no_replicas_no_aof_rl0qz() {
+        let mut rt = Runtime::default_strict();
+        let before = rt.replication_primary_offset().0;
+        for i in 0u64..5 {
+            rt.execute_frame(command(&[b"SET", format!("k{i}").as_bytes(), b"v"]), i);
+        }
+        let after = rt.replication_primary_offset().0;
+        assert_eq!(
+            after, before,
+            "master_repl_offset should not advance pre-first-replica with AOF off (was {before}, now {after})"
+        );
+
+        // After the latch, the next write should advance the offset.
+        rt.server.replication_runtime_state.ensure_replica(42);
+        let latched_before = rt.replication_primary_offset().0;
+        rt.execute_frame(command(&[b"SET", b"after", b"v"]), 10);
+        let latched_after = rt.replication_primary_offset().0;
+        assert!(
+            latched_after > latched_before,
+            "post-latch write should advance offset (was {latched_before}, now {latched_after})"
+        );
+    }
+
     // (frankenredis-f82ny) Vendored Redis 7.2.4 keeps repl_backlog ==
     // NULL until the first replica connects, so INFO replication reports
     // repl_backlog_first_byte_offset:0 and repl_backlog_histlen:0 even
@@ -19206,8 +19296,13 @@ mod tests {
             "expected 0 pre-first-replica, got: {info}"
         );
 
-        // Latch the any-replica-ever-connected flag.
+        // Latch the any-replica-ever-connected flag, then issue more
+        // writes — pre-latch writes are gated by rl0qz so they don't
+        // advance primary_offset.
         rt.server.replication_runtime_state.ensure_replica(42);
+        for i in 5u64..10 {
+            rt.execute_frame(command(&[b"SET", format!("k{i}").as_bytes(), b"v"]), i);
+        }
         let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 101);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
             unreachable!("expected bulk INFO response");
@@ -19215,11 +19310,11 @@ mod tests {
         let info = String::from_utf8(info_bytes).expect("utf8");
         assert!(
             !info.contains("repl_backlog_histlen:0\r\n"),
-            "expected non-zero histlen post-latch, got: {info}"
+            "expected non-zero histlen post-latch+writes, got: {info}"
         );
         assert!(
             info.contains("repl_backlog_first_byte_offset:1\r\n"),
-            "expected first_byte_offset:1 post-latch, got: {info}"
+            "expected first_byte_offset:1 post-latch+writes, got: {info}"
         );
     }
 
@@ -19227,15 +19322,16 @@ mod tests {
     fn replication_info_reports_byte_offsets() {
         let mut rt = Runtime::default_strict();
 
+        // (frankenredis-rl0qz) Latch BEFORE the write — pre-latch writes
+        // are gated by the no-slaves+no-backlog+no-aof short-circuit and
+        // wouldn't advance the offset. (frankenredis-f82ny) The latch
+        // also flips the display layer over to live counters.
+        rt.server.replication_runtime_state.ensure_replica(42);
         assert_eq!(
             rt.execute_frame(command(&[b"SET", b"rep:key", b"value"]), 0),
             RespFrame::SimpleString("OK".to_string())
         );
         let expected_offset = rt.replication_primary_offset().0;
-        // (frankenredis-f82ny) Trigger the any-replica-ever-connected
-        // latch so the backlog fields surface their running counters
-        // rather than vendored's pre-first-replica 0/0 sentinel.
-        rt.server.replication_runtime_state.ensure_replica(42);
 
         let info = rt.execute_frame(command(&[b"INFO", b"replication"]), 1);
         let RespFrame::BulkString(Some(info_bytes)) = info else {
