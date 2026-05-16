@@ -7613,12 +7613,16 @@ fn xgroup(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
                 subcommand: sub.to_string(),
             });
         }
-        // (br-frankenredis-qcmh)
-        match store.xlen(&argv[2], now_ms) {
-            Ok(0) => return Ok(xgroup_key_required_error()),
-            Ok(_) => {}
-            Err(StoreError::KeyNotFound) => return Ok(xgroup_key_required_error()),
-            Err(err) => return Err(CommandError::Store(err)),
+        // Same dead-code shape as DELCONSUMER (n4g5, supersedes qcmh):
+        // Store::xlen returns Ok(0) for both missing keys AND empty
+        // streams (e.g. created via XGROUP CREATE ... MKSTREAM), so the
+        // xlen probe wrongly emitted "key required" against an empty
+        // stream that vendored accepts. Use Store::key_type instead.
+        // (frankenredis-3vfpi)
+        match store.key_type(&argv[2], now_ms) {
+            None => return Ok(xgroup_key_required_error()),
+            Some("stream") => {}
+            Some(_) => return Err(CommandError::Store(StoreError::WrongType)),
         }
         return match store.xgroup_createconsumer(&argv[2], &argv[3], &argv[4], now_ms) {
             Ok(Some(created)) => Ok(RespFrame::Integer(if created { 1 } else { 0 })),
@@ -36080,6 +36084,80 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // (frankenredis-3vfpi) XGROUP CREATECONSUMER previously probed
+    // store.xlen, which returns Ok(0) for both missing keys and existing
+    // empty streams; an empty stream created by XGROUP CREATE ...
+    // MKSTREAM was therefore misclassified as missing. Pin that
+    // CREATECONSUMER now succeeds against the MKSTREAM-created empty
+    // stream, matching vendored Redis 7.2.4.
+    #[test]
+    fn xgroup_createconsumer_succeeds_on_empty_mkstream_created_stream_3vfpi() {
+        let mut store = Store::new();
+        let create = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATE".to_vec(),
+                b"empty".to_vec(),
+                b"g".to_vec(),
+                b"0".to_vec(),
+                b"MKSTREAM".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup create mkstream");
+        assert_eq!(create, RespFrame::SimpleString("OK".to_string()));
+
+        let created = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"empty".to_vec(),
+                b"g".to_vec(),
+                b"c1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup createconsumer on empty mkstream stream");
+        assert_eq!(created, RespFrame::Integer(1));
+
+        // Subsequent createconsumer on same name still returns 0 (dup).
+        let dup = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"empty".to_vec(),
+                b"g".to_vec(),
+                b"c1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup createconsumer duplicate on empty stream");
+        assert_eq!(dup, RespFrame::Integer(0));
+
+        // Missing-key path still returns the key-required error.
+        let missing = dispatch_argv(
+            &[
+                b"XGROUP".to_vec(),
+                b"CREATECONSUMER".to_vec(),
+                b"never_existed".to_vec(),
+                b"g".to_vec(),
+                b"c1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xgroup createconsumer truly missing key");
+        assert_eq!(
+            missing,
+            RespFrame::Error(
+                "ERR The XGROUP subcommand requires the key to exist. Note that for CREATE you may want to use the MKSTREAM option to create an empty stream automatically.".to_string()
+            )
+        );
     }
 
     // ── String extension command tests ──────────────────────────────────
