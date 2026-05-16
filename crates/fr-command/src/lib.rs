@@ -6238,6 +6238,7 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
     let mut minid_value: Option<StreamId> = None;
     let mut limit: Option<usize> = None;
     let mut limit_given = false;
+    let mut limit_value: i64 = 0;
     let incompat = || {
         RespFrame::Error(
             "ERR syntax error, MAXLEN and MINID options at the same time are not compatible"
@@ -6308,12 +6309,17 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
             continue;
         }
         if eq_ascii_command(tok, b"LIMIT") {
-            if strategy == Strat::None {
-                return Ok(RespFrame::Error(
-                    "ERR syntax error, LIMIT cannot be used without specifying a trimming strategy"
-                        .to_string(),
-                ));
-            }
+            // (frankenredis-5zr5y) Upstream
+            // t_stream.c::streamParseAddOrTrimArgsOrReply parses LIMIT
+            // eagerly (value + bounds check only) and defers the
+            // "without specifying a trimming strategy" / "XTRIM must be
+            // called with a trimming strategy" / "without the special ~
+            // option" diagnostics until after the full arg loop.
+            // The first of those checks is gated on `args->limit`
+            // (long long, C-truthy), so `LIMIT 0` skips it and falls
+            // through to the XTRIM-specific "must be called with a
+            // trimming strategy" wording. fr previously errored eagerly
+            // here on strategy==None and missed both behaviors.
             if i + 1 >= argv.len() {
                 return Err(CommandError::SyntaxError);
             }
@@ -6323,13 +6329,8 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
                     "ERR The LIMIT argument must be >= 0.".to_string(),
                 ));
             }
-            if !approx {
-                return Ok(RespFrame::Error(
-                    "ERR syntax error, LIMIT cannot be used without the special ~ option"
-                        .to_string(),
-                ));
-            }
             limit_given = true;
+            limit_value = n;
             if n != 0 {
                 limit = Some(usize::try_from(n).unwrap_or(usize::MAX));
             }
@@ -6342,8 +6343,24 @@ fn xtrim(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, 
         return Err(CommandError::SyntaxError);
     }
 
+    // (frankenredis-5zr5y) Deferred post-parse diagnostics, in vendored
+    // order (t_stream.c:998-1019). The first check is value-gated to
+    // mirror C's truthy/falsy semantics for `args->limit`.
+    if limit_given && limit_value > 0 && strategy == Strat::None {
+        return Ok(RespFrame::Error(
+            "ERR syntax error, LIMIT cannot be used without specifying a trimming strategy"
+                .to_string(),
+        ));
+    }
     if strategy == Strat::None {
-        return Err(CommandError::SyntaxError);
+        return Ok(RespFrame::Error(
+            "ERR syntax error, XTRIM must be called with a trimming strategy".to_string(),
+        ));
+    }
+    if limit_given && !approx {
+        return Ok(RespFrame::Error(
+            "ERR syntax error, LIMIT cannot be used without the special ~ option".to_string(),
+        ));
     }
     let is_maxlen = strategy == Strat::MaxLen;
 
@@ -30415,6 +30432,81 @@ mod tests {
         assert_eq!(
             reply,
             RespFrame::Error("ERR The LIMIT argument must be >= 0.".to_string())
+        );
+    }
+
+    /// (frankenredis-5zr5y) Vendored XTRIM defers the LIMIT/strategy
+    /// diagnostics to a post-parse pass: `args->limit && no_strategy`
+    /// emits "LIMIT cannot be used without specifying a trimming
+    /// strategy"; `!xadd && no_strategy` emits the XTRIM-specific
+    /// "must be called with a trimming strategy"; `limit_given &&
+    /// !approx` emits "without the special ~ option". The first check
+    /// is C-truthy on the LIMIT value, so `LIMIT 0` skips it and falls
+    /// through to the XTRIM-specific wording. fr previously errored
+    /// eagerly at the LIMIT token whenever strategy was unset and
+    /// always reported the "without strategy" wording.
+    #[test]
+    fn xtrim_limit_zero_without_strategy_returns_xtrim_specific_wording_5zr5y() {
+        let mut store = Store::new();
+        // LIMIT 0 without strategy: vendored falls through to the
+        // XTRIM-specific "must be called with a trimming strategy"
+        // wording because args->limit (0) is falsy.
+        let reply = dispatch_argv(
+            &[
+                b"XTRIM".to_vec(),
+                b"s".to_vec(),
+                b"LIMIT".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xtrim limit 0");
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR syntax error, XTRIM must be called with a trimming strategy".to_string()
+            )
+        );
+        // LIMIT 5 without strategy: vendored fires the value-gated
+        // "without specifying a trimming strategy" wording.
+        let reply = dispatch_argv(
+            &[
+                b"XTRIM".to_vec(),
+                b"s".to_vec(),
+                b"LIMIT".to_vec(),
+                b"5".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xtrim limit 5");
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR syntax error, LIMIT cannot be used without specifying a trimming strategy"
+                    .to_string()
+            )
+        );
+        // MAXLEN 5 LIMIT 0 (no ~): falls to the third diagnostic.
+        let reply = dispatch_argv(
+            &[
+                b"XTRIM".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"5".to_vec(),
+                b"LIMIT".to_vec(),
+                b"0".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xtrim maxlen 5 limit 0");
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR syntax error, LIMIT cannot be used without the special ~ option".to_string()
+            )
         );
     }
 
