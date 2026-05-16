@@ -9515,6 +9515,12 @@ fn json_to_lua_value(s: &str) -> Result<LuaValue, String> {
                     match esc {
                         b'"' => result.push(b'"'),
                         b'\\' => result.push(b'\\'),
+                        // (frankenredis-4h221) lua_cjson unescapes
+                        // `\/` to `/` symmetrically with its always-on
+                        // escape during encode. fr's earlier branch
+                        // dropped through to the catch-all, leaving the
+                        // literal two bytes in the result.
+                        b'/' => result.push(b'/'),
                         b'b' => result.push(0x08),
                         b'f' => result.push(0x0C),
                         b'n' => result.push(b'\n'),
@@ -9684,15 +9690,38 @@ fn split_json_values(s: &str) -> Result<Vec<String>, String> {
             b'[' | b'{' => depth += 1,
             b']' | b'}' => depth -= 1,
             b',' if depth == 0 => {
-                items.push(s[start..i].trim().to_string());
+                // (frankenredis-4h221) Upstream lua_cjson rejects empty
+                // commas at any position (`[1,]`, `[,1]`, `[1,,2]`,
+                // `{"a":1,}`). fr previously emitted Nil for the empty
+                // slice and let the value through. Match vendored by
+                // raising the canonical "Expected value" error.
+                let slice = s[start..i].trim();
+                if slice.is_empty() {
+                    return Err(
+                        "user_script:1: Expected value but found T_COMMA at character 1"
+                            .to_string(),
+                    );
+                }
+                items.push(slice.to_string());
                 start = i + 1;
             }
             _ => {}
         }
     }
-    if start < s.len() {
-        items.push(s[start..].trim().to_string());
+    // (frankenredis-4h221) Trailing comma (`[1,]`, `{"a":1,}`) leaves
+    // `start == s.len()` or a trimmed-empty tail. Reject either case.
+    if start >= s.len() {
+        return Err(
+            "user_script:1: Expected value but found T_COMMA at character 1".to_string(),
+        );
     }
+    let tail = s[start..].trim();
+    if tail.is_empty() {
+        return Err(
+            "user_script:1: Expected value but found T_COMMA at character 1".to_string(),
+        );
+    }
+    items.push(tail.to_string());
     Ok(items)
 }
 
@@ -12925,6 +12954,50 @@ mod tests {
         assert_eq!(
             lua_value_to_json(&LuaValue::Str(b"//".to_vec())).expect("dbl slash"),
             "\"\\/\\/\""
+        );
+    }
+
+    #[test]
+    fn cjson_decode_unescapes_slash_and_rejects_stray_commas_4h221() {
+        // (frankenredis-4h221) cjson.decode parity with vendored:
+        // 1. `\/` unescapes to `/` (symmetric with the always-on
+        //    encode-side escape pinned by frankenredis-t6bqz).
+        // 2. Empty slices around commas (`[1,]`, `[,1]`, `[1,,2]`,
+        //    `{"a":1,}`) must raise — vendored's lua_cjson rejects
+        //    each with "Expected value but found T_COMMA".
+        let mut store = Store::new();
+        // Slash unescape — direct + via decode-then-toString.
+        let frame = eval_script(b"return cjson.decode('\"\\/\"')", &[], &[], &mut store, 0)
+            .expect("slash decode");
+        match frame {
+            RespFrame::BulkString(Some(bytes)) => assert_eq!(bytes, b"/"),
+            other => panic!("expected /, got {other:?}"),
+        }
+        // Strict comma rejection — each variant should round-trip to
+        // `pcall(...)` returning false.
+        for bad in [
+            r#"return tostring(pcall(cjson.decode, '[1,]'))"#,
+            r#"return tostring(pcall(cjson.decode, '[,1]'))"#,
+            r#"return tostring(pcall(cjson.decode, '[1,,2]'))"#,
+            r#"return tostring(pcall(cjson.decode, '{"a":1,}'))"#,
+        ] {
+            let frame = eval_script(bad.as_bytes(), &[], &[], &mut store, 0)
+                .unwrap_or_else(|e| panic!("{bad} unexpected error: {e}"));
+            match frame {
+                RespFrame::BulkString(Some(bytes)) => assert_eq!(
+                    bytes, b"false",
+                    "{bad}: expected pcall to return false (got {})",
+                    String::from_utf8_lossy(&bytes)
+                ),
+                other => panic!("{bad}: expected bulkstring, got {other:?}"),
+            }
+        }
+        // Direct call (no pcall) must surface a Lua error.
+        let err = eval_script(b"return cjson.decode('[1,]')", &[], &[], &mut store, 0)
+            .expect_err("trailing comma direct call must error");
+        assert!(
+            err.contains("Expected value"),
+            "error must mention Expected value: {err}"
         );
     }
 
