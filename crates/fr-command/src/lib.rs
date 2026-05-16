@@ -1232,6 +1232,53 @@ fn command_key_references_with_exact_flags(
         }]));
     }
 
+    // EVAL/EVALSHA/FCALL: upstream commands.def declares keySpec flags as
+    // RW|ACCESS|UPDATE because the script body can arbitrarily mutate the
+    // passed-in keys. The _RO variants are RO|ACCESS. fr already documents
+    // this taxonomy at command_keyspec_notes (bead 5t2pb) for the COMMAND
+    // DOCS notes path — but the GETKEYSANDFLAGS path landed in the generic
+    // derived_flags fallback whose flags string for `eval` contains neither
+    // `readonly` nor `write`, so it returned the default &["access"].
+    // (frankenredis-btf8o)
+    //
+    // Layout: EVAL script numkeys k1..kN a1..aM
+    //         FCALL fnname numkeys k1..kN a1..aM
+    // numkeys is at argv[2]; keys at argv[3..3+numkeys]. validate_numkeys
+    // has already enforced that numkeys parses and fits.
+    if cmd_name.eq_ignore_ascii_case("EVAL")
+        || cmd_name.eq_ignore_ascii_case("EVALSHA")
+        || cmd_name.eq_ignore_ascii_case("FCALL")
+        || cmd_name.eq_ignore_ascii_case("EVAL_RO")
+        || cmd_name.eq_ignore_ascii_case("EVALSHA_RO")
+        || cmd_name.eq_ignore_ascii_case("FCALL_RO")
+    {
+        if argv.len() < 3 {
+            return Ok(None);
+        }
+        let Ok(numkeys_str) = std::str::from_utf8(&argv[2]) else {
+            return Ok(None);
+        };
+        let Ok(numkeys) = numkeys_str.parse::<usize>() else {
+            return Ok(None);
+        };
+        if numkeys == 0 || argv.len() < 3 + numkeys {
+            return Ok(None);
+        }
+        let is_ro = cmd_name.eq_ignore_ascii_case("EVAL_RO")
+            || cmd_name.eq_ignore_ascii_case("EVALSHA_RO")
+            || cmd_name.eq_ignore_ascii_case("FCALL_RO");
+        let flags = if is_ro {
+            KEY_FLAGS_RO_ACCESS
+        } else {
+            KEY_FLAGS_RW_ACCESS_UPDATE
+        };
+        return Ok(Some(
+            (3..3 + numkeys)
+                .map(|index| CommandKeyReference { index, flags })
+                .collect(),
+        ));
+    }
+
     if cmd_name.eq_ignore_ascii_case("XREAD") || cmd_name.eq_ignore_ascii_case("XREADGROUP") {
         let Some(streams_idx) = argv
             .iter()
@@ -55256,6 +55303,110 @@ mod tests {
                     RespFrame::SimpleString("update".to_string()),
                 ])),
             ]))]))
+        );
+    }
+
+    // (frankenredis-btf8o) COMMAND GETKEYSANDFLAGS EVAL previously fell
+    // through to the generic derived_flags path, whose flags string for
+    // `eval` ("noscript stale skip_monitor no_mandatory_keys movablekeys")
+    // contains neither `readonly` nor `write` — so each key wrongly
+    // surfaced just &["access"]. Pin upstream's keyspec taxonomy:
+    // EVAL/EVALSHA/FCALL → RW|access|update; EVAL_RO/EVALSHA_RO/FCALL_RO
+    // → RO|access. Pin both 1-key and 2-key shapes plus the _RO variant.
+    #[test]
+    fn command_getkeysandflags_eval_emits_rw_access_update_per_key_btf8o() {
+        let mut store = Store::new();
+
+        let two_keys = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"EVAL".to_vec(),
+                b"return 1".to_vec(),
+                b"2".to_vec(),
+                b"k1".to_vec(),
+                b"k2".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        let key_block = |name: &[u8]| {
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(name.to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::SimpleString("RW".to_string()),
+                    RespFrame::SimpleString("access".to_string()),
+                    RespFrame::SimpleString("update".to_string()),
+                ])),
+            ]))
+        };
+        assert_eq!(
+            two_keys,
+            RespFrame::Array(Some(vec![key_block(b"k1"), key_block(b"k2")]))
+        );
+
+        let evalsha_one_key = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"EVALSHA".to_vec(),
+                b"deadbeef".to_vec(),
+                b"1".to_vec(),
+                b"only".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            evalsha_one_key,
+            RespFrame::Array(Some(vec![key_block(b"only")]))
+        );
+
+        let eval_ro_one_key = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"EVAL_RO".to_vec(),
+                b"return 1".to_vec(),
+                b"1".to_vec(),
+                b"ro_key".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            eval_ro_one_key,
+            RespFrame::Array(Some(vec![RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"ro_key".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::SimpleString("RO".to_string()),
+                    RespFrame::SimpleString("access".to_string()),
+                ])),
+            ]))]))
+        );
+
+        let fcall_two_keys = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"FCALL".to_vec(),
+                b"myfn".to_vec(),
+                b"2".to_vec(),
+                b"k1".to_vec(),
+                b"k2".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            fcall_two_keys,
+            RespFrame::Array(Some(vec![key_block(b"k1"), key_block(b"k2")]))
         );
     }
 
