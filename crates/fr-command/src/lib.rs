@@ -14216,135 +14216,142 @@ const COMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
 /// common-case introspection clients use; full sub-array fidelity is
 /// out of scope for this bead). (frankenredis-99to6)
 const SUBCOMMAND_TABLE: &[(&str, i64, &str, i64, i64, i64)] = &[
-    ("acl|cat", -2, "noscript loading stale", 0, 0, 0),
-    ("acl|deluser", -3, "admin noscript loading stale", 0, 0, 0),
-    ("acl|dryrun", -4, "admin noscript loading stale", 0, 0, 0),
+    // Within each parent, ordering mirrors vendored Redis 7.2.4's
+    // subcommand-dict iteration order (the order
+    // server.c::commandCommand reaches each entry via
+    // dictGetIterator). For consumers that parse COMMAND INFO
+    // positionally, this must match upstream. Verified by
+    // `redis-cli -p 16380 COMMAND INFO <parent>` sweep against
+    // vendored 7.2.4. (frankenredis-fv0k2)
     ("acl|genpass", -2, "noscript loading stale", 0, 0, 0),
     ("acl|getuser", 3, "admin noscript loading stale", 0, 0, 0),
-    ("acl|help", 2, "loading stale", 0, 0, 0),
-    ("acl|list", 2, "admin noscript loading stale", 0, 0, 0),
-    ("acl|load", 2, "admin noscript loading stale", 0, 0, 0),
-    ("acl|log", -2, "admin noscript loading stale", 0, 0, 0),
     ("acl|save", 2, "admin noscript loading stale", 0, 0, 0),
     ("acl|setuser", -3, "admin noscript loading stale", 0, 0, 0),
-    ("acl|users", 2, "admin noscript loading stale", 0, 0, 0),
     ("acl|whoami", 2, "noscript loading stale", 0, 0, 0),
-    ("client|caching", 3, "noscript loading stale", 0, 0, 0),
-    ("client|getname", 2, "noscript loading stale", 0, 0, 0),
-    ("client|getredir", 2, "noscript loading stale", 0, 0, 0),
+    ("acl|load", 2, "admin noscript loading stale", 0, 0, 0),
+    ("acl|help", 2, "loading stale", 0, 0, 0),
+    ("acl|cat", -2, "noscript loading stale", 0, 0, 0),
+    ("acl|users", 2, "admin noscript loading stale", 0, 0, 0),
+    ("acl|deluser", -3, "admin noscript loading stale", 0, 0, 0),
+    ("acl|dryrun", -4, "admin noscript loading stale", 0, 0, 0),
+    ("acl|list", 2, "admin noscript loading stale", 0, 0, 0),
+    ("acl|log", -2, "admin noscript loading stale", 0, 0, 0),
     ("client|help", 2, "loading stale", 0, 0, 0),
-    ("client|id", 2, "noscript loading stale", 0, 0, 0),
-    ("client|info", 2, "noscript loading stale", 0, 0, 0),
-    ("client|kill", -3, "admin noscript loading stale", 0, 0, 0),
-    ("client|list", -2, "admin noscript loading stale", 0, 0, 0),
     ("client|no-evict", 3, "admin noscript loading stale", 0, 0, 0),
     ("client|no-touch", 3, "noscript loading stale", 0, 0, 0),
-    ("client|pause", -3, "admin noscript loading stale", 0, 0, 0),
-    ("client|reply", 3, "noscript loading stale", 0, 0, 0),
     ("client|setinfo", 4, "noscript loading stale", 0, 0, 0),
-    ("client|setname", 3, "noscript loading stale", 0, 0, 0),
-    ("client|tracking", -3, "noscript loading stale", 0, 0, 0),
+    ("client|kill", -3, "admin noscript loading stale", 0, 0, 0),
+    ("client|list", -2, "admin noscript loading stale", 0, 0, 0),
+    ("client|id", 2, "noscript loading stale", 0, 0, 0),
+    ("client|caching", 3, "noscript loading stale", 0, 0, 0),
+    ("client|reply", 3, "noscript loading stale", 0, 0, 0),
+    ("client|pause", -3, "admin noscript loading stale", 0, 0, 0),
     ("client|trackinginfo", 2, "noscript loading stale", 0, 0, 0),
+    ("client|tracking", -3, "noscript loading stale", 0, 0, 0),
     ("client|unblock", -3, "admin noscript loading stale", 0, 0, 0),
+    ("client|getname", 2, "noscript loading stale", 0, 0, 0),
+    ("client|getredir", 2, "noscript loading stale", 0, 0, 0),
+    ("client|info", 2, "noscript loading stale", 0, 0, 0),
+    ("client|setname", 3, "noscript loading stale", 0, 0, 0),
     ("client|unpause", 2, "admin noscript loading stale", 0, 0, 0),
-    ("cluster|addslots", -3, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|addslotsrange", -4, "admin stale no_async_loading", 0, 0, 0),
     ("cluster|bumpepoch", 2, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|count-failure-reports", 3, "admin stale", 0, 0, 0),
-    ("cluster|countkeysinslot", 3, "stale", 0, 0, 0),
-    ("cluster|delslots", -3, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|delslotsrange", -4, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|failover", -2, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|flushslots", 2, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|forget", 3, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|getkeysinslot", 4, "stale", 0, 0, 0),
-    ("cluster|help", 2, "loading stale", 0, 0, 0),
-    ("cluster|info", 2, "stale", 0, 0, 0),
-    ("cluster|keyslot", 3, "stale", 0, 0, 0),
-    ("cluster|links", 2, "stale", 0, 0, 0),
-    ("cluster|meet", -4, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|myid", 2, "stale", 0, 0, 0),
     ("cluster|myshardid", 2, "stale", 0, 0, 0),
-    ("cluster|nodes", 2, "stale", 0, 0, 0),
-    ("cluster|replicas", 3, "admin stale", 0, 0, 0),
-    ("cluster|replicate", 3, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|reset", -2, "admin noscript stale", 0, 0, 0),
     ("cluster|saveconfig", 2, "admin stale no_async_loading", 0, 0, 0),
     ("cluster|set-config-epoch", 3, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|setslot", -4, "admin stale no_async_loading", 0, 0, 0),
-    ("cluster|shards", 2, "loading stale", 0, 0, 0),
-    ("cluster|slaves", 3, "admin stale", 0, 0, 0),
     ("cluster|slots", 2, "loading stale", 0, 0, 0),
-    ("command|count", 2, "loading stale", 0, 0, 0),
+    ("cluster|count-failure-reports", 3, "admin stale", 0, 0, 0),
+    ("cluster|help", 2, "loading stale", 0, 0, 0),
+    ("cluster|reset", -2, "admin noscript stale", 0, 0, 0),
+    ("cluster|replicas", 3, "admin stale", 0, 0, 0),
+    ("cluster|countkeysinslot", 3, "stale", 0, 0, 0),
+    ("cluster|links", 2, "stale", 0, 0, 0),
+    ("cluster|replicate", 3, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|forget", 3, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|keyslot", 3, "stale", 0, 0, 0),
+    ("cluster|flushslots", 2, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|addslots", -3, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|addslotsrange", -4, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|myid", 2, "stale", 0, 0, 0),
+    ("cluster|getkeysinslot", 4, "stale", 0, 0, 0),
+    ("cluster|meet", -4, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|info", 2, "stale", 0, 0, 0),
+    ("cluster|shards", 2, "loading stale", 0, 0, 0),
+    ("cluster|nodes", 2, "stale", 0, 0, 0),
+    ("cluster|delslots", -3, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|setslot", -4, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|delslotsrange", -4, "admin stale no_async_loading", 0, 0, 0),
+    ("cluster|slaves", 3, "admin stale", 0, 0, 0),
+    ("cluster|failover", -2, "admin stale no_async_loading", 0, 0, 0),
     ("command|docs", -2, "loading stale", 0, 0, 0),
-    ("command|getkeys", -3, "loading stale", 0, 0, 0),
-    ("command|getkeysandflags", -3, "loading stale", 0, 0, 0),
     ("command|help", 2, "loading stale", 0, 0, 0),
+    ("command|count", 2, "loading stale", 0, 0, 0),
+    ("command|getkeys", -3, "loading stale", 0, 0, 0),
     ("command|info", -2, "loading stale", 0, 0, 0),
     ("command|list", -2, "loading stale", 0, 0, 0),
-    ("config|get", -3, "admin noscript loading stale", 0, 0, 0),
-    ("config|help", 2, "loading stale", 0, 0, 0),
-    ("config|resetstat", 2, "admin noscript loading stale", 0, 0, 0),
+    ("command|getkeysandflags", -3, "loading stale", 0, 0, 0),
     ("config|rewrite", 2, "admin noscript loading stale", 0, 0, 0),
+    ("config|resetstat", 2, "admin noscript loading stale", 0, 0, 0),
+    ("config|help", 2, "loading stale", 0, 0, 0),
+    ("config|get", -3, "admin noscript loading stale", 0, 0, 0),
     ("config|set", -4, "admin noscript loading stale", 0, 0, 0),
-    ("function|delete", 3, "write noscript", 0, 0, 0),
-    ("function|dump", 2, "noscript", 0, 0, 0),
-    ("function|flush", -2, "write noscript", 0, 0, 0),
-    ("function|help", 2, "loading stale", 0, 0, 0),
-    ("function|kill", 2, "noscript allow_busy", 0, 0, 0),
-    ("function|list", -2, "noscript", 0, 0, 0),
-    ("function|load", -3, "write denyoom noscript", 0, 0, 0),
     ("function|restore", -3, "write denyoom noscript", 0, 0, 0),
+    ("function|help", 2, "loading stale", 0, 0, 0),
+    ("function|dump", 2, "noscript", 0, 0, 0),
+    ("function|delete", 3, "write noscript", 0, 0, 0),
+    ("function|load", -3, "write denyoom noscript", 0, 0, 0),
+    ("function|flush", -2, "write noscript", 0, 0, 0),
+    ("function|list", -2, "noscript", 0, 0, 0),
+    ("function|kill", 2, "noscript allow_busy", 0, 0, 0),
     ("function|stats", 2, "noscript allow_busy", 0, 0, 0),
-    ("latency|doctor", 2, "admin noscript loading stale", 0, 0, 0),
     ("latency|graph", 3, "admin noscript loading stale", 0, 0, 0),
     ("latency|help", 2, "loading stale", 0, 0, 0),
     ("latency|histogram", -2, "admin noscript loading stale", 0, 0, 0),
     ("latency|history", 3, "admin noscript loading stale", 0, 0, 0),
-    ("latency|latest", 2, "admin noscript loading stale", 0, 0, 0),
     ("latency|reset", -2, "admin noscript loading stale", 0, 0, 0),
+    ("latency|doctor", 2, "admin noscript loading stale", 0, 0, 0),
+    ("latency|latest", 2, "admin noscript loading stale", 0, 0, 0),
     ("memory|doctor", 2, "", 0, 0, 0),
-    ("memory|help", 2, "loading stale", 0, 0, 0),
     ("memory|malloc-stats", 2, "", 0, 0, 0),
-    ("memory|purge", 2, "", 0, 0, 0),
-    ("memory|stats", 2, "", 0, 0, 0),
+    ("memory|help", 2, "loading stale", 0, 0, 0),
     ("memory|usage", -3, "readonly", 2, 2, 1),
+    ("memory|stats", 2, "", 0, 0, 0),
+    ("memory|purge", 2, "", 0, 0, 0),
     ("module|help", 2, "loading stale", 0, 0, 0),
-    ("module|list", 2, "admin noscript", 0, 0, 0),
     ("module|load", -3, "admin noscript no_async_loading", 0, 0, 0),
+    ("module|list", 2, "admin noscript", 0, 0, 0),
     ("module|loadex", -3, "admin noscript no_async_loading", 0, 0, 0),
     ("module|unload", 3, "admin noscript no_async_loading", 0, 0, 0),
-    ("object|encoding", 3, "readonly", 2, 2, 1),
-    ("object|freq", 3, "readonly", 2, 2, 1),
     ("object|help", 2, "loading stale", 0, 0, 0),
     ("object|idletime", 3, "readonly", 2, 2, 1),
     ("object|refcount", 3, "readonly", 2, 2, 1),
+    ("object|freq", 3, "readonly", 2, 2, 1),
+    ("object|encoding", 3, "readonly", 2, 2, 1),
+    ("pubsub|numsub", -2, "pubsub loading stale", 0, 0, 0),
+    ("pubsub|numpat", 2, "pubsub loading stale", 0, 0, 0),
     ("pubsub|channels", -2, "pubsub loading stale", 0, 0, 0),
     ("pubsub|help", 2, "loading stale", 0, 0, 0),
-    ("pubsub|numpat", 2, "pubsub loading stale", 0, 0, 0),
-    ("pubsub|numsub", -2, "pubsub loading stale", 0, 0, 0),
-    ("pubsub|shardchannels", -2, "pubsub loading stale", 0, 0, 0),
     ("pubsub|shardnumsub", -2, "pubsub loading stale", 0, 0, 0),
+    ("pubsub|shardchannels", -2, "pubsub loading stale", 0, 0, 0),
     ("script|debug", 3, "noscript", 0, 0, 0),
-    ("script|exists", -3, "noscript", 0, 0, 0),
     ("script|flush", -2, "noscript", 0, 0, 0),
+    ("script|exists", -3, "noscript", 0, 0, 0),
     ("script|help", 2, "loading stale", 0, 0, 0),
-    ("script|kill", 2, "noscript allow_busy", 0, 0, 0),
     ("script|load", 3, "noscript stale", 0, 0, 0),
-    ("slowlog|get", -2, "admin loading stale", 0, 0, 0),
-    ("slowlog|help", 2, "loading stale", 0, 0, 0),
+    ("script|kill", 2, "noscript allow_busy", 0, 0, 0),
     ("slowlog|len", 2, "admin loading stale", 0, 0, 0),
+    ("slowlog|help", 2, "loading stale", 0, 0, 0),
     ("slowlog|reset", 2, "admin loading stale", 0, 0, 0),
-    ("xgroup|create", -5, "write denyoom", 2, 2, 1),
+    ("slowlog|get", -2, "admin loading stale", 0, 0, 0),
     ("xgroup|createconsumer", 5, "write denyoom", 2, 2, 1),
-    ("xgroup|delconsumer", 5, "write", 2, 2, 1),
     ("xgroup|destroy", 4, "write", 2, 2, 1),
-    ("xgroup|help", 2, "loading stale", 0, 0, 0),
+    ("xgroup|create", -5, "write denyoom", 2, 2, 1),
     ("xgroup|setid", -5, "write", 2, 2, 1),
+    ("xgroup|help", 2, "loading stale", 0, 0, 0),
+    ("xgroup|delconsumer", 5, "write", 2, 2, 1),
+    ("xinfo|stream", -3, "readonly", 2, 2, 1),
+    ("xinfo|help", 2, "loading stale", 0, 0, 0),
     ("xinfo|consumers", 4, "readonly", 2, 2, 1),
     ("xinfo|groups", 3, "readonly", 2, 2, 1),
-    ("xinfo|help", 2, "loading stale", 0, 0, 0),
-    ("xinfo|stream", -3, "readonly", 2, 2, 1),
 ];
 
 /// Check if the argument count (including command name) satisfies the command's arity.
@@ -16269,7 +16276,8 @@ fn command_docs_entry(
     // arguments. RESP2 wire: flat 2N alternating array of (name, docs);
     // RESP3 wire: Map keyed by subcommand fullname → its docs map.
     // Upstream server.c::commandDocsCommand uses dictGetIterator order
-    // for subcommands — fr's SUBCOMMAND_TABLE is sorted alphabetically.
+    // for subcommands; (frankenredis-fv0k2) SUBCOMMAND_TABLE entries are
+    // now ordered to match upstream's dict iteration order verbatim.
     let subcommands = command_docs_subcommands(name, resp_protocol_version);
     if !subcommands.is_empty() {
         entry.push(hello_bulk("subcommands"));
@@ -63692,29 +63700,11 @@ mod tests {
                 ])),
                 RespFrame::Array(Some(vec![hello_bulk("nondeterministic_output_order")])),
                 RespFrame::Array(Some(Vec::new())),
-                // (frankenredis-o3xwt) Subcommand emission now filters
-                // SUBCOMMAND_TABLE for command|*, which iterates the
-                // alphabetically-sorted table. Order: count, docs,
-                // getkeys, getkeysandflags, help, info, list.
+                // (frankenredis-fv0k2) Subcommand emission filters
+                // SUBCOMMAND_TABLE for command|*, which mirrors vendored
+                // Redis 7.2.4 subcommand-dict iteration order verbatim:
+                // docs, help, count, getkeys, info, list, getkeysandflags.
                 RespFrame::Array(Some(vec![
-                    RespFrame::Array(Some(vec![
-                        hello_bulk("command|count"),
-                        RespFrame::Integer(2),
-                        RespFrame::Array(Some(vec![
-                            hello_simple("loading"),
-                            hello_simple("stale"),
-                        ])),
-                        RespFrame::Integer(0),
-                        RespFrame::Integer(0),
-                        RespFrame::Integer(0),
-                        RespFrame::Array(Some(vec![
-                            hello_simple("@slow"),
-                            hello_simple("@connection"),
-                        ])),
-                        RespFrame::Array(Some(Vec::new())),
-                        RespFrame::Array(Some(Vec::new())),
-                        RespFrame::Array(Some(Vec::new())),
-                    ])),
                     RespFrame::Array(Some(vec![
                         hello_bulk("command|docs"),
                         RespFrame::Integer(-2),
@@ -63734,44 +63724,44 @@ mod tests {
                         RespFrame::Array(Some(Vec::new())),
                     ])),
                     RespFrame::Array(Some(vec![
-                        hello_bulk("command|getkeys"),
-                        RespFrame::Integer(-3),
-                        RespFrame::Array(Some(vec![
-                            hello_simple("loading"),
-                            hello_simple("stale"),
-                        ])),
-                        RespFrame::Integer(0),
-                        RespFrame::Integer(0),
-                        RespFrame::Integer(0),
-                        RespFrame::Array(Some(vec![
-                            hello_simple("@slow"),
-                            hello_simple("@connection"),
-                        ])),
-                        RespFrame::Array(Some(Vec::new())),
-                        RespFrame::Array(Some(Vec::new())),
-                        RespFrame::Array(Some(Vec::new())),
-                    ])),
-                    RespFrame::Array(Some(vec![
-                        hello_bulk("command|getkeysandflags"),
-                        RespFrame::Integer(-3),
-                        RespFrame::Array(Some(vec![
-                            hello_simple("loading"),
-                            hello_simple("stale"),
-                        ])),
-                        RespFrame::Integer(0),
-                        RespFrame::Integer(0),
-                        RespFrame::Integer(0),
-                        RespFrame::Array(Some(vec![
-                            hello_simple("@slow"),
-                            hello_simple("@connection"),
-                        ])),
-                        RespFrame::Array(Some(Vec::new())),
-                        RespFrame::Array(Some(Vec::new())),
-                        RespFrame::Array(Some(Vec::new())),
-                    ])),
-                    RespFrame::Array(Some(vec![
                         hello_bulk("command|help"),
                         RespFrame::Integer(2),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("loading"),
+                            hello_simple("stale"),
+                        ])),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("@slow"),
+                            hello_simple("@connection"),
+                        ])),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("command|count"),
+                        RespFrame::Integer(2),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("loading"),
+                            hello_simple("stale"),
+                        ])),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("@slow"),
+                            hello_simple("@connection"),
+                        ])),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("command|getkeys"),
+                        RespFrame::Integer(-3),
                         RespFrame::Array(Some(vec![
                             hello_simple("loading"),
                             hello_simple("stale"),
@@ -63820,6 +63810,24 @@ mod tests {
                             hello_simple("@connection"),
                         ])),
                         RespFrame::Array(Some(vec![hello_bulk("nondeterministic_output_order")])),
+                        RespFrame::Array(Some(Vec::new())),
+                        RespFrame::Array(Some(Vec::new())),
+                    ])),
+                    RespFrame::Array(Some(vec![
+                        hello_bulk("command|getkeysandflags"),
+                        RespFrame::Integer(-3),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("loading"),
+                            hello_simple("stale"),
+                        ])),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Integer(0),
+                        RespFrame::Array(Some(vec![
+                            hello_simple("@slow"),
+                            hello_simple("@connection"),
+                        ])),
+                        RespFrame::Array(Some(Vec::new())),
                         RespFrame::Array(Some(Vec::new())),
                         RespFrame::Array(Some(Vec::new())),
                     ])),
@@ -65202,33 +65210,42 @@ mod tests {
     /// (frankenredis-o3xwt) Container parents (xinfo, xgroup, object,
     /// command) now emit subcommand entries via SUBCOMMAND_TABLE filter.
     /// Pre-fix: only `command` emitted subcommand entries (hand-listed).
-    /// This test pins the subcommand-name set per parent. Order is the
-    /// alphabetical SUBCOMMAND_TABLE order; upstream uses dict-hash
-    /// iteration which differs but the content is the same.
+    /// (frankenredis-fv0k2) Order now matches vendored Redis 7.2.4's
+    /// subcommand-dict iteration order (server.c::commandCommand uses
+    /// dictGetIterator). Verified by `redis-cli COMMAND INFO <parent>`
+    /// against vendored 7.2.4.
     #[test]
     fn command_info_container_parents_emit_subcommand_entries() {
         let mut store = Store::new();
         let cases: &[(&str, &[&str])] = &[
-            ("XINFO", &["xinfo|consumers", "xinfo|groups", "xinfo|help", "xinfo|stream"]),
+            (
+                "XINFO",
+                &[
+                    "xinfo|stream",
+                    "xinfo|help",
+                    "xinfo|consumers",
+                    "xinfo|groups",
+                ],
+            ),
             (
                 "XGROUP",
                 &[
-                    "xgroup|create",
                     "xgroup|createconsumer",
-                    "xgroup|delconsumer",
                     "xgroup|destroy",
-                    "xgroup|help",
+                    "xgroup|create",
                     "xgroup|setid",
+                    "xgroup|help",
+                    "xgroup|delconsumer",
                 ],
             ),
             (
                 "OBJECT",
                 &[
-                    "object|encoding",
-                    "object|freq",
                     "object|help",
                     "object|idletime",
                     "object|refcount",
+                    "object|freq",
+                    "object|encoding",
                 ],
             ),
         ];
@@ -65275,6 +65292,264 @@ mod tests {
             let expected_names: Vec<String> =
                 expected_subs.iter().map(|s| (*s).to_string()).collect();
             assert_eq!(actual_names, expected_names, "{cmd} subcommand names");
+        }
+    }
+
+    /// (frankenredis-fv0k2) COMMAND INFO emits subcommands per parent in
+    /// the same order vendored Redis 7.2.4 does — that order is dict
+    /// iteration of each container's subcommand_dict, which is stable
+    /// per build. Differential probe captured this verbatim from
+    /// `redis-cli -p 16380 COMMAND INFO <parent>` against vendored
+    /// 7.2.4; pre-fix fr emitted alphabetical SUBCOMMAND_TABLE order.
+    /// This test pins all 15 parent containers so any future reorder
+    /// regresses immediately.
+    #[test]
+    fn command_info_subcommand_order_matches_vendored_redis_7_2_4_fv0k2() {
+        let mut store = Store::new();
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "ACL",
+                &[
+                    "acl|genpass",
+                    "acl|getuser",
+                    "acl|save",
+                    "acl|setuser",
+                    "acl|whoami",
+                    "acl|load",
+                    "acl|help",
+                    "acl|cat",
+                    "acl|users",
+                    "acl|deluser",
+                    "acl|dryrun",
+                    "acl|list",
+                    "acl|log",
+                ],
+            ),
+            (
+                "CLIENT",
+                &[
+                    "client|help",
+                    "client|no-evict",
+                    "client|no-touch",
+                    "client|setinfo",
+                    "client|kill",
+                    "client|list",
+                    "client|id",
+                    "client|caching",
+                    "client|reply",
+                    "client|pause",
+                    "client|trackinginfo",
+                    "client|tracking",
+                    "client|unblock",
+                    "client|getname",
+                    "client|getredir",
+                    "client|info",
+                    "client|setname",
+                    "client|unpause",
+                ],
+            ),
+            (
+                "CLUSTER",
+                &[
+                    "cluster|bumpepoch",
+                    "cluster|myshardid",
+                    "cluster|saveconfig",
+                    "cluster|set-config-epoch",
+                    "cluster|slots",
+                    "cluster|count-failure-reports",
+                    "cluster|help",
+                    "cluster|reset",
+                    "cluster|replicas",
+                    "cluster|countkeysinslot",
+                    "cluster|links",
+                    "cluster|replicate",
+                    "cluster|forget",
+                    "cluster|keyslot",
+                    "cluster|flushslots",
+                    "cluster|addslots",
+                    "cluster|addslotsrange",
+                    "cluster|myid",
+                    "cluster|getkeysinslot",
+                    "cluster|meet",
+                    "cluster|info",
+                    "cluster|shards",
+                    "cluster|nodes",
+                    "cluster|delslots",
+                    "cluster|setslot",
+                    "cluster|delslotsrange",
+                    "cluster|slaves",
+                    "cluster|failover",
+                ],
+            ),
+            (
+                "COMMAND",
+                &[
+                    "command|docs",
+                    "command|help",
+                    "command|count",
+                    "command|getkeys",
+                    "command|info",
+                    "command|list",
+                    "command|getkeysandflags",
+                ],
+            ),
+            (
+                "CONFIG",
+                &[
+                    "config|rewrite",
+                    "config|resetstat",
+                    "config|help",
+                    "config|get",
+                    "config|set",
+                ],
+            ),
+            (
+                "FUNCTION",
+                &[
+                    "function|restore",
+                    "function|help",
+                    "function|dump",
+                    "function|delete",
+                    "function|load",
+                    "function|flush",
+                    "function|list",
+                    "function|kill",
+                    "function|stats",
+                ],
+            ),
+            (
+                "LATENCY",
+                &[
+                    "latency|graph",
+                    "latency|help",
+                    "latency|histogram",
+                    "latency|history",
+                    "latency|reset",
+                    "latency|doctor",
+                    "latency|latest",
+                ],
+            ),
+            (
+                "MEMORY",
+                &[
+                    "memory|doctor",
+                    "memory|malloc-stats",
+                    "memory|help",
+                    "memory|usage",
+                    "memory|stats",
+                    "memory|purge",
+                ],
+            ),
+            (
+                "MODULE",
+                &[
+                    "module|help",
+                    "module|load",
+                    "module|list",
+                    "module|loadex",
+                    "module|unload",
+                ],
+            ),
+            (
+                "OBJECT",
+                &[
+                    "object|help",
+                    "object|idletime",
+                    "object|refcount",
+                    "object|freq",
+                    "object|encoding",
+                ],
+            ),
+            (
+                "PUBSUB",
+                &[
+                    "pubsub|numsub",
+                    "pubsub|numpat",
+                    "pubsub|channels",
+                    "pubsub|help",
+                    "pubsub|shardnumsub",
+                    "pubsub|shardchannels",
+                ],
+            ),
+            (
+                "SCRIPT",
+                &[
+                    "script|debug",
+                    "script|flush",
+                    "script|exists",
+                    "script|help",
+                    "script|load",
+                    "script|kill",
+                ],
+            ),
+            (
+                "SLOWLOG",
+                &[
+                    "slowlog|len",
+                    "slowlog|help",
+                    "slowlog|reset",
+                    "slowlog|get",
+                ],
+            ),
+            (
+                "XGROUP",
+                &[
+                    "xgroup|createconsumer",
+                    "xgroup|destroy",
+                    "xgroup|create",
+                    "xgroup|setid",
+                    "xgroup|help",
+                    "xgroup|delconsumer",
+                ],
+            ),
+            (
+                "XINFO",
+                &[
+                    "xinfo|stream",
+                    "xinfo|help",
+                    "xinfo|consumers",
+                    "xinfo|groups",
+                ],
+            ),
+        ];
+        for (cmd, expected) in cases {
+            let r = dispatch_argv(
+                &[
+                    b"COMMAND".to_vec(),
+                    b"INFO".to_vec(),
+                    cmd.as_bytes().to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .unwrap_or_else(|_| panic!("COMMAND INFO {cmd}"));
+            let RespFrame::Array(Some(rows)) = r else {
+                panic!("expected Array reply for {cmd}");
+            };
+            let RespFrame::Array(Some(fields)) = rows
+                .into_iter()
+                .next()
+                .expect("expected one row for parent")
+            else {
+                panic!("expected per-command Array for {cmd}");
+            };
+            let RespFrame::Array(Some(subs)) = &fields[9] else {
+                panic!("{cmd} expected subcommands Array at index 9");
+            };
+            let actual: Vec<String> = subs
+                .iter()
+                .map(|sub| {
+                    let RespFrame::Array(Some(sub_fields)) = sub else {
+                        panic!("{cmd} subcommand entry not Array");
+                    };
+                    let RespFrame::BulkString(Some(name)) = &sub_fields[0] else {
+                        panic!("{cmd} subcommand[0] not BulkString");
+                    };
+                    String::from_utf8_lossy(name).to_string()
+                })
+                .collect();
+            let want: Vec<String> = expected.iter().map(|s| (*s).to_string()).collect();
+            assert_eq!(actual, want, "{cmd} subcommand order mismatch");
         }
     }
 

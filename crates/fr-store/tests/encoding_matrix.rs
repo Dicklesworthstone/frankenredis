@@ -232,8 +232,10 @@ fn list_encoding_listpack_for_values_above_legacy_per_value_cap() {
     assert_eq!(store.object_encoding(b"l", NOW), Some("listpack"));
 
     // Cranking the spurious config low has no effect — byte-budget
-    // alone is authoritative.
-    store.list_max_listpack_value = 1;
+    // alone is authoritative. (Pre-frankenredis-10lqb fr exposed a
+    // list_max_listpack_value field; that knob was removed because
+    // upstream's quicklist code path never consults it for the
+    // listpack→quicklist transition.)
     assert_eq!(store.object_encoding(b"l", NOW), Some("listpack"));
 }
 
