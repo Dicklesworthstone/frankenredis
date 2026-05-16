@@ -597,6 +597,21 @@ fn command_uses_custom_key_specs(cmd_name: &str) -> bool {
 }
 
 fn command_has_keys(cmd_name: &str) -> bool {
+    // SSUBSCRIBE/SUNSUBSCRIBE/SPUBLISH (shard pub/sub) declare a positional
+    // key_spec in commands.def but tag it with the NOT_KEY flag — the arg is
+    // a shard channel, not a keyspace key. Upstream's commandHasKeys() walks
+    // key_specs and skips entries flagged NOT_KEY, so COMMAND GETKEYS /
+    // GETKEYSANDFLAGS for these surfaces "The command has no key arguments"
+    // even though COMMAND INFO still reports first_key=1. fr's COMMAND_TABLE
+    // sets first_key=1 to keep the COMMAND INFO output consistent with
+    // vendored, so we filter the NOT_KEY-only commands here.
+    // (frankenredis-flfef)
+    if cmd_name.eq_ignore_ascii_case("SSUBSCRIBE")
+        || cmd_name.eq_ignore_ascii_case("SUNSUBSCRIBE")
+        || cmd_name.eq_ignore_ascii_case("SPUBLISH")
+    {
+        return false;
+    }
     command_uses_custom_key_specs(cmd_name)
         || COMMAND_TABLE
             .iter()
@@ -55799,6 +55814,63 @@ mod tests {
                 key_block(b"b", &["RO", "access"]),
             ]))
         );
+    }
+
+    // (frankenredis-flfef) SSUBSCRIBE/SUNSUBSCRIBE/SPUBLISH declare a
+    // NOT_KEY key_spec upstream; commandHasKeys() returns false because
+    // the positional arg is a shard channel, not a keyspace key. fr's
+    // COMMAND_TABLE keeps first_key=1 (so COMMAND INFO still reports the
+    // keyspec) and command_has_keys() now special-cases these three.
+    // Pin both GETKEYS and GETKEYSANDFLAGS, plus SPUBLISH's normal
+    // arity-3 form.
+    #[test]
+    fn command_getkeys_for_shard_pubsub_reports_no_key_arguments_flfef() {
+        let mut store = Store::new();
+        let no_keys_err = RespFrame::Error("ERR The command has no key arguments".to_string());
+
+        for argv in [
+            vec![
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"SPUBLISH".to_vec(),
+                b"ch".to_vec(),
+                b"msg".to_vec(),
+            ],
+            vec![
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"SPUBLISH".to_vec(),
+                b"ch".to_vec(),
+                b"msg".to_vec(),
+            ],
+            vec![
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"SSUBSCRIBE".to_vec(),
+                b"ch".to_vec(),
+            ],
+            vec![
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"SSUBSCRIBE".to_vec(),
+                b"ch".to_vec(),
+            ],
+            vec![
+                b"COMMAND".to_vec(),
+                b"GETKEYS".to_vec(),
+                b"SUNSUBSCRIBE".to_vec(),
+                b"ch".to_vec(),
+            ],
+            vec![
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"SUNSUBSCRIBE".to_vec(),
+                b"ch".to_vec(),
+            ],
+        ] {
+            let out = dispatch_argv(&argv, &mut store, 0).unwrap();
+            assert_eq!(out, no_keys_err, "argv={:?}", argv);
+        }
     }
 
     #[test]
