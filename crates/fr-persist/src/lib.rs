@@ -1856,8 +1856,16 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
 
         let mut emitted_match = false;
         if let Some(r) = ref_idx {
+            // (frankenredis-z4tsz) Mirror vendored lzf_c.c:164 which
+            // requires `ref > (u8 *)in_data` — the back-reference must
+            // be STRICTLY greater than the input start. Without this,
+            // fr emits a tighter LZF stream than vendored for inputs
+            // whose first trigram repeats at position 1 (e.g. all-'x'
+            // payloads), producing a valid-but-different compressed
+            // wire form and a divergent DEBUG OBJECT serializedlength.
             // off = ip - ref - 1, must be in 0..MAX_OFF.
-            if r < ip
+            if r > 0
+                && r < ip
                 && ip - r - 1 < MAX_OFF
                 && r + 2 < in_len
                 && input[r] == input[ip]
@@ -1865,7 +1873,14 @@ pub fn lzf_compress(input: &[u8], out_budget: usize) -> Option<Vec<u8>> {
                 && input[r + 2] == input[ip + 2]
             {
                 let off = ip - r - 1;
-                let max_len = std::cmp::min(MAX_REF, in_len - ip);
+                // (frankenredis-z4tsz) Mirror vendored lzf_c.c:175 which
+                // caps maxlen at `in_end - ip - 2`, leaving 2 trailing
+                // bytes for the closing literal run. Without this, fr
+                // matches all the way to the end, producing a shorter
+                // (but still valid) LZF stream that diverges from
+                // vendored's wire form. `ip + 2 < in_len` guarantees
+                // `in_len - ip - 2 > 0`.
+                let max_len = std::cmp::min(MAX_REF, in_len - ip - 2);
                 let mut match_len = 3;
                 while match_len < max_len && input[r + match_len] == input[ip + match_len] {
                     match_len += 1;
@@ -3910,6 +3925,27 @@ mod tests {
             compressed.is_none(),
             "incompressible 20-byte payload should fail to fit in budget {}",
             payload.len() - 4
+        );
+    }
+
+    #[test]
+    fn lzf_compress_matches_vendored_wire_format_for_all_xs_z4tsz() {
+        // (frankenredis-z4tsz) Vendored lzf_c.c emits an LZF stream that
+        // differs from a tighter encoder for all-repeating inputs because:
+        //   (a) line 164 requires ref > in_data — no back-reference to the
+        //       very first byte, so position 1 can't match position 0; and
+        //   (b) line 175 caps maxlen at in_end - ip - len (i.e. - 2), so
+        //       the trailing 2 bytes always land in a literal run.
+        // For input "x" * 30, vendored emits exactly:
+        //   01 78 78 e0 11 00 01 78 78  (9 bytes)
+        // i.e. [literal-2, 'x', 'x', long-match-26, literal-2, 'x', 'x'].
+        let input: Vec<u8> = vec![b'x'; 30];
+        let out = lzf_compress(&input, input.len() - 4)
+            .expect("compression of 30 x's must succeed");
+        assert_eq!(
+            out,
+            vec![0x01, b'x', b'x', 0xe0, 0x11, 0x00, 0x01, b'x', b'x'],
+            "fr LZF wire form must match vendored byte-for-byte for 'x' * 30",
         );
     }
 
