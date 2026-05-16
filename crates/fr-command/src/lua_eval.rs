@@ -3658,10 +3658,12 @@ impl<'a> LuaState<'a> {
                         // (frankenredis-md71j) Mirror Lua 5.1's "attempt to
                         // index a TYPE value" wording for the receiver-side
                         // index failure of `obj:m()` against nil/bool/etc.
-                        return Err(format!(
-                            "user_script:1: attempt to index a {} value",
-                            obj.type_name()
-                        ));
+                        // (frankenredis-aaudb) Route through
+                        // type_error_with_label so the receiver accessor
+                        // (local 'x' / field 'f' / etc.) is preserved —
+                        // upstream emits the indexing error here BEFORE
+                        // attempting the call, with full accessor context.
+                        return Err(self.type_error_with_label("index", obj_expr, &obj, env));
                     }
                 };
                 let mut arg_vals = vec![obj.clone()];
@@ -3825,7 +3827,14 @@ impl<'a> LuaState<'a> {
                             // single-call MethodCall arm above.
                             LuaValue::Str(_) => self
                                 .lookup_string_field(&LuaValue::Str(method.as_bytes().to_vec())),
-                            _ => LuaValue::Nil,
+                            // (frankenredis-aaudb) Non-table receivers
+                            // fail at the index step BEFORE the call —
+                            // mirror upstream's accessor-aware
+                            // "attempt to index local 'x' (a TYPE value)".
+                            _ => {
+                                return Err(self
+                                    .type_error_with_label("index", obj_expr, &obj, env));
+                            }
                         };
                         let mut arg_vals = vec![obj];
                         arg_vals.extend(self.eval_call_args(call_args, env, varargs)?);
@@ -15339,6 +15348,56 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn method_call_non_table_receiver_errors_at_index_step_aaudb() {
+        // (frankenredis-aaudb) Upstream Lua 5.1 grammar: `x:foo(...)`
+        // is sugar for `x.foo(x, ...)`. Indexing x with "foo" happens
+        // FIRST — if x isn't a table (and has no __index meta), the
+        // indexing step fails before the call is attempted. The error
+        // carries the receiver's accessor context.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                b"local x = 1; x:foo()",
+                "user_script:1: attempt to index local 'x' (a number value)",
+            ),
+            (
+                b"local x = nil; x:foo()",
+                "user_script:1: attempt to index local 'x' (a nil value)",
+            ),
+            (
+                b"local x = true; x:foo()",
+                "user_script:1: attempt to index local 'x' (a boolean value)",
+            ),
+            (
+                b"local t = {a = 1}; t.a:foo()",
+                "user_script:1: attempt to index field 'a' (a number value)",
+            ),
+        ];
+        for (body, expected) in cases {
+            let err = eval_script(body, &[], &[], &mut store, 0).unwrap_err();
+            assert!(
+                err.contains(expected),
+                "body={:?} got {err:?}",
+                String::from_utf8_lossy(body)
+            );
+        }
+
+        // Sanity: Table receivers with missing method key continue to
+        // emit "attempt to call method 'm' (a nil value)" — that's the
+        // correct path because indexing the table succeeds (returns nil)
+        // and the CALL step is what fails.
+        let err = eval_script(b"local t = {}; t:m()", &[], &[], &mut store, 0).unwrap_err();
+        assert!(
+            err.contains("attempt to call method 'm' (a nil value)"),
+            "got {err:?}"
+        );
+
+        // Sanity: String receivers route through the string library.
+        let frame = eval_script(b"return ('abc'):upper()", &[], &[], &mut store, 0).unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"ABC".to_vec())));
     }
 
     #[test]
