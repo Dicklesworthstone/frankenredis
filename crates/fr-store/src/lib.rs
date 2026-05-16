@@ -614,6 +614,14 @@ struct Entry {
     /// Likewise, once a set is promoted to hashtable, later removals
     /// do not compact it back to listpack or intset.
     force_set_hashtable_encoding: bool,
+    /// (frankenredis-yp503) Same one-way promotion as sets: once a hash
+    /// exceeds hash-max-listpack-entries/value, the encoding sticks at
+    /// `hashtable` even if a later CONFIG SET raises the threshold above
+    /// the current size or fields are deleted.
+    force_hash_hashtable_encoding: bool,
+    /// (frankenredis-yp503) Same one-way promotion for sorted sets:
+    /// once promoted to skiplist, never demoted back to listpack.
+    force_zset_skiplist_encoding: bool,
 }
 
 /// Upstream evict.h::LFU_INIT_VAL. Newly-created objects start at this
@@ -637,6 +645,8 @@ impl Entry {
             force_string_encoding: false,
             force_set_listpack_encoding: false,
             force_set_hashtable_encoding: false,
+            force_hash_hashtable_encoding: false,
+            force_zset_skiplist_encoding: false,
         }
     }
 
@@ -2478,6 +2488,48 @@ impl Store {
         entry.force_set_listpack_encoding = false;
     }
 
+    /// (frankenredis-yp503) Hash encoding promotion to hashtable is
+    /// one-way in vendored. Set the sticky flag whenever the hash
+    /// exceeds either listpack threshold (entries or per-key/value).
+    fn refresh_hash_encoding_flag(
+        entry: &mut Entry,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) {
+        if entry.force_hash_hashtable_encoding {
+            return;
+        }
+        let Value::Hash(m) = &entry.value else {
+            return;
+        };
+        let needs_hashtable = m.len() > max_listpack_entries
+            || m.iter().any(|(k, v)| {
+                k.len() > max_listpack_value || v.len() > max_listpack_value
+            });
+        if needs_hashtable {
+            entry.force_hash_hashtable_encoding = true;
+        }
+    }
+
+    /// (frankenredis-yp503) Same one-way promotion for sorted sets.
+    fn refresh_zset_encoding_flag(
+        entry: &mut Entry,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) {
+        if entry.force_zset_skiplist_encoding {
+            return;
+        }
+        let Value::SortedSet(zs) = &entry.value else {
+            return;
+        };
+        let needs_skiplist = zs.len() > max_listpack_entries
+            || zs.keys().any(|k| k.len() > max_listpack_value);
+        if needs_skiplist {
+            entry.force_zset_skiplist_encoding = true;
+        }
+    }
+
     fn set_entry(&self, set: BTreeSet<Vec<u8>>, expires_at_ms: Option<u64>, now_ms: u64) -> Entry {
         let mut entry = Entry::new(Value::Set(set), expires_at_ms, now_ms);
         Self::refresh_set_encoding_flags(
@@ -3539,7 +3591,12 @@ impl Store {
                 }
             }
             Value::Hash(m) => {
-                let fits_listpack = m.len() <= self.hash_max_listpack_entries
+                // (frankenredis-yp503) Sticky hashtable encoding: once a
+                // hash crosses the listpack threshold, vendored keeps it
+                // at `hashtable` even if a later CONFIG SET raises the
+                // threshold or fields are deleted.
+                let fits_listpack = !entry.force_hash_hashtable_encoding
+                    && m.len() <= self.hash_max_listpack_entries
                     && m.iter().all(|(k, v)| {
                         k.len() <= self.hash_max_listpack_value
                             && v.len() <= self.hash_max_listpack_value
@@ -3580,7 +3637,10 @@ impl Store {
                 }
             }
             Value::SortedSet(zs) => {
-                if zs.len() <= self.zset_max_listpack_entries
+                // (frankenredis-yp503) Sticky skiplist encoding (same
+                // one-way promotion as hashes / sets).
+                if !entry.force_zset_skiplist_encoding
+                    && zs.len() <= self.zset_max_listpack_entries
                     && zs.keys().all(|k| k.len() <= self.zset_max_listpack_value)
                 {
                     "listpack"
@@ -4669,6 +4729,8 @@ impl Store {
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
         self.internal_entry(key.to_vec(), Value::Hash(BTreeMap::new()), now_ms);
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
         let result = self
             .with_mutated_entry(key, |entry| {
                 let Value::Hash(m) = &mut entry.value else {
@@ -4677,6 +4739,9 @@ impl Store {
                 let is_new = !m.contains_key(&field);
                 m.insert(field, value);
                 entry.touch_write(now_ms);
+                // (frankenredis-yp503) Lock the encoding into hashtable
+                // once the hash crosses either listpack threshold.
+                Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
                 Ok(is_new)
             })
             .expect("hash entry was ensured");
@@ -4879,6 +4944,8 @@ impl Store {
     ) -> Result<i64, StoreError> {
         self.drop_if_expired(key, now_ms);
         self.internal_entry(key.to_vec(), Value::Hash(BTreeMap::new()), now_ms);
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
             .with_mutated_entry(key, |entry| {
                 let Value::Hash(m) = &mut entry.value else {
@@ -4903,6 +4970,9 @@ impl Store {
                 let is_empty = m.is_empty();
                 if touched {
                     entry.touch_write(now_ms);
+                    // (frankenredis-yp503) Crossing the entries count via
+                    // hincrby on a new field can promote to hashtable.
+                    Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
                 }
                 (res, is_empty)
             })
@@ -4925,6 +4995,8 @@ impl Store {
     ) -> Result<bool, StoreError> {
         self.drop_if_expired(key, now_ms);
         self.internal_entry(key.to_vec(), Value::Hash(BTreeMap::new()), now_ms);
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
         let result = self
             .with_mutated_entry(key, |entry| {
                 let Value::Hash(m) = &mut entry.value else {
@@ -4933,6 +5005,9 @@ impl Store {
                 if let std::collections::btree_map::Entry::Vacant(slot) = m.entry(field) {
                     slot.insert(value);
                     entry.touch_write(now_ms);
+                    // (frankenredis-yp503) Lock hashtable encoding if
+                    // threshold crossed.
+                    Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
                     Ok(true)
                 } else {
                     Ok(false)
@@ -4985,6 +5060,8 @@ impl Store {
     ) -> Result<Vec<u8>, StoreError> {
         self.drop_if_expired(key, now_ms);
         self.internal_entry(key.to_vec(), Value::Hash(BTreeMap::new()), now_ms);
+        let max_entries = self.hash_max_listpack_entries;
+        let max_value = self.hash_max_listpack_value;
         let (res, is_empty) = self
             .with_mutated_entry(key, |entry| {
                 let Value::Hash(m) = &mut entry.value else {
@@ -5007,6 +5084,9 @@ impl Store {
                 let is_empty = m.is_empty();
                 if touched {
                     entry.touch_write(now_ms);
+                    // (frankenredis-yp503) Float result text may exceed
+                    // hash-max-listpack-value, promoting to hashtable.
+                    Self::refresh_hash_encoding_flag(entry, max_entries, max_value);
                 }
                 (res, is_empty)
             })
@@ -6686,6 +6766,8 @@ impl Store {
             return Ok((0, 0));
         }
 
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
         let (added, changed, is_empty, touched) = {
             let entry =
                 self.internal_entry(key.to_vec(), Value::SortedSet(SortedSet::new()), now_ms);
@@ -6742,6 +6824,9 @@ impl Store {
             let touched = added > 0 || changed > 0;
             if touched {
                 entry.touch_write(now_ms);
+                // (frankenredis-yp503) Lock skiplist encoding once a
+                // zset crosses zset-max-listpack-{entries,value}.
+                Self::refresh_zset_encoding_flag(entry, zset_max_entries, zset_max_value);
             }
             (added, changed, is_empty, touched)
         };
@@ -7185,6 +7270,8 @@ impl Store {
             return Ok(None);
         }
 
+        let zset_max_entries = self.zset_max_listpack_entries;
+        let zset_max_value = self.zset_max_listpack_value;
         let (res, is_empty, touched) = {
             let entry =
                 self.internal_entry(key.to_vec(), Value::SortedSet(SortedSet::new()), now_ms);
@@ -7217,6 +7304,9 @@ impl Store {
             let touched = matches!(&res, Ok(Some(_)));
             if touched {
                 entry.touch_write(now_ms);
+                // (frankenredis-yp503) Crossing the entries count via
+                // zincrby on a new member can promote to skiplist.
+                Self::refresh_zset_encoding_flag(entry, zset_max_entries, zset_max_value);
             }
             (res, is_empty, touched)
         };
@@ -22302,6 +22392,105 @@ mod tests {
                 "seed {name} must reject (got Ok)"
             );
         }
+    }
+
+    #[test]
+    fn hash_zset_encoding_is_sticky_against_threshold_raise_yp503() {
+        // (frankenredis-yp503) Once a hash or zset crosses its
+        // listpack threshold, vendored Redis 7.2.4 promotes to
+        // hashtable / skiplist and NEVER demotes — even if a later
+        // CONFIG SET raises the threshold above the current size or
+        // fields are deleted. Set encoding has had this for a while;
+        // hash and zset got the same treatment in this bead.
+        let mut store = Store::new();
+        store.hash_max_listpack_entries = 128;
+        store.hash_max_listpack_value = 64;
+        store.zset_max_listpack_entries = 128;
+        store.zset_max_listpack_value = 64;
+
+        // Hash: insert 129 small entries -> hashtable
+        for i in 0..129u32 {
+            store
+                .hset(b"h", format!("f{i}").into_bytes(), b"v".to_vec(), 0)
+                .unwrap();
+        }
+        assert_eq!(store.object_encoding(b"h", 0), Some("hashtable"));
+
+        // Raise threshold above current size — must stay hashtable.
+        store.hash_max_listpack_entries = 200;
+        assert_eq!(
+            store.object_encoding(b"h", 0),
+            Some("hashtable"),
+            "hash must stay hashtable after threshold raise"
+        );
+
+        // Delete many fields so we're back under 128 — must still
+        // stay hashtable.
+        for i in 0..100u32 {
+            store
+                .hdel(b"h", &[format!("f{i}").into_bytes().as_slice()], 0)
+                .unwrap();
+        }
+        assert_eq!(
+            store.object_encoding(b"h", 0),
+            Some("hashtable"),
+            "hash must stay hashtable after fields deleted below threshold"
+        );
+
+        // DEL + small HSET resets stickiness.
+        store.del(&[b"h".to_vec()], 0);
+        store
+            .hset(b"h", b"f".to_vec(), b"v".to_vec(), 0)
+            .unwrap();
+        assert_eq!(store.object_encoding(b"h", 0), Some("listpack"));
+
+        // Reset threshold for the value-side check.
+        store.hash_max_listpack_entries = 128;
+        // Per-value threshold also flips encoding.
+        store
+            .hset(
+                b"hv",
+                b"f".to_vec(),
+                vec![b'x'; 65],
+                0,
+            )
+            .unwrap();
+        assert_eq!(store.object_encoding(b"hv", 0), Some("hashtable"));
+        store.hash_max_listpack_value = 100;
+        assert_eq!(
+            store.object_encoding(b"hv", 0),
+            Some("hashtable"),
+            "hash must stay hashtable after per-value threshold raise"
+        );
+
+        // ZSet: insert 130 entries -> skiplist
+        for i in 0..130u32 {
+            store
+                .zadd(b"z", &[(i as f64, format!("m{i}").into_bytes())], 0)
+                .unwrap();
+        }
+        assert_eq!(store.object_encoding(b"z", 0), Some("skiplist"));
+
+        // Raise threshold above current size — must stay skiplist.
+        store.zset_max_listpack_entries = 200;
+        assert_eq!(
+            store.object_encoding(b"z", 0),
+            Some("skiplist"),
+            "zset must stay skiplist after threshold raise"
+        );
+
+        // Per-value threshold also promotes.
+        store.zset_max_listpack_entries = 128;
+        let _ = store
+            .zadd(b"zv", &[(1.0, vec![b'x'; 65])], 0)
+            .unwrap();
+        assert_eq!(store.object_encoding(b"zv", 0), Some("skiplist"));
+        store.zset_max_listpack_value = 100;
+        assert_eq!(
+            store.object_encoding(b"zv", 0),
+            Some("skiplist"),
+            "zset must stay skiplist after per-value threshold raise"
+        );
     }
 
     #[test]
