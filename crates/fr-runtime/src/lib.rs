@@ -789,7 +789,17 @@ impl AclUser {
     }
 
     fn commands_string(&self) -> String {
-        if self.all_commands && self.denied_commands.is_empty() && self.denied_categories.is_empty()
+        // (frankenredis-23o12) Vendored acl.c::ACLDescribeUserCommandRules
+        // re-emits every explicit `+cmd`/`+@cat` even when `+@all` is
+        // already in effect, so a rule like `+@all -DEBUG +debug` round-
+        // trips as `+@all +debug`. The early-return shortcut here only
+        // applies when the user has ONLY `+@all` and no explicit allow
+        // or deny modifiers on top.
+        if self.all_commands
+            && self.allowed_commands.is_empty()
+            && self.allowed_categories.is_empty()
+            && self.denied_commands.is_empty()
+            && self.denied_categories.is_empty()
         {
             return "+@all".to_string();
         }
@@ -25404,6 +25414,66 @@ mod tests {
                 reply,
                 RespFrame::SimpleString("OK".to_string()),
                 "expected SETUSER to accept {ok:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn acl_commands_string_preserves_explicit_cmds_after_allcommands_23o12() {
+        // (frankenredis-23o12) `commands_string` previously short-
+        // circuited as soon as `all_commands` was set, dropping any
+        // explicit `+cmd`/`+@cat` modifiers layered on top of `+@all`.
+        // Vendored re-emits them so the rule round-trips exactly:
+        //   +@all +debug      -> "+@all +debug"  (was: "+@all")
+        //   +@all -DEBUG +debug -> "+@all +debug" (was: "+@all")
+        //   +@all              -> "+@all"        (unchanged)
+        //   +@all -DEBUG       -> "+@all -debug" (unchanged)
+        let mut rt = Runtime::default_strict();
+
+        let cases = [
+            // (rules, expected commands_string)
+            (vec!["on", "+@all"], "+@all"),
+            (vec!["on", "+@all", "+debug"], "+@all +debug"),
+            (vec!["on", "+@all", "-DEBUG", "+debug"], "+@all +debug"),
+            (vec!["on", "+@all", "-DEBUG"], "+@all -debug"),
+            (vec!["on", "+@all", "+set"], "+@all +set"),
+            (vec!["on", "+@all", "+@read"], "+@all +@read"),
+        ];
+
+        for (rules, expected) in cases {
+            let user = format!("u_{}", expected.replace(['+', '@', '-', ' '], "_"));
+            rt.execute_frame(
+                command(&[b"ACL", b"DELUSER", user.as_bytes()]),
+                0,
+            );
+            let mut argv: Vec<Vec<u8>> = vec![
+                b"ACL".to_vec(),
+                b"SETUSER".to_vec(),
+                user.as_bytes().to_vec(),
+            ];
+            for r in &rules {
+                argv.push(r.as_bytes().to_vec());
+            }
+            let argv_frame = RespFrame::Array(Some(
+                argv.iter()
+                    .map(|a| RespFrame::BulkString(Some(a.clone())))
+                    .collect(),
+            ));
+            let reply = rt.execute_frame(argv_frame, 0);
+            assert_eq!(
+                reply,
+                RespFrame::SimpleString("OK".to_string()),
+                "SETUSER {user} with rules {rules:?} should succeed: got {reply:?}",
+            );
+            let acl_user = rt
+                .server
+                .auth_state
+                .get_user(user.as_bytes())
+                .unwrap_or_else(|| panic!("user {user} should exist after SETUSER"));
+            let line = acl_user.acl_list_line(user.as_bytes());
+            assert!(
+                line.ends_with(expected) || line.contains(&format!(" {expected}")),
+                "user {user} rules {rules:?}: expected line to contain trailing '{expected}', got line={line:?}",
             );
         }
     }
