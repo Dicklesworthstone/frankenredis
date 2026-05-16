@@ -4607,8 +4607,14 @@ fn zpop_count_emit(
 }
 
 fn zpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() < 2 || argv.len() > 3 {
+    // (frankenredis-bexnm) Upstream t_zset.c:4028 `zpopMinMaxCommand`
+    // checks `c->argc > 3` and emits `shared.syntaxerr` — not the
+    // generic arity error. Too-few args still gets the arity error.
+    if argv.len() < 2 {
         return Err(CommandError::WrongArity("ZPOPMIN"));
+    }
+    if argv.len() > 3 {
+        return Err(CommandError::SyntaxError);
     }
     if argv.len() == 3 {
         // Upstream t_zset.c::genericZpopCommand uses
@@ -4644,8 +4650,13 @@ fn zpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
 }
 
 fn zpopmax(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
-    if argv.len() < 2 || argv.len() > 3 {
+    // (frankenredis-bexnm) Same as ZPOPMIN — `c->argc > 3` returns
+    // ERR syntax error in vendored's shared zpopMinMaxCommand handler.
+    if argv.len() < 2 {
         return Err(CommandError::WrongArity("ZPOPMAX"));
+    }
+    if argv.len() > 3 {
+        return Err(CommandError::SyntaxError);
     }
     if argv.len() == 3 {
         let count = parse_zpop_count(&argv[2])?;
@@ -54240,6 +54251,90 @@ mod tests {
         )
         .expect("count 0 should succeed");
         assert_eq!(frame, RespFrame::Array(Some(Vec::new())));
+    }
+
+    #[test]
+    fn zpopmin_zpopmax_too_many_args_return_syntax_error_bexnm() {
+        // (frankenredis-bexnm) Upstream t_zset.c:4029 — when
+        // `c->argc > 3` the shared `zpopMinMaxCommand` handler emits
+        // `shared.syntaxerr` ("ERR syntax error"), NOT the generic
+        // arity error. fr previously rejected too-many args via the
+        // dispatcher's `argv.len() > 3` check, which surfaced the
+        // generic 'wrong number of arguments' wording.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+
+        // Both ZPOPMIN and ZPOPMAX with 4 args -> "ERR syntax error".
+        for cmd in [b"ZPOPMIN".to_vec(), b"ZPOPMAX".to_vec()] {
+            let err = dispatch_argv(
+                &[
+                    cmd.clone(),
+                    b"z".to_vec(),
+                    b"1".to_vec(),
+                    b"extra".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect_err("4-arg call should error");
+            let resp = err.to_resp();
+            let RespFrame::Error(s) = &resp else {
+                panic!("expected error frame, got {resp:?}");
+            };
+            assert_eq!(
+                s, "ERR syntax error",
+                "{} 4 args expected syntax error",
+                std::str::from_utf8(&cmd).unwrap(),
+            );
+
+            // 5 args (4-arg case extended) -> still "ERR syntax error".
+            let err = dispatch_argv(
+                &[
+                    cmd.clone(),
+                    b"z".to_vec(),
+                    b"1".to_vec(),
+                    b"e1".to_vec(),
+                    b"e2".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect_err("5-arg call should error");
+            let resp = err.to_resp();
+            let RespFrame::Error(s) = &resp else {
+                panic!("expected error frame, got {resp:?}");
+            };
+            assert_eq!(
+                s, "ERR syntax error",
+                "{} 5 args expected syntax error",
+                std::str::from_utf8(&cmd).unwrap(),
+            );
+
+            // 1 arg (too few) is still WrongArity — different code path.
+            let err = dispatch_argv(&[cmd.clone()], &mut store, 0)
+                .expect_err("1-arg call should error (arity)");
+            let resp = err.to_resp();
+            let RespFrame::Error(s) = &resp else {
+                panic!("expected error frame, got {resp:?}");
+            };
+            assert!(
+                s.contains("wrong number of arguments"),
+                "{} with no args expected arity error, got {s}",
+                std::str::from_utf8(&cmd).unwrap(),
+            );
+        }
     }
 
     #[test]
