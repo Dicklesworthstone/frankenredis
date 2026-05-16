@@ -1433,6 +1433,7 @@ pub struct Store {
     pub list_max_listpack_size: i64,
     pub set_max_intset_entries: usize,
     pub set_max_listpack_entries: usize,
+    pub set_max_listpack_value: usize,
     pub zset_max_listpack_entries: usize,
     pub zset_max_listpack_value: usize,
 
@@ -1775,6 +1776,7 @@ impl Default for Store {
             list_max_listpack_size: -2,
             set_max_intset_entries: 512,
             set_max_listpack_entries: 128,
+            set_max_listpack_value: 64,
             zset_max_listpack_entries: 128,
             zset_max_listpack_value: 64,
             rng_seed: 0xDEADBEEF_C0FFEE11,
@@ -2451,14 +2453,20 @@ impl Store {
         set.len() <= max_intset_entries && set.iter().all(|member| parse_i64(member).is_ok())
     }
 
-    fn set_fits_listpack(set: &BTreeSet<Vec<u8>>, max_listpack_entries: usize) -> bool {
-        set.len() <= max_listpack_entries && set.iter().all(|member| member.len() <= 64)
+    fn set_fits_listpack(
+        set: &BTreeSet<Vec<u8>>,
+        max_listpack_entries: usize,
+        max_listpack_value: usize,
+    ) -> bool {
+        set.len() <= max_listpack_entries
+            && set.iter().all(|member| member.len() <= max_listpack_value)
     }
 
     fn refresh_set_encoding_flags(
         entry: &mut Entry,
         max_intset_entries: usize,
         max_listpack_entries: usize,
+        max_listpack_value: usize,
     ) {
         let Value::Set(set) = &entry.value else {
             return;
@@ -2468,19 +2476,17 @@ impl Store {
         }
         // (frankenredis-7vogx) Upstream t_set.c keeps intset until
         // either a non-integer member arrives or the cardinality
-        // crosses set-max-intset-entries (default 512), regardless
-        // of set-max-listpack-entries (default 128). Only when
-        // intset stops fitting do we consider listpack vs
-        // hashtable. fr previously short-circuited to hashtable as
-        // soon as listpack didn't fit, ignoring the still-valid
-        // intset path.
+        // crosses set-max-intset-entries (default 512). Only when
+        // intset stops fitting do we consider listpack vs hashtable.
         if Self::set_fits_intset(set, max_intset_entries) {
-            // intset still fits — no promotion flag needed (and a
-            // prior listpack flag stays in place to remember the
-            // listpack promotion if any).
             return;
         }
-        if Self::set_fits_listpack(set, max_listpack_entries) {
+        // (frankenredis-r6xt3) Upstream t_set.c picks listpack vs
+        // hashtable based on set-max-listpack-{entries,value}. fr
+        // previously hardcoded the per-element cap at 64 bytes and
+        // ignored CONFIG SET set-max-listpack-value entirely — now
+        // the configured cap is honored.
+        if Self::set_fits_listpack(set, max_listpack_entries, max_listpack_value) {
             entry.force_set_listpack_encoding = true;
             return;
         }
@@ -2536,6 +2542,7 @@ impl Store {
             &mut entry,
             self.set_max_intset_entries,
             self.set_max_listpack_entries,
+            self.set_max_listpack_value,
         );
         entry
     }
@@ -3630,7 +3637,11 @@ impl Store {
                     "listpack"
                 } else if Self::set_fits_intset(s, self.set_max_intset_entries) {
                     "intset"
-                } else if Self::set_fits_listpack(s, self.set_max_listpack_entries) {
+                } else if Self::set_fits_listpack(
+                    s,
+                    self.set_max_listpack_entries,
+                    self.set_max_listpack_value,
+                ) {
                     "listpack"
                 } else {
                     "hashtable"
@@ -6043,6 +6054,7 @@ impl Store {
         self.drop_if_expired(key, now_ms);
         let max_intset_entries = self.set_max_intset_entries;
         let max_listpack_entries = self.set_max_listpack_entries;
+        let max_listpack_value = self.set_max_listpack_value;
         match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Set(s) => {
@@ -6061,6 +6073,7 @@ impl Store {
                             entry,
                             max_intset_entries,
                             max_listpack_entries,
+                            max_listpack_value,
                         );
                     }
                     entry.touch_write(now_ms);
@@ -10425,6 +10438,7 @@ impl Store {
         self.drop_if_expired(key, now_ms);
         let max_intset_entries = self.set_max_intset_entries;
         let max_listpack_entries = self.set_max_listpack_entries;
+        let max_listpack_value = self.set_max_listpack_value;
         match self.entries.get_mut(key) {
             Some(entry) => match &entry.value {
                 Value::Set(s) => {
@@ -10436,7 +10450,11 @@ impl Store {
                     // hashtable-encoded path honors them.
                     let is_listpack_or_intset = !entry.force_set_hashtable_encoding
                         && (Self::set_fits_intset(s, max_intset_entries)
-                            || Self::set_fits_listpack(s, max_listpack_entries));
+                            || Self::set_fits_listpack(
+                                s,
+                                max_listpack_entries,
+                                max_listpack_value,
+                            ));
                     if is_listpack_or_intset {
                         let result: Vec<Vec<u8>> = s
                             .iter()
@@ -15937,6 +15955,29 @@ mod tests {
             )
             .expect("sadd mixed");
         assert_eq!(store2.object_encoding(b"t", 0), Some("listpack"));
+    }
+
+    #[test]
+    fn set_listpack_value_cap_drives_hashtable_promotion_r6xt3() {
+        // (frankenredis-r6xt3) Upstream t_set.c respects
+        // set-max-listpack-value as the per-element cap on the
+        // listpack encoding. fr previously hardcoded 64 bytes
+        // and ignored CONFIG SET set-max-listpack-value, so
+        // listpack-encoded sets stayed listpack even with
+        // 12-byte members under a 5-byte cap.
+        let mut store = Store::new();
+        store.set_max_listpack_value = 5;
+        // Mix in one non-integer so we land on listpack first.
+        store.sadd(b"s", &[b"short".to_vec()], 0).expect("sadd 5");
+        assert_eq!(store.object_encoding(b"s", 0), Some("listpack"));
+        store
+            .sadd(b"s", &[b"longerstring".to_vec()], 0)
+            .expect("sadd 12");
+        assert_eq!(
+            store.object_encoding(b"s", 0),
+            Some("hashtable"),
+            "12-byte member with cap=5 must promote listpack→hashtable"
+        );
     }
 
     #[test]

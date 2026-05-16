@@ -7894,6 +7894,10 @@ impl Runtime {
                 self.server.store.set_max_listpack_entries,
             ),
             (
+                "set-max-listpack-value",
+                self.server.store.set_max_listpack_value,
+            ),
+            (
                 "zset-max-listpack-entries",
                 self.server.store.zset_max_listpack_entries,
             ),
@@ -8110,6 +8114,7 @@ impl Runtime {
                 || name == "hash-max-ziplist-value"
                 || name == "set-max-intset-entries"
                 || name == "set-max-listpack-entries"
+                || name == "set-max-listpack-value"
                 || name == "zset-max-listpack-entries"
                 || name == "zset-max-listpack-value"
                 || name == "zset-max-ziplist-entries"
@@ -10051,6 +10056,7 @@ impl Runtime {
                 "hash-max-listpack-value" => self.server.store.hash_max_listpack_value = value,
                 "set-max-intset-entries" => self.server.store.set_max_intset_entries = value,
                 "set-max-listpack-entries" => self.server.store.set_max_listpack_entries = value,
+                "set-max-listpack-value" => self.server.store.set_max_listpack_value = value,
                 "zset-max-listpack-entries" => self.server.store.zset_max_listpack_entries = value,
                 "zset-max-listpack-value" => self.server.store.zset_max_listpack_value = value,
                 _ => {}
