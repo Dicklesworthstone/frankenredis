@@ -6483,10 +6483,18 @@ impl<'a> LuaState<'a> {
                 "user_script:1: unable to dump given function".to_string(),
             ),
             "string.byte" => {
-                let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "byte")?;
+                // (frankenredis-ii6en) Upstream string.byte applies
+                // luaL_optint to the optional i and j args, which
+                // raises 'bad argument #N to byte (number expected,
+                // got TYPE)' when the present arg isn't number-
+                // convertible. fr previously routed through
+                // to_number().unwrap_or(default), silently masking the
+                // error.
+                let inv = self.current_invocation_name.as_deref();
+                let s = lua_check_string(inv, args, 0, "byte")?;
                 let len = s.len() as i64;
-                let mut i = args.get(1).and_then(|v| v.to_number()).unwrap_or(1.0) as i64;
-                let mut j = args.get(2).and_then(|v| v.to_number()).unwrap_or(i as f64) as i64;
+                let mut i = lua_optional_integer_arg(inv, 2, args.get(1), 1)?;
+                let mut j = lua_optional_integer_arg(inv, 3, args.get(2), i)?;
                 if i < 0 {
                     i = len + i + 1;
                 }
@@ -16053,6 +16061,72 @@ mod tests {
             }
         }
         assert_eq!(nums, vec![75i64, 35, 12], "seed=42 3-draw sequence");
+    }
+
+    /// (frankenredis-ii6en) string.byte's optional `i` and `j` index
+    /// args go through luaL_optint in vendored Redis 7.2.4 — present-
+    /// but-non-numeric args raise 'bad argument #N to byte (number
+    /// expected, got TYPE)'. fr previously routed through
+    /// to_number().unwrap_or(default), silently swallowing the type
+    /// error.
+    #[test]
+    fn lua_string_byte_validates_index_args_per_vendored_ii6en() {
+        let mut store = Store::new();
+
+        // Numeric strings still coerce (matches vendored).
+        let r = eval_script(b"return string.byte('abc', '2')", &[], &[], &mut store, 0)
+            .expect("string-numeric index coerces");
+        assert_eq!(r, RespFrame::Integer(98));
+
+        // Non-numeric string → error with #2.
+        let err = eval_script(b"return string.byte('abc', 'xy')", &[], &[], &mut store, 0)
+            .expect_err("non-numeric index #2");
+        assert!(
+            err.contains("bad argument #2 to 'byte' (number expected, got string)"),
+            "wrong error: {err:?}"
+        );
+
+        // Boolean → error.
+        let err = eval_script(
+            b"local ok,e=pcall(string.byte, 'abc', true) return tostring(e)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall returns the error string");
+        assert_eq!(
+            err,
+            RespFrame::BulkString(Some(
+                b"bad argument #2 to '?' (number expected, got boolean)".to_vec()
+            ))
+        );
+
+        // Table → error at #3 (j arg).
+        let err = eval_script(
+            b"local ok,e=pcall(string.byte, 'abc', 1, {}) return tostring(e)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pcall returns the error string");
+        assert_eq!(
+            err,
+            RespFrame::BulkString(Some(
+                b"bad argument #3 to '?' (number expected, got table)".to_vec()
+            ))
+        );
+
+        // Missing args still use defaults — no error.
+        let r = eval_script(b"return string.byte('abc')", &[], &[], &mut store, 0)
+            .expect("no extra args");
+        assert_eq!(r, RespFrame::Integer(97));
+
+        // Explicit nil also uses default (luaL_optint default branch).
+        let r = eval_script(b"return string.byte('abc', nil)", &[], &[], &mut store, 0)
+            .expect("nil index uses default");
+        assert_eq!(r, RespFrame::Integer(97));
     }
 
     #[test]
