@@ -8203,8 +8203,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
-        let mut max_deleted = None;
-        let result = match self.entries.get_mut(key) {
+        match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
                     if entries.len() <= max_len {
@@ -8216,13 +8215,16 @@ impl Store {
                     }
                     let remove_ids: Vec<StreamId> =
                         entries.keys().copied().take(to_remove).collect();
-                    max_deleted = remove_ids.last().copied();
                     for id in &remove_ids {
                         entries.remove(id);
                     }
                     // Match Redis stream semantics: trimming removes
                     // stream entries, but pending-entry-list rows remain
                     // until XAUTOCLAIM surfaces them as deleted IDs.
+                    // (frankenredis-7s289) Vendored Redis intentionally
+                    // does NOT bump max_deleted_entry_id on trim — only
+                    // explicit XDEL bumps it. streamTrim() in t_stream.c
+                    // leaves stream->max_deleted_entry_id untouched.
                     if to_remove > 0 {
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
@@ -8236,11 +8238,7 @@ impl Store {
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(0),
-        };
-        if let Some(max_deleted) = max_deleted {
-            self.update_stream_max_deleted_id(key, max_deleted);
         }
-        result
     }
 
     /// XTRIM key MINID threshold [LIMIT count] — remove entries with
@@ -8254,8 +8252,7 @@ impl Store {
         now_ms: u64,
     ) -> Result<usize, StoreError> {
         self.drop_if_expired(key, now_ms);
-        let mut max_deleted = None;
-        let result = match self.entries.get_mut(key) {
+        match self.entries.get_mut(key) {
             Some(entry) => match &mut entry.value {
                 Value::Stream(entries) => {
                     let mut remove_ids: Vec<StreamId> = entries
@@ -8267,13 +8264,14 @@ impl Store {
                         remove_ids.truncate(cap);
                     }
                     let removed = remove_ids.len();
-                    max_deleted = remove_ids.last().copied();
                     for id in &remove_ids {
                         entries.remove(id);
                     }
                     // Match Redis stream semantics: trimming removes
                     // stream entries, but pending-entry-list rows remain
                     // until XAUTOCLAIM surfaces them as deleted IDs.
+                    // (frankenredis-7s289) Vendored Redis does NOT bump
+                    // max_deleted_entry_id on trim — only XDEL does.
                     if removed > 0 {
                         Self::mark_digest_stale_fields(
                             &mut self.digest_stale,
@@ -8287,11 +8285,7 @@ impl Store {
                 _ => Err(StoreError::WrongType),
             },
             None => Ok(0),
-        };
-        if let Some(max_deleted) = max_deleted {
-            self.update_stream_max_deleted_id(key, max_deleted);
         }
-        result
     }
 
     pub fn xread(
@@ -18630,7 +18624,12 @@ mod tests {
     }
 
     #[test]
-    fn stream_tracks_max_deleted_entry_id_across_xdel_and_xtrim() {
+    fn stream_max_deleted_entry_id_tracks_only_xdel_not_trim_7s289() {
+        // (frankenredis-7s289) Vendored Redis 7.2.4 deliberately does
+        // NOT bump `max_deleted_entry_id` on MAXLEN/MINID trim — only
+        // explicit XDEL does. streamTrim() in t_stream.c leaves the
+        // field untouched. Earlier fr code bumped it on all deletion
+        // paths, so XINFO STREAM diverged from vendored after any trim.
         let mut store = Store::new();
         store
             .xadd(b"s", (1000, 0), &[(b"f1".to_vec(), b"v1".to_vec())], 0)
@@ -18642,14 +18641,53 @@ mod tests {
             .xadd(b"s", (1001, 0), &[(b"f3".to_vec(), b"v3".to_vec())], 0)
             .unwrap();
 
+        // XDEL must bump max_deleted_entry_id.
         assert_eq!(store.xdel(b"s", &[(1000, 1)], 0).unwrap(), 1);
         assert_eq!(store.stream_max_deleted_id(b"s"), Some((1000, 1)));
 
+        // XTRIM MINID (removing 1000-0) MUST NOT touch the field, even
+        // though the removed id < current value.
         assert_eq!(store.xtrim_minid(b"s", (1001, 0), None, 0).unwrap(), 1);
         assert_eq!(store.stream_max_deleted_id(b"s"), Some((1000, 1)));
 
+        // XTRIM MAXLEN (removing 1001-0) MUST NOT touch the field, even
+        // though the removed id > current value — this is the exact
+        // divergence the bead caught: previously fr bumped to (1001,0),
+        // vendored stays at (1000,1).
         assert_eq!(store.xtrim(b"s", 0, None, 0).unwrap(), 1);
-        assert_eq!(store.stream_max_deleted_id(b"s"), Some((1001, 0)));
+        assert_eq!(store.stream_max_deleted_id(b"s"), Some((1000, 1)));
+    }
+
+    #[test]
+    fn stream_max_deleted_entry_id_unset_when_only_trims_occur_7s289() {
+        // (frankenredis-7s289) On a stream that has never seen XDEL,
+        // trim operations leave max_deleted_entry_id at its default
+        // 0-0 (None in fr's internal Option) — matching vendored's
+        // XINFO STREAM output of "max-deleted-entry-id 0-0".
+        let mut store = Store::new();
+        store
+            .xadd(b"s", (1, 0), &[(b"k".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (2, 0), &[(b"k".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (3, 0), &[(b"k".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+
+        // XADD MAXLEN trim path (when XADD parses MAXLEN it routes to xtrim).
+        assert_eq!(store.xtrim(b"s", 1, None, 0).unwrap(), 2);
+        assert_eq!(store.stream_max_deleted_id(b"s"), None);
+
+        // Re-add and now MINID trim.
+        store
+            .xadd(b"s", (4, 0), &[(b"k".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        store
+            .xadd(b"s", (5, 0), &[(b"k".to_vec(), b"v".to_vec())], 0)
+            .unwrap();
+        assert_eq!(store.xtrim_minid(b"s", (5, 0), None, 0).unwrap(), 2);
+        assert_eq!(store.stream_max_deleted_id(b"s"), None);
     }
 
     #[test]
