@@ -22664,9 +22664,19 @@ fn blmpop(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame,
     }
     for ki in 0..numkeys {
         let key = &argv[3 + ki];
+        // (frankenredis-oks10) Upstream t_list.c::lmpopGenericCommand
+        // (shared by LMPOP and BLMPOP) calls checkType on each key and
+        // returns WRONGTYPE immediately on the first wrongtype hit.
+        // fr previously swallowed all errors as `Err(_) => continue`,
+        // which silently skipped wrongtype keys and returned the
+        // empty-array fallthrough — diverging from vendored. Mirror
+        // LMPOP's explicit StoreError::WrongType handling.
         let llen = match store.llen(key, now_ms) {
             Ok(n) => n,
-            Err(_) => continue,
+            Err(StoreError::WrongType) => {
+                return Err(CommandError::Store(StoreError::WrongType));
+            }
+            Err(e) => return Err(CommandError::Store(e)),
         };
         if llen == 0 {
             continue;
@@ -40724,6 +40734,62 @@ mod tests {
         )
         .expect("blmpop empty");
         assert_eq!(out, RespFrame::Array(None));
+    }
+
+    #[test]
+    fn blmpop_returns_wrongtype_for_non_list_key_oks10() {
+        // (frankenredis-oks10) BLMPOP previously caught any
+        // store.llen error with `Err(_) => continue` and treated a
+        // wrongtype key as missing, returning the empty-array
+        // fallthrough. Upstream t_list.c::lmpopGenericCommand
+        // (shared by LMPOP and BLMPOP) returns WRONGTYPE on the
+        // first wrongtype hit; LMPOP already did this correctly.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"strkey".to_vec(), b"foo".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set strkey");
+        // Single wrongtype key.
+        let err = dispatch_argv(
+            &[
+                b"BLMPOP".to_vec(),
+                b"0.001".to_vec(),
+                b"1".to_vec(),
+                b"strkey".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CommandError::Store(StoreError::WrongType)),
+            "expected WrongType, got {:?}",
+            err
+        );
+        // Wrongtype after a missing key still surfaces WRONGTYPE
+        // (vendored iterates keys in order; the wrongtype hit fires
+        // even though the earlier nokey would be a continue case).
+        let err = dispatch_argv(
+            &[
+                b"BLMPOP".to_vec(),
+                b"0.001".to_vec(),
+                b"2".to_vec(),
+                b"nokey".to_vec(),
+                b"strkey".to_vec(),
+                b"LEFT".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, CommandError::Store(StoreError::WrongType)),
+            "expected WrongType for nokey-then-strkey order, got {:?}",
+            err
+        );
     }
 
     #[test]
