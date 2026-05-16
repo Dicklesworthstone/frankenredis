@@ -20713,6 +20713,15 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         }
         store.request_debug_reload();
         Ok(RespFrame::SimpleString("OK".to_string()))
+    } else if sub.eq_ignore_ascii_case("LOADAOF") {
+        // (frankenredis-x0rb0) Upstream debug.c::debugCommand handles
+        // DEBUG LOADAOF by emptying the dataset and reloading from
+        // AOF if enabled, returning OK either way. Vendored does not
+        // validate the arity (extra args are ignored). fr's runtime
+        // doesn't drive AOF reload from this surface, so this is a
+        // no-op that returns OK — matching vendored when AOF is
+        // disabled, which is the common case for sandbox testing.
+        Ok(RespFrame::SimpleString("OK".to_string()))
     } else if sub.eq_ignore_ascii_case("OBJECT") {
         if argv.len() != 3 {
             // Upstream debug.c::debugCommand emits
@@ -45496,6 +45505,32 @@ mod tests {
             !store.take_debug_reload_requested(),
             "reload flag must NOT be set when an unknown option is rejected"
         );
+    }
+
+    #[test]
+    fn debug_loadaof_returns_ok_and_ignores_extra_args_x0rb0() {
+        // (frankenredis-x0rb0) Upstream debug.c::debugCommand handles
+        // DEBUG LOADAOF by emptying and reloading from AOF if enabled,
+        // returning OK either way. fr previously fell through to the
+        // unknown-subcommand error. Vendored does not validate arity.
+        let mut store = Store::new();
+        let out = dispatch_argv(&[b"DEBUG".to_vec(), b"LOADAOF".to_vec()], &mut store, 0)
+            .expect("debug loadaof");
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+
+        // Extra args ignored.
+        let out = dispatch_argv(
+            &[b"DEBUG".to_vec(), b"LOADAOF".to_vec(), b"extra".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("debug loadaof extra");
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
+
+        // Case-insensitive subcommand.
+        let out = dispatch_argv(&[b"DEBUG".to_vec(), b"loadaof".to_vec()], &mut store, 0)
+            .expect("debug loadaof lowercase");
+        assert_eq!(out, RespFrame::SimpleString("OK".to_string()));
     }
 
     #[test]
