@@ -7929,6 +7929,29 @@ fn lua_pat_match(
         return if si == s.len() { Some(si) } else { None };
     }
 
+    // (frankenredis-53u08) Handle %N back-references (N = 1..9):
+    // upstream lstrlib.c::match_capture compares the N-th captured
+    // substring's bytes against s starting at si. The capture must
+    // already be closed (Substring(start, Some(end)) or Position).
+    // fr previously fell through to lua_single_match → lua_class_match
+    // which treated '%1' as the literal char '1'.
+    if pi + 1 < pat.len() && pat[pi] == b'%' && (b'1'..=b'9').contains(&pat[pi + 1]) {
+        let cap_idx = (pat[pi + 1] - b'0') as usize - 1;
+        // Out-of-range or unclosed → no match (upstream raises
+        // "invalid capture index" at compile-ish time, but for the
+        // common case we just fail the match here).
+        let cap_bytes: Vec<u8> = match captures.get(cap_idx) {
+            Some(LuaCapture::Substring(start, Some(end))) => s[*start..*end].to_vec(),
+            Some(LuaCapture::Position(pos)) => format!("{}", pos + 1).into_bytes(),
+            _ => return None,
+        };
+        let end = si + cap_bytes.len();
+        if end > s.len() || &s[si..end] != cap_bytes.as_slice() {
+            return None;
+        }
+        return lua_pat_match(s, end, pat, pi + 2, captures, depth + 1);
+    }
+
     // (frankenredis-3zxc1) Handle %f[set] frontier matcher — a zero-width
     // assertion that matches the empty string at a position where the
     // previous byte does NOT match [set] but the current byte DOES.
@@ -15373,6 +15396,79 @@ mod tests {
             s.contains("wrong number of arguments"),
             "pcall caught: {s:?}"
         );
+    }
+
+    #[test]
+    fn lua_pattern_back_references_match_captured_substring_53u08() {
+        // (frankenredis-53u08) Upstream Lua patterns support %1-%9 as
+        // back-references — the N-th capture's bytes must match at the
+        // current string position. fr previously routed %N through
+        // lua_class_match which treated it as the literal digit char.
+        let mut store = Store::new();
+
+        // Simple back-reference.
+        let frame = eval_script(
+            b"return string.match('abcabc', '(abc)%1')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"abc".to_vec())));
+
+        // Capture differs from the second occurrence.
+        let frame = eval_script(
+            b"return string.match('abcxyz', '(abc)%1')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(None));
+
+        // Two captures: %1 and %2 refer to first/second captures.
+        // Direct test: 'abxxabxx' matches (ab)(xx)%1%2 ⇒ first capture 'ab'.
+        let frame = eval_script(
+            b"return string.match('abxxabxx', '(ab)(xx)%1%2')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"ab".to_vec())));
+
+        // Out-of-range index → currently silently fails to match in
+        // fr (upstream raises "invalid capture index" at match time,
+        // which requires threading errors through lua_pat_match — see
+        // bead deferral note). Pin the current behavior; flip the
+        // assertion when the error-threading lands.
+        let frame = eval_script(
+            b"return string.match('abc', '(abc)%5')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(None));
+
+        // gsub also honors %N in the pattern.
+        // Vendored behavior: 'aaa-aaa' matches → 'M'. 'bbb-bbb' matches → 'M'.
+        // For 'xyz-zyx' the greedy %w+ then back-ref finds only the
+        // single-char palindrome 'z-z' (positions 2-4 inside 'xyz-zyx'),
+        // yielding 'xy' + 'M' + 'yx' = 'xyMyx'.
+        let frame = eval_script(
+            b"return string.gsub('aaa-aaa,bbb-bbb,xyz-zyx', '(%w+)-%1', 'M')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"M,M,xyMyx".to_vec())));
     }
 
     #[test]
