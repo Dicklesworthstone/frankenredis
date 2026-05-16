@@ -12353,16 +12353,13 @@ replica_announced:1\r\n",
             }
         }
 
-        // Replica-role rejection runs AFTER ABORT (matching upstream's
-        // ordering at line 4119) and before option parsing.
-        if matches!(
-            self.server.replication_runtime_state.role,
-            ReplicationRoleState::Replica { .. }
-        ) {
-            return RespFrame::Error(
-                "ERR FAILOVER is not valid when server is a replica.".to_string(),
-            );
-        }
+        // (frankenredis-w1v61) Upstream replication.c::failoverCommand
+        // runs the option parser (4087-4112) BEFORE the masterhost
+        // replica check (4119). On a replica node, malformed args like
+        // `FAILOVER BAD` or `FAILOVER TIMEOUT abc` therefore surface
+        // the parse error first; only a fully-parsed FAILOVER on a
+        // replica reports "is not valid when server is a replica". The
+        // replica check is deferred until after the parse loop.
 
         let mut target_host: Option<String> = None;
         // (frankenredis-ovp5b) Upstream failoverCommand parses the
@@ -12408,6 +12405,19 @@ replica_announced:1\r\n",
             } else {
                 return CommandError::SyntaxError.to_resp();
             }
+        }
+
+        // (frankenredis-w1v61) Replica-role rejection mirrors upstream
+        // replication.c:4119 — fires after the option parse loop, so
+        // malformed FAILOVER args on a replica surface the parse error
+        // first.
+        if matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Replica { .. }
+        ) {
+            return RespFrame::Error(
+                "ERR FAILOVER is not valid when server is a replica.".to_string(),
+            );
         }
 
         if self.server.replication_runtime_state.replicas.is_empty() {
@@ -18847,6 +18857,53 @@ mod tests {
         );
         assert_eq!(
             rt.execute_frame(command(&[b"FAILOVER"]), 1),
+            RespFrame::Error("ERR FAILOVER is not valid when server is a replica.".to_string())
+        );
+    }
+
+    #[test]
+    fn failover_parse_errors_fire_before_replica_check_w1v61() {
+        // (frankenredis-w1v61) Upstream replication.c::failoverCommand
+        // runs the option parser (4087-4112) BEFORE the masterhost
+        // replica check (4119). On a replica node, malformed args must
+        // surface the parse error first; only a fully-parsed FAILOVER
+        // hits the "not valid when server is a replica" wording.
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6380"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Unknown option -> syntax error, not the replica error.
+        let bad = rt.execute_frame(command(&[b"FAILOVER", b"BAD"]), 1);
+        assert_eq!(bad, RespFrame::Error("ERR syntax error".to_string()));
+
+        // TIMEOUT with non-integer -> integer parse error.
+        let timeout_abc = rt.execute_frame(command(&[b"FAILOVER", b"TIMEOUT", b"abc"]), 2);
+        assert_eq!(
+            timeout_abc,
+            RespFrame::Error("ERR value is not an integer or out of range".to_string())
+        );
+
+        // TIMEOUT 0 -> timeout-must-be-positive.
+        let timeout_zero = rt.execute_frame(command(&[b"FAILOVER", b"TIMEOUT", b"-1"]), 3);
+        assert_eq!(
+            timeout_zero,
+            RespFrame::Error("ERR FAILOVER timeout must be greater than 0".to_string())
+        );
+
+        // TO host port (non-int) -> integer parse error.
+        let to_bad_port =
+            rt.execute_frame(command(&[b"FAILOVER", b"TO", b"host", b"badport"]), 4);
+        assert_eq!(
+            to_bad_port,
+            RespFrame::Error("ERR value is not an integer or out of range".to_string())
+        );
+
+        // Bare FAILOVER (no parse error) still surfaces the replica wording.
+        let bare = rt.execute_frame(command(&[b"FAILOVER"]), 5);
+        assert_eq!(
+            bare,
             RespFrame::Error("ERR FAILOVER is not valid when server is a replica.".to_string())
         );
     }
