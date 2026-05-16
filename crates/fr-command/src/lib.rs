@@ -6005,7 +6005,19 @@ fn xadd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, C
         }
     }
 
-    if limit_given && trim_maxlen.is_none() && trim_minid.is_none() {
+    // (frankenredis-kgxl7) Upstream t_stream.c::streamParseAddOrTrimArgsOrReply
+    // gates the "without specifying a trimming strategy" check on
+    // `args->limit && args->trim_strategy == NONE` — the limit value is
+    // a long long treated as truthy/falsy in C, so `LIMIT 0` (value 0)
+    // skips this check and falls through to the "without ~" branch.
+    // fr previously gated on the `limit_given` boolean, which fired
+    // regardless of value; mirror vendored's quirk by checking value > 0
+    // so that `XADD ms LIMIT 0 * a 1` returns the "without the special ~
+    // option" wording.
+    if trim_limit.map_or(false, |n| n > 0)
+        && trim_maxlen.is_none()
+        && trim_minid.is_none()
+    {
         return Ok(RespFrame::Error(
             "ERR syntax error, LIMIT cannot be used without specifying a trimming strategy"
                 .to_string(),
@@ -30403,6 +30415,88 @@ mod tests {
         assert_eq!(
             reply,
             RespFrame::Error("ERR The LIMIT argument must be >= 0.".to_string())
+        );
+    }
+
+    /// (frankenredis-kgxl7) Vendored Redis 7.2.4 t_stream.c:998 gates the
+    /// "without specifying a trimming strategy" message on
+    /// `args->limit && trim_strategy == NONE`. The C `args->limit` is a
+    /// long long treated as truthy/falsy, so `LIMIT 0` (value 0) skips
+    /// the first check and falls through to line 1015's `limit_given &&
+    /// !approx_trim`, which emits "without the special ~ option".
+    /// fr previously emitted the "without specifying a trimming strategy"
+    /// wording in this case, diverging from vendored.
+    #[test]
+    fn xadd_limit_zero_without_strategy_matches_vendored_wording_kgxl7() {
+        let mut store = Store::new();
+        // LIMIT 0 with no MAXLEN/MINID — vendored quirk routes to the
+        // "without the special ~ option" wording even though there is
+        // no trim strategy at all.
+        let reply = dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"LIMIT".to_vec(),
+                b"0".to_vec(),
+                b"*".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd limit 0 no strategy");
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR syntax error, LIMIT cannot be used without the special ~ option".to_string()
+            )
+        );
+        // LIMIT >0 with no strategy keeps the original wording.
+        let reply = dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"LIMIT".to_vec(),
+                b"5".to_vec(),
+                b"*".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd limit 5 no strategy");
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR syntax error, LIMIT cannot be used without specifying a trimming strategy"
+                    .to_string()
+            )
+        );
+        // MAXLEN 5 (exact) + LIMIT 0 — strategy exists but no ~, still emits
+        // "without the special ~ option".
+        let reply = dispatch_argv(
+            &[
+                b"XADD".to_vec(),
+                b"s".to_vec(),
+                b"MAXLEN".to_vec(),
+                b"5".to_vec(),
+                b"LIMIT".to_vec(),
+                b"0".to_vec(),
+                b"*".to_vec(),
+                b"k".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("xadd maxlen 5 limit 0");
+        assert_eq!(
+            reply,
+            RespFrame::Error(
+                "ERR syntax error, LIMIT cannot be used without the special ~ option".to_string()
+            )
         );
     }
 
