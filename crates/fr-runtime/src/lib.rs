@@ -518,7 +518,8 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("enable-protected-configs", "no"),
     ("enable-debug-command", "no"),
     ("enable-module-command", "no"),
-    ("hide-user-data-from-log", "no"),
+    // (frankenredis-61w0b) `hide-user-data-from-log` was added in
+    // Redis 7.4; vendored 7.2.4 (our parity target) doesn't ship it.
     ("acl-pubsub-default", "resetchannels"),
     // CONFIG GET parity vs vendored Redis 7.2.4 — defaults pulled from
     // upstream config.c create*Config registrations. CONFIG SET wiring
@@ -23088,6 +23089,45 @@ mod tests {
                 "hidden config {hidden} must NOT appear in CONFIG GET * wildcard sweep",
             );
         }
+    }
+
+    /// (frankenredis-61w0b) `hide-user-data-from-log` is a Redis 7.4
+    /// addition; vendored 7.2.4 (our parity target) doesn't ship it.
+    /// Pin the wildcard sweep so the key doesn't sneak back in.
+    #[test]
+    fn config_omits_redis_7_4_only_keys_61w0b() {
+        let mut rt = Runtime::default_strict();
+        let RespFrame::Array(Some(all)) =
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"*"]), 0)
+        else {
+            panic!("expected array reply from CONFIG GET *");
+        };
+        let names: Vec<String> = all
+            .chunks(2)
+            .filter_map(|pair| match pair.first()? {
+                RespFrame::BulkString(Some(b)) => std::str::from_utf8(b).ok().map(String::from),
+                _ => None,
+            })
+            .collect();
+        for redis_7_4_only in ["hide-user-data-from-log"] {
+            assert!(
+                !names
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case(redis_7_4_only)),
+                "Redis 7.4-only config {redis_7_4_only} must NOT appear (vendored 7.2.4 doesn't have it)",
+            );
+        }
+        // Exact-name CONFIG GET should also return empty.
+        let RespFrame::Array(Some(items)) = rt.execute_frame(
+            command(&[b"CONFIG", b"GET", b"hide-user-data-from-log"]),
+            0,
+        ) else {
+            panic!("expected array reply");
+        };
+        assert!(
+            items.is_empty(),
+            "exact CONFIG GET hide-user-data-from-log must return empty"
+        );
     }
 
     /// (frankenredis-uxn6b) Mirror upstream config.c::setConfigSaveOption
