@@ -19033,9 +19033,15 @@ fn wait_cmd(argv: &[Vec<u8>], _store: &Store) -> Result<RespFrame, CommandError>
         return Err(CommandError::Custom("ERR timeout is negative".to_string()));
     }
     let _ = numreplicas;
-    Err(CommandError::Custom(
-        "ERR WAIT requires runtime replication context".to_string(),
-    ))
+    // (frankenredis-20i0i) Vendored waitCommand checks
+    // CLIENT_DENY_BLOCKING (which is set inside EVAL/FCALL) and
+    // returns the current ack count immediately without blocking.
+    // The dispatch_argv fallback has no runtime replication state
+    // to consult, so the ack count is trivially 0. Returning 0
+    // matches vendored for the no-replicas case; the runtime path
+    // (Runtime::handle_wait_command) is the one that produces real
+    // non-zero counts when a replica is attached.
+    Ok(RespFrame::Integer(0))
 }
 
 fn slowlog_cmd(argv: &[Vec<u8>], store: &mut Store) -> Result<RespFrame, CommandError> {
@@ -50430,7 +50436,14 @@ mod tests {
     // ── WAITAOF test ────────────────────────────────────────────────
 
     #[test]
-    fn wait_valid_direct_dispatch_requires_runtime_context_after_argument_checks() {
+    fn wait_valid_direct_dispatch_returns_zero_ack_count_20i0i() {
+        // (frankenredis-20i0i) Vendored waitCommand reaches the
+        // CLIENT_DENY_BLOCKING short-circuit (set inside EVAL/FCALL)
+        // and returns the current ack count immediately. With no
+        // runtime replication state to consult, fr's dispatch-path
+        // fallback returns 0 (the trivially correct ack count for
+        // zero attached replicas). Argument-validation errors still
+        // fire ahead of the success path.
         let mut store = Store::new();
 
         let invalid_numreplicas = dispatch_argv(
@@ -50441,16 +50454,13 @@ mod tests {
         .unwrap_err();
         assert_eq!(invalid_numreplicas, CommandError::InvalidInteger);
 
-        let negative = dispatch_argv(
-            &[b"WAIT".to_vec(), b"-1".to_vec(), b"0".to_vec()],
+        let valid = dispatch_argv(
+            &[b"WAIT".to_vec(), b"0".to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
-        .expect_err("valid WAIT shape needs runtime replication state");
-        assert_eq!(
-            negative,
-            CommandError::Custom("ERR WAIT requires runtime replication context".to_string())
-        );
+        .expect("WAIT 0 0 must succeed without runtime context");
+        assert_eq!(valid, RespFrame::Integer(0));
 
         let invalid_timeout = dispatch_argv(
             &[b"WAIT".to_vec(), b"0".to_vec(), b"abc".to_vec()],
@@ -50465,14 +50475,17 @@ mod tests {
     }
 
     #[test]
-    fn wait_rejects_extra_args_and_does_not_fake_script_ack_counts() {
+    fn wait_rejects_extra_args_and_returns_zero_in_script_context_20i0i() {
         // (frankenredis-waitsc) Upstream commands.def declares WAIT
         // with arity=3 (exact) and flags=0 — notably NOT
         // CMD_NOSCRIPT (compare the adjacent WAITAOF entry which
         // does carry CMD_NOSCRIPT). So trailing args surface
         // wrong-arity, but a scripted call must succeed and return
-        // 0 — fr previously fired noscript here, diverging from
-        // vendored 7.2.4 behavior verified via differential probe.
+        // the current ack count (0 here, since no replicas attached).
+        // (frankenredis-20i0i) fr previously errored with 'requires
+        // runtime replication context' which diverged from vendored —
+        // vendored's CLIENT_DENY_BLOCKING short-circuit returns the
+        // ack count immediately.
         let mut store = Store::new();
 
         // Trailing args → WrongArity (was silently accepted prior
@@ -50490,20 +50503,15 @@ mod tests {
         .unwrap_err();
         assert_eq!(extra, CommandError::WrongArity("WAIT"));
 
-        // WAIT is not CMD_NOSCRIPT, so direct dispatch reaches the
-        // handler in script context. It still must not fake a
-        // successful replica count without runtime ack state.
+        // Scripted call returns Integer(0) per vendored.
         store.script_nesting_level = 1;
         let scripted = dispatch_argv(
             &[b"WAIT".to_vec(), b"0".to_vec(), b"0".to_vec()],
             &mut store,
             0,
         )
-        .expect_err("direct WAIT dispatch requires runtime replication state");
-        assert_eq!(
-            scripted,
-            CommandError::Custom("ERR WAIT requires runtime replication context".to_string())
-        );
+        .expect("script-context WAIT must return Integer(0) without runtime state");
+        assert_eq!(scripted, RespFrame::Integer(0));
     }
 
     #[test]
