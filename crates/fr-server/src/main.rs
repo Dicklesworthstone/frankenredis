@@ -1484,12 +1484,20 @@ fn replica_handshake_frame(args: &[&[u8]]) -> RespFrame {
 }
 
 fn encode_replication_snapshot(snapshot: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(snapshot.len().saturating_add(34));
+    // (frankenredis-og1y6) Vendored Redis 7.2.4
+    // replication.c::sendBulkToSlave writes the bulk preamble
+    // ("$<len>\r\n") followed by the raw RDB bytes — no trailing CRLF.
+    // Tools that use SYNC as a debug subscriber (e.g. redis-cli --rdb)
+    // expect this exact framing; an extra trailing CRLF gets parsed as
+    // the next reply's type byte and surfaces as the spurious
+    // "Protocol error, got \"\\r\" as reply type byte" warning.
+    // read_replication_snapshot_from_stream tolerates either form, so
+    // dropping the trailing CRLF is safe for fr's own replica path.
+    let mut out = Vec::with_capacity(snapshot.len().saturating_add(32));
     out.extend_from_slice(b"$");
     out.extend_from_slice(snapshot.len().to_string().as_bytes());
     out.extend_from_slice(b"\r\n");
     out.extend_from_slice(snapshot);
-    out.extend_from_slice(b"\r\n");
     out
 }
 
@@ -3340,7 +3348,14 @@ mod tests {
         );
         let snapshot = &follow_up[snapshot_start..snapshot_end];
         let trailing = &follow_up[snapshot_end..];
-        assert_eq!(trailing, b"\r\n");
+        // (frankenredis-og1y6) Vendored Redis 7.2.4 sendBulkToSlave does
+        // NOT append a trailing CRLF after the RDB bulk bytes — clients
+        // that read the next reply byte (e.g. redis-cli --rdb) would
+        // otherwise parse the stray \r as a malformed reply type byte.
+        assert!(
+            trailing.is_empty(),
+            "snapshot payload should not be followed by CRLF (vendored sendBulkToSlave omits it); got {trailing:?}"
+        );
         assert!(!snapshot.is_empty(), "snapshot should not be empty");
         assert!(
             snapshot.starts_with(b"REDIS"),
@@ -3381,6 +3396,20 @@ mod tests {
     #[test]
     fn psync_continue_emits_aof_backlog_tail() {
         let mut runtime = Runtime::new(RuntimePolicy::hardened());
+        // (frankenredis-rl0qz) capture_aof_record is gated on
+        // master+no-replicas+no-aof — the SETs below would not advance
+        // primary_offset (and would not be captured into the backlog
+        // buffer) without first latching the any-replica-ever-connected
+        // flag. Trigger it via PSYNC ? -1 (the same handshake real
+        // replicas use), which calls ensure_replica internally.
+        runtime.execute_frame(
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"PSYNC".to_vec())),
+                RespFrame::BulkString(Some(b"?".to_vec())),
+                RespFrame::BulkString(Some(b"-1".to_vec())),
+            ])),
+            0,
+        );
         assert_eq!(
             runtime.execute_frame(
                 RespFrame::Array(Some(vec![
