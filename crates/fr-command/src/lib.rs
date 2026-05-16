@@ -20724,6 +20724,71 @@ fn debug_subcommand_envelope_error(sub: &str) -> CommandError {
     ))
 }
 
+/// (frankenredis-dp2wu) Match vendored's `sdsReqType` for keys: SDS_TYPE_5
+/// (1 byte header) for len < 32, SDS_TYPE_8 (3) below 256, SDS_TYPE_16 (5)
+/// below 65536, SDS_TYPE_32 (9) below 2^32, SDS_TYPE_64 (17) above.
+fn sds_key_header_size(len: usize) -> usize {
+    if len < 32 {
+        1
+    } else if len < 256 {
+        3
+    } else if len < 65536 {
+        5
+    } else if (len as u64) < (1u64 << 32) {
+        9
+    } else {
+        17
+    }
+}
+
+/// (frankenredis-dp2wu) Values created via `createEmbeddedStringObject` and
+/// `createRawStringObject` always start at SDS_TYPE_8 (no SDS_TYPE_5 for
+/// non-empty strings on the value path), so the header is 3 bytes for any
+/// len under 256.
+fn sds_value_header_size(len: usize) -> usize {
+    if len < 256 {
+        3
+    } else if len < 65536 {
+        5
+    } else if (len as u64) < (1u64 << 32) {
+        9
+    } else {
+        17
+    }
+}
+
+/// (frankenredis-dp2wu) SDS records its allocated buffer size in a
+/// type-specific field whose width caps the recorded value:
+/// SDS_TYPE_8 caps at 255, SDS_TYPE_16 at 65535, SDS_TYPE_32 at u32::MAX.
+/// `header_size` distinguishes the type (see `sds_*_header_size`).
+fn sds_alloc_field_cap(header_size: usize) -> usize {
+    match header_size {
+        1 => 0,                   // SDS_TYPE_5: no alloc field, avail always 0
+        3 => u8::MAX as usize,    // SDS_TYPE_8
+        5 => u16::MAX as usize,   // SDS_TYPE_16
+        9 => u32::MAX as usize,   // SDS_TYPE_32
+        _ => usize::MAX,          // SDS_TYPE_64
+    }
+}
+
+/// (frankenredis-dp2wu) Round `n` up to the next jemalloc default small
+/// size class. Within each `[2^k, 2^(k+1))` range, classes are spaced by
+/// `max(8, 2^(k-2))` (quartile spacing, floor 8). Matches the small-class
+/// table vendored Redis 7.2.4 returns via `zmalloc_size()`.
+fn jemalloc_small_size_class(n: usize) -> usize {
+    if n == 0 {
+        return 0;
+    }
+    if n <= 8 {
+        return 8;
+    }
+    // `lower` = largest power of 2 <= n.
+    let lower = 1usize << (usize::BITS - 1 - n.leading_zeros());
+    // Spacing inside [lower, 2*lower): max(8, lower / 4).
+    let spacing = std::cmp::max(8usize, lower >> 2);
+    n.div_ceil(spacing) * spacing
+}
+
 fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame, CommandError> {
     if argv.len() < 2 {
         return Err(CommandError::WrongArity("DEBUG"));
@@ -21240,9 +21305,13 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         //   ERR Not an sds encoded string.        if int-encoded or non-string
         //   +SimpleString with 6 sds-state fields otherwise
         // fr stores keys/values as Vec<u8> rather than upstream's sds, so
-        // the avail/zmalloc fields surface as the buffer length (no
-        // separate over-allocation concept). Tooling that parses the
-        // format gets a syntactically valid reply. (frankenredis-byt3l)
+        // the avail/zmalloc fields surface as the jemalloc-rounded size of
+        // (sds-header + len + 1 null terminator). Keys go through
+        // sdsReqType (1-byte SDS_TYPE_5 header below 32 chars) and values
+        // are embstr/raw which default to SDS_TYPE_8 (3-byte header) per
+        // object.c::createEmbeddedStringObject. Jemalloc small classes
+        // are quartile-spaced inside each power-of-2 range, floor 8.
+        // (frankenredis-byt3l / frankenredis-dp2wu)
         if argv.len() != 3 {
             return Err(debug_subcommand_envelope_error(sub));
         }
@@ -21257,9 +21326,27 @@ fn debug_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         }
         let key_len = key.len();
         let val_len = store.strlen(key, now_ms).unwrap_or(0);
+        let key_header = sds_key_header_size(key_len);
+        let val_header = sds_value_header_size(val_len);
+        let key_zmalloc = jemalloc_small_size_class(key_header + key_len + 1);
+        let val_zmalloc = jemalloc_small_size_class(val_header + val_len + 1);
+        // (frankenredis-dp2wu) avail captures the jemalloc over-allocation
+        // slack: for raw strings vendored sets `alloc = min(zmalloc -
+        // header - 1, sds_max_alloc_for_type)` and reports
+        // `avail = alloc - len`. The cap matters at SDS_TYPE_8's len=255
+        // boundary where the uint8_t alloc field can't represent the full
+        // jemalloc allocation. For embstr the buffer is sized exactly so
+        // avail is always 0.
+        let val_avail = if encoding == "raw" {
+            let raw_alloc = val_zmalloc.saturating_sub(val_header + 1);
+            let capped_alloc = std::cmp::min(raw_alloc, sds_alloc_field_cap(val_header));
+            capped_alloc.saturating_sub(val_len)
+        } else {
+            0
+        };
         Ok(RespFrame::SimpleString(format!(
-            "key_sds_len:{key_len}, key_sds_avail:0, key_zmalloc: {key_len}, \
-             val_sds_len:{val_len}, val_sds_avail:0, val_zmalloc: {val_len}"
+            "key_sds_len:{key_len}, key_sds_avail:0, key_zmalloc: {key_zmalloc}, \
+             val_sds_len:{val_len}, val_sds_avail:{val_avail}, val_zmalloc: {val_zmalloc}"
         )))
     } else if sub.eq_ignore_ascii_case("STRUCTSIZE") {
         // Upstream debug.c::debugCommand:878-888 returns a BulkString with
@@ -46861,6 +46948,87 @@ mod tests {
                     .to_string()
             )
         );
+    }
+
+    #[test]
+    fn debug_sdslen_reports_jemalloc_rounded_zmalloc_dp2wu() {
+        // (frankenredis-dp2wu) Vendored DEBUG SDSLEN reports
+        // jemalloc-rounded zmalloc sizes and `avail = alloc - len` for
+        // raw strings (capped at the SDS type's alloc-field width).
+        // Sample lengths confirmed against vendored 7.2.4 on :16380.
+        let mut store = Store::new();
+        for (val_len, expect_val_zmalloc, expect_val_avail, encoding_should_be) in [
+            (1usize, 8usize, 0usize, "embstr"),
+            (4, 8, 0, "embstr"),
+            (5, 16, 0, "embstr"),
+            (44, 48, 0, "embstr"),
+            (45, 56, 7, "raw"),       // 56 - 3 - 45 - 1
+            (47, 56, 5, "raw"),       // 56 - 3 - 47 - 1
+            (100, 112, 8, "raw"),     // 112 - 3 - 100 - 1
+            (200, 224, 20, "raw"),    // 224 - 3 - 200 - 1
+            (255, 320, 0, "raw"),     // 320 - 3 - 1 = 316, capped at 255, 255 - 255 = 0
+            (256, 320, 58, "raw"),    // SDS_TYPE_16 (header 5): 320 - 5 - 1 = 314, 314 - 256 = 58
+        ] {
+            // Reset key
+            dispatch_argv(&[b"DEL".to_vec(), b"k".to_vec()], &mut store, 0).ok();
+            let val = vec![b'x'; val_len];
+            dispatch_argv(
+                &[b"SET".to_vec(), b"k".to_vec(), val],
+                &mut store,
+                0,
+            )
+            .expect("seed");
+            // Sanity-check the encoding (which drives the avail branch).
+            let enc_reply = dispatch_argv(
+                &[
+                    b"OBJECT".to_vec(),
+                    b"ENCODING".to_vec(),
+                    b"k".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("enc");
+            let RespFrame::BulkString(Some(enc)) = enc_reply else {
+                panic!("encoding shape for len={val_len}: {enc_reply:?}");
+            };
+            assert_eq!(
+                std::str::from_utf8(&enc).unwrap(),
+                encoding_should_be,
+                "encoding mismatch for len={val_len}"
+            );
+
+            let reply = dispatch_argv(
+                &[
+                    b"DEBUG".to_vec(),
+                    b"SDSLEN".to_vec(),
+                    b"k".to_vec(),
+                ],
+                &mut store,
+                0,
+            )
+            .expect("debug sdslen");
+            let RespFrame::SimpleString(info) = reply else {
+                panic!("expected SimpleString for len={val_len}, got {reply:?}");
+            };
+            // Key is always "k" (1 byte) → SDS_TYPE_5, header 1, total 3, jemalloc 8.
+            assert!(
+                info.contains("key_sds_len:1, key_sds_avail:0, key_zmalloc: 8"),
+                "key fields wrong for val_len={val_len}: {info}"
+            );
+            assert!(
+                info.contains(&format!("val_sds_len:{val_len}")),
+                "val_sds_len mismatch for len={val_len}: {info}"
+            );
+            assert!(
+                info.contains(&format!("val_sds_avail:{expect_val_avail}")),
+                "val_sds_avail mismatch for len={val_len}: expected {expect_val_avail}, got {info}"
+            );
+            assert!(
+                info.contains(&format!("val_zmalloc: {expect_val_zmalloc}")),
+                "val_zmalloc mismatch for len={val_len}: expected {expect_val_zmalloc}, got {info}"
+            );
+        }
     }
 
     #[test]
