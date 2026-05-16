@@ -4514,9 +4514,15 @@ fn zrangebyscore(
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("ZRANGEBYSCORE"));
     }
+    // (frankenredis-e5mya) Walk the trailing option tail first so an
+    // unknown / misplaced option (e.g. ZRANGEBYSCORE k WITHSCORES 1 4)
+    // surfaces the upstream "syntax error" rather than the more
+    // specific "min or max is not a float" wording. Vendored
+    // t_zset.c::genericZrangebyscoreCommand parses options before
+    // bounds for exactly this reason.
+    let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
     let min = parse_score_bound(&argv[2])?;
     let max = parse_score_bound(&argv[3])?;
-    let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
     let mut pairs = store.zrangebyscore_withscores(&argv[1], min, max, now_ms)?;
     if let Some(offset) = limit_offset {
         if let Some(count) = limit_count {
@@ -11325,9 +11331,10 @@ fn zrevrangebyscore(
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("ZREVRANGEBYSCORE"));
     }
+    // (frankenredis-e5mya) Options before bounds; see zrangebyscore().
+    let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
     let max = parse_score_bound(&argv[2])?;
     let min = parse_score_bound(&argv[3])?;
-    let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
     let mut pairs = store.zrangebyscore_withscores(&argv[1], min, max, now_ms)?;
     pairs.reverse();
     if let Some(offset) = limit_offset {
@@ -11349,17 +11356,21 @@ fn zrangebylex(
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("ZRANGEBYLEX"));
     }
-    validate_lex_bound(&argv[2])?;
-    validate_lex_bound(&argv[3])?;
-    // (frankenredis-zlexws) Upstream t_zset.c::genericZrangebyscore
-    // Command guards `if (withscores && zlex)` and emits this exact
+    // (frankenredis-zlexws / frankenredis-e5mya) Upstream
+    // t_zset.c::genericZrangebyscoreCommand guards
+    // `if (withscores && zlex)` and emits the WITHSCORES-not-supported
     // wording. fr was reusing parse_zrangebyscore_opts (which silently
     // accepts WITHSCORES) and discarding the flag, so a stray
     // WITHSCORES on ZRANGEBYLEX returned the elements without scores
     // instead of erroring. The newer ZRANGE BYLEX path already
     // rejects this case correctly; the regression was scoped to the
-    // legacy ZRANGEBYLEX / ZREVRANGEBYLEX commands.
+    // legacy ZRANGEBYLEX / ZREVRANGEBYLEX commands. Options must also
+    // parse *before* validate_lex_bound so a misplaced LIMIT/option
+    // at the bound position surfaces "syntax error" rather than the
+    // bound-format wording (e5mya).
     let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
+    validate_lex_bound(&argv[2])?;
+    validate_lex_bound(&argv[3])?;
     if withscores {
         return Err(CommandError::Custom(
             "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
@@ -11389,10 +11400,10 @@ fn zrevrangebylex(
     if argv.len() < 4 {
         return Err(CommandError::WrongArity("ZREVRANGEBYLEX"));
     }
+    // (frankenredis-zlexws / frankenredis-e5mya) See zrangebylex().
+    let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
     validate_lex_bound(&argv[2])?;
     validate_lex_bound(&argv[3])?;
-    // (frankenredis-zlexws) See zrangebylex() above for rationale.
-    let (withscores, limit_offset, limit_count) = parse_zrangebyscore_opts(argv, 4)?;
     if withscores {
         return Err(CommandError::Custom(
             "ERR syntax error, WITHSCORES not supported in combination with BYLEX".to_string(),
@@ -28426,6 +28437,131 @@ mod tests {
         )
         .expect("zrangebyscore negative offset");
         assert_eq!(out, RespFrame::Array(Some(Vec::new())));
+    }
+
+    #[test]
+    fn zrangebyscore_bylex_parse_options_before_bounds_e5mya() {
+        // (frankenredis-e5mya) Upstream zrange{by,bylex} parse the
+        // trailing option tail FIRST, so an unknown / misplaced token
+        // surfaces "ERR syntax error" rather than the bound-format
+        // wording. fr previously parsed bounds first and leaked the
+        // more specific "min or max is not a float" /
+        // "min or max not valid string range item" errors.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd");
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"zlex".to_vec(),
+                b"0".to_vec(),
+                b"a".to_vec(),
+                b"0".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("zadd lex");
+        // Unknown / misplaced option must produce "syntax error".
+        for argv in [
+            vec![
+                b"ZRANGEBYSCORE".to_vec(),
+                b"z".to_vec(),
+                b"WITHSCORES".to_vec(),
+                b"1".to_vec(),
+                b"4".to_vec(),
+            ],
+            vec![
+                b"ZRANGEBYSCORE".to_vec(),
+                b"z".to_vec(),
+                b"LIMIT".to_vec(),
+                b"1".to_vec(),
+                b"4".to_vec(),
+            ],
+            vec![
+                b"ZRANGEBYSCORE".to_vec(),
+                b"z".to_vec(),
+                b"1".to_vec(),
+                b"4".to_vec(),
+                b"BAD".to_vec(),
+            ],
+            vec![
+                b"ZREVRANGEBYSCORE".to_vec(),
+                b"z".to_vec(),
+                b"4".to_vec(),
+                b"1".to_vec(),
+                b"BAD".to_vec(),
+            ],
+            vec![
+                b"ZRANGEBYLEX".to_vec(),
+                b"zlex".to_vec(),
+                b"LIMIT".to_vec(),
+                b"0".to_vec(),
+                b"2".to_vec(),
+            ],
+            vec![
+                b"ZREVRANGEBYLEX".to_vec(),
+                b"zlex".to_vec(),
+                b"LIMIT".to_vec(),
+                b"0".to_vec(),
+                b"2".to_vec(),
+            ],
+        ] {
+            let label = String::from_utf8_lossy(&argv.join(&b' ')).into_owned();
+            let err = dispatch_argv(&argv, &mut store, 0)
+                .err()
+                .unwrap_or_else(|| panic!("{label} should error"));
+            assert!(
+                matches!(err, CommandError::SyntaxError),
+                "{label}: expected SyntaxError, got {err:?}"
+            );
+        }
+        // 4-arg form keeps the bound-format wording when the option
+        // tail is empty.
+        let err = dispatch_argv(
+            &[
+                b"ZRANGEBYSCORE".to_vec(),
+                b"z".to_vec(),
+                b"WITHSCORES".to_vec(),
+                b"bogus".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("bound parse should fail");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("not a float") || msg.contains("MinMaxNotFloat"),
+            "bound err should be min-or-max-not-a-float wording, got {msg}"
+        );
+        let err = dispatch_argv(
+            &[
+                b"ZRANGEBYLEX".to_vec(),
+                b"zlex".to_vec(),
+                b"bogus_min".to_vec(),
+                b"+".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect_err("lex bound parse should fail");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("not valid string range item"),
+            "lex bound err should mention 'not valid string range item', got {msg}"
+        );
     }
 
     #[test]
