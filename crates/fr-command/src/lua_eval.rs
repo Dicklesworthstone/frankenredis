@@ -305,6 +305,74 @@ impl LuaTableInner {
     fn hash_is_empty(&self) -> bool {
         self.string_hash.is_empty() && self.other_hash.is_empty()
     }
+
+    /// (frankenredis-y0ri2) Lua 5.1 luaH_getn border search. When the array
+    /// part ends in nil, binary-search for a border `i` such that
+    /// `t[i] != nil && t[i+1] == nil`. When the array's last slot is
+    /// non-nil and there are integer keys in the hash part, unbound_search
+    /// extends the search past sizearray. Used by the `#` operator and by
+    /// table.concat's default `last` argument.
+    fn border_len(&self) -> usize {
+        let j = self.array.len();
+        if j > 0 && matches!(self.array[j - 1], LuaValue::Nil) {
+            let mut i: usize = 0;
+            let mut j: usize = j;
+            while j - i > 1 {
+                let m = (i + j) / 2;
+                if matches!(self.array[m - 1], LuaValue::Nil) {
+                    j = m;
+                } else {
+                    i = m;
+                }
+            }
+            return i;
+        }
+        if self.hash_is_empty() {
+            return j;
+        }
+        // Unbound search in the hash part: double-and-binary-search to find
+        // any integer-key border t[i] != nil && t[i+1] == nil.
+        let mut i = j;
+        let mut hi = j + 1;
+        while !matches!(self.hash_get(&LuaValue::Number(hi as f64)), LuaValue::Nil) {
+            i = hi;
+            if hi > usize::MAX / 2 {
+                let mut k = 1usize;
+                while !matches!(self.hash_get(&LuaValue::Number(k as f64)), LuaValue::Nil) {
+                    k += 1;
+                }
+                return k - 1;
+            }
+            hi *= 2;
+        }
+        while hi - i > 1 {
+            let m = (i + hi) / 2;
+            if matches!(self.hash_get(&LuaValue::Number(m as f64)), LuaValue::Nil) {
+                hi = m;
+            } else {
+                i = m;
+            }
+        }
+        i
+    }
+}
+
+/// (frankenredis-y0ri2) Lua 5.1 SETLIST semantics: positional fields in a
+/// table constructor occupy fixed slots even when the value is nil. The
+/// general LuaTable::set path drops nil at `array.len() + 1` (matching
+/// `t[i] = nil` delete semantics), which is wrong for `{1, nil, 3}` since
+/// it loses the slot. This helper grows the array with nil padding so
+/// the positional slot is preserved.
+fn set_positional_array_slot(table: &LuaTable, slot: usize, value: LuaValue) {
+    let mut inner = table.inner.borrow_mut();
+    if slot >= 1 && slot <= inner.array.len() {
+        inner.array[slot - 1] = value;
+        return;
+    }
+    while inner.array.len() + 1 < slot {
+        inner.array.push(LuaValue::Nil);
+    }
+    inner.array.push(value);
 }
 
 /// Format the chunk-name prefix Lua 5.1 wraps around loadstring/load
@@ -3557,7 +3625,15 @@ impl<'a> LuaState<'a> {
                     UnaryOp::Not => Ok(LuaValue::Bool(!val.is_truthy())),
                     UnaryOp::Len => match &val {
                         LuaValue::Str(s) => Ok(LuaValue::Number(s.len() as f64)),
-                        LuaValue::Table(t) => Ok(LuaValue::Number(t.len() as f64)),
+                        // (frankenredis-y0ri2) `#t` mirrors Lua 5.1
+                        // luaH_getn which does a binary border search
+                        // when the array part ends in nil (or extends
+                        // the search into the hash part). t.len() only
+                        // returns the raw array.len(), which diverges
+                        // from vendored on sparse / nil-hole tables.
+                        LuaValue::Table(t) => {
+                            Ok(LuaValue::Number(t.inner.borrow().border_len() as f64))
+                        }
                         // (frankenredis-7w22v / frankenredis-9ckvq) Prepend
                         // user_script:1: prefix and label the bad operand.
                         _ => Err(self.type_error_with_label(
@@ -3742,12 +3818,12 @@ impl<'a> LuaState<'a> {
                                     _ => vec![self.eval_expr(expr, env, varargs)?],
                                 };
                                 for val in values {
-                                    table.set(LuaValue::Number(auto_idx as f64), val);
+                                    set_positional_array_slot(&table, auto_idx, val);
                                     auto_idx += 1;
                                 }
                             } else {
                                 let val = self.eval_expr(expr, env, varargs)?;
-                                table.set(LuaValue::Number(auto_idx as f64), val);
+                                set_positional_array_slot(&table, auto_idx, val);
                                 auto_idx += 1;
                             }
                         }
@@ -5404,10 +5480,18 @@ impl<'a> LuaState<'a> {
                 let idx = args.get(1).and_then(|v| v.to_number()).unwrap_or(0.0) as usize + 1;
                 if let LuaValue::Table(t) = &table {
                     if idx <= t.inner.borrow().array.len() {
-                        Ok(vec![
-                            LuaValue::Number(idx as f64),
-                            t.inner.borrow().array[idx - 1].clone(),
-                        ])
+                        let v = t.inner.borrow().array[idx - 1].clone();
+                        // (frankenredis-y0ri2) ipairs stops at the first nil
+                        // value per Lua 5.1 ref §5.4. Now that table
+                        // constructors preserve nil slots in the array
+                        // (`{1, nil, 3}` -> array=[1, Nil, 3]), the iterator
+                        // must not return the nil — that would erroneously
+                        // step past the hole and emit (3, 3).
+                        if matches!(v, LuaValue::Nil) {
+                            Ok(vec![LuaValue::Nil])
+                        } else {
+                            Ok(vec![LuaValue::Number(idx as f64), v])
+                        }
                     } else {
                         Ok(vec![LuaValue::Nil])
                     }
@@ -5463,12 +5547,23 @@ impl<'a> LuaState<'a> {
                     ));
                 };
 
+                // (frankenredis-y0ri2) Find the next non-nil array slot
+                // at or after `from` (0-based). Lua 5.1 next() skips nil
+                // values — the table constructor now preserves nil
+                // positional slots in the array part, so a naive
+                // contiguous step would yield (2, nil) and `pairs` would
+                // emit a spurious nil-valued pair.
+                let next_array_slot = |from: usize| -> Option<usize> {
+                    let inner = t.inner.borrow();
+                    (from..inner.array.len()).find(|&i| !matches!(inner.array[i], LuaValue::Nil))
+                };
+
                 // Find next key after the given key.
                 if matches!(key, LuaValue::Nil) {
-                    if !t.inner.borrow().array.is_empty() {
+                    if let Some(i) = next_array_slot(0) {
                         return Ok(vec![
-                            LuaValue::Number(1.0),
-                            t.inner.borrow().array[0].clone(),
+                            LuaValue::Number((i + 1) as f64),
+                            t.inner.borrow().array[i].clone(),
                         ]);
                     }
                     let hash_pairs = t.hash_pairs();
@@ -5481,10 +5576,10 @@ impl<'a> LuaState<'a> {
                 if let LuaValue::Number(n) = &key {
                     let idx = *n as usize;
                     if idx >= 1 && idx <= t.inner.borrow().array.len() && *n == idx as f64 {
-                        if idx < t.inner.borrow().array.len() {
+                        if let Some(i) = next_array_slot(idx) {
                             return Ok(vec![
-                                LuaValue::Number((idx + 1) as f64),
-                                t.inner.borrow().array[idx].clone(),
+                                LuaValue::Number((i + 1) as f64),
+                                t.inner.borrow().array[i].clone(),
                             ]);
                         }
                         let hash_pairs = t.hash_pairs();
@@ -6694,7 +6789,14 @@ impl<'a> LuaState<'a> {
                         ));
                     }
                 };
-                let array_len = t.inner.borrow().array.len() as i64;
+                // (frankenredis-y0ri2) Upstream ltablib.c::tconcat defaults
+                // `last` to `luaL_getn(L,1)` which is the same border-search
+                // length as the `#` operator — not array.sizearray. Using
+                // raw array.len() here would mean `table.concat({1,nil,3})`
+                // silently truncates at the first nil instead of raising,
+                // because fr's array previously dropped nil-hole slots and
+                // now retains them.
+                let array_len = t.inner.borrow().border_len() as i64;
                 let start = lua_optional_integer_arg(inv, 3, args.get(2), 1)?;
                 let end =
                     lua_optional_integer_arg(inv, 4, args.get(3), array_len)?;
@@ -12939,6 +13041,138 @@ mod tests {
         // Server still alive after all the error cases: a follow-up eval works.
         let r = eval_script(b"return 1 + 1", &[], &[], &mut store, 0).expect("after");
         assert!(matches!(r, RespFrame::Integer(2)));
+    }
+
+    #[test]
+    fn table_constructor_preserves_nil_holes_for_border_and_concat_y0ri2() {
+        // (frankenredis-y0ri2) Lua 5.1 table constructor pre-allocates a
+        // slot for every positional field, even nil. fr previously routed
+        // through LuaTable::set, which drops a nil at array.len()+1,
+        // losing the slot. Both `#t` and `table.concat`'s default `last`
+        // depend on the slot being present.
+        let mut store = Store::new();
+        for (script, expected) in &[
+            // (frankenredis-y0ri2) `#{1,nil,3}` should return 3 — array
+            // part is [1,nil,3], last slot is non-nil so luaH_getn returns
+            // sizearray directly.
+            (b"return #{1,nil,3}".as_ref(), "3"),
+            // Last slot non-nil: returns sizearray = 4.
+            (b"return #{1,2,nil,4}".as_ref(), "4"),
+            // Last slot non-nil: returns sizearray = 3 even with leading nils.
+            (b"return #{nil,nil,3}".as_ref(), "3"),
+            // Last slot nil: binary border search returns 0 (no non-nil at
+            // any index where t[i+1]=nil).
+            (b"return #{nil,nil,3,nil}".as_ref(), "0"),
+            // Last slot nil: binary border search returns 2 (t[2]=2, t[3]=nil).
+            (b"return #{1,2,nil}".as_ref(), "2"),
+        ] {
+            let r = eval_script(script, &[], &[], &mut store, 0).unwrap_or_else(|e| {
+                panic!("script {:?} failed: {}", String::from_utf8_lossy(script), e)
+            });
+            match r {
+                RespFrame::Integer(n) => assert_eq!(
+                    n.to_string(),
+                    *expected,
+                    "script {:?} expected {} got {}",
+                    String::from_utf8_lossy(script),
+                    expected,
+                    n
+                ),
+                other => panic!(
+                    "script {:?} expected integer {}, got {:?}",
+                    String::from_utf8_lossy(script),
+                    expected,
+                    other
+                ),
+            }
+        }
+        // (frankenredis-y0ri2) table.concat with no explicit `last` now sees
+        // the nil hole and raises 'invalid value (nil) at index 2 in table
+        // for concat' to match vendored Redis 7.2.4. Previously fr returned
+        // "1" because array.len() truncated at the first nil.
+        let err = eval_script(
+            b"return table.concat({1,nil,3}, ',')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            "user_script:1: invalid value (nil) at index 2 in table for 'concat'"
+        );
+
+        // (frankenredis-y0ri2) ipairs still stops at the first nil per Lua
+        // 5.1 ref §5.4 — array=[1,2,Nil,4] iterates only (1,1) and (2,2)
+        // even though slot 4 is non-nil. Previously fr's array was [1,2]
+        // and stopping was incidental; the explicit nil check now keeps
+        // the behavior correct.
+        let r = eval_script(
+            b"local r={}; for i,v in ipairs({1,2,nil,4}) do r[#r+1]=v end; return r",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match r {
+            RespFrame::Array(Some(items)) => {
+                let nums: Vec<i64> = items
+                    .iter()
+                    .filter_map(|f| match f {
+                        RespFrame::Integer(n) => Some(*n),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(nums, vec![1, 2], "ipairs must stop at first nil");
+            }
+            other => panic!("expected Array, got {:?}", other),
+        }
+
+        // (frankenredis-y0ri2) `next` / `pairs` skip nil array entries.
+        // Vendored emits keys {1, 3, 5} for `pairs({1,nil,3,nil,5})`;
+        // fr now matches after teaching next() to advance past nil slots
+        // in the array part (preserved nil slots would otherwise yield
+        // spurious (2, nil) and (4, nil) pairs).
+        let r = eval_script(
+            b"local r={}; for k,_ in pairs({1,nil,3,nil,5}) do r[#r+1]=k end; table.sort(r); return r",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match r {
+            RespFrame::Array(Some(items)) => {
+                let nums: Vec<i64> = items
+                    .iter()
+                    .filter_map(|f| match f {
+                        RespFrame::Integer(n) => Some(*n),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(nums, vec![1, 3, 5], "pairs must skip nil array slots");
+            }
+            other => panic!("expected Array, got {:?}", other),
+        }
+
+        // next(t, prev) where prev's successor is nil must skip ahead to
+        // the next non-nil slot — for {1,nil,3}, next(t,1) returns key=3.
+        // (EVAL top-level return discards values beyond the first per
+        // Redis's lua-to-RESP conversion, so we only check the key.)
+        let r = eval_script(
+            b"return ({next({1,nil,3}, 1)})[1]",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        match r {
+            RespFrame::Integer(n) => assert_eq!(n, 3, "next must skip nil slot to key 3"),
+            other => panic!("expected Integer(3), got {:?}", other),
+        }
     }
 
     #[test]
