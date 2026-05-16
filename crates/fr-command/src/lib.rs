@@ -477,6 +477,7 @@ const KEY_FLAGS_RW_ACCESS_DELETE: &[&str] = &["RW", "access", "delete"];
 const KEY_FLAGS_RW_INSERT: &[&str] = &["RW", "insert"];
 const KEY_FLAGS_RW_DELETE: &[&str] = &["RW", "delete"];
 const KEY_FLAGS_RW_UPDATE: &[&str] = &["RW", "update"];
+const KEY_FLAGS_RW_ACCESS_INSERT: &[&str] = &["RW", "access", "insert"];
 const KEY_FLAGS_RO: &[&str] = &["RO"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1277,6 +1278,154 @@ fn command_key_references_with_exact_flags(
                 .map(|index| CommandKeyReference { index, flags })
                 .collect(),
         ));
+    }
+
+    // ZINTERSTORE/ZUNIONSTORE/ZDIFFSTORE: dst is OW|UPDATE, source keys
+    // are RO|ACCESS. Layout: <cmd> dst numkeys k1..kN [WEIGHTS...]
+    // [AGGREGATE...]. Source keys are at argv[3..3+numkeys].
+    // (frankenredis-bkk3h, upstream commands/<cmd>.json key_specs)
+    if cmd_name.eq_ignore_ascii_case("ZINTERSTORE")
+        || cmd_name.eq_ignore_ascii_case("ZUNIONSTORE")
+        || cmd_name.eq_ignore_ascii_case("ZDIFFSTORE")
+    {
+        if argv.len() < 4 {
+            return Ok(None);
+        }
+        let Ok(numkeys_str) = std::str::from_utf8(&argv[2]) else {
+            return Ok(None);
+        };
+        let Ok(numkeys) = numkeys_str.parse::<usize>() else {
+            return Ok(None);
+        };
+        if numkeys == 0 || argv.len() < 3 + numkeys {
+            return Ok(None);
+        }
+        let mut refs = vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_OW_UPDATE,
+        }];
+        refs.extend((3..3 + numkeys).map(|index| CommandKeyReference {
+            index,
+            flags: KEY_FLAGS_RO_ACCESS,
+        }));
+        return Ok(Some(refs));
+    }
+
+    // SUNIONSTORE / SDIFFSTORE: dst is OW|UPDATE, source keys are
+    // RO|ACCESS. SINTERSTORE is RW|UPDATE for dst (upstream marks it
+    // as read-modify-write because the dst can be one of the source
+    // sets). Layout: <cmd> dst k1 k2 ...
+    // (frankenredis-bkk3h)
+    if cmd_name.eq_ignore_ascii_case("SUNIONSTORE")
+        || cmd_name.eq_ignore_ascii_case("SDIFFSTORE")
+        || cmd_name.eq_ignore_ascii_case("SINTERSTORE")
+    {
+        if argv.len() < 3 {
+            return Ok(None);
+        }
+        let dst_flags = if cmd_name.eq_ignore_ascii_case("SINTERSTORE") {
+            KEY_FLAGS_RW_UPDATE
+        } else {
+            KEY_FLAGS_OW_UPDATE
+        };
+        let mut refs = vec![CommandKeyReference {
+            index: 1,
+            flags: dst_flags,
+        }];
+        refs.extend((2..argv.len()).map(|index| CommandKeyReference {
+            index,
+            flags: KEY_FLAGS_RO_ACCESS,
+        }));
+        return Ok(Some(refs));
+    }
+
+    // GEOSEARCHSTORE / ZRANGESTORE: dst is OW|UPDATE, src is RO|ACCESS.
+    // Layout: <cmd> dst src ...
+    // (frankenredis-bkk3h)
+    if cmd_name.eq_ignore_ascii_case("GEOSEARCHSTORE")
+        || cmd_name.eq_ignore_ascii_case("ZRANGESTORE")
+    {
+        if argv.len() < 3 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![
+            CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_OW_UPDATE,
+            },
+            CommandKeyReference {
+                index: 2,
+                flags: KEY_FLAGS_RO_ACCESS,
+            },
+        ]));
+    }
+
+    // SMOVE src dst member: src is RW|ACCESS|DELETE, dst is RW|INSERT.
+    // (frankenredis-bkk3h, upstream commands/smove.json)
+    if cmd_name.eq_ignore_ascii_case("SMOVE") {
+        if argv.len() < 4 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![
+            CommandKeyReference {
+                index: 1,
+                flags: KEY_FLAGS_RW_ACCESS_DELETE,
+            },
+            CommandKeyReference {
+                index: 2,
+                flags: KEY_FLAGS_RW_INSERT,
+            },
+        ]));
+    }
+
+    // LSET key index value: RW|UPDATE (rewrites a single element).
+    // LTRIM key start stop: RW|DELETE (removes elements outside window).
+    // LINSERT key BEFORE|AFTER pivot value: RW|INSERT (inserts a new
+    // element next to pivot). (frankenredis-bkk3h)
+    if cmd_name.eq_ignore_ascii_case("LSET") {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_UPDATE,
+        }]));
+    }
+    if cmd_name.eq_ignore_ascii_case("LTRIM") {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_DELETE,
+        }]));
+    }
+    if cmd_name.eq_ignore_ascii_case("LINSERT") {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        return Ok(Some(vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_INSERT,
+        }]));
+    }
+
+    // PFMERGE dst k1 k2 ...: dst is RW|ACCESS|INSERT (the destination
+    // is merged in-place with the incoming HLLs), source keys are
+    // RO|ACCESS. (frankenredis-bkk3h)
+    if cmd_name.eq_ignore_ascii_case("PFMERGE") {
+        if argv.len() < 2 {
+            return Ok(None);
+        }
+        let mut refs = vec![CommandKeyReference {
+            index: 1,
+            flags: KEY_FLAGS_RW_ACCESS_INSERT,
+        }];
+        refs.extend((2..argv.len()).map(|index| CommandKeyReference {
+            index,
+            flags: KEY_FLAGS_RO_ACCESS,
+        }));
+        return Ok(Some(refs));
     }
 
     if cmd_name.eq_ignore_ascii_case("XREAD") || cmd_name.eq_ignore_ascii_case("XREADGROUP") {
@@ -55407,6 +55556,248 @@ mod tests {
         assert_eq!(
             fcall_two_keys,
             RespFrame::Array(Some(vec![key_block(b"k1"), key_block(b"k2")]))
+        );
+    }
+
+    // (frankenredis-bkk3h) GETKEYSANDFLAGS for store-style and in-place
+    // mutate commands previously fell through to the generic derived_flags
+    // path which always emitted [RW, access, update]. Pin the upstream
+    // keyspec flag taxonomy per commands/<cmd>.json.
+    #[test]
+    fn command_getkeysandflags_store_and_mutate_match_upstream_keyspecs_bkk3h() {
+        let mut store = Store::new();
+        let key_block = |name: &[u8], flags: &[&str]| {
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(name.to_vec())),
+                RespFrame::Array(Some(
+                    flags
+                        .iter()
+                        .map(|flag| RespFrame::SimpleString((*flag).to_string()))
+                        .collect(),
+                )),
+            ]))
+        };
+
+        // ZINTERSTORE dst 2 a b: dst=OW|update, a/b=RO|access
+        let zis = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"ZINTERSTORE".to_vec(),
+                b"dst".to_vec(),
+                b"2".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            zis,
+            RespFrame::Array(Some(vec![
+                key_block(b"dst", &["OW", "update"]),
+                key_block(b"a", &["RO", "access"]),
+                key_block(b"b", &["RO", "access"]),
+            ]))
+        );
+
+        // SINTERSTORE dst a b: dst=RW|update (NOT OW), srcs=RO|access
+        let sis = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"SINTERSTORE".to_vec(),
+                b"dst".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            sis,
+            RespFrame::Array(Some(vec![
+                key_block(b"dst", &["RW", "update"]),
+                key_block(b"a", &["RO", "access"]),
+                key_block(b"b", &["RO", "access"]),
+            ]))
+        );
+
+        // SUNIONSTORE dst a b: dst=OW|update, srcs=RO|access
+        let sus = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"SUNIONSTORE".to_vec(),
+                b"dst".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            sus,
+            RespFrame::Array(Some(vec![
+                key_block(b"dst", &["OW", "update"]),
+                key_block(b"a", &["RO", "access"]),
+                key_block(b"b", &["RO", "access"]),
+            ]))
+        );
+
+        // GEOSEARCHSTORE dst src ...: dst=OW|update, src=RO|access
+        let gss = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"GEOSEARCHSTORE".to_vec(),
+                b"dst".to_vec(),
+                b"src".to_vec(),
+                b"FROMMEMBER".to_vec(),
+                b"m".to_vec(),
+                b"BYRADIUS".to_vec(),
+                b"5".to_vec(),
+                b"km".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            gss,
+            RespFrame::Array(Some(vec![
+                key_block(b"dst", &["OW", "update"]),
+                key_block(b"src", &["RO", "access"]),
+            ]))
+        );
+
+        // ZRANGESTORE dst src 0 -1: dst=OW|update, src=RO|access
+        let zrs = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"src".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            zrs,
+            RespFrame::Array(Some(vec![
+                key_block(b"dst", &["OW", "update"]),
+                key_block(b"src", &["RO", "access"]),
+            ]))
+        );
+
+        // SMOVE src dst m: src=RW|access|delete, dst=RW|insert
+        let smv = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"SMOVE".to_vec(),
+                b"src".to_vec(),
+                b"dst".to_vec(),
+                b"m".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            smv,
+            RespFrame::Array(Some(vec![
+                key_block(b"src", &["RW", "access", "delete"]),
+                key_block(b"dst", &["RW", "insert"]),
+            ]))
+        );
+
+        // LSET key i v: RW|update
+        let lset = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"LSET".to_vec(),
+                b"l".to_vec(),
+                b"0".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            lset,
+            RespFrame::Array(Some(vec![key_block(b"l", &["RW", "update"])]))
+        );
+
+        // LTRIM key 0 10: RW|delete
+        let ltrim = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"LTRIM".to_vec(),
+                b"l".to_vec(),
+                b"0".to_vec(),
+                b"10".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            ltrim,
+            RespFrame::Array(Some(vec![key_block(b"l", &["RW", "delete"])]))
+        );
+
+        // LINSERT key BEFORE a v: RW|insert
+        let lins = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"LINSERT".to_vec(),
+                b"l".to_vec(),
+                b"BEFORE".to_vec(),
+                b"a".to_vec(),
+                b"v".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            lins,
+            RespFrame::Array(Some(vec![key_block(b"l", &["RW", "insert"])]))
+        );
+
+        // PFMERGE dst a b: dst=RW|access|insert, srcs=RO|access
+        let pfm = dispatch_argv(
+            &[
+                b"COMMAND".to_vec(),
+                b"GETKEYSANDFLAGS".to_vec(),
+                b"PFMERGE".to_vec(),
+                b"dst".to_vec(),
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            pfm,
+            RespFrame::Array(Some(vec![
+                key_block(b"dst", &["RW", "access", "insert"]),
+                key_block(b"a", &["RO", "access"]),
+                key_block(b"b", &["RO", "access"]),
+            ]))
         );
     }
 
