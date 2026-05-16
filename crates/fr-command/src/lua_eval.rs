@@ -6896,20 +6896,22 @@ impl<'a> LuaState<'a> {
                 }
                 let pos_arg = args.get(1).cloned();
                 if let LuaValue::Table(ref mut t) = args[0] {
-                    let pos = lua_optional_integer_arg(
-                        inv,
-                        2,
-                        pos_arg.as_ref(),
-                        t.inner.borrow().array.len() as i64,
-                    )? as usize;
-                    let removed = if pos >= 1 && pos <= t.inner.borrow().array.len() {
-                        t.inner.borrow_mut().array.remove(pos - 1)
-                    } else {
-                        LuaValue::Nil
-                    };
+                    let len = t.inner.borrow().array.len() as i64;
+                    let pos = lua_optional_integer_arg(inv, 2, pos_arg.as_ref(), len)?;
+                    // (frankenredis-2hgg1) Redis's vendored Lua 5.1's
+                    // ltablib.c::tremove returns 0 Lua values (not a
+                    // pushed nil) when the position is out of bounds:
+                    //   if (!(1 <= pos && pos <= e)) return 0;
+                    // fr previously returned a single nil for this
+                    // case, breaking the return arity contract scripts
+                    // depend on (select('#', ...) == 0 vs 1).
+                    if pos < 1 || pos > len {
+                        return Ok(vec![]);
+                    }
+                    let removed = t.inner.borrow_mut().array.remove((pos - 1) as usize);
                     return Ok(vec![removed]);
                 }
-                Ok(vec![LuaValue::Nil])
+                Ok(vec![])
             }
             "table.concat" => {
                 let inv = self.current_invocation_name.as_deref();
@@ -12978,6 +12980,88 @@ mod tests {
         );
 
         assert!(matches!(result, Err(ref err) if err.contains("bad argument #2 to 'remove'")));
+    }
+
+    /// (frankenredis-2hgg1) Redis's vendored Lua 5.1's
+    /// ltablib.c::tremove pushes ZERO Lua values when the position is
+    /// out of bounds (the predicate `1 <= pos && pos <= e`). Pre-fix fr
+    /// pushed a single Lua nil, changing the return arity from 0 to 1.
+    /// Verified against vendored Redis 7.2.4 via differential probe.
+    #[test]
+    fn table_remove_out_of_bounds_returns_no_values_per_redis_lua_2hgg1() {
+        let mut store = Store::new();
+
+        let r = eval_script(
+            b"return select('#', table.remove({}))",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("empty table");
+        assert_eq!(r, RespFrame::Integer(0));
+
+        let r = eval_script(
+            b"return select('#', table.remove({1,2}, 100))",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("oob positive");
+        assert_eq!(r, RespFrame::Integer(0));
+
+        let r = eval_script(
+            b"return select('#', table.remove({1,2}, 0))",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("zero pos");
+        assert_eq!(r, RespFrame::Integer(0));
+
+        let r = eval_script(
+            b"return select('#', table.remove({1,2}, -1))",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("negative pos");
+        assert_eq!(r, RespFrame::Integer(0));
+
+        // In-bounds still returns 1 value.
+        let r = eval_script(
+            b"return select('#', table.remove({1,2}))",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("default last");
+        assert_eq!(r, RespFrame::Integer(1));
+
+        // In-bounds remove from position 1 shifts the rest left; the
+        // trailing slot t[#t] becomes nil and is dropped by Redis's
+        // RESP array conversion (it truncates at the first nil per
+        // Lua's table-to-array protocol).
+        let r = eval_script(
+            b"local t={1,2,3}; local r=table.remove(t,1); return {r, t[1], t[2], t[3]}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("shift left");
+        assert_eq!(
+            r,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(1),
+                RespFrame::Integer(2),
+                RespFrame::Integer(3),
+            ]))
+        );
     }
 
     #[test]
