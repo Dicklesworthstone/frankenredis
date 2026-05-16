@@ -1097,7 +1097,15 @@ impl<'a> Lexer<'a> {
                             }
                         }
                         if num > 255 {
-                            return Err("escape sequence too large".to_string());
+                            // (frankenredis-8xuri) Mirror Lua 5.1.5
+                            // llex.c::luaX_lexerror near-suffix: when
+                            // the error fires mid-string, the current
+                            // token rendering is the open/close quote
+                            // character. Format: "...near '<delim>'".
+                            return Err(format!(
+                                "escape sequence too large near '{}'",
+                                delim as char
+                            ));
                         }
                         buf.push(num as u8);
                     }
@@ -13339,17 +13347,35 @@ mod tests {
             "\\a \\b \\f \\v must resolve to 0x07 0x08 0x0c 0x0b"
         );
 
-        let too_big = eval_script(
+        // (frankenredis-8xuri) Mirror Lua 5.1.5 llex.c::luaX_lexerror
+        // near-suffix: "escape sequence too large near '<delim>'"
+        // where <delim> is the opening quote rendering. Pin both
+        // ' and " variants.
+        let too_big_single = eval_script(
             b"return '\\256'",
             &[],
             &[],
             &mut store,
             0,
         );
-        match too_big {
+        match too_big_single {
             Err(msg) => assert!(
-                msg.contains("escape sequence too large"),
-                "expected too-large error, got {msg:?}"
+                msg.contains("escape sequence too large near '''"),
+                "expected too-large + near suffix for single quote, got {msg:?}"
+            ),
+            Ok(other) => panic!("\\256 must error, got {other:?}"),
+        }
+        let too_big_double = eval_script(
+            b"return \"\\256\"",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        match too_big_double {
+            Err(msg) => assert!(
+                msg.contains("escape sequence too large near '\"'"),
+                "expected too-large + near suffix for double quote, got {msg:?}"
             ),
             Ok(other) => panic!("\\256 must error, got {other:?}"),
         }
