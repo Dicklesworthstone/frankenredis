@@ -4615,9 +4615,13 @@ fn zpopmin(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFrame
         // ZPOPMAX already uses to keep the wording uniform.
         // (frankenredis-zpopminword)
         let count = parse_zpop_count(&argv[2])?;
-        if count == 0 {
-            return Ok(RespFrame::Array(Some(vec![])));
-        }
+        // (frankenredis-5w1d3) Don't short-circuit count==0 here:
+        // zpopmin_count's type check at fr-store/src/lib.rs:7303
+        // must fire so a wrongtype-key with count==0 surfaces
+        // WRONGTYPE (matching upstream t_zset.c::genericZpopCommand
+        // and ZPOPMAX/LPOP/RPOP). The inner for-loop is a no-op when
+        // count==0, so this is functionally equivalent for set-typed
+        // keys.
         let pairs = store.zpopmin_count(&argv[1], count, now_ms)?;
         return Ok(zpop_count_emit(
             pairs,
@@ -59059,6 +59063,47 @@ mod tests {
 
         let card = dispatch_argv(&[b"ZCARD".to_vec(), b"zs".to_vec()], &mut store, 0).unwrap();
         assert_eq!(card, RespFrame::Integer(2));
+    }
+
+    #[test]
+    fn zpop_count_zero_on_wrongtype_key_reports_wrongtype_5w1d3() {
+        // (frankenredis-5w1d3) Both ZPOPMIN and ZPOPMAX must surface
+        // WRONGTYPE for `ZPOPM{IN,AX} <string-key> 0`. ZPOPMAX already
+        // routed through zpopmax_count whose type check fires; ZPOPMIN
+        // had an early count==0 return that skipped the check.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[b"SET".to_vec(), b"strkey".to_vec(), b"foo".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("set strkey");
+        for cmd in [b"ZPOPMIN".as_slice(), b"ZPOPMAX".as_slice()] {
+            let err = dispatch_argv(
+                &[cmd.to_vec(), b"strkey".to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .unwrap_err();
+            assert!(
+                matches!(err, CommandError::Store(StoreError::WrongType)),
+                "{:?} count=0 on wrongtype expected WrongType, got {:?}",
+                std::str::from_utf8(cmd).unwrap(),
+                err
+            );
+        }
+        // Sanity: count=0 on a missing key still returns empty array
+        // (no type to clash with), and count=0 on a real sorted set
+        // is a no-op that pops nothing but doesn't error.
+        for cmd in [b"ZPOPMIN".as_slice(), b"ZPOPMAX".as_slice()] {
+            let ok = dispatch_argv(
+                &[cmd.to_vec(), b"nokey".to_vec(), b"0".to_vec()],
+                &mut store,
+                0,
+            )
+            .expect("zpop nokey 0");
+            assert_eq!(ok, RespFrame::Array(Some(Vec::new())));
+        }
     }
 
     #[test]
