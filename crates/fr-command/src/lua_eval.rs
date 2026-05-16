@@ -7610,36 +7610,49 @@ fn acl_script_result(argv: &[Vec<u8>]) -> Option<Result<RespFrame, String>> {
 }
 
 fn acl_help_frame() -> RespFrame {
-    let bulk = |s: &str| RespFrame::BulkString(Some(s.as_bytes().to_vec()));
+    // (frankenredis-sebba) Mirror the wire-side ACL HELP in
+    // fr-runtime/src/lib.rs:7327 — 29 entries (header + 26 from
+    // upstream acl.c::ACL_CMD_HELP + 2-entry footer) using
+    // SimpleString frames (addReplyStatus in upstream).
+    // Previously this surfaced 28 entries with paraphrased wording
+    // and BulkString frames, so `redis.call('ACL','HELP')` from a
+    // script returned different content than wire ACL HELP — and a
+    // different RESP shape (SimpleString -> Lua {ok=...} table vs
+    // BulkString -> plain string). Source of truth is upstream
+    // acl.c:3047-3074 + networking.c::addReplyHelp.
+    let status = |s: &str| RespFrame::SimpleString(s.to_string());
     RespFrame::Array(Some(vec![
-        bulk("ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
-        bulk("CAT [<category>]"),
-        bulk("    List all commands that belong to <category>, or all command categories"),
-        bulk("    when no category is specified."),
-        bulk("DELUSER <username> [<username> ...]"),
-        bulk("    Delete a list of users."),
-        bulk("DRYRUN <username> <command> [<arg> ...]"),
-        bulk("    Test if a command would be allowed for the given user."),
-        bulk("GENPASS [<bits>]"),
-        bulk("    Generate a secure password."),
-        bulk("GETUSER <username>"),
-        bulk("    Get the user's details."),
-        bulk("LIST"),
-        bulk("    List users access rules in the ACL format."),
-        bulk("LOAD"),
-        bulk("    Reload users from the ACL file."),
-        bulk("LOG [<count> | RESET]"),
-        bulk("    List latest events denied because of ACLs."),
-        bulk("SAVE"),
-        bulk("    Save the current ACL rules to the ACL file."),
-        bulk("SETUSER <username> <property> [<property> ...]"),
-        bulk("    Create or modify a user with the specified properties."),
-        bulk("USERS"),
-        bulk("    List all usernames."),
-        bulk("WHOAMI"),
-        bulk("    Return the current connection username."),
-        bulk("HELP"),
-        bulk("    Print this help."),
+        status("ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:"),
+        status("CAT [<category>]"),
+        status("    List all commands that belong to <category>, or all command categories"),
+        status("    when no category is specified."),
+        status("DELUSER <username> [<username> ...]"),
+        status("    Delete a list of users."),
+        status("DRYRUN <username> <command> [<arg> ...]"),
+        status(
+            "    Returns whether the user can execute the given command without executing the command.",
+        ),
+        status("GETUSER <username>"),
+        status("    Get the user's details."),
+        status("GENPASS [<bits>]"),
+        status("    Generate a secure 256-bit user password. The optional `bits` argument can"),
+        status("    be used to specify a different size."),
+        status("LIST"),
+        status("    Show users details in config file format."),
+        status("LOAD"),
+        status("    Reload users from the ACL file."),
+        status("LOG [<count> | RESET]"),
+        status("    Show the ACL log entries."),
+        status("SAVE"),
+        status("    Save the current config to the ACL file."),
+        status("SETUSER <username> <attribute> [<attribute> ...]"),
+        status("    Create or modify a user with the specified attributes."),
+        status("USERS"),
+        status("    List all the registered usernames."),
+        status("WHOAMI"),
+        status("    Return the current connection username."),
+        status("HELP"),
+        status("    Print this help."),
     ]))
 }
 
@@ -12295,11 +12308,18 @@ mod tests {
             &mut store,
             0,
         );
+        // (frankenredis-sebba) Each ACL HELP entry is a SimpleString
+        // (upstream addReplyStatus). The Lua resp-to-value conversion
+        // wraps SimpleString as `{ok = "..."}`, and the script's
+        // `return reply[1]` re-emits that table as a SimpleString
+        // ("+...\r\n") on the wire. The previous BulkString expectation
+        // matched fr's pre-sebba acl_help_frame, which used BulkString
+        // instead of upstream's SimpleString.
         assert_eq!(
             help,
-            Ok(RespFrame::BulkString(Some(
-                b"ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_vec()
-            )))
+            Ok(RespFrame::SimpleString(
+                "ACL <subcommand> [<arg> [value] [opt] ...]. Subcommands are:".to_string()
+            ))
         );
 
         let help_arity = eval_script(
@@ -12313,6 +12333,36 @@ mod tests {
             help_arity,
             Err("ERR wrong number of arguments for 'acl|help' command".to_string())
         );
+
+        // (frankenredis-sebba) Length must equal upstream's 29
+        // (1 header + 26 from upstream acl.c::ACL_CMD_HELP + 2 from
+        // networking.c::addReplyHelp footer). Previously fr-command's
+        // acl_help_frame returned 28 entries (the GENPASS two-line
+        // description had been collapsed to one line). The wire-side
+        // ACL HELP in fr-runtime already had 29 entries, so the two
+        // dispatch paths had drifted.
+        let help_len = eval_script(
+            b"return #redis.call('ACL', 'HELP')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        assert_eq!(help_len, Ok(RespFrame::Integer(29)));
+        // Pin the GENPASS two-line description (the entry that was
+        // previously collapsed).
+        let genpass_line2 = eval_script(
+            b"local r = redis.call('ACL', 'HELP'); for i,e in ipairs(r) do if e.ok and e.ok:find('be used to specify a different size', 1, true) then return i end end; return -1",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        // The line "    be used to specify a different size." is the
+        // second part of GENPASS's description; in upstream it sits at
+        // position 13 (after GENPASS at 11 and "Generate a secure
+        // 256-bit user password..." at 12).
+        assert_eq!(genpass_line2, Ok(RespFrame::Integer(13)));
 
         for script in [
             b"return redis.call('ACL', 'WHOAMI')".as_slice(),
