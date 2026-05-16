@@ -435,7 +435,8 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("replica-lazy-flush", "no"),
     ("repl-diskless-sync", "yes"),
     ("repl-diskless-sync-delay", "5"),
-    ("repl-diskless-sync-period", "0"),
+    // (frankenredis-z6zp2) `repl-diskless-sync-period` does not exist in
+    // vendored Redis 7.2.4; CONFIG GET on it returns empty.
     ("repl-diskless-load", "disabled"),
     ("repl-ping-replica-period", "10"),
     ("repl-timeout", "60"),
@@ -507,14 +508,17 @@ const CONFIG_STATIC_PARAMS: &[(&str, &str)] = &[
     ("stream-node-max-entries", "100"),
     // Protocol
     ("proto-max-bulk-len", "536870912"),
-    ("close-on-oom", "no"),
+    // (frankenredis-z6zp2) `close-on-oom` is fr-specific; vendored
+    // Redis 7.2.4 has no such config.
     // I/O threads
     ("io-threads", "1"),
     ("io-threads-do-reads", "no"),
     // Memory allocator
     ("jemalloc-bg-thread", "yes"),
     // Misc
-    ("rename-command", ""),
+    // (frankenredis-z6zp2) `rename-command` is a config-file-only
+    // directive in vendored — CONFIG GET on it returns empty. The
+    // fr-config parser still accepts it from the config file.
     ("enable-protected-configs", "no"),
     ("enable-debug-command", "no"),
     ("enable-module-command", "no"),
@@ -23117,7 +23121,31 @@ mod tests {
                 "Redis 7.4-only config {redis_7_4_only} must NOT appear (vendored 7.2.4 doesn't have it)",
             );
         }
-        // Exact-name CONFIG GET should also return empty.
+        // (frankenredis-z6zp2) Three more keys that were leaking through
+        // CONFIG GET but have no counterpart in vendored 7.2.4:
+        //   close-on-oom              - fr-specific, no upstream equivalent
+        //   repl-diskless-sync-period - not in vendored 7.2.4
+        //   rename-command            - config-file-only in vendored (CONFIG GET returns empty)
+        for fr_only in [
+            "close-on-oom",
+            "repl-diskless-sync-period",
+            "rename-command",
+        ] {
+            assert!(
+                !names.iter().any(|n| n.eq_ignore_ascii_case(fr_only)),
+                "{fr_only} must NOT appear in CONFIG GET * (absent in vendored 7.2.4)",
+            );
+            let RespFrame::Array(Some(items)) =
+                rt.execute_frame(command(&[b"CONFIG", b"GET", fr_only.as_bytes()]), 0)
+            else {
+                panic!("expected array reply for exact CONFIG GET {fr_only}");
+            };
+            assert!(
+                items.is_empty(),
+                "exact CONFIG GET {fr_only} must return empty (vendored returns empty)",
+            );
+        }
+        // Exact-name CONFIG GET should also return empty for the 7.4 key.
         let RespFrame::Array(Some(items)) = rt.execute_frame(
             command(&[b"CONFIG", b"GET", b"hide-user-data-from-log"]),
             0,
