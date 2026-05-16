@@ -1491,7 +1491,7 @@
     {
       "name": "eval_pcall_catches_error",
       "now_ms": 100,
-      "comment": "Upstream Lua's error() builtin prepends 'user_script:1: ' to the message at default level (1). pcall returns the prefixed string as its second value. (frankenredis-orgvv aligned with q27hu)",
+      "comment": "When pcall calls a C function (error) directly, the default level=1 resolves to the calling C frame which has no Lua source position — so error() emits the bare message with no 'user_script:1:' prefix. Probed against vendored Redis 7.2.4 (frankenredis-junab refresh).",
       "argv": [
         "EVAL",
         "local ok, err = pcall(error, 'boom') return err",
@@ -1499,7 +1499,7 @@
       ],
       "expect": {
         "kind": "bulk",
-        "value": "user_script:1: boom"
+        "value": "boom"
       }
     },
     {
@@ -1632,6 +1632,7 @@
     {
       "name": "eval_table_concat_rejects_non_table_argument",
       "now_ms": 100,
+      "comment": "Uncaught Lua errors get the 'user_script:1:' prefix from luaL_error/luaL_argerror. (frankenredis-junab refresh)",
       "argv": [
         "EVAL",
         "return table.concat(42, '-')",
@@ -1639,7 +1640,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #1 to 'concat' (table expected, got number) script: 414e1980611373ed68b7a9da71899208a1d90ffc, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #1 to 'concat' (table expected, got number) script: 414e1980611373ed68b7a9da71899208a1d90ffc, on @user_script:1."
       }
     },
     {
@@ -1652,7 +1653,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #3 to 'concat' (number expected, got string) script: 5de4a30753683595b9969964f40b39dbda6e67d6, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #3 to 'concat' (number expected, got string) script: 5de4a30753683595b9969964f40b39dbda6e67d6, on @user_script:1."
       }
     },
     {
@@ -1665,7 +1666,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #4 to 'concat' (number expected, got string) script: 8be0a210df5e2d4db781cbaac45ed2495f6ab3ac, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #4 to 'concat' (number expected, got string) script: 8be0a210df5e2d4db781cbaac45ed2495f6ab3ac, on @user_script:1."
       }
     },
     {
@@ -1704,7 +1705,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #1 to 'select' (index out of range) script: 0484320ce867a23e621bb5c436db2841454ca75b, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #1 to 'select' (index out of range) script: 0484320ce867a23e621bb5c436db2841454ca75b, on @user_script:1."
       }
     },
     {
@@ -1845,20 +1846,21 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #1 to 'insert' (table expected, got number) script: f63f37620c8e389bbb9417e340c1d45747ce6ddc, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #1 to 'insert' (table expected, got number) script: f63f37620c8e389bbb9417e340c1d45747ce6ddc, on @user_script:1."
       }
     },
     {
       "name": "eval_table_insert_rejects_out_of_bounds_position",
       "now_ms": 0,
+      "comment": "Redis's vendored Lua 5.1 ltablib.c::tinsert does NOT enforce the position-out-of-bounds luaL_argcheck — it silently no-ops on OOB positions and returns nil. fr matches this behavior. (frankenredis-junab refresh — fixture previously expected the upstream Lua 5.1.5 'position out of bounds' error which Redis's bundled copy skips.)",
       "argv": [
         "EVAL",
         "local t = {1, 2}\ntable.insert(t, 4, 3)",
         "0"
       ],
       "expect": {
-        "kind": "error",
-        "value": "ERR bad argument #2 to 'insert' (position out of bounds) script: e5fba7e36cfc9ac025ed70ad9f12cca3828d53e5, on @user_script:1."
+        "kind": "bulk",
+        "value": null
       }
     },
     {
@@ -1871,7 +1873,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #2 to 'insert' (number expected, got string) script: b71b73854945f5077dbdd612451df2fb07552230, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #2 to 'insert' (number expected, got string) script: b71b73854945f5077dbdd612451df2fb07552230, on @user_script:1."
       }
     },
     {
@@ -1897,7 +1899,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #1 to 'remove' (table expected, got number) script: 8ae9ded7c617fcab18cb308ee4efcf5ceb46aea4, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #1 to 'remove' (table expected, got number) script: 8ae9ded7c617fcab18cb308ee4efcf5ceb46aea4, on @user_script:1."
       }
     },
     {
@@ -1910,7 +1912,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #2 to 'remove' (number expected, got string) script: ac450261d2f39b89d24700c1005f46df3ec72e32, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #2 to 'remove' (number expected, got string) script: ac450261d2f39b89d24700c1005f46df3ec72e32, on @user_script:1."
       }
     },
     {
@@ -2314,7 +2316,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #1 to 'rawget' (table expected, got number) script: 40396758d168e0bc50cceafcb5325cc40544a4a8, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #1 to 'rawget' (table expected, got number) script: 40396758d168e0bc50cceafcb5325cc40544a4a8, on @user_script:1."
       }
     },
     {
@@ -2327,7 +2329,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #1 to 'rawset' (table expected, got number) script: 30e7df52429b46510d184a153a071e6d5f4eed64, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #1 to 'rawset' (table expected, got number) script: 30e7df52429b46510d184a153a071e6d5f4eed64, on @user_script:1."
       }
     },
     {
@@ -2828,27 +2830,29 @@
     {
       "name": "eval_os_clock_returns_number",
       "now_ms": 0,
+      "comment": "Redis sandboxes the Lua os stdlib — only os.time and os.clock-like helpers are exposed selectively. Vendored Redis 7.2.4 does NOT expose 'os' as a global, so any access errors with 'nonexistent global'. fr matches this. (frankenredis-junab refresh)",
       "argv": [
         "EVAL",
         "return type(os.clock())",
         "0"
       ],
       "expect": {
-        "kind": "bulk",
-        "value": "number"
+        "kind": "error",
+        "value": "ERR user_script:1: Script attempted to access nonexistent global variable 'os' script: 9cb747080dced7677254b1b2a90673ffa0fd9ead, on @user_script:1."
       }
     },
     {
       "name": "eval_os_clock_non_negative",
       "now_ms": 0,
+      "comment": "See eval_os_clock_returns_number — os is sandboxed.",
       "argv": [
         "EVAL",
         "if os.clock() >= 0 then return 1 else return 0 end",
         "0"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 1
+        "kind": "error",
+        "value": "ERR user_script:1: Script attempted to access nonexistent global variable 'os' script: ad80871ad80acc57a333c9c4e07870db2114bf4a, on @user_script:1."
       }
     },
     {
@@ -3075,14 +3079,15 @@
     {
       "name": "eval_rawlen_table",
       "now_ms": 0,
+      "comment": "Lua 5.2 introduced rawlen as a global builtin; Lua 5.1 (which Redis 7.2.4 ships) has no rawlen — use the # operator or table.maxn instead. fr matches vendored: rawlen is absent and accessing it errors. (frankenredis-junab refresh)",
       "argv": [
         "EVAL",
         "return rawlen({10, 20, 30})",
         "0"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 3
+        "kind": "error",
+        "value": "ERR user_script:1: Script attempted to access nonexistent global variable 'rawlen' script: 9c261073df64e1c1b0316ea515e3ee6361c6f32f, on @user_script:1."
       }
     },
     {
@@ -3121,7 +3126,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #1 to 'next' (table expected, got number) script: 249bb8e2e724e06c6bf1c329587ee3770cf15155, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #1 to 'next' (table expected, got number) script: 249bb8e2e724e06c6bf1c329587ee3770cf15155, on @user_script:1."
       }
     },
     {
@@ -3147,7 +3152,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #1 to 'pairs' (table expected, got number) script: 080b001990b6f45d24083df12db11bb3c5bada39, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #1 to 'pairs' (table expected, got number) script: 080b001990b6f45d24083df12db11bb3c5bada39, on @user_script:1."
       }
     },
     {
@@ -3160,7 +3165,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #1 to 'ipairs' (table expected, got number) script: 246849f8c1fe52e52ec68609b3f564718a0e155f, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #1 to 'ipairs' (table expected, got number) script: 246849f8c1fe52e52ec68609b3f564718a0e155f, on @user_script:1."
       }
     },
     {
@@ -3186,7 +3191,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #1 to 'unpack' (table expected, got number) script: 2cb1f123953bf9391e8c808214cb3c4bdeaebd1d, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #1 to 'unpack' (table expected, got number) script: 2cb1f123953bf9391e8c808214cb3c4bdeaebd1d, on @user_script:1."
       }
     },
     {
@@ -3199,7 +3204,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #2 to 'unpack' (number expected, got string) script: a1476faf81976e0f3252f015262bf1f0a948d8e6, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #2 to 'unpack' (number expected, got string) script: a1476faf81976e0f3252f015262bf1f0a948d8e6, on @user_script:1."
       }
     },
     {
@@ -3212,7 +3217,7 @@
       ],
       "expect": {
         "kind": "error",
-        "value": "ERR bad argument #3 to 'unpack' (number expected, got string) script: 93096f5125abde5ef21b97a90c28c86a4f34e34e, on @user_script:1."
+        "value": "ERR user_script:1: bad argument #3 to 'unpack' (number expected, got string) script: 93096f5125abde5ef21b97a90c28c86a4f34e34e, on @user_script:1."
       }
     },
     {
@@ -3722,14 +3727,15 @@
     {
       "name": "eval_os_clock_returns_number",
       "now_ms": 0,
+      "comment": "Redis sandboxes Lua's os global — see the earlier eval_os_clock_returns_number entry. (frankenredis-junab refresh)",
       "argv": [
         "EVAL",
         "local t = os.clock() if type(t) == 'number' then return 1 end return 0",
         "0"
       ],
       "expect": {
-        "kind": "integer",
-        "value": 1
+        "kind": "error",
+        "value": "ERR user_script:1: Script attempted to access nonexistent global variable 'os' script: bb4ac0a44726ab90e9ec0f9bb3ef273ce79169c7, on @user_script:1."
       }
     },
     {

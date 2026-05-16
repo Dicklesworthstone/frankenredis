@@ -306,69 +306,6 @@
                     "value": [
                       {
                         "kind": "bulk",
-                        "value": "command|count"
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 2
-                      },
-                      {
-                        "kind": "array",
-                        "value": [
-                          {
-                            "kind": "simple",
-                            "value": "loading"
-                          },
-                          {
-                            "kind": "simple",
-                            "value": "stale"
-                          }
-                        ]
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 0
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 0
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 0
-                      },
-                      {
-                        "kind": "array",
-                        "value": [
-                          {
-                            "kind": "simple",
-                            "value": "@slow"
-                          },
-                          {
-                            "kind": "simple",
-                            "value": "@connection"
-                          }
-                        ]
-                      },
-                      {
-                        "kind": "array",
-                        "value": []
-                      },
-                      {
-                        "kind": "array",
-                        "value": []
-                      },
-                      {
-                        "kind": "array",
-                        "value": []
-                      }
-                    ]
-                  },
-                  {
-                    "kind": "array",
-                    "value": [
-                      {
-                        "kind": "bulk",
                         "value": "command|docs"
                       },
                       {
@@ -437,137 +374,137 @@
                     "value": [
                       {
                         "kind": "bulk",
-                        "value": "command|getkeys"
-                      },
-                      {
-                        "kind": "integer",
-                        "value": -3
-                      },
-                      {
-                        "kind": "array",
-                        "value": [
-                          {
-                            "kind": "simple",
-                            "value": "loading"
-                          },
-                          {
-                            "kind": "simple",
-                            "value": "stale"
-                          }
-                        ]
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 0
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 0
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 0
-                      },
-                      {
-                        "kind": "array",
-                        "value": [
-                          {
-                            "kind": "simple",
-                            "value": "@slow"
-                          },
-                          {
-                            "kind": "simple",
-                            "value": "@connection"
-                          }
-                        ]
-                      },
-                      {
-                        "kind": "array",
-                        "value": []
-                      },
-                      {
-                        "kind": "array",
-                        "value": []
-                      },
-                      {
-                        "kind": "array",
-                        "value": []
-                      }
-                    ]
-                  },
-                  {
-                    "kind": "array",
-                    "value": [
-                      {
-                        "kind": "bulk",
-                        "value": "command|getkeysandflags"
-                      },
-                      {
-                        "kind": "integer",
-                        "value": -3
-                      },
-                      {
-                        "kind": "array",
-                        "value": [
-                          {
-                            "kind": "simple",
-                            "value": "loading"
-                          },
-                          {
-                            "kind": "simple",
-                            "value": "stale"
-                          }
-                        ]
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 0
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 0
-                      },
-                      {
-                        "kind": "integer",
-                        "value": 0
-                      },
-                      {
-                        "kind": "array",
-                        "value": [
-                          {
-                            "kind": "simple",
-                            "value": "@slow"
-                          },
-                          {
-                            "kind": "simple",
-                            "value": "@connection"
-                          }
-                        ]
-                      },
-                      {
-                        "kind": "array",
-                        "value": []
-                      },
-                      {
-                        "kind": "array",
-                        "value": []
-                      },
-                      {
-                        "kind": "array",
-                        "value": []
-                      }
-                    ]
-                  },
-                  {
-                    "kind": "array",
-                    "value": [
-                      {
-                        "kind": "bulk",
                         "value": "command|help"
                       },
                       {
                         "kind": "integer",
                         "value": 2
+                      },
+                      {
+                        "kind": "array",
+                        "value": [
+                          {
+                            "kind": "simple",
+                            "value": "loading"
+                          },
+                          {
+                            "kind": "simple",
+                            "value": "stale"
+                          }
+                        ]
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "array",
+                        "value": [
+                          {
+                            "kind": "simple",
+                            "value": "@slow"
+                          },
+                          {
+                            "kind": "simple",
+                            "value": "@connection"
+                          }
+                        ]
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "command|count"
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 2
+                      },
+                      {
+                        "kind": "array",
+                        "value": [
+                          {
+                            "kind": "simple",
+                            "value": "loading"
+                          },
+                          {
+                            "kind": "simple",
+                            "value": "stale"
+                          }
+                        ]
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "array",
+                        "value": [
+                          {
+                            "kind": "simple",
+                            "value": "@slow"
+                          },
+                          {
+                            "kind": "simple",
+                            "value": "@connection"
+                          }
+                        ]
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "command|getkeys"
+                      },
+                      {
+                        "kind": "integer",
+                        "value": -3
                       },
                       {
                         "kind": "array",
@@ -746,6 +683,69 @@
                             "value": "nondeterministic_output_order"
                           }
                         ]
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
+                      }
+                    ]
+                  },
+                  {
+                    "kind": "array",
+                    "value": [
+                      {
+                        "kind": "bulk",
+                        "value": "command|getkeysandflags"
+                      },
+                      {
+                        "kind": "integer",
+                        "value": -3
+                      },
+                      {
+                        "kind": "array",
+                        "value": [
+                          {
+                            "kind": "simple",
+                            "value": "loading"
+                          },
+                          {
+                            "kind": "simple",
+                            "value": "stale"
+                          }
+                        ]
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "integer",
+                        "value": 0
+                      },
+                      {
+                        "kind": "array",
+                        "value": [
+                          {
+                            "kind": "simple",
+                            "value": "@slow"
+                          },
+                          {
+                            "kind": "simple",
+                            "value": "@connection"
+                          }
+                        ]
+                      },
+                      {
+                        "kind": "array",
+                        "value": []
                       },
                       {
                         "kind": "array",
