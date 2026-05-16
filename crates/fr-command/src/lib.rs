@@ -9477,12 +9477,27 @@ fn zrangestore_cmd(
     while i < argv.len() {
         let opt = std::str::from_utf8(&argv[i]).map_err(|_| CommandError::InvalidUtf8Argument)?;
         if opt.eq_ignore_ascii_case("BYSCORE") {
+            // (frankenredis-r2f7m) ZRANGE rejects duplicate BYSCORE /
+            // BYLEX / REV because upstream t_zset.c::zrangeGenericCommand
+            // only matches each marker while the corresponding state is
+            // still AUTO. ZRANGESTORE shares that parser; mirror the
+            // guards here so a second `BYSCORE`/`BYLEX`/`REV` falls
+            // through to "syntax error" instead of silently winning.
+            if byscore || bylex {
+                return Err(CommandError::SyntaxError);
+            }
             byscore = true;
             i += 1;
         } else if opt.eq_ignore_ascii_case("BYLEX") {
+            if byscore || bylex {
+                return Err(CommandError::SyntaxError);
+            }
             bylex = true;
             i += 1;
         } else if opt.eq_ignore_ascii_case("REV") {
+            if rev {
+                return Err(CommandError::SyntaxError);
+            }
             rev = true;
             i += 1;
         } else if opt.eq_ignore_ascii_case("LIMIT") {
@@ -58452,6 +58467,110 @@ mod tests {
         // Verify dst has 2 members
         let card = dispatch_argv(&[b"ZCARD".to_vec(), b"dst".to_vec()], &mut store, 0).unwrap();
         assert_eq!(card, RespFrame::Integer(2));
+    }
+
+    #[test]
+    fn zrangestore_rejects_duplicate_rev_byscore_bylex_r2f7m() {
+        // (frankenredis-r2f7m) Upstream t_zset.c::zrangeGenericCommand
+        // only matches each direction/range marker while the
+        // corresponding state is still AUTO; a second REV / BYSCORE /
+        // BYLEX falls through to "syntax error". fr's ZRANGE already
+        // guards this — bring ZRANGESTORE in line with the same
+        // behavior.
+        let mut store = Store::new();
+        dispatch_argv(
+            &[
+                b"ZADD".to_vec(),
+                b"src".to_vec(),
+                b"1".to_vec(),
+                b"a".to_vec(),
+                b"2".to_vec(),
+                b"b".to_vec(),
+                b"3".to_vec(),
+                b"c".to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        for argv in [
+            vec![
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"src".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"REV".to_vec(),
+                b"REV".to_vec(),
+            ],
+            vec![
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"src".to_vec(),
+                b"1".to_vec(),
+                b"3".to_vec(),
+                b"BYSCORE".to_vec(),
+                b"BYSCORE".to_vec(),
+            ],
+            vec![
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"src".to_vec(),
+                b"-".to_vec(),
+                b"+".to_vec(),
+                b"BYLEX".to_vec(),
+                b"BYLEX".to_vec(),
+            ],
+            vec![
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"src".to_vec(),
+                b"1".to_vec(),
+                b"3".to_vec(),
+                b"BYSCORE".to_vec(),
+                b"BYLEX".to_vec(),
+            ],
+        ] {
+            let label = String::from_utf8_lossy(&argv.join(&b' ')).into_owned();
+            let err = dispatch_argv(&argv, &mut store, 0)
+                .err()
+                .unwrap_or_else(|| panic!("{label}: should error"));
+            assert!(
+                matches!(err, CommandError::SyntaxError),
+                "{label}: expected SyntaxError, got {err:?}"
+            );
+        }
+        // Single REV / BYSCORE / BYLEX still works (no false positive).
+        for argv in [
+            vec![
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"src".to_vec(),
+                b"0".to_vec(),
+                b"-1".to_vec(),
+                b"REV".to_vec(),
+            ],
+            vec![
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"src".to_vec(),
+                b"1".to_vec(),
+                b"3".to_vec(),
+                b"BYSCORE".to_vec(),
+            ],
+            vec![
+                b"ZRANGESTORE".to_vec(),
+                b"dst".to_vec(),
+                b"src".to_vec(),
+                b"-".to_vec(),
+                b"+".to_vec(),
+                b"BYLEX".to_vec(),
+            ],
+        ] {
+            let label = String::from_utf8_lossy(&argv.join(&b' ')).into_owned();
+            dispatch_argv(&argv, &mut store, 0)
+                .unwrap_or_else(|e| panic!("{label}: should succeed, got {e:?}"));
+        }
     }
 
     #[test]
