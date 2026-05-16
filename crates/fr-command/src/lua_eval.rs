@@ -1066,13 +1066,24 @@ impl<'a> Lexer<'a> {
                 let Some(esc) = self.advance() else {
                     return Err("unterminated escape".to_string());
                 };
+                // (frankenredis-whyor) Mirror Lua 5.1.5's llex.c::
+                // read_string exactly: recognized named escapes resolve
+                // to their control bytes; numeric \ddd reads up to 3
+                // base-10 digits and rejects >255; ANY other escape
+                // (e.g. \x, \z, \q) drops the backslash and keeps the
+                // following byte verbatim — Lua 5.1 has no \xNN hex
+                // escape, so pre-fix fr's "preserve both bytes"
+                // behavior diverged from vendored on every script that
+                // used \xff-style literals.
                 match esc {
+                    b'a' => buf.push(0x07),
+                    b'b' => buf.push(0x08),
+                    b'f' => buf.push(0x0c),
                     b'n' => buf.push(b'\n'),
-                    b't' => buf.push(b'\t'),
                     b'r' => buf.push(b'\r'),
-                    b'\\' => buf.push(b'\\'),
-                    b'\'' => buf.push(b'\''),
-                    b'"' => buf.push(b'"'),
+                    b't' => buf.push(b'\t'),
+                    b'v' => buf.push(0x0b),
+                    b'\n' | b'\r' => buf.push(b'\n'),
                     b'0'..=b'9' => {
                         let mut num = (esc - b'0') as u16;
                         for _ in 0..2 {
@@ -1085,12 +1096,12 @@ impl<'a> Lexer<'a> {
                                 }
                             }
                         }
+                        if num > 255 {
+                            return Err("escape sequence too large".to_string());
+                        }
                         buf.push(num as u8);
                     }
-                    _ => {
-                        buf.push(b'\\');
-                        buf.push(esc);
-                    }
+                    _ => buf.push(esc),
                 }
             } else {
                 buf.push(b);
@@ -13178,6 +13189,95 @@ mod tests {
         assert_eq!(lua_value_to_json(&LuaValue::Nil).expect("nil"), "null");
     }
 
+    /// (frankenredis-whyor) Lua 5.1.5 llex.c::read_string treats
+    /// unrecognized escape sequences (anything outside
+    /// abfnrtv\\\"'\\n\\r and digit escapes) by *dropping the
+    /// backslash* and keeping the next byte verbatim. Vendored Redis
+    /// 7.2.4 ships Lua 5.1.5 unchanged, so `'\\xff'` parses to the
+    /// 3-byte string "xff" (not the 1-byte 0xFF — Lua 5.1 has no hex
+    /// escape syntax). Pre-fix fr preserved both bytes (`\\` + `x`),
+    /// which broke any script using \\xNN-style literals (e.g.
+    /// redis.sha1hex on binary payloads).
+    #[test]
+    fn lua_string_escape_unknown_drops_backslash_per_lua_5_1_5_whyor() {
+        let mut store = Store::new();
+        let len = eval_script(
+            b"return string.len('\\x00\\x01\\xff')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("string.len");
+        assert_eq!(len, RespFrame::Integer(9), "literal 9 chars: x00x01xff");
+
+        let first_byte = eval_script(
+            b"return string.byte('\\xff')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("string.byte");
+        assert_eq!(
+            first_byte,
+            RespFrame::Integer(120),
+            "'\\xff' parses as 'xff'; first byte is ASCII 'x' (120)"
+        );
+
+        let known = eval_script(
+            b"return {string.byte('\\a'), string.byte('\\b'), string.byte('\\f'), string.byte('\\v')}",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("named escapes");
+        assert_eq!(
+            known,
+            RespFrame::Array(Some(vec![
+                RespFrame::Integer(7),
+                RespFrame::Integer(8),
+                RespFrame::Integer(12),
+                RespFrame::Integer(11),
+            ])),
+            "\\a \\b \\f \\v must resolve to 0x07 0x08 0x0c 0x0b"
+        );
+
+        let too_big = eval_script(
+            b"return '\\256'",
+            &[],
+            &[],
+            &mut store,
+            0,
+        );
+        match too_big {
+            Err(msg) => assert!(
+                msg.contains("escape sequence too large"),
+                "expected too-large error, got {msg:?}"
+            ),
+            Ok(other) => panic!("\\256 must error, got {other:?}"),
+        }
+
+        // SHA1 over the parsed bytes: hash of 9-byte "x00x01xff" must
+        // match what vendored returns for the same literal source.
+        let sha = eval_script(
+            b"return redis.sha1hex('\\x00\\x01\\xff')",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("sha1hex");
+        assert_eq!(
+            sha,
+            RespFrame::BulkString(Some(
+                b"8e4d7558499d94310d39f185778734645ca58577".to_vec()
+            )),
+            "sha1 over literal \"x00x01xff\" must match vendored Redis 7.2.4"
+        );
+    }
+
     #[test]
     fn string_format_no_args_does_not_panic_and_matches_upstream() {
         // (frankenredis-be7o1) Regression: string.format() with no args
@@ -14809,13 +14909,20 @@ mod tests {
         // (frankenredis-ljxmd) Lua-bundled cjson combines UTF-16
         // surrogate pairs into single supplementary codepoints during
         // \u escape decoding. Probed against vendored Redis 7.2.4.
+        //
+        // (frankenredis-whyor) Source bytes must use `\\u` so the Lua
+        // lexer sees `\u` as a literal backslash+u pair — vendored
+        // Lua 5.1.5 drops unknown single-backslash escapes (`'\u'` →
+        // `'u'`), so a single backslash in the Rust source bytes would
+        // produce a JSON literal with no `\u` escapes for cjson to
+        // decode. Doubling the backslash sends real `\u` to cjson.
         let mut store = Store::new();
 
         // U+1F600 (grinning face) encodes as the surrogate pair
         // D83D / DE00 — the resulting UTF-8 is the 4-byte sequence
         // F0 9F 98 80.
         let r = eval_script(
-            b"return cjson.decode('\"\\uD83D\\uDE00\"')",
+            b"return cjson.decode('\"\\\\uD83D\\\\uDE00\"')",
             &[], &[], &mut store, 0,
         ).expect("surrogate pair");
         assert_eq!(
@@ -14825,14 +14932,14 @@ mod tests {
 
         // Basic single-codepoint escapes still work.
         let r = eval_script(
-            b"return cjson.decode('\"\\u0041\"')",
+            b"return cjson.decode('\"\\\\u0041\"')",
             &[], &[], &mut store, 0,
         ).expect("ASCII u-escape");
         assert_eq!(r, RespFrame::BulkString(Some(b"A".to_vec())));
 
         // Another supplementary plane test: U+10000 → D800 DC00 → F0 90 80 80
         let r = eval_script(
-            b"return cjson.decode('\"\\uD800\\uDC00\"')",
+            b"return cjson.decode('\"\\\\uD800\\\\uDC00\"')",
             &[], &[], &mut store, 0,
         ).expect("U+10000");
         assert_eq!(
