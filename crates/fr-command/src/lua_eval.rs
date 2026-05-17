@@ -8757,8 +8757,12 @@ fn lua_gsub_replace(s: &[u8], m: &LuaPatMatch, repl: &[u8]) -> Result<Vec<u8>, S
                 result.push(b'%');
                 i += 2;
             } else {
-                result.push(repl[i]);
-                i += 1;
+                // (frankenredis-6oe9g) Upstream lstrlib.c::add_s emits
+                // the literal char after % for any non-digit non-'%'
+                // suffix (e.g. '%w' -> 'w'). fr previously pushed
+                // both '%' and the following char, leaking '%w'.
+                result.push(next);
+                i += 2;
             }
         } else {
             result.push(repl[i]);
@@ -16235,6 +16239,59 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_string_gsub_repl_non_digit_after_percent_emits_literal_6oe9g() {
+        // (frankenredis-6oe9g) Upstream lstrlib.c::add_s emits the
+        // literal char after % for any non-digit non-'%' suffix in
+        // the gsub replacement string (e.g. '%w' -> 'w', '%a' -> 'a').
+        // fr previously pushed both '%' and the following char,
+        // leaking the original '%w'.
+        let mut store = Store::new();
+
+        // %w → w (one w per match).
+        let r = eval_script(
+            b"return string.gsub('abc', '(.)', '%w')",
+            &[], &[], &mut store, 0,
+        ).expect("gsub %w");
+        // Note: gsub returns (s, n). EVAL surfaces multi-return as
+        // top-of-stack first, so this returns just the string.
+        assert_eq!(r, RespFrame::BulkString(Some(b"www".to_vec())));
+
+        // %x → x, %A → A — same rule for any non-digit, non-%.
+        let r = eval_script(
+            b"return string.gsub('abc', '.', '%x')",
+            &[], &[], &mut store, 0,
+        ).expect("gsub %x");
+        assert_eq!(r, RespFrame::BulkString(Some(b"xxx".to_vec())));
+
+        let r = eval_script(
+            b"return string.gsub('abc', '.', '%A')",
+            &[], &[], &mut store, 0,
+        ).expect("gsub %A");
+        assert_eq!(r, RespFrame::BulkString(Some(b"AAA".to_vec())));
+
+        // %! → ! (non-letter punctuation after %).
+        let r = eval_script(
+            b"return string.gsub('abc', '.', '%!')",
+            &[], &[], &mut store, 0,
+        ).expect("gsub %!");
+        assert_eq!(r, RespFrame::BulkString(Some(b"!!!".to_vec())));
+
+        // Numeric capture refs still work — %1 with captures.
+        let r = eval_script(
+            b"return string.gsub('abc', '(.)', '<%1>')",
+            &[], &[], &mut store, 0,
+        ).expect("gsub %1");
+        assert_eq!(r, RespFrame::BulkString(Some(b"<a><b><c>".to_vec())));
+
+        // %% still emits a literal %.
+        let r = eval_script(
+            b"return string.gsub('a', '.', '%%')",
+            &[], &[], &mut store, 0,
+        ).expect("gsub %%");
+        assert_eq!(r, RespFrame::BulkString(Some(b"%".to_vec())));
     }
 
     #[test]
