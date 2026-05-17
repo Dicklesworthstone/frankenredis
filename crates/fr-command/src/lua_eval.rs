@@ -1874,6 +1874,21 @@ impl Parser {
     }
 
     fn parse_expr_or_assign(&mut self) -> Result<Stmt, String> {
+        // (frankenredis-cdfpx) Upstream lparser.c restricts statement
+        // starts to keywords, Name, or '(' for a parenthesized
+        // prefixexp. Anything else (Number, Str, True, False, Nil,
+        // operators that aren't statement starts) is rejected with
+        // 'unexpected symbol near <X>'. fr's parse_suffixed_expr will
+        // happily start an expression on Number/Str/Bool/Nil and only
+        // fail later with the assignment wording, so guard here so
+        // SCRIPT LOAD / loadstring on '123' / '1.5' / '"x"' / 'true'
+        // surface the right wording.
+        if !matches!(self.peek(), Token::Name(_) | Token::LParen) {
+            return Err(format!(
+                "unexpected symbol near '{}'",
+                token_display(self.peek())
+            ));
+        }
         let expr = self.parse_suffixed_expr()?;
 
         // Check for assignment
@@ -12336,6 +12351,40 @@ mod tests {
             err.contains("malformed number"),
             "expected malformed-number error, got {err}"
         );
+    }
+
+    #[test]
+    fn parser_rejects_non_name_statement_starts_with_unexpected_symbol_cdfpx() {
+        // (frankenredis-cdfpx) Upstream lparser.c restricts statement
+        // starts to keywords, Name, or '(' for a parenthesized
+        // prefixexp. Numbers / strings / true / false / nil tokens
+        // cannot start a statement; vendored rejects them at
+        // statement-start with "unexpected symbol near '<X>'". fr
+        // previously routed them into parse_suffixed_expr and only
+        // failed later with the assignment wording "'=' expected
+        // near '<eof>'", which leaked through loadstring('123') and
+        // similar shapes.
+        let cases: &[(&str, &str)] = &[
+            ("123", "unexpected symbol near '123'"),
+            ("1.5", "unexpected symbol near '1.5'"),
+            ("true", "unexpected symbol near 'true'"),
+            ("false", "unexpected symbol near 'false'"),
+            ("nil", "unexpected symbol near 'nil'"),
+        ];
+        for (src, expected) in cases {
+            let err = compile_check(src.as_bytes())
+                .expect_err(&format!("expected error for {src:?}"));
+            assert_eq!(err, *expected, "wrong wording for {src:?}: {err}");
+        }
+        // Bare Names continue to use the '=' expected wording (covered
+        // by parser_rejects_bare_identifier_statements_with_upstream_wording).
+        let err = compile_check(b"foo").expect_err("foo should error");
+        assert_eq!(err, "'=' expected near '<eof>'");
+        // Function calls and parenthesized prefixexps remain valid.
+        for src in ["f()", "(function() end)()", "f(1)", "obj:m()"] {
+            compile_check(src.as_bytes())
+                .unwrap_or_else(|e| panic!("{src:?} should compile: {e}"));
+        }
     }
 
     #[test]
