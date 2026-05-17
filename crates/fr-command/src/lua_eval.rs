@@ -2375,6 +2375,14 @@ pub struct LuaState<'a> {
     /// cleared by `pcall`/`xpcall` around their protected callback.
     /// (frankenredis-557p3)
     current_invocation_name: Option<String>,
+    /// True when the current invocation entered via method-style call
+    /// `t:f(args)` — Lua desugars this to `t.f(t, args...)` and
+    /// reports arg #1 type errors with the `'calling 'f' on bad self
+    /// (... expected, got ...)'` wording instead of the standard
+    /// `'bad argument #1 to 'f' (...)'`. Stashed/restored by
+    /// `call_function_with_callee` alongside `current_invocation_name`.
+    /// (frankenredis-rbec9)
+    current_invocation_is_method: bool,
     /// Depth of nested exec_stmts calls. The coroutine resume path
     /// (exec_coroutine_stmts → exec_stmt) keeps this at 0 for top-
     /// level body statements; any nested control-flow block (for,
@@ -2808,6 +2816,7 @@ impl<'a> LuaState<'a> {
             pending_error_is_raw_body: false,
             current_source_label: None,
             current_invocation_name: None,
+            current_invocation_is_method: false,
             nested_exec_stmts_depth: 0,
             inside_bare_expression_stmt: false,
         }
@@ -4541,6 +4550,20 @@ impl<'a> LuaState<'a> {
     /// (e.g. `pcall(select, ...)`), the C closure has no debug name —
     /// vendored emits `'?'` and no source prefix. (frankenredis-557p3)
     fn format_builtin_argerror(&self, _fallback_name: &str, arg_idx: usize, reason: &str) -> String {
+        // (frankenredis-rbec9) Method-style invocation (`t:f(args)`) is
+        // desugared to `t.f(t, args...)`. Lua 5.1 reports arg #1 type
+        // failures with the `calling 'f' on bad self (...)` wording
+        // instead of the standard bad-argument template. Match upstream
+        // when both: invocation came via colon-call AND the failing arg
+        // is the synthetic self (arg #1).
+        if arg_idx == 1
+            && self.current_invocation_is_method
+            && let Some(name) = &self.current_invocation_name
+        {
+            return format!(
+                "user_script:1: calling '{name}' on bad self ({reason})"
+            );
+        }
         match &self.current_invocation_name {
             Some(name) => format!(
                 "user_script:1: bad argument #{arg_idx} to '{name}' ({reason})"
@@ -4586,10 +4609,18 @@ impl<'a> LuaState<'a> {
             // (frankenredis-557p3) Stash the AST-derived call-site name
             // so C-builtin errors can use it (matching Lua 5.1's
             // lua_getinfo("n.name") behavior). Restored on return.
+            // (frankenredis-rbec9) Also stash whether this was a
+            // method-style invocation so format_builtin_argerror can
+            // emit the `'calling 'f' on bad self'` wording for arg #1.
             let inv_name = self.ast_call_name(callee_expr, method_override);
             let prev = std::mem::replace(&mut self.current_invocation_name, inv_name);
+            let prev_method = std::mem::replace(
+                &mut self.current_invocation_is_method,
+                method_override.is_some(),
+            );
             let result = self.call_function(func, args, env, varargs);
             self.current_invocation_name = prev;
+            self.current_invocation_is_method = prev_method;
             return result;
         }
         // (frankenredis-2c7hj) Tables with a callable __call metamethod
@@ -4600,8 +4631,13 @@ impl<'a> LuaState<'a> {
         if matches!(func, LuaValue::Table(_)) && self.metatable_call_handler(func).is_some() {
             let inv_name = self.ast_call_name(callee_expr, method_override);
             let prev = std::mem::replace(&mut self.current_invocation_name, inv_name);
+            let prev_method = std::mem::replace(
+                &mut self.current_invocation_is_method,
+                method_override.is_some(),
+            );
             let result = self.call_function(func, args, env, varargs);
             self.current_invocation_name = prev;
+            self.current_invocation_is_method = prev_method;
             return result;
         }
         let label = match method_override {
@@ -5519,8 +5555,11 @@ impl<'a> LuaState<'a> {
                 // "n.name" for C closures invoked via lua_pcall, so any
                 // C-builtin errors raised inside use '?' as the name.
                 let prev_inv = self.current_invocation_name.take();
+                let prev_method =
+                    std::mem::replace(&mut self.current_invocation_is_method, false);
                 let result = self.call_function(&func, &mut call_args_vec, env, &mut Vec::new());
                 self.current_invocation_name = prev_inv;
+                self.current_invocation_is_method = prev_method;
                 match result {
                     Ok(vals) => {
                         // Drop any stale typed-error stash; the protected
@@ -5582,8 +5621,11 @@ impl<'a> LuaState<'a> {
                 let mut call_args_vec = args.get(2..).unwrap_or(&[]).to_vec();
                 // (frankenredis-557p3) Same AST-context clear as pcall.
                 let prev_inv = self.current_invocation_name.take();
+                let prev_method =
+                    std::mem::replace(&mut self.current_invocation_is_method, false);
                 let result = self.call_function(&func, &mut call_args_vec, env, &mut Vec::new());
                 self.current_invocation_name = prev_inv;
+                self.current_invocation_is_method = prev_method;
                 match result {
                     Ok(vals) => {
                         self.pending_error_value = None;
