@@ -124,7 +124,7 @@ Numbers below are from the standard `fr-bench` workload (50 clients, 100k reques
 
 > Bench: 50 clients, 100k requests, 10k-key keyspace, 3-byte payload. Build: `cargo build --release -p fr-server`. Optional allocator features `mimalloc` or `jemalloc` may be enabled with `--features mimalloc`/`--features jemalloc`; the default is the system allocator.
 
-**Reading these numbers.** Single-command throughput sits in the **73–83% range of vendored Redis 7.2.4** across the eight standard workloads, with median request latency well under a millisecond and p99 in the 1.0–1.4 ms range. Heavily pipelined batches (`pipeline=16`) show a wider gap: Redis benefits there from very aggressive batching and `writev` scatter-gather. The FrankenRedis pipeline path coalesces writes per-poll-cycle but does not yet use `writev`, and closing that gap is the next perf workstream. Run-to-run variance is non-trivial; individual workloads have hit higher parity numbers on warmer cache runs (e.g. `GET p1` has clocked 99% parity in prior captures).
+**Reading these numbers.** Single-command throughput sits in the **71–83% range of vendored Redis 7.2.4** across the eight standard workloads (geometric mean ~77%), with median request latency well under a millisecond and p99 in the 1.0–1.4 ms range. Heavily pipelined batches (`pipeline=16`) show a wider gap: Redis benefits there from very aggressive batching and `writev` scatter-gather. The FrankenRedis pipeline path coalesces writes per-poll-cycle but does not yet use `writev`, and closing that gap is the next perf workstream. Run-to-run variance is non-trivial; individual workloads have hit higher parity numbers on warmer cache runs (e.g. `GET p1` has clocked 99% parity in prior captures).
 
 To reproduce locally:
 
@@ -852,7 +852,7 @@ cargo build --release -p fr-server
 ./target/release/frankenredis --help
 ```
 
-The release profile (`Cargo.toml`) is tuned for server workloads: `opt-level = 3`, `lto = true`, `codegen-units = 1`, `strip = true`.
+The workspace `Cargo.toml` does not currently override `[profile.release]`, so the release build uses cargo's defaults (`opt-level = 3`, `lto = false`, `codegen-units = 16`, `strip = "none"`). The doctrine in `AGENTS.md` describes a tuned profile (`lto = true`, `codegen-units = 1`, `strip = true`) that has not yet been added to the workspace root; opt in locally via `RUSTFLAGS` or a Cargo profile override if you need it.
 
 ### Build the bench harness
 
@@ -1313,7 +1313,7 @@ FrankenRedis emits the same observability surface Redis operators are used to, p
 
 ### `CLIENT LIST` / `CLIENT INFO`
 
-`CLIENT LIST` returns one line per connected client with the standard fields: `id addr laddr fd name age idle flags db sub psub ssub multi qbuf qbuf-free obl oll omem tot-mem events cmd user redir resp lib-name lib-ver`. The flag string preserves the upstream alphabet (`e` evicted, `T` no-touch, `t` keys-tracking, `B` blocked, `P` pubsub, `r` readonly, `x` MULTI/EXEC, …) so existing dashboards and parsers keep working.
+`CLIENT LIST` returns one line per connected client with the standard fields: `id addr laddr fd name age idle flags db sub psub ssub multi qbuf qbuf-free argv-mem multi-mem rbs rbp obl oll omem tot-mem events cmd user redir resp lib-name lib-ver`. The flag string preserves the upstream alphabet (`e` evicted, `T` no-touch, `t` keys-tracking, `B` blocked, `P` pubsub, `r` readonly, `x` MULTI/EXEC, …) so existing dashboards and parsers keep working.
 
 ### Keyspace notifications
 
@@ -1548,7 +1548,7 @@ In strict mode, the default decision for every threat class is `FailClosed` with
 | Built-in Sentinel | **yes (`fr-sentinel`)** | yes (external binary) | yes | no (Raft built-in) | no | yes |
 | Cluster sharding | not yet | yes | yes | yes | partial | yes |
 | RaptorQ durability sidecar | planned (not implemented) | no | no | no | no | no |
-| License | MIT | BSD-3 (legacy), now AGPL/RSALv2/SSPL fork-split | BSD-3 | BSL → AGPL switch | MIT | BSD-3 |
+| License | MIT | BSD-3 (≤7.2), then dual SSPLv1 / RSALv2 (7.4+) | BSD-3 | BSL 1.1 (since v1.4) | MIT | BSD-3 (Linux Foundation Redis 7.2.4 fork) |
 
 **Position.** FrankenRedis does not aim to be faster than Redis or to multithread it. The goal is the same observable behavior with `unsafe` removed, a real strict/hardened policy split, an explicit threat-event ledger, and a clean enough internal model that the data engine, RDB codec, replication FSM, and Lua evaluator can be embedded into other Rust projects.
 
@@ -1559,9 +1559,9 @@ In strict mode, the default decision for every threat class is `FailClosed` with
 Honest list of what FrankenRedis does *not* do today. The roadmap below tracks closure.
 
 - **No multi-node cluster sharding.** The `CLUSTER` command surface is implemented for single-node mode (slot map, NODES, INFO, KEYSLOT, etc.), but FrankenRedis does not yet do CRC16 slot rebalancing or live shard migration across multiple FrankenRedis processes.
-- **Pipelined throughput trails Redis at high pipeline depth.** Single-command throughput is in the 73–87% range of Redis; `pipeline=16` is at ~33–47%. The `writev` scatter-gather work that closes the gap is on the roadmap.
+- **Pipelined throughput trails Redis at high pipeline depth.** Single-command throughput is in the 71–83% range of Redis; `pipeline=16` is at ~33–47%. The `writev` scatter-gather work that closes the gap is on the roadmap.
 - **Wire-level TLS not yet terminated.** TLS configuration, accept-rate-limit, and policy are wired through `fr-config` / `fr-runtime`, but the listener does not yet terminate `rustls` connections. Clients connect in plaintext for now.
-- **Hash field TTL: storage layer only.** The in-memory representation (`hash_field_expires: BTreeMap<(key, field), expires_at_ms>` on `Store`) plus the `RDB_TYPE_HASH_WITH_TTLS` (tag 100) round-trip both exist, but the wire-level `HEXPIRE`/`HTTL`/`HPERSIST`/`HPEXPIRE`/`HPTTL`/`HEXPIREAT`/`HEXPIRETIME` command family (Redis 7.4) is not yet dispatched, and the lazy-expiry enforcement at every hash read path is still to come.
+- **Hash field TTL: storage layer only.** The in-memory representation (`hash_field_expires: BTreeMap<(key, field), expires_at_ms>` on `Store`) plus the `RDB_TYPE_HASH_WITH_TTLS` (tag 100) round-trip both exist, but the full Redis 7.4 wire-level command family — `HEXPIRE`, `HPEXPIRE`, `HEXPIREAT`, `HPEXPIREAT`, `HEXPIRETIME`, `HPEXPIRETIME`, `HPERSIST`, `HTTL`, `HPTTL` — is not yet dispatched, and the lazy-expiry enforcement at every hash read path is still to come.
 - **HyperLogLog representation is always dense.** Upstream uses a sparse representation for low cardinalities; FrankenRedis uses the 16,389-byte dense form unconditionally. Tracked as `frankenredis-j2tuo`.
 - **`DUMP` for large quicklist entries uses the PACKED container.** Upstream Redis emits a PLAIN container compressed with LZF for big-item quicklist nodes; FrankenRedis currently emits PACKED. The on-wire payload remains a valid `DUMP`/`RESTORE` round-trip in both directions, but is not byte-identical to vendored. Tracked as `frankenredis-371l9`.
 - **Maxmemory eviction is exact-scan, not sample-based.** `select_eviction_candidate` walks every `Entry` to find the best LRU/TTL candidate (`O(N)` per eviction). Upstream samples `maxmemory-samples` random keys and merges into an `EVPOOL_SIZE = 16` pool. `CONFIG SET maxmemory-samples` is accepted for compatibility but doesn't yet influence selection.
@@ -1696,17 +1696,29 @@ A few patterns we've found useful for running FrankenRedis in real scenarios.
 FrankenRedis reads vendored Redis 7.2.4 RDB files unmodified, so the simplest migration is:
 
 ```bash
-# 1. On the legacy host, take a fresh snapshot
+# 1. On the legacy host, take a fresh snapshot.
 redis-cli BGSAVE
 # wait for rdb_bgsave_in_progress=0 in INFO persistence
 
-# 2. Copy dump.rdb to the new host's --dir
+# 2. Copy dump.rdb to the new host.
 scp /var/lib/redis/dump.rdb new-host:/var/lib/frankenredis/dump.rdb
 
-# 3. Start FrankenRedis pointing at it
+# 3. Start FrankenRedis with --rdb only. RDB auto-load on startup runs
+#    only when --aof is NOT passed (matching Redis: AOF takes precedence
+#    over RDB at boot if both are configured, so passing --aof against an
+#    empty AOF file would start the server empty).
 ./target/release/frankenredis --port 6379 \
-    --rdb /var/lib/frankenredis/dump.rdb \
-    --aof /var/lib/frankenredis/appendonly.aof
+    --rdb /var/lib/frankenredis/dump.rdb
+
+# 4. If you want AOF durability going forward, enable it after startup
+#    so the in-memory state from the RDB gets persisted into the new AOF
+#    via the implicit BGREWRITEAOF that CONFIG SET triggers.
+#
+#    Note: `dir` is a PROTECTED config in Redis 7.x, so it can only be
+#    set at startup via a config file (or by first enabling
+#    enable-protected-configs). The clean path is to start with
+#    --config redis.conf where redis.conf contains `dir /var/lib/...`.
+redis-cli -p 6379 CONFIG SET appendonly yes
 ```
 
 For zero-downtime cutover, run FrankenRedis as a **replica** of the legacy primary first, let it fully catch up (`INFO replication` → `master_link_status:up`, `master_last_io_seconds_ago:0`), then issue `REPLICAOF NO ONE` on the FrankenRedis side and repoint your clients. Both directions have been integration-tested.
@@ -1789,7 +1801,7 @@ Not yet. The `fr-sentinel` crate currently exposes the state machine, command su
 
 ### How is performance trending?
 
-Single-command throughput sits at **73–83% of vendored Redis 7.2.4** on the standard `fr-bench` workloads, with sub-millisecond p50 latency. Pipelined throughput (`pipeline=16`) sits at ~33–47% of Redis; the bottleneck is the lack of `writev` scatter-gather on the write path, and closing it is the next perf workstream. Each optimization round produces an `ISOMORPHISM_PROOF_*.md` artifact next to before/after flamegraphs under `artifacts/optimization/` so nothing changes observable behavior to gain a few microseconds.
+Single-command throughput sits at **71–83% of vendored Redis 7.2.4** on the standard `fr-bench` workloads (geometric mean ~77%), with sub-millisecond p50 latency. Pipelined throughput (`pipeline=16`) sits at ~33–47% of Redis; the bottleneck is the lack of `writev` scatter-gather on the write path, and closing it is the next perf workstream. Each optimization round produces an `ISOMORPHISM_PROOF_*.md` artifact next to before/after flamegraphs under `artifacts/optimization/` so nothing changes observable behavior to gain a few microseconds.
 
 ### Where does the parity bar come from?
 

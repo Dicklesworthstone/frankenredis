@@ -130,13 +130,18 @@ diagnostic quirk; `XGROUP CREATECONSUMER` accepts an empty `MKSTREAM` stream.
 
 ### CONFIG alignment with vendored 7.2.4
 
-Listpack encoding defaults realigned to upstream (`hash-max-listpack-entries` = 128;
+Listpack encoding defaults realigned to upstream
+(`hash-max-listpack-entries` = 512, matching `redis.conf` and
+`server.hash_max_listpack_entries` in vendored 7.2.4's `config.c`;
 `set-max-listpack-value` cap enforced on promotion). Three `CONFIG` keys absent in 7.2.4 are
 dropped, including the 7.4-only `hide-user-data-from-log`. `CONFIG GET` wildcard emits both
 `slave-*` and `replica-*` aliases.
 
-- `hash-max-listpack-entries` default 128 matches upstream
-  ([f4bbeb5](https://github.com/Dicklesworthstone/frankenredis/commit/f4bbeb549bd096a78204388fcb443d5cb0ebf789))
+- `hash-max-listpack-entries` default realigned to upstream — first to 128
+  ([f4bbeb5](https://github.com/Dicklesworthstone/frankenredis/commit/f4bbeb549bd096a78204388fcb443d5cb0ebf789)),
+  then corrected back to 512 two days later
+  ([406d511](https://github.com/Dicklesworthstone/frankenredis/commit/406d51163e1a9ea8df071d5c9bc949cb094abaaf))
+  once the actual vendored `config.c` default was checked
 - Drop three `CONFIG` keys absent in vendored 7.2.4
   ([faadec3](https://github.com/Dicklesworthstone/frankenredis/commit/faadec32fd3a7edafe1ee43c0f54660e8143056a))
 - Drop `hide-user-data-from-log` (Redis 7.4-only)
