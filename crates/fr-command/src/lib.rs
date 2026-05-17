@@ -10336,21 +10336,38 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
     let (_numkeys, keys, args) = parse_eval_args(argv).map_err(fcall_map_eval_arg_error)?;
 
     // Transform the library code for execution:
-    // 1. Strip the #!lua name=... header line (not valid Lua)
+    // 1. Strip the #!lua name=... header line (not valid Lua) but
+    //    preserve its line position with a blank line so reported line
+    //    numbers still align with the library source.
     // 2. Convert redis.register_function('name', func) calls into
-    //    named function definitions so they can be called directly
+    //    named function definitions so they can be called directly.
+    // (frankenredis-tos1j) Track the source line of the matching
+    // register_function call so FCALL errors can report
+    // user_function:<line> with the same line vendored would (the line
+    // of the function definition inside the library code).
     let code_str = String::from_utf8_lossy(&script);
     let mut lua_lines = Vec::new();
-    for line in code_str.lines() {
+    let mut target_func_line: Option<usize> = None;
+    for (idx, line) in code_str.lines().enumerate() {
+        let line_no = idx + 1;
         let trimmed = line.trim();
         if trimmed.starts_with("#!") {
+            lua_lines.push(String::new());
             continue;
         }
         if trimmed.contains("register_function") {
-            // Transform: redis.register_function('name', function(k,a) ... end)
-            // Into: function name(k,a) ... end
             if let Some(transformed) = transform_register_function(trimmed) {
+                if let Some(name) = transformed
+                    .strip_prefix("local function ")
+                    .and_then(|s| s.find('(').map(|i| &s[..i]))
+                {
+                    if name == func_name && target_func_line.is_none() {
+                        target_func_line = Some(line_no);
+                    }
+                }
                 lua_lines.push(transformed);
+            } else {
+                lua_lines.push(String::new());
             }
             continue;
         }
@@ -10372,11 +10389,38 @@ fn fcall_cmd(argv: &[Vec<u8>], store: &mut Store, now_ms: u64) -> Result<RespFra
         now_ms,
     ) {
         Ok(frame) => Ok(frame),
-        Err(e) => Ok(RespFrame::Error(format!("ERR Error running function: {e}"))),
+        Err(e) => Ok(RespFrame::Error(format_fcall_runtime_error(
+            &e,
+            func_name,
+            target_func_line.unwrap_or(2),
+        ))),
     };
     store.script_nesting_level -= 1;
     store.script_read_only = previous_read_only;
     result
+}
+
+/// Reformat an eval_script error to match vendored Redis 7.0+ FCALL
+/// error wording: `ERR <body> script: <func>, on @user_function:<N>.`
+/// where <body> retains any `user_function:<N>:` source-location
+/// prefix (rewritten from fr's hardcoded `user_script:<N>:`) and
+/// errors from redis.call propagate without the source-location
+/// prefix. (frankenredis-tos1j) Vendored f_lua_error_call composes
+/// this in functions.c via luaPushErrorBuff; mirror it at the FCALL
+/// boundary since fr's interpreter labels every line `user_script:1:`
+/// regardless of where the error actually originated.
+fn format_fcall_runtime_error(err: &str, func_name: &str, func_line: usize) -> String {
+    let body = err.strip_prefix("ERR ").unwrap_or(err);
+    let body = if let Some(rest) = body.strip_prefix("user_script:") {
+        if let Some(colon) = rest.find(':') {
+            format!("user_function:{}{}", func_line, &rest[colon..])
+        } else {
+            format!("user_function:{rest}")
+        }
+    } else {
+        body.to_string()
+    };
+    format!("ERR {body} script: {func_name}, on @user_function:{func_line}.")
 }
 
 /// Transform `redis.register_function('name', function(k,a) body end)` into
@@ -58276,6 +58320,141 @@ mod tests {
             out,
             CommandError::Custom("ERR Bad number of keys provided".to_string())
         );
+    }
+
+    #[test]
+    fn fcall_runtime_errors_match_vendored_user_function_wording_tos1j() {
+        // (frankenredis-tos1j) Vendored Redis 7.0+ FCALL emits errors
+        // as `ERR <body> script: <name>, on @user_function:<line>.`
+        // with the `user_script:<line>:` source prefix rewritten to
+        // `user_function:<line>:`. fr previously wrapped with
+        // `ERR Error running function: <inner>` which dropped the
+        // script suffix and leaked the EVAL-style user_script label.
+        // Pin the four canonical error shapes against the upstream
+        // wording.
+        let mut store = Store::new();
+
+        // Load library with function 'e' on line 2.
+        dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=m1\nredis.register_function(\"e\", function(keys, args) return keys[1]..\":\"..args[1] end)"
+                    .to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("FUNCTION LOAD seed");
+
+        // Nil concat — function called with no args.
+        let out = dispatch_argv(
+            &[b"FCALL".to_vec(), b"e".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("FCALL must return a frame (error frame, not bubbled)");
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR user_function:2: attempt to concatenate field '?' (a nil value) \
+                 script: e, on @user_function:2."
+                    .to_string()
+            )
+        );
+
+        // Reload library with an explicit error('boom') function 'er' on line 2.
+        dispatch_argv(
+            &[b"FUNCTION".to_vec(), b"FLUSH".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("FUNCTION FLUSH");
+        dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=m2\nredis.register_function(\"er\", function() error(\"boom\") end)"
+                    .to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("FUNCTION LOAD seed");
+        let out = dispatch_argv(
+            &[b"FCALL".to_vec(), b"er".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("FCALL must return an error frame");
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR user_function:2: boom script: er, on @user_function:2.".to_string()
+            )
+        );
+
+        // redis.call against unknown command — inner error already
+        // carries "ERR " prefix; the script suffix is appended without
+        // rewriting a user_function source prefix.
+        dispatch_argv(
+            &[b"FUNCTION".to_vec(), b"FLUSH".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("FUNCTION FLUSH");
+        dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=m3\nredis.register_function(\"er\", function() return redis.call(\"BADCMD\") end)"
+                    .to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("FUNCTION LOAD seed");
+        let out = dispatch_argv(
+            &[b"FCALL".to_vec(), b"er".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("FCALL must return an error frame");
+        assert_eq!(
+            out,
+            RespFrame::Error(
+                "ERR Unknown Redis command called from script \
+                 script: er, on @user_function:2."
+                    .to_string()
+            )
+        );
+
+        // redis.error_reply returns 'ERR custom' undecorated — flows
+        // through the Ok arm, the script suffix must NOT be appended.
+        dispatch_argv(
+            &[b"FUNCTION".to_vec(), b"FLUSH".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("FUNCTION FLUSH");
+        dispatch_argv(
+            &[
+                b"FUNCTION".to_vec(),
+                b"LOAD".to_vec(),
+                b"#!lua name=m4\nredis.register_function(\"er\", function() return redis.error_reply(\"custom\") end)"
+                    .to_vec(),
+            ],
+            &mut store,
+            0,
+        )
+        .expect("FUNCTION LOAD seed");
+        let out = dispatch_argv(
+            &[b"FCALL".to_vec(), b"er".to_vec(), b"0".to_vec()],
+            &mut store,
+            0,
+        )
+        .expect("FCALL must return an error frame");
+        assert_eq!(out, RespFrame::Error("ERR custom".to_string()));
     }
 
     #[test]
