@@ -6336,13 +6336,29 @@ impl<'a> LuaState<'a> {
                 // Vendored Redis routes that srand to redisSrand48, which
                 // initializes the 48-bit LCG state x[0]=0x330E, x[1]=low16,
                 // x[2]=high16 of the seed.
-                if let Some(arg) = args.first()
-                    && let Some(n) = arg.to_number()
-                {
-                    let seed_i32 = n as i32; // matches C int cast
-                    self.lua_random.srand(seed_i32);
-                    self.rng_seed = n.to_bits();
-                }
+                // (frankenredis-4xjb0) luaL_checkint raises 'bad argument
+                // #1 (number expected, got TYPE)' for missing/nil/non-
+                // numeric args. fr previously silently no-op'd on any
+                // bogus input, masking the error.
+                let arg_opt = args.first();
+                let n = match arg_opt {
+                    Some(v) => lua_required_integer_arg(
+                        self.current_invocation_name.as_deref(),
+                        1,
+                        v,
+                    )?,
+                    None => {
+                        return Err(lua_bad_number_arg(
+                            self.current_invocation_name.as_deref(),
+                            1,
+                            None,
+                        ));
+                    }
+                };
+                let n_f = n as f64;
+                let seed_i32 = n as i32; // matches C int cast
+                self.lua_random.srand(seed_i32);
+                self.rng_seed = n_f.to_bits();
                 Ok(vec![LuaValue::Nil])
             }
             // ── OS library ───────────────────────────────────────────────
@@ -16185,6 +16201,73 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_math_randomseed_validates_arg_4xjb0() {
+        // (frankenredis-4xjb0) Upstream lmathlib.c uses luaL_checkint
+        // for the seed arg, raising 'bad argument #1 (number expected,
+        // got TYPE)' on missing/non-numeric values. fr previously
+        // silently no-op'd, masking the error.
+        let mut store = Store::new();
+
+        // Numeric / numeric-string seeds still work.
+        eval_script(b"math.randomseed(42) return 1", &[], &[], &mut store, 0)
+            .expect("numeric seed");
+        eval_script(b"math.randomseed('42') return 1", &[], &[], &mut store, 0)
+            .expect("numeric-string seed");
+
+        // Bad args raise the anonymous-C pcall wording.
+        let r = eval_script(
+            b"local ok,e = pcall(math.randomseed, nil); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (number expected, got nil)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(math.randomseed); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (number expected, got no value)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(math.randomseed, {}); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (number expected, got table)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(math.randomseed, true); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (number expected, got boolean)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(math.randomseed, 'bad'); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (number expected, got string)".to_vec()
+            ))
+        );
     }
 
     #[test]
