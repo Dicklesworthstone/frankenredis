@@ -386,7 +386,7 @@ pub struct SortedSet {
 
 **SCAN cursors are positional, not bit-reversed.** Real Redis uses a clever reverse-binary cursor that survives hash-table rehashing without missing or duplicating keys. FrankenRedis's `HashMap` doesn't have Redis's two-table rehash, so it can get away with a simpler positional cursor: `next_cursor = pos`, returning `0` on completion. Redis explicitly documents SCAN cursors as opaque to clients, so this is allowed; `HSCAN`/`SSCAN`/`ZSCAN` short-circuit small-encoding values (return everything with cursor = 0) just like upstream does.
 
-**Hash field TTL** has its storage layer wired (`hash_field_expires: BTreeMap<(key, field), expires_at_ms>` plus per-key reap counters) so RDB round-trips already preserve per-field expirations through vendored servers. The `HEXPIRE`/`HTTL`/`HPERSIST` lazy-expiry enforcement at every read path is the remaining work to fully ship the Redis 7.4 command family.
+**Hash field TTL** has its storage layer wired (`hash_field_expires: BTreeMap<(key, field), expires_at_ms>` plus per-key reap counters) and RDB round-trips through `RDB_TYPE_HASH_WITH_TTLS` (tag 100) already preserve per-field expirations across both runtimes. What is *not* yet wired is the wire-level command dispatch: the Redis 7.4 `HEXPIRE`/`HTTL`/`HPERSIST` family does not have command-arm entries in `fr-command::dispatch_argv` yet, and the lazy-expiry enforcement at every hash read path is still to come.
 
 **LFU is the logarithmic counter from upstream** with `LFU_INIT_VAL = 5` (newly-created objects start at 5 so they aren't immediate eviction candidates) and `lfu-log-factor = 10` controlling counter growth speed; decay is applied via `lfu_last_touch_min` so the counter doesn't grow without bound during long-running cache sessions.
 
@@ -431,7 +431,7 @@ A few design notes that matter when porting scripts:
 
 The evaluator is exercised by:
 - A dedicated `fuzz_lua_eval` cargo-fuzz target with checked-in seed corpus.
-- 272 `core_scripting` conformance fixtures (the third-largest fixture family).
+- 272 `core_scripting` conformance fixtures (the fifth-largest fixture family, behind `core_zset` 324, `core_strings` 307, `core_server` 282, and `core_stream` 273).
 - A separate `fuzz_function_restore` target covering `FUNCTION DUMP`/`RESTORE` round-trips through the RDB envelope.
 
 ### Event loop discipline: DLRC in practice (`fr-eventloop`)
@@ -811,7 +811,7 @@ The trade-off is that a single-threaded server doesn't scale across cores for ra
 The literal hex of a `SET hello world` request and reply, for grounding:
 
 ```
-Request                                          (29 bytes on the wire)
+Request                                          (35 bytes on the wire)
 00000000  2a 33 0d 0a 24 33 0d 0a  53 45 54 0d 0a 24 35 0d   |*3..$3..SET..$5.|
 00000010  0a 68 65 6c 6c 6f 0d 0a  24 35 0d 0a 77 6f 72 6c   |.hello..$5..worl|
 00000020  64 0d 0a                                            |d..|
@@ -1210,14 +1210,15 @@ The `fr-conformance` crate is the single source of truth for parity.
 # Run the in-process conformance suite (FrankenRedis runtime vs declared expectations)
 cargo test -p fr-conformance -- --nocapture
 
-# Run a single fixture against a live vendored Redis 7.2.4 and diff the wire
+# Run a single fixture in `command` mode against a live vendored Redis 7.2.4
+# on host:port. The binary takes positional <mode> <fixture> [host] [port]
+# plus optional --log-root / --json-out / --run-id / --case flags.
 cargo run -p fr-conformance --bin live_oracle_diff -- \
-    --fixture crates/fr-conformance/fixtures/core_zset.json \
-    --redis-binary legacy_redis_code/redis/src/redis-server
+    command crates/fr-conformance/fixtures/core_zset.json 127.0.0.1 6390
 
-# Orchestrate the matrix across all fixtures with budget tracking
-cargo run -p fr-conformance --bin live_oracle_orchestrator -- \
-    --matrix crates/fr-conformance/fixtures/live_oracle_matrix.json
+# Orchestrate the canonical matrix profile across the standard suites.
+# --matrix accepts `baseline` (default), `parity`, or `all`.
+cargo run -p fr-conformance --bin live_oracle_orchestrator -- --matrix parity
 ```
 
 ### What's inside
@@ -1560,8 +1561,9 @@ Honest list of what FrankenRedis does *not* do today. The roadmap below tracks c
 - **No multi-node cluster sharding.** The `CLUSTER` command surface is implemented for single-node mode (slot map, NODES, INFO, KEYSLOT, etc.), but FrankenRedis does not yet do CRC16 slot rebalancing or live shard migration across multiple FrankenRedis processes.
 - **Pipelined throughput trails Redis at high pipeline depth.** Single-command throughput is in the 73–87% range of Redis; `pipeline=16` is at ~33–47%. The `writev` scatter-gather work that closes the gap is on the roadmap.
 - **Wire-level TLS not yet terminated.** TLS configuration, accept-rate-limit, and policy are wired through `fr-config` / `fr-runtime`, but the listener does not yet terminate `rustls` connections. Clients connect in plaintext for now.
-- **Hash field TTL: storage wired, lazy-read pending.** The on-disk and in-memory representation of per-field expirations exists, but `HEXPIRE`/`HTTL`/`HPERSIST` (the Redis 7.4 command family) are not yet enforced at every read path.
+- **Hash field TTL: storage layer only.** The in-memory representation (`hash_field_expires: BTreeMap<(key, field), expires_at_ms>` on `Store`) plus the `RDB_TYPE_HASH_WITH_TTLS` (tag 100) round-trip both exist, but the wire-level `HEXPIRE`/`HTTL`/`HPERSIST`/`HPEXPIRE`/`HPTTL`/`HEXPIREAT`/`HEXPIRETIME` command family (Redis 7.4) is not yet dispatched, and the lazy-expiry enforcement at every hash read path is still to come.
 - **HyperLogLog representation is always dense.** Upstream uses a sparse representation for low cardinalities; FrankenRedis uses the 16,389-byte dense form unconditionally. Tracked as `frankenredis-j2tuo`.
+- **`DUMP` for large quicklist entries uses the PACKED container.** Upstream Redis emits a PLAIN container compressed with LZF for big-item quicklist nodes; FrankenRedis currently emits PACKED. The on-wire payload remains a valid `DUMP`/`RESTORE` round-trip in both directions, but is not byte-identical to vendored. Tracked as `frankenredis-371l9`.
 - **Maxmemory eviction is exact-scan, not sample-based.** `select_eviction_candidate` walks every `Entry` to find the best LRU/TTL candidate (`O(N)` per eviction). Upstream samples `maxmemory-samples` random keys and merges into an `EVPOOL_SIZE = 16` pool. `CONFIG SET maxmemory-samples` is accepted for compatibility but doesn't yet influence selection.
 - **LFU eviction selection currently falls back to LRU.** The 8-bit LFU counter is tracked per-Entry and exposed correctly via `OBJECT FREQ` (with upstream-shape logarithmic increment + minute-decay), but `select_eviction_candidate` for `allkeys-lfu` / `volatile-lfu` picks by `last_access_ms` rather than by `lfu_freq` today.
 - **`ACL` does not yet implement `%R`/`%W`/`%RW` key selectors.** The Redis 7.0 fine-grained key-selector syntax is on the roadmap. Tracked as `frankenredis-y40p3`.
@@ -1606,22 +1608,26 @@ cargo test   --workspace
 cargo test -p fr-conformance -- --nocapture
 ```
 
-### Adding a conformance fixture by capturing a live oracle reply
+### Adding a conformance fixture from observed vendored replies
 
-The harness has a `--capture` mode that runs your fixture against a live vendored `redis-server` and writes the observed wire bytes back into the fixture as the expected reply. That's the canonical way to add new cases: never invent expectations, observe them.
+The discipline for new fixtures is "never invent expectations, observe them." The canonical workflow:
 
-```bash
-# In one terminal
-legacy_redis_code/redis/src/redis-server --port 6390 --save "" --appendonly no
+1. Start vendored Redis 7.2.4 on a known port:
+   ```bash
+   legacy_redis_code/redis/src/redis-server --port 6390 --save "" --appendonly no
+   ```
+2. Run the case through `redis-cli` (or a small Rust harness) against that
+   port and capture the wire reply byte-for-byte.
+3. Translate the observed reply into the JSON fixture's `ExpectedFrame`
+   shape (`Simple`/`Error`/`Integer`/`Bulk`/`Array`, or `SimplePattern`
+   with `{hex40}` / `{int}` placeholders when the reply contains
+   run-id-ish substrings).
+4. Add the case to the appropriate `core_<family>.json` and re-run
+   `cargo test -p fr-conformance` plus a `live_oracle_diff` against the
+   same fixture to confirm the new case passes on both runtimes.
 
-# In another
-cargo run -p fr-conformance --bin live_oracle_diff -- \
-    --fixture crates/fr-conformance/fixtures/core_strings.json \
-    --capture-missing \
-    --redis-port 6390
-```
-
-Then commit the updated JSON.
+The repeating "probe sweep" workflow (described below) is the automated
+form of the same loop.
 
 ### Running a probe sweep
 
@@ -1657,8 +1663,8 @@ The CHANGELOG's Phase 11 section is largely the output of this workflow. The met
 | What's the actual memory pressure? | `INFO memory` and `MEMORY STATS` |
 | Force a synchronous save? | `SAVE` (blocks the loop) or `BGSAVE` (forks a child) |
 | Reload the AOF without restarting? | `DEBUG LOADAOF` (requires `enable-debug-command yes`) |
-| Check which command failed a fixture | run with `live_oracle_diff --halt-on-first-diff` |
-| Re-verify a probe-sweep hunch | `cargo run -p fr-conformance --bin adversarial_triage -- <argv-spec>` |
+| Run a single fixture case against both runtimes | `cargo run -p fr-conformance --bin live_oracle_diff -- --case <case_name> command <fixture.json> 127.0.0.1 6390` |
+| Re-verify a probe-sweep hunch | `cargo run -p fr-conformance --bin adversarial_triage -- --manifest <path>` (see `--help`) |
 
 ### What runs in CI
 
@@ -1713,11 +1719,10 @@ The conformance harness is the supported way to run differential checks locally:
 # In one terminal: start vendored Redis on a non-standard port
 legacy_redis_code/redis/src/redis-server --port 6390 --save "" --appendonly no
 
-# Then in another: run a single fixture against both
+# Then in another: run a single fixture against both runtimes and diff replies.
+# Positional args after `--`: <mode> <fixture> [host] [port].
 cargo run -p fr-conformance --bin live_oracle_diff -- \
-    --fixture crates/fr-conformance/fixtures/core_strings.json \
-    --fr-port 6379 \
-    --redis-port 6390
+    command crates/fr-conformance/fixtures/core_strings.json 127.0.0.1 6390
 ```
 
 The harness reports any wire-byte differences with the case index, the argv, and the two replies side by side, which is exactly what `(frankenredis-<slug>)` commits typically reference.
