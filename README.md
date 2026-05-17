@@ -473,7 +473,7 @@ ThreatEvent
 └── decision_action     DecisionAction         FailClosed | BoundedDefense | RejectNonAllowlisted
 ```
 
-A related-but-different lazy-evaluation optimization in `Store::state_digest` (used by the forensics ledger to fingerprint store state on error paths) is documented in `artifacts/optimization/throughput-gap/ISOMORPHISM_PROOF_LAZY_DIGEST.md` and was the headline throughput win of April 9 — see Performance and the Phase 9 CHANGELOG entry for the recovery numbers.
+The matching two-round optimization that recovered the April 7 throughput gap is documented in `artifacts/optimization/throughput-gap/ISOMORPHISM_PROOF_LAZY_DIGEST.md`. Round 1 makes `Store::state_digest`, `input_digest`, and `state_digest_before/after` lazy (gated behind `self.policy.emit_evidence_ledger`) so the success path pays zero digest cost; the eager precomputation that previously ran on every command was discarded by the threat-event ledger 99.99% of the time. Round 2 short-circuits ACL category resolution for users whose `denied_categories` and `allowed_categories` are both empty (the default `+@all` user), skipping ~4,200 string-splitting iterations per command. Together they moved single-command throughput from ~1.3% to 79-99% of Redis. See the Phase 9 CHANGELOG entry for the wider recovery story.
 
 The eight threat classes are:
 
@@ -1509,7 +1509,7 @@ A perf change can be a regression even if every benchmark improves, if it change
 1. **Behavior unchanged.** The differential conformance suite still passes against vendored Redis after the change.
 2. **The change is the cause.** A before/after `perf record` flamegraph and an `strace` syscall trace show the hotspot moved where the proof says it did.
 
-The "lazy threat-event digest" round in `artifacts/optimization/throughput-gap/ISOMORPHISM_PROOF_LAZY_DIGEST.md` is a worked example.
+The lazy `Store::state_digest` + ACL category short-circuit rounds in `artifacts/optimization/throughput-gap/ISOMORPHISM_PROOF_LAZY_DIGEST.md` are a worked example.
 
 ---
 
