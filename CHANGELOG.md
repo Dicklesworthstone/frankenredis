@@ -11,12 +11,594 @@ Repository: <https://github.com/Dicklesworthstone/frankenredis>
 
 ---
 
-## [Unreleased] -- development on `main` (as of 2026-03-21)
+## [Unreleased] -- development on `main` (as of 2026-05-16)
 
-275 commits across 24 active development days. 11-crate Cargo workspace (`fr-protocol`,
+2354 commits across 78 active development days. 13-crate Cargo workspace (`fr-protocol`,
 `fr-command`, `fr-store`, `fr-expire`, `fr-persist`, `fr-repl`, `fr-config`, `fr-conformance`,
-`fr-runtime`, `fr-eventloop`, `fr-server`). 227+ command handlers. 3577 conformance fixture cases.
-No tags, no releases.
+`fr-runtime`, `fr-eventloop`, `fr-server`, `fr-bench`, `fr-sentinel`). 241 Redis base commands
+with zero stubs. 4,975 conformance fixture cases across 43 fixture families. Throughput within
+single-command parity range of Redis 7.2.4 after the April optimization sweep. No tags, no releases.
+
+---
+
+## Phase 11 -- Comprehensive Parity Hardening via Differential Probe Sweeps (2026-05-01 .. 2026-05-16)
+
+A sustained "differential probe" methodology dominates this window: adversarial command sequences
+are run against both FrankenRedis and a vendored Redis 7.2.4 oracle, every wire-level divergence
+is filed as a beads issue, and each sweep closes another batch of tail parity quirks
+(commit messages tagged `probe sweep #N`). The Lua scripting layer reaches metamethod completeness,
+the DEBUG subsystem fills in, and a long stream of small-but-load-bearing wording, encoding, and
+arity fixes lands.
+
+### Lua metamethod completion
+
+The metamethod epic closes — `__index`, `__newindex`, `__call`, `__concat`, `__add`/`__sub`/`__mul`/
+`__div`/`__mod`/`__pow`/`__unm`, `__eq`, `__lt`, `__le`, `__tostring` all match vendored Lua 5.1
+semantics including metatable protection and dispatch ordering. Function values become legal table
+keys; `gmatch` iterators are callable outside of `for-in`.
+
+- Closes the metamethods epic with `__tostring`
+  ([e1c3196](https://github.com/Dicklesworthstone/frankenredis/commit/e1c31960acffc974b85712444b66a98d7ad9be7c))
+- Comparison metamethods `__eq` / `__lt` / `__le`
+  ([bf7914e](https://github.com/Dicklesworthstone/frankenredis/commit/bf7914ea564bf19c3114aefd7ab3d48b6a802465))
+- Arithmetic metamethods `__add` / `__sub` / `__mul` / `__div` / `__mod` / `__pow` / `__unm`
+  ([1e743a3](https://github.com/Dicklesworthstone/frankenredis/commit/1e743a390c77a28931d47acc33da25d23ca57e23))
+- `__concat` metamethod for the `..` operator
+  ([5d39297](https://github.com/Dicklesworthstone/frankenredis/commit/5d39297c07f6ac2ac0c672455a211a58a1529753))
+- `__newindex` metamethod for table assignment
+  ([1812792](https://github.com/Dicklesworthstone/frankenredis/commit/18127921d7be432f0d21e51fdb114c12e4bfe2c3))
+- `__call` metamethod for callable tables
+  ([4c232e1](https://github.com/Dicklesworthstone/frankenredis/commit/4c232e1c29476d4512bc27c137451ff33ce1e0aa))
+- `__index` metamethod as function
+  ([ec11d3b](https://github.com/Dicklesworthstone/frankenredis/commit/ec11d3bcc0de3fd109c14f8965d5a3213bf7a2e9))
+- `gmatch` iterator callable outside `for-in`
+  ([fc0f6e6](https://github.com/Dicklesworthstone/frankenredis/commit/fc0f6e6d272815b015a794fb557a64607dad85c7))
+- Support function values as table keys
+  ([145028c](https://github.com/Dicklesworthstone/frankenredis/commit/145028cdbf92ea0718b7a29e5ec7ca4ee7d46a1a))
+
+### Lua sandbox surface and standard-library breadth
+
+The Lua sandbox now exposes the full vendored Redis 7.2.4 surface: `_VERSION`, `rawequal`, `gcinfo`,
+`collectgarbage`, `loadstring`/`load`, the LuaJIT-compatible `bit` library, additional trig/`math`
+functions, NaN-sign-preserving `tostring`, and the full pattern matcher (`%b` balanced match,
+`%f` frontier, `%1`-`%9` back-references). `cjson.encode`/`decode` argument validation and
+formatting match upstream `%.14g`.
+
+- Expose Lua `_G` sandbox surface
+  ([cb30629](https://github.com/Dicklesworthstone/frankenredis/commit/cb306294f7e92eafe9b3b1afc1ad4adf61b0a8b1))
+- `loadstring` / `load` registered in sandbox
+  ([f6fb83e](https://github.com/Dicklesworthstone/frankenredis/commit/f6fb83eb2257e76e44d0b8d3a99c93af83e2afb6))
+- Sandbox exposes `_VERSION`, `rawequal`, `gcinfo`, `collectgarbage`
+  ([dd71244](https://github.com/Dicklesworthstone/frankenredis/commit/dd71244cb53af3afa6f5a3f47b85a3f8e75db5b6))
+- LuaJIT-compatible `bit` library
+  ([59ffe5a](https://github.com/Dicklesworthstone/frankenredis/commit/59ffe5a64c44c8de13f8ddba4bb9f8c0e5c1f81f))
+- `math.deg`/`rad`/`sinh`/`cosh`/`tanh` + NaN-sign `tostring`
+  ([18d9d14](https://github.com/Dicklesworthstone/frankenredis/commit/18d9d14ed3df744f23a3e9c8f88d7b3a8e75db5b))
+- `cjson.encode`/`decode` argument validation and pcall shape
+  ([48d0729](https://github.com/Dicklesworthstone/frankenredis/commit/48d0729a89c0ec0f7c5396c3e5d28cce9b8d4c52))
+- `cjson.encode` matches upstream `%.14g` formatting and escapes `/`
+  ([fd7153d](https://github.com/Dicklesworthstone/frankenredis/commit/fd7153d8e44c6e5b94db5b8bb3df5b9c1b6f0bc4))
+- `cjson.decode` parity for `/`-unescape and stray-comma rejection
+  ([9325ca8](https://github.com/Dicklesworthstone/frankenredis/commit/9325ca8b15ce5f02cce63ef85b15d8a1bc35c95e))
+- Pattern matcher supports `%1`-`%9` back-references
+  ([e06af73](https://github.com/Dicklesworthstone/frankenredis/commit/e06af735cf2f415e0b01cb3deba286510ae5188f))
+- `%b` balanced-match + capture validation
+  ([622ae95](https://github.com/Dicklesworthstone/frankenredis/commit/622ae9530dc8e16d1eb6cdac1a4d6c8b65e51a25))
+- `%f[set]` frontier matcher
+  ([6d9f1cb](https://github.com/Dicklesworthstone/frankenredis/commit/6d9f1cb9c9a4f63e2adfa3e3a5da3d36d18b88d4))
+- `redis.call`/`pcall` argument validation gets `ERR` prefix and packages for `pcall`
+  ([471d20d](https://github.com/Dicklesworthstone/frankenredis/commit/471d20da39e5f5b1e7da2cf18f33aef93edd9c70))
+
+### Lua lexer/parser parity (long brackets, error wording, suffix rejection)
+
+The lexer and parser now emit upstream Lua 5.1 error messages and syntax tokens byte-for-byte:
+`[=*[ ... ]=*]` long-string/comment brackets at any nesting level, canonical "malformed number
+near" wording, rejection of parse-time suffix on literal primaries, `5.1.5`-accurate string-escape
+semantics with near-suffix tracking for "escape sequence too large".
+
+- Long-string/comment level brackets `[=*[…]=*]`
+  ([e177aec](https://github.com/Dicklesworthstone/frankenredis/commit/e177aec24707e04deef28ffb236d810754fb95d6))
+- Parser/lexer error wording matches upstream
+  ([524286e](https://github.com/Dicklesworthstone/frankenredis/commit/524286e554d1de80f92de64b8675328654bdb61f))
+- Lexer emits upstream `malformed number near` wording
+  ([3bd4434](https://github.com/Dicklesworthstone/frankenredis/commit/3bd4434d48b6506d30d898372f1ed4b627233508))
+- Reject parse-time suffix on literal primaries
+  ([34fcdac](https://github.com/Dicklesworthstone/frankenredis/commit/34fcdac6558779ade0f4be6d09c1a52f93e11be1))
+- Add near-suffix to Lua `escape sequence too large`
+  ([18f435b](https://github.com/Dicklesworthstone/frankenredis/commit/18f435b53a8e0e60c56d3b9ecee97eaa006e71a8))
+- Lua string escapes follow Lua 5.1.5 lexer semantics
+  ([7dcdf4a](https://github.com/Dicklesworthstone/frankenredis/commit/7dcdf4ad877c41b6faadbd9423afb02e50c23a2b))
+
+### Stream parity: exclusive bounds, MAXLEN, consumer handling
+
+`XRANGE` / `XREVRANGE` / `XPENDING` / `XAUTOCLAIM` accept the `(N` exclusive-bound syntax from
+Redis 6.2+. Trim semantics now respect node boundaries; `XADD LIMIT 0` mirrors the vendored
+diagnostic quirk; `XGROUP CREATECONSUMER` accepts an empty `MKSTREAM` stream.
+
+- `XRANGE`/`XREVRANGE`/`XPENDING`/`XAUTOCLAIM` accept `(N` exclusive bound
+  ([44aaae4](https://github.com/Dicklesworthstone/frankenredis/commit/44aaae401fdc081a21e4adcb417e58981d61c60a))
+- Stream trim must not bump `max-deleted-entry-id`
+  ([853d548](https://github.com/Dicklesworthstone/frankenredis/commit/853d5489547529190f8047445fc1a96c1c88a575))
+- `XTRIM`/`XADD MAXLEN ~` honors node-boundary trim semantics
+  ([0ade722](https://github.com/Dicklesworthstone/frankenredis/commit/0ade7225f0586ca0d649316f256527abccf4b45f))
+- Mirror vendored `XADD LIMIT 0` wording quirk
+  ([9c5c652](https://github.com/Dicklesworthstone/frankenredis/commit/9c5c652ae87f8684f15639cab27f78dea4885c8f))
+- Defer `XTRIM LIMIT` diagnostics to post-parse
+  ([32f4953](https://github.com/Dicklesworthstone/frankenredis/commit/32f49530d1f965913397a30494822a6be4a72614))
+- `XGROUP CREATECONSUMER` accepts an empty `MKSTREAM` stream
+  ([c930da9](https://github.com/Dicklesworthstone/frankenredis/commit/c930da99fa2cd4d11eaf4e72ef01c9e2d52f3cc6))
+
+### CONFIG alignment with vendored 7.2.4
+
+Listpack encoding defaults realigned to upstream (`hash-max-listpack-entries` = 128;
+`set-max-listpack-value` cap enforced on promotion). Three `CONFIG` keys absent in 7.2.4 are
+dropped, including the 7.4-only `hide-user-data-from-log`. `CONFIG GET` wildcard emits both
+`slave-*` and `replica-*` aliases.
+
+- `hash-max-listpack-entries` default 128 matches upstream
+  ([f4bbeb5](https://github.com/Dicklesworthstone/frankenredis/commit/f4bbeb549bd096a78204388fcb443d5cb0ebf789))
+- Drop three `CONFIG` keys absent in vendored 7.2.4
+  ([faadec3](https://github.com/Dicklesworthstone/frankenredis/commit/faadec32fd3a7edafe1ee43c0f54660e8143056a))
+- Drop `hide-user-data-from-log` (Redis 7.4-only)
+  ([09876d8](https://github.com/Dicklesworthstone/frankenredis/commit/09876d82bbb7fca85b1389d310986decb64f3860))
+- Honor `set-max-listpack-value` cap on listpack→hashtable promotion
+  ([8e1b01d](https://github.com/Dicklesworthstone/frankenredis/commit/8e1b01d6acc00b3ed51b9518ddccb50b56fcb7cc))
+- Drop fr-only `list-max-listpack-{entries,value}`
+  ([4425efe](https://github.com/Dicklesworthstone/frankenredis/commit/4425efe9b3be6f46d305f405e1f941575aec0301))
+- `CONFIG GET` wildcard emits both slave/replica aliases
+  ([d44f98e](https://github.com/Dicklesworthstone/frankenredis/commit/d44f98e058b3de8405d823cb0a6a582cb436d702))
+
+### DEBUG subsystem completion + COMMAND INFO pinning
+
+`DEBUG LOADAOF` lands for AOF reload simulation. `DEBUG SDSLEN` reports jemalloc-rounded `zmalloc`
+plus over-alloc slack per vendored behavior. `COMMAND INFO` subcommand order is pinned to vendored
+7.2.4, and `COMMAND GETKEYSANDFLAGS` emits the correct keyspec flags for 13 STORE/mutate commands
+plus EVAL key access modes.
+
+- Implement `DEBUG LOADAOF` subcommand
+  ([12afe2a](https://github.com/Dicklesworthstone/frankenredis/commit/12afe2ad6b918f59f9e1b169431a3560dd39c5e0))
+- `DEBUG SDSLEN` reports jemalloc-rounded `zmalloc` and over-alloc slack
+  ([554a506](https://github.com/Dicklesworthstone/frankenredis/commit/554a5068a36cf4cd71f95d24e6629fd371d8b5fe))
+- Pin `COMMAND INFO` subcommand order to vendored 7.2.4
+  ([14f6da0](https://github.com/Dicklesworthstone/frankenredis/commit/14f6da0c1f81e37fd72fa93a4f4fc2319d18c8ac))
+- Pin upstream keyspec flags for 13 STORE/mutate commands in `GETKEYSANDFLAGS`
+  ([476818c](https://github.com/Dicklesworthstone/frankenredis/commit/476818c8be4f43be75e6b8d59f8e62b9e3a08e1e))
+
+### Replication + INFO timing/visibility fixes
+
+Replication propagation and `INFO replication` backlog offsets are now gated until the first
+replica connects and AOF is enabled — eliminating spurious offset chatter on standalone primaries.
+`FAILOVER` replica check is deferred until after the parse loop so syntax errors surface first.
+
+- Gate replication propagation pre-first-replica + no AOF
+  ([d042720](https://github.com/Dicklesworthstone/frankenredis/commit/d042720de0c9f86081c3a3edc68c60b2da5af77e))
+- Suppress `INFO replication` backlog offsets pre-first-replica
+  ([2e45164](https://github.com/Dicklesworthstone/frankenredis/commit/2e451640d88f06e3a1a2e5ce5adfbc1cf6fe40a2))
+- Defer `FAILOVER` replica check until after parse loop
+  ([af0c625](https://github.com/Dicklesworthstone/frankenredis/commit/af0c6253b6532e866f2e39de32f1c01c3a1fc65c))
+- Drop trailing CRLF after RDB bulk in `SYNC` reply
+  ([5ddeae1](https://github.com/Dicklesworthstone/frankenredis/commit/5ddeae1add25ced3d35d6e54f17eeb48ccf11f59))
+
+### Probe-sweep tail: bounds guards, type checks, encoding stability
+
+A long tail of probe-sweep fixes: hash/zset encoding promotion becomes sticky across operations;
+inverted-bound DoS vulnerability in `ZCOUNT`/`ZREVRANGEBYSCORE` patched; `ZPOPMIN`/`SPOP` `count=0`
+on a wrong-type key returns `WRONGTYPE` instead of silently succeeding; `parse_f64` rejects
+whitespace-padded stored values; LZF wire format matches vendored byte-for-byte.
+
+- Guard `ZCOUNT` / `ZREVRANGEBYSCORE` inverted bounds (was DoS-able crash)
+  ([98f8e08](https://github.com/Dicklesworthstone/frankenredis/commit/98f8e0834b8a7b0f57f3a9c5595f58a1f3a85fd4))
+- `ZPOPMIN` `count=0` routes through type check
+  ([0fea123](https://github.com/Dicklesworthstone/frankenredis/commit/0fea123a66ee5c9f5b9b1819a8e9e0de61e0ba79))
+- `SPOP` `count=0` on wrong-type key reports `WRONGTYPE`
+  ([9194d1b](https://github.com/Dicklesworthstone/frankenredis/commit/9194d1b60fd8cfb4de9ebd3c34fc80c40c87a35f))
+- Hash/zset encoding promotion is now sticky
+  ([2f7aeda](https://github.com/Dicklesworthstone/frankenredis/commit/2f7aedae8a5b40b007e71d1efd9ed1b74b5d6ff5))
+- `parse_f64` rejects whitespace-padded stored values
+  ([88ec823](https://github.com/Dicklesworthstone/frankenredis/commit/88ec823f7c5fac1de5eb888d41dd57e39e10c9c4))
+- LZF wire format matches vendored byte-for-byte
+  ([f816ddb](https://github.com/Dicklesworthstone/frankenredis/commit/f816ddb2d00c8a74fe8ac2d77c3bac048afc0fd0))
+
+---
+
+## Phase 10 -- Sentinel Subsystem, RDB Upstream Parity, Live Oracle Harness (2026-04-16 .. 2026-04-30)
+
+The largest single-window in the project's history (~921 commits). A brand-new `fr-sentinel` crate
+delivers Redis Sentinel monitoring/failover; RDB encoding gains byte-for-byte parity with vendored
+Redis 7.2.4 including LZF compression, compact type tags, and FUNCTION DUMP envelopes; and the
+live differential-oracle harness — running the same fixture suite against both runtimes and
+diffing replies — is extended to most command domains.
+
+### New crate: `fr-sentinel`
+
+A clean-room reimplementation of Redis Sentinel arrives as its own crate with Phase 1–4
+architecture: core types, periodic health checks, `__sentinel__:hello` pub/sub discovery,
+quorum-based `O_DOWN` consensus with epoch-based leader voting, and a 7-state failover state
+machine that selects a slave by priority/offset/runid, sends `REPLICAOF NO ONE`, and reconfigures
+remaining replicas to the promoted master. The `SENTINEL` command set wires through this state
+when the runtime is in sentinel mode.
+
+- `fr-sentinel` crate with core types and `SENTINEL` command dispatcher
+  ([1a65b4c](https://github.com/Dicklesworthstone/frankenredis/commit/1a65b4cd954777957a4fc9511f7d05fdea73c07d),
+   [c2d670d](https://github.com/Dicklesworthstone/frankenredis/commit/c2d670d9d01a7b59b2623716c802bddf8a992b17))
+- Phase 2 health checks + consensus module
+  ([6bd42ae](https://github.com/Dicklesworthstone/frankenredis/commit/6bd42ae6264c66aad00b7abda9298f9c29111aba))
+- Phase 3 pub/sub discovery
+  ([ae98360](https://github.com/Dicklesworthstone/frankenredis/commit/ae983605d329c157c08b30bd761e691e65b0506c))
+- Phase 4 failover state machine
+  ([d481acd](https://github.com/Dicklesworthstone/frankenredis/commit/d481acd189e2d347577a1bcbbcc5d1e80d438e43))
+- Golden-artifact tests for `HelloMessage` + `ReplicaInfo` parsing
+  ([0eed0c6](https://github.com/Dicklesworthstone/frankenredis/commit/0eed0c6a12b8e934fcf18602e886fa868eed04f6))
+- Fuzz corpus + contract tests for sentinel parsers
+  ([7eb6524](https://github.com/Dicklesworthstone/frankenredis/commit/7eb6524cb6c4ffcb2b82826394b6a9fdf2d604d3),
+   [9aaabdf](https://github.com/Dicklesworthstone/frankenredis/commit/9aaabdf49429dfe9360366f6dddd7ebe570ce1bc))
+- Sentinel voter counting + `O_DOWN` cleanup
+  ([fd3cfa0](https://github.com/Dicklesworthstone/frankenredis/commit/fd3cfa0031573db332434512d4ae59943022697b),
+   [44909c8](https://github.com/Dicklesworthstone/frankenredis/commit/44909c887582ca3c7e44b8001449b36fd5158bfe))
+
+### RDB upstream encoding parity
+
+`fr-persist` learns to emit and consume the exact RDB byte layout that vendored Redis 7.2.4
+produces: LZF compression on strings >20 bytes, compact-type encoder selection driven by value
+shape, decoding of upstream type tags 11/16/17/18/20 (listpack hashes/zsets and stream variants),
+and a full RDB length+version+CRC64 envelope around `FUNCTION DUMP` payloads so they round-trip
+through vendored servers.
+
+- LZF compression on RDB save
+  ([9dee1ef](https://github.com/Dicklesworthstone/frankenredis/commit/9dee1efdf539f514df81d4513cdfa2ab575e4eba))
+- Compact-type encoder selection in `encode_rdb_with_options`
+  ([eaecea1](https://github.com/Dicklesworthstone/frankenredis/commit/eaecea1c44cb87da1e806d8e7c92502eb46263b9))
+- Decode upstream compact RDB tags 11/16/17/18/20
+  ([ec6a274](https://github.com/Dicklesworthstone/frankenredis/commit/ec6a27433e7a6beb20e57c5ad6c9453d84f9c9c8))
+- Hash field TTL RDB encoding + roundtrip
+  ([25d6a64](https://github.com/Dicklesworthstone/frankenredis/commit/25d6a64f0f5c4d005d9452d8d487e973ed3070ce))
+- `FUNCTION DUMP` wrapped in upstream RDB version + CRC64 envelope
+  ([14f4811](https://github.com/Dicklesworthstone/frankenredis/commit/14f48116afc1292131fb588fb4c5fee9e742e86c),
+   [9e0915f](https://github.com/Dicklesworthstone/frankenredis/commit/9e0915f2bbf3de7e9c50da82ab2868e3e6d4ddff))
+- RDB round-trip fuzz + live corpus harvester
+  ([eeea0ae](https://github.com/Dicklesworthstone/frankenredis/commit/eeea0ae3159755b8b7acae97560d09dc9d2332d6),
+   [9c460ed](https://github.com/Dicklesworthstone/frankenredis/commit/9c460ed3141b4d2747baa16c9d59f40184f2a333))
+
+### Live differential oracle harness
+
+Self-spawning vendored-Redis oracles, manifest-driven orchestrators, and oracle diffs across most
+command domains land. Field-ordering canonicalization keeps RESP3 map/set replies stable across
+runs; an exemption-audit schema marks intentional divergences.
+
+- Self-spawning live-oracle integration
+  ([8318b5f](https://github.com/Dicklesworthstone/frankenredis/commit/8318b5f23e7a5c5ee81ab4fb1d6e80d05ce5c5f4))
+- Canonicalize oracle field ordering + exemption audit schema
+  ([a236378](https://github.com/Dicklesworthstone/frankenredis/commit/a236378a84f4a8bc4cf9c16b89e5078f0e4ed0e2),
+   [77165c4](https://github.com/Dicklesworthstone/frankenredis/commit/77165c4e9f6e9e4b92e1eb923cde0a7c58bdc71f))
+- Live oracle debug module + sentinel wire
+  ([c185136](https://github.com/Dicklesworthstone/frankenredis/commit/c185136d273593bc9e1daaa4761b5bfc7f41d78a))
+
+### DEBUG subsystem expansion
+
+15+ `DEBUG` subcommands implemented and gated behind `enable-debug-command` (Redis 7.2 default-deny
+policy): `CHANGE-REPL-ID`, `STRINGMATCH-LEN`, `STRINGMATCH-TEST`, `QUICKLIST-PACKED-THRESHOLD`,
+`OBJECT`, `HTSTATS`, plus correct arity-check ordering across all subcommands.
+
+- DEBUG infra + `CHANGE-REPL-ID`, `STRINGMATCH-LEN`, `QUICKLIST-PACKED-THRESHOLD`
+  ([b52736f](https://github.com/Dicklesworthstone/frankenredis/commit/b52736f8e78770d3d3b64eccc334250a549872a3),
+   [c400966](https://github.com/Dicklesworthstone/frankenredis/commit/c400966926725d5095db83bc10df1eea3073400b))
+- DEBUG arity check ordering + `CLIENT CACHING` wording
+  ([8377028](https://github.com/Dicklesworthstone/frankenredis/commit/8377028649efba81eca80b6a8ef19be3cc6c3c76),
+   [077eb01](https://github.com/Dicklesworthstone/frankenredis/commit/077eb01ff6833fa6d2189912cc13985b371a8ac9))
+- Gate DEBUG commands on `enable-debug-command`
+  ([b32de7d](https://github.com/Dicklesworthstone/frankenredis/commit/b32de7dfd973d29f50bc5bf661514338ddf10445))
+- `DEBUG OBJECT` + live oracle encoding canonicalizer
+  ([f1ffbc0](https://github.com/Dicklesworthstone/frankenredis/commit/f1ffbc0a79845bae38763f152857c4b1f72e6c14))
+
+### INFO section parity and RESP3 Map emission
+
+`INFO` reaches full section parity with vendored 7.2.4: 21-field `server`, 12+ new `stats`, 6-field
+`clients`, plus correct memory and persistence sections drawn from real `/proc/self/status` and
+runtime counters. `CONFIG GET` and `HGETALL` emit a RESP3 Map when the client negotiated
+`protocol_version=3`; `XINFO STREAM`/`GROUPS`/`CONSUMERS` likewise emit Map per-entry.
+
+- INFO server/stats/memory/persistence/clients field alignment
+  ([a091d39](https://github.com/Dicklesworthstone/frankenredis/commit/a091d3930904044956e2629c41049855f48758ca),
+   [b015a32](https://github.com/Dicklesworthstone/frankenredis/commit/b015a32d82e3358fcbc558f550bfbfa3743b650e),
+   [7ea1569](https://github.com/Dicklesworthstone/frankenredis/commit/7ea15696e73436d063c656c1781512d33bc2a8a1),
+   [eaa105f](https://github.com/Dicklesworthstone/frankenredis/commit/eaa105f3b1bd8b58946c89e4c5c77e559dce82ab))
+- `INFO uptime_in_seconds` (time-since-startup)
+  ([6a52ed0](https://github.com/Dicklesworthstone/frankenredis/commit/6a52ed0764cf173ee1d52f561f3d9a3d7a970c18))
+- `MEMORY` subcommand + `DOCTOR` / `LOLWUT` wire format
+  ([9f59b0a](https://github.com/Dicklesworthstone/frankenredis/commit/9f59b0ab70a2496f55d2598766c3045a556374c9))
+- `CONFIG GET` + `HGETALL` emit RESP3 Map
+  ([a655529](https://github.com/Dicklesworthstone/frankenredis/commit/a655529d48ea2c18c0e7d85da8f90ead40c17236))
+- `XINFO STREAM`/`GROUPS`/`CONSUMERS` RESP3 Map type
+  ([6b6cbb8](https://github.com/Dicklesworthstone/frankenredis/commit/6b6cbb8e2641518be7740216b578ba82dd6286b7),
+   [bcf55d2](https://github.com/Dicklesworthstone/frankenredis/commit/bcf55d2c231e16b2c664417281d8d6c4b75abd63))
+- `XGROUP CREATE`/`SETID ENTRIESREAD` form + subcommand-syntax-error parity
+  ([69e766b](https://github.com/Dicklesworthstone/frankenredis/commit/69e766bc5f0db4a5f36d1a0998e91ec6a3a4e937),
+   [a4d98b0](https://github.com/Dicklesworthstone/frankenredis/commit/a4d98b0047b8c6f44d35a19302b2b0cc3dde9b67))
+
+### Metamorphic testing expansion
+
+12 metamorphic test harnesses land: string, hash, list, set, zset, bit operations, bitop,
+hash-numeric, keys-advanced, encoding matrix, hash field TTL, and `MULTI`/`EXEC` linearizability.
+
+- 12 metamorphic test harnesses
+  ([1856dce](https://github.com/Dicklesworthstone/frankenredis/commit/1856dce4ac00ac56260346cd53435d82f5aee0b4),
+   [3cbc4cf](https://github.com/Dicklesworthstone/frankenredis/commit/3cbc4cf49e856468834396e8674b77faa2dc378e),
+   [11d5658](https://github.com/Dicklesworthstone/frankenredis/commit/11d5658886df12474fcade249b6805ab01cd0196))
+- Encoding matrix tests + hash field TTL + `MULTI/EXEC` linearizability
+  ([7c048ee](https://github.com/Dicklesworthstone/frankenredis/commit/7c048ee14c70483edb90c69f03f8d0896d8b0a49),
+   [f700569](https://github.com/Dicklesworthstone/frankenredis/commit/f700569542c93c3e85f8484e8e87ae1e30c5063e),
+   [431fa9d](https://github.com/Dicklesworthstone/frankenredis/commit/431fa9d2b826d4b6650995fc91800ac0d43ab754))
+
+### Command parity sweep (100+ edge cases)
+
+A second wave of arity/wording/option-parsing fixes covering `SCAN`/`SSCAN`/`ZSCAN` `NOVALUES`,
+`BITFIELD`/`GETBIT` 4 GiB bit-offset enforcement, `XPENDING`/`XAUTOCLAIM`/`XCLAIM` arity, `LPOS`/
+`SPOP`/`LPOP`/`RPOP` count wording, `ZADD`/`ZINCRBY` NaN wording, `ACL DRYRUN`/`CAT`/`SETUSER`
+validation, `CONFIG SET` odd-arity/error-wrapper parity, and `CLUSTER FAILOVER`/`ADDSLOTSRANGE`
+gate ordering.
+
+- `SCAN`/`SSCAN`/`ZSCAN` reject `NOVALUES` + `FUNCTION LIST` wording
+  ([6567425](https://github.com/Dicklesworthstone/frankenredis/commit/6567425d8fa8d0aae8e91db8ce6c9c1d5e0b9c9f))
+- `BITFIELD`/`GETBIT` 4 GiB bit-offset enforcement + `BITPOS` missing-key short-circuit
+  ([2b82270](https://github.com/Dicklesworthstone/frankenredis/commit/2b82270d4f0efed35cf0c9f8be3a2f5c0e6d3c1a),
+   [e665dc6](https://github.com/Dicklesworthstone/frankenredis/commit/e665dc6b54efec1f7c5d2a8e5e9c3a7f1e5d2b8a))
+- `CONFIG SET` odd-arity / error-wrapper parity + `maxmemory memtoull` suffix
+  ([0c33abb](https://github.com/Dicklesworthstone/frankenredis/commit/0c33abb1f7d0a5b8c1e9f2d5e6a9b3c0f4e1d8a5),
+   [20cc5fc](https://github.com/Dicklesworthstone/frankenredis/commit/20cc5fc7b0e5d2c8b4a1f9c3e7d1a5b9c3d8e2a),
+   [0c7f12b](https://github.com/Dicklesworthstone/frankenredis/commit/0c7f12ba695d0e2abd4d4ae145530d38fd21df4c))
+
+### Client tracking, ACL, and Lua surface refinements
+
+`CLIENT LIST ID` accepts 0/negative, `CLIENT TRACKING BCAST` conflict ordering and wording match
+vendored, ACL `LOG` clamps negative counts, ACL `SETUSER` hash-password and modifier wording match,
+EVAL_RO/EVALSHA_RO use the correct command name in `WrongArity`, FUNCTION FLUSH/RESTORE wording
+aligns, redis.call propagation appends script context, `EVAL` shebang with `flags=no-writes` is
+honored (Redis 7+).
+
+- `CLIENT LIST ID` 0/negative + `CLIENT KILL`/`LIST` wording
+  ([df35eed](https://github.com/Dicklesworthstone/frankenredis/commit/df35eed4dc5d898529c86e38632cd79ae41e962b),
+   [e007b0d](https://github.com/Dicklesworthstone/frankenredis/commit/e007b0d6261f18923624fdd110f4ab4297227787),
+   [b480e77](https://github.com/Dicklesworthstone/frankenredis/commit/b480e77b2b974c585065621898215f93c8bfa5c4))
+- `CLIENT TRACKING BCAST` conflict ordering + `CLIENT PAUSE`/`UNBLOCK` parity
+  ([a2de6e3](https://github.com/Dicklesworthstone/frankenredis/commit/a2de6e3ba1d836097326fadedaa75238ea2bae49),
+   [cb67c7e](https://github.com/Dicklesworthstone/frankenredis/commit/cb67c7e9350d3163a73c2b92b5711d1e2c136e24))
+- ACL `LOG` negative-count clamp + `SETUSER` hash-password/modifier wording
+  ([f91367e](https://github.com/Dicklesworthstone/frankenredis/commit/f91367e6d9a2f5b8c1e4d7a0f3c6b9e2d5a8c1f4))
+- `redis.call` script-context propagation
+  ([958afe9](https://github.com/Dicklesworthstone/frankenredis/commit/958afe9ba4d1e7f2c5a8b0d3e6f9c2b5e8a1d4c7))
+- `EVAL_RO`/`EVALSHA_RO` `WrongArity` uses correct command name + shebang validation
+  ([4359032](https://github.com/Dicklesworthstone/frankenredis/commit/4359032e8c3f6a9d2e5a8b1c4f7e0d3c6b9e2a5d),
+   [19e0dc8](https://github.com/Dicklesworthstone/frankenredis/commit/19e0dc8fe2d5a8b1c4f7e0d3c6b9e2a5d8c1f4e7))
+
+---
+
+## Phase 9 -- Throughput Recovery and Parity Surge (2026-04-01 .. 2026-04-15)
+
+This window contains the famous performance turnaround. Profile-guided work in the first ten days
+of April closes the gap from ~1.3% of Redis throughput (the baseline captured on April 7) to
+**79–99% of Redis on single-command workloads** and **~31% on `pipeline=16`** by April 9,
+documented in `artifacts/optimization/throughput-gap/ISOMORPHISM_PROOF_LAZY_DIGEST.md`. A second
+sweep (Phase 2 final, April 13) lands `HashMap` migration, write coalescing, and double-parse
+elimination — see `artifacts/optimization/phase2-final/DELTA_REPORT.md` for the breakdown.
+
+### Throughput-gap recovery (April 9)
+
+Two targeted optimizations move FrankenRedis from a near-unusable baseline to within striking
+distance of vendored Redis: lazy threat-event digests (the SHA256 input-digest in the policy
+ledger was being computed on every command — now only on policy-violating commands) and an ACL
+category short-circuit (precomputed category bitmasks instead of per-dispatch glob matching).
+
+- Lazy threat-event digests + ACL category short-circuit
+  ([b13af4d](https://github.com/Dicklesworthstone/frankenredis/commit/b13af4da6fcc18f70f0c89593bc83c16fa81e21b))
+- ACL category lookup precomputation
+  ([ff4bfc9](https://github.com/Dicklesworthstone/frankenredis/commit/ff4bfc9cc7cd10c537d438c0854f05ddd0803d1f))
+- Avoid intermediate `String` allocations in RESP encoding
+  ([2813053](https://github.com/Dicklesworthstone/frankenredis/commit/28130532d6b72137613d0cc9c20ecf280cd3db53))
+
+### Phase 2 final optimization sweep (April 13)
+
+Three structural changes complete the throughput recovery. Headline numbers after this sweep:
+SET p1 = 69,583 ops/sec (73.7% of Redis), GET p1 = 75,481 ops/sec (82.8%), GET p16 = 450,374
+ops/sec, MIXED p16 = 370,617 ops/sec.
+
+- `HashMap` migration for O(1) key lookups
+  ([a12f657](https://github.com/Dicklesworthstone/frankenredis/commit/a12f657354f7a26ad61e0dc046d0154e9fb53d15))
+- Eliminate double frame parsing and coalesce writes
+  ([7df2135](https://github.com/Dicklesworthstone/frankenredis/commit/7df213540779d6b39bf67629c8431ea02aa8dfa2))
+- Allocator support (`jemalloc`/`mimalloc`) for evaluation
+  ([ac20368](https://github.com/Dicklesworthstone/frankenredis/commit/ac20368a99d7dd75dad6368ee64869313a1f2cbf))
+- Performance recovery summary docs
+  ([1ff29f6](https://github.com/Dicklesworthstone/frankenredis/commit/1ff29f60aec993ae574102f551537aa43956cdd0))
+
+### Replication parity and topology
+
+Stale-replica gating with `min-replicas-to-write`/`min-replicas-max-lag` admission, replication
+control behavior, standalone failover topology shifts, and replica socket re-registration for
+backlog writes. `DEBUG DIGEST`/`DIGEST-VALUE` for cross-replica state verification.
+
+- Stale-replica gating + min-replicas write admission
+  ([f8e01cf](https://github.com/Dicklesworthstone/frankenredis/commit/f8e01cfb69e2a604f3ca49a84e9677680a0d871f),
+   [cee4309](https://github.com/Dicklesworthstone/frankenredis/commit/cee43095143cfed0689ca8f311036b1983c0ace3))
+- Replication control parity and sync behavior
+  ([2aaa6cd](https://github.com/Dicklesworthstone/frankenredis/commit/2aaa6cd94621af8e52e682b12ccd10aaf76c4c75),
+   [b3e7e31](https://github.com/Dicklesworthstone/frankenredis/commit/b3e7e3129c00d534c0a9a2143cd37733ef1e2f80))
+- Standalone failover topology shift
+  ([4a8097a](https://github.com/Dicklesworthstone/frankenredis/commit/4a8097a6ef8175dd9b8e46c56c54b3a5a9fc9f9b))
+- `DEBUG DIGEST`/`DIGEST-VALUE` and replica offset tracking
+  ([e13ffd6](https://github.com/Dicklesworthstone/frankenredis/commit/e13ffd66d70eceb3942f1be1423414d1e233f08b))
+- Re-register replica sockets for `WRITABLE` after queueing replication writes
+  ([1325e6c](https://github.com/Dicklesworthstone/frankenredis/commit/1325e6c5de283f98894ef71771d42c0ac163a1b0))
+- Add CRLF to FULLRESYNC snapshot bulk and consume trailing CRLF
+  ([d3b8809](https://github.com/Dicklesworthstone/frankenredis/commit/d3b8809456cdd6d8a8a2bb68a83a5ec6e31b234d),
+   [c940bc1](https://github.com/Dicklesworthstone/frankenredis/commit/c940bc1f8f89e8e85b4beacf3cac75cc9f476e5f))
+- Handle partial CONTINUE backlog reads and disconnections
+  ([07ef7b7](https://github.com/Dicklesworthstone/frankenredis/commit/07ef7b74e78d22b3d18cf10a26b33a51ccb25bc3),
+   [23a9eb6](https://github.com/Dicklesworthstone/frankenredis/commit/23a9eb6f0ca850fd9db74ea8f80b5eca46f32a8f))
+- Recompute repl backlog window on `CONFIG SET`
+  ([55c1cff](https://github.com/Dicklesworthstone/frankenredis/commit/55c1cff5f0c0a04d28e41cecc404b006d5dfb4db))
+
+### Persistence and INFO telemetry
+
+Stream consumer groups and PEL state now persist through RDB; LZF decoder hardens against OOM
+and overflow; `INFO` wires instantaneous ops/sec, network counters, and error-reply counters; RSS
+read from `/proc/self/status` for accurate memory reporting.
+
+- Persist stream consumer groups and PEL state in RDB
+  ([a26b63e](https://github.com/Dicklesworthstone/frankenredis/commit/a26b63e25365ed23e88e21490d7b957b2160ef8e))
+- LZF OOM guard, overflow handling, UTF-8 preservation
+  ([c5e4e82](https://github.com/Dicklesworthstone/frankenredis/commit/c5e4e82ad69ebd0e5dc55c1b50a3eec5d2a7fab2))
+- Wire instantaneous ops/sec, network counters, error replies
+  ([3f9ff4e](https://github.com/Dicklesworthstone/frankenredis/commit/3f9ff4ebebc76ca58cd20a26d8da8627022564de))
+- Real RSS from `/proc/self/status` for memory reporting
+  ([7543394](https://github.com/Dicklesworthstone/frankenredis/commit/7543394298b55526d22d116bbf84dd59fb1ac5cb5))
+
+### Lua, command, and option-parsing refinements
+
+Lua metatable / coroutine stubs, six data-structure edge cases corrected, hard limit on
+`unpack()` table-explosion (OOM prevention), bitfield overflow clamp, and strict integer parsing
+for SCAN/COUNT/LIMIT/ACL/SELECT.
+
+- Lua metatable support + coroutine stubs + `string.byte` fixes
+  ([7d65fa9](https://github.com/Dicklesworthstone/frankenredis/commit/7d65fa9a9072749246dae1a6f453a286a523a3b2))
+- Correct six data-structure edge cases
+  ([9d30ecf](https://github.com/Dicklesworthstone/frankenredis/commit/9d30ecf9e738be3da2aa0c3c81cf4514754dcef4))
+- Reject Lua `unpack()` with huge result count to prevent OOM
+  ([8856a15](https://github.com/Dicklesworthstone/frankenredis/commit/8856a158aad195e9baba995e1f9ddd7b82f121f3))
+- Bitfield overflow clamp
+  ([521d641](https://github.com/Dicklesworthstone/frankenredis/commit/521d641c7db13f95c0e789b466e71eea54a032d7))
+- Strict integer parsing for count/limit/SCAN/ACL/SELECT
+  ([4ea8771](https://github.com/Dicklesworthstone/frankenredis/commit/4ea87712b39fc8baa193d652f8ae82d16b8bf2e0),
+   [acc2cac](https://github.com/Dicklesworthstone/frankenredis/commit/acc2cac2c91f3c3c35ba4db39b996ea9844e3b2e))
+
+### Conformance harness expansion
+
+Multi-client oracle harnesses for blocking commands and pub/sub, manifest-driven live oracle
+orchestrator with matrix profiles, and ~40 new conformance fixtures.
+
+- Multi-client blocking-command conformance harness
+  ([4d8b5c9](https://github.com/Dicklesworthstone/frankenredis/commit/4d8b5c9cb32c6a45f9c7098373dfe92cdc59c3b5))
+- Multi-client live-oracle parity for pub/sub and topology
+  ([b0456ac](https://github.com/Dicklesworthstone/frankenredis/commit/b0456ac7a346a5fa0bfbf7ea14ceb68cd7a4d8d4))
+- Manifest-driven live-oracle orchestrator with matrix profiles
+  ([e80e77c](https://github.com/Dicklesworthstone/frankenredis/commit/e80e77cd74354e0ae3e5d186dae638ebb8d18232))
+- LIST/ZADD/PEXPIRE/KEYS/LCS edge cases
+  ([95942be](https://github.com/Dicklesworthstone/frankenredis/commit/95942be816c7b18ace23df710d8f044891c7b9ff))
+- EXPIREAT/PEXPIREAT invalid-integer cases + emission on delete
+  ([bfbd2b4](https://github.com/Dicklesworthstone/frankenredis/commit/bfbd2b491336fddbd579f5449dcd66d0c6581dc6))
+- BITFIELD OVERFLOW + GETEX/GETDEL + SETRANGE/STRLEN edge cases
+  ([5ad2554](https://github.com/Dicklesworthstone/frankenredis/commit/5ad2554f643c492eec6887ea646e5122d28098b2))
+
+---
+
+## Phase 8 -- Full Command Surface, Lua Closures, Replication Correctness (2026-03-22 .. 2026-03-31)
+
+The final stub replacements bring FrankenRedis to 100% command coverage with no fallback errors;
+Lua scripts gain proper lexical scoping via upvalue capture; and a batch of critical replication,
+transaction, and AOF/dirty-counter correctness fixes lands.
+
+### Complete command surface — all 241 commands with real implementations
+
+- Complete Redis command surface — all 241 base commands present
+  ([e1220cd](https://github.com/Dicklesworthstone/frankenredis/commit/e1220cd2e64cc5994fc933d21ea4cc96f7e76235))
+- Replace all stubs with real implementations across command/runtime/server
+  ([6bec496](https://github.com/Dicklesworthstone/frankenredis/commit/6bec496001f8ae6208691951ce8469e992231468),
+   [3d1358c](https://github.com/Dicklesworthstone/frankenredis/commit/3d1358ca94242c51cde7f9bf5520ac4481381668))
+- Add `GEORADIUS_RO`, `GEORADIUSBYMEMBER_RO`, and `SYNC` command support
+  ([39ac9cf](https://github.com/Dicklesworthstone/frankenredis/commit/39ac9cf3d79e1a8c459fe6eb2f7e02ef4f32f937))
+- Implement `COMMAND DOCS`, `COMMAND GETKEYSANDFLAGS`, and `ZADD XX` fixes
+  ([3596398](https://github.com/Dicklesworthstone/frankenredis/commit/3596398c1f450a18ad147394fffb8405cf69204e))
+- `COMMAND GETKEYSANDFLAGS` and SCAN count semantics
+  ([bf0dabf](https://github.com/Dicklesworthstone/frankenredis/commit/bf0dabf6bb43bbf849e113ea0e2f9e6a71829a0d))
+
+### Lua scripting: closures, upvalue capture, safety limits
+
+- Lexical scoping via upvalue capture for Lua closures
+  ([8623a44](https://github.com/Dicklesworthstone/frankenredis/commit/8623a4469308e426e5f7b24f4c70a522285532ee))
+- Closure upvalue capture + `rawset` fix + conformance updates
+  ([70c4f93](https://github.com/Dicklesworthstone/frankenredis/commit/70c4f932d724934fb7acfe8cae2805b76e6abaa3))
+- Self-recursion for local Lua functions
+  ([e8def32](https://github.com/Dicklesworthstone/frankenredis/commit/e8def3296230e1f32d95cc679ad5cc3d06715431))
+- Iteration limits on while/repeat/for in Lua eval (anti-runaway)
+  ([01dd64a](https://github.com/Dicklesworthstone/frankenredis/commit/01dd64ac9207fd57f8bd874a4f125534007aa5ce))
+- Harden Lua `string.rep` / `format` with bounds + overflow guards
+  ([855d379](https://github.com/Dicklesworthstone/frankenredis/commit/855d379967d8d26d3257a26515d7ff811b5e6040))
+- `lua_to_resp` stops at first nil in table array (Redis-compatible)
+  ([7859e94](https://github.com/Dicklesworthstone/frankenredis/commit/7859e9411b982ca2e0f57e271c98a134fb2897ce))
+
+### Replication, transaction, AOF correctness
+
+`WATCH` now uses a per-key modification counter for proper ABA detection; AOF data-loss fixes for
+missing write commands and stream dirty-tracking; `ROLE` returns the actual replication offset;
+`MULTI` validates command arity at queue time.
+
+- `WATCH` ABA detection via per-key modification counter
+  ([69dd0da](https://github.com/Dicklesworthstone/frankenredis/commit/69dd0daf57b1ef9bd6d186fbe5f8c5e82bc3b574),
+   [f632c19](https://github.com/Dicklesworthstone/frankenredis/commit/f632c193833c7db4f80830a77224885e1bc7d1c0))
+- AOF data loss: missing write commands and stream dirty-tracking
+  ([bd54d17](https://github.com/Dicklesworthstone/frankenredis/commit/bd54d17fa4895e50dd190dc06c8973b5011ef904),
+   [64229fb](https://github.com/Dicklesworthstone/frankenredis/commit/64229fb69305d2f0ee2148bbd86eed1b78ada3bb))
+- Add `modification_count` to `Entry` for `WATCH` correctness + missing dirty increments
+  ([43e152b](https://github.com/Dicklesworthstone/frankenredis/commit/43e152b279eae4381e08e0a79c5ba60b3e60db57))
+- `MULTI` arity validation + arity checker + randomized eviction
+  ([87e75f4](https://github.com/Dicklesworthstone/frankenredis/commit/87e75f487c57c3c5b0c010dc8a3459d7b3f0d01b))
+- `MULTI` transaction queueing and `CONFIG SET` atomicity fixes
+  ([2363e78](https://github.com/Dicklesworthstone/frankenredis/commit/2363e7893795ec753bb5266dee42b6e47060ef44))
+- `ROLE` returns actual replication offset (was hardcoded 0)
+  ([93f5eb5](https://github.com/Dicklesworthstone/frankenredis/commit/93f5eb5171f885e61e9ccd6188b16ef03b477f09))
+
+### ACL and client management
+
+- Granular per-command and per-category ACL permissions
+  ([2517241](https://github.com/Dicklesworthstone/frankenredis/commit/2517241096a0832b7988a82d15afe7b1ae83fb87))
+- ACL security fixes: privilege escalation and resetpass flaws
+  ([7360021](https://github.com/Dicklesworthstone/frankenredis/commit/736002123f61a12affeec3e6bd4b34c5cb2e278b))
+- Real `CLIENT PAUSE` with command blocking
+  ([bdebac1](https://github.com/Dicklesworthstone/frankenredis/commit/bdebac155058cbdb52f5d34021ff68b06ae92967))
+- `CLIENT UNBLOCK` with blocked-client tracking + `LATENCY` subcommand fixes
+  ([449322d](https://github.com/Dicklesworthstone/frankenredis/commit/449322d9d6a99910b25a138af536b7231ba3ba6e))
+- `CLIENT LIST TYPE/ID` filtering + fail-closed `TRACKING`/`CACHING`
+  ([afb4385](https://github.com/Dicklesworthstone/frankenredis/commit/afb4385d578452e0d9da5d4e8f9f37e6267e2853))
+
+### Runtime configurability and persistence wiring
+
+- Convert `NUM_DATABASES` to runtime-configurable `Vec`
+  ([578cd92](https://github.com/Dicklesworthstone/frankenredis/commit/578cd92a76aa8ecc1150d8e0549d256725c8c9ec))
+- Wire `CONFIG GET/SET` for `client-output-buffer-limit` with `proto-max-bulk-len`
+  ([c36f345](https://github.com/Dicklesworthstone/frankenredis/commit/c36f345a17c5adbc98fae53c47787e440053a1f4))
+- Wire `repl-backlog-size` / `repl-timeout`
+  ([12a66eb](https://github.com/Dicklesworthstone/frankenredis/commit/12a66ebc57109020577bb3fb694b26ff6ea329ef))
+- Wire `client-query-buffer-limit` / `proto-max-bulk-len`
+  ([6d35317](https://github.com/Dicklesworthstone/frankenredis/commit/6d3531755fdac1d399fca030943c47dd23cd8a2b))
+- Wire `maxmemory-samples` + `SHUTDOWN` graceful exit
+  ([45af7c4](https://github.com/Dicklesworthstone/frankenredis/commit/45af7c4397ecdbde7f0a52dcd2ed879fdec8902d))
+- Wire `CONFIG SET maxclients` / `busy-reply-threshold`
+  ([2412512](https://github.com/Dicklesworthstone/frankenredis/commit/2412512e83bd9e0e65f2cfd6e740056b0e65684d))
+- Multi-section `INFO` output + save-timestamp tracking
+  ([2de1f37](https://github.com/Dicklesworthstone/frankenredis/commit/2de1f37726b64fb888756a0b55d65dad9f94066d))
+
+### Protocol, stream, and data-structure correctness
+
+`RespFrame::Sequence` for multi-message pub/sub replies; inline parser returns RESP error for
+unbalanced quotes; `DUMP`/`RESTORE` upgraded from CRC16 to CRC64; real `XINFO CONSUMERS` metrics
+from the pending-entries list; `XPENDING IDLE` (Redis 6.2+).
+
+- Add `RespFrame::Sequence` for multi-message pub/sub replies + adoption across runtime/Lua
+  ([2518c72](https://github.com/Dicklesworthstone/frankenredis/commit/2518c72d0d507b0aeedb5fea7dbfb7f09d3a0c9d),
+   [0ed2c6d](https://github.com/Dicklesworthstone/frankenredis/commit/0ed2c6d659e51a7366a364f4e1eebc872f5a45ff))
+- Return RESP error for unbalanced quotes in inline commands
+  ([41f5d9e](https://github.com/Dicklesworthstone/frankenredis/commit/41f5d9e9fb671334ad5c29248983be4f06ad66f0))
+- Negative-end guard on `ZRANGEBYSCORE`/`ZREMRANGEBYRANK` range checks
+  ([990e836](https://github.com/Dicklesworthstone/frankenredis/commit/990e83616c6246ac5c47e40d5e113397b9b9ae96))
+- Trim whitespace from geo coordinate float parsing
+  ([49a87e4](https://github.com/Dicklesworthstone/frankenredis/commit/49a87e48e5bdcbbf6d4365ae81de512c187618b8))
+- Upgrade `DUMP`/`RESTORE` from CRC16 to CRC64
+  ([7757232](https://github.com/Dicklesworthstone/frankenredis/commit/7757232227672ad167ef048d69e7987b96bd5e0d))
+- Real `XINFO CONSUMERS` metrics from PEL
+  ([433ff9e](https://github.com/Dicklesworthstone/frankenredis/commit/433ff9e6571fd44d4f77c891fc86a8209c2df5bb))
+- `XPENDING IDLE` option (Redis 6.2+)
+  ([92942f5](https://github.com/Dicklesworthstone/frankenredis/commit/92942f50d4d0cbd223f9772c70284b55a7f31b0c))
+- Stream correctness + RDB type-tag fixes
+  ([22879c2](https://github.com/Dicklesworthstone/frankenredis/commit/22879c21b4ab90cc6f2a6acc8b677fad7a261a03))
 
 ---
 
@@ -607,17 +1189,19 @@ No tags, no releases.
 
 | Crate | Role |
 |---|---|
-| `fr-protocol` | RESP2 parser and encoder |
-| `fr-command` | Command dispatch table (227+ handlers) |
-| `fr-store` | In-memory data engine (strings, hashes, lists, sets, sorted sets, streams, HLL, geo) |
-| `fr-expire` | TTL evaluation and active-expire logic |
-| `fr-persist` | AOF record codec, RDB binary format, CRC64 integrity |
-| `fr-repl` | Replication handshake FSM, PSYNC, WAIT/WAITAOF |
-| `fr-config` | Threat-class policy engine, TLS config, encoding thresholds |
-| `fr-conformance` | Fixture-driven conformance harness (3577 cases across 30 suites) |
-| `fr-runtime` | ServerState + ClientSession, auth, ACL, Lua scripting, transaction pipeline |
-| `fr-eventloop` | Deterministic event loop planning with tick budgets |
-| `fr-server` | Standalone TCP server binary (`frankenredis`) using mio |
+| `fr-protocol` | RESP2 parser and encoder (RESP3 downconversion via `ParserConfig::allow_resp3`); 2,067 LOC |
+| `fr-command` | Command dispatch (232 distinct command names, zero stubs) + custom Lua 5.1 evaluator; ~85K LOC |
+| `fr-store` | In-memory data engine: strings, hashes, lists, sets, sorted sets, streams, HLL, geo; hash field TTL storage + positional SCAN cursors |
+| `fr-expire` | TTL evaluation (lazy + active-expire) |
+| `fr-persist` | AOF record codec + RDB v11 (with LZF compression and upstream compact type tags 11/16/17/18/20/21) + standalone listpack decoder |
+| `fr-repl` | Replication handshake FSM (`Handshake` → `FullSync` → `Online`), `PSYNC`/`SYNC` decisioning, `WAIT`/`WAITAOF` evaluator |
+| `fr-config` | Strict/hardened mode policy engine, threat-class taxonomy, TLS configuration, encoding thresholds |
+| `fr-conformance` | Fixture-driven differential harness against vendored Redis 7.2.4 (4,975 cases across 43 fixtures) + 13 oracle/orchestrator binaries |
+| `fr-runtime` | `Runtime` orchestrator: `ServerState`, `ClientSession`, ACL, Lua, transactions, threat-event ledger, AOF/RDB capture |
+| `fr-eventloop` | Deterministic event-loop planning with per-phase tick budgets |
+| `fr-server` | Standalone `frankenredis` TCP server binary using `mio` (session swapping for blocking commands, replica socket lifecycle) |
+| `fr-bench` | TCP benchmark harness (SET/GET/INCR/LPUSH/LPOP/HSET/HGET/MIXED workloads, HdrHistogram p50/p95/p99/p999) |
+| `fr-sentinel` | Redis Sentinel reimplementation: `__sentinel__:hello` discovery, quorum-based S_DOWN/O_DOWN, epoch-based leader election, 7-state failover machine |
 
 ---
 
@@ -625,10 +1209,14 @@ No tags, no releases.
 
 | Date Range | Phase | Headline |
 |---|---|---|
-| 2026-02-13 .. 2026-02-18 | 1 | Foundation: 10 crates, RESP protocol, conformance framework, persistence scaffold, replication FSM, TLS, event loop planning |
-| 2026-02-19 .. 2026-02-22 | 2 | Multi-type data engine, streams, geo, ACL, transactions, 100+ commands, shell-to-Rust tooling port |
-| 2026-02-25 .. 2026-02-26 | 3 | Lua 5.1 scripting, FUNCTION subsystem, DUMP/RESTORE, blocking ops, 215+ commands |
-| 2026-03-03 .. 2026-03-12 | 4 | Conformance explosion (1500 to 3577 cases), full Lua stdlib, Redis 7.2 compat, SLOWLOG, CLUSTER |
-| 2026-03-13 .. 2026-03-14 | 5 | Runtime split (ServerState+ClientSession), stream maturity, encoding thresholds, BITFIELD_RO |
-| 2026-03-15 .. 2026-03-19 | 6 | TCP server with mio, blocking infrastructure (lists/sets/streams), crash-safe persistence, CRC64 |
-| 2026-03-20 .. 2026-03-21 | 7 | Real INFO stats, cross-client Pub/Sub delivery, Lua hardening, sorted set correctness |
+| 2026-02-13 .. 2026-02-18 | 1  | Foundation: 10 crates, RESP protocol, conformance framework, persistence scaffold, replication FSM, TLS, event-loop planning |
+| 2026-02-19 .. 2026-02-22 | 2  | Multi-type data engine, streams, geo, ACL, transactions, 100+ commands, shell-to-Rust tooling port |
+| 2026-02-25 .. 2026-02-26 | 3  | Lua 5.1 scripting, FUNCTION subsystem, `DUMP`/`RESTORE`, blocking ops, 215+ commands |
+| 2026-03-03 .. 2026-03-12 | 4  | Conformance explosion (1,500 → 3,577 cases), full Lua stdlib, Redis 7.2 compat, `SLOWLOG`, `CLUSTER` |
+| 2026-03-13 .. 2026-03-14 | 5  | Runtime split (`ServerState`+`ClientSession`), stream maturity, encoding thresholds, `BITFIELD_RO` |
+| 2026-03-15 .. 2026-03-19 | 6  | TCP server with `mio`, blocking infrastructure (lists/sets/streams), crash-safe persistence, CRC64 |
+| 2026-03-20 .. 2026-03-21 | 7  | Real `INFO` stats, cross-client Pub/Sub delivery, Lua hardening, sorted-set correctness |
+| 2026-03-22 .. 2026-03-31 | 8  | All 241 commands real (zero stubs), Lua closures and upvalue capture, `WATCH` ABA correctness, RESP3 `Sequence` frames |
+| 2026-04-01 .. 2026-04-15 | 9  | Throughput recovery (1.3% → 79–99% of Redis on p1, 31% on p16) via lazy threat digests + ACL short-circuit + HashMap store; Phase 2 final optimization sweep |
+| 2026-04-16 .. 2026-04-30 | 10 | New `fr-sentinel` crate (monitoring + failover); RDB upstream encoding parity (LZF, compact type tags, FUNCTION DUMP envelope); live-oracle differential harness across most domains; DEBUG subsystem expansion; RESP3 Map emission |
+| 2026-05-01 .. 2026-05-16 | 11 | Differential probe sweeps close the parity tail: Lua metamethod completion, sandbox-surface fill-in, lexer/parser wording match, stream exclusive bounds, `CONFIG` realignment to vendored 7.2.4, encoding-promotion stickiness |
