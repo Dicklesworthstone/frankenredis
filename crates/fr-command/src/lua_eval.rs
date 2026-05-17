@@ -9224,7 +9224,22 @@ fn lua_string_format(
                             // is suppressed and spaces fill the
                             // remaining width. When precision is 0 and
                             // value is 0, NO digits are produced.
-                            let n = require_number(&arg)? as i64;
+                            // (frankenredis-45jr8) Upstream Lua 5.1.5
+                            // calls (long)x on the result of
+                            // luaL_checknumber. For finite f64 values
+                            // exceeding LLONG_MAX the C cast is UB; on
+                            // x86_64 it produces LLONG_MIN. Rust's
+                            // `f64 as i64` saturates to i64::MAX, so
+                            // mirror x86_64 UB explicitly for parity.
+                            let raw = require_number(&arg)?;
+                            let n = if raw.is_finite()
+                                && (raw >= 9223372036854775808.0
+                                    || raw < -9223372036854775808.0)
+                            {
+                                i64::MIN
+                            } else {
+                                raw as i64
+                            };
                             let abs_str = if n == i64::MIN {
                                 "9223372036854775808".to_string()
                             } else {
