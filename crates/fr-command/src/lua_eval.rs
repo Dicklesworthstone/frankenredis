@@ -3447,7 +3447,13 @@ impl<'a> LuaState<'a> {
                 }
             }
         }
-        Err("user_script:1: __newindex cascade exceeded depth limit".to_string())
+        // (frankenredis-fhf2s) Upstream lvm.c::luaV_settable raises
+        // 'loop in settable' when the MAXTAGLOOP cap is exhausted —
+        // the write-side counterpart to 'loop in gettable'
+        // (frankenredis-91w0c). fr previously emitted a bespoke
+        // '__newindex cascade exceeded depth limit' string that
+        // didn't match vendored.
+        Err("user_script:1: loop in settable".to_string())
     }
 
     fn write_back_table_expr(
@@ -6869,7 +6875,23 @@ impl<'a> LuaState<'a> {
                         ));
                     }
                 }
-                let max_n = args.get(3).and_then(|v| v.to_number()).map(|n| n as usize);
+                // (frankenredis-mzjqw) Upstream lstrlib.c::str_gsub uses
+                // luaL_optinteger for the optional 4th arg ('max
+                // substitutions'), raising 'bad argument #4 (number
+                // expected, got TYPE)' for non-number-convertible
+                // values. fr previously coerced via to_number() and
+                // silently defaulted to None (unlimited), masking
+                // the error. For negative n, preserve the original
+                // saturating `f64 as usize` behavior (which yielded
+                // 0 substitutions on -N) — vendored matches because
+                // it treats negative-as-0 too.
+                let max_n: Option<usize> = match args.get(3) {
+                    None | Some(LuaValue::Nil) => None,
+                    Some(v) => {
+                        let n = lua_required_integer_arg(inv, 4, v)?;
+                        Some(if n < 0 { 0 } else { n as usize })
+                    }
+                };
                 // (frankenredis-vfv8s) Validate pattern eagerly.
                 // (frankenredis-uqnq6) inv_name routes the prefix.
                 lua_pattern_validate_named(inv, &pattern)?;
@@ -16213,6 +16235,99 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_cyclic_newindex_chain_raises_loop_in_settable_fhf2s() {
+        // (frankenredis-fhf2s) Write-side counterpart to 91w0c:
+        // upstream lvm.c::luaV_settable raises 'loop in settable'
+        // on MAXTAGLOOP exhaustion. fr previously emitted a bespoke
+        // '__newindex cascade exceeded depth limit' string.
+        let mut store = Store::new();
+
+        let r = eval_script(
+            b"local t={}; setmetatable(t,{__newindex=t}); local ok,e = pcall(function() t.x=1 end); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        let body = match r {
+            RespFrame::BulkString(Some(b)) => String::from_utf8(b).unwrap(),
+            other => panic!("unexpected reply: {other:?}"),
+        };
+        assert!(body.starts_with("false:"), "got {body}");
+        assert!(body.contains("loop in settable"), "got {body}");
+
+        // Mutual cycle a→b→a.
+        let r = eval_script(
+            b"local a={}; local b={}; setmetatable(a,{__newindex=b}); setmetatable(b,{__newindex=a}); local ok,e = pcall(function() a.x=1 end); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        let body = match r {
+            RespFrame::BulkString(Some(b)) => String::from_utf8(b).unwrap(),
+            other => panic!("unexpected reply: {other:?}"),
+        };
+        assert!(body.contains("loop in settable"), "got {body}");
+
+        // Non-cyclic write still succeeds — single hop through an
+        // __newindex table writes into the target.
+        let r = eval_script(
+            b"local proxy={}; local t = setmetatable({}, {__newindex=proxy}); t.x = 42; return proxy.x",
+            &[], &[], &mut store, 0,
+        ).expect("__newindex proxy must write through");
+        assert_eq!(r, RespFrame::Integer(42));
+    }
+
+    #[test]
+    fn lua_string_gsub_validates_n_arg_mzjqw() {
+        // (frankenredis-mzjqw) Upstream lstrlib.c::str_gsub uses
+        // luaL_optinteger for the n arg, raising 'bad argument #4
+        // (number expected, got TYPE)' for non-number-convertible
+        // values. fr previously silently defaulted to unlimited.
+        let mut store = Store::new();
+
+        // Numeric / numeric-string n still work.
+        let r = eval_script(
+            b"local s,n = string.gsub('aaaa', 'a', 'X', 2); return s..':'..n",
+            &[], &[], &mut store, 0,
+        ).expect("numeric n");
+        assert_eq!(r, RespFrame::BulkString(Some(b"XXaa:2".to_vec())));
+
+        let r = eval_script(
+            b"local s,n = string.gsub('aaaa', 'a', 'X', '2'); return s..':'..n",
+            &[], &[], &mut store, 0,
+        ).expect("numeric-string n");
+        assert_eq!(r, RespFrame::BulkString(Some(b"XXaa:2".to_vec())));
+
+        // Bad-n types raise the anonymous-C pcall wording.
+        let r = eval_script(
+            b"local ok,e = pcall(string.gsub, 'aaaa', 'a', 'X', 'bad'); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #4 to '?' (number expected, got string)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(string.gsub, 'aaaa', 'a', 'X', {}); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #4 to '?' (number expected, got table)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(string.gsub, 'aaaa', 'a', 'X', true); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #4 to '?' (number expected, got boolean)".to_vec()
+            ))
+        );
     }
 
     #[test]
