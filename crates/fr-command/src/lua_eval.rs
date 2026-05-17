@@ -6740,16 +6740,18 @@ impl<'a> LuaState<'a> {
                     }
                     result_table.set(LuaValue::Number((i + 1) as f64), LuaValue::Table(row));
                 }
-                // Return a special iterator: we store matches in a table and return
-                // an iterator function that pops values. For simplicity in our evaluator,
-                // we return the first match's captures (single call pattern used in for loops
-                // is handled by the generic-for which calls the iterator repeatedly).
-                // Actually, gmatch returns an iterator function. We need a stateful closure.
-                // Simplest approach: return a Rust function that internally tracks state.
-                // For now, flatten to first match only if used as expression.
-                // The for-in loop handles this via repeated calls.
-                // We'll store all matches in the iterator's upvalue.
-                // Return a table with __gmatch_data so the for loop can consume it.
+                // (frankenredis-8vp9w) gmatch must return a stateful
+                // iterator that works both via for-in dispatch and via
+                // direct calls (e.g. `gmatch(s,p)()` or stored in a
+                // local and called repeatedly). Vendored gmatch returns
+                // a closure with the source/pattern/position captured
+                // as upvalues. We approximate that with a Table holding
+                // the precomputed matches plus a __call metamethod
+                // pointing at __gmatch_iter. The for-in path still
+                // works: GenericFor calls iter_fn(state, control), the
+                // table dispatches through metatable_call_handler which
+                // prepends the table itself as the first arg —
+                // matching the state slot __gmatch_iter already reads.
                 let iter_state = LuaTable::new();
                 iter_state.set(
                     LuaValue::Str(b"__gmatch_data".to_vec()),
@@ -6759,9 +6761,15 @@ impl<'a> LuaState<'a> {
                     LuaValue::Str(b"__gmatch_idx".to_vec()),
                     LuaValue::Number(0.0),
                 );
-                Ok(vec![
+                let mt = LuaTable::new();
+                mt.set(
+                    LuaValue::Str(b"__call".to_vec()),
                     LuaValue::RustFunction("__gmatch_iter".to_string()),
+                );
+                iter_state.inner.borrow_mut().metatable = Some(mt);
+                Ok(vec![
                     LuaValue::Table(iter_state),
+                    LuaValue::Nil,
                     LuaValue::Nil,
                 ])
             }
@@ -15983,6 +15991,58 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_gmatch_iterator_callable_outside_for_in_8vp9w() {
+        // (frankenredis-8vp9w) Lua 5.1 gmatch returns an iterator
+        // function with the source/pattern/position captured as an
+        // upvalue closure. fr previously returned a (RustFunction,
+        // state_table, nil) triple whose iterator builtin read state
+        // from args[0] — the for-in path passed state explicitly, so
+        // it worked, but direct calls like `gmatch(s,p)()` saw args[0]
+        // as nil and silently returned nil. The fix attaches a __call
+        // metatable to the state table itself; both for-in dispatch
+        // and direct calls route through metatable_call_handler which
+        // prepends the table as the first arg.
+        let mut store = Store::new();
+        let direct = eval_script(
+            b"return string.gmatch('abc def', '%a+')()",
+            &[], &[], &mut store, 0,
+        ).expect("direct gmatch call must not error");
+        assert_eq!(
+            direct,
+            RespFrame::BulkString(Some(b"abc".to_vec())),
+            "gmatch()() must return first match",
+        );
+        let three = eval_script(
+            b"local g=string.gmatch('a b c', '%a'); return g()..g()..g()",
+            &[], &[], &mut store, 0,
+        ).expect("three successive gmatch calls must not error");
+        assert_eq!(
+            three,
+            RespFrame::BulkString(Some(b"abc".to_vec())),
+            "three successive g() calls must return successive matches",
+        );
+        let exhausted = eval_script(
+            b"local g=string.gmatch('a', '%a'); g(); return g()",
+            &[], &[], &mut store, 0,
+        ).expect("exhausted gmatch must return nil cleanly");
+        assert_eq!(
+            exhausted,
+            RespFrame::BulkString(None),
+            "exhausted gmatch must return nil",
+        );
+        // For-in dispatch must still produce all matches.
+        let for_in = eval_script(
+            b"local out={}; for w in string.gmatch('one two three', '%a+') do out[#out+1]=w end return table.concat(out, ',')",
+            &[], &[], &mut store, 0,
+        ).expect("for-in gmatch must not error");
+        assert_eq!(
+            for_in,
+            RespFrame::BulkString(Some(b"one,two,three".to_vec())),
+            "for-in gmatch must collect every match",
+        );
     }
 
     #[test]
