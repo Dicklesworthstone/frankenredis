@@ -7248,12 +7248,19 @@ impl<'a> LuaState<'a> {
                 Ok(vec![LuaValue::Nil])
             }
             "table.getn" => {
-                let table = args.first().cloned().unwrap_or(LuaValue::Nil);
-                if let LuaValue::Table(t) = &table {
-                    Ok(vec![LuaValue::Number(t.len() as f64)])
-                } else {
-                    Ok(vec![LuaValue::Number(0.0)])
-                }
+                // (frankenredis-ian3l) Upstream ltablib.c::getn uses
+                // luaL_checktype(L, 1, LUA_TTABLE) which raises 'bad
+                // argument #1 (table expected, got TYPE)' for any
+                // non-table arg (including missing/nil). fr previously
+                // silently returned 0 for bogus inputs, matching the
+                // table.maxn fix already in place.
+                let t = lua_check_table(
+                    self.current_invocation_name.as_deref(),
+                    args,
+                    0,
+                    "getn",
+                )?;
+                Ok(vec![LuaValue::Number(t.len() as f64)])
             }
             "table.maxn" => {
                 // (frankenredis-3osi6) Upstream ltablib.c:maxn uses
@@ -16239,6 +16246,62 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_table_getn_validates_arg_ian3l() {
+        // (frankenredis-ian3l) Upstream ltablib.c::getn uses
+        // luaL_checktype(LUA_TTABLE) and errors with
+        // 'bad argument #1 (table expected, got TYPE)' on any
+        // non-table arg. fr previously silently returned 0.
+        let mut store = Store::new();
+
+        // Valid table arg.
+        let r = eval_script(b"return table.getn({1,2,3})", &[], &[], &mut store, 0)
+            .expect("valid getn");
+        assert_eq!(r, RespFrame::Integer(3));
+
+        // Bad-type args raise the anonymous-C pcall wording.
+        let r = eval_script(
+            b"local ok,e = pcall(table.getn, nil); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (table expected, got nil)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(table.getn); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (table expected, got no value)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(table.getn, 42); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (table expected, got number)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(table.getn, 'abc'); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (table expected, got string)".to_vec()
+            ))
+        );
     }
 
     #[test]
