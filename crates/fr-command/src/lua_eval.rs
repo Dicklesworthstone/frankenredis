@@ -8884,10 +8884,16 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
             // {double = x}: emit BulkString of the double formatted
             // upstream-style. Lua's `%.17g`-equivalent rendering
             // matches what Redis surfaces, so use Rust's default
-            // f64 Display which is round-trip safe.
+            // f64 Display which is round-trip safe — EXCEPT for NaN
+            // where Rust emits 'NaN' but C printf '%g' emits 'nan'
+            // lowercase. (frankenredis-s964e)
             let double_field = t.get(&LuaValue::Str(b"double".to_vec()));
             if let LuaValue::Number(n) = double_field {
-                let s = format!("{n}");
+                let s = if n.is_nan() {
+                    "nan".to_string()
+                } else {
+                    format!("{n}")
+                };
                 return RespFrame::BulkString(Some(s.into_bytes()));
             }
 
@@ -8899,16 +8905,26 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
                 return RespFrame::BulkString(Some(s.clone()));
             }
 
-            // {verbatim_string = {format = ..., string = ...}}:
+            // {verbatim_string = {format = "<3char>", string = "..."}}:
             // emit BulkString of the inner `string` field. Upstream's
             // RESP3 `=<len>\r\n<fmt>:<payload>` framing isn't
             // representable in fr's frame enum; the BulkString of the
             // raw payload is the documented RESP2 fallback.
+            // (frankenredis-eojcu) Vendored script_lua.c requires
+            // BOTH subfields to be strings — if either is missing or
+            // a non-string type, the hint is rejected and the table
+            // falls through to the normal array-part serialisation
+            // (which yields an empty array for a hint-only table).
             let vs_field = t.get(&LuaValue::Str(b"verbatim_string".to_vec()));
-            if let LuaValue::Table(inner) = vs_field
-                && let LuaValue::Str(s) = inner.get(&LuaValue::Str(b"string".to_vec()))
-            {
-                return RespFrame::BulkString(Some(s));
+            if let LuaValue::Table(inner) = vs_field {
+                let fmt_ok = matches!(
+                    inner.get(&LuaValue::Str(b"format".to_vec())),
+                    LuaValue::Str(_)
+                );
+                let str_field = inner.get(&LuaValue::Str(b"string".to_vec()));
+                if fmt_ok && let LuaValue::Str(s) = str_field {
+                    return RespFrame::BulkString(Some(s));
+                }
             }
 
             // Convert array part to RESP array (stop at first nil, matching Redis)
@@ -16138,6 +16154,85 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_double_nan_renders_lowercase_per_printf_g_s964e() {
+        // (frankenredis-s964e) Vendored renders {double=x} via C
+        // printf '%g' which emits lowercase 'nan' for NaN. fr's
+        // lua_to_resp Table arm used Rust's default Display for
+        // f64 which emits 'NaN'. Pin lowercase parity for NaN; inf
+        // / -inf already match (both formatters lowercase).
+        let mut store = Store::new();
+        let r = eval_script(
+            b"return {double=0/0}",
+            &[], &[], &mut store, 0,
+        ).expect("double nan reply");
+        assert_eq!(r, RespFrame::BulkString(Some(b"nan".to_vec())));
+
+        let r = eval_script(
+            b"return {double=1/0}",
+            &[], &[], &mut store, 0,
+        ).expect("double +inf reply");
+        assert_eq!(r, RespFrame::BulkString(Some(b"inf".to_vec())));
+
+        let r = eval_script(
+            b"return {double=-1/0}",
+            &[], &[], &mut store, 0,
+        ).expect("double -inf reply");
+        assert_eq!(r, RespFrame::BulkString(Some(b"-inf".to_vec())));
+
+        let r = eval_script(
+            b"return {double=3.14}",
+            &[], &[], &mut store, 0,
+        ).expect("regular double");
+        assert_eq!(r, RespFrame::BulkString(Some(b"3.14".to_vec())));
+    }
+
+    #[test]
+    fn lua_verbatim_string_requires_format_and_string_subfields_eojcu() {
+        // (frankenredis-eojcu) Vendored script_lua.c rejects the
+        // verbatim_string hint when either 'format' or 'string'
+        // subfield is missing/non-string and falls through to the
+        // generic table serialisation — yielding an empty array for
+        // hint-only tables. fr previously emitted the BulkString
+        // whenever 'string' was a string, ignoring 'format'.
+        let mut store = Store::new();
+
+        // Both subfields present and string — emits BulkString.
+        let r = eval_script(
+            b"return {verbatim_string={format='txt', string='hi'}}",
+            &[], &[], &mut store, 0,
+        ).expect("valid verbatim_string");
+        assert_eq!(r, RespFrame::BulkString(Some(b"hi".to_vec())));
+
+        // Format missing — fall through, empty array.
+        let r = eval_script(
+            b"return {verbatim_string={string='hi'}}",
+            &[], &[], &mut store, 0,
+        ).expect("verbatim_string missing format");
+        assert_eq!(r, RespFrame::Array(Some(vec![])));
+
+        // String missing — fall through, empty array.
+        let r = eval_script(
+            b"return {verbatim_string={format='txt'}}",
+            &[], &[], &mut store, 0,
+        ).expect("verbatim_string missing string");
+        assert_eq!(r, RespFrame::Array(Some(vec![])));
+
+        // Format is non-string (number) — fall through.
+        let r = eval_script(
+            b"return {verbatim_string={format=42, string='hi'}}",
+            &[], &[], &mut store, 0,
+        ).expect("verbatim_string number format");
+        assert_eq!(r, RespFrame::Array(Some(vec![])));
+
+        // verbatim_string itself is not a table — fall through.
+        let r = eval_script(
+            b"return {verbatim_string='hi'}",
+            &[], &[], &mut store, 0,
+        ).expect("verbatim_string not a table");
+        assert_eq!(r, RespFrame::Array(Some(vec![])));
     }
 
     #[test]
