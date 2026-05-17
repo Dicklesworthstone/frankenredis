@@ -9331,7 +9331,14 @@ fn lua_string_format(
                                     b'"' => q.push_str("\\\""),
                                     b'\n' => q.push_str("\\\n"),
                                     b'\r' => q.push_str("\\r"),
-                                    b'\0' => q.push_str("\\0"),
+                                    // (frankenredis-0en30) Upstream
+                                    // Lua 5.1.5 lstrlib.c::addquoted
+                                    // emits NUL as the three-digit
+                                    // zero-padded "\\000" form so a
+                                    // subsequent digit can't be misread
+                                    // as part of the escape; fr was
+                                    // emitting the ambiguous "\\0".
+                                    b'\0' => q.push_str("\\000"),
                                     _ => q.push(b as char),
                                 }
                             }
@@ -16201,6 +16208,42 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_string_format_q_escapes_nul_as_three_digit_octal_0en30() {
+        // (frankenredis-0en30) Upstream Lua 5.1.5 lstrlib.c::addquoted
+        // emits the NUL byte as the three-digit zero-padded \\000 form
+        // so a subsequent digit can't be misread as part of the escape.
+        // fr previously emitted the ambiguous "\\0" form.
+        let mut store = Store::new();
+
+        let r = eval_script(
+            b"return string.format('%q', '\\0')",
+            &[], &[], &mut store, 0,
+        ).expect("nul-only quote");
+        assert_eq!(r, RespFrame::BulkString(Some(b"\"\\000\"".to_vec())));
+
+        let r = eval_script(
+            b"return string.format('%q', 'a\\0b')",
+            &[], &[], &mut store, 0,
+        ).expect("nul-in-middle quote");
+        assert_eq!(r, RespFrame::BulkString(Some(b"\"a\\000b\"".to_vec())));
+
+        // NUL followed by digit is the disambiguation case the
+        // three-digit form preserves.
+        let r = eval_script(
+            b"return string.format('%q', '\\0' .. '1')",
+            &[], &[], &mut store, 0,
+        ).expect("nul-then-digit quote");
+        assert_eq!(r, RespFrame::BulkString(Some(b"\"\\0001\"".to_vec())));
+
+        // Non-nul escapes unchanged.
+        let r = eval_script(
+            b"return string.format('%q', 'a\\rb')",
+            &[], &[], &mut store, 0,
+        ).expect("cr escape");
+        assert_eq!(r, RespFrame::BulkString(Some(b"\"a\\rb\"".to_vec())));
     }
 
     #[test]
