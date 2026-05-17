@@ -814,6 +814,28 @@ fn command_key_references_with_exact_flags(
     cmd_name: &str,
     argv: &[Vec<u8>],
 ) -> Result<Option<Vec<CommandKeyReference>>, CommandKeyLookupError> {
+    // (frankenredis-6fnjb) MIGRATE's keyspec mandates that when the
+    // KEYS option is present the positional key argument (argv[3])
+    // must be the empty string. parse_migrate_request enforces this
+    // at runtime with a bespoke wording, but COMMAND GETKEYS /
+    // GETKEYSANDFLAGS take the keyspec path and the dedicated MIGRATE
+    // arm in command_key_indexes silently returned both the
+    // positional key and the KEYS tail. Vendored's getKeysProc
+    // rejects the bad combo with the generic 'Invalid arguments
+    // specified for command' wording; mirror that here so GETKEYS
+    // surfaces the same diagnosis without re-running the runtime
+    // parser.
+    if cmd_name.eq_ignore_ascii_case("MIGRATE")
+        && argv.len() >= 7
+        && !argv[3].is_empty()
+        && argv
+            .iter()
+            .skip(6)
+            .any(|arg| arg.eq_ignore_ascii_case(b"KEYS"))
+    {
+        return Err(CommandKeyLookupError::InvalidArguments);
+    }
+
     if cmd_name.eq_ignore_ascii_case("SET") {
         let flags = if argv[3..].iter().any(|arg| arg.eq_ignore_ascii_case(b"GET")) {
             KEY_FLAGS_RW_ACCESS_UPDATE
@@ -54747,8 +54769,11 @@ mod tests {
             ]))
         );
 
-        // With BOTH a single-key arg AND a KEYS tail, upstream returns
-        // both. Verify fr now does too.
+        // (frankenredis-6fnjb) With BOTH a non-empty positional key
+        // AND a KEYS tail, vendored's keyspec validation rejects with
+        // 'Invalid arguments specified for command'. The previous
+        // expectation here mistakenly accepted both keys; live
+        // differential probe vs 7.2.4 confirmed the error wording.
         let out = dispatch_argv(
             &[
                 b"COMMAND".to_vec(),
@@ -54765,13 +54790,12 @@ mod tests {
             &mut store,
             0,
         )
-        .expect("MIGRATE single + KEYS form");
+        .expect("MIGRATE single + KEYS form returns error frame");
         assert_eq!(
             out,
-            RespFrame::Array(Some(vec![
-                RespFrame::BulkString(Some(b"first".to_vec())),
-                RespFrame::BulkString(Some(b"second".to_vec())),
-            ]))
+            RespFrame::Error(
+                "ERR Invalid arguments specified for command".to_string()
+            )
         );
 
         // With AUTH / COPY / REPLACE options between key and KEYS, the
