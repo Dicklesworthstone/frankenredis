@@ -473,7 +473,7 @@ ThreatEvent
 └── decision_action     DecisionAction         FailClosed | BoundedDefense | RejectNonAllowlisted
 ```
 
-The matching two-round optimization that recovered the April 7 throughput gap is documented in `artifacts/optimization/throughput-gap/ISOMORPHISM_PROOF_LAZY_DIGEST.md`. Round 1 makes `Store::state_digest`, `input_digest`, and `state_digest_before/after` lazy (gated behind `self.policy.emit_evidence_ledger`) so the success path pays zero digest cost; the eager precomputation that previously ran on every command was discarded by the threat-event ledger 99.99% of the time. Round 2 short-circuits ACL category resolution for users whose `denied_categories` and `allowed_categories` are both empty (the default `+@all` user), skipping ~4,200 string-splitting iterations per command. Together they moved single-command throughput from ~1.3% to 79-99% of Redis. See the Phase 9 CHANGELOG entry for the wider recovery story.
+The matching two-round optimization that recovered the April 7 throughput gap is documented in `artifacts/optimization/throughput-gap/ISOMORPHISM_PROOF_LAZY_DIGEST.md`. Round 1 makes `Store::state_digest`, `input_digest`, and `state_digest_before/after` lazy (gated behind `self.policy.emit_evidence_ledger`) so the success path pays zero digest cost; the eager precomputation that previously ran on every command was discarded by the threat-event ledger 99.99% of the time. Round 2 short-circuits ACL category resolution for users whose `denied_categories` and `allowed_categories` are both empty (the default `+@all` user), skipping a per-command scan of every ACL category against the full command table (~5,500 string-splitting iterations per command today, with 23 categories × ~240 commands). Together they moved single-command throughput from ~1.3% to 79-99% of Redis. See the Phase 9 CHANGELOG entry for the wider recovery story.
 
 The eight threat classes are:
 
@@ -1068,7 +1068,7 @@ All 241 base Redis commands are implemented and exposed. Counts below are approx
 - Format: RESP-encoded command stream (compatible with stock Redis AOF readers for the implemented command set).
 - Manifest-based multi-part layout: base RDB preamble + history files + incremental AOF files tracked in a manifest.
 - `appendfsync everysec` / `always` / `no` (defaults to `everysec`).
-- Replay policy: `AofReplayTailRepairPolicy::{Disabled, BoundedFinalSegment, HardenedNonAllowlisted}` selects how aggressively the server is allowed to recover from a torn tail.
+- Replay policy: `AofReplayTailRepairPolicy::{Disabled, BoundedFinalSegment { max_tail_bytes }, HardenedNonAllowlisted}` selects how aggressively the server is allowed to recover from a torn tail; `BoundedFinalSegment` carries a `max_tail_bytes` cap so a malicious tail can't trigger unbounded repair.
 - `BGREWRITEAOF` rewrites the AOF as a Store snapshot to a temp file and atomically swaps.
 - AOF replay is fail-closed in strict mode: an unknown command inside a `MULTI` aborts the whole transaction rather than partially applying.
 
