@@ -9103,6 +9103,18 @@ fn lua_string_format(
                         break;
                     }
                 }
+                // (frankenredis-94zyf) Upstream Lua 5.1.5 lstrlib.c
+                // ::scanformat reads at most 2 digits for width;
+                // a third digit raises 'invalid format (width or
+                // precision too long)'. fr previously accepted
+                // arbitrary-length runs, producing absurd output for
+                // specs like '%100d' / '%999d' that vendored rejects.
+                if w_str.len() > 2 {
+                    return Err(match inv_name {
+                        Some(_) => "user_script:1: invalid format (width or precision too long)".to_string(),
+                        None => "invalid format (width or precision too long)".to_string(),
+                    });
+                }
                 if !w_str.is_empty() {
                     width = w_str.parse().ok();
                 }
@@ -9118,6 +9130,13 @@ fn lua_string_format(
                         } else {
                             break;
                         }
+                    }
+                    // (frankenredis-94zyf) Same 2-digit cap as width.
+                    if p_str.len() > 2 {
+                        return Err(match inv_name {
+                            Some(_) => "user_script:1: invalid format (width or precision too long)".to_string(),
+                            None => "invalid format (width or precision too long)".to_string(),
+                        });
                     }
                     precision = Some(p_str.parse().unwrap_or(0));
                 }
@@ -16246,6 +16265,67 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_string_format_width_precision_capped_at_99_94zyf() {
+        // (frankenredis-94zyf) Upstream lstrlib.c::scanformat reads
+        // at most 2 digits for both width and precision; a third
+        // digit raises 'invalid format (width or precision too long)'.
+        // fr previously accepted arbitrary-length runs.
+        let mut store = Store::new();
+
+        // Boundary: 99 still works.
+        let _ = eval_script(b"return string.format('%.99d', 1)", &[], &[], &mut store, 0)
+            .expect("precision=99 must work");
+        let _ = eval_script(b"return string.format('%99d', 1)", &[], &[], &mut store, 0)
+            .expect("width=99 must work");
+
+        // precision=100 errors under pcall with the anonymous-C wording.
+        let r = eval_script(
+            b"local ok,e = pcall(string.format, '%.100d', 1); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:invalid format (width or precision too long)".to_vec()
+            ))
+        );
+
+        // width=100 same.
+        let r = eval_script(
+            b"local ok,e = pcall(string.format, '%100d', 1); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:invalid format (width or precision too long)".to_vec()
+            ))
+        );
+
+        // Larger values (999, 1000) still error with the same wording.
+        let r = eval_script(
+            b"local ok,e = pcall(string.format, '%.999d', 1); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:invalid format (width or precision too long)".to_vec()
+            ))
+        );
+
+        // Direct call (no pcall) keeps the user_script:1: prefix.
+        let err = eval_script(
+            b"return string.format('%.100d', 1)",
+            &[], &[], &mut store, 0,
+        ).expect_err("direct call must raise");
+        assert!(
+            err.contains("user_script:1: invalid format (width or precision too long)"),
+            "got: {err}"
+        );
     }
 
     #[test]
