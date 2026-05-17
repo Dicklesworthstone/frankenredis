@@ -9081,6 +9081,13 @@ fn lua_string_format(
                 let mut show_sign = false;
                 let mut space_sign = false;
                 let mut alt_form = false;
+                // (frankenredis-b8y0g) Upstream lstrlib.c::scanformat
+                // bounds the flag-consumption loop via
+                // `(p - strfrmt) >= sizeof(FLAGS)` where FLAGS = "-+ #0"
+                // (5 chars + null = 6 bytes). 6+ flag chars raises
+                // 'invalid format (repeated flags)'. fr previously
+                // accepted any number of repeated flags silently.
+                let mut flag_chars: usize = 0;
                 while let Some(&fc) = chars.peek() {
                     match fc {
                         '-' => left_align = true,
@@ -9091,6 +9098,13 @@ fn lua_string_format(
                         _ => break,
                     }
                     chars.next();
+                    flag_chars += 1;
+                    if flag_chars > 5 {
+                        return Err(match inv_name {
+                            Some(_) => "user_script:1: invalid format (repeated flags)".to_string(),
+                            None => "invalid format (repeated flags)".to_string(),
+                        });
+                    }
                 }
                 // Width
                 let mut width: Option<usize> = None;
@@ -16265,6 +16279,43 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_string_format_flag_chars_capped_at_5_b8y0g() {
+        // (frankenredis-b8y0g) Upstream lstrlib.c::scanformat bounds
+        // flag consumption via `(p - strfrmt) >= sizeof(FLAGS)` where
+        // FLAGS = "-+ #0" (5 chars + null = 6 bytes). 6+ consumed
+        // flag chars raises 'invalid format (repeated flags)'. fr
+        // previously accepted any number of repeated flags silently.
+        let mut store = Store::new();
+
+        // Boundary: 5 distinct flags still works.
+        let r = eval_script(b"return string.format('%-+ #0d', 1)", &[], &[], &mut store, 0)
+            .expect("5 flag chars must work");
+        assert_eq!(r, RespFrame::BulkString(Some(b"+1".to_vec())));
+
+        // 6 flag chars (one repeated) raises the upstream wording.
+        let r = eval_script(
+            b"local ok,e = pcall(string.format, '%-+ #00d', 1); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:invalid format (repeated flags)".to_vec()
+            ))
+        );
+
+        // Direct call (no pcall) carries the user_script:1: prefix.
+        let err = eval_script(
+            b"return string.format('%-+ #00d', 1)",
+            &[], &[], &mut store, 0,
+        ).expect_err("direct call must raise");
+        assert!(
+            err.contains("user_script:1: invalid format (repeated flags)"),
+            "got: {err}"
+        );
     }
 
     #[test]
