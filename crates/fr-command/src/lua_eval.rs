@@ -6460,7 +6460,18 @@ impl<'a> LuaState<'a> {
                 let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "sub")?;
                 let len = s.len() as i64;
                 let mut i = lua_check_number(self.current_invocation_name.as_deref(), args, 1, "sub")? as i64;
-                let mut j = args.get(2).and_then(|v| v.to_number()).unwrap_or(-1.0) as i64;
+                // (frankenredis-v2ipw) Upstream luaB_sub uses
+                // luaL_optinteger for the j arg, raising 'bad
+                // argument #3 (number expected, got TYPE)' for
+                // non-number-convertible values. fr previously
+                // coerced via to_number() and silently defaulted to
+                // -1 (full-length), masking the error.
+                let mut j = lua_optional_integer_arg(
+                    self.current_invocation_name.as_deref(),
+                    3,
+                    args.get(2),
+                    -1,
+                )?;
                 // Lua string indices: negative means from end
                 if i < 0 {
                     i = (len + i + 1).max(1);
@@ -16174,6 +16185,70 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_string_sub_validates_j_arg_v2ipw() {
+        // (frankenredis-v2ipw) Same fix pattern as izta5 but for
+        // string.sub's third arg (j, end position). Upstream
+        // luaB_sub uses luaL_optinteger which raises 'bad argument
+        // #3 (number expected, got TYPE)' for non-number-convertible
+        // values. fr previously silently defaulted to -1.
+        let mut store = Store::new();
+
+        // Numeric / numeric-string / nil / missing still work.
+        let r = eval_script(
+            b"return string.sub('hello', 1, 3)",
+            &[], &[], &mut store, 0,
+        ).expect("numeric j");
+        assert_eq!(r, RespFrame::BulkString(Some(b"hel".to_vec())));
+        let r = eval_script(
+            b"return string.sub('hello', 1, '3')",
+            &[], &[], &mut store, 0,
+        ).expect("numeric-string j");
+        assert_eq!(r, RespFrame::BulkString(Some(b"hel".to_vec())));
+        let r = eval_script(
+            b"return string.sub('hello', 1, nil)",
+            &[], &[], &mut store, 0,
+        ).expect("nil j");
+        assert_eq!(r, RespFrame::BulkString(Some(b"hello".to_vec())));
+        let r = eval_script(
+            b"return string.sub('hello', 1)",
+            &[], &[], &mut store, 0,
+        ).expect("missing j");
+        assert_eq!(r, RespFrame::BulkString(Some(b"hello".to_vec())));
+
+        // Bad-j types raise the anonymous-C pcall wording.
+        let r = eval_script(
+            b"local ok,e = pcall(string.sub,'hello',1,'bad'); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #3 to '?' (number expected, got string)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(string.sub,'hello',1,{}); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #3 to '?' (number expected, got table)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(string.sub,'hello',1,true); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #3 to '?' (number expected, got boolean)".to_vec()
+            ))
+        );
     }
 
     #[test]
