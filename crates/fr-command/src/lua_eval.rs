@@ -6634,7 +6634,19 @@ impl<'a> LuaState<'a> {
             "string.find" => {
                 let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "find")?;
                 let pattern = lua_check_string(self.current_invocation_name.as_deref(), args, 1, "find")?;
-                let init_raw = args.get(2).and_then(|v| v.to_number()).unwrap_or(1.0) as i64;
+                // (frankenredis-izta5) Upstream luaB_str_find_aux uses
+                // luaL_optinteger for the init arg, which raises 'bad
+                // argument #3 (number expected, got TYPE)' when the
+                // value is present but neither a number nor a numeric
+                // string. fr previously coerced via to_number() and
+                // silently defaulted to 1 for bogus inputs, masking
+                // the error.
+                let init_raw = lua_optional_integer_arg(
+                    self.current_invocation_name.as_deref(),
+                    3,
+                    args.get(2),
+                    1,
+                )?;
                 let init = if init_raw < 0 {
                     (s.len() as i64 + init_raw).max(0) as usize
                 } else {
@@ -6704,7 +6716,15 @@ impl<'a> LuaState<'a> {
             "string.match" => {
                 let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "match")?;
                 let pattern = lua_check_string(self.current_invocation_name.as_deref(), args, 1, "match")?;
-                let init_raw = args.get(2).and_then(|v| v.to_number()).unwrap_or(1.0) as i64;
+                // (frankenredis-izta5) Same init-arg validation as
+                // string.find — upstream luaB_str_find_aux raises
+                // 'bad argument #3' for non-number-convertible init.
+                let init_raw = lua_optional_integer_arg(
+                    self.current_invocation_name.as_deref(),
+                    3,
+                    args.get(2),
+                    1,
+                )?;
                 let init = if init_raw < 0 {
                     (s.len() as i64 + init_raw).max(0) as usize
                 } else {
@@ -16154,6 +16174,73 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_string_find_match_validate_init_arg_izta5() {
+        // (frankenredis-izta5) Upstream luaB_str_find_aux uses
+        // luaL_optinteger for the init arg; non-number-convertible
+        // values raise 'bad argument #3 (number expected, got TYPE)'.
+        // fr previously coerced via to_number() and silently
+        // defaulted to 1 for bogus inputs, masking the error.
+        let mut store = Store::new();
+
+        // Numeric and numeric-string still work (Lua coerces "2"→2).
+        let r = eval_script(
+            b"return string.match('hello', 'l', 2)",
+            &[], &[], &mut store, 0,
+        ).expect("numeric init must succeed");
+        assert_eq!(r, RespFrame::BulkString(Some(b"l".to_vec())));
+        let r = eval_script(
+            b"return string.match('hello', 'l', '2')",
+            &[], &[], &mut store, 0,
+        ).expect("numeric-string init must succeed");
+        assert_eq!(r, RespFrame::BulkString(Some(b"l".to_vec())));
+
+        // Bad-init cases (string / table / bool) raise the upstream
+        // anonymous-C wording when wrapped in pcall.
+        let r = eval_script(
+            b"local ok,e = pcall(string.match, 'h', 'h', 'bad'); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper must not bubble");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #3 to '?' (number expected, got string)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(string.match, 'h', 'h', {}); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper must not bubble");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #3 to '?' (number expected, got table)".to_vec()
+            ))
+        );
+        let r = eval_script(
+            b"local ok,e = pcall(string.match, 'h', 'h', true); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper must not bubble");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #3 to '?' (number expected, got boolean)".to_vec()
+            ))
+        );
+
+        // string.find shares the validation.
+        let r = eval_script(
+            b"local ok,e = pcall(string.find, 'h', 'h', 'bad'); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper must not bubble");
+        assert_eq!(
+            r,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #3 to '?' (number expected, got string)".to_vec()
+            ))
+        );
     }
 
     #[test]
