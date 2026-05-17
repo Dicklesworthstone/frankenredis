@@ -1959,7 +1959,7 @@ Numbers behind the "clean-room reimplementation" claim:
 | Redis 7.2.4 base commands implemented | 241 |
 | Distinct command-name dispatch arms in `fr-command` | 231 |
 | RDB version emitted | 11 |
-| Open parity beads as of 2026-05-16 | 12 (1 P2, 2 P3, 9 P4) |
+| Open parity beads as of 2026-05-17 | 14 (1 P2, 2 P3, 11 P4) |
 | `unsafe` blocks across all 13 crates | 3 (all `libc::waitpid` in `fr-runtime`) |
 | Tagged releases | 0 (pre-1.0; `main` is the version spine) |
 
