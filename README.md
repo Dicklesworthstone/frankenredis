@@ -233,7 +233,7 @@ Performance work is gated on showing that observable behavior didn't change. Eac
 | [`fr-persist`](crates/fr-persist) | AOF record codec + manifest, RDB v11 encoder/decoder with LZF and CRC64, standalone listpack decoder for upstream macro-node entries. |
 | [`fr-repl`](crates/fr-repl) | Replication handshake FSM (`Init → PingSeen → AuthSeen → ReplconfSeen → PsyncSent → Online`), PSYNC decisioning, `ReplProgress` offset/ACK tracking, `WAIT`/`WAITAOF` evaluator. |
 | [`fr-config`](crates/fr-config) | `Mode::{Strict,Hardened}`, `ThreatClass` taxonomy with decision actions, TLS configuration, encoding thresholds. |
-| [`fr-runtime`](crates/fr-runtime) | The `Runtime` orchestrator: `ServerState`, `ClientSession`, ACL, transactions, threat-event ledger, AOF/replication signal capture, ~100+ recognised `CONFIG` keys. |
+| [`fr-runtime`](crates/fr-runtime) | The `Runtime` orchestrator: `ServerState`, `ClientSession`, ACL, transactions, threat-event ledger, AOF/replication signal capture, 230+ recognised `CONFIG` keys. |
 | [`fr-eventloop`](crates/fr-eventloop) | Deterministic event-loop planning with per-phase tick budgets and phase-replay validators. |
 | [`fr-server`](crates/fr-server) | The `frankenredis` binary; mio-based single-threaded TCP server; per-connection read/write buffers; blocked-client session swap; replica socket lifecycle. |
 | [`fr-bench`](crates/fr-bench) | TCP benchmark harness for 8 workloads with HdrHistogram percentile reporting. |
@@ -473,7 +473,7 @@ ThreatEvent
 └── decision_action     DecisionAction         FailClosed | BoundedDefense | RejectNonAllowlisted
 ```
 
-The digest is computed lazily, so uninteresting requests cost nothing. (That lazy-digest optimization is the headline change in `artifacts/optimization/throughput-gap/ISOMORPHISM_PROOF_LAZY_DIGEST.md`.)
+A related-but-different lazy-evaluation optimization in `Store::state_digest` (used by the forensics ledger to fingerprint store state on error paths) is documented in `artifacts/optimization/throughput-gap/ISOMORPHISM_PROOF_LAZY_DIGEST.md` and was the headline throughput win of April 9 — see Performance and the Phase 9 CHANGELOG entry for the recovery numbers.
 
 The eight threat classes are:
 
@@ -1008,7 +1008,7 @@ latency-monitor-threshold 0
 enable-debug-command no
 ```
 
-`CONFIG GET '*'` returns roughly 100+ live keys. `CONFIG REWRITE` writes back to the file passed via `--config`. Slave/replica aliases are emitted on both spellings (e.g. `slave-read-only` and `replica-read-only`).
+`CONFIG GET '*'` returns 230+ live keys (the static-defaults table in `fr-runtime` carries 232 entries; some are aliases for upstream spellings). `CONFIG REWRITE` writes back to the file passed via `--config`. Slave/replica aliases are emitted on both spellings (e.g. `slave-read-only` and `replica-read-only`).
 
 ### CLI flags
 
@@ -1252,7 +1252,7 @@ Total: **4,975 cases across 43 fixtures**. Each case carries an `argv`, a `now_m
 
 ### Differential testing
 
-The harness can spawn vendored `redis-server`, execute the same case on both runtimes via TCP, and compare RESP frames byte-for-byte. Field-ordering canonicalization keeps RESP3 Map/Set replies stable across runs; an exemption audit file (`live_oracle_audit_exemptions.json`) marks the small number of intentional divergences.
+The harness can spawn vendored `redis-server`, execute the same case on both runtimes via TCP, and compare RESP frames byte-for-byte. Field-ordering canonicalization keeps RESP3 Map/Set replies stable across runs. An exemption audit file (`live_oracle_audit_exemptions.json`, schema `live_oracle_audit_exemptions/v2`) lists the small number of fixtures intentionally **excluded from the live-oracle matrix** because they require specialized harnesses (multi-client blocking, dedicated replication-handshake harness, dedicated persist-replay path, TLS-enabled oracle); each exemption records its replacement coverage.
 
 CI runs the full live conformance suite on every push to `main` (`.github/workflows/live-conformance-gates.yml`).
 
@@ -1669,20 +1669,22 @@ The CHANGELOG's Phase 11 section is largely the output of this workflow. The met
 
 ### What runs in CI
 
-`.github/workflows/live-conformance-gates.yml` is the source of truth. The pipeline:
+`.github/workflows/live-conformance-gates.yml` is the source of truth. The actual workflow runs `ubuntu-latest`, installs Redis via apt-get plus Rust nightly via `dtolnay/rust-toolchain@nightly`, and then drives these gates in order:
 
-1. **Install vendored Redis 7.2.4** (apt-get install redis-server). Used as the differential oracle.
-2. **Install Rust nightly** (the toolchain pin in `rust-toolchain.toml`).
-3. **G1: verify formatting:** `cargo fmt --check`.
-4. **G1: verify lints:** `cargo clippy --workspace --all-targets -- -D warnings`.
-5. **Workspace check:** `cargo check --workspace --all-targets`.
-6. **Workspace tests:** `cargo test --workspace`.
-7. **Conformance tests:** `cargo test -p fr-conformance -- --nocapture`.
-8. **Live oracle gate:** spawn `redis-server`, run every fixture under `crates/fr-conformance/fixtures/` against both servers, diff replies, fail if any divergence is observed that isn't in `live_oracle_audit_exemptions.json`.
-9. **Adversarial triage:** run the adversarial corpus against both servers, classify any new divergences.
-10. **RaptorQ artifact gate:** verify the durability-artifact schema (the artifact framework is wired even though the RaptorQ sidecar itself is still on the roadmap).
-11. **Failure forensics:** any failed gate uploads its full reply / argv / digest log under `artifacts/failure_forensics/<run-id>/` for postmortem.
-12. **Optional:** `--run-benchmark-gate` (a workflow_dispatch input) runs `scripts/benchmark_gate.sh` against the checked-in baselines.
+- **G1 — Verify Formatting:** `cargo fmt --check`.
+- **G1 — Verify Lints:** `cargo clippy --workspace --all-targets -- -D warnings`.
+- **G2 — Unit and Property Baseline:** `cargo test --workspace` plus property-test sweeps.
+- **G3 + G5 — Live Oracle Differential Suites:** the CI step shells out to `./scripts/run_live_oracle_diff.sh` which drives the `live_oracle_orchestrator` binary (`cargo run -p fr-conformance --bin live_oracle_orchestrator`) against the already-running `redis-server` on 127.0.0.1:6379. Every fixture under `crates/fr-conformance/fixtures/` is diffed reply-by-reply. Fail if a divergence appears that isn't already in `live_oracle_audit_exemptions.json`.
+- **G7 — Coverage / Flake Budgets:** `scripts/check_coverage_flake_budget.sh`.
+- **G4 — Adversarial Triage:** run the adversarial corpus against both servers and classify any divergences.
+- **G6 — Optimization Gate:** `phase2c_schema_gate --optimization-gate`.
+- **G6 — Benchmark Regression Gate** *(opt-in via the `run_benchmark_gate` workflow_dispatch input)*: `scripts/benchmark_gate.sh` against checked-in baselines.
+- **G7 — User Workflow Corpus Gate:** the `user_journey_corpus_gate` binary.
+- **G7 — Packet Schema Gate:** `phase2c_schema_gate` against the extraction packets in `artifacts/phase2c/`.
+- **G8 — RaptorQ Artifact Gate:** verify the durability-artifact schema (the framework is wired even though the RaptorQ sidecar itself is still on the roadmap).
+- **G7 — Failure Forensics Index:** any failed gate above contributes to a forensics bundle under `artifacts/failure_forensics/<run-id>/`.
+
+Each major stage (live oracle, adversarial triage, raptorq, failure forensics, benchmark regression) uploads its artifact bundle so a reviewer can inspect the full reply / argv / digest log without re-running CI locally.
 
 A PR cannot merge to `main` unless the gates pass and there are no new exemption entries.
 
