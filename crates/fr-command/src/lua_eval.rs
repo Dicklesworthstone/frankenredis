@@ -7644,7 +7644,34 @@ impl<'a> LuaState<'a> {
                         "user_script:1: Expected value but found T_END at character 1"
                     ));
                 }
-                let val = json_to_lua_value(&s)?;
+                // (frankenredis-9pvke) Map fr's generic `invalid JSON:`
+                // fallback onto upstream lua_cjson's parse-failure shape
+                // `Expected value but found invalid token at character N`.
+                // The character offset is best-effort — fr's recursive
+                // parser doesn't track byte position through nested
+                // splits, so we use the offset of the first non-
+                // whitespace byte in the original input.
+                let val = match json_to_lua_value(&s) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        let mapped = if let Some(rest) = e.strip_prefix("invalid JSON: ") {
+                            let offset = s
+                                .as_bytes()
+                                .windows(rest.len().min(s.len()))
+                                .position(|w| w == rest.as_bytes())
+                                .map(|p| p + 1)
+                                .unwrap_or(1);
+                            format!(
+                                "user_script:1: Expected value but found invalid token at character {offset}"
+                            )
+                        } else if !e.starts_with("user_script:") {
+                            format!("user_script:1: {e}")
+                        } else {
+                            e
+                        };
+                        return Err(mapped);
+                    }
+                };
                 Ok(vec![val])
             }
             // (frankenredis-u24vv) `_G` metatable handlers. These are
