@@ -17479,13 +17479,23 @@ fn config_cmd(
         if store.script_nesting_level >= 1 {
             return Err(script_noscript_command_error());
         }
-        let mut entries = Vec::new();
+        // (frankenredis-2ribk) Upstream config.c::configGetCommand
+        // iterates the parameters dict once and emits any param that
+        // matches any of the supplied glob patterns, deduping by name.
+        // fr was emitting in user-arg order (e.g. CONFIG GET maxmemory
+        // timeout returned in that order), but vendored is consistent
+        // regardless of arg order because it walks its own dict. Match
+        // the order-independence by emitting each parameter at most
+        // once in the canonical (registry) order.
+        let mut patterns: Vec<String> = Vec::with_capacity(argv.len() - 2);
         for arg in &argv[2..] {
             let raw_pattern =
                 std::str::from_utf8(arg).map_err(|_| CommandError::InvalidUtf8Argument)?;
-            let pattern = raw_pattern.to_ascii_lowercase();
-            config_collect_store_entries(&pattern, store, &mut entries);
+            patterns.push(raw_pattern.to_ascii_lowercase());
         }
+        let mut entries = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        config_collect_store_entries_multi(&patterns, store, &mut entries, &mut seen);
         Ok(RespFrame::Array(Some(entries)))
     } else if sub.eq_ignore_ascii_case("SET") {
         if argv.len() < 4 {
@@ -17676,6 +17686,94 @@ const CONFIG_DYNAMIC_PARAM_NAMES: &[&str] = &[
     "lfu-decay-time",
     "maxmemory-policy",
 ];
+
+/// Like `config_collect_store_entries` but accepts multiple glob patterns and
+/// dedupes by parameter name across all matches. Mirrors upstream
+/// `configGetCommand`'s dict walk: each parameter is emitted at most once
+/// regardless of how many patterns match it, and the order is the registry's
+/// canonical order rather than the user-supplied arg order.
+fn config_collect_store_entries_multi(
+    patterns: &[String],
+    store: &Store,
+    entries: &mut Vec<RespFrame>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    fn matches_any(patterns: &[String], name: &str) -> bool {
+        patterns
+            .iter()
+            .any(|p| glob_match(p.as_bytes(), name.as_bytes()))
+    }
+    fn push_pair(
+        entries: &mut Vec<RespFrame>,
+        seen: &mut std::collections::HashSet<String>,
+        name: &str,
+        value: &str,
+    ) {
+        if !seen.insert(name.to_string()) {
+            return;
+        }
+        entries.push(RespFrame::BulkString(Some(name.as_bytes().to_vec())));
+        entries.push(RespFrame::BulkString(Some(value.as_bytes().to_vec())));
+    }
+
+    let usize_params: &[(&str, usize)] = &[
+        ("hash-max-listpack-entries", store.hash_max_listpack_entries),
+        ("hash-max-listpack-value", store.hash_max_listpack_value),
+        ("set-max-intset-entries", store.set_max_intset_entries),
+        ("set-max-listpack-entries", store.set_max_listpack_entries),
+        ("zset-max-listpack-entries", store.zset_max_listpack_entries),
+        ("zset-max-listpack-value", store.zset_max_listpack_value),
+        ("hash-max-ziplist-entries", store.hash_max_listpack_entries),
+        ("hash-max-ziplist-value", store.hash_max_listpack_value),
+        ("zset-max-ziplist-entries", store.zset_max_listpack_entries),
+        ("zset-max-ziplist-value", store.zset_max_listpack_value),
+    ];
+    for &(name, value) in usize_params {
+        if matches_any(patterns, name) {
+            push_pair(entries, seen, name, &value.to_string());
+        }
+    }
+    if matches_any(patterns, "list-max-listpack-size") {
+        push_pair(
+            entries,
+            seen,
+            "list-max-listpack-size",
+            &store.list_max_listpack_size.to_string(),
+        );
+    }
+    if matches_any(patterns, "list-max-ziplist-size") {
+        push_pair(
+            entries,
+            seen,
+            "list-max-ziplist-size",
+            &store.list_max_listpack_size.to_string(),
+        );
+    }
+    if matches_any(patterns, "maxmemory-policy") {
+        push_pair(
+            entries,
+            seen,
+            "maxmemory-policy",
+            store.maxmemory_policy.as_config_str(),
+        );
+    }
+    if matches_any(patterns, "lfu-decay-time") {
+        push_pair(
+            entries,
+            seen,
+            "lfu-decay-time",
+            &store.lfu_decay_time.to_string(),
+        );
+    }
+    for &(name, default_value) in CONFIG_STATIC_DEFAULTS {
+        if CONFIG_DYNAMIC_PARAM_NAMES.contains(&name) {
+            continue;
+        }
+        if matches_any(patterns, name) {
+            push_pair(entries, seen, name, default_value);
+        }
+    }
+}
 
 /// Collect store-accessible CONFIG parameters matching a glob pattern.
 ///
