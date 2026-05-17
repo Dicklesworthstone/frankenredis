@@ -2709,7 +2709,7 @@ impl<'a> LuaState<'a> {
 
         // Table library
         let table_lib = LuaTable::new();
-        for name in &["insert", "remove", "concat", "sort", "getn", "maxn"] {
+        for name in &["insert", "remove", "concat", "sort", "getn", "maxn", "foreach", "foreachi"] {
             table_lib.set(
                 LuaValue::Str(name.as_bytes().to_vec()),
                 LuaValue::RustFunction(format!("table.{name}")),
@@ -7189,6 +7189,100 @@ impl<'a> LuaState<'a> {
                 } else {
                     Ok(vec![LuaValue::Number(0.0)])
                 }
+            }
+            // (frankenredis-1ohjy) Lua 5.1 ltablib.c:tforeach and
+            // tforeachi — deprecated/removed in 5.2+ but Redis pins
+            // Lua 5.1 so vendored exposes both. foreach iterates the
+            // entire table via lua_next (array part skipping nil
+            // holes, then hash part); foreachi iterates 1..n inclusive
+            // calling the function with (i, t[i]) for every index.
+            // Both short-circuit and return the first non-nil value
+            // the callback yields; otherwise no value is returned.
+            "table.foreach" => {
+                let inv = self.current_invocation_name.as_deref();
+                let table = lua_check_table(inv, args, 0, "foreach")?;
+                let func = match args.get(1) {
+                    Some(v) if matches!(
+                        v,
+                        LuaValue::Function(_)
+                            | LuaValue::RustFunction(_)
+                            | LuaValue::WrappedCoroutine(_)
+                    ) || (matches!(v, LuaValue::Table(_))
+                        && self.metatable_call_handler(v).is_some()) => v.clone(),
+                    other => {
+                        return Err(self.format_builtin_argerror(
+                            "foreach",
+                            2,
+                            &format!(
+                                "function expected, got {}",
+                                lua_arg_got_label(other),
+                            ),
+                        ));
+                    }
+                };
+                let array_snapshot = table.inner.borrow().array.clone();
+                for (i, v) in array_snapshot.iter().enumerate() {
+                    if matches!(v, LuaValue::Nil) {
+                        continue;
+                    }
+                    let mut call_args =
+                        vec![LuaValue::Number((i + 1) as f64), v.clone()];
+                    let result =
+                        self.call_function(&func, &mut call_args, env, &mut Vec::new())?;
+                    if let Some(first) = result.first()
+                        && !matches!(first, LuaValue::Nil)
+                    {
+                        return Ok(vec![first.clone()]);
+                    }
+                }
+                let hash_pairs = table.hash_pairs();
+                for (k, v) in hash_pairs {
+                    let mut call_args = vec![k, v];
+                    let result =
+                        self.call_function(&func, &mut call_args, env, &mut Vec::new())?;
+                    if let Some(first) = result.first()
+                        && !matches!(first, LuaValue::Nil)
+                    {
+                        return Ok(vec![first.clone()]);
+                    }
+                }
+                Ok(vec![])
+            }
+            "table.foreachi" => {
+                let inv = self.current_invocation_name.as_deref();
+                let table = lua_check_table(inv, args, 0, "foreachi")?;
+                let func = match args.get(1) {
+                    Some(v) if matches!(
+                        v,
+                        LuaValue::Function(_)
+                            | LuaValue::RustFunction(_)
+                            | LuaValue::WrappedCoroutine(_)
+                    ) || (matches!(v, LuaValue::Table(_))
+                        && self.metatable_call_handler(v).is_some()) => v.clone(),
+                    other => {
+                        return Err(self.format_builtin_argerror(
+                            "foreachi",
+                            2,
+                            &format!(
+                                "function expected, got {}",
+                                lua_arg_got_label(other),
+                            ),
+                        ));
+                    }
+                };
+                let n = table.inner.borrow().array.len();
+                for i in 1..=n {
+                    let v = table.inner.borrow().array[i - 1].clone();
+                    let mut call_args = vec![LuaValue::Number(i as f64), v];
+                    let result =
+                        self.call_function(&func, &mut call_args, env, &mut Vec::new())?;
+                    if let Some(first) = result.first()
+                        && !matches!(first, LuaValue::Nil)
+                    {
+                        return Ok(vec![first.clone()]);
+                    }
+                }
+                Ok(vec![])
             }
             // ── plain top-level globals (frankenredis-vgnsc) ──────────
             "rawequal" => {
@@ -15991,6 +16085,98 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_table_foreach_foreachi_match_lua_5_1_stdlib_1ohjy() {
+        // (frankenredis-1ohjy) Lua 5.1 ltablib.c exposes table.foreach
+        // and table.foreachi; both were deprecated/removed in 5.2+
+        // but Redis pins Lua 5.1 so vendored 7.2.4 exposes them in
+        // the sandbox. fr's table library omitted both, so any script
+        // calling them errored with 'attempt to call field <name> (a
+        // nil value)'. Pin parity with the upstream contract.
+        let mut store = Store::new();
+
+        // Basic iteration: foreach over a sequence-only table emits
+        // 1-indexed numeric keys with values.
+        let r = eval_script(
+            b"local t={'a','b'}; local r=''; table.foreach(t, function(k,v) r=r..k..v end); return r",
+            &[], &[], &mut store, 0,
+        ).expect("foreach basic must not error");
+        assert_eq!(r, RespFrame::BulkString(Some(b"1a2b".to_vec())));
+
+        // foreachi over the same shape: same emission order, called
+        // with (i, t[i]).
+        let r = eval_script(
+            b"local t={'a','b'}; local r=''; table.foreachi(t, function(i,v) r=r..i..v end); return r",
+            &[], &[], &mut store, 0,
+        ).expect("foreachi basic must not error");
+        assert_eq!(r, RespFrame::BulkString(Some(b"1a2b".to_vec())));
+
+        // Early-return short circuits and returns the non-nil value.
+        let r = eval_script(
+            b"return tostring(table.foreach({1,2,3}, function(k,v) if v==2 then return 'STOP' end end))",
+            &[], &[], &mut store, 0,
+        ).expect("foreach early-return must not error");
+        assert_eq!(r, RespFrame::BulkString(Some(b"STOP".to_vec())));
+
+        let r = eval_script(
+            b"return tostring(table.foreachi({10,20,30}, function(i,v) if i==2 then return 99 end end))",
+            &[], &[], &mut store, 0,
+        ).expect("foreachi early-return must not error");
+        assert_eq!(r, RespFrame::BulkString(Some(b"99".to_vec())));
+
+        // foreach skips nil holes in the array part (lua_next
+        // semantics) and continues into the hash part.
+        let r = eval_script(
+            b"local t={1,nil,3,x='X'}; local r=''; table.foreach(t,function(k,v) r=r..tostring(k)..tostring(v)..';' end); return r",
+            &[], &[], &mut store, 0,
+        ).expect("foreach holes must not error");
+        // The first three emissions are deterministic (array part 1,
+        // 3); the hash part (only 'x') follows. Verify the array
+        // segment is present and the hash entry appears after it.
+        let body = match r {
+            RespFrame::BulkString(Some(b)) => String::from_utf8(b).unwrap(),
+            other => panic!("unexpected reply: {other:?}"),
+        };
+        assert!(body.starts_with("11;33;"), "got: {body}");
+        assert!(body.contains("xX;"), "got: {body}");
+
+        // Bad table arg: missing/nil errors with the upstream-style
+        // 'table expected, got TYPE' (anonymous-C-function shape via
+        // pcall — name renders as '?').
+        let err = eval_script(
+            b"local ok,e = pcall(table.foreach, nil, function() end); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper must not bubble");
+        assert_eq!(
+            err,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (table expected, got nil)".to_vec()
+            ))
+        );
+
+        // Bad function arg: same anonymous-C-function shape, arg #2.
+        let err = eval_script(
+            b"local ok,e = pcall(table.foreach, {1}, nil); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper must not bubble");
+        assert_eq!(
+            err,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #2 to '?' (function expected, got nil)".to_vec()
+            ))
+        );
+        let err = eval_script(
+            b"local ok,e = pcall(table.foreachi, {1}, nil); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper must not bubble");
+        assert_eq!(
+            err,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #2 to '?' (function expected, got nil)".to_vec()
+            ))
+        );
     }
 
     #[test]
