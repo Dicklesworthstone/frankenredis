@@ -9520,7 +9520,19 @@ fn lua_string_format(
                             // 256 -> 0. Rust's 'as u8' saturates floats, so go via
                             // i64 first to recover the C wrap-around semantics.
                             let n = require_number(&arg)? as i64 as u8;
-                            String::from(n as char)
+                            // (frankenredis-se4hs) Upstream lstrlib.c::str_format
+                            // dispatches %c through sprintf into a temp buffer,
+                            // then uses luaL_addsize(b, strlen(buff)) to copy the
+                            // result. With n=0 sprintf writes a single NUL byte
+                            // and strlen returns 0, so the formatted output
+                            // contains nothing. fr's String accumulator would
+                            // preserve the NUL, so suppress it explicitly to
+                            // match vendored.
+                            if n == 0 {
+                                String::new()
+                            } else {
+                                String::from(n as char)
+                            }
                         }
                         _ => {
                             // (frankenredis-be7o1) Upstream lstrlib.c:str_format
