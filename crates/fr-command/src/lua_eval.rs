@@ -57,7 +57,10 @@ impl std::hash::Hash for LuaHashKey {
             LuaValue::Number(n) => n.to_bits().hash(state),
             LuaValue::Str(s) => s.hash(state),
             LuaValue::Table(_) => "table".hash(state),
-            LuaValue::Function(_) => "func".hash(state),
+            // (frankenredis-sxqtm) Hash by function identity so distinct
+            // functions land in different buckets — required for
+            // function-as-table-key support per Lua 5.1 object identity.
+            LuaValue::Function(f) => f.identity.hash(state),
             LuaValue::RustFunction(n) => n.hash(state),
             LuaValue::Coroutine(co) | LuaValue::WrappedCoroutine(co) => {
                 (Rc::as_ptr(&co.inner) as usize).hash(state);
@@ -90,6 +93,22 @@ pub struct LuaFunc {
     /// script's `user_script:1:`. None means the function inherits the
     /// outer script's prefix. (frankenredis-ycaog)
     pub source_label: Option<String>,
+    /// (frankenredis-sxqtm) Process-unique identity, assigned at
+    /// function-definition time and preserved across clones. Lua 5.1
+    /// uses object identity for function equality (==) and for table-key
+    /// hashing. Without an explicit id, two LuaValue::Function clones of
+    /// the same source-function would never compare equal under
+    /// lua_raw_equal — silently dropping the entry from table lookups.
+    pub identity: u64,
+}
+
+/// (frankenredis-sxqtm) Source for `LuaFunc::identity` values. Each call
+/// to `next_function_identity()` returns a fresh u64 used as the function
+/// object's identity for `==` and table-key hashing.
+fn next_function_identity() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    COUNTER.fetch_add(1, Ordering::Relaxed)
 }
 
 #[derive(Clone, Debug)]
@@ -427,6 +446,10 @@ fn lua_raw_equal(a: &LuaValue, b: &LuaValue) -> bool {
         | (LuaValue::WrappedCoroutine(x), LuaValue::WrappedCoroutine(y)) => {
             Rc::ptr_eq(&x.inner, &y.inner)
         }
+        // (frankenredis-sxqtm) Lua 5.1 functions compare by object
+        // identity (==). Use the per-function identity counter assigned
+        // at definition time; clones inherit the same id.
+        (LuaValue::Function(x), LuaValue::Function(y)) => x.identity == y.identity,
         _ => false,
     }
 }
@@ -3184,6 +3207,7 @@ impl<'a> LuaState<'a> {
                     captured_env: Some(env.snapshot()),
                     self_name: None,
                     source_label: self.current_source_label.clone(),
+                    identity: next_function_identity(),
                 });
                 if names.len() == 1 {
                     // (frankenredis-j02x9) `function f() end` is
@@ -3207,6 +3231,7 @@ impl<'a> LuaState<'a> {
                     captured_env: Some(env.snapshot()),
                     self_name: Some(name.clone()),
                     source_label: self.current_source_label.clone(),
+                    identity: next_function_identity(),
                 });
                 env.set_local(name, func);
                 Ok(ControlFlow::None)
@@ -3997,6 +4022,7 @@ impl<'a> LuaState<'a> {
                 captured_env: Some(env.snapshot()),
                 self_name: None,
                 source_label: self.current_source_label.clone(),
+                identity: next_function_identity(),
             })),
         }
     }
@@ -5410,6 +5436,7 @@ impl<'a> LuaState<'a> {
                         // the loadstring chunk-label prefix instead of
                         // the outer script's `user_script:1:` prefix.
                         source_label: Some(chunk_label),
+                        identity: next_function_identity(),
                     })]),
                     Err(msg) => Ok(vec![
                         LuaValue::Nil,
@@ -12921,6 +12948,50 @@ mod tests {
         let result = eval_script(b"return rawset(42, 'x', 1)", &[], &[], &mut store, 0);
 
         assert!(matches!(result, Err(ref err) if err.contains("bad argument #1 to 'rawset'")));
+    }
+
+    // (frankenredis-sxqtm) Lua 5.1 supports function values as table
+    // keys via object identity. fr previously silently dropped the
+    // entry (lua_raw_equal had no Function arm so two cloned function
+    // references never matched on lookup). Pin the rawset/rawget +
+    // pairs roundtrip, plus the `==` identity invariant.
+    #[test]
+    fn function_value_works_as_table_key_sxqtm() {
+        let mut store = Store::new();
+        let roundtrip = eval_script(
+            b"local t={}; local k=function() end; rawset(t, k, 'v'); return rawget(t, k)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("rawset/rawget roundtrip");
+        assert_eq!(roundtrip, RespFrame::BulkString(Some(b"v".to_vec())));
+
+        let pairs_count = eval_script(
+            b"local t={}; local k=function() end; rawset(t, k, 'v'); local n=0; for kk,vv in pairs(t) do n=n+1 end; return n",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("pairs walk");
+        assert_eq!(pairs_count, RespFrame::Integer(1));
+
+        // `==` identity: two distinct function definitions are NOT equal,
+        // but a function references itself == itself.
+        let same = eval_script(b"local k=function() end; return tostring(k == k)", &[], &[], &mut store, 0)
+            .expect("self-eq");
+        assert_eq!(same, RespFrame::BulkString(Some(b"true".to_vec())));
+        let diff = eval_script(
+            b"local a=function() end; local b=function() end; return tostring(a == b)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .expect("distinct-funcs");
+        assert_eq!(diff, RespFrame::BulkString(Some(b"false".to_vec())));
     }
 
     #[test]
