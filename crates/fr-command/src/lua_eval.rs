@@ -8817,12 +8817,16 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
         }
         LuaValue::Str(s) => RespFrame::BulkString(Some(s.clone())),
         LuaValue::Table(t) => {
-            // Check for special "ok" or "err" fields
-            if let LuaValue::Str(ok) = t.get(&LuaValue::Str(b"ok".to_vec())) {
-                return RespFrame::SimpleString(String::from_utf8_lossy(&ok).to_string());
-            }
+            // (frankenredis-ly7jr) Upstream script_lua.c::luaReplyToRedisReply
+            // checks the 'err' field BEFORE 'ok' so a table carrying
+            // both collapses to an error reply with the err contents.
+            // fr previously checked ok first and would emit a status
+            // reply, swallowing the err side.
             if let LuaValue::Str(err) = t.get(&LuaValue::Str(b"err".to_vec())) {
                 return RespFrame::Error(String::from_utf8_lossy(&err).to_string());
+            }
+            if let LuaValue::Str(ok) = t.get(&LuaValue::Str(b"ok".to_vec())) {
+                return RespFrame::SimpleString(String::from_utf8_lossy(&ok).to_string());
             }
 
             // Upstream src/script_lua.c::luaReplyToRedisReply checks for
@@ -16134,6 +16138,58 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_reply_table_prefers_err_over_ok_ly7jr() {
+        // (frankenredis-ly7jr) Upstream script_lua.c::luaReplyToRedisReply
+        // checks the 'err' field BEFORE 'ok' so a table carrying both
+        // fields collapses to an error reply. fr previously checked
+        // ok first and emitted a status reply, swallowing the err
+        // side.
+        let mut store = Store::new();
+
+        // Both fields present, ok first in source: err still wins.
+        let r = eval_script(
+            b"return {ok='okay', err='oops'}",
+            &[], &[], &mut store, 0,
+        ).expect("ok+err return must reach the wire as an error frame");
+        assert_eq!(r, RespFrame::Error("oops".to_string()));
+
+        // Both fields present, err first in source: err still wins
+        // (priority is field-driven, not iteration-order driven).
+        let r = eval_script(
+            b"return {err='oops', ok='okay'}",
+            &[], &[], &mut store, 0,
+        ).expect("err+ok return must reach the wire as an error frame");
+        assert_eq!(r, RespFrame::Error("oops".to_string()));
+
+        // err only — unchanged.
+        let r = eval_script(
+            b"return {err='just_err'}",
+            &[], &[], &mut store, 0,
+        ).expect("err-only must reach the wire as an error frame");
+        assert_eq!(r, RespFrame::Error("just_err".to_string()));
+
+        // ok only — unchanged.
+        let r = eval_script(
+            b"return {ok='just_ok'}",
+            &[], &[], &mut store, 0,
+        ).expect("ok-only must reach the wire as a status frame");
+        assert_eq!(r, RespFrame::SimpleString("just_ok".to_string()));
+
+        // Non-string err/ok values fall through to the regular table
+        // serialisation path; neither field triggers the special arms.
+        let r = eval_script(
+            b"return {ok=1, err=2}",
+            &[], &[], &mut store, 0,
+        ).expect("numeric ok/err must not trigger the special arms");
+        // Upstream collapses a table whose array part is empty to an
+        // empty array; the hash entries (ok/err) are discarded by
+        // luaReplyToRedisReply because it only converts integer-keyed
+        // entries. fr's lua_to_resp does the same — verify it's not
+        // accidentally returning the numeric err/ok values.
+        assert!(matches!(r, RespFrame::Array(_) | RespFrame::BulkString(None)));
     }
 
     #[test]
