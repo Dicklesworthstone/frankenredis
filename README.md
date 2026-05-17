@@ -201,7 +201,7 @@ Performance work is gated on showing that observable behavior didn't change. Eac
                               │             │                │
               ┌───────────────▼──┐ ┌────────▼────────┐ ┌─────▼─────────┐
               │ fr-command       │ │ fr-store        │ │ fr-persist    │
-              │ dispatch (232    │ │ data engine     │ │ AOF + RDB v11 │
+              │ dispatch (231    │ │ data engine     │ │ AOF + RDB v11 │
               │ commands), Lua   │ │ + hash field    │ │ + LZF + CRC64 │
               │ 5.1 evaluator    │ │ TTL + SCAN      │ │ + listpack    │
               └───────────────┬──┘ └────────┬────────┘ └──────┬────────┘
@@ -227,7 +227,7 @@ Performance work is gated on showing that observable behavior didn't change. Eac
 | Crate | Role |
 |---|---|
 | [`fr-protocol`](crates/fr-protocol) | RESP2 parser/encoder; RESP3 inbound parsing with downconversion; CRLF-injection sanitization; configurable bulk/array/recursion limits. |
-| [`fr-command`](crates/fr-command) | Command dispatch (`dispatch_argv`) for 232 distinct commands and a custom Lua 5.1 evaluator (`lua_eval.rs`). Largest crate by far. |
+| [`fr-command`](crates/fr-command) | Command dispatch (`dispatch_argv`) for 231 distinct commands and a custom Lua 5.1 evaluator (`lua_eval.rs`). Largest crate by far. |
 | [`fr-store`](crates/fr-store) | In-memory data engine: `Value::{String,Hash,List,Set,SortedSet,Stream}`; `Entry` with TTL, LFU counter, modification count, encoding-promotion flags; positional `SCAN`/`HSCAN`/`SSCAN`/`ZSCAN` cursors; hash field TTL storage. |
 | [`fr-expire`](crates/fr-expire) | `evaluate_expiry(now_ms, expires_at_ms)` with i64-clamp semantics, used by both lazy access paths and the active-expire cycle. |
 | [`fr-persist`](crates/fr-persist) | AOF record codec + manifest, RDB v11 encoder/decoder with LZF and CRC64, standalone listpack decoder for upstream macro-node entries. |
@@ -282,7 +282,7 @@ Trace of a single `SET hello world` from the moment its bytes hit the socket unt
               │
               ▼
 ┌─ 4. fr-command::dispatch_argv. ─────────────────────────────────────────────┐
-│   Matches the verb against ~232 distinct command-name arms.                  │
+│   Matches the verb against ~231 distinct command-name arms.                  │
 │   For SET: parses tail options (EX/PX/EXAT/PXAT/KEEPTTL/NX/XX/GET),         │
 │   validates argv arity, calls Store::set with computed expires_at_ms,       │
 │   the value bytes, and the option flags.                                     │
@@ -423,7 +423,7 @@ A few design notes that matter when porting scripts:
 - **Metamethods are complete.** `__index`/`__newindex` (function or table), `__call`, `__concat`, the arithmetic family (`__add`/`__sub`/`__mul`/`__div`/`__mod`/`__pow`/`__unm`), `__eq`/`__lt`/`__le`, `__tostring`, and `__metatable` protection all match vendored Redis Lua 5.1 semantics including the dispatch ordering between the left and right operands.
 - **The pattern matcher is full Lua 5.1.** All character classes, all quantifiers (`*`/`+`/`-`/`?`), anchors, captures, and sets, plus the trickier `%b()` balanced match, `%f[set]` frontier, and `%1`–`%9` back-references. The same engine drives `string.match`, `string.gmatch`, `string.gsub`, and `string.find`. (`gmatch` iterators are callable outside `for-in` loops, which matters when scripts pass them as closures.)
 - **`cjson` is the bundled upstream encoder/decoder.** `cjson.encode` formats numbers with `%.14g` (the upstream printf format) and escapes `/` exactly the way Redis does. `cjson.decode` is currently permissive about trailing commas and non-string keys; full strict-mode rejection is tracked as a parity bead.
-- **The `redis.*` namespace** carries `redis.call`, `redis.pcall`, `redis.error_reply`, `redis.status_reply`, `redis.sha1hex`, `redis.log`, `redis.replicate_commands`, `redis.set_repl`, `redis.setresp`, `redis.acl_check_cmd`, `redis.breakpoint`, `redis.debug`, plus the `redis.REPL_*` (PROPAGATE_NONE/AOF/SLAVE/REPLICA) and `redis.LOG_*` (DEBUG/VERBOSE/NOTICE/WARNING) constants. `redis.call` propagates the calling script's context so nested calls keep the same replication / RESP version / ACL identity.
+- **The `redis.*` namespace** carries `redis.call`, `redis.pcall`, `redis.error_reply`, `redis.status_reply`, `redis.sha1hex`, `redis.log`, `redis.replicate_commands`, `redis.set_repl`, `redis.setresp`, `redis.acl_check_cmd`, `redis.breakpoint`, `redis.debug`, plus the `redis.REPL_NONE`/`REPL_AOF`/`REPL_SLAVE`/`REPL_REPLICA`/`REPL_ALL` constants (script-side aliases for the upstream `PROPAGATE_*` C enum) and `redis.LOG_DEBUG`/`LOG_VERBOSE`/`LOG_NOTICE`/`LOG_WARNING` log-level constants. `redis.call` propagates the calling script's context so nested calls keep the same replication / RESP version / ACL identity.
 - **Pcall shape is precisely upstream.** When a built-in raises, the message is packaged inside `pcall` exactly the way Redis's vendored Lua does: anonymous template for C-builtin errors, named template for Lua errors, `ERR ` prefix where upstream uses one, callable line tracking for `loadstring` chunks. Most of Phase 11 was iterative closure of this surface, one wording at a time.
 - **Coroutines work.** `coroutine.create`/`resume`/`yield`/`wrap` are all live; `WrappedCoroutine` exists so `coroutine.wrap` can return a closure that resumes a hidden coroutine without exposing it.
 - **Closures with upvalue capture work.** Lexical scoping is real: `local x = 5; local f = function() return x end` captures `x` by upvalue, not by re-evaluation.
@@ -1052,7 +1052,7 @@ All 241 base Redis commands are implemented and exposed. Counts below are approx
 | Transactions | 5 | MULTI, EXEC, DISCARD, WATCH, UNWATCH |
 | Server | 30+ | INFO, CONFIG, DBSIZE, FLUSHDB, FLUSHALL, SAVE, BGSAVE, BGREWRITEAOF, LASTSAVE, SWAPDB, SHUTDOWN, LATENCY, SLOWLOG, MONITOR, ROLE, COMMAND (COUNT/LIST/INFO/DOCS/GETKEYS/GETKEYSANDFLAGS), MEMORY (USAGE/STATS/DOCTOR), MODULE (LIST/LOAD/LOADEX/UNLOAD failure surfaces), LOLWUT, DEBUG, RESET, FAILOVER, WAIT, WAITAOF |
 | Client | 13 | CLIENT SETNAME / GETNAME / ID / LIST / INFO / KILL / PAUSE / UNPAUSE / UNBLOCK / TRACKING / CACHING / NO-EVICT / NO-TOUCH / SETINFO |
-| Cluster | 17 | CLUSTER INFO / MYID / SLOTS / SHARDS / NODES / KEYSLOT / RESET / ADDSLOTS / DELSLOTS / FLUSHSLOTS / FAILOVER / REPLICATE / REPLICAS / MEET / FORGET / SET-CONFIG-EPOCH / BUMPEPOCH / SAVECONFIG / LINKS / MYSHARDID / SLOTSTATE (single-node mode; full multi-node sharding is not yet implemented) |
+| Cluster | 20+ | CLUSTER INFO / MYID / SLOTS / SHARDS / NODES / KEYSLOT / RESET / ADDSLOTS / DELSLOTS / FLUSHSLOTS / FAILOVER / REPLICATE / REPLICAS / MEET / FORGET / SET-CONFIG-EPOCH / BUMPEPOCH / SAVECONFIG / LINKS / MYSHARDID / SLOTSTATE / COUNTKEYSINSLOT / GETKEYSINSLOT / COUNT-FAILURE-REPORTS / ADDSLOTSRANGE / DELSLOTSRANGE / SETSLOT (single-node mode; full multi-node sharding is not yet implemented) |
 | Connection | 8 | AUTH, HELLO, PING, ECHO, SELECT, QUIT, CLIENT, RESET |
 | ACL | 13 | All `ACL` subcommands listed above |
 | Keys | 22 | DEL, EXISTS, TYPE, EXPIRE, EXPIREAT, PEXPIRE, PEXPIREAT, TTL, PTTL, EXPIRETIME, PEXPIRETIME, PERSIST, KEYS, RANDOMKEY, RENAME, RENAMENX, MOVE, COPY, TOUCH, UNLINK, DUMP, RESTORE, OBJECT (`ENCODING`/`REFCOUNT`/`IDLETIME`/`FREQ`/`HELP`), SCAN (`MATCH`/`COUNT`/`TYPE`) |
@@ -1548,7 +1548,7 @@ In strict mode, the default decision for every threat class is `FailClosed` with
 | Built-in Sentinel | **yes (`fr-sentinel`)** | yes (external binary) | yes | no (Raft built-in) | no | yes |
 | Cluster sharding | not yet | yes | yes | yes | partial | yes |
 | RaptorQ durability sidecar | planned (not implemented) | no | no | no | no | no |
-| License | MIT | BSD-3 (≤7.2), then dual SSPLv1 / RSALv2 (7.4+) | BSD-3 | BSL 1.1 (since v1.4) | MIT | BSD-3 (Linux Foundation Redis 7.2.4 fork) |
+| License | MIT | BSD-3 (≤7.2), then dual SSPLv1 / RSALv2 (7.4+) | BSD-3 | BSL 1.1 | MIT | BSD-3 (Linux Foundation Redis 7.2.4 fork) |
 
 **Position.** FrankenRedis does not aim to be faster than Redis or to multithread it. The goal is the same observable behavior with `unsafe` removed, a real strict/hardened policy split, an explicit threat-event ledger, and a clean enough internal model that the data engine, RDB codec, replication FSM, and Lua evaluator can be embedded into other Rust projects.
 
@@ -1940,7 +1940,7 @@ Numbers behind the "clean-room reimplementation" claim:
 | Crates in the workspace | 13 |
 | Rust source files (excluding tests) | 40 |
 | Rust source lines (excluding tests, fuzz harnesses, conformance fixtures) | ~186,000 |
-| Lines in `fr-command/src/lib.rs` (largest single file — dispatch + 232 command arms) | ~67,600 |
+| Lines in `fr-command/src/lib.rs` (largest single file — dispatch + 231 command arms) | ~67,600 |
 | Lines in `fr-command/src/lua_eval.rs` (custom Lua 5.1 evaluator) | ~18,000 |
 | Lines in `fr-runtime/src/lib.rs` (Runtime orchestrator) | ~28,500 |
 | Lines in `fr-store/src/lib.rs` (data engine) | ~24,600 |
@@ -1954,7 +1954,7 @@ Numbers behind the "clean-room reimplementation" claim:
 | Conformance fixture families | 43 |
 | `cargo-fuzz` targets | 33 |
 | Redis 7.2.4 base commands implemented | 241 |
-| Distinct command-name dispatch arms in `fr-command` | 232 |
+| Distinct command-name dispatch arms in `fr-command` | 231 |
 | RDB version emitted | 11 |
 | Open parity beads as of 2026-05-16 | 12 (1 P2, 2 P3, 9 P4) |
 | `unsafe` blocks across all 13 crates | 3 (all `libc::waitpid` in `fr-runtime`) |
