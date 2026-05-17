@@ -4455,7 +4455,12 @@ impl<'a> LuaState<'a> {
                 _ => return Ok(LuaValue::Nil),
             }
         }
-        Ok(LuaValue::Nil)
+        // (frankenredis-91w0c) Upstream lvm.c::luaV_gettable raises
+        // 'loop in gettable' when the MAXTAGLOOP cap is exhausted —
+        // the canonical signal for a cyclic __index chain like
+        // setmetatable(t, {__index=t}). fr previously returned nil
+        // silently, swallowing the diagnosis.
+        Err("user_script:1: loop in gettable".to_string())
     }
 
     /// Compute the Lua 5.1-style accessor label for a call site, e.g.
@@ -16208,6 +16213,54 @@ mod tests {
             b"return string.gsub('hello', '(l)', '<%1>')",
             &[], &[], &mut store, 0,
         ).expect("valid gsub must match");
+    }
+
+    #[test]
+    fn lua_cyclic_index_chain_raises_loop_in_gettable_91w0c() {
+        // (frankenredis-91w0c) Upstream lvm.c::luaV_gettable raises
+        // 'loop in gettable' when the __index chain depth limit
+        // (MAXTAGLOOP = 2000 in 5.1) is exhausted. fr previously
+        // returned nil silently after 16 hops.
+        let mut store = Store::new();
+
+        // Self-cycle: setmetatable(t, {__index=t}).
+        let r = eval_script(
+            b"local t = {}; setmetatable(t, {__index=t}); local ok,e = pcall(function() return t.x end); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        let body = match r {
+            RespFrame::BulkString(Some(b)) => String::from_utf8(b).unwrap(),
+            other => panic!("unexpected reply: {other:?}"),
+        };
+        assert!(body.starts_with("false:"), "got {body}");
+        assert!(body.contains("loop in gettable"), "got {body}");
+
+        // Mutual cycle: a.__index=b, b.__index=a.
+        let r = eval_script(
+            b"local a = {}; local b = {}; setmetatable(a, {__index=b}); setmetatable(b, {__index=a}); local ok,e = pcall(function() return a.x end); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        ).expect("pcall wrapper");
+        let body = match r {
+            RespFrame::BulkString(Some(b)) => String::from_utf8(b).unwrap(),
+            other => panic!("unexpected reply: {other:?}"),
+        };
+        assert!(body.starts_with("false:"), "got {body}");
+        assert!(body.contains("loop in gettable"), "got {body}");
+
+        // Non-cyclic chains still resolve normally — a single hop
+        // through an __index table.
+        let r = eval_script(
+            b"local fallback = {x=42}; local t = setmetatable({}, {__index=fallback}); return t.x",
+            &[], &[], &mut store, 0,
+        ).expect("__index fallback must work");
+        assert_eq!(r, RespFrame::Integer(42));
+
+        // __index function returning nil still yields nil (no loop).
+        let r = eval_script(
+            b"local t = setmetatable({}, {__index=function() return nil end}); return tostring(t.x)",
+            &[], &[], &mut store, 0,
+        ).expect("__index function returning nil must yield nil string");
+        assert_eq!(r, RespFrame::BulkString(Some(b"nil".to_vec())));
     }
 
     #[test]
