@@ -1752,7 +1752,7 @@ The combination of AOF (`appendfsync everysec`) and periodic RDB (`save 3600 1`)
 
 ### Capacity and tuning notes
 
-- **`hz`** controls how often the active-expire and active-defrag cycles run. The default (10) is fine; raise it if you have many short-TTL keys.
+- **`hz`** (default 10) controls how often the active-expire cycle runs per second. Raise it if you have many short-TTL keys; lower it on memory-constrained hosts that don't care about prompt expiry. The upstream `active-defrag-*` keys are accepted by `CONFIG SET` for parity but FrankenRedis does not yet run an active defragmentation cycle, so they have no observable effect today.
 - **`repl-backlog-size`** should be at least `(peak write throughput bytes/sec × tolerable disconnect seconds)`. The default `1mb` is too small for most production workloads.
 - **`client-output-buffer-limit`** for replicas should be generous; if a slow replica is killed for OBL overflow you'll see a FULLRESYNC storm next time it reconnects.
 - **`maxmemory-samples`** of 5 is sufficient for `allkeys-lru`/`volatile-lru`; raise to 10 for `allkeys-lfu`/`volatile-lfu` where counter accuracy matters more.
