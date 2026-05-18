@@ -199,6 +199,15 @@ ubs_*.jsonl
 crates/fr-server/tests/replica_of_replica.rs
 crates/fr-server/tests/test_replica_of_replica.rs
 
+# Remote compilation helper per-job target shards (target-set + job-id +
+# nanos + retry counter) — created by concurrent `rch` cargo invocations.
+.rch-target/
+.rch-target-*/
+.rch-deploy-root/
+
+# Captured `df` output left behind by disk-usage doctor probes.
+.df_out
+
 # ACFS MCP config files
 codex.mcp.json
 cursor.mcp.json
