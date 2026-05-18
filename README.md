@@ -1821,7 +1821,7 @@ Organized by date-bounded development phases (Phase 1–11) from foundation thro
 ```
 frankenredis/
 ├── AGENTS.md                                    # multi-agent build doctrine
-├── CHANGELOG.md                                 # 11 phases, 2,354 commits across 78 days
+├── CHANGELOG.md                                 # 11 phases, 2,389 commits across 79 days
 ├── COMPREHENSIVE_SPEC_FOR_FRANKENREDIS_V1.md    # design spec
 ├── FEATURE_PARITY.md                            # per-feature parity matrix
 ├── PLAN_TO_PORT_REDIS_TO_RUST.md                # porting plan
@@ -1951,15 +1951,15 @@ Numbers behind the "clean-room reimplementation" claim:
 | Lines in `fr-persist/src/lib.rs` (AOF + RDB) | ~6,600 |
 | Lines in `fr-server/src/main.rs` (mio TCP server) | ~6,100 |
 | Lines in `fr-protocol/src/lib.rs` (RESP codec) | ~2,100 |
-| Commits on `main` | 2,354 |
-| Active development days | 78 |
+| Commits on `main` | 2,389 |
+| Active development days | 79 |
 | Conformance fixture cases | 4,975 |
 | Conformance fixture families | 43 |
 | `cargo-fuzz` targets | 33 |
 | Redis 7.2.4 base commands implemented | 241 |
 | Distinct command-name dispatch arms in `fr-command` | 231 |
 | RDB version emitted | 11 |
-| Open parity beads as of 2026-05-17 | 14 (1 P2, 2 P3, 11 P4) |
+| Open parity beads as of 2026-05-18 | 10 (1 P2, 2 P3, 7 P4) |
 | `unsafe` blocks across all 13 crates | 3 (all `libc::waitpid` in `fr-runtime`) |
 | Tagged releases | 0 (pre-1.0; `main` is the version spine) |
 
