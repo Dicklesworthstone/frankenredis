@@ -11831,10 +11831,7 @@ impl Store {
             }
             Value::List(l) => {
                 buf.push(RDB_TYPE_LIST_QUICKLIST_2);
-                encode_length(&mut buf, 1);
-                encode_length(&mut buf, 2);
-                let items: Vec<&[u8]> = l.iter().map(Vec::as_slice).collect();
-                encode_dump_bulk(&mut buf, &encode_listpack_strings(&items)?);
+                encode_dump_quicklist2(&mut buf, l, self.list_max_listpack_size)?;
             }
             Value::Set(s) => {
                 let integer_members: Option<Vec<i64>> =
@@ -12106,13 +12103,21 @@ impl Store {
                 for _ in 0..node_count {
                     let (container, consumed) = decode_length(payload, cursor)?;
                     cursor += consumed;
-                    if container != 2 {
-                        return Err(StoreError::InvalidDumpPayload);
-                    }
-                    let (listpack, consumed) = decode_rdb_string(payload, cursor, data_end)?;
-                    cursor += consumed;
-                    for item in decode_listpack_strings(&listpack)? {
-                        list.push_back(item);
+                    match container {
+                        1 => {
+                            let (item, consumed) = decode_rdb_string(payload, cursor, data_end)?;
+                            cursor += consumed;
+                            list.push_back(item);
+                        }
+                        2 => {
+                            let (listpack, consumed) =
+                                decode_rdb_string(payload, cursor, data_end)?;
+                            cursor += consumed;
+                            for item in decode_listpack_strings(&listpack)? {
+                                list.push_back(item);
+                            }
+                        }
+                        _ => return Err(StoreError::InvalidDumpPayload),
                     }
                 }
                 Value::List(list)
@@ -12525,6 +12530,92 @@ fn encode_rdb_string(buf: &mut Vec<u8>, data: &[u8]) {
     }
     encode_length(buf, data.len());
     buf.extend_from_slice(data);
+}
+
+fn encode_dump_quicklist2(
+    buf: &mut Vec<u8>,
+    list: &VecDeque<Vec<u8>>,
+    list_max_listpack_size: i64,
+) -> Option<()> {
+    if list.is_empty() {
+        return None;
+    }
+
+    enum Node<'a> {
+        Plain(&'a [u8]),
+        Packed(Vec<&'a [u8]>),
+    }
+
+    let mut nodes = Vec::new();
+    let mut packed = Vec::new();
+    for item in list {
+        let item = item.as_slice();
+        if quicklist_plain_node_required(item, list_max_listpack_size) {
+            if !packed.is_empty() {
+                nodes.push(Node::Packed(std::mem::take(&mut packed)));
+            }
+            nodes.push(Node::Plain(item));
+            continue;
+        }
+
+        if !quicklist_packed_node_allows_append(&packed, item, list_max_listpack_size) {
+            nodes.push(Node::Packed(std::mem::take(&mut packed)));
+        }
+        packed.push(item);
+    }
+    if !packed.is_empty() {
+        nodes.push(Node::Packed(packed));
+    }
+
+    encode_length(buf, nodes.len());
+    for node in nodes {
+        match node {
+            Node::Plain(item) => {
+                encode_length(buf, 1);
+                encode_rdb_string(buf, item);
+            }
+            Node::Packed(items) => {
+                let listpack = encode_listpack_strings(&items)?;
+                encode_length(buf, 2);
+                encode_rdb_string(buf, &listpack);
+            }
+        }
+    }
+    Some(())
+}
+
+fn quicklist_plain_node_required(item: &[u8], list_max_listpack_size: i64) -> bool {
+    list_max_listpack_size < 0
+        && !quicklist_packed_node_fits(&[item], list_max_listpack_size).unwrap_or(false)
+}
+
+fn quicklist_packed_node_allows_append(
+    current: &[&[u8]],
+    next: &[u8],
+    list_max_listpack_size: i64,
+) -> bool {
+    if current.is_empty() {
+        return true;
+    }
+
+    let mut trial = current.to_vec();
+    trial.push(next);
+    quicklist_packed_node_fits(&trial, list_max_listpack_size).unwrap_or(false)
+}
+
+fn quicklist_packed_node_fits(entries: &[&[u8]], list_max_listpack_size: i64) -> Option<bool> {
+    if list_max_listpack_size >= 0 {
+        return Some(entries.len() <= list_max_listpack_size as usize);
+    }
+
+    let max_bytes = match list_max_listpack_size {
+        -1 => 4096,
+        -2 => 8192,
+        -3 => 16384,
+        -4 => 32768,
+        _ => 65536,
+    };
+    Some(encode_listpack_strings(entries)?.len() <= max_bytes)
 }
 
 /// Number of bytes `encode_length` would emit for the given length.
@@ -13076,17 +13167,16 @@ pub fn redis_score_to_string(value: f64) -> String {
         // "1e308"). Insert it after the 'e' when the next char is
         // a digit.
         let bytes = raw.as_bytes();
-        if let Some(epos) = bytes.iter().position(|&b| b == b'e') {
-            if epos + 1 < bytes.len()
-                && bytes[epos + 1] != b'-'
-                && bytes[epos + 1] != b'+'
-            {
-                let mut out = String::with_capacity(raw.len() + 1);
-                out.push_str(&raw[..=epos]);
-                out.push('+');
-                out.push_str(&raw[epos + 1..]);
-                return out;
-            }
+        if let Some(epos) = bytes.iter().position(|&b| b == b'e')
+            && epos + 1 < bytes.len()
+            && bytes[epos + 1] != b'-'
+            && bytes[epos + 1] != b'+'
+        {
+            let mut out = String::with_capacity(raw.len() + 1);
+            out.push_str(&raw[..=epos]);
+            out.push('+');
+            out.push_str(&raw[epos + 1..]);
+            return out;
         }
         raw
     } else {
@@ -15316,8 +15406,9 @@ mod tests {
         RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET_2,
         RDB_TYPE_ZSET_LISTPACK, ScoreBound, ScoreMember, Store, StoreError, StreamAutoClaimOptions,
         StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
-        StreamGroupReadOptions, StreamPendingEntry, Value, ValueType, decode_rdb_string,
-        encode_db_key, encode_length, hll_sparse_decode,
+        StreamGroupReadOptions, StreamPendingEntry, Value, ValueType, decode_length,
+        decode_listpack_strings, decode_rdb_string, encode_db_key, encode_length,
+        hll_sparse_decode,
     };
 
     fn group_read_options(
@@ -20317,6 +20408,71 @@ mod tests {
             store2.lrange(b"l", 0, -1, 100).unwrap(),
             vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
         );
+    }
+
+    #[test]
+    fn dump_big_list_item_uses_plain_lzf_quicklist_node() {
+        let mut store = Store::new();
+        let big = vec![b'x'; 9_000];
+        store.rpush(b"l", std::slice::from_ref(&big), 100).unwrap();
+
+        let payload = store.dump_key(b"l", 100).unwrap();
+        assert_eq!(payload[0], RDB_TYPE_LIST_QUICKLIST_2);
+        assert_eq!(payload[1], 1); // one quicklist node
+        assert_eq!(payload[2], 1); // container=PLAIN
+        assert_eq!(payload[3], 0xC3); // LZF-encoded RDB string payload
+        assert!(
+            payload.len() < 200,
+            "plain LZF node should be compact, got {} bytes",
+            payload.len()
+        );
+
+        let data_end = payload.len() - DUMP_TRAILER_LEN;
+        let (decoded, consumed) = decode_rdb_string(&payload, 3, data_end).unwrap();
+        assert_eq!(decoded, big);
+        assert_eq!(3 + consumed, data_end);
+
+        let mut restored = Store::new();
+        restored.restore_key(b"l", 0, &payload, false, 100).unwrap();
+        assert_eq!(restored.lrange(b"l", 0, -1, 100).unwrap(), vec![big]);
+    }
+
+    #[test]
+    fn dump_mixed_list_keeps_small_items_packed_before_plain_big_item() {
+        let mut store = Store::new();
+        let big = vec![b'x'; 9_000];
+        let items = vec![b"a".to_vec(), b"b".to_vec(), big.clone()];
+        store.rpush(b"l", &items, 100).unwrap();
+
+        let payload = store.dump_key(b"l", 100).unwrap();
+        let data_end = payload.len() - DUMP_TRAILER_LEN;
+        assert_eq!(payload[0], RDB_TYPE_LIST_QUICKLIST_2);
+        let mut cursor = 1;
+        let (node_count, consumed) = decode_length(&payload, cursor).unwrap();
+        cursor += consumed;
+        assert_eq!(node_count, 2);
+
+        let (container, consumed) = decode_length(&payload, cursor).unwrap();
+        cursor += consumed;
+        assert_eq!(container, 2);
+        let (listpack, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+        cursor += consumed;
+        assert_eq!(
+            decode_listpack_strings(&listpack).unwrap(),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
+
+        let (container, consumed) = decode_length(&payload, cursor).unwrap();
+        cursor += consumed;
+        assert_eq!(container, 1);
+        let (decoded_big, consumed) = decode_rdb_string(&payload, cursor, data_end).unwrap();
+        cursor += consumed;
+        assert_eq!(decoded_big, big);
+        assert_eq!(cursor, data_end);
+
+        let mut restored = Store::new();
+        restored.restore_key(b"l", 0, &payload, false, 100).unwrap();
+        assert_eq!(restored.lrange(b"l", 0, -1, 100).unwrap(), items);
     }
 
     #[test]
