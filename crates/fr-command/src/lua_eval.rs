@@ -84,6 +84,9 @@ pub struct LuaFunc {
     pub is_variadic: bool,
     /// Captured lexical environment (upvalues) from function definition site.
     pub captured_env: Option<Vec<HashMap<String, Rc<RefCell<LuaValue>>>>>,
+    /// Lua 5.1 function environment used for unresolved global reads and
+    /// writes. `None` means the interpreter's default protected globals.
+    pub env_table: Rc<RefCell<Option<LuaTable>>>,
     /// For `local function f(x) ... end`, stores the name so the function
     /// can be injected into its own call scope for self-recursion.
     pub self_name: Option<String>,
@@ -2529,6 +2532,9 @@ impl Scope {
 #[derive(Clone, Debug)]
 struct Env {
     scopes: Vec<Scope>,
+    /// Active Lua 5.1 environment table for unresolved global accesses.
+    /// None keeps using the interpreter's default protected globals map.
+    global_env: Option<LuaTable>,
     /// Index of the first scope that holds a "local" (vs upvalue) for the
     /// purposes of error messages. Scopes at indices < local_floor are
     /// captured upvalues (Lua 5.1 reports them as "upvalue 'NAME'"); scopes
@@ -2545,8 +2551,17 @@ impl Env {
     fn new() -> Self {
         Self {
             scopes: vec![Scope::new()],
+            global_env: None,
             local_floor: 0,
         }
+    }
+
+    fn current_global_env(&self) -> Option<LuaTable> {
+        self.global_env.clone()
+    }
+
+    fn set_global_env(&mut self, table: LuaTable) {
+        self.global_env = Some(table);
     }
 
     fn push_scope(&mut self) {
@@ -2604,6 +2619,7 @@ impl Env {
                     locals: locals.clone(),
                 })
                 .collect(),
+            global_env: None,
             local_floor,
         }
     }
@@ -2644,6 +2660,8 @@ impl<'a> LuaState<'a> {
             // handler is kept for any internal callers but is not bound.
             "setmetatable",
             "getmetatable",
+            "getfenv",
+            "setfenv",
             "assert",
             "xpcall",
             // (frankenredis-cfflo) loadstring/load parse a chunk of
@@ -3229,6 +3247,7 @@ impl<'a> LuaState<'a> {
                     body: body.clone(),
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
+                    env_table: Rc::new(RefCell::new(env.current_global_env())),
                     self_name: None,
                     source_label: self.current_source_label.clone(),
                     identity: next_function_identity(),
@@ -3237,10 +3256,7 @@ impl<'a> LuaState<'a> {
                     // (frankenredis-j02x9) `function f() end` is
                     // equivalent to `f = function() end`; both write
                     // to the globals table. Block once locked.
-                    if self.globals_locked {
-                        return Err("user_script:1: Attempt to modify a readonly table".to_string());
-                    }
-                    self.globals.insert(names[0].clone(), func);
+                    self.assign_to(&Expr::Name(names[0].clone()), func, env, varargs)?;
                 } else {
                     // Nested field assignment: a.b.c = func
                     self.set_nested_field(names, func)?;
@@ -3253,6 +3269,7 @@ impl<'a> LuaState<'a> {
                     body: body.clone(),
                     is_variadic: *is_variadic,
                     captured_env: Some(env.snapshot()),
+                    env_table: Rc::new(RefCell::new(env.current_global_env())),
                     self_name: Some(name.clone()),
                     source_label: self.current_source_label.clone(),
                     identity: next_function_identity(),
@@ -3340,6 +3357,16 @@ impl<'a> LuaState<'a> {
         match lhs {
             Expr::Name(name) => {
                 if !env.set_existing_local(name, value.clone()) {
+                    if let Some(global_env) = env.current_global_env() {
+                        self.table_assign_with_newindex(
+                            global_env,
+                            LuaValue::Str(name.as_bytes().to_vec()),
+                            value,
+                            env,
+                            varargs,
+                        )?;
+                        return Ok(());
+                    }
                     // (frankenredis-j02x9) Once locked, the globals
                     // table is read-only — both new and overwriting
                     // assignments raise. Locals (Stmt::LocalAssign)
@@ -3475,6 +3502,16 @@ impl<'a> LuaState<'a> {
         match table_expr {
             Expr::Name(name) => {
                 if !env.set_existing_local(name, table.clone()) {
+                    if let Some(global_env) = env.current_global_env() {
+                        self.table_assign_with_newindex(
+                            global_env,
+                            LuaValue::Str(name.as_bytes().to_vec()),
+                            table,
+                            env,
+                            varargs,
+                        )?;
+                        return Ok(());
+                    }
                     self.globals.insert(name.clone(), table);
                 }
                 Ok(())
@@ -3511,6 +3548,13 @@ impl<'a> LuaState<'a> {
             Expr::Name(name) => {
                 if let Some(val) = env.get_local(name) {
                     Ok(val.clone())
+                } else if let Some(global_env) = env.current_global_env() {
+                    self.table_lookup_with_index_meta(
+                        &global_env,
+                        &LuaValue::Str(name.as_bytes().to_vec()),
+                        env,
+                        varargs,
+                    )
                 } else if let Some(val) = self.globals.get(name) {
                     Ok(val.clone())
                 } else if self.globals_locked {
@@ -4050,6 +4094,7 @@ impl<'a> LuaState<'a> {
                 body: body.clone(),
                 is_variadic: *is_variadic,
                 captured_env: Some(env.snapshot()),
+                env_table: Rc::new(RefCell::new(env.current_global_env())),
                 self_name: None,
                 source_label: self.current_source_label.clone(),
                 identity: next_function_identity(),
@@ -4154,6 +4199,7 @@ impl<'a> LuaState<'a> {
             Some(captured) => Env::from_captured(captured),
             None => Env::new(),
         };
+        new_env.global_env = lua_func.env_table.borrow().clone();
         new_env.push_scope();
         if let Some(name) = &lua_func.self_name {
             new_env.set_local(name, func_value);
@@ -4415,6 +4461,22 @@ impl<'a> LuaState<'a> {
         g_table.inner.borrow_mut().metatable = Some(mt);
         self.globals
             .insert("_G".to_string(), LuaValue::Table(g_table));
+    }
+
+    fn default_global_env_table(&self) -> LuaTable {
+        if let Some(LuaValue::Table(table)) = self.globals.get("_G") {
+            return table.clone();
+        }
+        let table = LuaTable::new();
+        for (k, v) in &self.globals {
+            table.set(LuaValue::Str(k.as_bytes().to_vec()), v.clone());
+        }
+        table
+    }
+
+    fn effective_global_env_table(&self, env: &Env) -> LuaTable {
+        env.current_global_env()
+            .unwrap_or_else(|| self.default_global_env_table())
     }
 
     fn lookup_string_field(&self, key: &LuaValue) -> LuaValue {
@@ -5492,6 +5554,7 @@ impl<'a> LuaState<'a> {
                         body,
                         is_variadic: true,
                         captured_env: Some(env.snapshot()),
+                        env_table: Rc::new(RefCell::new(env.current_global_env())),
                         self_name: None,
                         // (frankenredis-ycaog) Tag the chunk so runtime
                         // errors raised from inside it are reported with
@@ -6109,6 +6172,101 @@ impl<'a> LuaState<'a> {
                         }
                     }
                     _ => Ok(vec![LuaValue::Nil]),
+                }
+            }
+            "getfenv" => {
+                // (frankenredis-cp1gs) Vendored Redis exposes Lua 5.1's
+                // base getfenv. Numeric levels beyond the current script
+                // frame are rejected; C/Rust builtins report the default
+                // protected globals table.
+                let table = match args.first() {
+                    None | Some(LuaValue::Nil) => self.effective_global_env_table(env),
+                    Some(LuaValue::Function(func)) => func
+                        .env_table
+                        .borrow()
+                        .clone()
+                        .unwrap_or_else(|| self.default_global_env_table()),
+                    Some(LuaValue::RustFunction(_)) => self.default_global_env_table(),
+                    Some(value) => {
+                        let Some(number) = value.to_number() else {
+                            return Err(lua_bad_number_arg(
+                                self.current_invocation_name.as_deref(),
+                                1,
+                                Some(value),
+                            ));
+                        };
+                        let level = number as i64;
+                        if level < 0 {
+                            return Err(lua_format_argerror(
+                                self.current_invocation_name.as_deref(),
+                                "getfenv",
+                                1,
+                                "level must be non-negative",
+                            ));
+                        }
+                        if level > 1 {
+                            return Err(lua_format_argerror(
+                                self.current_invocation_name.as_deref(),
+                                "getfenv",
+                                1,
+                                "invalid level",
+                            ));
+                        }
+                        self.effective_global_env_table(env)
+                    }
+                };
+                Ok(vec![LuaValue::Table(table)])
+            }
+            "setfenv" => {
+                // Keep the same check order as lbaselib.c: argument #2
+                // must be a table before the target function/level is
+                // resolved.
+                let inv = self.current_invocation_name.as_deref();
+                let new_env = lua_table_arg(inv, 2, args.get(1))?.clone();
+                let cannot_change = || match inv {
+                    Some(_) => {
+                        "user_script:1: 'setfenv' cannot change environment of given object"
+                            .to_string()
+                    }
+                    None => "'setfenv' cannot change environment of given object".to_string(),
+                };
+                match args.first() {
+                    Some(LuaValue::Function(func)) => {
+                        *func.env_table.borrow_mut() = Some(new_env);
+                        Ok(vec![args[0].clone()])
+                    }
+                    Some(LuaValue::RustFunction(_)) => Err(cannot_change()),
+                    Some(value) => {
+                        let Some(number) = value.to_number() else {
+                            return Err(lua_bad_number_arg(inv, 1, Some(value)));
+                        };
+                        let level = number as i64;
+                        if level < 0 {
+                            return Err(lua_format_argerror(
+                                inv,
+                                "setfenv",
+                                1,
+                                "level must be non-negative",
+                            ));
+                        }
+                        if level > 1 {
+                            return Err(lua_format_argerror(
+                                inv,
+                                "setfenv",
+                                1,
+                                "invalid level",
+                            ));
+                        }
+                        env.set_global_env(new_env);
+                        if level == 0 {
+                            Ok(Vec::new())
+                        } else {
+                            Ok(vec![LuaValue::RustFunction(
+                                "__fr_current_chunk_env".to_string(),
+                            )])
+                        }
+                    }
+                    None => Err(lua_bad_number_arg(inv, 1, None)),
                 }
             }
             "rawlen" => {
@@ -11278,6 +11436,57 @@ mod tests {
             &[], &[], &mut store, 0,
         ).unwrap();
         assert_eq!(frame, RespFrame::Integer(1));
+    }
+
+    #[test]
+    fn lua_getfenv_setfenv_sandbox_surface_cp1gs() {
+        // (frankenredis-cp1gs) Redis 7.2.4 exposes Lua 5.1 getfenv and
+        // setfenv in the sandbox. setfenv must affect subsequent
+        // unresolved global reads/writes, not just exist as a stub.
+        let mut store = Store::new();
+
+        let frame = eval_script(
+            b"return type(getfenv)..':'..type(setfenv)..':'..type(getfenv(0))..':'..tostring(getfenv(0) == _G)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"function:function:table:true".to_vec()))
+        );
+
+        let frame = eval_script(
+            b"setfenv(1, {answer = 42}); return answer",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::Integer(42));
+
+        let frame = eval_script(
+            b"local env = {answer = 41}; setfenv(1, env); answer = answer + 1; return env.answer",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::Integer(42));
+
+        let frame = eval_script(
+            b"local env = {answer = 99}; local f = function() return answer end; setfenv(f, env); return tostring(getfenv(f) == env)..':'..f()",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"true:99".to_vec())));
+
+        let frame = eval_script(
+            b"local ok, e = pcall(setfenv, 2, {}); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (invalid level)".to_vec(),
+            ))
+        );
     }
 
     #[test]
