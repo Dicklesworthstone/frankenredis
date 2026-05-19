@@ -2837,6 +2837,17 @@ impl<'a> LuaState<'a> {
                 LuaValue::RustFunction(format!("cmsgpack.{name}")),
             );
         }
+        for (name, value) in &[
+            ("_NAME", "cmsgpack"),
+            ("_VERSION", "lua-cmsgpack 0.4.0"),
+            ("_COPYRIGHT", "Copyright (C) 2012, Salvatore Sanfilippo"),
+            ("_DESCRIPTION", "MessagePack C implementation for Lua"),
+        ] {
+            cmsgpack_table.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::Str(value.as_bytes().to_vec()),
+            );
+        }
         globals.insert("cmsgpack".to_string(), LuaValue::Table(cmsgpack_table));
 
         // struct library bundled with Redis' Lua sandbox.
@@ -15049,6 +15060,21 @@ mod tests {
         assert_eq!(
             frame,
             RespFrame::BulkString(Some(b"table:function:function".to_vec()))
+        );
+
+        let frame = eval_script(
+            b"return cmsgpack._NAME..'|'..cmsgpack._VERSION..'|'..cmsgpack._COPYRIGHT..'|'..cmsgpack._DESCRIPTION",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(
+                b"cmsgpack|lua-cmsgpack 0.4.0|Copyright (C) 2012, Salvatore Sanfilippo|MessagePack C implementation for Lua".to_vec()
+            ))
         );
 
         let frame = eval_script(
