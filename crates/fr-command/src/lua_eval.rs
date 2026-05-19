@@ -10588,7 +10588,7 @@ fn lua_struct_pack(
     let mut arg_idx = 1_usize;
     let mut fmt_idx = 0_usize;
 
-    while fmt_idx < fmt.len() {
+    while fmt_idx < fmt.len() && fmt[fmt_idx] != 0 {
         let opt = fmt[fmt_idx];
         fmt_idx += 1;
         let mut size = lua_struct_optsize(inv_name, opt, fmt, &mut fmt_idx)?;
@@ -10669,7 +10669,7 @@ fn lua_struct_unpack(
     let mut data_pos = (pos - 1) as usize;
     let mut fmt_idx = 0_usize;
 
-    while fmt_idx < fmt.len() {
+    while fmt_idx < fmt.len() && fmt[fmt_idx] != 0 {
         let opt = fmt[fmt_idx];
         fmt_idx += 1;
         let mut size = lua_struct_optsize(inv_name, opt, fmt, &mut fmt_idx)?;
@@ -10739,7 +10739,7 @@ fn lua_struct_size(inv_name: Option<&str>, fmt: &[u8]) -> Result<usize, String> 
     let mut pos = 0_usize;
     let mut fmt_idx = 0_usize;
 
-    while fmt_idx < fmt.len() {
+    while fmt_idx < fmt.len() && fmt[fmt_idx] != 0 {
         let opt = fmt[fmt_idx];
         fmt_idx += 1;
         let size = lua_struct_optsize(inv_name, opt, fmt, &mut fmt_idx)?;
@@ -15149,6 +15149,16 @@ mod tests {
                 b"false:bad argument #2 to '?' (data string too short)".to_vec()
             ))
         );
+
+        let frame = eval_script(
+            b"local f='b'..string.char(0)..'!3B'; local p=struct.pack(f, 7, 8); local n,pos=struct.unpack(f, p..string.char(9)); return tostring(struct.size(f))..':'..tostring(#p)..':'..tostring(n)..':'..tostring(pos)",
+            &[],
+            &[],
+            &mut store,
+            0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"1:1:7:2".to_vec())));
     }
 
     #[test]
