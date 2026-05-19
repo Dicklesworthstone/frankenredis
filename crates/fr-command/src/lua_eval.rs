@@ -26,8 +26,14 @@ pub enum LuaValue {
     Table(LuaTable),
     Function(LuaFunc),
     RustFunction(String), // name of built-in
+    Userdata(LuaUserdata),
     Coroutine(LuaCoroutine),
     WrappedCoroutine(LuaCoroutine),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LuaUserdata {
+    CjsonNull,
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +68,7 @@ impl std::hash::Hash for LuaHashKey {
             // function-as-table-key support per Lua 5.1 object identity.
             LuaValue::Function(f) => f.identity.hash(state),
             LuaValue::RustFunction(n) => n.hash(state),
+            LuaValue::Userdata(kind) => kind.hash(state),
             LuaValue::Coroutine(co) | LuaValue::WrappedCoroutine(co) => {
                 (Rc::as_ptr(&co.inner) as usize).hash(state);
             }
@@ -453,6 +460,7 @@ fn lua_raw_equal(a: &LuaValue, b: &LuaValue) -> bool {
         // identity (==). Use the per-function identity counter assigned
         // at definition time; clones inherit the same id.
         (LuaValue::Function(x), LuaValue::Function(y)) => x.identity == y.identity,
+        (LuaValue::Userdata(x), LuaValue::Userdata(y)) => x == y,
         _ => false,
     }
 }
@@ -650,6 +658,7 @@ impl LuaValue {
             LuaValue::Str(_) => "string",
             LuaValue::Table(_) => "table",
             LuaValue::Function(_) | LuaValue::RustFunction(_) => "function",
+            LuaValue::Userdata(_) => "userdata",
             LuaValue::Coroutine(_) => "thread",
             LuaValue::WrappedCoroutine(_) => "function",
         }
@@ -758,6 +767,7 @@ impl LuaValue {
                 let addr = n.as_ptr() as usize;
                 format!("function: 0x{addr:014x}").into_bytes()
             }
+            LuaValue::Userdata(LuaUserdata::CjsonNull) => b"userdata: (nil)".to_vec(),
             LuaValue::Coroutine(co) => {
                 let addr = Rc::as_ptr(&co.inner) as usize;
                 format!("thread: 0x{addr:014x}").into_bytes()
@@ -2766,6 +2776,10 @@ impl<'a> LuaState<'a> {
                 LuaValue::RustFunction(format!("cjson.{name}")),
             );
         }
+        cjson_table.set(
+            LuaValue::Str(b"null".to_vec()),
+            LuaValue::Userdata(LuaUserdata::CjsonNull),
+        );
         globals.insert("cjson".to_string(), LuaValue::Table(cjson_table));
 
         // cmsgpack library bundled with Redis' Lua sandbox.
@@ -9183,6 +9197,7 @@ pub fn lua_to_resp(val: &LuaValue) -> RespFrame {
             RespFrame::Integer(i)
         }
         LuaValue::Str(s) => RespFrame::BulkString(Some(s.clone())),
+        LuaValue::Userdata(_) => RespFrame::BulkString(None),
         LuaValue::Table(t) => {
             // (frankenredis-ly7jr) Upstream script_lua.c::luaReplyToRedisReply
             // checks the 'err' field BEFORE 'ok' so a table carrying
@@ -9973,6 +9988,7 @@ fn cmsgpack_pack_value(value: &LuaValue, out: &mut Vec<u8>, depth: usize) -> Res
         LuaValue::Nil
         | LuaValue::Function(_)
         | LuaValue::RustFunction(_)
+        | LuaValue::Userdata(_)
         | LuaValue::Coroutine(_)
         | LuaValue::WrappedCoroutine(_) => out.push(0xc0),
         LuaValue::Bool(false) => out.push(0xc2),
@@ -10621,6 +10637,7 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
         LuaValue::Function(_) | LuaValue::RustFunction(_) => {
             Err("Cannot serialise function: type not supported".to_string())
         }
+        LuaValue::Userdata(LuaUserdata::CjsonNull) => Ok("null".to_string()),
         LuaValue::Coroutine(_) | LuaValue::WrappedCoroutine(_) => {
             Err("Cannot serialise thread: type not supported".to_string())
         }
@@ -10688,7 +10705,9 @@ impl<'a> JsonParser<'a> {
                 "Expected value but found T_END at character {}",
                 self.char_pos()
             )),
-            Some(b'n') if self.consume_literal(b"null") => Ok(LuaValue::Nil),
+            Some(b'n') if self.consume_literal(b"null") => {
+                Ok(LuaValue::Userdata(LuaUserdata::CjsonNull))
+            }
             Some(b't') if self.consume_literal(b"true") => Ok(LuaValue::Bool(true)),
             Some(b'f') if self.consume_literal(b"false") => Ok(LuaValue::Bool(false)),
             Some(b'"') => self.parse_string().map(LuaValue::Str),
@@ -14518,6 +14537,42 @@ mod tests {
             frame,
             RespFrame::BulkString(Some(b"Bad data format in input.".to_vec()))
         );
+    }
+
+    #[test]
+    fn cjson_null_decodes_as_userdata_sentinel_v29t6() {
+        // (frankenredis-v29t6) Redis-bundled lua-cjson represents JSON
+        // null as cjson.null, a lightuserdata sentinel distinct from
+        // Lua nil and round-trippable through cjson.encode.
+        let mut store = Store::new();
+
+        let frame = eval_script(
+            b"return type(cjson.null)..':'..type(cjson.decode('null'))..':'..tostring(cjson.decode('null') == cjson.null)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"userdata:userdata:true".to_vec()))
+        );
+
+        let frame = eval_script(b"return cjson.encode(cjson.null)", &[], &[], &mut store, 0)
+            .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"null".to_vec())));
+
+        let frame = eval_script(
+            b"return cjson.encode(cjson.decode('[null,true]'))",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"[null,true]".to_vec())));
+
+        let frame = eval_script(
+            b"return cjson.encode(cjson.decode('{\"a\":null}'))",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"{\"a\":null}".to_vec())));
     }
 
     #[test]
