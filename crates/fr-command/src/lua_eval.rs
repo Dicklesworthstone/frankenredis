@@ -6709,7 +6709,7 @@ impl<'a> LuaState<'a> {
                 let fmt_str = String::from_utf8_lossy(&fmt_bytes).to_string();
                 let rest: &[LuaValue] = if args.is_empty() { &[] } else { &args[1..] };
                 let result = lua_string_format(inv, &fmt_str, rest)?;
-                Ok(vec![LuaValue::Str(result.into_bytes())])
+                Ok(vec![LuaValue::Str(result)])
             }
             "string.find" => {
                 let s = lua_check_string(self.current_invocation_name.as_deref(), args, 0, "find")?;
@@ -9104,7 +9104,7 @@ fn lua_string_format(
     inv_name: Option<&str>,
     fmt: &str,
     args: &[LuaValue],
-) -> Result<String, String> {
+) -> Result<Vec<u8>, String> {
     // (frankenredis-fllxr) When inv_name is Some, render the named/
     // prefixed shape (direct or Lua-wrapped call). When None, render
     // the anonymous/unprefixed shape (pcall directly invoking the
@@ -9118,7 +9118,7 @@ fn lua_string_format(
             None => format!("invalid option '%{conv}' to 'format'"),
         }
     };
-    let mut result = String::new();
+    let mut result = Vec::new();
     let mut arg_idx = 0;
     let mut chars = fmt.chars().peekable();
 
@@ -9141,7 +9141,7 @@ fn lua_string_format(
             if let Some(&next) = chars.peek() {
                 if next == '%' {
                     chars.next();
-                    result.push('%');
+                    result.push(b'%');
                     continue;
                 }
                 // Parse flags
@@ -9257,7 +9257,7 @@ fn lua_string_format(
                             ))
                         }
                     };
-                    let formatted = match conv {
+                    let formatted: Vec<u8> = match conv {
                         'd' | 'i' => {
                             // (frankenredis-3pug0) C printf treats
                             // precision for integer conversions as the
@@ -9314,7 +9314,7 @@ fn lua_string_format(
                             } else {
                                 ' '
                             };
-                            lua_fmt_pad(&s, width, left_align, effective_pad)
+                            lua_fmt_pad(&s, width, left_align, effective_pad).into_bytes()
                         }
                         'u' => {
                             // (frankenredis-t1ah8) Upstream %u prints the unsigned
@@ -9340,6 +9340,7 @@ fn lua_string_format(
                                 ' '
                             };
                             lua_fmt_pad(&padded_digits, width, left_align, effective_pad)
+                                .into_bytes()
                         }
                         'f' => {
                             let n = require_number(&arg)?;
@@ -9351,7 +9352,7 @@ fn lua_string_format(
                                 } else {
                                     s
                                 };
-                                lua_fmt_pad(&s, width, left_align, ' ')
+                                lua_fmt_pad(&s, width, left_align, ' ').into_bytes()
                             } else {
                                 let prec = precision.unwrap_or(6);
                                 let s = if show_sign && n >= 0.0 {
@@ -9362,6 +9363,7 @@ fn lua_string_format(
                                     format!("{n:.prec$}")
                                 };
                                 lua_fmt_pad(&s, width, left_align, if zero_pad { '0' } else { ' ' })
+                                    .into_bytes()
                             }
                         }
                         'e' | 'E' => {
@@ -9374,7 +9376,7 @@ fn lua_string_format(
                                 } else {
                                     s
                                 };
-                                lua_fmt_pad(&s, width, left_align, ' ')
+                                lua_fmt_pad(&s, width, left_align, ' ').into_bytes()
                             } else {
                                 let prec = precision.unwrap_or(6);
                                 let s = lua_fmt_scientific(n, prec, conv == 'E');
@@ -9383,7 +9385,7 @@ fn lua_string_format(
                                 } else {
                                     s
                                 };
-                                lua_fmt_pad(&s, width, left_align, ' ')
+                                lua_fmt_pad(&s, width, left_align, ' ').into_bytes()
                             }
                         }
                         'g' | 'G' => {
@@ -9396,7 +9398,7 @@ fn lua_string_format(
                                 } else {
                                     s
                                 };
-                                lua_fmt_pad(&s, width, left_align, ' ')
+                                lua_fmt_pad(&s, width, left_align, ' ').into_bytes()
                             } else {
                                 let prec = precision.unwrap_or(6).max(1);
                                 let s = lua_fmt_g(n, prec, conv == 'G');
@@ -9405,7 +9407,7 @@ fn lua_string_format(
                                 } else {
                                     s
                                 };
-                                lua_fmt_pad(&s, width, left_align, ' ')
+                                lua_fmt_pad(&s, width, left_align, ' ').into_bytes()
                             }
                         }
                         's' => {
@@ -9440,11 +9442,11 @@ fn lua_string_format(
                                     ));
                                 }
                             };
-                            let mut s = String::from_utf8_lossy(&s).to_string();
+                            let mut s = s;
                             if let Some(prec) = precision {
                                 s.truncate(prec);
                             }
-                            lua_fmt_pad(&s, width, left_align, ' ')
+                            lua_fmt_pad_bytes(s, width, left_align, b' ')
                         }
                         'q' => {
                             // (frankenredis-u5qgq follow-up) Lua 5.1
@@ -9478,14 +9480,14 @@ fn lua_string_format(
                                     ));
                                 }
                             };
-                            let mut q = String::new();
-                            q.push('"');
+                            let mut q = Vec::new();
+                            q.push(b'"');
                             for &b in &s {
                                 match b {
-                                    b'\\' => q.push_str("\\\\"),
-                                    b'"' => q.push_str("\\\""),
-                                    b'\n' => q.push_str("\\\n"),
-                                    b'\r' => q.push_str("\\r"),
+                                    b'\\' => q.extend_from_slice(b"\\\\"),
+                                    b'"' => q.extend_from_slice(b"\\\""),
+                                    b'\n' => q.extend_from_slice(b"\\\n"),
+                                    b'\r' => q.extend_from_slice(b"\\r"),
                                     // (frankenredis-0en30) Upstream
                                     // Lua 5.1.5 lstrlib.c::addquoted
                                     // emits NUL as the three-digit
@@ -9493,11 +9495,11 @@ fn lua_string_format(
                                     // subsequent digit can't be misread
                                     // as part of the escape; fr was
                                     // emitting the ambiguous "\\0".
-                                    b'\0' => q.push_str("\\000"),
-                                    _ => q.push(b as char),
+                                    b'\0' => q.extend_from_slice(b"\\000"),
+                                    _ => q.push(b),
                                 }
                             }
-                            q.push('"');
+                            q.push(b'"');
                             q
                         }
                         'x' | 'X' => {
@@ -9540,7 +9542,7 @@ fn lua_string_format(
                             } else {
                                 ' '
                             };
-                            lua_fmt_pad(&s, width, left_align, effective_pad)
+                            lua_fmt_pad(&s, width, left_align, effective_pad).into_bytes()
                         }
                         'o' => {
                             // (frankenredis-t1ah8) Same fix as %x/%X — recover
@@ -9569,7 +9571,7 @@ fn lua_string_format(
                             } else {
                                 ' '
                             };
-                            lua_fmt_pad(&s, width, left_align, effective_pad)
+                            lua_fmt_pad(&s, width, left_align, effective_pad).into_bytes()
                         }
                         'c' => {
                             // (frankenredis-be7o1) Upstream printf %c casts to
@@ -9586,9 +9588,9 @@ fn lua_string_format(
                             // preserve the NUL, so suppress it explicitly to
                             // match vendored.
                             if n == 0 {
-                                String::new()
+                                Vec::new()
                             } else {
-                                String::from(n as char)
+                                vec![n]
                             }
                         }
                         _ => {
@@ -9601,16 +9603,43 @@ fn lua_string_format(
                             return Err(invalid_option(conv));
                         }
                     };
-                    result.push_str(&formatted);
+                    result.extend_from_slice(&formatted);
                 }
             } else {
-                result.push(c);
+                let mut buf = [0u8; 4];
+                result.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
             }
         } else {
-            result.push(c);
+            let mut buf = [0u8; 4];
+            result.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
         }
     }
     Ok(result)
+}
+
+fn lua_fmt_pad_bytes(
+    s: Vec<u8>,
+    width: Option<usize>,
+    left_align: bool,
+    pad: u8,
+) -> Vec<u8> {
+    let mut w = match width {
+        Some(w) if w > s.len() => w,
+        _ => return s,
+    };
+    if w > 512 * 1024 * 1024 {
+        w = 512 * 1024 * 1024;
+    }
+    let padding = w - s.len();
+    let mut out = Vec::with_capacity(w);
+    if left_align {
+        out.extend_from_slice(&s);
+        out.resize(w, b' ');
+    } else {
+        out.resize(padding, pad);
+        out.extend_from_slice(&s);
+    }
+    out
 }
 
 /// Pad a string to a given width, respecting left-align and pad character.
@@ -16759,6 +16788,26 @@ mod tests {
             &[], &[], &mut store, 0,
         ).expect("cr escape");
         assert_eq!(r, RespFrame::BulkString(Some(b"\"a\\rb\"".to_vec())));
+    }
+
+    #[test]
+    fn lua_string_format_q_preserves_high_bytes_7xudk() {
+        let mut store = Store::new();
+
+        for (byte, expected) in [
+            (128_u8, b"\"\x80\"".to_vec()),
+            (200_u8, b"\"\xC8\"".to_vec()),
+            (255_u8, b"\"\xFF\"".to_vec()),
+        ] {
+            let script = format!("return string.format('%q', string.char({byte}))");
+            let r = eval_script(script.as_bytes(), &[], &[], &mut store, 0)
+                .expect("high-byte %q must format");
+            assert_eq!(
+                r,
+                RespFrame::BulkString(Some(expected)),
+                "wrong %q output for byte {byte}"
+            );
+        }
     }
 
     #[test]
