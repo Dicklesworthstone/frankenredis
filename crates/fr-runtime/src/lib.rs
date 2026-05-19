@@ -12336,6 +12336,19 @@ replica_announced:1\r\n",
         if argv.len() != 3 {
             return CommandError::WrongArity("WAIT").to_resp();
         }
+        // Upstream replication.c::waitCommand rejects WAIT on replica
+        // instances *before* parsing numreplicas/timeout, so a malformed
+        // WAIT on a replica still surfaces the replica error rather than an
+        // argument error. (frankenredis-kwvqi)
+        if matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Replica { .. }
+        ) {
+            return RespFrame::Error(
+                "ERR WAIT cannot be used with replica instances. Please also note that since Redis 4.0 if a replica is configured to be writable (which is not the default) writes to replicas are just local and are not propagated."
+                    .to_string(),
+            );
+        }
         let required_replicas = match parse_i64_arg(&argv[1]) {
             Ok(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
             Ok(_) => 0,
@@ -12352,19 +12365,6 @@ replica_announced:1\r\n",
             }
             _ => {}
         }
-        // Upstream replication.c::waitCommand:3534-3537 rejects WAIT on
-        // replica instances. The matching check exists below for WAITAOF
-        // but was missing here. (frankenredis-kwvqi)
-        if matches!(
-            self.server.replication_runtime_state.role,
-            ReplicationRoleState::Replica { .. }
-        ) {
-            return RespFrame::Error(
-                "ERR WAIT cannot be used with replica instances. Please also note that since Redis 4.0 if a replica is configured to be writable (which is not the default) writes to replicas are just local and are not propagated."
-                    .to_string(),
-            );
-        }
-
         // Refresh replica ACK snapshots to get current state
         self.server.refresh_replica_ack_snapshots();
 
@@ -12382,6 +12382,17 @@ replica_announced:1\r\n",
     fn handle_waitaof_command(&mut self, argv: &[Vec<u8>]) -> RespFrame {
         if argv.len() != 4 {
             return CommandError::WrongArity("WAITAOF").to_resp();
+        }
+        // Upstream replication.c::waitaofCommand rejects WAITAOF on replica
+        // instances *before* parsing numlocal/numreplicas/timeout, so a
+        // malformed WAITAOF on a replica still surfaces the replica error.
+        if matches!(
+            self.server.replication_runtime_state.role,
+            ReplicationRoleState::Replica { .. }
+        ) {
+            return RespFrame::Error(
+                "ERR WAITAOF cannot be used with replica instances. Please also note that writes to replicas are just local and are not propagated.".to_string(),
+            );
         }
         let required_local = match parse_i64_arg(&argv[1]) {
             Ok(value @ 0..=1) => usize::try_from(value).unwrap_or(usize::MAX),
@@ -12408,14 +12419,6 @@ replica_announced:1\r\n",
                 );
             }
             _ => {}
-        }
-        if matches!(
-            self.server.replication_runtime_state.role,
-            ReplicationRoleState::Replica { .. }
-        ) {
-            return RespFrame::Error(
-                "ERR WAITAOF cannot be used with replica instances. Please also note that writes to replicas are just local and are not propagated.".to_string(),
-            );
         }
         if required_local > 0 && !self.server.store.aof_enabled {
             return RespFrame::Error(
@@ -17384,6 +17387,51 @@ mod tests {
         let mut rt = Runtime::default_strict();
         let zero = rt.execute_frame(command(&[b"WAIT", b"0", b"0"]), 0);
         assert_eq!(zero, RespFrame::Integer(0));
+    }
+
+    #[test]
+    fn wait_replica_check_precedes_argument_parsing() {
+        // Upstream replication.c::waitCommand / waitaofCommand reject WAIT /
+        // WAITAOF on a replica *before* parsing any arguments, so a malformed
+        // WAIT on a replica surfaces the replica error rather than an
+        // argument error. (frankenredis-kwvqi)
+        let wait_err = RespFrame::Error(
+            "ERR WAIT cannot be used with replica instances. Please also note that since Redis 4.0 if a replica is configured to be writable (which is not the default) writes to replicas are just local and are not propagated."
+                .to_string(),
+        );
+        let waitaof_err = RespFrame::Error(
+            "ERR WAITAOF cannot be used with replica instances. Please also note that writes to replicas are just local and are not propagated.".to_string(),
+        );
+
+        let mut rt = Runtime::default_strict();
+        assert_eq!(
+            rt.execute_frame(command(&[b"REPLICAOF", b"127.0.0.1", b"6379"]), 0),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // Non-integer numreplicas / numlocal on a replica.
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAIT", b"nope", b"0"]), 1),
+            wait_err
+        );
+        // Negative timeout on a replica.
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAIT", b"1", b"-5"]), 2),
+            wait_err
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"nope", b"0", b"0"]), 3),
+            waitaof_err
+        );
+        // numlocal out of range on a replica.
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAITAOF", b"2", b"0", b"0"]), 4),
+            waitaof_err
+        );
+        // Arity is still checked first (framework-level), before the role gate.
+        assert_eq!(
+            rt.execute_frame(command(&[b"WAIT", b"1"]), 5),
+            RespFrame::Error("ERR wrong number of arguments for 'wait' command".to_string())
+        );
     }
 
     #[test]
