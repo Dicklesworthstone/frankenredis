@@ -370,7 +370,7 @@ pub struct SortedSet {
 }
 ```
 
-`ScoreMember` wraps the `(f64, Vec<u8>)` pair to give Redis-compatible total ordering: `f64::total_cmp` for the score (handles NaN, -0 vs +0, +∞/-∞) with the lexicographic member as tie-breaker. Range queries by score (`ZRANGEBYSCORE`), by lex (`ZRANGEBYLEX`), and by rank (`ZRANGE 0 -1`) all become standard `BTreeMap::range` traversals. The result is the same algorithmic complexity as upstream with substantially less code.
+`ScoreMember` wraps `(f64, MemberPart)` where `MemberPart` is a small enum `{ Min, Actual(Vec<u8>), Max }`. The `Min` and `Max` sentinels exist so range queries can construct `(score, MemberPart::Min)` and `(score, MemberPart::Max)` keys that bracket any real member at that score — important for BYLEX range queries. Ordering uses `f64::total_cmp` for the score (handles NaN, -0 vs +0, +∞/-∞) with the lexicographic member as tie-breaker. Range queries by score (`ZRANGEBYSCORE`), by lex (`ZRANGEBYLEX`), and by rank (`ZRANGE 0 -1`) all become standard `BTreeMap::range` traversals. The result is the same algorithmic complexity as upstream with substantially less code.
 
 **Encoding promotion is sticky.** Real Redis promotes encodings one-way: an `intset` that gets a non-integer member promotes to `listpack`, and once promoted it never demotes even if the offending member is removed. FrankenRedis enforces the same sticky contract via per-`Entry` boolean flags. The promotion paths are:
 
@@ -1944,7 +1944,7 @@ Numbers behind the "clean-room reimplementation" claim:
 | Rust source files (excluding tests) | 40 |
 | Rust source lines (excluding tests, fuzz harnesses, conformance fixtures) | ~186,000 |
 | Lines in `fr-command/src/lib.rs` (largest single file — dispatch + 231 command arms) | ~67,600 |
-| Lines in `fr-command/src/lua_eval.rs` (custom Lua 5.1 evaluator) | ~18,000 |
+| Lines in `fr-command/src/lua_eval.rs` (custom Lua 5.1 evaluator) | ~19,300 |
 | Lines in `fr-runtime/src/lib.rs` (Runtime orchestrator) | ~28,500 |
 | Lines in `fr-store/src/lib.rs` (data engine) | ~24,600 |
 | Lines in `fr-conformance/src/lib.rs` (test harness) | ~13,300 |
