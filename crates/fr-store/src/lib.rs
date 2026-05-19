@@ -14730,7 +14730,9 @@ fn hll_rho(w: u64) -> u8 {
 
 fn hll_parse(data: &[u8]) -> Result<(HllEncoding, Vec<u8>), StoreError> {
     if data.starts_with(HLL_REDIS_MAGIC) {
-        let encoding = data[HLL_REDIS_MAGIC.len()];
+        let Some(&encoding) = data.get(HLL_REDIS_MAGIC.len()) else {
+            return Err(StoreError::InvalidHllValue);
+        };
         match encoding {
             HLL_REDIS_DENSE_ENCODING if data.len() == HLL_REDIS_DENSE_SIZE => {
                 return Ok((
@@ -20101,6 +20103,21 @@ mod tests {
         let count = store.pfcount(&[b"hll"], 0).unwrap();
         // HLL is approximate; allow 100 ± 10
         assert!((90..=110).contains(&count), "count={count}, expected ~100");
+    }
+
+    #[test]
+    fn hll_bare_magic_string_is_invalid_not_panic() {
+        let mut store = Store::new();
+        store.set(b"hll".to_vec(), HLL_REDIS_MAGIC.to_vec(), None, 0);
+
+        assert_eq!(
+            store.pfcount(&[b"hll"], 0),
+            Err(StoreError::InvalidHllValue)
+        );
+        assert_eq!(
+            store.pfadd(b"hll", &[b"x".to_vec()], 0),
+            Err(StoreError::InvalidHllValue)
+        );
     }
 
     #[test]
