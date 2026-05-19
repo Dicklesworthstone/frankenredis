@@ -2839,6 +2839,16 @@ impl<'a> LuaState<'a> {
         }
         globals.insert("cmsgpack".to_string(), LuaValue::Table(cmsgpack_table));
 
+        // struct library bundled with Redis' Lua sandbox.
+        let struct_table = LuaTable::new();
+        for name in &["pack", "unpack", "size"] {
+            struct_table.set(
+                LuaValue::Str(name.as_bytes().to_vec()),
+                LuaValue::RustFunction(format!("struct.{name}")),
+            );
+        }
+        globals.insert("struct".to_string(), LuaValue::Table(struct_table));
+
         // (frankenredis-vgnsc) Standard Lua 5.1 globals also exposed in
         // Redis 7.2.4's sandbox: _VERSION constant, rawequal /
         // gcinfo / collectgarbage function entries. fr's tree-walking
@@ -8036,6 +8046,23 @@ impl<'a> LuaState<'a> {
                 let offset = lua_optional_integer_arg(inv, 3, args.get(2), 0)?;
                 cmsgpack_unpack_with_offset(&data, offset, limit)
             }
+            "struct.pack" => {
+                let inv = self.current_invocation_name.as_deref();
+                let fmt = lua_check_string(inv, args, 0, "pack")?;
+                lua_struct_pack(inv, &fmt, args)
+            }
+            "struct.unpack" => {
+                let inv = self.current_invocation_name.as_deref();
+                let fmt = lua_check_string(inv, args, 0, "unpack")?;
+                let data = lua_check_string(inv, args, 1, "unpack")?;
+                let pos = lua_optional_integer_arg(inv, 3, args.get(2), 1)?;
+                lua_struct_unpack(inv, &fmt, &data, pos)
+            }
+            "struct.size" => {
+                let inv = self.current_invocation_name.as_deref();
+                let fmt = lua_check_string(inv, args, 0, "size")?;
+                Ok(vec![LuaValue::Number(lua_struct_size(inv, &fmt)? as f64)])
+            }
             // (frankenredis-u24vv) `_G` metatable handlers. These are
             // never user-callable directly; they fire when scripts
             // read/write missing keys on `_G`, mirroring the protected
@@ -10519,6 +10546,421 @@ fn strip_trailing_zeros(s: &str) -> String {
     let trimmed = s.trim_end_matches('0');
     let trimmed = trimmed.trim_end_matches('.');
     trimmed.to_string()
+}
+
+// ── struct helpers ─────────────────────────────────────────────────────
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LuaStructEndian {
+    Big,
+    Little,
+}
+
+#[derive(Clone, Copy)]
+struct LuaStructHeader {
+    endian: LuaStructEndian,
+    align: usize,
+}
+
+impl LuaStructHeader {
+    fn new() -> Self {
+        Self {
+            endian: LuaStructEndian::Little,
+            align: 1,
+        }
+    }
+}
+
+const LUA_STRUCT_MAX_INT_SIZE: usize = 32;
+const LUA_STRUCT_INT_SIZE: usize = 4;
+const LUA_STRUCT_LONG_SIZE: usize = 8;
+const LUA_STRUCT_SIZE_T_SIZE: usize = std::mem::size_of::<usize>();
+const LUA_STRUCT_MAX_ALIGN: usize = 8;
+
+fn lua_struct_pack(
+    inv_name: Option<&str>,
+    fmt: &[u8],
+    args: &[LuaValue],
+) -> Result<Vec<LuaValue>, String> {
+    let mut header = LuaStructHeader::new();
+    let mut out = Vec::new();
+    let mut totalsize = 0_usize;
+    let mut arg_idx = 1_usize;
+    let mut fmt_idx = 0_usize;
+
+    while fmt_idx < fmt.len() {
+        let opt = fmt[fmt_idx];
+        fmt_idx += 1;
+        let mut size = lua_struct_optsize(inv_name, opt, fmt, &mut fmt_idx)?;
+        let to_align = lua_struct_to_align(totalsize, &header, opt, size);
+        totalsize = totalsize.saturating_add(to_align);
+        out.extend(std::iter::repeat(0).take(to_align));
+
+        match opt {
+            b'b' | b'B' | b'h' | b'H' | b'l' | b'L' | b'T' | b'i' | b'I' => {
+                let n = lua_check_number(inv_name, args, arg_idx, "pack")?;
+                lua_struct_put_integer(n, header.endian, size, &mut out);
+                arg_idx += 1;
+            }
+            b'x' => out.push(0),
+            b'f' => {
+                let n = lua_check_number(inv_name, args, arg_idx, "pack")?;
+                let bytes = match header.endian {
+                    LuaStructEndian::Big => (n as f32).to_be_bytes(),
+                    LuaStructEndian::Little => (n as f32).to_le_bytes(),
+                };
+                out.extend_from_slice(&bytes);
+                arg_idx += 1;
+            }
+            b'd' => {
+                let n = lua_check_number(inv_name, args, arg_idx, "pack")?;
+                let bytes = match header.endian {
+                    LuaStructEndian::Big => n.to_be_bytes(),
+                    LuaStructEndian::Little => n.to_le_bytes(),
+                };
+                out.extend_from_slice(&bytes);
+                arg_idx += 1;
+            }
+            b'c' | b's' => {
+                let bytes = lua_check_string(inv_name, args, arg_idx, "pack")?;
+                if size == 0 {
+                    size = bytes.len();
+                }
+                if bytes.len() < size {
+                    return Err(lua_format_argerror(
+                        inv_name,
+                        "pack",
+                        arg_idx + 1,
+                        "string too short",
+                    ));
+                }
+                out.extend_from_slice(&bytes[..size]);
+                if opt == b's' {
+                    out.push(0);
+                    size += 1;
+                }
+                arg_idx += 1;
+            }
+            _ => lua_struct_control_option(inv_name, "pack", opt, fmt, &mut fmt_idx, &mut header)?,
+        }
+        totalsize = totalsize.saturating_add(size);
+    }
+
+    Ok(vec![LuaValue::Str(out)])
+}
+
+fn lua_struct_unpack(
+    inv_name: Option<&str>,
+    fmt: &[u8],
+    data: &[u8],
+    pos: i64,
+) -> Result<Vec<LuaValue>, String> {
+    if pos <= 0 {
+        return Err(lua_format_argerror(
+            inv_name,
+            "unpack",
+            3,
+            "offset must be 1 or greater",
+        ));
+    }
+
+    let mut header = LuaStructHeader::new();
+    let mut results = Vec::new();
+    let mut data_pos = (pos - 1) as usize;
+    let mut fmt_idx = 0_usize;
+
+    while fmt_idx < fmt.len() {
+        let opt = fmt[fmt_idx];
+        fmt_idx += 1;
+        let mut size = lua_struct_optsize(inv_name, opt, fmt, &mut fmt_idx)?;
+        data_pos = data_pos.saturating_add(lua_struct_to_align(data_pos, &header, opt, size));
+        lua_struct_check_data_len(inv_name, data, data_pos, size)?;
+
+        match opt {
+            b'b' | b'B' | b'h' | b'H' | b'l' | b'L' | b'T' | b'i' | b'I' => {
+                let is_signed = opt.is_ascii_lowercase();
+                let value = lua_struct_get_integer(
+                    &data[data_pos..data_pos + size],
+                    header.endian,
+                    is_signed,
+                );
+                results.push(LuaValue::Number(value));
+            }
+            b'x' => {}
+            b'f' => {
+                let mut bytes = [0_u8; 4];
+                bytes.copy_from_slice(&data[data_pos..data_pos + 4]);
+                let value = match header.endian {
+                    LuaStructEndian::Big => f32::from_be_bytes(bytes),
+                    LuaStructEndian::Little => f32::from_le_bytes(bytes),
+                };
+                results.push(LuaValue::Number(value as f64));
+            }
+            b'd' => {
+                let mut bytes = [0_u8; 8];
+                bytes.copy_from_slice(&data[data_pos..data_pos + 8]);
+                let value = match header.endian {
+                    LuaStructEndian::Big => f64::from_be_bytes(bytes),
+                    LuaStructEndian::Little => f64::from_le_bytes(bytes),
+                };
+                results.push(LuaValue::Number(value));
+            }
+            b'c' => {
+                if size == 0 {
+                    let Some(LuaValue::Number(n)) = results.pop() else {
+                        return Err(lua_struct_runtime_error(
+                            inv_name,
+                            "format 'c0' needs a previous size",
+                        ));
+                    };
+                    size = lua_struct_number_to_size(n);
+                    lua_struct_check_data_len(inv_name, data, data_pos, size)?;
+                }
+                results.push(LuaValue::Str(data[data_pos..data_pos + size].to_vec()));
+            }
+            b's' => {
+                let Some(end_rel) = data[data_pos..].iter().position(|b| *b == 0) else {
+                    return Err(lua_struct_runtime_error(inv_name, "unfinished string in data"));
+                };
+                size = end_rel + 1;
+                results.push(LuaValue::Str(data[data_pos..data_pos + end_rel].to_vec()));
+            }
+            _ => lua_struct_control_option(inv_name, "unpack", opt, fmt, &mut fmt_idx, &mut header)?,
+        }
+        data_pos = data_pos.saturating_add(size);
+    }
+
+    results.push(LuaValue::Number((data_pos + 1) as f64));
+    Ok(results)
+}
+
+fn lua_struct_size(inv_name: Option<&str>, fmt: &[u8]) -> Result<usize, String> {
+    let mut header = LuaStructHeader::new();
+    let mut pos = 0_usize;
+    let mut fmt_idx = 0_usize;
+
+    while fmt_idx < fmt.len() {
+        let opt = fmt[fmt_idx];
+        fmt_idx += 1;
+        let size = lua_struct_optsize(inv_name, opt, fmt, &mut fmt_idx)?;
+        pos = pos.saturating_add(lua_struct_to_align(pos, &header, opt, size));
+        if opt == b's' {
+            return Err(lua_format_argerror(
+                inv_name,
+                "size",
+                1,
+                "option 's' has no fixed size",
+            ));
+        }
+        if opt == b'c' && size == 0 {
+            return Err(lua_format_argerror(
+                inv_name,
+                "size",
+                1,
+                "option 'c0' has no fixed size",
+            ));
+        }
+        if !opt.is_ascii_alphanumeric() {
+            lua_struct_control_option(inv_name, "size", opt, fmt, &mut fmt_idx, &mut header)?;
+        }
+        pos = pos.saturating_add(size);
+    }
+
+    Ok(pos)
+}
+
+fn lua_struct_optsize(
+    inv_name: Option<&str>,
+    opt: u8,
+    fmt: &[u8],
+    fmt_idx: &mut usize,
+) -> Result<usize, String> {
+    match opt {
+        b'B' | b'b' => Ok(1),
+        b'H' | b'h' => Ok(2),
+        b'L' | b'l' => Ok(LUA_STRUCT_LONG_SIZE),
+        b'T' => Ok(LUA_STRUCT_SIZE_T_SIZE),
+        b'f' => Ok(4),
+        b'd' => Ok(8),
+        b'x' => Ok(1),
+        b'c' => lua_struct_getnum(inv_name, fmt, fmt_idx, 1),
+        b'i' | b'I' => {
+            let size = lua_struct_getnum(inv_name, fmt, fmt_idx, LUA_STRUCT_INT_SIZE)?;
+            if size > LUA_STRUCT_MAX_INT_SIZE {
+                return Err(lua_struct_runtime_error(
+                    inv_name,
+                    &format!(
+                        "integral size {size} is larger than limit of {LUA_STRUCT_MAX_INT_SIZE}"
+                    ),
+                ));
+            }
+            Ok(size)
+        }
+        _ => Ok(0),
+    }
+}
+
+fn lua_struct_getnum(
+    inv_name: Option<&str>,
+    fmt: &[u8],
+    fmt_idx: &mut usize,
+    default: usize,
+) -> Result<usize, String> {
+    if fmt.get(*fmt_idx).is_none_or(|b| !b.is_ascii_digit()) {
+        return Ok(default);
+    }
+
+    let mut value = 0_usize;
+    while let Some(byte) = fmt.get(*fmt_idx)
+        && byte.is_ascii_digit()
+    {
+        let digit = (byte - b'0') as usize;
+        if value > (i32::MAX as usize / 10)
+            || value.saturating_mul(10) > i32::MAX as usize - digit
+        {
+            return Err(lua_struct_runtime_error(inv_name, "integral size overflow"));
+        }
+        value = value * 10 + digit;
+        *fmt_idx += 1;
+    }
+    Ok(value)
+}
+
+fn lua_struct_control_option(
+    inv_name: Option<&str>,
+    fname: &str,
+    opt: u8,
+    fmt: &[u8],
+    fmt_idx: &mut usize,
+    header: &mut LuaStructHeader,
+) -> Result<(), String> {
+    match opt {
+        b' ' => Ok(()),
+        b'>' => {
+            header.endian = LuaStructEndian::Big;
+            Ok(())
+        }
+        b'<' => {
+            header.endian = LuaStructEndian::Little;
+            Ok(())
+        }
+        b'!' => {
+            let align = lua_struct_getnum(inv_name, fmt, fmt_idx, LUA_STRUCT_MAX_ALIGN)?;
+            if align == 0 || (align & (align - 1)) != 0 {
+                return Err(lua_struct_runtime_error(
+                    inv_name,
+                    &format!("alignment {align} is not a power of 2"),
+                ));
+            }
+            header.align = align;
+            Ok(())
+        }
+        _ => Err(lua_format_argerror(
+            inv_name,
+            fname,
+            1,
+            &format!("invalid format option '{}'", char::from(opt)),
+        )),
+    }
+}
+
+fn lua_struct_to_align(len: usize, header: &LuaStructHeader, opt: u8, mut size: usize) -> usize {
+    if size == 0 || opt == b'c' {
+        return 0;
+    }
+    if size > header.align {
+        size = header.align;
+    }
+    (size - (len & (size - 1))) & (size - 1)
+}
+
+fn lua_struct_put_integer(n: f64, endian: LuaStructEndian, size: usize, out: &mut Vec<u8>) {
+    let mut value = if n < 0.0 { (n as i64) as u64 } else { n as u64 };
+    match endian {
+        LuaStructEndian::Little => {
+            for _ in 0..size {
+                out.push((value & 0xff) as u8);
+                value >>= 8;
+            }
+        }
+        LuaStructEndian::Big => {
+            let mut buf = vec![0_u8; size];
+            for byte in buf.iter_mut().rev() {
+                *byte = (value & 0xff) as u8;
+                value >>= 8;
+            }
+            out.extend_from_slice(&buf);
+        }
+    }
+}
+
+fn lua_struct_get_integer(bytes: &[u8], endian: LuaStructEndian, is_signed: bool) -> f64 {
+    let mut value = 0_u64;
+    match endian {
+        LuaStructEndian::Big => {
+            for byte in bytes {
+                value = (value << 8) | u64::from(*byte);
+            }
+        }
+        LuaStructEndian::Little => {
+            for byte in bytes.iter().rev() {
+                value = (value << 8) | u64::from(*byte);
+            }
+        }
+    }
+
+    if !is_signed {
+        return value as f64;
+    }
+    let bit_count = (bytes.len() * 8).min(64);
+    if bit_count == 0 {
+        return 0.0;
+    }
+    if bit_count == 64 {
+        return (value as i64) as f64;
+    }
+    let sign_bit = 1_u64 << (bit_count - 1);
+    if value & sign_bit != 0 {
+        let mask = (!0_u64) << bit_count;
+        (value | mask) as i64 as f64
+    } else {
+        value as f64
+    }
+}
+
+fn lua_struct_number_to_size(n: f64) -> usize {
+    if !n.is_finite() || n <= 0.0 {
+        0
+    } else if n >= usize::MAX as f64 {
+        usize::MAX
+    } else {
+        n as usize
+    }
+}
+
+fn lua_struct_check_data_len(
+    inv_name: Option<&str>,
+    data: &[u8],
+    pos: usize,
+    size: usize,
+) -> Result<(), String> {
+    if size > data.len() || pos > data.len() - size {
+        Err(lua_format_argerror(
+            inv_name,
+            "unpack",
+            2,
+            "data string too short",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn lua_struct_runtime_error(inv_name: Option<&str>, message: &str) -> String {
+    match inv_name {
+        Some(_) => format!("user_script:1: {message}"),
+        None => message.to_string(),
+    }
 }
 
 /// (frankenredis-v95aj) Normalise a LuaValue to u32 for bit library
@@ -14632,6 +15074,68 @@ mod tests {
         assert_eq!(
             frame,
             RespFrame::BulkString(Some(b"Bad data format in input.".to_vec()))
+        );
+    }
+
+    #[test]
+    fn lua_struct_pack_unpack_size_surface_oybyb() {
+        // (frankenredis-oybyb) Redis exposes lua-struct as a global
+        // sandbox library for fixed-width binary packing.
+        let mut store = Store::new();
+
+        let frame = eval_script(
+            b"return type(struct)..':'..type(struct.pack)..':'..type(struct.unpack)..':'..type(struct.size)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(b"table:function:function:function".to_vec()))
+        );
+
+        let frame = eval_script(
+            b"local n,pos=struct.unpack('>I2', string.char(0x12,0x34)); return tostring(n)..':'..tostring(pos)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"4660:3".to_vec())));
+
+        let frame = eval_script(
+            b"local b=struct.pack('>i2Bc0s', -2, 3, 'abc', 'z'); local i,s,z,pos=struct.unpack('>i2Bc0s', b); return tostring(i)..':'..s..':'..z..':'..tostring(pos)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"-2:abc:z:9".to_vec())));
+
+        let frame = eval_script(
+            b"return tostring(struct.size('!4bi'))..':'..tostring(struct.size('>i2xB'))",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(frame, RespFrame::BulkString(Some(b"8:4".to_vec())));
+
+        let frame = eval_script(
+            b"local ok,e=pcall(struct.unpack, 'c0', ''); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(
+                b"false:format 'c0' needs a previous size".to_vec()
+            ))
+        );
+
+        let frame = eval_script(
+            b"local ok,e=pcall(struct.size, 's'); return tostring(ok)..':'..tostring(e)",
+            &[], &[], &mut store, 0,
+        )
+        .unwrap();
+        assert_eq!(
+            frame,
+            RespFrame::BulkString(Some(
+                b"false:bad argument #1 to '?' (option 's' has no fixed size)".to_vec()
+            ))
         );
     }
 
