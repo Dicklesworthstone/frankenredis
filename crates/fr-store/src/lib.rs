@@ -12196,6 +12196,9 @@ impl Store {
                         .ok()
                         .and_then(|raw| raw.parse::<f64>().ok())
                         .ok_or(StoreError::InvalidDumpPayload)?;
+                    if score.is_nan() {
+                        return Err(StoreError::InvalidDumpPayload);
+                    }
                     zs.insert(pair[0].clone(), score);
                 }
                 Value::SortedSet(zs)
@@ -15565,7 +15568,8 @@ mod tests {
         ScoreBound, ScoreMember, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
         StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
         StreamPendingEntry, Value, ValueType, decode_length, decode_listpack_strings,
-        decode_rdb_string, encode_db_key, encode_length, hll_sparse_decode,
+        decode_rdb_string, encode_db_key, encode_length, encode_listpack_strings,
+        hll_sparse_decode,
     };
 
     fn group_read_options(
@@ -20767,6 +20771,20 @@ mod tests {
         store2.restore_key(b"z", 0, &payload, false, 100).unwrap();
         assert_eq!(store2.zscore(b"z", b"a", 100).unwrap(), Some(1.5));
         assert_eq!(store2.zscore(b"z", b"b", 100).unwrap(), Some(2.5));
+    }
+
+    #[test]
+    fn restore_rejects_zset_listpack_nan_score() {
+        let listpack = encode_listpack_strings(&[b"a".as_slice(), b"nan".as_slice()]).unwrap();
+        let mut body = vec![RDB_TYPE_ZSET_LISTPACK];
+        append_raw_dump_bulk(&mut body, &listpack);
+        let payload = append_dump_footer(body);
+
+        let mut store = Store::new();
+        assert_eq!(
+            store.restore_key(b"z", 0, &payload, false, 100),
+            Err(StoreError::InvalidDumpPayload)
+        );
     }
 
     #[test]
