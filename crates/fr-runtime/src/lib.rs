@@ -8033,6 +8033,10 @@ impl Runtime {
                 "hll-sparse-max-bytes",
                 self.server.store.hll_sparse_max_bytes,
             ),
+            (
+                "hll-sparse-max-bytes",
+                self.server.store.hll_sparse_max_bytes,
+            ),
         ];
         for &(name, value) in encoding_params {
             if Self::config_pattern_matches(pattern, name) {
@@ -8243,6 +8247,7 @@ impl Runtime {
                 || name == "set-max-intset-entries"
                 || name == "set-max-listpack-entries"
                 || name == "set-max-listpack-value"
+                || name == "hll-sparse-max-bytes"
                 || name == "zset-max-listpack-entries"
                 || name == "zset-max-listpack-value"
                 || name == "zset-max-ziplist-entries"
@@ -8356,6 +8361,7 @@ impl Runtime {
         let mut next_output_buffer_limit: Option<usize> = None;
         let mut next_maxmemory_samples: Option<usize> = None;
         let mut next_command_time_budget: Option<u64> = None;
+        let mut next_hll_sparse_max_bytes: Option<usize> = None;
         let mut next_appendonly: Option<bool> = None;
         let mut next_appendfsync: Option<AppendFsyncMode> = None;
         let mut next_acl_pubsub_default: Option<AclPubsubDefault> = None;
@@ -9450,7 +9456,11 @@ impl Runtime {
                         );
                     }
                 };
-                static_override_updates.push((canonical.to_string(), parsed.to_string()));
+                if canonical == "hll-sparse-max-bytes" {
+                    next_hll_sparse_max_bytes = Some(parsed);
+                } else {
+                    static_override_updates.push((canonical.to_string(), parsed.to_string()));
+                }
                 continue;
             }
             if parameter.eq_ignore_ascii_case("active-defrag-max-scan-fields") {
@@ -10171,6 +10181,13 @@ impl Runtime {
                 self.server.replication_ack_state.local_fsync_offset =
                     self.server.replication_ack_state.primary_offset;
             }
+        if let Some(hll_sparse_max_bytes) = next_hll_sparse_max_bytes {
+            self.server.store.hll_sparse_max_bytes = hll_sparse_max_bytes;
+            self.server.config_overrides.insert(
+                "hll-sparse-max-bytes".to_string(),
+                hll_sparse_max_bytes.to_string(),
+            );
+        }
         } else if self.server.local_waitaof_fsync_tracks_primary_offset() {
             self.server.replication_ack_state.local_fsync_offset =
                 self.server.replication_ack_state.primary_offset;
@@ -23710,6 +23727,27 @@ mod tests {
         let maxmemory_policy =
             rt.execute_frame(command(&[b"CONFIG", b"GET", b"maxmemory-policy"]), 1);
         assert_eq!(
+    #[test]
+    fn config_set_hll_sparse_max_bytes_updates_store_threshold() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"hll-sparse-max-bytes", b"64"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.server.store.hll_sparse_max_bytes, 64);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"hll-sparse-max-bytes"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"hll-sparse-max-bytes".to_vec())),
+                RespFrame::BulkString(Some(b"64".to_vec())),
+            ]))
+        );
+    }
+
             maxmemory_policy,
             RespFrame::Array(Some(vec![
                 RespFrame::BulkString(Some(b"maxmemory-policy".to_vec())),

@@ -1452,6 +1452,7 @@ pub struct Store {
     pub set_max_listpack_value: usize,
     pub zset_max_listpack_entries: usize,
     pub zset_max_listpack_value: usize,
+    pub hll_sparse_max_bytes: usize,
 
     /// Seed for deterministic pseudo-random operations (HRANDFIELD, RANDOMKEY, etc.).
     pub rng_seed: u64,
@@ -1795,6 +1796,7 @@ impl Default for Store {
             set_max_listpack_value: 64,
             zset_max_listpack_entries: 128,
             zset_max_listpack_value: 64,
+            hll_sparse_max_bytes: HLL_REDIS_SPARSE_MAX_BYTES,
             rng_seed: 0xDEADBEEF_C0FFEE11,
             dirty: 0,
             // (frankenredis-30hub) Mirror upstream server.c::initServerConfig
@@ -9372,8 +9374,13 @@ impl Store {
             let expires_at = self.entries.get(key).and_then(|e| e.expires_at_ms);
             let encoding = match encoding {
                 HllEncoding::Dense => HllEncoding::Dense,
-                HllEncoding::Sparse if hll_sparse_should_promote(&registers) => HllEncoding::Dense,
-                HllEncoding::Sparse => HllEncoding::Sparse,
+                HllEncoding::Sparse => {
+                    if hll_sparse_should_promote(&registers, self.hll_sparse_max_bytes) {
+                        HllEncoding::Dense
+                    } else {
+                        HllEncoding::Sparse
+                    }
+                }
             };
             let data = hll_encode(&registers, encoding);
             let mut entry = Entry::new(Value::String(data), expires_at, now_ms);
@@ -9451,7 +9458,9 @@ impl Store {
 
         let dest_encoding = match dest_encoding {
             HllEncoding::Dense => HllEncoding::Dense,
-            HllEncoding::Sparse if hll_sparse_should_promote(&merged) => HllEncoding::Dense,
+            HllEncoding::Sparse if hll_sparse_should_promote(&merged, self.hll_sparse_max_bytes) => {
+                HllEncoding::Dense
+            }
             HllEncoding::Sparse => HllEncoding::Sparse,
         };
         let data = hll_encode(&merged, dest_encoding);
@@ -14620,12 +14629,18 @@ fn invalid_lex_range_error() -> StoreError {
 
 const HLL_P: u32 = 14;
 const HLL_REGISTERS: usize = 1 << HLL_P; // 16384
-const HLL_LEGACY_MAGIC: &[u8] = b"HYLL";
+const HLL_REDIS_MAGIC: &[u8] = b"HYLL";
 const HLL_MAGIC_V2: &[u8] = b"HYL2";
 const HLL_HEADER_SIZE: usize = HLL_MAGIC_V2.len() + 1;
 const HLL_DATA_SIZE: usize = HLL_HEADER_SIZE + HLL_REGISTERS; // 16389
-const HLL_LEGACY_DATA_SIZE: usize = HLL_LEGACY_MAGIC.len() + HLL_REGISTERS; // 16388
+const HLL_LEGACY_DATA_SIZE: usize = HLL_REDIS_MAGIC.len() + HLL_REGISTERS; // 16388
 const HLL_REDIS_HEADER_SIZE: usize = 16;
+const HLL_REDIS_DENSE_REGISTER_BYTES: usize = (HLL_REGISTERS * 6).div_ceil(8);
+const HLL_REDIS_DENSE_SIZE: usize = HLL_REDIS_HEADER_SIZE + HLL_REDIS_DENSE_REGISTER_BYTES;
+const HLL_REDIS_DENSE_ENCODING: u8 = 0;
+const HLL_REDIS_SPARSE_ENCODING: u8 = 1;
+const HLL_SPARSE_XZERO_BIT: u8 = 0x40;
+const HLL_SPARSE_VAL_BIT: u8 = 0x80;
 const HLL_SPARSE_VAL_MAX_VALUE: u8 = 32;
 const HLL_SPARSE_VAL_MAX_LEN: usize = 4;
 const HLL_SPARSE_ZERO_MAX_LEN: usize = 64;
@@ -14646,13 +14661,6 @@ enum HllSparseOpcode {
 }
 
 impl HllEncoding {
-    fn as_byte(self) -> u8 {
-        match self {
-            Self::Sparse => 0,
-            Self::Dense => 1,
-        }
-    }
-
     fn from_byte(byte: u8) -> Option<Self> {
         match byte {
             0 => Some(Self::Sparse),
@@ -14720,13 +14728,32 @@ fn hll_rho(w: u64) -> u8 {
 }
 
 fn hll_parse(data: &[u8]) -> Result<(HllEncoding, Vec<u8>), StoreError> {
+    if data.starts_with(HLL_REDIS_MAGIC) {
+        let encoding = data[HLL_REDIS_MAGIC.len()];
+        match encoding {
+            HLL_REDIS_DENSE_ENCODING if data.len() == HLL_REDIS_DENSE_SIZE => {
+                return Ok((
+                    HllEncoding::Dense,
+                    hll_decode_dense_registers(&data[HLL_REDIS_HEADER_SIZE..])?,
+                ));
+            }
+            HLL_REDIS_SPARSE_ENCODING if data.len() >= HLL_REDIS_HEADER_SIZE => {
+                return Ok((
+                    HllEncoding::Sparse,
+                    hll_decode_sparse_registers(&data[HLL_REDIS_HEADER_SIZE..])?,
+                ));
+            }
+            _ => {}
+        }
+        if data.len() == HLL_LEGACY_DATA_SIZE {
+            return Ok((HllEncoding::Dense, data[HLL_REDIS_MAGIC.len()..].to_vec()));
+        }
+        return Err(StoreError::InvalidHllValue);
+    }
     if data.len() == HLL_DATA_SIZE && data.starts_with(HLL_MAGIC_V2) {
         let encoding =
             HllEncoding::from_byte(data[HLL_MAGIC_V2.len()]).ok_or(StoreError::InvalidHllValue)?;
         return Ok((encoding, data[HLL_HEADER_SIZE..].to_vec()));
-    }
-    if data.len() == HLL_LEGACY_DATA_SIZE && data.starts_with(HLL_LEGACY_MAGIC) {
-        return Ok((HllEncoding::Dense, data[HLL_LEGACY_MAGIC.len()..].to_vec()));
     }
     Err(StoreError::InvalidHllValue)
 }
@@ -14736,11 +14763,121 @@ fn hll_parse_registers(data: &[u8]) -> Result<Vec<u8>, StoreError> {
 }
 
 fn hll_encode(registers: &[u8], encoding: HllEncoding) -> Vec<u8> {
-    let mut data = Vec::with_capacity(HLL_DATA_SIZE);
-    data.extend_from_slice(HLL_MAGIC_V2);
-    data.push(encoding.as_byte());
-    data.extend_from_slice(registers);
+    let mut data = Vec::new();
+    data.extend_from_slice(HLL_REDIS_MAGIC);
+    data.push(match encoding {
+        HllEncoding::Dense => HLL_REDIS_DENSE_ENCODING,
+        HllEncoding::Sparse => HLL_REDIS_SPARSE_ENCODING,
+    });
+    data.extend_from_slice(&[0, 0, 0]);
+    data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 0x80]);
+    match encoding {
+        HllEncoding::Dense => data.extend_from_slice(&hll_encode_dense_registers(registers)),
+        HllEncoding::Sparse => {
+            if let Some(encoded) = hll_encode_sparse_registers(registers) {
+                data.extend_from_slice(&encoded);
+            } else {
+                data[HLL_REDIS_MAGIC.len()] = HLL_REDIS_DENSE_ENCODING;
+                data.extend_from_slice(&hll_encode_dense_registers(registers));
+            }
+        }
+    }
     data
+}
+
+fn hll_encode_dense_registers(registers: &[u8]) -> Vec<u8> {
+    let mut payload = vec![0u8; HLL_REDIS_DENSE_REGISTER_BYTES];
+    for (index, &register) in registers.iter().take(HLL_REGISTERS).enumerate() {
+        let bit = index * 6;
+        let byte = bit / 8;
+        let shift = bit % 8;
+        let value = u16::from(register & 0x3f);
+        payload[byte] |= (value << shift) as u8;
+        if shift > 2 {
+            payload[byte + 1] |= (value >> (8 - shift)) as u8;
+        }
+    }
+    payload
+}
+
+fn hll_decode_dense_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
+    if payload.len() != HLL_REDIS_DENSE_REGISTER_BYTES {
+        return Err(StoreError::InvalidHllValue);
+    }
+    let mut registers = vec![0u8; HLL_REGISTERS];
+    for (index, register) in registers.iter_mut().enumerate() {
+        let bit = index * 6;
+        let byte = bit / 8;
+        let shift = bit % 8;
+        let raw = u16::from(payload[byte]) | u16::from(payload.get(byte + 1).copied().unwrap_or(0)) << 8;
+        *register = ((raw >> shift) & 0x3f) as u8;
+    }
+    Ok(registers)
+}
+
+fn hll_encode_sparse_registers(registers: &[u8]) -> Option<Vec<u8>> {
+    let opcodes = hll_sparse_opcodes(registers)?;
+    let mut payload = Vec::with_capacity(opcodes.len());
+    for opcode in opcodes {
+        match opcode {
+            HllSparseOpcode::Zero(len) => {
+                if !(1..=HLL_SPARSE_ZERO_MAX_LEN).contains(&len) {
+                    return None;
+                }
+                payload.push((len - 1) as u8);
+            }
+            HllSparseOpcode::XZero(len) => {
+                if !(1..=HLL_SPARSE_XZERO_MAX_LEN).contains(&len) {
+                    return None;
+                }
+                let adjusted = len - 1;
+                payload.push(HLL_SPARSE_XZERO_BIT | ((adjusted >> 8) as u8 & 0x3f));
+                payload.push(adjusted as u8);
+            }
+            HllSparseOpcode::Val { value, len } => {
+                if !(1..=HLL_SPARSE_VAL_MAX_VALUE).contains(&value)
+                    || !(1..=HLL_SPARSE_VAL_MAX_LEN).contains(&len)
+                {
+                    return None;
+                }
+                payload.push(HLL_SPARSE_VAL_BIT | ((value - 1) << 2) | ((len - 1) as u8));
+            }
+        }
+    }
+    Some(payload)
+}
+
+fn hll_decode_sparse_registers(payload: &[u8]) -> Result<Vec<u8>, StoreError> {
+    let mut registers = Vec::with_capacity(HLL_REGISTERS);
+    let mut index = 0;
+    while index < payload.len() {
+        let byte = payload[index];
+        if byte & 0xc0 == 0 {
+            let len = usize::from(byte & 0x3f) + 1;
+            registers.resize(registers.len().saturating_add(len), 0);
+            index += 1;
+        } else if byte & 0xc0 == HLL_SPARSE_XZERO_BIT {
+            let Some(&next) = payload.get(index + 1) else {
+                return Err(StoreError::InvalidHllValue);
+            };
+            let len = (((usize::from(byte & 0x3f)) << 8) | usize::from(next)) + 1;
+            registers.resize(registers.len().saturating_add(len), 0);
+            index += 2;
+        } else {
+            let value = ((byte >> 2) & 0x1f) + 1;
+            let len = usize::from(byte & 0x03) + 1;
+            registers.resize(registers.len().saturating_add(len), value);
+            index += 1;
+        }
+        if registers.len() > HLL_REGISTERS {
+            return Err(StoreError::InvalidHllValue);
+        }
+    }
+    if registers.len() == HLL_REGISTERS {
+        Ok(registers)
+    } else {
+        Err(StoreError::InvalidHllValue)
+    }
 }
 
 fn hll_sparse_opcodes(registers: &[u8]) -> Option<Vec<HllSparseOpcode>> {
@@ -14796,9 +14933,9 @@ fn hll_sparse_storage_len(registers: &[u8]) -> Option<usize> {
     })
 }
 
-fn hll_sparse_should_promote(registers: &[u8]) -> bool {
+fn hll_sparse_should_promote(registers: &[u8], max_sparse_bytes: usize) -> bool {
     match hll_sparse_storage_len(registers) {
-        Some(len) => len > HLL_REDIS_SPARSE_MAX_BYTES,
+        Some(len) => len > max_sparse_bytes,
         None => true,
     }
 }
@@ -15415,16 +15552,17 @@ fn match_character_class(pattern: &[u8], pi: usize, ch: u8) -> Option<(bool, usi
 mod tests {
     use super::{
         BitRangeUnit, DUMP_CRC64_LEN, DUMP_TRAILER_LEN, DUMP_VERSION_LEN, EvictionLoopFailure,
-        EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue, HLL_REGISTERS, LatencySample,
-        MaxmemoryPolicy, MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC,
-        NOTIFY_KEYEVENT, PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH,
-        RDB_TYPE_HASH_LISTPACK, RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET, RDB_TYPE_SET_INTSET,
-        RDB_TYPE_SET_LISTPACK, RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET_2,
-        RDB_TYPE_ZSET_LISTPACK, ScoreBound, ScoreMember, Store, StoreError, StreamAutoClaimOptions,
-        StreamAutoClaimReply, StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor,
-        StreamGroupReadOptions, StreamPendingEntry, Value, ValueType, decode_length,
-        decode_listpack_strings, decode_rdb_string, encode_db_key, encode_length,
-        hll_sparse_decode,
+        EvictionLoopStatus, EvictionSafetyGateState, ExpireTimeValue, HLL_REDIS_DENSE_ENCODING,
+        HLL_REDIS_DENSE_SIZE, HLL_REDIS_HEADER_SIZE, HLL_REDIS_MAGIC, HLL_REDIS_SPARSE_ENCODING,
+        HLL_REGISTERS, HLL_SPARSE_XZERO_BIT, LatencySample, MaxmemoryPolicy,
+        MaxmemoryPressureLevel, NOTIFY_EVICTED, NOTIFY_EXPIRED, NOTIFY_GENERIC, NOTIFY_KEYEVENT,
+        PttlValue, RDB_DUMP_VERSION, RDB_OPCODE_FUNCTION2, RDB_TYPE_HASH, RDB_TYPE_HASH_LISTPACK,
+        RDB_TYPE_LIST_QUICKLIST_2, RDB_TYPE_SET, RDB_TYPE_SET_INTSET, RDB_TYPE_SET_LISTPACK,
+        RDB_TYPE_STREAM_LISTPACKS_3, RDB_TYPE_STRING, RDB_TYPE_ZSET_2, RDB_TYPE_ZSET_LISTPACK,
+        ScoreBound, ScoreMember, Store, StoreError, StreamAutoClaimOptions, StreamAutoClaimReply,
+        StreamClaimOptions, StreamClaimReply, StreamGroupReadCursor, StreamGroupReadOptions,
+        StreamPendingEntry, Value, ValueType, decode_length, decode_listpack_strings,
+        decode_rdb_string, encode_db_key, encode_length, hll_sparse_decode,
     };
 
     fn group_read_options(
@@ -19895,6 +20033,57 @@ mod tests {
         assert!(store.pfadd(b"hll", &[], 0).unwrap());
         // Second call with no elements, key already exists, no change
         assert!(!store.pfadd(b"hll", &[], 0).unwrap());
+    }
+
+    #[test]
+    fn pfadd_empty_hll_uses_redis_sparse_xzero_payload() {
+        let mut store = Store::new();
+        assert!(store.pfadd(b"hll", &[], 0).unwrap());
+
+        let data = store.get(b"hll", 0).unwrap().unwrap();
+        assert_eq!(&data[..HLL_REDIS_MAGIC.len()], HLL_REDIS_MAGIC);
+        assert_eq!(data[HLL_REDIS_MAGIC.len()], HLL_REDIS_SPARSE_ENCODING);
+        assert_eq!(data.len(), HLL_REDIS_HEADER_SIZE + 2);
+        assert_eq!(
+            &data[HLL_REDIS_HEADER_SIZE..],
+            &[HLL_SPARSE_XZERO_BIT | 0x3f, 0xff]
+        );
+        assert_eq!(store.strlen(b"hll", 0).unwrap(), HLL_REDIS_HEADER_SIZE + 2);
+    }
+
+    #[test]
+    fn pfadd_low_cardinality_hll_stays_sparse_and_compact() {
+        let mut store = Store::new();
+        let elements: Vec<Vec<u8>> = (0..100).map(|i| format!("elem{i}").into_bytes()).collect();
+        assert!(store.pfadd(b"hll", &elements, 0).unwrap());
+
+        let data = store.get(b"hll", 0).unwrap().unwrap();
+        assert_eq!(&data[..HLL_REDIS_MAGIC.len()], HLL_REDIS_MAGIC);
+        assert_eq!(data[HLL_REDIS_MAGIC.len()], HLL_REDIS_SPARSE_ENCODING);
+        assert!(
+            data.len() < HLL_REDIS_DENSE_SIZE,
+            "low-cardinality HLL should remain compact, len={}",
+            data.len()
+        );
+        assert_eq!(store.hll_debug_encoding(b"hll", 0).unwrap(), Some("sparse"));
+        let count = store.pfcount(&[b"hll"], 0).unwrap();
+        assert!((90..=110).contains(&count), "count={count}, expected ~100");
+    }
+
+    #[test]
+    fn pfadd_promotes_to_redis_packed_dense_when_sparse_limit_is_exceeded() {
+        let mut store = Store::new();
+        store.hll_sparse_max_bytes = 64;
+        let elements: Vec<Vec<u8>> = (0..100).map(|i| format!("elem{i}").into_bytes()).collect();
+        assert!(store.pfadd(b"hll", &elements, 0).unwrap());
+
+        let data = store.get(b"hll", 0).unwrap().unwrap();
+        assert_eq!(&data[..HLL_REDIS_MAGIC.len()], HLL_REDIS_MAGIC);
+        assert_eq!(data[HLL_REDIS_MAGIC.len()], HLL_REDIS_DENSE_ENCODING);
+        assert_eq!(data.len(), HLL_REDIS_DENSE_SIZE);
+        assert_eq!(store.hll_debug_encoding(b"hll", 0).unwrap(), Some("dense"));
+        let count = store.pfcount(&[b"hll"], 0).unwrap();
+        assert!((90..=110).contains(&count), "count={count}, expected ~100");
     }
 
     #[test]
