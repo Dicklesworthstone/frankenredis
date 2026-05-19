@@ -927,17 +927,23 @@ impl AclUser {
             .join(" ")
     }
 
-    /// Append an ACL key pattern, skipping exact (pattern + permission)
-    /// duplicates — mirrors upstream acl.c `ACLSetSelectorKeyPattern`, which
-    /// returns early when the same pattern with the same flags already exists.
+    /// Append an ACL key pattern, merging permissions for duplicate patterns.
+    /// Upstream acl.c compares only the glob string in `listSearchKey`, then
+    /// ORs the permission flags into the existing entry.
     fn add_key_pattern(&mut self, pattern: Vec<u8>, read: bool, write: bool) {
-        let entry = AclKeyPattern {
-            pattern,
-            read,
-            write,
-        };
-        if !self.key_patterns.contains(&entry) {
-            self.key_patterns.push(entry);
+        if let Some(existing) = self
+            .key_patterns
+            .iter_mut()
+            .find(|existing| existing.pattern == pattern)
+        {
+            existing.read |= read;
+            existing.write |= write;
+        } else {
+            self.key_patterns.push(AclKeyPattern {
+                pattern,
+                read,
+                write,
+            });
         }
         self.all_keys = false;
     }
@@ -3707,8 +3713,7 @@ impl Runtime {
     /// clientMemUsage(c) = querybuf_alloc + reply_buffer_size + per-client
     /// struct overhead; fr's per-session contribution is 432 (struct
     /// overhead, same baseline tepuj uses for tot-mem) + qbuf + qbuf-free
-    /// + output_buffer. The replica/normal bucket follows
-    /// Runtime::is_replica.
+    /// + output_buffer. The replica/normal bucket follows `Runtime::is_replica`.
     fn refresh_client_memory_aggregates(&mut self) {
         const PER_CLIENT_STRUCT_BYTES: usize = 432;
         let mut normal_total: usize = 0;
@@ -23449,14 +23454,13 @@ mod tests {
                 _ => None,
             })
             .collect();
-        for redis_7_4_only in ["hide-user-data-from-log"] {
-            assert!(
-                !names
-                    .iter()
-                    .any(|n| n.eq_ignore_ascii_case(redis_7_4_only)),
-                "Redis 7.4-only config {redis_7_4_only} must NOT appear (vendored 7.2.4 doesn't have it)",
-            );
-        }
+        let redis_7_4_only = "hide-user-data-from-log";
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.eq_ignore_ascii_case(redis_7_4_only)),
+            "Redis 7.4-only config {redis_7_4_only} must NOT appear (vendored 7.2.4 doesn't have it)",
+        );
         // (frankenredis-z6zp2) Three more keys that were leaking through
         // CONFIG GET but have no counterpart in vendored 7.2.4:
         //   close-on-oom              - fr-specific, no upstream equivalent
@@ -25742,7 +25746,7 @@ mod tests {
             );
             // Bad-named user must not be created.
             assert!(
-                rt.server.auth_state.acl_users.get(&bad.to_vec()).is_none(),
+                !rt.server.auth_state.acl_users.contains_key(*bad),
                 "user {bad:?} must not be inserted",
             );
         }
@@ -27568,6 +27572,61 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"GET", b"w1"]), 12),
             RespFrame::Error("NOPERM No permissions to access a key".to_string())
+        );
+    }
+
+    #[test]
+    fn acl_key_selectors_merge_permissions_for_duplicate_patterns() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL",
+                    b"SETUSER",
+                    b"combo",
+                    b"on",
+                    b"nopass",
+                    b"-@all",
+                    b"+set",
+                    b"%R~foo*",
+                    b"%W~foo*",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // Vendored Redis merges duplicate pattern strings by OR-ing the
+        // read/write flags, so a later `%W~foo*` upgrades an earlier
+        // `%R~foo*` to the same effective permissions as `~foo*`.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"DRYRUN", b"combo", b"SET", b"foo:1", b"v", b"GET"]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"GETUSER", b"combo"]), 2),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"on".to_vec())),
+                    RespFrame::BulkString(Some(b"nopass".to_vec())),
+                    RespFrame::BulkString(Some(b"sanitize-payload".to_vec())),
+                ])),
+                RespFrame::BulkString(Some(b"passwords".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+                RespFrame::BulkString(Some(b"commands".to_vec())),
+                RespFrame::BulkString(Some(b"-@all +set".to_vec())),
+                RespFrame::BulkString(Some(b"keys".to_vec())),
+                RespFrame::BulkString(Some(b"~foo*".to_vec())),
+                RespFrame::BulkString(Some(b"channels".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
+                RespFrame::BulkString(Some(b"selectors".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
         );
     }
 
