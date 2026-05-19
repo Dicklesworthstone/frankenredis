@@ -810,6 +810,64 @@ fn command_key_references(
         .collect())
 }
 
+/// Per-key ACL access requirement derived from a command's key specs.
+///
+/// `read` / `write` mirror upstream acl.c `ACLSelectorCheckKey`, which maps a
+/// key spec's `access` flag to a read requirement and the
+/// `insert` / `delete` / `update` flags to a write requirement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AclKeyAccess {
+    /// Index into `argv` of the key argument.
+    pub index: usize,
+    /// Command reads the key (needs ACL read permission).
+    pub read: bool,
+    /// Command writes the key (needs ACL write permission).
+    pub write: bool,
+}
+
+/// Derive `(read, write)` ACL requirements from a key spec's flag list.
+///
+/// Upstream `ACLSelectorCheckKey` keys only off the logical
+/// `access` / `insert` / `delete` / `update` flags, never the base
+/// `RO` / `RW` / `OW` / `RM` flag. We follow that, with one safety net: a
+/// degenerate key spec carrying *only* a base flag falls back to that base
+/// flag so ACL still demands some permission instead of silently granting
+/// access.
+fn acl_access_from_key_flags(flags: &[&str]) -> (bool, bool) {
+    let read = flags.contains(&"access");
+    let write = flags
+        .iter()
+        .any(|f| matches!(*f, "insert" | "delete" | "update"));
+    if read || write {
+        return (read, write);
+    }
+    let read = flags.iter().any(|f| matches!(*f, "RO" | "RW"));
+    let write = flags.iter().any(|f| matches!(*f, "RW" | "OW" | "RM"));
+    (read, write)
+}
+
+/// Return the per-key read/write ACL access requirements for `argv`.
+///
+/// Returns an empty vec when the command references no keys or `argv` is
+/// malformed — callers treat that as "no key checks needed", matching the
+/// earlier `command_key_indexes`-based behaviour.
+pub fn command_acl_key_access(argv: &[Vec<u8>]) -> Vec<AclKeyAccess> {
+    match command_key_references(argv) {
+        Ok(refs) => refs
+            .into_iter()
+            .map(|r| {
+                let (read, write) = acl_access_from_key_flags(r.flags);
+                AclKeyAccess {
+                    index: r.index,
+                    read,
+                    write,
+                }
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
 fn command_key_references_with_exact_flags(
     cmd_name: &str,
     argv: &[Vec<u8>],
@@ -15192,13 +15250,14 @@ fn dispatch_acl_permission_error_for_argv(
     if check_command_arity(cmd, argv.len()).is_err() {
         return None;
     }
-    for key_index in command_key_indexes(argv) {
-        if let Some(key) = argv.get(key_index)
+    for access in command_acl_key_access(argv) {
+        if let Some(key) = argv.get(access.index)
             && !permissions.all_keys
-            && !permissions
-                .key_patterns
-                .iter()
-                .any(|pattern| glob_match(pattern, key))
+            && !permissions.key_patterns.iter().any(|pattern| {
+                (!access.read || pattern.read)
+                    && (!access.write || pattern.write)
+                    && glob_match(&pattern.pattern, key)
+            })
         {
             return Some(DispatchAclPermissionError::Key(key.clone()));
         }
@@ -24440,7 +24499,7 @@ mod tests {
         // authenticated user's ACL command/key permissions. The previous
         // gate scoped the check to script_nesting_level >= 1, so an alice-
         // like user with limited perms could run arbitrary commands.
-        use fr_store::{DispatchAclPermissions, DispatchClientContext};
+        use fr_store::{AclKeyPattern, DispatchAclPermissions, DispatchClientContext};
         let mut store = Store::new();
 
         // Build a permissions snapshot for an alice-like user: only GET
@@ -24455,7 +24514,11 @@ mod tests {
                 denied_commands: Default::default(),
                 allowed_categories: Default::default(),
                 denied_categories: Default::default(),
-                key_patterns: vec![b"k*".to_vec()],
+                key_patterns: vec![AclKeyPattern {
+                    pattern: b"k*".to_vec(),
+                    read: true,
+                    write: true,
+                }],
                 all_keys: false,
                 channel_patterns: vec![],
                 all_channels: false,

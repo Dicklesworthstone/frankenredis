@@ -1332,6 +1332,22 @@ pub struct PendingAclLogEvent {
     pub username: Vec<u8>,
 }
 
+/// A single ACL key glob pattern together with the access it grants.
+///
+/// Redis 7.0 ACL key selectors let a pattern grant read-only (`%R~`),
+/// write-only (`%W~`), or read+write (`~` / `%RW~`) access to matching
+/// keys. `read` / `write` mirror upstream acl.c `ACL_READ_PERMISSION` /
+/// `ACL_WRITE_PERMISSION`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AclKeyPattern {
+    /// Glob pattern, stored without any leading `~` / `%R` / `%W` decoration.
+    pub pattern: Vec<u8>,
+    /// Pattern grants read access to matching keys.
+    pub read: bool,
+    /// Pattern grants write access to matching keys.
+    pub write: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DispatchAclPermissions {
     pub all_commands: bool,
@@ -1339,7 +1355,7 @@ pub struct DispatchAclPermissions {
     pub denied_commands: HashSet<String>,
     pub allowed_categories: HashSet<String>,
     pub denied_categories: HashSet<String>,
-    pub key_patterns: Vec<Vec<u8>>,
+    pub key_patterns: Vec<AclKeyPattern>,
     pub all_keys: bool,
     pub channel_patterns: Vec<Vec<u8>>,
     pub all_channels: bool,

@@ -38,7 +38,7 @@ use fr_repl::{
     evaluate_wait, evaluate_waitaof, parse_psync_reply,
 };
 use fr_store::{
-    ClientReplyState, ClientTrackingState, CommandHistogram, CommandRecordKind,
+    AclKeyPattern, ClientReplyState, ClientTrackingState, CommandHistogram, CommandRecordKind,
     DispatchAclLogContext, DispatchAclPermissionReason, DispatchAclPermissions,
     DispatchClientContext, EvictionLoopFailure, EvictionLoopResult, EvictionLoopStatus,
     EvictionSafetyGateState, MaxmemoryPolicy, PendingAclLogEvent, Store, decode_db_key,
@@ -122,6 +122,61 @@ fn acl_setuser_allchannels_pattern_error(rule_str: &str) -> String {
         "ERR Error in ACL SETUSER modifier '{}': Adding a pattern after the * pattern (or the 'allchannels' flag) is not valid and does not have any effect. Try 'resetchannels' to start with an empty list of channels",
         rule_str
     )
+}
+
+/// Render an ACL key pattern as a SETUSER modifier token.
+///
+/// Mirrors upstream acl.c `ACLDescribeSelectorKeyPatterns`: a read+write
+/// pattern uses the bare `~` prefix, a read-only pattern `%R~`, a write-only
+/// pattern `%W~`. A stored pattern always carries at least one permission;
+/// the impossible no-permission case falls back to `~`.
+fn acl_key_pattern_token(pat: &AclKeyPattern) -> String {
+    let prefix = match (pat.read, pat.write) {
+        (true, false) => "%R~",
+        (false, true) => "%W~",
+        _ => "~",
+    };
+    format!("{prefix}{}", String::from_utf8_lossy(&pat.pattern))
+}
+
+/// Parse a `%`-prefixed ACL key selector modifier into
+/// `(pattern_bytes, read, write)`.
+///
+/// Returns `None` when `rule` is not a `%` token or is malformed, letting the
+/// caller surface the generic "Syntax error" (upstream maps the `%`-parser's
+/// `EINVAL` to the same wording). Mirrors acl.c `ACLSetSelector`'s `%`
+/// branch: `%` is followed by one or more of `R` / `W` (case-insensitive,
+/// each at most once), then a mandatory `~`, then the glob pattern.
+fn parse_acl_key_selector(rule: &str) -> Option<(Vec<u8>, bool, bool)> {
+    let bytes = rule.as_bytes();
+    if bytes.first() != Some(&b'%') {
+        return None;
+    }
+    // Upstream rejects `%` tokens shorter than 3 bytes (`%`, >=1 flag, `~`).
+    if bytes.len() < 3 {
+        return None;
+    }
+    let mut read = false;
+    let mut write = false;
+    let mut idx = 1;
+    let mut saw_tilde = false;
+    while idx < bytes.len() {
+        match bytes[idx] {
+            b'R' | b'r' if !read => read = true,
+            b'W' | b'w' if !write => write = true,
+            b'~' if read || write => {
+                idx += 1;
+                saw_tilde = true;
+                break;
+            }
+            _ => return None,
+        }
+        idx += 1;
+    }
+    if !saw_tilde {
+        return None;
+    }
+    Some((bytes[idx..].to_vec(), read, write))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -650,8 +705,9 @@ struct AclUser {
     allowed_categories: HashSet<String>,
     /// Explicitly denied categories (lowercase).
     denied_categories: HashSet<String>,
-    /// Explicitly allowed key glob patterns, stored without the leading `~`.
-    key_patterns: Vec<Vec<u8>>,
+    /// Explicitly allowed key glob patterns, each carrying the read/write
+    /// access it grants (`~` / `%R~` / `%W~` / `%RW~`).
+    key_patterns: Vec<AclKeyPattern>,
     /// True when all keys are allowed regardless of `key_patterns`.
     all_keys: bool,
     /// Explicitly allowed channel patterns, stored without the leading `&`.
@@ -866,17 +922,40 @@ impl AclUser {
 
         self.key_patterns
             .iter()
-            .map(|pattern| format!("~{}", String::from_utf8_lossy(pattern)))
+            .map(acl_key_pattern_token)
             .collect::<Vec<_>>()
             .join(" ")
     }
 
-    fn is_key_allowed(&self, key: &[u8]) -> bool {
-        self.all_keys
-            || self
-                .key_patterns
-                .iter()
-                .any(|pattern| glob_match(pattern, key))
+    /// Append an ACL key pattern, skipping exact (pattern + permission)
+    /// duplicates — mirrors upstream acl.c `ACLSetSelectorKeyPattern`, which
+    /// returns early when the same pattern with the same flags already exists.
+    fn add_key_pattern(&mut self, pattern: Vec<u8>, read: bool, write: bool) {
+        let entry = AclKeyPattern {
+            pattern,
+            read,
+            write,
+        };
+        if !self.key_patterns.contains(&entry) {
+            self.key_patterns.push(entry);
+        }
+        self.all_keys = false;
+    }
+
+    /// Whether this user may access `key` with the requested permissions.
+    ///
+    /// Mirrors upstream acl.c `ACLSelectorCheckKey`: a pattern only grants
+    /// access when its flags are a superset of the requested read/write
+    /// flags, so a `%R~` pattern never satisfies a write and vice versa.
+    fn is_key_access_allowed(&self, key: &[u8], need_read: bool, need_write: bool) -> bool {
+        if self.all_keys {
+            return true;
+        }
+        self.key_patterns.iter().any(|pattern| {
+            (!need_read || pattern.read)
+                && (!need_write || pattern.write)
+                && glob_match(&pattern.pattern, key)
+        })
     }
 
     fn channels_string(&self) -> String {
@@ -948,9 +1027,9 @@ impl AclUser {
             return None;
         }
 
-        for key_index in fr_command::command_key_indexes(argv) {
-            if let Some(key) = argv.get(key_index)
-                && !self.is_key_allowed(key)
+        for access in fr_command::command_acl_key_access(argv) {
+            if let Some(key) = argv.get(access.index)
+                && !self.is_key_access_allowed(key, access.read, access.write)
             {
                 return Some(AclCommandPermissionError::Key(key.clone()));
             }
@@ -1008,11 +1087,7 @@ impl AclUser {
             parts.push("~*".to_string());
         } else if !self.key_patterns.is_empty() {
             parts.push("resetkeys".to_string());
-            parts.extend(
-                self.key_patterns
-                    .iter()
-                    .map(|pattern| format!("~{}", String::from_utf8_lossy(pattern))),
-            );
+            parts.extend(self.key_patterns.iter().map(acl_key_pattern_token));
         }
         if self.all_channels {
             parts.push("&*".to_string());
@@ -1065,11 +1140,7 @@ impl AclUser {
             parts.push("~*".to_string());
         } else if !self.key_patterns.is_empty() {
             parts.push("resetkeys".to_string());
-            parts.extend(
-                self.key_patterns
-                    .iter()
-                    .map(|pattern| format!("~{}", String::from_utf8_lossy(pattern))),
-            );
+            parts.extend(self.key_patterns.iter().map(acl_key_pattern_token));
         }
         if self.all_channels {
             parts.push("&*".to_string());
@@ -1425,11 +1496,20 @@ impl AuthState {
                 }
                 let pattern = rule_str
                     .strip_prefix('~')
-                    .expect("tilde-prefixed rule should strip");
-                let pattern = pattern.as_bytes().to_vec();
-                user.key_patterns.retain(|existing| existing != &pattern);
-                user.key_patterns.push(pattern);
-                user.all_keys = false;
+                    .expect("tilde-prefixed rule should strip")
+                    .as_bytes()
+                    .to_vec();
+                // A bare `~pat` modifier grants both read and write
+                // (upstream `ACL_ALL_PERMISSION`).
+                user.add_key_pattern(pattern, true, true);
+            } else if let Some((pattern, read, write)) = parse_acl_key_selector(rule_str) {
+                // Redis 7.0 ACL key selector: `%R~pat` / `%W~pat` /
+                // `%RW~pat` restrict a pattern to read-only, write-only, or
+                // read+write access. (acl.c::ACLSetSelector `%` branch)
+                if user.all_keys {
+                    return Err(acl_setuser_allkeys_pattern_error(rule_str));
+                }
+                user.add_key_pattern(pattern, read, write);
             } else if rule_str.starts_with('&') {
                 if user.all_channels {
                     return Err(acl_setuser_allchannels_pattern_error(rule_str));
@@ -7949,6 +8029,10 @@ impl Runtime {
                 "zset-max-listpack-value",
                 self.server.store.zset_max_listpack_value,
             ),
+            (
+                "hll-sparse-max-bytes",
+                self.server.store.hll_sparse_max_bytes,
+            ),
         ];
         for &(name, value) in encoding_params {
             if Self::config_pattern_matches(pattern, name) {
@@ -8163,6 +8247,7 @@ impl Runtime {
                 || name == "zset-max-listpack-value"
                 || name == "zset-max-ziplist-entries"
                 || name == "zset-max-ziplist-value"
+                || name == "hll-sparse-max-bytes"
                 || name == "list-max-listpack-size"
                 || name == "list-max-ziplist-size"
                 || name == "appendonly"
@@ -8276,6 +8361,7 @@ impl Runtime {
         let mut next_acl_pubsub_default: Option<AclPubsubDefault> = None;
         let mut next_keyspace_events: Option<u32> = None;
         let mut next_list_max_listpack_size: Option<i64> = None;
+        let mut next_hll_sparse_max_bytes: Option<usize> = None;
         let mut next_rdb_path = self
             .server
             .rdb_path
@@ -9069,7 +9155,11 @@ impl Runtime {
                         "argument must be between 1 and 9223372036854775807 inclusive",
                     );
                 }
-                static_override_updates.push((canonical.to_string(), parsed.to_string()));
+                if canonical == "hll-sparse-max-bytes" {
+                    next_hll_sparse_max_bytes = Some(parsed);
+                } else {
+                    static_override_updates.push((canonical.to_string(), parsed.to_string()));
+                }
                 continue;
             }
             if parameter.eq_ignore_ascii_case("maxmemory-clients") {
@@ -10090,6 +10180,13 @@ impl Runtime {
         }
         if let Some(list_max_listpack_size) = next_list_max_listpack_size {
             self.server.store.list_max_listpack_size = list_max_listpack_size;
+        }
+        if let Some(hll_sparse_max_bytes) = next_hll_sparse_max_bytes {
+            self.server.store.hll_sparse_max_bytes = hll_sparse_max_bytes;
+            self.server.config_overrides.insert(
+                "hll-sparse-max-bytes".to_string(),
+                hll_sparse_max_bytes.to_string(),
+            );
         }
         // Apply encoding threshold updates to Store and CONFIG GET state.
         // (frankenredis-10lqb) list-max-listpack-{entries,value} are
@@ -13923,7 +14020,8 @@ mod tests {
         build_hello_response, canonical_static_config_param, canonicalize_acl_rules,
         classify_cluster_subcommand, classify_cluster_subcommand_linear,
         classify_runtime_special_command, classify_runtime_special_command_linear,
-        client_wrong_subcommand_arity, sha256_hex_bytes, store_to_rdb_entries, wrong_arity_error,
+        client_wrong_subcommand_arity, parse_acl_key_selector, sha256_hex_bytes,
+        store_to_rdb_entries, wrong_arity_error,
     };
 
     fn command(parts: &[&[u8]]) -> RespFrame {
@@ -23631,6 +23729,27 @@ mod tests {
     }
 
     #[test]
+    fn config_set_hll_sparse_max_bytes_updates_store_threshold() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"CONFIG", b"SET", b"hll-sparse-max-bytes", b"64"]),
+                0
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(rt.server.store.hll_sparse_max_bytes, 64);
+        assert_eq!(
+            rt.execute_frame(command(&[b"CONFIG", b"GET", b"hll-sparse-max-bytes"]), 0),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"hll-sparse-max-bytes".to_vec())),
+                RespFrame::BulkString(Some(b"64".to_vec())),
+            ]))
+        );
+    }
+
+    #[test]
     fn config_set_maxmemory_accepts_redis_memory_suffixes() {
         // (frankenredis-memtu) Empty input, bare suffixes ('b' / 'kb' /
         // 'mb' / 'gb' alone), and zero are all accepted by upstream
@@ -27269,6 +27388,231 @@ mod tests {
         assert_eq!(
             rt.execute_frame(command(&[b"GET", b"zap:3"]), 8),
             RespFrame::Error("NOPERM No permissions to access a key".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_acl_key_selector_handles_redis_7_syntax() {
+        // Well-formed selectors.
+        assert_eq!(
+            parse_acl_key_selector("%R~r*"),
+            Some((b"r*".to_vec(), true, false))
+        );
+        assert_eq!(
+            parse_acl_key_selector("%W~w*"),
+            Some((b"w*".to_vec(), false, true))
+        );
+        assert_eq!(
+            parse_acl_key_selector("%RW~foo"),
+            Some((b"foo".to_vec(), true, true))
+        );
+        // Flag order does not matter and parsing is case-insensitive.
+        assert_eq!(
+            parse_acl_key_selector("%wr~foo"),
+            Some((b"foo".to_vec(), true, true))
+        );
+        // Empty pattern is permitted (matches only the empty key).
+        assert_eq!(
+            parse_acl_key_selector("%R~"),
+            Some((Vec::new(), true, false))
+        );
+        // Not a `%` token.
+        assert_eq!(parse_acl_key_selector("~foo"), None);
+        // Malformed: no flags, repeated flag, unknown flag, no `~`, too short.
+        assert_eq!(parse_acl_key_selector("%~foo"), None);
+        assert_eq!(parse_acl_key_selector("%RR~foo"), None);
+        assert_eq!(parse_acl_key_selector("%X~foo"), None);
+        assert_eq!(parse_acl_key_selector("%RWfoo"), None);
+        assert_eq!(parse_acl_key_selector("%R"), None);
+    }
+
+    #[test]
+    fn acl_key_selectors_enforce_read_write_distinction() {
+        let mut rt = Runtime::default_strict();
+
+        // `reader` is granted both GET and SET at the command level but only
+        // read access to `r*` keys; `writer` only write access to `w*`.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"reader", b"on", b">rpass", b"-@all", b"+get", b"+set",
+                    b"%R~r*",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"writer", b"on", b">wpass", b"-@all", b"+get", b"+set",
+                    b"%W~w*",
+                ]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // DRYRUN: reader may GET an r* key but not SET it (write needs %W).
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"DRYRUN", b"reader", b"GET", b"r1"]),
+                2,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"DRYRUN", b"reader", b"SET", b"r1", b"v"]),
+                3,
+            ),
+            RespFrame::BulkString(Some(
+                b"User reader has no permissions to access the 'r1' key".to_vec(),
+            ))
+        );
+        // DRYRUN: writer may SET a w* key but not GET it (read needs %R).
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"DRYRUN", b"writer", b"SET", b"w1", b"v"]),
+                4,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"DRYRUN", b"writer", b"GET", b"w1"]),
+                5,
+            ),
+            RespFrame::BulkString(Some(
+                b"User writer has no permissions to access the 'w1' key".to_vec(),
+            ))
+        );
+
+        // Runtime enforcement after AUTH must agree with DRYRUN.
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"reader", b"rpass"]), 6),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"r1"]), 7),
+            RespFrame::BulkString(None)
+        );
+        // SET on a read-only selector is denied even though `+set` was granted.
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"r1", b"v"]), 8),
+            RespFrame::Error("NOPERM No permissions to access a key".to_string())
+        );
+        // A key outside the selector pattern is denied regardless of access.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"x1"]), 9),
+            RespFrame::Error("NOPERM No permissions to access a key".to_string())
+        );
+
+        assert_eq!(
+            rt.execute_frame(command(&[b"AUTH", b"writer", b"wpass"]), 10),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"SET", b"w1", b"v"]), 11),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        // GET on a write-only selector is denied even though `+get` was granted.
+        assert_eq!(
+            rt.execute_frame(command(&[b"GET", b"w1"]), 12),
+            RespFrame::Error("NOPERM No permissions to access a key".to_string())
+        );
+    }
+
+    #[test]
+    fn acl_key_selectors_round_trip_through_getuser_and_list() {
+        let mut rt = Runtime::default_strict();
+
+        assert_eq!(
+            rt.execute_frame(
+                command(&[
+                    b"ACL", b"SETUSER", b"mixed", b"on", b"nopass", b"~obj*", b"%R~r*", b"%W~w*",
+                    b"%RW~rw*",
+                ]),
+                0,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+
+        // GETUSER renders read+write as `~`, read-only as `%R~`, write-only
+        // as `%W~`, matching upstream ACLDescribeSelectorKeyPatterns.
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"GETUSER", b"mixed"]), 1),
+            RespFrame::Array(Some(vec![
+                RespFrame::BulkString(Some(b"flags".to_vec())),
+                RespFrame::Array(Some(vec![
+                    RespFrame::BulkString(Some(b"on".to_vec())),
+                    RespFrame::BulkString(Some(b"nopass".to_vec())),
+                    RespFrame::BulkString(Some(b"sanitize-payload".to_vec())),
+                ])),
+                RespFrame::BulkString(Some(b"passwords".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+                RespFrame::BulkString(Some(b"commands".to_vec())),
+                RespFrame::BulkString(Some(b"-@all".to_vec())),
+                RespFrame::BulkString(Some(b"keys".to_vec())),
+                RespFrame::BulkString(Some(b"~obj* %R~r* %W~w* ~rw*".to_vec())),
+                RespFrame::BulkString(Some(b"channels".to_vec())),
+                RespFrame::BulkString(Some(Vec::new())),
+                RespFrame::BulkString(Some(b"selectors".to_vec())),
+                RespFrame::Array(Some(Vec::new())),
+            ]))
+        );
+
+        let list = rt.execute_frame(command(&[b"ACL", b"LIST"]), 2);
+        let RespFrame::Array(Some(entries)) = list else {
+            unreachable!("expected ACL LIST to return an array");
+        };
+        let mixed = entries
+            .iter()
+            .find_map(|entry| match entry {
+                RespFrame::BulkString(Some(line))
+                    if String::from_utf8_lossy(line).contains("mixed") =>
+                {
+                    Some(String::from_utf8_lossy(line).into_owned())
+                }
+                _ => None,
+            })
+            .expect("expected mixed in ACL LIST");
+        assert_eq!(
+            mixed,
+            "user mixed on nopass sanitize-payload resetkeys ~obj* %R~r* %W~w* ~rw* resetchannels -@all"
+        );
+    }
+
+    #[test]
+    fn acl_setuser_rejects_malformed_percent_key_selectors() {
+        let mut rt = Runtime::default_strict();
+
+        for bad in [&b"%X~foo"[..], &b"%~foo"[..], &b"%RR~foo"[..]] {
+            let reply = rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"bad", b"on", b"nopass", bad]),
+                0,
+            );
+            let expected = format!(
+                "ERR Error in ACL SETUSER modifier '{}': Syntax error",
+                String::from_utf8_lossy(bad)
+            );
+            assert_eq!(reply, RespFrame::Error(expected));
+        }
+
+        // A `%`-selector after `allkeys` is rejected just like a bare `~pat`.
+        assert_eq!(
+            rt.execute_frame(
+                command(&[b"ACL", b"SETUSER", b"ak", b"on", b"nopass", b"allkeys"]),
+                1,
+            ),
+            RespFrame::SimpleString("OK".to_string())
+        );
+        assert_eq!(
+            rt.execute_frame(command(&[b"ACL", b"SETUSER", b"ak", b"%R~foo"]), 2),
+            RespFrame::Error(
+                "ERR Error in ACL SETUSER modifier '%R~foo': Adding a pattern after the * pattern (or the 'allkeys' flag) is not valid and does not have any effect. Try 'resetkeys' to start with an empty list of patterns"
+                    .to_string(),
+            )
         );
     }
 
