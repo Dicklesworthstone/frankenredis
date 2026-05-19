@@ -10241,255 +10241,319 @@ fn lua_value_to_json(val: &LuaValue) -> Result<String, String> {
 }
 
 fn json_to_lua_value(s: &str) -> Result<LuaValue, String> {
-    let s = s.trim();
-    if s == "null" || s.is_empty() {
-        Ok(LuaValue::Nil)
-    } else if s == "true" {
-        Ok(LuaValue::Bool(true))
-    } else if s == "false" {
-        Ok(LuaValue::Bool(false))
-    } else if s.starts_with('"') && s.ends_with('"') {
-        let inner = &s[1..s.len() - 1];
-        // Basic unescape
+    let mut parser = JsonParser::new(s);
+    let value = parser.parse_value()?;
+    parser.skip_ws();
+    if !parser.is_eof() {
+        return Err(format!(
+            "Expected the end but found {} at character {}",
+            parser.token_name_at(parser.pos),
+            parser.char_pos()
+        ));
+    }
+    Ok(value)
+}
+
+struct JsonParser<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> JsonParser<'a> {
+    fn new(input: &'a str) -> Self {
+        Self {
+            bytes: input.as_bytes(),
+            pos: 0,
+        }
+    }
+
+    fn is_eof(&self) -> bool {
+        self.pos >= self.bytes.len()
+    }
+
+    fn char_pos(&self) -> usize {
+        self.pos + 1
+    }
+
+    fn skip_ws(&mut self) {
+        while matches!(self.bytes.get(self.pos), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+            self.pos += 1;
+        }
+    }
+
+    fn token_name_at(&self, pos: usize) -> &'static str {
+        match self.bytes.get(pos).copied() {
+            None => "T_END",
+            Some(b']') => "T_ARR_END",
+            Some(b'}') => "T_OBJ_END",
+            Some(b',') => "T_COMMA",
+            Some(b':') => "T_COLON",
+            Some(b'"') => "T_STRING",
+            Some(b'-' | b'0'..=b'9') => "T_NUMBER",
+            _ => "invalid token",
+        }
+    }
+
+    fn parse_value(&mut self) -> Result<LuaValue, String> {
+        self.skip_ws();
+        match self.bytes.get(self.pos).copied() {
+            None => Err(format!(
+                "Expected value but found T_END at character {}",
+                self.char_pos()
+            )),
+            Some(b'n') if self.consume_literal(b"null") => Ok(LuaValue::Nil),
+            Some(b't') if self.consume_literal(b"true") => Ok(LuaValue::Bool(true)),
+            Some(b'f') if self.consume_literal(b"false") => Ok(LuaValue::Bool(false)),
+            Some(b'"') => self.parse_string().map(LuaValue::Str),
+            Some(b'[') => self.parse_array(),
+            Some(b'{') => self.parse_object(),
+            Some(b'-' | b'0'..=b'9') => self.parse_number().map(LuaValue::Number),
+            Some(b']' | b'}') => Err(format!(
+                "Expected value but found {} at character {}",
+                self.token_name_at(self.pos),
+                self.char_pos()
+            )),
+            Some(_) => Err(format!(
+                "Expected value but found invalid token at character {}",
+                self.char_pos()
+            )),
+        }
+    }
+
+    fn consume_literal(&mut self, literal: &[u8]) -> bool {
+        if self.bytes[self.pos..].starts_with(literal) {
+            self.pos += literal.len();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn parse_string(&mut self) -> Result<Vec<u8>, String> {
+        self.pos += 1;
         let mut result = Vec::new();
-        let mut chars = inner.bytes().peekable();
-        while let Some(b) = chars.next() {
-            if b == b'\\' {
-                if let Some(esc) = chars.next() {
+        while let Some(b) = self.bytes.get(self.pos).copied() {
+            self.pos += 1;
+            match b {
+                b'"' => return Ok(result),
+                b'\\' => {
+                    let Some(esc) = self.bytes.get(self.pos).copied() else {
+                        return Err(format!(
+                            "Expected value but found unexpected end of string at character {}",
+                            self.char_pos()
+                        ));
+                    };
+                    self.pos += 1;
                     match esc {
                         b'"' => result.push(b'"'),
                         b'\\' => result.push(b'\\'),
-                        // (frankenredis-4h221) lua_cjson unescapes
-                        // `\/` to `/` symmetrically with its always-on
-                        // escape during encode. fr's earlier branch
-                        // dropped through to the catch-all, leaving the
-                        // literal two bytes in the result.
+                        // (frankenredis-4h221) lua_cjson unescapes `\/`
+                        // to `/`, matching its encode-side slash escape.
                         b'/' => result.push(b'/'),
                         b'b' => result.push(0x08),
                         b'f' => result.push(0x0C),
                         b'n' => result.push(b'\n'),
                         b'r' => result.push(b'\r'),
                         b't' => result.push(b'\t'),
-                        b'u' => {
-                            // (frankenredis-ljxmd) When the parsed
-                            // codepoint is a UTF-16 high surrogate
-                            // (D800..=DBFF), Lua-bundled cjson looks
-                            // ahead for an immediately-following
-                            // \uXXXX low surrogate (DC00..=DFFF) and
-                            // combines them into a single supplementary
-                            // codepoint via
-                            //   cp = 0x10000 + ((high-0xD800)<<10) + (low-0xDC00).
-                            // Without this 😀 (😀 →
-                            // U+1F600) round-trips as garbage bytes.
-                            let mut hex = [0u8; 4];
-                            let mut read_len = 0usize;
-                            let mut complete = true;
-                            for digit in &mut hex {
-                                if let Some(next) = chars.next() {
-                                    *digit = next;
-                                    read_len += 1;
-                                } else {
-                                    complete = false;
-                                    break;
-                                }
-                            }
-                            let first_cp = if complete {
-                                std::str::from_utf8(&hex)
-                                    .ok()
-                                    .and_then(|s| u32::from_str_radix(s, 16).ok())
-                            } else {
-                                None
-                            };
-                            let mut codepoint = first_cp;
-                            if let Some(cp) = first_cp {
-                                if (0xD800..=0xDBFF).contains(&cp) {
-                                    // Peek for "\u" + 4 hex digits.
-                                    let mut lookahead: Vec<u8> = Vec::with_capacity(6);
-                                    for _ in 0..6 {
-                                        if let Some(&b) = chars.peek() {
-                                            lookahead.push(b);
-                                            chars.next();
-                                        } else {
-                                            break;
-                                        }
-                                    }
-                                    if lookahead.len() == 6
-                                        && lookahead[0] == b'\\'
-                                        && lookahead[1] == b'u'
-                                        && let Ok(low_str) = std::str::from_utf8(&lookahead[2..])
-                                        && let Ok(low) = u32::from_str_radix(low_str, 16)
-                                        && (0xDC00..=0xDFFF).contains(&low)
-                                    {
-                                        codepoint = Some(
-                                            0x10000
-                                                + ((cp - 0xD800) << 10)
-                                                + (low - 0xDC00),
-                                        );
-                                    } else {
-                                        // Push back the lookahead so the
-                                        // outer loop can emit it as-is.
-                                        // (fr's existing fallback path
-                                        // emits the literal \uXXXX bytes
-                                        // when the codepoint can't be
-                                        // resolved.)
-                                        for b in lookahead.into_iter().rev() {
-                                            // Re-prepend by consuming the
-                                            // iterator pattern: easiest is
-                                            // to leave it dropped and have
-                                            // the lookahead bytes lost.
-                                            // To preserve we'd need a more
-                                            // complex parser; the
-                                            // canonical decoder rejects
-                                            // lone surrogates anyway, so
-                                            // matching vendored's
-                                            // "Latin-1 fallback" here is a
-                                            // best-effort.
-                                            let _ = b;
-                                        }
-                                    }
-                                }
-                            }
-                            if let Some(cp) = codepoint
-                                && let Some(decoded) = char::from_u32(cp)
-                            {
-                                let mut utf8 = [0u8; 4];
-                                let encoded = decoded.encode_utf8(&mut utf8);
-                                result.extend_from_slice(encoded.as_bytes());
-                            } else {
-                                result.extend_from_slice(br"\u");
-                                result.extend_from_slice(&hex[..read_len]);
-                            }
-                        }
+                        b'u' => self.push_unicode_escape(&mut result)?,
                         _ => {
-                            result.push(b'\\');
-                            result.push(esc);
+                            return Err(format!(
+                                "Expected value but found invalid escape character at character {}",
+                                self.pos
+                            ));
                         }
                     }
                 }
-            } else {
-                result.push(b);
-            }
-        }
-        Ok(LuaValue::Str(result))
-    } else if s.starts_with('[') && s.ends_with(']') {
-        // Simple JSON array parser
-        let inner = &s[1..s.len() - 1].trim();
-        if inner.is_empty() {
-            return Ok(LuaValue::Table(LuaTable::new()));
-        }
-        let items = split_json_values(inner)?;
-        let t = LuaTable::new();
-        for item in items {
-            t.inner.borrow_mut().array.push(json_to_lua_value(&item)?);
-        }
-        Ok(LuaValue::Table(t))
-    } else if s.starts_with('{') && s.ends_with('}') {
-        let inner = &s[1..s.len() - 1].trim();
-        if inner.is_empty() {
-            return Ok(LuaValue::Table(LuaTable::new()));
-        }
-        let pairs = split_json_values(inner)?;
-        let t = LuaTable::new();
-        for pair in pairs {
-            if let Some(colon_pos) = find_json_colon(&pair) {
-                let key = pair[..colon_pos].trim();
-                let val = pair[colon_pos + 1..].trim();
-                let key_val = json_to_lua_value(key)?;
-                let val_val = json_to_lua_value(val)?;
-                t.set(key_val, val_val);
-            }
-        }
-        Ok(LuaValue::Table(t))
-    } else if let Ok(n) = s.parse::<f64>() {
-        Ok(LuaValue::Number(n))
-    } else {
-        Err(format!("invalid JSON: {s}"))
-    }
-}
-
-fn split_json_values(s: &str) -> Result<Vec<String>, String> {
-    let mut items = Vec::new();
-    let mut depth = 0i32;
-    let mut in_string = false;
-    let mut escape = false;
-    let mut start = 0;
-
-    for (i, &b) in s.as_bytes().iter().enumerate() {
-        if escape {
-            escape = false;
-            continue;
-        }
-        if b == b'\\' && in_string {
-            escape = true;
-            continue;
-        }
-        if b == b'"' {
-            in_string = !in_string;
-            continue;
-        }
-        if in_string {
-            continue;
-        }
-        match b {
-            b'[' | b'{' => depth += 1,
-            b']' | b'}' => depth -= 1,
-            b',' if depth == 0 => {
-                // (frankenredis-4h221) Upstream lua_cjson rejects empty
-                // commas at any position (`[1,]`, `[,1]`, `[1,,2]`,
-                // `{"a":1,}`). fr previously emitted Nil for the empty
-                // slice and let the value through. Match vendored by
-                // raising the canonical "Expected value" error.
-                let slice = s[start..i].trim();
-                if slice.is_empty() {
-                    return Err(
-                        "user_script:1: Expected value but found T_COMMA at character 1"
-                            .to_string(),
-                    );
+                0x00..=0x1f => {
+                    return Err(format!(
+                        "Expected value but found invalid string character at character {}",
+                        self.pos
+                    ));
                 }
-                items.push(slice.to_string());
-                start = i + 1;
+                _ => result.push(b),
             }
-            _ => {}
         }
+        Err(format!(
+            "Expected value but found unexpected end of string at character {}",
+            self.bytes.len() + 1
+        ))
     }
-    // (frankenredis-4h221) Trailing comma (`[1,]`, `{"a":1,}`) leaves
-    // `start == s.len()` or a trimmed-empty tail. Reject either case.
-    if start >= s.len() {
-        return Err(
-            "user_script:1: Expected value but found T_COMMA at character 1".to_string(),
-        );
-    }
-    let tail = s[start..].trim();
-    if tail.is_empty() {
-        return Err(
-            "user_script:1: Expected value but found T_COMMA at character 1".to_string(),
-        );
-    }
-    items.push(tail.to_string());
-    Ok(items)
-}
 
-fn find_json_colon(s: &str) -> Option<usize> {
-    let mut in_string = false;
-    let mut escape = false;
-    for (i, &b) in s.as_bytes().iter().enumerate() {
-        if escape {
-            escape = false;
-            continue;
+    fn push_unicode_escape(&mut self, out: &mut Vec<u8>) -> Result<(), String> {
+        let Some(mut codepoint) = self.parse_hex4() else {
+            return Err(format!(
+                "Expected value but found invalid unicode escape at character {}",
+                self.char_pos()
+            ));
+        };
+        if (0xD800..=0xDBFF).contains(&codepoint)
+            && self.bytes.get(self.pos) == Some(&b'\\')
+            && self.bytes.get(self.pos + 1) == Some(&b'u')
+        {
+            let saved = self.pos;
+            self.pos += 2;
+            if let Some(low) = self.parse_hex4() {
+                if (0xDC00..=0xDFFF).contains(&low) {
+                    codepoint = 0x10000
+                        + ((codepoint - 0xD800) << 10)
+                        + (low - 0xDC00);
+                } else {
+                    self.pos = saved;
+                }
+            } else {
+                self.pos = saved;
+            }
         }
-        if b == b'\\' && in_string {
-            escape = true;
-            continue;
+        if let Some(decoded) = char::from_u32(codepoint) {
+            let mut utf8 = [0u8; 4];
+            out.extend_from_slice(decoded.encode_utf8(&mut utf8).as_bytes());
         }
-        if b == b'"' {
-            in_string = !in_string;
-            continue;
+        Ok(())
+    }
+
+    fn parse_hex4(&mut self) -> Option<u32> {
+        let end = self.pos.checked_add(4)?;
+        let slice = self.bytes.get(self.pos..end)?;
+        let text = std::str::from_utf8(slice).ok()?;
+        let value = u32::from_str_radix(text, 16).ok()?;
+        self.pos = end;
+        Some(value)
+    }
+
+    fn parse_array(&mut self) -> Result<LuaValue, String> {
+        self.pos += 1;
+        let table = LuaTable::new();
+        self.skip_ws();
+        if self.bytes.get(self.pos) == Some(&b']') {
+            self.pos += 1;
+            return Ok(LuaValue::Table(table));
         }
-        if !in_string && b == b':' {
-            return Some(i);
+        loop {
+            let value = self.parse_value()?;
+            table.inner.borrow_mut().array.push(value);
+            self.skip_ws();
+            match self.bytes.get(self.pos).copied() {
+                Some(b',') => {
+                    self.pos += 1;
+                }
+                Some(b']') => {
+                    self.pos += 1;
+                    return Ok(LuaValue::Table(table));
+                }
+                _ => {
+                    return Err(format!(
+                        "Expected comma or array end but found {} at character {}",
+                        self.token_name_at(self.pos),
+                        self.char_pos()
+                    ));
+                }
+            }
         }
     }
-    None
+
+    fn parse_object(&mut self) -> Result<LuaValue, String> {
+        self.pos += 1;
+        let table = LuaTable::new();
+        self.skip_ws();
+        if self.bytes.get(self.pos) == Some(&b'}') {
+            self.pos += 1;
+            return Ok(LuaValue::Table(table));
+        }
+        loop {
+            self.skip_ws();
+            if self.bytes.get(self.pos) != Some(&b'"') {
+                return Err(format!(
+                    "Expected object key string but found {} at character {}",
+                    self.token_name_at(self.pos),
+                    self.char_pos()
+                ));
+            }
+            let key = self.parse_string()?;
+            self.skip_ws();
+            if self.bytes.get(self.pos) != Some(&b':') {
+                return Err(format!(
+                    "Expected colon but found {} at character {}",
+                    self.token_name_at(self.pos),
+                    self.char_pos()
+                ));
+            }
+            self.pos += 1;
+            let value = self.parse_value()?;
+            table.set(LuaValue::Str(key), value);
+            self.skip_ws();
+            match self.bytes.get(self.pos).copied() {
+                Some(b',') => {
+                    self.pos += 1;
+                }
+                Some(b'}') => {
+                    self.pos += 1;
+                    return Ok(LuaValue::Table(table));
+                }
+                _ => {
+                    return Err(format!(
+                        "Expected comma or object end but found {} at character {}",
+                        self.token_name_at(self.pos),
+                        self.char_pos()
+                    ));
+                }
+            }
+        }
+    }
+
+    fn parse_number(&mut self) -> Result<f64, String> {
+        let start = self.pos;
+        if self.bytes.get(self.pos) == Some(&b'-') {
+            self.pos += 1;
+        }
+        match self.bytes.get(self.pos).copied() {
+            Some(b'0') => self.pos += 1,
+            Some(b'1'..=b'9') => {
+                self.pos += 1;
+                while matches!(self.bytes.get(self.pos), Some(b'0'..=b'9')) {
+                    self.pos += 1;
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "Expected value but found invalid token at character {}",
+                    start + 1
+                ));
+            }
+        }
+        if self.bytes.get(self.pos) == Some(&b'.') {
+            self.pos += 1;
+            let digits_start = self.pos;
+            while matches!(self.bytes.get(self.pos), Some(b'0'..=b'9')) {
+                self.pos += 1;
+            }
+            if self.pos == digits_start {
+                return Err(format!(
+                    "Expected value but found invalid token at character {}",
+                    start + 1
+                ));
+            }
+        }
+        if matches!(self.bytes.get(self.pos), Some(b'e' | b'E')) {
+            self.pos += 1;
+            if matches!(self.bytes.get(self.pos), Some(b'+' | b'-')) {
+                self.pos += 1;
+            }
+            let digits_start = self.pos;
+            while matches!(self.bytes.get(self.pos), Some(b'0'..=b'9')) {
+                self.pos += 1;
+            }
+            if self.pos == digits_start {
+                return Err(format!(
+                    "Expected value but found invalid token at character {}",
+                    start + 1
+                ));
+            }
+        }
+        let text = std::str::from_utf8(&self.bytes[start..self.pos])
+            .map_err(|_| format!("Expected value but found invalid token at character {}", start + 1))?;
+        text.parse::<f64>()
+            .map_err(|_| format!("Expected value but found invalid token at character {}", start + 1))
+    }
 }
 
 // ── Public entry point ──────────────────────────────────────────────────
@@ -13954,6 +14018,56 @@ mod tests {
             err.contains("Expected value"),
             "error must mention Expected value: {err}"
         );
+    }
+
+    #[test]
+    fn cjson_decode_rejects_malformed_json_like_lua_cjson_qatse() {
+        // (frankenredis-qatse) The decoder must reject malformed JSON
+        // with lua-cjson's token-specific wording instead of accepting
+        // trailing commas, missing values, or non-string object keys.
+        let mut store = Store::new();
+        let cases: &[(&[u8], &str)] = &[
+            (
+                br#"return cjson.decode('[1,2,]')"#,
+                "user_script:1: Expected value but found T_ARR_END at character 6",
+            ),
+            (
+                br#"return cjson.decode('{"a":1,}')"#,
+                "user_script:1: Expected object key string but found T_OBJ_END at character 8",
+            ),
+            (
+                br#"return cjson.decode('{1:2}')"#,
+                "user_script:1: Expected object key string but found T_NUMBER at character 2",
+            ),
+            (
+                br#"return cjson.decode('{"a":}')"#,
+                "user_script:1: Expected value but found T_OBJ_END at character 6",
+            ),
+            (
+                br#"return cjson.decode('[1,2 3]')"#,
+                "user_script:1: Expected comma or array end but found T_NUMBER at character 6",
+            ),
+            (
+                br#"return cjson.decode('"abc')"#,
+                "user_script:1: Expected value but found unexpected end of string at character 5",
+            ),
+            (
+                br#"return cjson.decode('abc')"#,
+                "user_script:1: Expected value but found invalid token at character 1",
+            ),
+        ];
+        for (script, expected) in cases {
+            let err = eval_script(script, &[], &[], &mut store, 0)
+                .unwrap_err();
+            assert_eq!(&err, expected, "script={}", String::from_utf8_lossy(script));
+        }
+
+        let frame = eval_script(
+            br#"return cjson.decode('{"a":[1,true,false,null],"b":"\/"}').b"#,
+            &[], &[], &mut store, 0,
+        )
+        .expect("valid nested json still decodes");
+        assert_eq!(frame, RespFrame::BulkString(Some(b"/".to_vec())));
     }
 
     #[test]
